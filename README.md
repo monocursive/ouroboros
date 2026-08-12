@@ -111,6 +111,15 @@ makes retries idempotent, while the returned reference routes over distribution:
 `steer/3`, `respond_approval/3`, and `interrupt/2` route to native Harness
 capabilities when the selected provider transport supports them.
 
+Control-plane calls (`info/1`, `replay/2`, `subscribe/2`, `cancel/1`, `steer/3`,
+`respond_approval/3`, `interrupt/2`) are bounded by
+`:ouroboros, :session_call_timeout` so one wedged coordinator cannot freeze every
+caller; `await` keeps the caller's own timeout. If a provider session closes while a
+dispatched turn never resolves, the turn is settled as `:ambiguous` with
+`{:unresolved_at_session_close, turn_id}` after
+`:ouroboros, :interactive_unresolved_turn_deadline_ms` — the provider work may have
+happened, and the session is released rather than polled forever.
+
 Writing is opt-in. A provider can only edit the workspace when the caller explicitly
 selects a write-capable provider policy, for example `sandbox_mode: :workspace_write`.
 These normalized flags configure the provider CLI; they are not a substitute for an
@@ -364,6 +373,12 @@ single-owner atomic file checkpoints.
   aggregate in production. Release and fast-patch mutation journals add file and
   directory sync before acknowledging a checkpoint. All remain single-node ownership,
   not transactional HA databases.
+- Terminal coding tasks and interactive sessions are the only durable state that is
+  ever retired. Their recovery loops sweep entries older than
+  `:ouroboros, :terminal_retention_ms` (seven days by default, `nil` disables the
+  sweep), and `Store.delete/1` refuses anything non-terminal. Team, orchestration,
+  control, upgrade, and release aggregates still only accumulate; sizing them is an
+  operator concern until each plane grows its own retention policy.
 - Harness runs survive callers and Ouroboros coordinator crashes, but not a full
   Harness application/BEAM/host restart. Ouroboros retains the task and reports
   `:lost`; automated resume/retry policy is future work.

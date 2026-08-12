@@ -13,6 +13,8 @@ defmodule Ouroboros.Interactive.Task do
   @terminal_retire_ms 100
   @workspace_reacquire_attempts 25
   @workspace_reacquire_delay_ms 4
+  @retry_backoff_max_ms 5_000
+  @default_unresolved_turn_deadline_ms 10 * 60 * 1_000
 
   def child_spec(id) do
     %{
@@ -189,11 +191,14 @@ defmodule Ouroboros.Interactive.Task do
   @impl true
   def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
 
+  # A turn waiter that arrives in the window between the terminal checkpoint and
+  # this message used to strand the coordinator: nothing rescheduled retirement
+  # once it had been declined.
   def handle_info(:retire, runtime) do
-    if State.terminal?(runtime.session) and map_size(runtime.turn_waiters) == 0 do
-      {:stop, :normal, runtime}
-    else
-      {:noreply, runtime}
+    cond do
+      not State.terminal?(runtime.session) -> {:noreply, runtime}
+      map_size(runtime.turn_waiters) == 0 -> {:stop, :normal, runtime}
+      true -> {:noreply, schedule_retire(runtime)}
     end
   end
 
@@ -221,13 +226,17 @@ defmodule Ouroboros.Interactive.Task do
       turn_waiters: %{},
       ready_waiters: [],
       workspace_lease: lease,
-      workspace_capability: capability
+      workspace_capability: capability,
+      retry: no_retry(),
+      terminal_observed_at: nil
     }
   end
 
+  defp no_retry, do: %{signature: nil, count: 0, delay: 0}
+
   defp attach_or_start(%{session: %State{harness_session_id: id}} = runtime) when is_binary(id) do
     case safe_session_call(fn -> Session.info(id) end) do
-      {:ok, %SessionInfo{}} -> schedule_poll(runtime, 0)
+      {:ok, %SessionInfo{}} -> runtime |> clear_retry() |> schedule_poll(0)
       {:error, :not_found} -> lose(runtime, :harness_session_not_found)
       {:error, reason} -> retry(runtime, :harness_session_info_failed, reason)
     end
@@ -307,7 +316,7 @@ defmodule Ouroboros.Interactive.Task do
              limit: @replay_limit
            )
          end) do
-      {:ok, [_ | _] = events} -> persist_harness_events(runtime, events)
+      {:ok, [_ | _] = events} -> runtime |> clear_retry() |> persist_harness_events(events)
       {:ok, []} -> refresh_session(runtime)
       {:error, :not_found} -> lose(runtime, :harness_session_not_found)
       {:error, reason} -> retry(runtime, :harness_session_replay_failed, reason)
@@ -339,6 +348,7 @@ defmodule Ouroboros.Interactive.Task do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
       {:ok, %SessionInfo{} = info} ->
         runtime
+        |> clear_retry()
         |> collect_turn_results()
         |> recover_checkpointed_dispatch(info)
         |> checkpoint_info(info)
@@ -365,7 +375,15 @@ defmodule Ouroboros.Interactive.Task do
                  Session.await(runtime.session.harness_session_id, turn.harness_turn_id, 0)
                end) do
             {:ok, %TurnResult{} = result} ->
-              finish_turn(runtime, turn.id, result)
+              # A turn result becomes readable in the same provider transition that
+              # appends the turn's terminal event, so a result read here can be newer
+              # than the mirrored event log. Finishing now would reply to an awaiter
+              # whose subsequent replay is missing the completion it just waited for.
+              if mirrored_through_result?(runtime) do
+                finish_turn(runtime, turn.id, result)
+              else
+                runtime
+              end
 
             {:error, :timeout} ->
               runtime
@@ -380,14 +398,83 @@ defmodule Ouroboros.Interactive.Task do
     end)
   end
 
+  # Read the provider's cursor high-water mark *after* the result: whatever the
+  # provider had emitted when the result existed is included in it, so a mirror that
+  # has reached it has already checkpointed the turn's terminal event. Anything still
+  # missing is drained by the next poll, and a pruned event still advances the cursor,
+  # so this defers a turn at most until the mirror catches up. An unreachable session
+  # fails open — `refresh_session` owns that diagnosis.
+  defp mirrored_through_result?(runtime) do
+    case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
+      {:ok, %SessionInfo{output_cursor: output_cursor}} ->
+        runtime.session.cursor >= output_cursor
+
+      _unavailable ->
+        true
+    end
+  end
+
+  # Waiting for a turn to resolve after the provider session has already reached a
+  # terminal state is correct only for as long as resolution is still plausible. An
+  # unbounded wait is a livelock: the session never reaches its terminal status, the
+  # workspace lease is never released, and recovery faithfully resurrects the wait
+  # after every restart. The deadline is measured from the first terminal
+  # observation, and expiry resolves outstanding turns as explicitly ambiguous —
+  # the provider work may well have happened.
   defp checkpoint_info(runtime, info) do
     runtime = settle_terminal_dispatch_intents(runtime, info)
 
     if terminal_session_state?(info.state) and unresolved_result_turns?(runtime.session) do
-      schedule_poll(runtime, @poll_interval)
+      runtime = observe_terminal_session(runtime)
+
+      runtime =
+        if unresolved_deadline_expired?(runtime),
+          do: resolve_turns_at_session_close(runtime),
+          else: runtime
+
+      # A resolution whose checkpoint failed has not happened. Retry rather than
+      # close the session over a turn the store never accepted as settled.
+      if unresolved_result_turns?(runtime.session) do
+        schedule_poll(runtime, @poll_interval)
+      else
+        persist_session_info(runtime, info)
+      end
     else
-      persist_session_info(runtime, info)
+      persist_session_info(%{runtime | terminal_observed_at: nil}, info)
     end
+  end
+
+  defp observe_terminal_session(%{terminal_observed_at: nil} = runtime),
+    do: %{runtime | terminal_observed_at: System.monotonic_time(:millisecond)}
+
+  defp observe_terminal_session(runtime), do: runtime
+
+  defp unresolved_deadline_expired?(%{terminal_observed_at: observed_at})
+       when is_integer(observed_at) do
+    System.monotonic_time(:millisecond) - observed_at >= unresolved_turn_deadline_ms()
+  end
+
+  defp unresolved_deadline_expired?(_runtime), do: false
+
+  defp unresolved_turn_deadline_ms do
+    case Application.get_env(
+           :ouroboros,
+           :interactive_unresolved_turn_deadline_ms,
+           @default_unresolved_turn_deadline_ms
+         ) do
+      deadline when is_integer(deadline) and deadline >= 0 -> deadline
+      _invalid -> @default_unresolved_turn_deadline_ms
+    end
+  end
+
+  defp resolve_turns_at_session_close(runtime) do
+    runtime.session.turns
+    |> Enum.reject(fn {_id, turn} -> State.terminal_turn?(turn) end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
+    |> Enum.reduce(runtime, fn turn_id, runtime ->
+      mark_turn_ambiguous(runtime, turn_id, {:unresolved_at_session_close, turn_id})
+    end)
   end
 
   defp persist_session_info(runtime, info) do
@@ -859,15 +946,38 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # A wedged provider used to be retried every 25ms, rewriting the whole session
+  # aggregate to disk on every attempt to record an error identical to the one
+  # already checkpointed. Back off, and only checkpoint the error the first time it
+  # is seen or when it changes.
   defp retry(runtime, kind, reason) do
     error = {kind, Jido.Harness.Redaction.redact(reason)}
-    session = runtime.session |> Map.put(:error, error) |> State.touch()
+    {repeat?, runtime} = note_retry(runtime, error)
+    delay = runtime.retry.delay
 
-    case persist(runtime, session, []) do
-      {:ok, runtime} -> schedule_poll(runtime, @poll_interval)
-      {:error, runtime} -> schedule_poll(runtime, @poll_interval)
+    if repeat? do
+      schedule_poll(runtime, delay)
+    else
+      session = runtime.session |> Map.put(:error, error) |> State.touch()
+
+      case persist(runtime, session, []) do
+        {:ok, runtime} -> schedule_poll(runtime, delay)
+        {:error, runtime} -> schedule_poll(runtime, delay)
+      end
     end
   end
+
+  defp note_retry(%{retry: retry} = runtime, signature) do
+    repeat? = retry.count > 0 and retry.signature == signature
+
+    delay =
+      if retry.count == 0, do: @poll_interval, else: min(retry.delay * 2, @retry_backoff_max_ms)
+
+    {repeat?, %{runtime | retry: %{signature: signature, count: retry.count + 1, delay: delay}}}
+  end
+
+  defp clear_retry(%{retry: %{count: 0}} = runtime), do: runtime
+  defp clear_retry(runtime), do: %{runtime | retry: no_retry()}
 
   defp finalize_unresolved_turns(session, reason) do
     turns =

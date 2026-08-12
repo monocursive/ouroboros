@@ -11,6 +11,13 @@ defmodule Ouroboros.CodingSession do
 
   @type task :: TaskRef.t() | String.t()
 
+  # Control-plane operations (info/replay/subscribe/unsubscribe/cancel) are bounded so
+  # one wedged coordinator cannot freeze every caller, cancellation included. `await/2`
+  # is the deliberate exception: it threads the caller's own timeout, and the transport
+  # is given that timeout plus a margin so the local waiter, not the transport, decides.
+  @default_call_timeout 30_000
+  @remote_margin_ms 5_000
+
   @doc "Starts a detached coding task on the local node."
   @spec start(String.t(), keyword()) :: {:ok, TaskRef.t()} | {:error, term()}
   def start(objective, opts \\ []) when is_binary(objective) and is_list(opts) do
@@ -75,7 +82,13 @@ defmodule Ouroboros.CodingSession do
     if owner == node() do
       local_await(id, request_ref, timeout)
     else
-      route(owner, __MODULE__, :local_await, [id, request_ref, timeout])
+      route(
+        owner,
+        __MODULE__,
+        :local_await,
+        [id, request_ref, timeout],
+        transport_timeout(timeout)
+      )
     end
   end
 
@@ -109,9 +122,10 @@ defmodule Ouroboros.CodingSession do
   @doc false
   def local_call(id, message) do
     with {:ok, pid} <- ensure_coordinator(id) do
-      GenServer.call(pid, message, :infinity)
+      GenServer.call(pid, message, call_timeout())
     end
   catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
     :exit, reason -> {:error, {:task_call_failed, reason}}
   end
 
@@ -122,7 +136,7 @@ defmodule Ouroboros.CodingSession do
     if owner == node() do
       local_call(id, message)
     else
-      route(owner, __MODULE__, :local_call, [id, message])
+      route(owner, __MODULE__, :local_call, [id, message], call_timeout())
     end
   end
 
@@ -152,11 +166,13 @@ defmodule Ouroboros.CodingSession do
     end
   end
 
-  defp route(owner, module, function, arguments) do
+  # Starting a task remotely keeps an unbounded transport: it has no caller-supplied
+  # timeout to thread, and provider start-up latency is legitimately unbounded.
+  defp route(owner, module, function, arguments, timeout \\ :infinity) do
     cond do
       owner == node() -> apply(module, function, arguments)
       owner not in Node.list() -> {:error, {:owner_unavailable, owner}}
-      true -> :erpc.call(owner, module, function, arguments, :infinity)
+      true -> :erpc.call(owner, module, function, arguments, timeout)
     end
   catch
     :error, {:erpc, reason} when reason in [:noconnection, :timeout] ->
@@ -165,6 +181,18 @@ defmodule Ouroboros.CodingSession do
     kind, reason ->
       {:error, {:remote_call_failed, owner, kind, reason}}
   end
+
+  defp call_timeout do
+    case Application.get_env(:ouroboros, :session_call_timeout, @default_call_timeout) do
+      :infinity -> :infinity
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _invalid -> @default_call_timeout
+    end
+  end
+
+  defp transport_timeout(:infinity), do: :infinity
+  defp transport_timeout(timeout) when is_integer(timeout), do: timeout + @remote_margin_ms
+  defp transport_timeout(_timeout), do: call_timeout()
 
   defp fail_unstarted_task(task, reason) do
     case Store.get(task.id) do

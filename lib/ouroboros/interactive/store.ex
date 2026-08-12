@@ -7,6 +7,14 @@ defmodule Ouroboros.Interactive.Store do
 
   @store_key {:ouroboros, :interactive_sessions, 1}
 
+  @type recoverable :: %{
+          id: String.t(),
+          node: node(),
+          status: State.status(),
+          terminal?: boolean(),
+          updated_at: String.t()
+        }
+
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
@@ -21,6 +29,32 @@ defmodule Ouroboros.Interactive.Store do
 
   @spec list(GenServer.server()) :: [State.t()]
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
+
+  @doc """
+  Returns the projection recovery needs, computed inside the store process.
+
+  Each entry is `%{id:, node:, status:, terminal?:, updated_at:}`. Recovery runs on a
+  one-second tick, and deep-copying every retained event list and turn map on every
+  tick is the cost this exists to avoid.
+  """
+  @spec list_recoverable(GenServer.server()) :: [recoverable()]
+  def list_recoverable(server \\ __MODULE__), do: GenServer.call(server, :list_recoverable)
+
+  @doc "Deletes one terminal session. Non-terminal sessions are refused."
+  @spec delete(String.t(), GenServer.server()) :: :ok | :not_found | {:error, term()}
+  def delete(id, server \\ __MODULE__), do: GenServer.call(server, {:delete, id})
+
+  @doc "Deletes terminal sessions whose last transition is older than `older_than_ms`."
+  @spec prune_terminal(non_neg_integer(), GenServer.server()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def prune_terminal(older_than_ms, server \\ __MODULE__)
+
+  def prune_terminal(older_than_ms, server)
+      when is_integer(older_than_ms) and older_than_ms >= 0 do
+    GenServer.call(server, {:prune_terminal, older_than_ms})
+  end
+
+  def prune_terminal(older_than_ms, _server), do: {:error, {:invalid_retention, older_than_ms}}
 
   @impl true
   def init(opts) do
@@ -87,6 +121,38 @@ defmodule Ouroboros.Interactive.Store do
     {:reply, sessions, state}
   end
 
+  def handle_call(:list_recoverable, _from, state) do
+    {:reply, Enum.map(state.sessions, fn {_id, session} -> recoverable(session) end), state}
+  end
+
+  def handle_call({:delete, id}, _from, state) do
+    case Map.fetch(state.sessions, id) do
+      :error ->
+        {:reply, :not_found, state}
+
+      {:ok, session} ->
+        if State.terminal?(session) do
+          persist(Map.delete(state.sessions, id), state)
+        else
+          {:reply, {:error, {:session_not_terminal, session.status}}, state}
+        end
+    end
+  end
+
+  def handle_call({:prune_terminal, older_than_ms}, _from, state) do
+    horizon = DateTime.add(DateTime.utc_now(), -older_than_ms, :millisecond)
+    expired = Enum.filter(state.sessions, fn {_id, session} -> prunable?(session, horizon) end)
+
+    case expired do
+      [] ->
+        {:reply, {:ok, []}, state}
+
+      expired ->
+        ids = Enum.map(expired, &elem(&1, 0))
+        persist(Map.drop(state.sessions, ids), state, {:ok, ids})
+    end
+  end
+
   defp load_sessions(sessions, adapter, adapter_opts, key) do
     if Enum.all?(sessions, fn {id, session} ->
          is_binary(id) and match?(%State{id: ^id}, session) and State.valid?(session)
@@ -97,11 +163,34 @@ defmodule Ouroboros.Interactive.Store do
     end
   end
 
-  defp persist(sessions, state) do
+  defp persist(sessions, state, reply \\ :ok) do
     case adapter_call(state.adapter, :put_checkpoint, [state.key, sessions, state.opts]) do
-      :ok -> {:reply, :ok, %{state | sessions: sessions}}
+      :ok -> {:reply, reply, %{state | sessions: sessions}}
       {:error, reason} -> {:reply, {:error, reason}, state}
       other -> {:reply, {:error, {:invalid_storage_response, other}}, state}
+    end
+  end
+
+  defp recoverable(%State{} = session) do
+    %{
+      id: session.id,
+      node: session.node,
+      status: session.status,
+      terminal?: State.terminal?(session),
+      updated_at: session.updated_at
+    }
+  end
+
+  defp prunable?(%State{} = session, horizon) do
+    State.terminal?(session) and older_than?(session.updated_at, horizon)
+  end
+
+  # An unparsable timestamp is not evidence of age. Retain it rather than delete
+  # durable state on a guess.
+  defp older_than?(updated_at, horizon) do
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, timestamp, _offset} -> DateTime.compare(timestamp, horizon) == :lt
+      _error -> false
     end
   end
 
