@@ -2,14 +2,30 @@ defmodule Ouroboros.Upgrade.Verifier do
   @moduledoc """
   Fail-closed policy checks for fast-lane BEAM artifacts.
 
-  The fast lane can replace agent behavior, but not this verifier, the upgrade
-  executor, the application root, NIF/on-load code, or consolidated protocols.
+  The fast lane can replace agent behavior, but not the modules that enforce this
+  lane's own guarantees, on-load code, or consolidated protocols. The protected set
+  is every `Ouroboros.Upgrade.*` module (verifier, executor, coordinator), every
+  `Ouroboros.Storage.*` module (the synced journal writer a patch could turn into a
+  silent no-op), every `Ouroboros.Release.*` module (the durable lane's authorizer
+  and journal), every `Ouroboros.Control.*` module (which decides what is patched at
+  all), and the application root and its registry owner.
+
+  Detection is a policy gate, not a security sandbox. On-load functions are detected
+  soundly by asking the code server to prepare the batch. NIF loading is detected only
+  as a static import of `:erlang.load_nif/2`; a module that resolves that call at
+  runtime is not detected, and any accepted BEAM already runs with ambient VM
+  authority.
   """
 
   alias Ouroboros.Upgrade.{Artifact, Beam}
 
-  @protected_modules [Ouroboros.Application]
-  @protected_prefix "Elixir.Ouroboros.Upgrade."
+  @protected_modules [Ouroboros.Application, Ouroboros.Application.RegistryOwner]
+  @protected_prefixes [
+    "Elixir.Ouroboros.Upgrade.",
+    "Elixir.Ouroboros.Release.",
+    "Elixir.Ouroboros.Storage.",
+    "Elixir.Ouroboros.Control."
+  ]
 
   @spec verify(Artifact.t(), keyword()) :: :ok | {:error, term()}
   def verify(artifact, trust_policy \\ [])
@@ -136,7 +152,7 @@ defmodule Ouroboros.Upgrade.Verifier do
   defp allowed_module(module) do
     name = Atom.to_string(module)
 
-    if module in @protected_modules or String.starts_with?(name, @protected_prefix) do
+    if module in @protected_modules or String.starts_with?(name, @protected_prefixes) do
       {:error, {:immutable_control_module, module}}
     else
       :ok

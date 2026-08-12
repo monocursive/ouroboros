@@ -2,7 +2,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Test.UpgradeCounter
-  alias Ouroboros.Upgrade.{Artifact, NodeExecutor, Verifier}
+  alias Ouroboros.Upgrade.{Artifact, Beam, NodeExecutor, Verifier}
 
   defmodule UnrelatedServer do
     @moduledoc false
@@ -125,6 +125,78 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
 
     assert {:error, {:immutable_control_module, NodeExecutor}} =
              Verifier.verify(forbidden, allow_unsigned: true)
+  end
+
+  test "refuses to patch any module that enforces this lane's guarantees" do
+    # Protecting only the loader leaves the enforcement path open: one patch against the
+    # journal writer makes every durable write a silent no-op, one against the release
+    # authorizer unlocks the durable lane, and the control plane decides what is patched
+    # at all.
+    for module <- [
+          NodeExecutor,
+          Verifier,
+          Ouroboros.Storage.DurableFile,
+          Ouroboros.Release.Authorizer.Deny,
+          Ouroboros.Release.Journal,
+          Ouroboros.Control.Store,
+          Ouroboros.Application,
+          Ouroboros.Application.RegistryOwner
+        ] do
+      binary = object_code!(module)
+
+      assert {:ok, artifact} =
+               Artifact.build(
+                 [{module, binary, old_binary: binary}],
+                 epoch: System.unique_integer([:positive, :monotonic])
+               )
+
+      assert {:error, {:immutable_control_module, ^module}} =
+               Verifier.verify(artifact, allow_unsigned: true)
+    end
+  end
+
+  test "rejects on-load code in the new binary and in the rollback preimage" do
+    probe = Ouroboros.Test.OnLoadProbe
+    plain_binary = compile_probe!(probe, "")
+    on_load_binary = compile_probe!(probe, "@on_load :__probe_init__")
+
+    on_exit(fn ->
+      :code.soft_purge(probe)
+      :code.delete(probe)
+      :code.soft_purge(probe)
+    end)
+
+    # The old attribute lookup could only ever answer "no": `-on_load` is a Code-chunk
+    # construct and never reaches the attributes chunk.
+    assert {:ok, {^probe, [attributes: attributes]}} =
+             :beam_lib.chunks(on_load_binary, [:attributes])
+
+    refute Keyword.has_key?(attributes, :on_load)
+
+    assert {:ok, %{on_load?: true}} = Beam.inspect_binary(on_load_binary)
+    assert {:ok, %{on_load?: false}} = Beam.inspect_binary(plain_binary)
+
+    assert {:error, {:forbidden_beam_feature, ^probe, :on_load}} =
+             Beam.build(probe, on_load_binary, old_binary: plain_binary)
+
+    # Rollback loads the preimage with `:code.load_binary/3`, which would run its
+    # on-load function, so the preimage is not exempt.
+    assert {:error, {:forbidden_beam_feature, ^probe, :on_load}} =
+             Beam.build(probe, plain_binary, old_binary: on_load_binary)
+
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+
+    assert {:ok, artifact} =
+             Artifact.build(
+               [{UpgradeCounter, new_binary, old_binary: old_binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    smuggled = %{artifact | modules: [on_load_beam(probe, on_load_binary)]}
+
+    assert {:error, {:forbidden_beam_feature, ^probe}} =
+             Verifier.verify(smuggled, allow_unsigned: true)
   end
 
   test "requires trusted signatures under the production trust policy" do
@@ -859,9 +931,284 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     stop_isolated_executor(executor)
   end
 
+  test "a failed resume compensates first and keeps rollback material journaled" do
+    observer = String.to_atom("upgrade_resume_observer_#{System.unique_integer([:positive])}")
+    Process.register(self(), observer)
+    on_exit(fn -> if Process.whereis(observer) == self(), do: Process.unregister(observer) end)
+
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_blocking_v2!(old_binary, observer)
+    storage = unique_ets_storage()
+    {server, executor} = start_isolated_executor!(storage)
+    extra = {:block_for_restart_test, observer}
+
+    # Unsupervised targets: one is killed on purpose and must stay dead so the commit
+    # discovers the loss where the executor resumes, not where it migrates.
+    {:ok, first} = GenServer.start(UpgradeCounter, 3)
+    {:ok, second} = GenServer.start(UpgradeCounter, 5)
+    on_exit(fn -> Enum.each([first, second], &stop_if_alive/1) end)
+
+    assert {:ok, artifact} =
+             Artifact.build(
+               [
+                 {UpgradeCounter, new_binary,
+                  old_binary: old_binary, stateful: true, migration_extra: extra}
+               ],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:ok, token} =
+             NodeExecutor.prepare(artifact,
+               server: server,
+               migrations: [{UpgradeCounter, first, extra}, {UpgradeCounter, second, extra}]
+             )
+
+    caller = self()
+
+    spawn(fn ->
+      result = NodeExecutor.commit(token, server: server, process_timeout: 30_000)
+      send(caller, {:commit_result, result})
+    end)
+
+    assert_receive {:blocking_code_change_entered, ^first}, 5_000
+    send(first, {:continue_blocking_code_change, first})
+    assert_receive {:blocking_code_change_returning, ^first}, 5_000
+    assert_receive {:blocking_code_change_entered, ^second}, 5_000
+    Process.exit(first, :kill)
+    send(second, {:continue_blocking_code_change, second})
+    assert_receive {:blocking_code_change_returning, ^second}, 5_000
+
+    assert_receive {:commit_result, {:error, {:resume_failed, _errors, _recovery}, :quarantined}},
+                   15_000
+
+    # Compensation still ran: the surviving target is downgraded and the node is back on
+    # its preimage even though the transition failed.
+    assert UpgradeCounter.version() == 1
+    assert UpgradeCounter.value(second) == {1, 5}
+
+    status = NodeExecutor.status(server: server)
+    assert status.mode == :quarantined
+    assert status.quarantine_reason == {:commit_recovery_failed, :rollback_material_retained}
+
+    [old_md5] = Enum.map(artifact.modules, & &1.old_md5)
+    failed = Enum.find(status.operations, &(&1.operation == :commit and &1.outcome == :failed))
+    assert failed.modules == [%{module: UpgradeCounter, md5: old_md5}]
+    refute Map.has_key?(failed, :artifact)
+    refute Map.has_key?(failed, :migrations)
+
+    # The write-ahead record was the only durable copy of the preimages. A failure that
+    # left code mutated must not be the thing that deletes them.
+    retained = retained_commit_operation!(storage)
+    assert [%{module: UpgradeCounter, old_binary: ^old_binary}] = retained.artifact.modules
+    assert Enum.map(retained.migrations, & &1.pid) == [first, second]
+
+    executor = restart_isolated_executor!(server, executor, storage)
+
+    assert %{
+             mode: :quarantined,
+             quarantine_reason: {:commit_recovery_failed, :rollback_material_retained}
+           } = NodeExecutor.status(server: server)
+
+    assert %{artifact: %Artifact{}} = retained_commit_operation!(storage)
+    stop_isolated_executor(executor)
+  end
+
+  test "a quarantined executor refuses rollback and promote until state matches again" do
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+    storage = unique_ets_storage()
+    {server, executor} = start_isolated_executor!(storage)
+
+    assert {:ok, artifact} =
+             Artifact.build(
+               [{UpgradeCounter, new_binary, old_binary: old_binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
+    assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
+
+    stop_isolated_executor(executor)
+    restore_v1!(old_binary)
+    {^server, executor} = start_isolated_executor!(storage, server)
+
+    reason = {:startup_reconciliation, {:module_hash_mismatch, UpgradeCounter}}
+    assert %{mode: :quarantined, quarantine_reason: ^reason} = NodeExecutor.status(server: server)
+
+    # Startup proved loaded code disagrees with the journal. Mutating it further, or
+    # discarding its preimages through a promote, is exactly what must not be possible.
+    assert {:error, {:executor_quarantined, ^reason}, :quarantined} =
+             NodeExecutor.rollback(receipt, server: server)
+
+    assert {:error, {:executor_quarantined, ^reason}} =
+             NodeExecutor.promote(receipt, server: server)
+
+    assert {:error, {:reconciliation_failed, {:module_hash_mismatch, UpgradeCounter}}} =
+             NodeExecutor.reconcile_quarantine(server: server)
+
+    assert %{mode: :quarantined} = NodeExecutor.status(server: server)
+
+    load_binary!(new_binary, ~c"upgrade_counter_v2.beam")
+    assert :ok = NodeExecutor.reconcile_quarantine(server: server)
+
+    status = NodeExecutor.status(server: server)
+    assert status.mode == :ready
+    assert status.quarantine_reason == nil
+
+    assert Enum.any?(
+             status.operations,
+             &(&1.operation == :quarantine and &1.outcome == :cleared)
+           )
+
+    assert {:error, :not_quarantined} = NodeExecutor.reconcile_quarantine(server: server)
+    assert :ok = NodeExecutor.rollback(receipt, server: server)
+    assert UpgradeCounter.version() == 1
+
+    stop_isolated_executor(executor)
+  end
+
+  test "a reservation whose token was lost is inspectable and releasable by artifact" do
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+    storage = unique_ets_storage()
+    {server, executor} = start_isolated_executor!(storage)
+    base_epoch = System.unique_integer([:positive, :monotonic])
+
+    build = fn epoch ->
+      assert {:ok, artifact} =
+               Artifact.build(
+                 [{UpgradeCounter, new_binary, old_binary: old_binary}],
+                 epoch: epoch
+               )
+
+      artifact
+    end
+
+    artifact = build.(base_epoch)
+    assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
+
+    artifact_id = artifact.id
+    status = NodeExecutor.status(server: server)
+
+    assert [%{artifact_id: ^artifact_id, epoch: ^base_epoch, prepared_at: prepared_at}] =
+             status.prepared
+
+    assert is_binary(prepared_at)
+    refute inspect(status) =~ token
+
+    # Without the lost token the node would answer this way forever.
+    assert {:error,
+            {:upgrade_in_progress, [%{artifact_id: ^artifact_id, prepared_at: ^prepared_at}]}} =
+             NodeExecutor.prepare(build.(base_epoch + 1), server: server)
+
+    assert {:error, {:unknown_reservation, "no-such-artifact"}} =
+             NodeExecutor.abort_prepared_reservation("no-such-artifact", server: server)
+
+    assert {:error, :invalid_artifact_id} = NodeExecutor.abort_prepared_reservation(:not_a_binary)
+    assert :ok = NodeExecutor.abort_prepared_reservation(artifact_id, server: server)
+    # A coordinator that never learned the first attempt's outcome may repeat it.
+    assert :ok = NodeExecutor.abort_prepared_reservation(artifact_id, server: server)
+
+    assert NodeExecutor.status(server: server).prepared == []
+    assert {:error, :unknown_token, :unchanged} = NodeExecutor.commit(token, server: server)
+
+    assert {:ok, later_token} = NodeExecutor.prepare(build.(base_epoch + 2), server: server)
+    assert :ok = NodeExecutor.abort(later_token, server: server)
+
+    stop_isolated_executor(executor)
+  end
+
+  test "the operations log is bounded without dropping pending or rollback evidence" do
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+    storage = unique_ets_storage()
+    {server, executor} = start_isolated_executor!(storage)
+
+    assert {:ok, artifact} =
+             Artifact.build(
+               [{UpgradeCounter, new_binary, old_binary: old_binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    for _attempt <- 1..60 do
+      assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
+      assert :ok = NodeExecutor.abort(token, server: server)
+    end
+
+    journal = :sys.get_state(executor).journal
+    sequences = Enum.map(journal.operations, & &1.sequence)
+
+    assert length(journal.operations) == 100
+    assert journal.next_sequence == 121
+    assert sequences == Enum.sort(sequences)
+    assert sequences == Enum.uniq(sequences)
+    assert List.first(sequences) == 21
+
+    # A trimmed history is still a valid journal on the next restart.
+    executor = restart_isolated_executor!(server, executor, storage)
+    assert %{mode: :ready} = NodeExecutor.status(server: server)
+
+    stop_isolated_executor(executor)
+  end
+
   defp object_code!(module) do
     {^module, binary, _filename} = :code.get_object_code(module)
     binary
+  end
+
+  defp stop_if_alive(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid)
+    :ok
+  end
+
+  defp retained_commit_operation!({adapter, adapter_opts}) do
+    key = {:ouroboros, :upgrade_node_executor, 1, node()}
+    assert {:ok, journal} = adapter.get_checkpoint(key, adapter_opts)
+
+    assert operation =
+             Enum.find(
+               journal.operations,
+               &(&1.operation == :commit and &1.outcome == :failed)
+             )
+
+    operation
+  end
+
+  defp compile_probe!(module, attribute) do
+    source = """
+    defmodule #{inspect(module)} do
+      #{attribute}
+      def __probe_init__, do: :ok
+      def hello, do: :world
+    end
+    """
+
+    previous = Code.get_compiler_option(:ignore_module_conflict)
+    Code.put_compiler_option(:ignore_module_conflict, true)
+    [{^module, binary}] = Code.compile_string(source, "on_load_probe.ex")
+    Code.put_compiler_option(:ignore_module_conflict, previous)
+
+    # Compiling loads, and the verifier rejects any module that still has retired code.
+    assert :code.soft_purge(module)
+    binary
+  end
+
+  defp on_load_beam(module, binary) do
+    assert {:ok, info} = Beam.inspect_binary(binary)
+
+    %Beam{
+      module: module,
+      filename: ~c"on_load_probe.beam",
+      binary: binary,
+      sha256: Beam.sha256(binary),
+      md5: info.md5,
+      vsn: info.vsn,
+      old_filename: ~c"on_load_probe.beam",
+      old_binary: binary,
+      old_sha256: Beam.sha256(binary),
+      old_md5: info.md5,
+      old_vsn: info.vsn
+    }
   end
 
   defp compile_v2!(old_binary) do
@@ -981,11 +1328,12 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     :ok
   end
 
-  defp restore_v1!(old_binary) do
+  defp restore_v1!(old_binary), do: load_binary!(old_binary, ~c"upgrade_counter_v1.beam")
+
+  defp load_binary!(binary, filename) do
     assert :code.soft_purge(UpgradeCounter)
 
-    assert {:module, UpgradeCounter} =
-             :code.load_binary(UpgradeCounter, ~c"upgrade_counter_v1.beam", old_binary)
+    assert {:module, UpgradeCounter} = :code.load_binary(UpgradeCounter, filename, binary)
 
     assert :code.soft_purge(UpgradeCounter)
     :ok

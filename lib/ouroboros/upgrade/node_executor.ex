@@ -16,8 +16,16 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   deliberately memory-only; only a SHA-256 token digest and redacted reservation are
   journaled, and the reservation becomes `:lost_on_restart`.
 
+  A commit failure that leaves this node mutated keeps the write-ahead artifact and its
+  migration targets in the terminal journal record, so preimages remain restorable even
+  though the transition failed. A quarantined executor refuses every mutating call,
+  including rollback and promote; `reconcile_quarantine/1` is the only exit and only
+  succeeds when the journal again matches loaded code.
+
   `status/1` never exposes prepare tokens or rollback receipt identifiers. A caller
-  that retained a receipt ID can recover the capability through `receipt/2`.
+  that retained a receipt ID can recover the capability through `receipt/2`. It does
+  report reservation metadata, and `abort_prepared_reservation/2` releases a reservation
+  whose token was lost with its prepare reply.
 
   This is the fast patch lane. Durable reboot-persistent upgrades still require OTP
   release artifacts (`.appup`/`.relup` and `:release_handler`).
@@ -29,6 +37,8 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   @journal_version 1
   @public_operation_limit 50
+  @operation_history_limit 100
+  @pending_outcomes [:committing, :rolling_back, :promoting]
   @operation_outcomes %{
     prepare: [:prepared],
     commit: [
@@ -42,7 +52,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     rollback: [:rolling_back, :rolled_back, :failed],
     promote: [:promoting, :promoted, :failed],
     restart: [:lost_on_restart, :pending_targets_resumed, :pending_target_resume_failed],
-    quarantine: [:reconciliation_required]
+    quarantine: [:reconciliation_required, :cleared]
   }
 
   defmodule Migration do
@@ -135,6 +145,55 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   def abort(_token, _opts), do: {:error, :invalid_request}
 
+  @doc """
+  Releases the single prepared reservation for `artifact_id` without its bearer token.
+
+  A prepare whose reply is lost in transport leaves the reservation held and its token
+  unknown, which would otherwise wedge the node until the process is killed. This is a
+  node-local operator and coordinator path: it is journaled like `abort/2`, it cannot
+  affect already committed code, and it never needs the token.
+  """
+  @spec abort_prepared_reservation(String.t(), keyword()) :: :ok | {:error, term()}
+  def abort_prepared_reservation(artifact_id, opts \\ [])
+
+  def abort_prepared_reservation(artifact_id, opts)
+      when is_binary(artifact_id) and is_list(opts) do
+    if artifact_id != "" and Keyword.keyword?(opts) do
+      {server, opts} = client_options(opts)
+
+      GenServer.call(
+        server,
+        {:abort_prepared_reservation, artifact_id},
+        Keyword.get(opts, :timeout, 5_000)
+      )
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  def abort_prepared_reservation(_artifact_id, _opts), do: {:error, :invalid_artifact_id}
+
+  @doc """
+  Leaves quarantine only if the journal now matches this node's loaded code.
+
+  This replays the startup reconciliation checks against current state and journals the
+  transition. Anything that still disagrees is returned as diagnostics and the executor
+  stays quarantined; there is no way to declare a mismatch resolved.
+  """
+  @spec reconcile_quarantine(keyword()) :: :ok | {:error, term()}
+  def reconcile_quarantine(opts \\ [])
+
+  def reconcile_quarantine(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      {server, opts} = client_options(opts)
+      GenServer.call(server, :reconcile_quarantine, Keyword.get(opts, :timeout, 15_000))
+    else
+      {:error, :invalid_options}
+    end
+  end
+
+  def reconcile_quarantine(_opts), do: {:error, :invalid_options}
+
   @spec rollback(Receipt.t(), keyword()) :: :ok | {:error, term(), atom()}
   def rollback(receipt, opts \\ [])
 
@@ -204,18 +263,20 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
          {:ok, prepared_code} <- :code.prepare_loading(triples) do
       token = Jido.Signal.ID.generate!()
       token_digest = token_digest(token)
+      prepared_at = now()
 
       prepared = %{
         artifact: artifact,
         code: prepared_code,
         migrations: migrations,
-        token_digest: token_digest
+        token_digest: token_digest,
+        prepared_at: prepared_at
       }
 
       reservation = %{
         artifact_id: artifact.id,
         epoch: artifact.epoch,
-        prepared_at: now(),
+        prepared_at: prepared_at,
         modules: module_names(artifact)
       }
 
@@ -256,28 +317,28 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   def handle_call({:abort, token}, _from, state) do
     case Map.fetch(state.prepared, token) do
       {:ok, prepared} ->
-        journal =
-          state.journal
-          |> delete_reservation(prepared.token_digest)
-          |> put_token_outcome(prepared.token_digest, prepared.artifact, :aborted)
-          |> append_operation(:abort, prepared.artifact,
-            outcome: :aborted,
-            token_digest: prepared.token_digest
-          )
-
-        case persist_journal(state, journal) do
-          {:ok, state} ->
-            {:reply, :ok, %{state | prepared: Map.delete(state.prepared, token)}}
-
-          {:error, reason, state} ->
-            {:reply, {:error, {:journal_persist_failed, public_storage_reason(reason)}}, state}
-        end
+        release_reservation(state, token, prepared)
 
       :error ->
         if completed_token_operation?(state.journal, token, [:aborted, :lost_on_restart]) do
           {:reply, :ok, state}
         else
           {:reply, {:error, :unknown_token}, state}
+        end
+    end
+  end
+
+  def handle_call({:abort_prepared_reservation, artifact_id}, _from, state)
+      when is_binary(artifact_id) do
+    case Enum.find(state.prepared, fn {_token, entry} -> entry.artifact.id == artifact_id end) do
+      {token, prepared} ->
+        release_reservation(state, token, prepared)
+
+      nil ->
+        if released_reservation?(state.journal, artifact_id) do
+          {:reply, :ok, state}
+        else
+          {:reply, {:error, {:unknown_reservation, artifact_id}}, state}
         end
     end
   end
@@ -306,60 +367,84 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   def handle_call({:rollback, %Receipt{} = receipt, opts}, _from, state) do
-    case Map.fetch(state.journal.receipts, receipt.id) do
-      {:ok, ^receipt} ->
-        timeout = Keyword.get(opts, :process_timeout, 5_000)
+    with :ok <- ensure_ready(state) do
+      case Map.fetch(state.journal.receipts, receipt.id) do
+        {:ok, ^receipt} ->
+          timeout = Keyword.get(opts, :process_timeout, 5_000)
 
-        intent =
-          append_operation(state.journal, :rollback, receipt.artifact,
-            outcome: :rolling_back,
-            receipt_id: receipt.id,
-            migration_count: length(receipt.migrations),
-            modules: preimage_module_identities(receipt.artifact)
-          )
+          intent =
+            append_operation(state.journal, :rollback, receipt.artifact,
+              outcome: :rolling_back,
+              receipt_id: receipt.id,
+              migration_count: length(receipt.migrations),
+              modules: preimage_module_identities(receipt.artifact)
+            )
 
-        case persist_journal(state, intent) do
-          {:ok, state} ->
-            finish_rollback(receipt, timeout, state)
+          case persist_journal(state, intent) do
+            {:ok, state} ->
+              finish_rollback(receipt, timeout, state)
 
-          {:error, reason, state} ->
-            {:reply,
-             {:error, {:journal_persist_failed, public_storage_reason(reason)}, :unchanged},
-             state}
-        end
+            {:error, reason, state} ->
+              {:reply,
+               {:error, {:journal_persist_failed, public_storage_reason(reason)}, :unchanged},
+               state}
+          end
 
-      _ ->
-        if completed_receipt_operation?(state.journal, :rollback, receipt.id, :rolled_back) do
-          {:reply, :ok, state}
-        else
-          {:reply, {:error, :unknown_receipt, :unchanged}, state}
-        end
+        _ ->
+          if completed_receipt_operation?(state.journal, :rollback, receipt.id, :rolled_back) do
+            {:reply, :ok, state}
+          else
+            {:reply, {:error, :unknown_receipt, :unchanged}, state}
+          end
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason, :quarantined}, state}
     end
   end
 
   def handle_call({:promote, %Receipt{} = receipt}, _from, state) do
-    case Map.fetch(state.journal.receipts, receipt.id) do
-      {:ok, ^receipt} ->
-        intent =
-          append_operation(state.journal, :promote, receipt.artifact,
-            outcome: :promoting,
-            receipt_id: receipt.id,
-            modules: target_module_identities(receipt.artifact)
-          )
+    with :ok <- ensure_ready(state) do
+      case Map.fetch(state.journal.receipts, receipt.id) do
+        {:ok, ^receipt} ->
+          intent =
+            append_operation(state.journal, :promote, receipt.artifact,
+              outcome: :promoting,
+              receipt_id: receipt.id,
+              modules: target_module_identities(receipt.artifact)
+            )
 
-        case persist_journal(state, intent) do
-          {:ok, state} ->
-            finish_promote(receipt, state)
+          case persist_journal(state, intent) do
+            {:ok, state} ->
+              finish_promote(receipt, state)
 
-          {:error, reason, state} ->
-            {:reply, {:error, {:journal_persist_failed, public_storage_reason(reason)}}, state}
-        end
+            {:error, reason, state} ->
+              {:reply, {:error, {:journal_persist_failed, public_storage_reason(reason)}}, state}
+          end
 
-      _ ->
-        if completed_receipt_operation?(state.journal, :promote, receipt.id, :promoted) do
-          {:reply, :ok, state}
-        else
-          {:reply, {:error, :unknown_receipt}, state}
+        _ ->
+          if completed_receipt_operation?(state.journal, :promote, receipt.id, :promoted) do
+            {:reply, :ok, state}
+          else
+            {:reply, {:error, :unknown_receipt}, state}
+          end
+      end
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:reconcile_quarantine, _from, state) do
+    case state.journal.mode do
+      :ready ->
+        {:reply, {:error, :not_quarantined}, state}
+
+      :quarantined ->
+        case reconcile_current_state(state.journal) do
+          :ok ->
+            clear_quarantine(state)
+
+          {:error, reason} ->
+            {:reply, {:error, {:reconciliation_failed, public_quarantine_reason(reason)}}, state}
         end
     end
   end
@@ -376,6 +461,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
            %{
              artifact_id: prepared.artifact.id,
              epoch: prepared.artifact.epoch,
+             prepared_at: prepared.prepared_at,
              modules: module_names(prepared.artifact)
            }
          end),
@@ -385,7 +471,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   def handle_call({operation, _value}, _from, state)
-      when operation in [:abort, :promote] do
+      when operation in [:abort, :promote, :abort_prepared_reservation] do
     {:reply, {:error, :invalid_request}, state}
   end
 
@@ -481,9 +567,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
     reconciliation =
       with :ok <- target_reconciliation,
-           :ok <- reconcile_pending_operations(journal.operations),
-           :ok <- reconcile_expected_modules(journal.expected_modules),
-           :ok <- reconcile_receipts(journal.receipts) do
+           :ok <- reconcile_current_state(journal) do
         :ok
       end
 
@@ -510,6 +594,34 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     else
       state
     end
+  end
+
+  defp release_reservation(state, token, prepared) do
+    journal =
+      state.journal
+      |> delete_reservation(prepared.token_digest)
+      |> put_token_outcome(prepared.token_digest, prepared.artifact, :aborted)
+      |> append_operation(:abort, prepared.artifact,
+        outcome: :aborted,
+        token_digest: prepared.token_digest
+      )
+
+    case persist_journal(state, journal) do
+      {:ok, state} ->
+        {:reply, :ok, %{state | prepared: Map.delete(state.prepared, token)}}
+
+      {:error, reason, state} ->
+        {:reply, {:error, {:journal_persist_failed, public_storage_reason(reason)}}, state}
+    end
+  end
+
+  # An ambiguous prepare can be retried by a coordinator that never learned the outcome
+  # of the first attempt, so a reservation already released for this artifact answers
+  # the same way a token abort does.
+  defp released_reservation?(journal, artifact_id) do
+    Enum.any?(journal.token_outcomes, fn {_digest, outcome} ->
+      outcome.artifact_id == artifact_id and outcome.outcome in [:aborted, :lost_on_restart]
+    end)
   end
 
   defp base_state(storage, policy, journal) do
@@ -571,20 +683,16 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       {:ok, receipt} ->
         persist_committed(prepared, token, receipt, timeout, state)
 
-      {:error, reason, recovery} ->
+      {:error, reason, recovery, rollback_material} ->
         journal =
           state.journal
           |> clear_pending_operation(:commit, :token_digest, prepared.token_digest)
           |> put_token_outcome(prepared.token_digest, prepared.artifact, :failed)
-          |> append_operation(:commit, prepared.artifact,
-            outcome: :failed,
-            token_digest: prepared.token_digest,
-            reason: public_operation_reason(reason)
-          )
+          |> append_failed_commit(prepared, reason, rollback_material)
 
         journal =
           if recovery == :quarantined,
-            do: quarantine_journal(journal, {:commit_recovery_failed, :reconciliation_required}),
+            do: quarantine_journal(journal, failed_commit_quarantine(rollback_material)),
             else: journal
 
         state = %{state | prepared: Map.delete(state.prepared, token)}
@@ -608,6 +716,38 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
         end
     end
   end
+
+  # The write-ahead `:committing` record is the only place preimage bytes are durable.
+  # Clearing it is correct once the node is provably back on its preimages, and wrong
+  # when the failure left code mutated: the same record is then the only journaled way
+  # back. Carry the artifact and its migration targets into the terminal record in that
+  # case so an operator or a later restart can still restore them.
+  defp append_failed_commit(journal, prepared, reason, :not_required) do
+    append_operation(journal, :commit, prepared.artifact,
+      outcome: :failed,
+      token_digest: prepared.token_digest,
+      reason: public_operation_reason(reason)
+    )
+  end
+
+  defp append_failed_commit(journal, prepared, reason, :required) do
+    append_operation(journal, :commit, prepared.artifact,
+      outcome: :failed,
+      token_digest: prepared.token_digest,
+      reason: public_operation_reason(reason),
+      module_count: length(prepared.artifact.modules),
+      migration_count: length(prepared.migrations),
+      modules: preimage_module_identities(prepared.artifact),
+      artifact: prepared.artifact,
+      migrations: prepared.migrations
+    )
+  end
+
+  defp failed_commit_quarantine(:required),
+    do: {:commit_recovery_failed, :rollback_material_retained}
+
+  defp failed_commit_quarantine(:not_required),
+    do: {:commit_recovery_failed, :reconciliation_required}
 
   defp persist_committed(prepared, token, receipt, timeout, state) do
     journal =
@@ -1114,8 +1254,38 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       valid_reservation_relationships?(journal) and
       valid_token_relationships?(journal) and
       valid_pending_relationships?(journal) and
+      valid_retained_material_relationships?(journal) and
       valid_receipt_expectations?(journal)
   end
+
+  # A terminal commit record carries rollback material only when the failure left this
+  # node mutated. When it does, the retained artifact and migration targets are the
+  # only remaining way back and must describe the same transition the record names.
+  defp valid_retained_material_relationships?(journal) do
+    journal.operations
+    |> Enum.filter(&(&1.operation == :commit and &1.outcome == :failed))
+    |> Enum.all?(fn operation ->
+      is_nil(operation[:artifact]) or valid_retained_commit_context?(operation)
+    end)
+  end
+
+  defp valid_retained_commit_context?(%{
+         artifact_id: artifact_id,
+         epoch: epoch,
+         module_count: module_count,
+         migration_count: migration_count,
+         modules: modules,
+         artifact: %Artifact{} = artifact,
+         migrations: migrations
+       })
+       when is_list(modules) and is_list(migrations) do
+    artifact.id == artifact_id and artifact.epoch == epoch and
+      module_count == length(artifact.modules) and migration_count == length(migrations) and
+      modules == preimage_module_identities(artifact) and
+      valid_pending_migration_relationships?(artifact, migrations)
+  end
+
+  defp valid_retained_commit_context?(_operation), do: false
 
   defp valid_reservation_relationships?(journal) do
     Enum.all?(journal.reservations, fn {digest, reservation} ->
@@ -1211,7 +1381,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp valid_pending_relationships?(journal) do
     pending =
-      Enum.filter(journal.operations, &(&1.outcome in [:committing, :rolling_back, :promoting]))
+      Enum.filter(journal.operations, &(&1.outcome in @pending_outcomes))
 
     length(pending) <= 1 and
       Enum.all?(pending, fn
@@ -1342,8 +1512,37 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     end)
   end
 
+  # The checks a restart runs against loaded code, without the mutating target resume.
+  # `reconcile_quarantine/1` replays exactly these so a quarantine is only ever cleared
+  # on the same evidence that would have let a restart come up ready.
+  defp reconcile_current_state(journal) do
+    with :ok <- reconcile_pending_operations(journal.operations),
+         :ok <- reconcile_expected_modules(journal.expected_modules),
+         :ok <- reconcile_receipts(journal.receipts) do
+      :ok
+    end
+  end
+
+  defp clear_quarantine(state) do
+    journal =
+      state.journal
+      |> append_system_operation(:quarantine, :cleared,
+        reason: public_quarantine_reason(state.journal.quarantine_reason)
+      )
+
+    journal = %{journal | mode: :ready, quarantine_reason: nil}
+
+    case persist_journal(state, journal) do
+      {:ok, state} ->
+        {:reply, :ok, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, {:journal_persist_failed, public_storage_reason(reason)}}, state}
+    end
+  end
+
   defp reconcile_pending_operations(operations) do
-    case Enum.find(operations, &(&1.outcome in [:committing, :rolling_back, :promoting])) do
+    case Enum.find(operations, &(&1.outcome in @pending_outcomes)) do
       nil ->
         :ok
 
@@ -1641,14 +1840,34 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp append_operation_metadata(journal, operation_metadata) do
-    operations = journal.operations ++ [operation_metadata]
+    operations = trim_operations(journal.operations ++ [operation_metadata])
     %{journal | operations: operations, next_sequence: journal.next_sequence + 1}
+  end
+
+  # History is bounded, but never at the cost of evidence. A pending write-ahead record
+  # is what restart reconciliation reads, and a record carrying an artifact is the only
+  # remaining copy of a preimage; both survive trimming regardless of age. Sequences stay
+  # unique and ascending, and `next_sequence` keeps advancing, so a trimmed journal still
+  # validates on restart.
+  defp trim_operations(operations) do
+    excess = length(operations) - @operation_history_limit
+
+    if excess > 0 do
+      {trimmed, retained} = Enum.split(operations, excess)
+      Enum.filter(trimmed, &retained_operation?/1) ++ retained
+    else
+      operations
+    end
+  end
+
+  defp retained_operation?(operation) do
+    operation.outcome in @pending_outcomes or Map.has_key?(operation, :artifact)
   end
 
   defp clear_pending_operation(journal, operation, identity_key, identity) do
     operations =
       Enum.reject(journal.operations, fn entry ->
-        entry.operation == operation and entry.outcome in [:committing, :rolling_back, :promoting] and
+        entry.operation == operation and entry.outcome in @pending_outcomes and
           entry[identity_key] == identity
       end)
 
@@ -1790,6 +2009,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp storage_response_kind({tag, _value}) when is_atom(tag), do: tag
   defp storage_response_kind(_response), do: :unexpected
 
+  # Failures return `{:error, reason, recovery, rollback_material}`. The last element
+  # says whether this node's code was already mutated when the failure was final: a
+  # failure before `finish_loading/1` leaves nothing to restore, while a failure at or
+  # after it leaves the journal as the only place preimages still exist.
   defp commit_prepared(prepared, timeout) do
     pids = migration_pids(prepared.migrations)
 
@@ -1797,12 +2020,12 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       {:error, reason, suspended} ->
         case resume_all(suspended) do
           :ok ->
-            {:error, {:suspend_failed, reason}, :unchanged}
+            {:error, {:suspend_failed, reason}, :unchanged, :not_required}
 
           {:error, resume_errors} ->
             {:error,
              {:suspend_failed, reason, {:resume_failed, public_resume_errors(resume_errors)}},
-             :quarantined}
+             :quarantined, :not_required}
         end
 
       {:ok, suspended} ->
@@ -1822,7 +2045,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
                      }}
 
                   {:error, resume_errors} ->
-                    {:error, {:resume_failed, public_resume_errors(resume_errors)}, :quarantined}
+                    recover_failed_resume(prepared, migrated, resume_errors, timeout)
                 end
 
               {:error, reason, migrated} ->
@@ -1832,12 +2055,13 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
           {:error, {:finish_loading, reason}} ->
             case resume_all(suspended) do
               :ok ->
-                {:error, {:finish_loading_failed, reason}, :unchanged}
+                {:error, {:finish_loading_failed, reason}, :unchanged, :not_required}
 
               {:error, resume_errors} ->
                 {:error,
                  {:finish_loading_failed, reason,
-                  {:resume_failed, public_resume_errors(resume_errors)}}, :quarantined}
+                  {:resume_failed, public_resume_errors(resume_errors)}}, :quarantined,
+                 :not_required}
             end
         end
     end
@@ -1874,16 +2098,56 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp recover_failed_commit(prepared, migrated, suspended, reason, timeout) do
+    case compensate_mutated_commit(prepared, migrated, suspended, timeout) do
+      :ok ->
+        {:error, {:migration_failed, reason}, :rolled_back, :not_required}
+
+      {:error, recovery_errors} ->
+        {:error, {:migration_failed, reason, recovery_errors}, :quarantined, :required}
+    end
+  end
+
+  # A failed resume happens after the batch is visible and every migration ran. The
+  # preimages and the migrated targets are still in scope here, so attempt the same
+  # compensation a failed migration gets instead of quarantining a mutated node that
+  # could have been restored.
+  defp recover_failed_resume(prepared, migrated, resume_errors, timeout) do
+    errors = public_resume_errors(resume_errors)
+    suspended = resuspend_targets(migrated, timeout)
+
+    case compensate_mutated_commit(prepared, migrated, suspended, timeout) do
+      :ok ->
+        {:error, {:resume_failed, errors}, :rolled_back, :not_required}
+
+      {:error, recovery_errors} ->
+        {:error, {:resume_failed, errors, recovery_errors}, :quarantined, :required}
+    end
+  end
+
+  # `resume_all/1` resumes every target it can before reporting, so the ones that came
+  # back are no longer suspended and would refuse `:sys.change_code/5`. Re-suspend them
+  # the way rolling back a committed receipt does. This is best effort by design: a
+  # target that cannot be suspended cannot be downgraded either, and the failed
+  # downgrade is what makes that visible instead of a silent partial compensation.
+  defp resuspend_targets(migrations, timeout) do
+    migrations
+    |> Enum.reduce([], fn migration, suspended ->
+      case safe_sys_call(fn -> :sys.suspend(migration.pid, timeout) end) do
+        :ok -> [migration.pid | suspended]
+        {:error, _reason} -> suspended
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  defp compensate_mutated_commit(prepared, migrated, suspended, timeout) do
     downgrade_result = downgrade_migrations(migrated, prepared.artifact, timeout)
     restore_result = restore_preimages(prepared.artifact)
     resume_result = resume_all(suspended)
 
     case {downgrade_result, restore_result, resume_result} do
-      {:ok, :ok, :ok} ->
-        {:error, {:migration_failed, reason}, :rolled_back}
-
-      recovery_errors ->
-        {:error, {:migration_failed, reason, recovery_errors}, :quarantined}
+      {:ok, :ok, :ok} -> :ok
+      recovery_errors -> {:error, recovery_errors}
     end
   end
 
@@ -2136,7 +2400,11 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp ensure_no_prepared(prepared) do
     operations =
       Enum.map(prepared, fn {_token, entry} ->
-        %{artifact_id: entry.artifact.id, epoch: entry.artifact.epoch}
+        %{
+          artifact_id: entry.artifact.id,
+          epoch: entry.artifact.epoch,
+          prepared_at: entry.prepared_at
+        }
       end)
 
     {:error, {:upgrade_in_progress, operations}}
