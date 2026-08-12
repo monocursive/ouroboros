@@ -321,6 +321,41 @@ lane's guarantees: everything under `Ouroboros.Upgrade.*`, `Ouroboros.Storage.*`
 registry owner. On-load functions are detected by asking the code server to prepare
 the batch, in both the new binary and the preimage the rollback path would load back.
 
+### Introducing new modules
+
+An entry's `:disposition` chooses between replacing a loaded module (`:replace`, the
+default) and loading one that has never existed in this VM (`:introduce`). One artifact
+may mix both, and they commit and roll back together:
+
+```elixir
+{:ok, artifact} =
+  Ouroboros.Upgrade.Artifact.build(
+    [
+      {MyAgent, new_beam, old_binary: current_beam},
+      {Ouroboros.Capability.Summarize, forged_beam, disposition: :introduce}
+    ],
+    epoch: 43
+  )
+```
+
+An introduction has no preimage: every `old_*` field is `nil`, it cannot declare
+`stateful: true` or a `migration_extra` (there are no processes to migrate yet), and
+rolling it back means unloading the module — `:code.delete/1` followed by a soft purge.
+Nothing is ever brutally purged, so a process still executing introduced code produces
+`{:introduced_code_in_use, module}` and quarantine rather than a kill. The disposition
+is part of the signed manifest, so a signature covers how each module is loaded, not
+only its bytes.
+
+Two extra gates apply. The module must be genuinely absent — unloaded, unreachable on
+the code path, and not something the node's journal already expects to be present — and
+its name must live under `Ouroboros.Capability.`, the namespace `Ouroboros.Mesh` already
+reserves for agents forged at runtime.
+
+Loading a new module is **not** safer than replacing one. Any accepted BEAM runs with
+full ambient VM authority whichever disposition carried it; the namespace rule is policy
+that keeps a new module from silently taking an existing name, not a sandbox, and it
+constrains nothing about what the module may then do.
+
 NIF loading is detected only as a static import of `:erlang.load_nif/2`. A module that
 resolves that call at runtime is not detected, and no static check would make it so;
 this is the policy gate being a policy gate, not a sandbox.
@@ -351,7 +386,11 @@ signing should live outside the patchable application, ideally on a separate loa
 node or service.
 
 Epoch, receipts, expected module identities, write-ahead operations, and quarantine
-state are durably journaled. On executor restart, opaque prepared loader terms are
+state are durably journaled. After a rolled-back introduction the expected identity is
+`:non_existing`: absence is a checked expectation rather than a missing one, so a name
+that reappears behind the executor's back fails closed exactly like a wrong hash. A
+journal this build cannot interpret is quarantined with its evidence intact rather than
+coerced or replaced. On executor restart, opaque prepared loader terms are
 declared lost. If a commit was interrupted while stateful processes may be suspended,
 the journal's verified migration targets are resumed only after their live callback
 modules match; the incomplete commit then remains in inspectable quarantine. Committed

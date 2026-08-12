@@ -199,6 +199,157 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
              Verifier.verify(smuggled, allow_unsigned: true)
   end
 
+  test "introduces only absent modules, and only under the capability namespace" do
+    module = Ouroboros.Capability.AlreadyPresent
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:ok, artifact} = introduce_artifact!(module, binary)
+    assert :ok = Verifier.verify(artifact, allow_unsigned: true)
+
+    # The same artifact, once the name is taken. An introduction that would quietly
+    # become a replacement is the failure this gate exists to prevent.
+    assert {:module, ^module} = :code.load_binary(module, ~c"capability_present.beam", binary)
+
+    assert {:error, {:module_already_present, ^module}} =
+             Verifier.verify(artifact, allow_unsigned: true)
+
+    unload_capability(module)
+    assert :ok = Verifier.verify(artifact, allow_unsigned: true)
+
+    # A module absent from the module table but reachable on the code path is present as
+    # far as this lane cares: the next `Code.ensure_loaded/1` would resurrect it.
+    directory = publish_beam!(module, binary)
+    assert :code.which(module) != :non_existing
+    refute :code.get_object_code(module) == :error
+
+    assert {:error, {:module_already_present, ^module}} =
+             Verifier.verify(artifact, allow_unsigned: true)
+
+    assert true = :code.del_path(directory)
+    assert :ok = Verifier.verify(artifact, allow_unsigned: true)
+
+    outsider = Ouroboros.Test.IntroducedOutsideNamespace
+    outsider_binary = compile_capability!(outsider)
+    assert {:ok, unnamespaced} = introduce_artifact!(outsider, outsider_binary)
+
+    assert {:error, {:capability_namespace_required, ^outsider}} =
+             Verifier.verify(unnamespaced, allow_unsigned: true)
+
+    # The protected set outranks the namespace rule: a forged control module is refused
+    # as a control module, not as a badly named capability.
+    forged = Ouroboros.Upgrade.ForgedLoader
+    forged_binary = compile_capability!(forged)
+    assert {:ok, control} = introduce_artifact!(forged, forged_binary)
+
+    assert {:error, {:immutable_control_module, ^forged}} =
+             Verifier.verify(control, allow_unsigned: true)
+  end
+
+  test "introduced binaries are held to every new-binary gate and to the trust policy" do
+    module = Ouroboros.Capability.OnLoadIntroduction
+    plain_binary = compile_capability!(module)
+    on_load_binary = compile_capability!(module, "@on_load :__probe_init__")
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:error, {:forbidden_beam_feature, ^module, :on_load}} =
+             Beam.introduce(module, on_load_binary)
+
+    assert {:ok, artifact} = introduce_artifact!(module, plain_binary)
+    smuggled = %{artifact | modules: [%{hd(artifact.modules) | binary: on_load_binary}]}
+
+    assert {:error, {:module_verification_failed, ^module}} =
+             Verifier.verify(smuggled, allow_unsigned: true)
+
+    forged = %{
+      artifact
+      | modules: [introduced_beam(module, on_load_binary)]
+    }
+
+    assert {:error, {:forbidden_beam_feature, ^module}} =
+             Verifier.verify(forged, allow_unsigned: true)
+
+    # Loading a module that never existed is not a lesser act than replacing one, so it
+    # is not exempt from the signature policy either.
+    assert {:error, :signature_required} = Verifier.verify(artifact, [])
+
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    signed = Artifact.sign(artifact, "test-signer", private_key)
+    assert :ok = Verifier.verify(signed, trusted_signers: %{"test-signer" => public_key})
+
+    # The disposition is inside the signed manifest, so a signature covers how each
+    # module is loaded and not only its bytes.
+    assert %{modules: [%{disposition: :introduce}]} = Artifact.manifest(artifact)
+  end
+
+  test "verifies an artifact that both replaces and introduces modules" do
+    module = Ouroboros.Capability.MixedIntroduction
+    capability_binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+
+    assert {:ok, mixed} =
+             Artifact.build(
+               [
+                 {UpgradeCounter, new_binary, old_binary: old_binary},
+                 {module, capability_binary, disposition: :introduce}
+               ],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert :ok = Verifier.verify(mixed, allow_unsigned: true)
+
+    # A stale base in the replacement half still fails the whole artifact.
+    [replacement, introduction] = mixed.modules
+    tampered = %{mixed | modules: [%{replacement | old_sha256: String.duplicate("0", 64)}]}
+
+    assert {:error, {:module_verification_failed, UpgradeCounter}} =
+             Verifier.verify(tampered, allow_unsigned: true)
+
+    assert introduction.disposition == :introduce
+    assert introduction.old_binary == nil
+  end
+
+  test "an introduction declares no state to migrate and carries no preimage" do
+    module = Ouroboros.Capability.StatelessIntroduction
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:error, :stateful_introduction} = Beam.introduce(module, binary, stateful: true)
+
+    assert {:error, :migration_extra_for_introduced_module} =
+             Beam.introduce(module, binary, migration_extra: %{})
+
+    assert {:error, :preimage_for_introduced_module} =
+             Beam.introduce(module, binary, old_binary: binary)
+
+    assert {:error, {:invalid_disposition, ^module, :replace_maybe}} =
+             Artifact.build([{module, binary, disposition: :replace_maybe}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:ok, beam} = Beam.introduce(module, binary)
+    assert beam.disposition == :introduce
+    assert beam.stateful == false
+
+    assert [beam.old_filename, beam.old_binary, beam.old_sha256, beam.old_md5, beam.old_vsn] ==
+             [nil, nil, nil, nil, nil]
+
+    # A hand-forged struct claiming to be an introduction while carrying a preimage is
+    # refused rather than silently treated as one or the other.
+    assert {:ok, artifact} = introduce_artifact!(module, binary)
+
+    contradictory = %{
+      artifact
+      | modules: [%{hd(artifact.modules) | old_binary: binary, old_sha256: Beam.sha256(binary)}]
+    }
+
+    assert {:error, {:invalid_introduction, ^module}} =
+             Verifier.verify(contradictory, allow_unsigned: true)
+  end
+
   test "requires trusted signatures under the production trust policy" do
     old_binary = object_code!(UpgradeCounter)
     new_binary = compile_v2!(old_binary)
@@ -550,7 +701,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     }
 
     {adapter, adapter_opts} = storage
-    key = {:ouroboros, :upgrade_node_executor, 1, node()}
+    key = {:ouroboros, :upgrade_node_executor, node()}
     assert :ok = adapter.put_checkpoint(key, inconsistent, adapter_opts)
     {^server, executor} = start_isolated_executor!(storage, server)
 
@@ -613,7 +764,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     }
 
     {adapter, adapter_opts} = storage
-    key = {:ouroboros, :upgrade_node_executor, 1, node()}
+    key = {:ouroboros, :upgrade_node_executor, node()}
     assert :ok = adapter.put_checkpoint(key, intent, adapter_opts)
     assert reservation.artifact_id == artifact.id
 
@@ -758,7 +909,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     }
 
     {adapter, adapter_opts} = storage
-    key = {:ouroboros, :upgrade_node_executor, 1, node()}
+    key = {:ouroboros, :upgrade_node_executor, node()}
     assert :ok = adapter.put_checkpoint(key, intent, adapter_opts)
     assert :ok = :sys.suspend(unrelated)
     on_exit(fn -> if Process.alive?(unrelated), do: :sys.resume(unrelated) end)
@@ -1162,7 +1313,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
   end
 
   defp retained_commit_operation!({adapter, adapter_opts}) do
-    key = {:ouroboros, :upgrade_node_executor, 1, node()}
+    key = {:ouroboros, :upgrade_node_executor, node()}
     assert {:ok, journal} = adapter.get_checkpoint(key, adapter_opts)
 
     assert operation =
@@ -1191,6 +1342,76 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     # Compiling loads, and the verifier rejects any module that still has retired code.
     assert :code.soft_purge(module)
     binary
+  end
+
+  defp introduce_artifact!(module, binary) do
+    Artifact.build([{module, binary, disposition: :introduce}],
+      epoch: System.unique_integer([:positive, :monotonic])
+    )
+  end
+
+  defp compile_capability!(module, attribute \\ "") do
+    source = """
+    defmodule #{inspect(module)} do
+      @vsn 1
+      #{attribute}
+      def __probe_init__, do: :ok
+      def hello, do: :world
+    end
+    """
+
+    previous = Code.get_compiler_option(:ignore_module_conflict)
+    Code.put_compiler_option(:ignore_module_conflict, true)
+    [{^module, binary}] = Code.compile_string(source, "capability.ex")
+    Code.put_compiler_option(:ignore_module_conflict, previous)
+
+    # Compiling loads. An introduction is only an introduction if the name is free, so
+    # every fixture starts by proving the VM has never heard of it.
+    unload_capability(module)
+    binary
+  end
+
+  defp unload_capability(module) do
+    :code.delete(module)
+    :code.soft_purge(module)
+    assert :code.which(module) == :non_existing
+    assert :code.get_object_code(module) == :error
+    :ok
+  end
+
+  defp publish_beam!(module, binary) do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros_capability_path_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(directory)
+    File.write!(Path.join(directory, "#{module}.beam"), binary)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    charlist = String.to_charlist(directory)
+    assert true = :code.add_patha(charlist)
+    on_exit(fn -> :code.del_path(charlist) end)
+    charlist
+  end
+
+  defp introduced_beam(module, binary) do
+    assert {:ok, info} = Beam.inspect_binary(binary)
+
+    %Beam{
+      module: module,
+      filename: ~c"capability.beam",
+      binary: binary,
+      sha256: Beam.sha256(binary),
+      md5: info.md5,
+      vsn: info.vsn,
+      old_filename: nil,
+      old_binary: nil,
+      old_sha256: nil,
+      old_md5: nil,
+      old_vsn: nil,
+      disposition: :introduce
+    }
   end
 
   defp on_load_beam(module, binary) do

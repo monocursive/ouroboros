@@ -4,6 +4,11 @@ defmodule Ouroboros.Upgrade.Artifact do
 
   Source compilation is intentionally absent. Production nodes accept BEAM artifacts,
   not source strings or quoted forms whose compilation would execute arbitrary code.
+
+  Each entry's `:disposition` option selects `Beam.build/3` (`:replace`, the default) or
+  `Beam.introduce/3` (`:introduce`). One artifact may mix both. The disposition is part
+  of the signed manifest, so a signature covers *how* each module is loaded and not only
+  its bytes.
   """
 
   alias Ouroboros.Upgrade.Beam
@@ -96,6 +101,7 @@ defmodule Ouroboros.Upgrade.Artifact do
             sha256: beam.sha256,
             md5: beam.md5,
             vsn: beam.vsn,
+            disposition: beam.disposition,
             old_sha256: beam.old_sha256,
             old_filename: beam.old_filename,
             old_md5: beam.old_md5,
@@ -111,7 +117,7 @@ defmodule Ouroboros.Upgrade.Artifact do
     entries
     |> Enum.reduce_while({:ok, []}, fn
       {module, binary, entry_opts}, {:ok, acc} when is_list(entry_opts) ->
-        case Beam.build(module, binary, entry_opts) do
+        case build_beam(module, binary, entry_opts) do
           {:ok, beam} -> {:cont, {:ok, [beam | acc]}}
           {:error, reason} -> {:halt, {:error, reason}}
         end
@@ -122,6 +128,14 @@ defmodule Ouroboros.Upgrade.Artifact do
     |> case do
       {:ok, modules} -> {:ok, Enum.reverse(modules)}
       error -> error
+    end
+  end
+
+  defp build_beam(module, binary, opts) do
+    case Keyword.pop(opts, :disposition, :replace) do
+      {:replace, beam_opts} -> Beam.build(module, binary, beam_opts)
+      {:introduce, beam_opts} -> Beam.introduce(module, binary, beam_opts)
+      {other, _beam_opts} -> {:error, {:invalid_disposition, module, other}}
     end
   end
 

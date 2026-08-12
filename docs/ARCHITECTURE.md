@@ -135,6 +135,25 @@ point where code became visible and compensation cannot finish, the terminal jou
 record keeps the artifact and its migration targets rather than clearing the only
 durable copy of the preimages.
 
+Each module in an artifact carries a disposition. `:replace` is the transaction above.
+`:introduce` loads a module that has never existed in this VM: no preimage is captured,
+step 7 inverts to an unload (`:code.delete/1` then soft purge), and the identity the
+node then expects for that module is `:non_existing` — a checked expectation, so a name
+that reappears fails closed like a wrong hash would. Introduced modules cannot be
+declared stateful, because a module nothing is running has no state to migrate, and the
+retained rollback material for one is only its name: there are no preimage bytes to
+keep when the way back is an unload. Unloading is not exempt from the no-brutal-purge
+rule, so a process still executing introduced code yields
+`{:introduced_code_in_use, module}` and quarantine. A single artifact may mix both
+dispositions and commits or rolls back as one transition.
+
+An introduction is additionally required to be absent — unloaded, unreachable on the
+code path, and not already expected by the journal — and to be named under
+`Ouroboros.Capability.`, the namespace `Ouroboros.Mesh` reserves for agents forged at
+runtime. Neither rule makes introducing a module safer than replacing one. Any accepted
+BEAM has full ambient VM authority however it arrived; the namespace gate only prevents
+a new module from silently occupying an existing name.
+
 Policy protects the modules that make these guarantees enforceable, not just the loader:
 `Ouroboros.Upgrade.*`, `Ouroboros.Storage.*` (a patched journal writer makes every
 write a silent no-op), `Ouroboros.Release.*` (the durable lane's authorizer), and
@@ -158,7 +177,10 @@ signing/authorization belongs outside the patchable application, preferably on a
 separate least-privileged loader node.
 
 The node executor durably journals write-ahead operations, monotonic epoch, retained
-rollback receipts, expected loaded hashes, and quarantine. Opaque OTP prepared-code
+rollback receipts, expected loaded hashes, and quarantine. The journal key is not
+versioned, so a checkpoint this build cannot interpret is read and quarantined with its
+evidence preserved instead of disappearing behind a `:not_found` while the node's code is
+already patched. Opaque OTP prepared-code
 terms are intentionally not persisted and become `lost_on_restart`. A reservation whose
 prepare reply was lost can be released by artifact id, so an ambiguous prepare does not
 wedge the node; status reports the reservation's artifact, epoch, and prepare time.
@@ -205,6 +227,8 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Fast patch migration fails | Reverse migrated state and restore preimages, or quarantine while keeping the artifact and preimages journaled | Done; release persistence remains separate |
 | Fast patch resume fails after loading | Compensate first; quarantine with retained rollback material only if compensation fails | Done |
 | Fast patch prepare reply is lost | Reservation is released by artifact id; no code was loaded | Done |
+| Introduced module is still running on rollback | `{:introduced_code_in_use, module}` and quarantine; never a brutal purge | Done |
+| Introduced module reappears after rollback | Restart reconciliation fails closed against the expected `:non_existing` identity | Done |
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
@@ -220,6 +244,10 @@ rehearsed lane can prove restart persistence or an ERTS change.
   application root and its registry owner, on-load code, consolidated protocols, and
   sticky modules. It rejects statically imported `:erlang.load_nif/2`, which a
   runtime-resolved call evades. Loaded code remains VM-privileged.
+- Newly introduced modules must be absent and named under `Ouroboros.Capability.`. Both
+  rules are policy about names, not a sandbox: an introduced module is exactly as
+  privileged as a replacement, and the gate only stops a new module from taking a name
+  that already means something.
 - Coding requests default to read-only and prompt approval. Write access is explicit.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.

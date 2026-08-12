@@ -1,6 +1,16 @@
 defmodule Ouroboros.Upgrade.Beam do
   @moduledoc """
-  One verified BEAM replacement and the pre-image needed for rollback.
+  One verified BEAM transition: either a replacement plus its rollback pre-image, or the
+  introduction of a module that has never existed in this VM.
+
+  `disposition` names which one. `:replace` carries the exact pre-image `build/3`
+  captured from the running node, and rolling it back reloads those bytes. `:introduce`
+  has no pre-image at all — every `old_*` field is `nil`, rolling it back means
+  unloading the module, and a module with no processes cannot declare `stateful: true`
+  or a `migration_extra`.
+
+  Introducing a module is not the safer of the two. Both dispositions hand the VM a
+  binary with full ambient authority; the difference is only in what rollback means.
 
   This struct is data only. It never compiles source and never loads code. Inspecting a
   binary does ask the code server to *prepare* it, which is how on-load functions are
@@ -20,7 +30,9 @@ defmodule Ouroboros.Upgrade.Beam do
     :old_md5,
     :old_vsn
   ]
-  defstruct @enforce_keys ++ [stateful: false, migration_extra: nil]
+  defstruct @enforce_keys ++ [disposition: :replace, stateful: false, migration_extra: nil]
+
+  @type disposition :: :replace | :introduce
 
   @type t :: %__MODULE__{
           module: module(),
@@ -29,11 +41,12 @@ defmodule Ouroboros.Upgrade.Beam do
           sha256: String.t(),
           md5: binary(),
           vsn: term(),
-          old_filename: charlist(),
-          old_binary: binary(),
-          old_sha256: String.t(),
-          old_md5: binary(),
+          old_filename: charlist() | nil,
+          old_binary: binary() | nil,
+          old_sha256: String.t() | nil,
+          old_md5: binary() | nil,
           old_vsn: term(),
+          disposition: disposition(),
           stateful: boolean(),
           migration_extra: term()
         }
@@ -67,8 +80,49 @@ defmodule Ouroboros.Upgrade.Beam do
          old_sha256: sha256(old_binary),
          old_md5: old_info.md5,
          old_vsn: old_info.vsn,
+         disposition: :replace,
          stateful: stateful,
          migration_extra: migration_extra
+       }}
+    end
+  end
+
+  @doc """
+  Builds the introduction of a module that has never been loaded on this node.
+
+  The new binary is inspected exactly the way `build/3` inspects it, on-load functions
+  included. There is no pre-image to capture and nothing to migrate, so every `old_*`
+  field is `nil`, `stateful` must be false, and `migration_extra` must be absent.
+
+  Whether the module is *actually* absent is not decided here. This struct is data, and
+  a pre-image capture is the only reason `build/3` touches the code server at all;
+  absence is a fail-closed policy check that `Ouroboros.Upgrade.Verifier` re-runs on the
+  loading node at verify, prepare, and commit time rather than once at build time.
+  """
+  @spec introduce(module(), binary(), keyword()) :: {:ok, t()} | {:error, term()}
+  def introduce(module, binary, opts \\ []) when is_atom(module) and is_binary(binary) do
+    with :ok <- ensure_no_preimage_options(opts),
+         :ok <- ensure_stateless_introduction(Keyword.get(opts, :stateful, false)),
+         :ok <- ensure_no_migration_extra(Keyword.get(opts, :migration_extra)),
+         {:ok, new_info} <- inspect_binary(binary),
+         :ok <- ensure_module(module, new_info.module),
+         :ok <- ensure_no_on_load(module, new_info) do
+      {:ok,
+       %__MODULE__{
+         module: module,
+         filename: normalize_filename(Keyword.get(opts, :filename, "ouroboros://#{module}")),
+         binary: binary,
+         sha256: sha256(binary),
+         md5: new_info.md5,
+         vsn: new_info.vsn,
+         old_filename: nil,
+         old_binary: nil,
+         old_sha256: nil,
+         old_md5: nil,
+         old_vsn: nil,
+         disposition: :introduce,
+         stateful: false,
+         migration_extra: nil
        }}
     end
   end
@@ -181,6 +235,22 @@ defmodule Ouroboros.Upgrade.Beam do
 
   defp validate_stateful(value) when is_boolean(value), do: :ok
   defp validate_stateful(value), do: {:error, {:invalid_stateful, value}}
+
+  defp ensure_no_preimage_options(opts) do
+    if Keyword.has_key?(opts, :old_binary) or Keyword.has_key?(opts, :old_filename) do
+      {:error, :preimage_for_introduced_module}
+    else
+      :ok
+    end
+  end
+
+  # An introduced module has no processes running it yet, so there is no state to
+  # migrate and nothing for `code_change/3` to be called on.
+  defp ensure_stateless_introduction(false), do: :ok
+  defp ensure_stateless_introduction(_stateful), do: {:error, :stateful_introduction}
+
+  defp ensure_no_migration_extra(nil), do: :ok
+  defp ensure_no_migration_extra(_extra), do: {:error, :migration_extra_for_introduced_module}
 
   defp validate_migration_extra(false, nil), do: :ok
 

@@ -22,6 +22,14 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   including rollback and promote; `reconcile_quarantine/1` is the only exit and only
   succeeds when the journal again matches loaded code.
 
+  An artifact may also introduce modules that have never been loaded here. The inverse
+  of loading a new module is unloading it, so rolling back a committed `:introduce`
+  deletes and soft-purges it, and the identity this node then expects for that module is
+  `:non_existing` — absence is a checked expectation, not an absence of expectation, so
+  reconciliation still fails closed if the name reappears. Unloading is never brutal: a
+  process still running introduced code produces `{:introduced_code_in_use, module}` and
+  quarantine, exactly as retired code in use does on the replacement path.
+
   `status/1` never exposes prepare tokens or rollback receipt identifiers. A caller
   that retained a receipt ID can recover the capability through `receipt/2`. It does
   report reservation metadata, and `abort_prepared_reservation/2` releases a reservation
@@ -35,7 +43,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   alias Ouroboros.Upgrade.{Artifact, Beam, Verifier}
 
-  @journal_version 1
+  @journal_version 2
   @public_operation_limit 50
   @operation_history_limit 100
   @pending_outcomes [:committing, :rolling_back, :promoting]
@@ -259,6 +267,9 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
              state.journal.expected_modules
            ),
          {:ok, migrations} <- normalize_migrations(artifact, Keyword.get(opts, :migrations, [])),
+         # Preparation is disposition-blind on purpose: the code server does not require
+         # a module to be loaded to prepare one, so a batch that mixes replacements with
+         # first-time introductions still becomes visible in a single `finish_loading/1`.
          triples <- Enum.map(artifact.modules, &{&1.module, &1.filename, &1.binary}),
          {:ok, prepared_code} <- :code.prepare_loading(triples) do
       token = Jido.Signal.ID.generate!()
@@ -722,6 +733,13 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   # when the failure left code mutated: the same record is then the only journaled way
   # back. Carry the artifact and its migration targets into the terminal record in that
   # case so an operator or a later restart can still restore them.
+  #
+  # For an introduced module the retained material is only the module identity: there
+  # are no preimage bytes to keep because the way back is `:code.delete/1` plus a soft
+  # purge, which needs nothing but the name. The record is retained all the same, so a
+  # mixed artifact keeps one shape and the recorded `modules` list still states, per
+  # module, what this node should be holding — a hash for a replacement, absence for an
+  # introduction.
   defp append_failed_commit(journal, prepared, reason, :not_required) do
     append_operation(journal, :commit, prepared.artifact,
       outcome: :failed,
@@ -1007,7 +1025,12 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     end)
   end
 
-  defp journal_key, do: {:ouroboros, :upgrade_node_executor, @journal_version, node()}
+  # The journal version is deliberately *not* part of the key. Versioning the key would
+  # hide an unreadable journal behind a `:not_found` and let this executor come up ready
+  # with an empty history while the node's code was already patched. One stable key means
+  # a journal this build cannot interpret is read, rejected by `validate_journal/1`, and
+  # quarantined with its evidence left untouched.
+  defp journal_key, do: {:ouroboros, :upgrade_node_executor, node()}
 
   defp safe_storage_call(fun) do
     fun.()
@@ -1092,12 +1115,8 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       valid_signature_envelope?(artifact.signature)
   end
 
-  defp valid_beam_data?(%Beam{} = beam) do
-    with true <- is_atom(beam.module),
-         true <- is_list(beam.filename),
-         true <- is_binary(beam.binary),
-         true <- valid_sha256?(beam.sha256),
-         true <- is_binary(beam.md5),
+  defp valid_beam_data?(%Beam{disposition: :replace} = beam) do
+    with true <- valid_new_beam_data?(beam),
          true <- is_list(beam.old_filename),
          true <- is_binary(beam.old_binary),
          true <- valid_sha256?(beam.old_sha256),
@@ -1105,13 +1124,9 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
          true <- is_boolean(beam.stateful),
          true <- Beam.portable_term?(beam.migration_extra),
          true <- beam.stateful or is_nil(beam.migration_extra),
-         {:ok, new_info} <- Beam.inspect_binary(beam.binary),
          {:ok, old_info} <- Beam.inspect_binary(beam.old_binary) do
-      new_info.module == beam.module and new_info.md5 == beam.md5 and
-        new_info.vsn == beam.vsn and Beam.sha256(beam.binary) == beam.sha256 and
-        old_info.module == beam.module and old_info.md5 == beam.old_md5 and
+      old_info.module == beam.module and old_info.md5 == beam.old_md5 and
         old_info.vsn == beam.old_vsn and Beam.sha256(beam.old_binary) == beam.old_sha256 and
-        not new_info.on_load? and not new_info.nif? and not new_info.protocol? and
         not old_info.on_load? and not old_info.nif? and not old_info.protocol?
     else
       _other -> false
@@ -1120,7 +1135,30 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     _error -> false
   end
 
+  defp valid_beam_data?(%Beam{disposition: :introduce} = beam) do
+    valid_new_beam_data?(beam) and is_nil(beam.old_filename) and is_nil(beam.old_binary) and
+      is_nil(beam.old_sha256) and is_nil(beam.old_md5) and is_nil(beam.old_vsn) and
+      beam.stateful == false and is_nil(beam.migration_extra)
+  rescue
+    _error -> false
+  end
+
   defp valid_beam_data?(_beam), do: false
+
+  defp valid_new_beam_data?(%Beam{} = beam) do
+    with true <- is_atom(beam.module),
+         true <- is_list(beam.filename),
+         true <- is_binary(beam.binary),
+         true <- valid_sha256?(beam.sha256),
+         true <- is_binary(beam.md5),
+         {:ok, new_info} <- Beam.inspect_binary(beam.binary) do
+      new_info.module == beam.module and new_info.md5 == beam.md5 and
+        new_info.vsn == beam.vsn and Beam.sha256(beam.binary) == beam.sha256 and
+        not new_info.on_load? and not new_info.nif? and not new_info.protocol?
+    else
+      _other -> false
+    end
+  end
 
   defp valid_signature_envelope?(nil), do: true
 
@@ -1240,6 +1278,20 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       when is_atom(module) and is_binary(sha256) and byte_size(sha256) == 64 and is_binary(md5) and
              is_binary(artifact_id) and is_integer(epoch) and epoch > 0 and
              disposition in [:committed, :promoted, :rolled_back, :ambiguous] ->
+        true
+
+      # The absent identity, and the only transition that can produce it: an
+      # introduction that was rolled back. A committed or promoted module is present by
+      # definition, so pairing absence with those dispositions is corruption.
+      {module,
+       %{
+         sha256: :non_existing,
+         md5: :non_existing,
+         artifact_id: artifact_id,
+         epoch: epoch,
+         disposition: :rolled_back
+       }}
+      when is_atom(module) and is_binary(artifact_id) and is_integer(epoch) and epoch > 0 ->
         true
 
       _other ->
@@ -1434,6 +1486,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     Enum.all?(modules, fn
       module when is_atom(module) -> true
       %{module: module, md5: md5} when is_atom(module) and is_binary(md5) -> true
+      %{module: module, md5: :non_existing} when is_atom(module) -> true
       _other -> false
     end)
   end
@@ -1498,18 +1551,33 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp reconcile_expected_modules(expected_modules) do
     Enum.reduce_while(expected_modules, :ok, fn {module, expected}, :ok ->
-      case loaded_module_identity(module) do
-        {:ok, %{md5: md5, sha256: sha256}} ->
-          if md5 == expected.md5 and (is_nil(sha256) or sha256 == expected.sha256) do
-            {:cont, :ok}
-          else
-            {:halt, {:error, {:module_hash_mismatch, module}}}
-          end
-
-        {:error, _reason} ->
-          {:halt, {:error, {:module_unavailable, module}}}
+      case reconcile_expected_module(module, expected) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # Absence is checked against the code server directly. `loaded_module_identity/1` would
+  # ask `Code.ensure_loaded/1`, which is allowed to *load* the module it is asked about.
+  defp reconcile_expected_module(module, %{sha256: :non_existing, md5: :non_existing}) do
+    if module_absent?(module),
+      do: :ok,
+      else: {:error, {:module_unexpectedly_present, module}}
+  end
+
+  defp reconcile_expected_module(module, expected) do
+    case loaded_module_identity(module) do
+      {:ok, %{md5: md5, sha256: sha256}} ->
+        if md5 == expected.md5 and (is_nil(sha256) or sha256 == expected.sha256) do
+          :ok
+        else
+          {:error, {:module_hash_mismatch, module}}
+        end
+
+      {:error, _reason} ->
+        {:error, {:module_unavailable, module}}
+    end
   end
 
   # The checks a restart runs against loaded code, without the mutating target resume.
@@ -1557,6 +1625,11 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp pending_operation_matches_loaded_code(%{modules: expected_modules})
        when is_list(expected_modules) and expected_modules != [] do
     Enum.reduce_while(expected_modules, :ok, fn
+      %{module: module, md5: :non_existing}, :ok when is_atom(module) ->
+        if module_absent?(module),
+          do: {:cont, :ok},
+          else: {:halt, {:error, {:module_unexpectedly_present, module}}}
+
       %{module: module, md5: expected_md5}, :ok
       when is_atom(module) and is_binary(expected_md5) ->
         case loaded_module_identity(module) do
@@ -1775,16 +1848,33 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp expect_preimages(journal, receipt) do
     expected =
       Enum.reduce(receipt.artifact.modules, journal.expected_modules, fn beam, acc ->
-        Map.put(acc, beam.module, %{
-          sha256: beam.old_sha256,
-          md5: beam.old_md5,
-          artifact_id: receipt.artifact.id,
-          epoch: receipt.artifact.epoch,
-          disposition: :rolled_back
-        })
+        Map.put(acc, beam.module, preimage_expectation(beam, receipt.artifact))
       end)
 
     %{journal | expected_modules: expected}
+  end
+
+  defp preimage_expectation(%Beam{disposition: :replace} = beam, artifact) do
+    %{
+      sha256: beam.old_sha256,
+      md5: beam.old_md5,
+      artifact_id: artifact.id,
+      epoch: artifact.epoch,
+      disposition: :rolled_back
+    }
+  end
+
+  # Undoing an introduction leaves no bytes to expect, and "no entry" would mean "no
+  # opinion". `:non_existing` is the identity of an absent module: a positive expectation
+  # this node re-checks on every restart, so a name that reappears fails closed.
+  defp preimage_expectation(%Beam{disposition: :introduce}, artifact) do
+    %{
+      sha256: :non_existing,
+      md5: :non_existing,
+      artifact_id: artifact.id,
+      epoch: artifact.epoch,
+      disposition: :rolled_back
+    }
   end
 
   defp append_operation(journal, operation, %Artifact{} = artifact, attributes) do
@@ -1964,8 +2054,16 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     Enum.map(artifact.modules, &%{module: &1.module, md5: &1.md5})
   end
 
+  # The pre-image identity of an introduced module is its absence.
   defp preimage_module_identities(artifact) do
-    Enum.map(artifact.modules, &%{module: &1.module, md5: &1.old_md5})
+    Enum.map(artifact.modules, fn
+      %Beam{disposition: :introduce} = beam -> %{module: beam.module, md5: :non_existing}
+      beam -> %{module: beam.module, md5: beam.old_md5}
+    end)
+  end
+
+  defp module_absent?(module) do
+    :code.which(module) == :non_existing and :code.get_object_code(module) == :error
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.to_iso8601()
@@ -2201,21 +2299,55 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp restore_preimages(artifact) do
-    with :ok <-
-           Enum.reduce_while(artifact.modules, :ok, fn beam, :ok ->
-             if :code.soft_purge(beam.module) do
-               case :code.load_binary(beam.module, beam.old_filename, beam.old_binary) do
-                 {:module, module} when module == beam.module -> {:cont, :ok}
-                 other -> {:halt, {:error, {:reload_failed, beam.module, other}}}
-               end
-             else
-               {:halt, {:error, {:old_code_in_use, beam.module}}}
-             end
-           end) do
+    with :ok <- Enum.reduce_while(artifact.modules, :ok, &restore_module/2) do
       purge_old_versions(artifact)
     end
   end
 
+  defp restore_module(%Beam{disposition: :replace} = beam, :ok) do
+    if :code.soft_purge(beam.module) do
+      case :code.load_binary(beam.module, beam.old_filename, beam.old_binary) do
+        {:module, module} when module == beam.module -> {:cont, :ok}
+        other -> {:halt, {:error, {:reload_failed, beam.module, other}}}
+      end
+    else
+      {:halt, {:error, {:old_code_in_use, beam.module}}}
+    end
+  end
+
+  # There is no earlier version to put back, so the inverse of loading an introduced
+  # module is unloading it: retire the current version, then drop it. A process still
+  # executing that code stops the purge and is reported instead of being killed, which
+  # leaves the module retired but not yet reclaimed. That state is inspectable, it is
+  # what quarantine exists for, and it resolves the moment the process leaves the code.
+  defp restore_module(%Beam{disposition: :introduce} = beam, :ok) do
+    cond do
+      # Gone already, with nothing retired behind the name. The replacement path reloads
+      # its preimage without first asking whether someone had already put it back; the
+      # goal here is absence, and absence is what this is. An unload that happened
+      # outside this executor is caught where it belongs, in startup reconciliation
+      # against the identity the journal expects.
+      module_absent?(beam.module) and not :erlang.check_old_code(beam.module) ->
+        {:cont, :ok}
+
+      # `:code.delete/1` refuses while a retired version of the name still exists, which
+      # for an introduced module means something else has been loaded over it. Undoing
+      # the introduction under a live replacement is not this operation's to do.
+      not :code.delete(beam.module) ->
+        {:halt, {:error, {:introduced_unload_failed, beam.module}}}
+
+      not :code.soft_purge(beam.module) ->
+        {:halt, {:error, {:introduced_code_in_use, beam.module}}}
+
+      true ->
+        {:cont, :ok}
+    end
+  end
+
+  # `:code.soft_purge/1` answers true when a module has no retired version at all, which
+  # is exactly the state a just-introduced module is in. Nothing to purge is success:
+  # promoting an artifact only means giving up the ability to go back, and an
+  # introduction has no earlier version to give up.
   defp purge_old_versions(artifact) do
     Enum.reduce_while(artifact.modules, :ok, fn beam, :ok ->
       if :code.soft_purge(beam.module) do

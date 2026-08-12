@@ -15,6 +15,15 @@ defmodule Ouroboros.Upgrade.Verifier do
   as a static import of `:erlang.load_nif/2`; a module that resolves that call at
   runtime is not detected, and any accepted BEAM already runs with ambient VM
   authority.
+
+  A `:introduce` beam is held to every gate a `:replace` beam is held to, plus two of
+  its own. The module must be genuinely absent from this VM — unloaded, unreachable on
+  the code path, and not something the journal already expects to be present — and its
+  name must live under `Ouroboros.Capability.`, the namespace `Ouroboros.Mesh` already
+  reserves for modules forged at runtime. That namespace is a policy boundary and
+  nothing more: an introduced module is not sandboxed, is not less privileged than a
+  replacement, and can do anything any other loaded module can do. Its only guarantee is
+  that a new module cannot silently take the name of an existing one.
   """
 
   alias Ouroboros.Upgrade.{Artifact, Beam}
@@ -26,6 +35,7 @@ defmodule Ouroboros.Upgrade.Verifier do
     "Elixir.Ouroboros.Storage.",
     "Elixir.Ouroboros.Control."
   ]
+  @introduce_prefix "Elixir.Ouroboros.Capability."
 
   @spec verify(Artifact.t(), keyword()) :: :ok | {:error, term()}
   def verify(artifact, trust_policy \\ [])
@@ -79,6 +89,9 @@ defmodule Ouroboros.Upgrade.Verifier do
       modules |> Enum.map(& &1.module) |> Enum.uniq() |> length() != length(modules) ->
         {:error, :duplicate_modules}
 
+      not Enum.all?(modules, &(&1.disposition in [:replace, :introduce])) ->
+        {:error, :invalid_disposition}
+
       not Enum.all?(modules, &is_boolean(&1.stateful)) ->
         {:error, :invalid_stateful_declaration}
 
@@ -116,7 +129,23 @@ defmodule Ouroboros.Upgrade.Verifier do
     end)
   end
 
-  defp verify_module(%Beam{} = beam, expected_modules) do
+  defp verify_module(%Beam{disposition: :replace} = beam, expected_modules) do
+    verify_replacement(beam, expected_modules)
+  rescue
+    error -> {:error, {:module_verification_failed, beam.module, error}}
+  end
+
+  defp verify_module(%Beam{disposition: :introduce} = beam, expected_modules) do
+    verify_introduction(beam, expected_modules)
+  rescue
+    error -> {:error, {:module_verification_failed, beam.module, error}}
+  end
+
+  defp verify_module(%Beam{} = beam, _expected_modules) do
+    {:error, {:invalid_disposition, beam.module, beam.disposition}}
+  end
+
+  defp verify_replacement(%Beam{} = beam, expected_modules) do
     with :ok <- allowed_module(beam.module),
          false <- :code.is_sticky(beam.module),
          false <- :erlang.check_old_code(beam.module),
@@ -145,9 +174,69 @@ defmodule Ouroboros.Upgrade.Verifier do
       {:error, reason} -> {:error, reason}
       actual -> {:error, {:module_verification_failed, beam.module, actual}}
     end
-  rescue
-    error -> {:error, {:module_verification_failed, beam.module, error}}
   end
+
+  # Every gate the replacement path applies to a *new* binary applies here too. What is
+  # missing is only what a pre-image would have been checked for; what is added is proof
+  # that this really is an introduction and that its name is one the policy allows to
+  # appear from nowhere.
+  defp verify_introduction(%Beam{} = beam, expected_modules) do
+    with :ok <- allowed_module(beam.module),
+         :ok <- introducible_module(beam.module),
+         :ok <- introduction_shape(beam),
+         :ok <- module_absent(beam.module, expected_modules),
+         false <- :code.is_sticky(beam.module),
+         false <- :erlang.check_old_code(beam.module),
+         {:ok, new_info} <- Beam.inspect_binary(beam.binary),
+         true <- new_info.module == beam.module,
+         true <- Beam.sha256(beam.binary) == beam.sha256,
+         true <- new_info.md5 == beam.md5,
+         true <- new_info.vsn == beam.vsn,
+         false <- new_info.on_load?,
+         false <- new_info.nif?,
+         false <- new_info.protocol? do
+      :ok
+    else
+      true -> {:error, {:forbidden_beam_feature, beam.module}}
+      false -> {:error, {:module_verification_failed, beam.module}}
+      {:error, reason} -> {:error, reason}
+      actual -> {:error, {:module_verification_failed, beam.module, actual}}
+    end
+  end
+
+  defp introduction_shape(%Beam{} = beam) do
+    if is_nil(beam.old_filename) and is_nil(beam.old_binary) and is_nil(beam.old_sha256) and
+         is_nil(beam.old_md5) and is_nil(beam.old_vsn) and beam.stateful == false and
+         is_nil(beam.migration_extra) do
+      :ok
+    else
+      {:error, {:invalid_introduction, beam.module}}
+    end
+  end
+
+  defp introducible_module(module) do
+    if String.starts_with?(Atom.to_string(module), @introduce_prefix) do
+      :ok
+    else
+      {:error, {:capability_namespace_required, module}}
+    end
+  end
+
+  # "Absent" has to mean absent to every path that could resurrect the name: the module
+  # table, the code path a later `Code.ensure_loaded/1` would search, and this node's own
+  # record of what it expects to be loaded. An expectation of absence, left by a
+  # rolled-back introduction, is the one entry that does not contradict a new one.
+  defp module_absent(module, expected_modules) do
+    cond do
+      :code.which(module) != :non_existing -> {:error, {:module_already_present, module}}
+      :code.get_object_code(module) != :error -> {:error, {:module_already_present, module}}
+      true -> expected_absent(module, Map.get(expected_modules, module))
+    end
+  end
+
+  defp expected_absent(_module, nil), do: :ok
+  defp expected_absent(_module, %{sha256: :non_existing, md5: :non_existing}), do: :ok
+  defp expected_absent(module, _present), do: {:error, {:module_already_present, module}}
 
   defp allowed_module(module) do
     name = Atom.to_string(module)
@@ -166,6 +255,11 @@ defmodule Ouroboros.Upgrade.Verifier do
         if sha256 == beam.old_sha256 and md5 == beam.old_md5,
           do: :ok,
           else: {:error, {:stale_preimage_sha256, beam.module}}
+
+      # A rolled-back introduction leaves an expectation of absence. There is nothing
+      # for a replacement to be a replacement *of*.
+      %{sha256: :non_existing, md5: :non_existing} ->
+        {:error, {:module_absent, beam.module}}
 
       nil ->
         verify_code_path_object(beam)
