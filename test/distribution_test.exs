@@ -34,6 +34,28 @@ defmodule Ouroboros.DistributionTest do
     assert_eventually(fn -> Mesh.whereis(id) == nil end)
   end
 
+  test "a connected node without the runtime fails placement instead of exiting the caller" do
+    ensure_distributed!()
+
+    peer_name = String.to_atom("ouroboros_bare_peer_#{System.unique_integer([:positive])}")
+    args = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
+
+    assert {:ok, peer, peer_node} =
+             :peer.start(%{name: peer_name, args: args, wait_boot: 15_000})
+
+    on_exit(fn -> :peer.stop(peer) end)
+
+    # The peer is connected and can load the code, but never started :ouroboros, so
+    # the remote start exits on its missing supervisor. `:erpc` surfaces that as
+    # `:exit`, not `:error`, which used to escape and crash the placing caller.
+    id = "bare-peer-worker-#{System.unique_integer([:positive])}"
+
+    assert {:error, {:remote_start_failed, ^peer_node, {:exit, _reason}}} =
+             Mesh.start_agent_on(peer_node, id)
+
+    assert Mesh.whereis(id) == nil
+  end
+
   defp ensure_distributed! do
     unless Node.alive?() do
       name = String.to_atom("ouroboros_root_#{System.unique_integer([:positive])}")

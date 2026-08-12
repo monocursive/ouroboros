@@ -150,6 +150,24 @@ a named `:pg` scope and monitors local Jido processes. `:global.trans/2` narrows
 duplicate-start races in a healthy connected cluster; it is explicitly not a
 partition-safe consensus protocol.
 
+Visibility is eventually consistent. `whereis/1` and `members/1` qualify a remote entry
+by node connectivity, not by remote process liveness, because probing the owner would
+make every lookup a network call. A returned pid is an observation, not a guarantee: a
+remote agent can already be dead while `:pg` propagates its leave. Mesh calls therefore
+never exit the caller — a dead, unreachable, or slow target returns
+`{:error, {:agent_call_failed, kind, reason}}`, and remote placement or shutdown
+failures return `{:error, {:remote_start_failed, node, {kind, reason}}}` and
+`{:error, {:remote_stop_failed, {kind, reason}}}`.
+
+`start_agent/2` is a remote-reachable start surface, since `:erpc` from any connected
+node can invoke it and pick the `:agent` module. Startable modules are restricted to the
+`Ouroboros.Agent.` and `Ouroboros.Capability.` namespaces — the latter reserved for
+agents forged at runtime — plus any module listed in
+`config :ouroboros, mesh_allowed_agent_modules: [...]`. Anything else is refused with
+`{:error, {:agent_module_not_allowed, module}}`. An `:initial_state` map option is
+merged over the `:role`/`:objective`/`:parent_id` trio so runtime-defined agents can
+seed their own schema keys.
+
 Coding task references include their owner node. Calls made with a task reference are
 routed through `:erpc`; a disconnected owner returns `{:owner_unavailable, node}`
 instead of incorrectly marking its provider run lost. A bare task ID intentionally

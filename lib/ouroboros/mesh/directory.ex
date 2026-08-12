@@ -78,7 +78,7 @@ defmodule Ouroboros.Mesh.Directory do
 
       _other ->
         with true <- Process.alive?(pid),
-             :ok <- :pg.join(@scope, group(id), pid) do
+             :ok <- join_once(id, pid) do
           state = drop_previous_monitor(id, pid, state)
           ref = Process.monitor(pid)
 
@@ -92,6 +92,18 @@ defmodule Ouroboros.Mesh.Directory do
           false -> {:error, :not_alive}
           {:error, reason} -> {:error, reason}
         end
+    end
+  end
+
+  # :pg.join/3 is refcounted and :pg monitors the joined pid rather than this
+  # directory, so memberships outlive a directory crash while `by_id` does not.
+  # Reconciling after a restart would otherwise join every live agent a second time
+  # and report a healthy process as two replicas.
+  defp join_once(id, pid) do
+    if pid in :pg.get_local_members(@scope, group(id)) do
+      :ok
+    else
+      :pg.join(@scope, group(id), pid)
     end
   end
 

@@ -7,19 +7,48 @@ defmodule Ouroboros.Mesh do
   across connected BEAM nodes. `:global.trans/2` narrows duplicate-start races in a
   healthy connected cluster; it is intentionally not presented as partition-safe
   consensus.
+
+  Visibility is eventually consistent. `whereis/1` and `members/1` qualify a remote
+  entry by node connectivity, never by remote process liveness, because probing the
+  owner would turn every lookup into a network call. A returned pid is an observation,
+  not a guarantee: a remote agent can already be dead while `:pg` propagates its leave.
+  The mitigation is that every call here converts a failed or unanswered target into an
+  error tuple instead of exiting the caller, so callers must handle
+  `{:error, {:agent_call_failed, kind, reason}}`.
+
+  `start_agent/2` is a remote-reachable start surface: `:erpc` from any connected node
+  can invoke it and choose the `:agent` module. Startable modules are therefore limited
+  to the `Ouroboros.Agent.` and `Ouroboros.Capability.` namespaces — the latter reserved
+  for agents forged at runtime — plus whatever `:mesh_allowed_agent_modules` names in
+  application config.
   """
 
   alias Ouroboros.Mesh.Directory
   alias Ouroboros.Signals.{AgentMessage, TaskAssigned, TaskCompleted}
 
   @scope Ouroboros.Mesh.Scope
+  @agent_module_prefixes ["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]
 
   @type agent_id :: String.t()
 
-  @doc "Starts a logical agent on the local node."
+  @doc """
+  Starts a logical agent on the local node.
+
+  `:role`, `:objective`, and `:parent_id` seed agent state. An explicit `:initial_state`
+  map is merged over that trio and wins on conflict, so a runtime-defined agent can seed
+  schema keys this module does not know about.
+  """
   @spec start_agent(agent_id(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent(id, opts \\ []) when is_binary(id) and is_list(opts) do
-    :global.trans({__MODULE__, id}, fn -> do_start_agent(id, opts) end)
+    agent_module = Keyword.get(opts, :agent, Ouroboros.Agent.Worker)
+
+    # Both checks are pure input validation on a remote-reachable surface, so settle
+    # them before taking a cluster-wide lock.
+    with :ok <- check_agent_module(agent_module),
+         {:ok, initial_state} <- build_initial_state(opts) do
+      start_opts = build_start_opts(id, opts, initial_state)
+      :global.trans({__MODULE__, id}, fn -> do_start_agent(id, agent_module, start_opts) end)
+    end
   end
 
   @doc "Starts an agent on a selected connected node."
@@ -32,7 +61,10 @@ defmodule Ouroboros.Mesh do
       :erpc.call(target_node, __MODULE__, :start_agent, [id, opts])
     end
   catch
-    :error, reason -> {:error, {:remote_start_failed, target_node, reason}}
+    # `:erpc` reports transport faults as `:error`, but a remote exit arrives as
+    # `:exit` and a remote throw as `:throw`. Catching only `:error` let both escape
+    # and crash callers that are merely trying to place an agent.
+    kind, reason -> {:error, {:remote_start_failed, target_node, {kind, reason}}}
   end
 
   @doc "Returns the deterministic live owner for a logical agent ID."
@@ -97,7 +129,7 @@ defmodule Ouroboros.Mesh do
              subject: to,
              source: source_for(from)
            ) do
-      Jido.AgentServer.call(pid, signal, Keyword.get(opts, :timeout, 5_000))
+      call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
     else
       nil -> {:error, {:agent_not_found, to}}
       {:error, reason} -> {:error, reason}
@@ -124,7 +156,7 @@ defmodule Ouroboros.Mesh do
              subject: to,
              source: source_for(from)
            ),
-         {:ok, agent} <- Jido.AgentServer.call(pid, signal, Keyword.get(opts, :timeout, 5_000)) do
+         {:ok, agent} <- call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000)) do
       {:ok, task_id, agent}
     else
       nil -> {:error, {:agent_not_found, to}}
@@ -139,7 +171,7 @@ defmodule Ouroboros.Mesh do
       when is_binary(id) and is_binary(task_id) and is_list(opts) do
     with pid when is_pid(pid) <- whereis(id),
          {:ok, signal} <- TaskCompleted.new(%{task_id: task_id, result: result}, subject: id) do
-      Jido.AgentServer.call(pid, signal, Keyword.get(opts, :timeout, 5_000))
+      call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
     else
       nil -> {:error, {:agent_not_found, id}}
       {:error, reason} -> {:error, reason}
@@ -151,7 +183,7 @@ defmodule Ouroboros.Mesh do
   def state(id) when is_binary(id) do
     case whereis(id) do
       nil -> {:error, {:agent_not_found, id}}
-      pid -> Jido.AgentServer.state(pid)
+      pid -> agent_state(pid)
     end
   end
 
@@ -164,28 +196,16 @@ defmodule Ouroboros.Mesh do
       pid -> :erpc.call(node(pid), Ouroboros.Jido, :stop_agent, [pid])
     end
   catch
-    :error, reason -> {:error, {:remote_stop_failed, reason}}
+    kind, reason -> {:error, {:remote_stop_failed, {kind, reason}}}
   end
 
   @doc "Connects this runtime to another distributed Erlang node."
   @spec connect(node()) :: true | false | :ignored
   def connect(other_node) when is_atom(other_node), do: Node.connect(other_node)
 
-  defp do_start_agent(id, opts) do
+  defp do_start_agent(id, agent_module, start_opts) do
     case whereis(id) do
       nil ->
-        agent_module = Keyword.get(opts, :agent, Ouroboros.Agent.Worker)
-
-        initial_state =
-          opts
-          |> Keyword.take([:role, :objective, :parent_id])
-          |> Map.new()
-
-        start_opts =
-          opts
-          |> Keyword.take([:debug, :error_policy, :max_queue_size])
-          |> Keyword.merge(id: id, initial_state: initial_state)
-
         with {:ok, pid} <- Ouroboros.Jido.start_agent(agent_module, start_opts),
              :ok <- Directory.register(id, pid) do
           {:ok, pid}
@@ -194,6 +214,52 @@ defmodule Ouroboros.Mesh do
       pid ->
         {:error, {:already_started, pid}}
     end
+  end
+
+  defp check_agent_module(module) do
+    if agent_module_allowed?(module) do
+      :ok
+    else
+      {:error, {:agent_module_not_allowed, module}}
+    end
+  end
+
+  defp agent_module_allowed?(module) when is_atom(module) do
+    String.starts_with?(Atom.to_string(module), @agent_module_prefixes) or
+      module in Application.get_env(:ouroboros, :mesh_allowed_agent_modules, [])
+  end
+
+  defp agent_module_allowed?(_module), do: false
+
+  defp build_initial_state(opts) do
+    seeded = opts |> Keyword.take([:role, :objective, :parent_id]) |> Map.new()
+
+    case Keyword.get(opts, :initial_state, %{}) do
+      explicit when is_map(explicit) -> {:ok, Map.merge(seeded, explicit)}
+      other -> {:error, {:invalid_initial_state, other}}
+    end
+  end
+
+  defp build_start_opts(id, opts, initial_state) do
+    opts
+    |> Keyword.take([:debug, :error_policy, :max_queue_size])
+    |> Keyword.merge(id: id, initial_state: initial_state)
+  end
+
+  # Jido.AgentServer.call/3 and state/1 are plain GenServer calls, so they exit on
+  # timeout, :noproc, and :noconnection. Agent visibility here is eventually
+  # consistent and a handler may legitimately outrun the call timeout, which makes
+  # those ordinary outcomes rather than caller bugs.
+  defp call_agent(pid, signal, timeout) do
+    Jido.AgentServer.call(pid, signal, timeout)
+  catch
+    kind, reason -> {:error, {:agent_call_failed, kind, reason}}
+  end
+
+  defp agent_state(pid) do
+    Jido.AgentServer.state(pid)
+  catch
+    kind, reason -> {:error, {:agent_call_failed, kind, reason}}
   end
 
   defp deterministic_owner([]), do: nil
