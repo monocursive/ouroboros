@@ -1,0 +1,111 @@
+defmodule Ouroboros.Test.HarnessAdapter do
+  @moduledoc false
+
+  @behaviour Jido.Harness.Adapter
+
+  alias Jido.Harness.{AdapterSpec, Capabilities, Event, ProviderStatus, RunRequest}
+
+  @provider :ouroboros_test
+
+  @impl true
+  def spec do
+    AdapterSpec.new!(
+      provider: @provider,
+      name: "Ouroboros deterministic test adapter",
+      executable: "in-memory",
+      capabilities:
+        Capabilities.new!(
+          streaming?: true,
+          resume?: true,
+          usage?: true,
+          native_cancel?: true
+        ),
+      normalized_options: [:provider_session_id, :approval_mode, :sandbox_mode],
+      provider_options: []
+    )
+  end
+
+  @impl true
+  def status(_config) do
+    {:ok,
+     ProviderStatus.new!(
+       provider: @provider,
+       installed: true,
+       compatible: true,
+       authenticated: true,
+       smoke_ready: true,
+       executable: "in-memory",
+       capabilities: spec().capabilities
+     )}
+  end
+
+  @impl true
+  def run(%RunRequest{} = request, context) do
+    with controller when is_pid(controller) <- controller(context.config) do
+      adapter = self()
+      provider_session_id = request.provider_session_id || "ouroboros-test-session"
+
+      send(
+        controller,
+        {:ouroboros_test_adapter_started, context.run_id, request, adapter}
+      )
+
+      {:ok, controlled_stream(controller, context.run_id, provider_session_id)}
+    else
+      _ -> {:error, :test_controller_not_configured}
+    end
+  end
+
+  @impl true
+  def cancel(run_id, context) do
+    case controller(context.config) do
+      pid when is_pid(pid) -> send(pid, {:ouroboros_test_adapter_cancelled, run_id})
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  @spec emit(pid(), Event.event_type(), map()) :: :ok
+  def emit(adapter, type, payload \\ %{})
+      when is_pid(adapter) and is_atom(type) and is_map(payload) do
+    send(adapter, {:ouroboros_test_emit, type, payload})
+    :ok
+  end
+
+  @spec finish(pid()) :: :ok
+  def finish(adapter) when is_pid(adapter) do
+    send(adapter, :ouroboros_test_finish)
+    :ok
+  end
+
+  defp controlled_stream(controller, run_id, provider_session_id) do
+    Stream.resource(
+      fn -> provider_session_id end,
+      fn provider_session_id ->
+        receive do
+          {:ouroboros_test_emit, type, payload} ->
+            event =
+              Event.new!(
+                provider: @provider,
+                type: type,
+                provider_session_id: provider_session_id,
+                payload: payload
+              )
+
+            {[event], provider_session_id}
+
+          :ouroboros_test_finish ->
+            {:halt, provider_session_id}
+        end
+      end,
+      fn _provider_session_id ->
+        send(controller, {:ouroboros_test_adapter_closed, run_id})
+      end
+    )
+  end
+
+  defp controller(config) do
+    Map.get(config, :test_pid) || Map.get(config, "test_pid")
+  end
+end
