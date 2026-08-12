@@ -13,6 +13,14 @@ defmodule Ouroboros.InteractiveSession do
 
   @turn_options [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
 
+  # Control-plane operations (info/replay/subscribe/steer/respond_approval/interrupt/
+  # close/kill) are bounded so one wedged coordinator cannot freeze every caller.
+  # `await/3` is the deliberate exception: it threads the caller's own timeout, and the
+  # transport is given that timeout plus a margin so the local waiter, not the
+  # transport, decides when to stop waiting.
+  @default_call_timeout 30_000
+  @remote_margin_ms 5_000
+
   @doc "Starts or adopts a caller-independent interactive coding session."
   @spec start(keyword()) :: {:ok, Ref.t()} | {:error, term()}
   def start(opts \\ [])
@@ -24,7 +32,9 @@ defmodule Ouroboros.InteractiveSession do
       with {:ok, session} <- State.new(id, opts),
            :ok <- create_or_match(session),
            {:ok, pid} <- ensure_coordinator(id) do
-        case safe_call(pid, :ready) do
+        # Readiness waits for provider start-up, whose latency is legitimately
+        # unbounded, so it keeps the long wait rather than the control-plane bound.
+        case safe_call(pid, :ready, :infinity) do
           {:ok, _state} -> {:ok, Ref.new(id)}
           {:error, reason} -> {:error, reason}
         end
@@ -98,7 +108,13 @@ defmodule Ouroboros.InteractiveSession do
       if owner == node() do
         local_await(id, turn_id, request_ref, timeout)
       else
-        route(owner, __MODULE__, :local_await, [id, turn_id, request_ref, timeout])
+        route(
+          owner,
+          __MODULE__,
+          :local_await,
+          [id, turn_id, request_ref, timeout],
+          transport_timeout(timeout)
+        )
       end
     end
   end
@@ -156,7 +172,9 @@ defmodule Ouroboros.InteractiveSession do
 
   @doc false
   def local_call(id, message) do
-    with :ok <- validate_id(id), {:ok, pid} <- ensure_coordinator(id), do: safe_call(pid, message)
+    with :ok <- validate_id(id),
+         {:ok, pid} <- ensure_coordinator(id),
+         do: safe_call(pid, message, call_timeout())
   end
 
   defp create_or_match(session) do
@@ -191,7 +209,7 @@ defmodule Ouroboros.InteractiveSession do
     with {:ok, id, owner} <- session_identity(session) do
       if owner == node(),
         do: local_call(id, message),
-        else: route(owner, __MODULE__, :local_call, [id, message])
+        else: route(owner, __MODULE__, :local_call, [id, message], call_timeout())
     end
   end
 
@@ -221,19 +239,23 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
-  defp safe_call(pid, message) do
+  defp safe_call(pid, message, timeout) do
     try do
-      GenServer.call(pid, message, :infinity)
+      GenServer.call(pid, message, timeout)
     catch
+      :exit, {:timeout, _call} -> {:error, :timeout}
       :exit, reason -> {:error, {:session_call_failed, reason}}
     end
   end
 
-  defp route(owner, module, function, arguments) do
+  # Starting a session remotely keeps an unbounded transport: it has no
+  # caller-supplied timeout to thread, and provider start-up latency is legitimately
+  # unbounded.
+  defp route(owner, module, function, arguments, timeout \\ :infinity) do
     cond do
       owner == node() -> apply(module, function, arguments)
       owner not in Node.list() -> {:error, {:owner_unavailable, owner}}
-      true -> :erpc.call(owner, module, function, arguments, :infinity)
+      true -> :erpc.call(owner, module, function, arguments, timeout)
     end
   catch
     :error, {:erpc, reason} when reason in [:noconnection, :timeout] ->
@@ -242,6 +264,18 @@ defmodule Ouroboros.InteractiveSession do
     kind, reason ->
       {:error, {:remote_call_failed, owner, kind, reason}}
   end
+
+  defp call_timeout do
+    case Application.get_env(:ouroboros, :session_call_timeout, @default_call_timeout) do
+      :infinity -> :infinity
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _invalid -> @default_call_timeout
+    end
+  end
+
+  # `await/3` validates the timeout before routing, so only these two shapes reach here.
+  defp transport_timeout(:infinity), do: :infinity
+  defp transport_timeout(timeout) when is_integer(timeout), do: timeout + @remote_margin_ms
 
   defp validate_timeout(:infinity), do: :ok
   defp validate_timeout(timeout) when is_integer(timeout) and timeout >= 0, do: :ok

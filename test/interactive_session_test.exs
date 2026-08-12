@@ -155,13 +155,18 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok =
              DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, original)
 
+    # Recovery only adopts sessions whose last transition is older than its restart
+    # grace, so rebuilding deliberately lags the terminate by a couple of seconds.
     replacement =
-      assert_eventually(fn ->
-        case Task.whereis(id) do
-          pid when is_pid(pid) and pid != original -> pid
-          _other -> false
-        end
-      end)
+      assert_eventually(
+        fn ->
+          case Task.whereis(id) do
+            pid when is_pid(pid) and pid != original -> pid
+            _other -> false
+          end
+        end,
+        800
+      )
 
     assert is_pid(replacement)
     assert {:ok, %State{status: status}} = InteractiveSession.info(ref)

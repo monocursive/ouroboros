@@ -13,6 +13,7 @@ defmodule Ouroboros.Coding.Task do
   @terminal_retire_ms 100
   @workspace_reacquire_attempts 25
   @workspace_reacquire_delay_ms 4
+  @retry_backoff_max_ms 5_000
 
   def child_spec(id) do
     %{
@@ -131,11 +132,14 @@ defmodule Ouroboros.Coding.Task do
   @impl true
   def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
 
+  # A waiter that arrives in the window between the terminal checkpoint and this
+  # message used to strand the coordinator: nothing rescheduled retirement once it
+  # had been declined.
   def handle_info(:retire, %{task: task} = runtime) do
-    if TaskState.terminal?(task) and map_size(runtime.waiters) == 0 do
-      {:stop, :normal, runtime}
-    else
-      {:noreply, runtime}
+    cond do
+      not TaskState.terminal?(task) -> {:noreply, runtime}
+      map_size(runtime.waiters) == 0 -> {:stop, :normal, runtime}
+      true -> {:noreply, schedule_retire(runtime)}
     end
   end
 
@@ -171,9 +175,12 @@ defmodule Ouroboros.Coding.Task do
       subscriber_monitors: %{},
       waiters: %{},
       workspace_lease: lease,
-      workspace_capability: capability
+      workspace_capability: capability,
+      retry: no_retry()
     }
   end
+
+  defp no_retry, do: %{signature: nil, count: 0, delay: 0}
 
   defp admit_workspace(task) do
     if is_pid(Process.whereis(WorkspaceManager)) do
@@ -275,7 +282,7 @@ defmodule Ouroboros.Coding.Task do
   defp attach_or_start(%{task: %TaskState{harness_run_id: run_id}} = runtime)
        when is_binary(run_id) do
     case safe_run_call(fn -> Run.info(run_id) end) do
-      {:ok, _info} -> schedule_poll(runtime, 0)
+      {:ok, _info} -> runtime |> clear_retry() |> schedule_poll(0)
       {:error, :not_found} -> lose(runtime, :harness_run_not_found)
       {:error, reason} -> retry_with_error(runtime, :harness_info_failed, reason)
     end
@@ -345,7 +352,7 @@ defmodule Ouroboros.Coding.Task do
     case safe_run_call(fn ->
            Run.replay(task.harness_run_id, cursor: task.cursor, limit: @replay_limit)
          end) do
-      {:ok, [_ | _] = events} -> persist_harness_events(runtime, events)
+      {:ok, [_ | _] = events} -> runtime |> clear_retry() |> persist_harness_events(events)
       {:ok, []} -> collect_result(runtime)
       {:error, :not_found} -> lose(runtime, :harness_run_not_found)
       {:error, reason} -> retry_with_error(runtime, :harness_replay_failed, reason)
@@ -380,10 +387,36 @@ defmodule Ouroboros.Coding.Task do
 
   defp collect_result(runtime) do
     case safe_run_call(fn -> Run.await(runtime.task.harness_run_id, 0) end) do
-      {:ok, %RunResult{} = result} -> finish(runtime, result)
-      {:error, :timeout} -> schedule_poll(runtime, @poll_interval)
-      {:error, :not_found} -> lose(runtime, :harness_run_not_found)
-      {:error, reason} -> retry_with_error(runtime, :harness_await_failed, reason)
+      {:ok, %RunResult{} = result} ->
+        # A run result becomes readable in the same provider transition that appends
+        # the run's terminal event, so a result read here can be newer than the
+        # mirrored event log. Finishing now would reply to an awaiter whose subsequent
+        # replay is missing the terminal event it just waited for.
+        if mirrored_through_result?(runtime),
+          do: finish(runtime, result),
+          else: runtime |> clear_retry() |> schedule_poll(@poll_interval)
+
+      {:error, :timeout} ->
+        runtime |> clear_retry() |> schedule_poll(@poll_interval)
+
+      {:error, :not_found} ->
+        lose(runtime, :harness_run_not_found)
+
+      {:error, reason} ->
+        retry_with_error(runtime, :harness_await_failed, reason)
+    end
+  end
+
+  # Read the provider's cursor high-water mark *after* the result: whatever the
+  # provider had emitted when the result existed is included in it, so a mirror that
+  # has reached it has already checkpointed the run's terminal event. Anything still
+  # missing is drained by the next poll, and a pruned event still advances the cursor,
+  # so this defers a finish at most until the mirror catches up. An unreachable run
+  # fails open — the next poll owns that diagnosis.
+  defp mirrored_through_result?(runtime) do
+    case safe_run_call(fn -> Run.info(runtime.task.harness_run_id) end) do
+      {:ok, %{output_cursor: output_cursor}} -> runtime.task.cursor >= output_cursor
+      _unavailable -> true
     end
   end
 
@@ -426,15 +459,40 @@ defmodule Ouroboros.Coding.Task do
     end
   end
 
+  # A wedged provider used to be retried every 25ms with one durable error event
+  # per attempt: the retained event ring filled with error noise in minutes, evicting
+  # real agent output past `event_floor` and rewriting the whole aggregate 40 times a
+  # second. Back off, and only checkpoint an error the first time it is seen or when
+  # it changes. The repeat count rides along on the next event that is written.
   defp retry_with_error(runtime, type, reason) do
     redacted = Jido.Harness.Redaction.redact(reason)
-    {task, event} = append_internal(runtime.task, type, %{error: inspect(redacted)})
+    {repeat?, runtime} = note_retry(runtime, {type, redacted})
+    delay = runtime.retry.delay
 
-    case persist(runtime, touch(task), [event]) do
-      {:ok, runtime} -> schedule_poll(runtime, @poll_interval)
-      {:error, runtime} -> schedule_poll(runtime, @poll_interval)
+    if repeat? do
+      schedule_poll(runtime, delay)
+    else
+      payload = %{error: inspect(redacted), consecutive_errors: runtime.retry.count}
+      {task, event} = append_internal(runtime.task, type, payload)
+
+      case persist(runtime, touch(task), [event]) do
+        {:ok, runtime} -> schedule_poll(runtime, delay)
+        {:error, runtime} -> schedule_poll(runtime, delay)
+      end
     end
   end
+
+  defp note_retry(%{retry: retry} = runtime, signature) do
+    repeat? = retry.count > 0 and retry.signature == signature
+
+    delay =
+      if retry.count == 0, do: @poll_interval, else: min(retry.delay * 2, @retry_backoff_max_ms)
+
+    {repeat?, %{runtime | retry: %{signature: signature, count: retry.count + 1, delay: delay}}}
+  end
+
+  defp clear_retry(%{retry: %{count: 0}} = runtime), do: runtime
+  defp clear_retry(runtime), do: %{runtime | retry: no_retry()}
 
   defp append_internal(task, type, payload) do
     event = Ouroboros.Coding.Event.internal(task.id, task.next_sequence, type, payload)
