@@ -8,6 +8,11 @@ defmodule Ouroboros.Upgrade.Coordinator do
   returning its receipt. Such an ambiguous node is reported as quarantined and is
   never claimed to have rolled back.
 
+  An ambiguous *prepare* is different: no code is loaded yet, so compensation releases
+  the node's reservation by artifact id rather than by the token the failed reply would
+  have carried. A node that proves the release is reported as aborted; one that does not
+  stays quarantined.
+
   `deploy/3` accepts these coordinator options:
 
     * `:migrations` - a map of node names to node-local migration lists
@@ -85,6 +90,7 @@ defmodule Ouroboros.Upgrade.Coordinator do
       else
         prepared
         |> abort_prepared(opts)
+        |> abort_ambiguous_prepares(artifact, opts)
         |> finish_error(:prepare_failed)
       end
     else
@@ -456,6 +462,42 @@ defmodule Ouroboros.Upgrade.Coordinator do
     abort_nodes(receipt, nodes, opts)
   end
 
+  # A prepare whose reply was lost may still hold a reservation on that node, with a
+  # token nobody knows. Left alone it wedges every later prepare there. The reservation
+  # is node-local and holds no committed code, so releasing it by artifact id is
+  # best-effort self-healing: it can only ever undo this deployment's own prepare.
+  defp abort_ambiguous_prepares(receipt, artifact, opts) do
+    nodes =
+      Enum.filter(receipt.nodes, fn target ->
+        Map.fetch!(receipt.node_receipts, target).prepare == :unknown
+      end)
+
+    results =
+      parallel(nodes, opts, :abort, fn target ->
+        rpc(
+          target,
+          NodeExecutor,
+          :abort_prepared_reservation,
+          [artifact.id],
+          timeout(opts, :abort)
+        )
+      end)
+
+    Enum.reduce(results, receipt, fn {target, result}, acc ->
+      update_node(acc, target, fn node_receipt ->
+        apply_reservation_abort_result(node_receipt, result)
+      end)
+    end)
+  end
+
+  # Only a proven release downgrades the node's recovery status. Anything else leaves
+  # the original ambiguous prepare error and its quarantine in place.
+  defp apply_reservation_abort_result(node_receipt, {:ok, :ok}) do
+    %{node_receipt | token: nil, recovery: :aborted}
+  end
+
+  defp apply_reservation_abort_result(node_receipt, _result), do: node_receipt
+
   defp abort_nodes(receipt, nodes, opts) do
     results =
       parallel(nodes, opts, :abort, fn target ->
@@ -497,7 +539,7 @@ defmodule Ouroboros.Upgrade.Coordinator do
   end
 
   defp apply_promote_result(node_receipt, {:ok, {:error, reason}}) do
-    %{node_receipt | recovery: :unchanged, error: {:promote, reason}}
+    %{node_receipt | recovery: promote_failure_recovery(reason), error: {:promote, reason}}
   end
 
   defp apply_promote_result(node_receipt, {:ok, unexpected}) do
@@ -515,6 +557,13 @@ defmodule Ouroboros.Upgrade.Coordinator do
         error: {:promote, {:transport, reason}}
     }
   end
+
+  # An executor that quarantined itself while promoting, or that refused because it was
+  # already quarantined, is not an unchanged node. Reporting it as unchanged hides the
+  # ambiguity the deployment receipt exists to surface.
+  defp promote_failure_recovery({_tag, _reason, :reconciliation_required}), do: :quarantined
+  defp promote_failure_recovery({:executor_quarantined, _reason}), do: :quarantined
+  defp promote_failure_recovery(_reason), do: :unchanged
 
   defp migrations_for(opts, target) do
     case Keyword.get(opts, :migrations, %{}) do
@@ -555,20 +604,26 @@ defmodule Ouroboros.Upgrade.Coordinator do
       else: {:error, String.to_atom("#{operation}_unavailable")}
   end
 
+  # A quarantined node outranks a partial promotion: a partially irreversible cluster is
+  # still a cluster whose state is known, while a quarantined node's is not.
   defp finish_promotion(receipt) do
     cond do
       not retained_executor_receipts?(receipt) ->
         {:ok, finish(receipt, :promoted, :not_available)}
 
+      quarantined?(receipt) ->
+        {:error, finish(receipt, promotion_outcome(receipt), :quarantined)}
+
       promoted_any?(receipt) ->
         {:error, finish(receipt, :promotion_partial, :partial_irreversible)}
-
-      quarantined?(receipt) ->
-        {:error, finish(receipt, :promotion_failed, :quarantined)}
 
       true ->
         {:error, finish(receipt, :promotion_failed, :unchanged)}
     end
+  end
+
+  defp promotion_outcome(receipt) do
+    if promoted_any?(receipt), do: :promotion_partial, else: :promotion_failed
   end
 
   defp promoted_any?(receipt) do

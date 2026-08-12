@@ -37,6 +37,44 @@ if config_env() == :prod do
       _other -> raise "OUROBOROS_ORCHESTRATION_CONCURRENCY must be a positive integer"
     end
 
+  signer_format =
+    "OUROBOROS_UPGRADE_TRUSTED_SIGNERS must be comma-separated " <>
+      "\"signer_id:base64_ed25519_public_key\" entries"
+
+  # The fast patch lane is fail-closed: an absent or empty variable trusts nobody and
+  # every signed artifact is rejected. A malformed entry raises rather than silently
+  # narrowing the trusted set at boot.
+  trusted_signers =
+    (System.get_env("OUROBOROS_UPGRADE_TRUSTED_SIGNERS") || "")
+    |> String.split(",", trim: true)
+    |> Enum.reduce(%{}, fn entry, signers ->
+      {signer, encoded} =
+        case entry |> String.trim() |> String.split(":", parts: 2) do
+          [signer, encoded] -> {String.trim(signer), String.trim(encoded)}
+          _other -> raise signer_format
+        end
+
+      if signer == "" do
+        raise signer_format
+      end
+
+      if Map.has_key?(signers, signer) do
+        raise "OUROBOROS_UPGRADE_TRUSTED_SIGNERS lists signer #{inspect(signer)} more than once"
+      end
+
+      public_key =
+        case Base.decode64(encoded) do
+          {:ok, key} when byte_size(key) == 32 ->
+            key
+
+          _other ->
+            raise "OUROBOROS_UPGRADE_TRUSTED_SIGNERS entry #{inspect(signer)} must carry a " <>
+                    "base64-encoded 32-byte Ed25519 public key"
+        end
+
+      Map.put(signers, signer, public_key)
+    end)
+
   config :ouroboros,
     coding_storage: {Jido.Storage.File, path: Path.join(data_dir, "coding")},
     interactive_storage: {Jido.Storage.File, path: Path.join(data_dir, "interactive")},
@@ -52,6 +90,6 @@ if config_env() == :prod do
     orchestration_worker_id: System.get_env("OUROBOROS_ORCHESTRATION_WORKER_ID"),
     upgrade_trust_policy: [
       allow_unsigned: false,
-      trusted_signers: %{}
+      trusted_signers: trusted_signers
     ]
 end

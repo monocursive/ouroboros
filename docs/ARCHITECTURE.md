@@ -130,7 +130,18 @@ Fast-lane transaction:
 7. Promote with soft purge, or downgrade state and restore preimages.
 
 Never brutal-purge. If retired code remains on a process stack, quarantine the node
-and retain rollback material.
+and retain rollback material. Retention is literal: when a commit fails at or after the
+point where code became visible and compensation cannot finish, the terminal journal
+record keeps the artifact and its migration targets rather than clearing the only
+durable copy of the preimages.
+
+Policy protects the modules that make these guarantees enforceable, not just the loader:
+`Ouroboros.Upgrade.*`, `Ouroboros.Storage.*` (a patched journal writer makes every
+write a silent no-op), `Ouroboros.Release.*` (the durable lane's authorizer), and
+`Ouroboros.Control.*` (which decides what gets patched), plus the application root and
+its registry owner. On-load functions are detected by preparing the batch, because
+`-on_load` lives in the Code chunk and never appears among a module's attributes; the
+preimage is probed too, since rollback loads it with `:code.load_binary/3`.
 
 The coordinator performs parallel prepare/commit, compensating abort/rollback,
 optional health checks, promotion, and status across explicit connected nodes. It is
@@ -140,19 +151,31 @@ epoch, stateful declarations require migrations, and epoch monotonicity survives
 rollback and executor restart.
 
 This is not a security boundary against malicious loaded code. Any accepted BEAM has
-ambient VM authority and can call the code server or mutate processes. Independent
+ambient VM authority and can call the code server or mutate processes. NIF loading is
+detected as a static import of `:erlang.load_nif/2` only; a runtime-resolved call is
+not detected, and the import check is a policy gate rather than a proof. Independent
 signing/authorization belongs outside the patchable application, preferably on a
 separate least-privileged loader node.
 
 The node executor durably journals write-ahead operations, monotonic epoch, retained
 rollback receipts, expected loaded hashes, and quarantine. Opaque OTP prepared-code
-terms are intentionally not persisted and become `lost_on_restart`. Restart verifies
-loaded module identities and migration-process liveness; mismatches fail closed. For
-an interrupted commit, the verified artifact and migration targets in the write-ahead
-record let restart resume matching live callback processes before retaining the
-incomplete operation in quarantine. Post-mutation journal failures trigger immediate
-compensation where possible and otherwise leave an explicit reconciliation-required
-quarantine.
+terms are intentionally not persisted and become `lost_on_restart`. A reservation whose
+prepare reply was lost can be released by artifact id, so an ambiguous prepare does not
+wedge the node; status reports the reservation's artifact, epoch, and prepare time.
+Restart verifies loaded module identities and migration-process liveness; mismatches
+fail closed. For an interrupted commit, the verified artifact and migration targets in
+the write-ahead record let restart resume matching live callback processes before
+retaining the incomplete operation in quarantine. Post-mutation journal failures trigger
+immediate compensation where possible and otherwise leave an explicit
+reconciliation-required quarantine.
+
+Quarantine is a refusal, not a warning: prepare, commit, rollback, and promote are all
+gated on it, so a node whose loaded code provably disagrees with its journal cannot be
+mutated further or have its preimages discarded by a promote.
+`reconcile_quarantine/1` is the only exit and replays the same startup checks against
+current state, journaling the transition when everything matches and returning
+diagnostics when it does not. The operations log is bounded, except for pending
+write-ahead records and records still carrying rollback material.
 
 The durable lane is separate. `Release.Metadata` builds and validates `.rel`, `.appup`,
 and `relup` terms; `RelupBuilder` invokes `:systools.make_relup` without writing;
@@ -179,7 +202,9 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Network partition during placement | `:global` cannot guarantee one owner | Consensus lease/admission service |
 | Store write fails | Cursor is not advanced and events are not broadcast | Backpressure/health alarms |
 | Workspace/registry owner restarts | Nonterminal durable roots remain reserved until the registered owner reclaims them | Cross-node consensus authority |
-| Fast patch migration fails | Reverse migrated state and restore preimages, or quarantine | Done; release persistence remains separate |
+| Fast patch migration fails | Reverse migrated state and restore preimages, or quarantine while keeping the artifact and preimages journaled | Done; release persistence remains separate |
+| Fast patch resume fails after loading | Compensate first; quarantine with retained rollback material only if compensation fails | Done |
+| Fast patch prepare reply is lost | Reservation is released by artifact id; no code was loaded | Done |
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
@@ -188,9 +213,13 @@ rehearsed lane can prove restart persistence or an ERTS change.
 
 ## Safety boundaries
 
-- Development/test permits unsigned local patch tests. Production never does.
-- Upgrade policy rejects verifier, node executor, application root, NIF/on-load code,
-  consolidated protocols, and sticky modules. Loaded code remains VM-privileged.
+- Development/test permits unsigned local patch tests. Production never does. Trusted
+  keys arrive through `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; boot fails on a malformed
+  entry and an unset variable trusts nobody.
+- Upgrade policy rejects the upgrade, storage, release, and control namespaces, the
+  application root and its registry owner, on-load code, consolidated protocols, and
+  sticky modules. It rejects statically imported `:erlang.load_nif/2`, which a
+  runtime-resolved call evades. Loaded code remains VM-privileged.
 - Coding requests default to read-only and prompt approval. Write access is explicit.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.

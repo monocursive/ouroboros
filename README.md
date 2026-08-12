@@ -306,10 +306,19 @@ signed = Ouroboros.Upgrade.Artifact.sign(artifact, "release-key", private_key)
 ```
 
 The verifier rejects stale preimages, runtime mismatches, unsigned production
-artifacts, NIF/on-load/protocol modules, sticky modules, and policy-protected upgrade
-control modules. Commit uses OTP's prepared loading plus explicit
-`:sys.suspend/2`, `:sys.change_code/5`, and resume. Rollback restores both process
-state and the preimage without brutal purge.
+artifacts, consolidated protocols, sticky modules, and the modules that enforce this
+lane's guarantees: everything under `Ouroboros.Upgrade.*`, `Ouroboros.Storage.*`,
+`Ouroboros.Release.*`, and `Ouroboros.Control.*`, plus the application root and its
+registry owner. On-load functions are detected by asking the code server to prepare
+the batch, in both the new binary and the preimage the rollback path would load back.
+
+NIF loading is detected only as a static import of `:erlang.load_nif/2`. A module that
+resolves that call at runtime is not detected, and no static check would make it so;
+this is the policy gate being a policy gate, not a sandbox.
+
+Commit uses OTP's prepared loading plus explicit `:sys.suspend/2`,
+`:sys.change_code/5`, and resume. Rollback restores both process state and the
+preimage without brutal purge.
 
 Cluster rollout is explicit and best-effort, not a distributed transaction:
 
@@ -323,10 +332,14 @@ Cluster rollout is explicit and best-effort, not a distributed transaction:
 Ouroboros.Upgrade.Coordinator.promote(deployment)
 ```
 
-An ambiguous remote outcome is quarantined, never described as rolled back. Fast
-patches are fully privileged inside their VM: the verifier is a policy gate, not a
-security sandbox. Independent authorization and signing should live outside the
-patchable application, ideally on a separate loader node or service.
+An ambiguous remote outcome is quarantined, never described as rolled back. An
+ambiguous *prepare* holds a reservation whose token the lost reply was carrying, so
+compensation releases it by artifact id through
+`NodeExecutor.abort_prepared_reservation/2` instead of leaving the node unable to
+prepare anything again. Fast patches are fully privileged inside their VM: the
+verifier is a policy gate, not a security sandbox. Independent authorization and
+signing should live outside the patchable application, ideally on a separate loader
+node or service.
 
 Epoch, receipts, expected module identities, write-ahead operations, and quarantine
 state are durably journaled. On executor restart, opaque prepared loader terms are
@@ -336,6 +349,14 @@ modules match; the incomplete commit then remains in inspectable quarantine. Com
 module hashes and retained migration processes are also reconciled, and any mismatch
 fails closed. A successful code mutation is never reported before its checkpoint;
 journal failure triggers compensation or an explicit reconciliation-required outcome.
+
+A commit that fails after code is already visible first attempts the same compensation
+a failed migration gets. If that compensation cannot complete, the terminal journal
+record keeps the artifact and its migration targets, so the preimages remain restorable
+from the journal alone. A quarantined executor refuses every mutating call, rollback
+and promote included; `NodeExecutor.reconcile_quarantine/1` re-runs the startup checks
+and clears the quarantine only when loaded code matches the journal again, otherwise
+returning the diagnostics unchanged.
 
 This lane changes a running node only. Reboot-persistent changes and ERTS upgrades
 still require `.appup`/`.relup` release handling; Mix releases do not generate hot
@@ -379,13 +400,17 @@ Production startup requires a durable directory:
 ```sh
 export OUROBOROS_DATA_DIR=/var/lib/ouroboros
 export OUROBOROS_WORKSPACE_ROOTS=/srv/agent-worktrees
+export OUROBOROS_UPGRADE_TRUSTED_SIGNERS="release-key:$(base64 < release-key.pub)"
 MIX_ENV=prod mix release
 ```
 
-Production also fails closed on unsigned patches. Trusted Ed25519 public keys must be
-injected into `:ouroboros, :upgrade_trust_policy` by the deployment's configuration
-boundary before upgrades can be accepted. Release and fast-patch journals use a
-file-and-parent-directory-synced checkpoint adapter; the other domain aggregates use
+Production fails closed on unsigned patches. `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` is the
+injection point for trusted Ed25519 public keys: comma-separated
+`signer_id:base64_ed25519_public_key` entries, each key exactly 32 raw bytes. A
+malformed or duplicated entry stops the boot rather than quietly narrowing the trusted
+set, and an unset variable trusts nobody, so every artifact is rejected until keys are
+supplied by the deployment's configuration boundary. Release and fast-patch journals use
+a file-and-parent-directory-synced checkpoint adapter; the other domain aggregates use
 single-owner atomic file checkpoints.
 
 ## Current limits

@@ -2,7 +2,9 @@ defmodule Ouroboros.Upgrade.Beam do
   @moduledoc """
   One verified BEAM replacement and the pre-image needed for rollback.
 
-  This struct is data only. It never compiles source and never loads code.
+  This struct is data only. It never compiles source and never loads code. Inspecting a
+  binary does ask the code server to *prepare* it, which is how on-load functions are
+  detected soundly; preparation makes nothing visible and the handle is discarded.
   """
 
   @enforce_keys [
@@ -46,9 +48,11 @@ defmodule Ouroboros.Upgrade.Beam do
          :ok <- validate_migration_extra(stateful, migration_extra),
          {:ok, new_info} <- inspect_binary(binary),
          :ok <- ensure_module(module, new_info.module),
+         :ok <- ensure_no_on_load(module, new_info),
          {:ok, {old_binary, old_filename}} <- old_object_code(module, opts),
          {:ok, old_info} <- inspect_binary(old_binary),
          :ok <- ensure_module(module, old_info.module),
+         :ok <- ensure_no_on_load(module, old_info),
          :ok <- ensure_current_md5(module, old_info.md5) do
       {:ok,
        %__MODULE__{
@@ -76,24 +80,49 @@ defmodule Ouroboros.Upgrade.Beam do
          {:ok, module} <- Keyword.fetch(info, :module),
          {:ok, {^module, md5}} <- :beam_lib.md5(binary),
          {:ok, {^module, [attributes: attributes]}} <- :beam_lib.chunks(binary, [:attributes]),
-         {:ok, {^module, [imports: imports]}} <- :beam_lib.chunks(binary, [:imports]) do
+         {:ok, {^module, [imports: imports]}} <- :beam_lib.chunks(binary, [:imports]),
+         {:ok, on_load?} <- on_load?(module, binary) do
       {:ok,
        %{
          module: module,
          md5: md5,
          vsn: attributes |> Keyword.get(:vsn, [nil]) |> List.first(),
-         on_load?: Keyword.has_key?(attributes, :on_load),
+         on_load?: on_load?,
          protocol?:
            Keyword.has_key?(attributes, :__protocol__) or Keyword.has_key?(attributes, :__impl__),
          nif?: Enum.any?(imports, &match?({:erlang, :load_nif, 2}, &1))
        }}
     else
+      {:error, {:unpreparable_beam, _module, _reason} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:invalid_beam, reason}}
       other -> {:error, {:invalid_beam, other}}
     end
   rescue
     error -> {:error, {:invalid_beam, error}}
   end
+
+  # `-on_load` is a Code-chunk construct: it never appears in the attributes chunk,
+  # so an attribute lookup can only ever answer "no". Ask the code server to prepare
+  # the batch instead. Preparation is the same check the forward path already relies
+  # on, it has no globally visible effect, and the prepared handle is discarded here.
+  # The rollback path loads pre-images with `:code.load_binary/3`, which would run an
+  # on-load function, so both binaries have to be probed rather than assumed.
+  defp on_load?(module, binary) do
+    case :code.prepare_loading([{module, ~c"ouroboros://verify", binary}]) do
+      {:ok, _prepared} -> {:ok, false}
+      {:error, [{^module, :on_load_not_allowed}]} -> {:ok, true}
+      {:error, [{^module, reason}]} -> {:error, {:unpreparable_beam, module, reason}}
+      {:error, reason} -> {:error, {:unpreparable_beam, module, reason}}
+      other -> {:error, {:unpreparable_beam, module, other}}
+    end
+  catch
+    _kind, _reason -> {:error, {:unpreparable_beam, module, :prepare_loading_failed}}
+  end
+
+  defp ensure_no_on_load(_module, %{on_load?: false}), do: :ok
+
+  defp ensure_no_on_load(module, %{on_load?: true}),
+    do: {:error, {:forbidden_beam_feature, module, :on_load}}
 
   @doc false
   @spec sha256(binary()) :: String.t()
