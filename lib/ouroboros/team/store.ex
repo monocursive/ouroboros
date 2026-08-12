@@ -5,6 +5,11 @@ defmodule Ouroboros.Team.Store do
   All teams share one adapter checkpoint. Creating a logical team ID and updating
   its membership/delegation state are therefore serialized through this process,
   while the underlying Jido storage adapter remains replaceable.
+
+  Durability is reported as an explicit level rather than a boolean, because the
+  levels are not equivalent. `Jido.Storage.File` writes and renames without
+  `fsync`, so it survives a BEAM restart (`:durable_checkpoint`) but not power
+  loss. Only a synced adapter is reported as `:synced_checkpoint`.
   """
 
   use GenServer
@@ -34,8 +39,10 @@ defmodule Ouroboros.Team.Store do
   @spec list(GenServer.server()) :: [Snapshot.t()] | {:error, term()}
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
 
-  @spec durable?(GenServer.server()) :: boolean()
-  def durable?(server \\ __MODULE__), do: GenServer.call(server, :durable?)
+  @type durability :: :ephemeral_checkpoint | :durable_checkpoint | :synced_checkpoint
+
+  @spec durability(GenServer.server()) :: durability()
+  def durability(server \\ __MODULE__), do: GenServer.call(server, :durability)
 
   @doc false
   def checkpoint_key, do: @store_key
@@ -50,7 +57,7 @@ defmodule Ouroboros.Team.Store do
          adapter: adapter,
          opts: adapter_opts,
          teams: teams,
-         durable?: adapter != Jido.Storage.ETS
+         durability: durability_level(adapter)
        }}
     else
       {:error, reason} -> {:stop, reason}
@@ -95,7 +102,11 @@ defmodule Ouroboros.Team.Store do
     {:reply, snapshots, state}
   end
 
-  def handle_call(:durable?, _from, state), do: {:reply, state.durable?, state}
+  def handle_call(:durability, _from, state), do: {:reply, state.durability, state}
+
+  defp durability_level(Jido.Storage.ETS), do: :ephemeral_checkpoint
+  defp durability_level(Ouroboros.Storage.DurableFile), do: :synced_checkpoint
+  defp durability_level(_adapter), do: :durable_checkpoint
 
   defp storage_config(opts) do
     case Keyword.fetch(opts, :storage) do

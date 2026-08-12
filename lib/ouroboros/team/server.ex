@@ -18,7 +18,9 @@ defmodule Ouroboros.Team.Server.State do
                 waiters: %{},
                 waiter_monitors: %{},
                 cleanup_agents?: true,
-                store_durable?: false
+                durability: :ephemeral_checkpoint,
+                backoff: %{},
+                start_deadlines: %{}
               ]
 end
 
@@ -37,6 +39,14 @@ defmodule Ouroboros.Team.Server do
   callers. Runtime PIDs and waiter capabilities never enter that checkpoint.
   Abnormal process failure is recovered by the supervisor without cancelling the
   detached run; orderly shutdown first closes the aggregate so it cannot resurrect.
+  Recovery therefore never compensates a coding task it merely failed to resubscribe
+  to: a rejected cursor or unreachable owner degrades the delegation to completion
+  polling with the error recorded. Only a fresh `delegate/4` request fails fast.
+
+  Transport ambiguity during startup is not a durable failure. Because the coding
+  task ID is deterministic, an unreachable owner keeps the delegation `:starting`
+  and retries with backoff until `:delegation_start_retry_ms` elapses; the durable
+  failure then records that provider-side work may exist unconfirmed.
 
   Local workers use Jido's logical parent/child machinery. Jido 2.3.3 validates
   adopted children with a local-only `Process.alive?/1` guard, so remote PIDs
@@ -59,6 +69,8 @@ defmodule Ouroboros.Team.Server do
 
   @completion_check_ms 25
   @delivery_retry_ms 50
+  @backoff_cap_ms 5_000
+  @default_start_retry_ms 300_000
   @mesh_visibility_timeout_ms 2_000
   @terminal_statuses [:completed, :failed, :cancelled, :lost]
   @server_options [:id, :coordinator_id, :cleanup_agents, :store]
@@ -123,7 +135,7 @@ defmodule Ouroboros.Team.Server do
     reply =
       with pid when is_pid(pid) <- Ouroboros.Mesh.whereis(state.coordinator_id),
            :ok <- verify_coordinator_owner(pid, state.id, state.coordinator_id) do
-        Jido.AgentServer.state(pid)
+        safe_agent_state(pid)
       else
         nil -> {:error, {:coordinator_not_found, state.coordinator_id}}
         {:error, reason} -> {:error, reason}
@@ -251,6 +263,10 @@ defmodule Ouroboros.Team.Server do
 
   def handle_info({:retry_cancel, delegation_id}, state) do
     transition_info(propagate_cancellation(state, delegation_id), state)
+  end
+
+  def handle_info({:retry_start, delegation_id}, state) do
+    transition_info(resume_delegation_start(state, delegation_id), state)
   end
 
   def handle_info(
@@ -429,57 +445,56 @@ defmodule Ouroboros.Team.Server do
         {:ok, state}
 
       {:ok, %Delegation{} = delegation} ->
-        with :ok <- verify_coding_task_owner(delegation) do
-          # The durable Coding store is the terminal source of truth. Calling
-          # the coordinator here with an infinite timeout lets a suspended or
-          # wedged coding process block this Team server, including a queued
-          # `close/1` request whose only job is to checkpoint cancellation
-          # intent. Read the checkpoint directly so control-plane calls remain
-          # responsive while delivery is retried asynchronously.
-          case coding_store_get(delegation.task_ref) do
-            {:ok, %TaskState{status: status} = task} when status in @terminal_statuses ->
-              delegation = %{
-                delegation
-                | status: status,
-                  result: task.result,
-                  error: task.error,
-                  delivery: :delivering,
-                  delivery_error: nil,
-                  updated_at: timestamp()
-              }
+        # The durable Coding store is the terminal source of truth. Calling the
+        # coordinator here with an infinite timeout lets a suspended or wedged
+        # coding process block this Team server, including a queued `close/1`
+        # request whose only job is to checkpoint cancellation intent. One
+        # verified checkpoint read per tick serves both ownership and progress,
+        # so a busy store is polled once rather than twice.
+        case verified_coding_task(delegation) do
+          {:ok, %TaskState{status: status} = task} when status in @terminal_statuses ->
+            delegation = %{
+              delegation
+              | status: status,
+                result: task.result,
+                error: task.error,
+                delivery: :delivering,
+                delivery_error: nil,
+                updated_at: timestamp()
+            }
 
-              case checkpoint(put_delegation(state, delegation)) do
-                {:ok, state} ->
-                  send(self(), {:deliver_terminal, delegation_id})
-                  {:ok, state}
+            case checkpoint(put_delegation(state, delegation)) do
+              {:ok, state} ->
+                send(self(), {:deliver_terminal, delegation_id})
+                {:ok, reset_backoff(state, {:completion, delegation_id})}
 
-                {:error, reason} ->
-                  {:error, reason}
-              end
+              {:error, reason} ->
+                {:error, reason}
+            end
 
-            {:ok, %TaskState{}} ->
-              schedule_completion_check(delegation_id, @completion_check_ms)
-              {:ok, state}
+          {:ok, %TaskState{}} ->
+            schedule_completion_check(delegation_id, @completion_check_ms)
+            {:ok, reset_backoff(state, {:completion, delegation_id})}
 
-            {:error, reason} ->
-              checkpoint_completion_error(state, delegation, delegation_id, reason)
-          end
-        else
           {:error, reason} ->
             checkpoint_completion_error(state, delegation, delegation_id, reason)
         end
     end
   end
 
+  # A partitioned owner or a busy store would otherwise checkpoint the whole team
+  # aggregate at every retry. Only a changed error term is durable news.
   defp checkpoint_completion_error(state, delegation, delegation_id, reason) do
-    delegation = %{
-      delegation
-      | delivery_error: {:completion_check_failed, durable_error(reason)},
-        updated_at: timestamp()
-    }
+    error = {:completion_check_failed, durable_error(reason)}
+    {delay, state} = next_backoff(state, {:completion, delegation_id}, @delivery_retry_ms)
+    schedule_completion_check(delegation_id, delay)
 
-    schedule_completion_check(delegation_id, @delivery_retry_ms)
-    checkpoint(put_delegation(state, delegation))
+    if delegation.delivery_error == error do
+      {:ok, state}
+    else
+      delegation = %{delegation | delivery_error: error, updated_at: timestamp()}
+      checkpoint(put_delegation(state, delegation))
+    end
   end
 
   defp request_cancellation(state, delegation_id) do
@@ -583,19 +598,25 @@ defmodule Ouroboros.Team.Server do
           }
 
           case checkpoint(put_delegation(state, delegation)) do
-            {:ok, state} -> {:ok, reply_waiters(state, delegation)}
-            {:error, reason} -> {:error, reason}
+            {:ok, state} ->
+              state = reset_backoff(state, {:delivery, delegation_id})
+              {:ok, reply_waiters(state, delegation)}
+
+            {:error, reason} ->
+              {:error, reason}
           end
         else
           {:error, reason} ->
-            delegation = %{
-              delegation
-              | delivery_error: Jido.Harness.Redaction.redact(reason),
-                updated_at: timestamp()
-            }
+            error = durable_error(reason)
+            {delay, state} = next_backoff(state, {:delivery, delegation_id}, @delivery_retry_ms)
+            Process.send_after(self(), {:deliver_terminal, delegation_id}, delay)
 
-            Process.send_after(self(), {:deliver_terminal, delegation_id}, @delivery_retry_ms)
-            checkpoint(put_delegation(state, delegation))
+            if delegation.delivery_error == error do
+              {:ok, state}
+            else
+              delegation = %{delegation | delivery_error: error, updated_at: timestamp()}
+              checkpoint(put_delegation(state, delegation))
+            end
         end
 
       _not_delivering ->
@@ -715,7 +736,7 @@ defmodule Ouroboros.Team.Server do
            start_or_adopt_coordinator(snapshot.coordinator_id, snapshot.id),
          {:ok, _agent} <-
            initialize_coordinator(coordinator_pid, snapshot.id, snapshot.coordinator_id),
-         {:ok, durable?} <- store_durable?(store) do
+         {:ok, durability} <- store_durability(store) do
       coordinator_monitor = Process.monitor(coordinator_pid)
 
       state = %State{
@@ -730,7 +751,7 @@ defmodule Ouroboros.Team.Server do
         created_at: snapshot.created_at,
         updated_at: snapshot.updated_at,
         store: store,
-        store_durable?: durable?
+        durability: durability
       }
 
       with {:ok, state} <- restore_workers(snapshot.workers, state),
@@ -910,7 +931,7 @@ defmodule Ouroboros.Team.Server do
   defp reconcile_delegation(state, %Delegation{delivery: :delivered}), do: {:ok, state}
 
   defp reconcile_delegation(state, %Delegation{status: :starting} = delegation) do
-    case start_assigned_coding(state, delegation) do
+    case start_assigned_coding(state, delegation, :recovery) do
       {:ok, delegation, state} ->
         if delegation.cancellation_requested_at != nil do
           send(self(), {:retry_cancel, delegation.id})
@@ -941,14 +962,20 @@ defmodule Ouroboros.Team.Server do
             if next_state == state, do: {:ok, state}, else: checkpoint(next_state)
 
           {:error, reason} ->
-            redacted = Jido.Harness.Redaction.redact(reason)
-            delegation = %{delegation | delivery_error: {:resubscribe_failed, redacted}}
+            delegation = %{
+              delegation
+              | delivery_error: {:resubscribe_failed, durable_error(reason)}
+            }
+
             checkpoint(put_delegation(state, delegation))
         end
       else
         {:error, reason} ->
-          redacted = Jido.Harness.Redaction.redact(reason)
-          delegation = %{delegation | delivery_error: {:resubscribe_failed, redacted}}
+          delegation = %{
+            delegation
+            | delivery_error: {:resubscribe_failed, durable_error(reason)}
+          }
+
           checkpoint(put_delegation(state, delegation))
       end
 
@@ -1198,7 +1225,7 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp existing_child?(coordinator_pid, worker_id, expected_pid) do
-    case Jido.AgentServer.state(coordinator_pid) do
+    case safe_agent_state(coordinator_pid) do
       {:ok, %{children: %{{:worker, ^worker_id} => %{pid: ^expected_pid}}}} ->
         {:ok, :jido_child}
 
@@ -1295,7 +1322,7 @@ defmodule Ouroboros.Team.Server do
 
     case checkpoint(put_delegation(state, delegation)) do
       {:ok, state} ->
-        start_assigned_coding(state, delegation)
+        start_assigned_coding(state, delegation, :fresh)
 
       {:error, reason} ->
         failed_delivery = %{
@@ -1311,15 +1338,74 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
-  defp start_assigned_coding(state, delegation) do
+  defp start_assigned_coding(state, delegation, mode) do
     case ensure_coding_task(delegation) do
       {:ok, %TaskRef{} = task_ref} ->
-        subscribe_assigned_coding(state, %{delegation | task_ref: task_ref})
+        subscribe_assigned_coding(state, %{delegation | task_ref: task_ref}, mode)
 
       {:error, reason} ->
-        fail_durable_delegation(state, delegation, :coding_start, reason)
+        if ambiguous_start?(reason) do
+          retry_delegation_start(state, delegation, reason)
+        else
+          fail_durable_delegation(state, delegation, :coding_start, reason)
+        end
     end
   end
+
+  defp resume_delegation_start(state, delegation_id) do
+    case Map.fetch(state.delegations, delegation_id) do
+      {:ok, %Delegation{status: :starting, delivery: delivery} = delegation}
+      when delivery != :delivered ->
+        case start_assigned_coding(state, delegation, :recovery) do
+          {:ok, delegation, state} ->
+            if delegation.cancellation_requested_at != nil do
+              send(self(), {:retry_cancel, delegation.id})
+            end
+
+            {:ok, state}
+
+          {:error, _setup_reason, state} ->
+            case Map.fetch(state.delegations, delegation_id) do
+              {:ok, %Delegation{status: :failed}} -> {:ok, state}
+              _other -> {:error, {:delegation_start_retry_failed, delegation_id}}
+            end
+        end
+
+      _other ->
+        {:ok, state}
+    end
+  end
+
+  # `CodingSession.start_on/3` is idempotent for this caller because the coding
+  # task ID is deterministic. An unreachable owner therefore proves nothing about
+  # whether provider work began, and must not become an unretryable `:failed`.
+  defp retry_delegation_start(state, delegation, reason) do
+    {deadline, state} = start_deadline(state, delegation.id)
+
+    if System.monotonic_time(:millisecond) >= deadline do
+      fail_durable_delegation(state, delegation, :coding_start_unconfirmed, reason)
+    else
+      error = {:coding_start_unconfirmed, durable_error(reason)}
+      {delay, state} = next_backoff(state, {:start, delegation.id}, @delivery_retry_ms)
+      Process.send_after(self(), {:retry_start, delegation.id}, delay)
+
+      if delegation.delivery_error == error do
+        {:ok, delegation, state}
+      else
+        delegation = %{delegation | delivery_error: error, updated_at: timestamp()}
+
+        case checkpoint(put_delegation(state, delegation)) do
+          {:ok, state} -> {:ok, delegation, state}
+          {:error, reason} -> {:error, {:delegation_progress_checkpoint_failed, reason}, state}
+        end
+      end
+    end
+  end
+
+  defp ambiguous_start?({:owner_unavailable, _owner}), do: true
+  defp ambiguous_start?({:owner_unavailable, _owner, _reason}), do: true
+  defp ambiguous_start?({:remote_call_failed, _owner, _kind, _reason}), do: true
+  defp ambiguous_start?(_reason), do: false
 
   defp ensure_coding_task(delegation) do
     case Ouroboros.CodingSession.info(delegation.task_ref) do
@@ -1332,6 +1418,9 @@ defmodule Ouroboros.Team.Server do
         start_coding_task(delegation)
 
       {:error, {:owner_unavailable, _owner} = reason} ->
+        {:error, reason}
+
+      {:error, {:owner_unavailable, _owner, _erpc_reason} = reason} ->
         {:error, reason}
 
       {:error, reason} ->
@@ -1396,11 +1485,17 @@ defmodule Ouroboros.Team.Server do
     Keyword.merge(Map.to_list(delegation.coding_options.options), fixed)
   end
 
-  defp subscribe_assigned_coding(state, delegation) do
+  defp subscribe_assigned_coding(state, delegation, mode) do
     with :ok <- verify_coding_task_owner(delegation) do
       case Ouroboros.CodingSession.subscribe(delegation.task_ref, cursor: delegation.cursor) do
         {:ok, backlog} ->
           publish_delegation(state, delegation, backlog)
+
+        # The task is verified as ours and alive. A pruned cursor or an
+        # unavailable owner is a delivery problem, never grounds for recovery to
+        # compensate a healthy provider run.
+        {:error, reason} when mode == :recovery ->
+          degrade_to_completion_polling(state, delegation, reason)
 
         {:error, reason} ->
           fail_durable_delegation(state, delegation, :coding_subscribe, reason)
@@ -1408,6 +1503,24 @@ defmodule Ouroboros.Team.Server do
     else
       {:error, reason} ->
         fail_durable_delegation(state, delegation, :coding_identity, reason)
+    end
+  end
+
+  defp degrade_to_completion_polling(state, delegation, reason) do
+    delegation = %{
+      delegation
+      | status: :running,
+        delivery_error: {:resubscribe_failed, durable_error(reason)},
+        updated_at: timestamp()
+    }
+
+    case checkpoint(put_delegation(state, delegation)) do
+      {:ok, state} ->
+        schedule_completion_check(delegation.id, 0)
+        {:ok, delegation, forget_start(state, delegation.id)}
+
+      {:error, reason} ->
+        {:error, {:delegation_progress_checkpoint_failed, reason}, state}
     end
   end
 
@@ -1420,6 +1533,7 @@ defmodule Ouroboros.Team.Server do
 
     case checkpoint(next_state) do
       {:ok, next_state} ->
+        next_state = forget_start(next_state, delegation.id)
         delegation = Map.fetch!(next_state.delegations, delegation.id)
         schedule_completion_check(delegation.id, 0)
 
@@ -1428,7 +1542,7 @@ defmodule Ouroboros.Team.Server do
             {:ok, delegation, next_state}
 
           {:error, reason} ->
-            redacted = Jido.Harness.Redaction.redact(reason)
+            redacted = durable_error(reason)
             delegation = %{delegation | delivery_error: {:projection_reconcile_failed, redacted}}
 
             case checkpoint(put_delegation(next_state, delegation)) do
@@ -1444,13 +1558,12 @@ defmodule Ouroboros.Team.Server do
 
   defp fail_durable_delegation(state, delegation, stage, reason) do
     redacted = durable_error(reason)
-
-    _ = compensate_owned_coding_task(delegation)
+    error = setup_failure(stage, redacted, compensate_owned_coding_task(delegation))
 
     delegation = %{
       delegation
       | status: :failed,
-        error: {:delegation_setup_failed, stage, redacted},
+        error: error,
         delivery: :delivering,
         delivery_error: nil,
         updated_at: timestamp()
@@ -1459,14 +1572,35 @@ defmodule Ouroboros.Team.Server do
     case checkpoint(put_delegation(state, delegation)) do
       {:ok, state} ->
         send(self(), {:deliver_terminal, delegation.id})
-        {:error, {:delegation_setup_failed, stage, redacted}, state}
+        {:error, error, forget_start(state, delegation.id)}
 
       {:error, checkpoint_reason} ->
-        {:error,
-         {:delegation_setup_failed, stage, redacted,
-          {:failure_checkpoint_failed, checkpoint_reason}}, state}
+        {:error, setup_checkpoint_failure(error, checkpoint_reason), state}
     end
   end
+
+  defp setup_checkpoint_failure({:delegation_setup_failed, stage, redacted}, reason),
+    do: {:delegation_setup_failed, stage, redacted, {:failure_checkpoint_failed, reason}}
+
+  defp setup_checkpoint_failure(
+         {:delegation_setup_failed, stage, redacted, compensation},
+         reason
+       ),
+       do:
+         {:delegation_setup_failed, stage, redacted,
+          {compensation, {:failure_checkpoint_failed, reason}}}
+
+  # A task that is foreign or absent is correctly left alone. A compensation that
+  # could not run at all is different, and is recorded rather than implied.
+  defp setup_failure(
+         stage,
+         redacted,
+         {:error, {:compensation_unavailable, _reason} = unavailable}
+       ),
+       do: {:delegation_setup_failed, stage, redacted, unavailable}
+
+  defp setup_failure(stage, redacted, _compensation),
+    do: {:delegation_setup_failed, stage, redacted}
 
   defp coding_options(opts, coding_task_id) do
     opts
@@ -1732,11 +1866,16 @@ defmodule Ouroboros.Team.Server do
     kind, reason -> {:error, {:team_store_unavailable, kind, reason}}
   end
 
-  defp store_durable?(store) do
-    case store_call(store, :durable?, []) do
-      value when is_boolean(value) -> {:ok, value}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:invalid_team_store_durability, other}}
+  defp store_durability(store) do
+    case store_call(store, :durability, []) do
+      level when level in [:ephemeral_checkpoint, :durable_checkpoint, :synced_checkpoint] ->
+        {:ok, level}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:invalid_team_store_durability, other}}
     end
   end
 
@@ -1760,8 +1899,14 @@ defmodule Ouroboros.Team.Server do
   defp durable_error(term) when is_reference(term), do: :runtime_reference
   defp durable_error(term) when is_function(term), do: :runtime_function
 
+  defp durable_error(%_{} = term), do: term |> Map.from_struct() |> durable_error()
+
+  # Redaction is key-aware for maps and would be lost by decomposing one here, so
+  # it runs first and this pass only removes runtime authority from the result.
   defp durable_error(term) when is_map(term) do
-    Map.new(term, fn {key, value} -> {durable_error(key), durable_error(value)} end)
+    term
+    |> Jido.Harness.Redaction.redact()
+    |> Map.new(fn {key, value} -> {durable_error(key), durable_error(value)} end)
   end
 
   defp durable_error(term) when is_list(term), do: Enum.map(term, &durable_error/1)
@@ -1790,6 +1935,47 @@ defmodule Ouroboros.Team.Server do
     Process.send_after(self(), {:check_completion, delegation_id}, delay)
   end
 
+  # Retry pacing is runtime scheduling, not durable domain state, so it is held in
+  # memory only. A restart honestly restarts the bound.
+  defp next_backoff(state, key, base) do
+    delay = Map.get(state.backoff, key, base)
+    {delay, %{state | backoff: Map.put(state.backoff, key, min(delay * 2, @backoff_cap_ms))}}
+  end
+
+  defp reset_backoff(state, key), do: %{state | backoff: Map.delete(state.backoff, key)}
+
+  defp start_deadline(state, delegation_id) do
+    case Map.fetch(state.start_deadlines, delegation_id) do
+      {:ok, deadline} ->
+        {deadline, state}
+
+      :error ->
+        deadline = System.monotonic_time(:millisecond) + start_retry_ms()
+
+        {deadline,
+         %{state | start_deadlines: Map.put(state.start_deadlines, delegation_id, deadline)}}
+    end
+  end
+
+  defp forget_start(state, delegation_id) do
+    state
+    |> reset_backoff({:start, delegation_id})
+    |> Map.update!(:start_deadlines, &Map.delete(&1, delegation_id))
+  end
+
+  defp start_retry_ms do
+    case Application.get_env(:ouroboros, :delegation_start_retry_ms, @default_start_retry_ms) do
+      value when is_integer(value) and value >= 0 -> value
+      _other -> @default_start_retry_ms
+    end
+  end
+
+  defp safe_agent_state(pid) do
+    Jido.AgentServer.state(pid)
+  catch
+    kind, reason -> {:error, {:agent_state_call_failed, node(pid), kind, reason}}
+  end
+
   defp public_state(state) do
     %{
       id: state.id,
@@ -1800,9 +1986,11 @@ defmodule Ouroboros.Team.Server do
         Map.new(state.delegations, fn {id, value} -> {id, public_delegation(value)} end),
       waiter_count: Enum.sum(Enum.map(state.waiters, fn {_id, waiters} -> map_size(waiters) end)),
       status: state.status,
-      durability: if(state.store_durable?, do: :durable_checkpoint, else: :ephemeral_checkpoint),
+      durability: state.durability,
       process_restart_safe?: true,
-      host_restart_safe?: state.store_durable?
+      # Only a synced adapter commits through the page cache, so a file-backed
+      # checkpoint survives a BEAM restart but is not a power-loss claim.
+      host_restart_safe?: state.durability == :synced_checkpoint
     }
   end
 
@@ -1819,6 +2007,10 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp verify_coding_task_owner(%Delegation{} = delegation) do
+    with {:ok, %TaskState{}} <- verified_coding_task(delegation), do: :ok
+  end
+
+  defp verified_coding_task(%Delegation{} = delegation) do
     case coding_store_get(delegation.task_ref) do
       {:ok, %TaskState{} = task} ->
         expected = %{
@@ -1846,7 +2038,7 @@ defmodule Ouroboros.Team.Server do
         }
 
         if actual == expected do
-          :ok
+          {:ok, task}
         else
           {:error, {:coding_task_owner_conflict, delegation.task_ref.id}}
         end
@@ -1859,8 +2051,13 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
-  defp coding_store_get(%TaskRef{id: id, node: owner}) when owner == node(),
-    do: CodingStore.get(id)
+  # A busy local Coding.Store answers a 5s GenServer call late. That timeout is a
+  # delivery problem, not grounds for taking this team's control plane down.
+  defp coding_store_get(%TaskRef{id: id, node: owner}) when owner == node() do
+    CodingStore.get(id)
+  catch
+    kind, reason -> {:error, {:local_store_unavailable, kind, reason}}
+  end
 
   defp coding_store_get(%TaskRef{id: id, node: owner}) do
     :erpc.call(owner, CodingStore, :get, [id])
@@ -1869,9 +2066,19 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp compensate_owned_coding_task(%Delegation{} = delegation) do
-    with :ok <- verify_coding_task_owner(delegation) do
-      _ = Ouroboros.CodingSession.unsubscribe(delegation.task_ref)
-      Ouroboros.CodingSession.cancel(delegation.task_ref)
+    case verify_coding_task_owner(delegation) do
+      :ok ->
+        _ = Ouroboros.CodingSession.unsubscribe(delegation.task_ref)
+        Ouroboros.CodingSession.cancel(delegation.task_ref)
+
+      {:error, {:coding_task_owner_conflict, _id}} ->
+        :ok
+
+      {:error, {:coding_task_not_found, _id}} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:compensation_unavailable, durable_error(reason)}}
     end
   end
 

@@ -203,6 +203,18 @@ origin digest, so a matching foreign task cannot be adopted or cancelled. Coordi
 ownership is claimed inside the Jido agent, monitored, and reverified before signals
 or cleanup.
 
+Recovery never compensates a run it merely failed to resubscribe to: a pruned cursor
+or unreachable owner degrades that delegation to polling the durable coding
+checkpoint, with the reason recorded. Only a fresh `delegate/4` fails fast. Because
+the coding-task ID is deterministic, an unreachable owner during startup keeps the
+delegation `:starting` and retries within `:delegation_start_retry_ms` (default five
+minutes); the durable failure after that bound explicitly records that provider-side
+work may exist unconfirmed. `add_worker/3` and `delegate/4` are bounded by
+`:team_call_timeout` (default 60s) so one wedged peer cannot freeze the local control
+plane. `Team.state/1` reports durability as `:ephemeral_checkpoint`,
+`:durable_checkpoint`, or `:synced_checkpoint`, and only the synced level reports
+`host_restart_safe?: true` — the default file adapter does not `fsync`.
+
 ## Durable orchestration
 
 ```elixir

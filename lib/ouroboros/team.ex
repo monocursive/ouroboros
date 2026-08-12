@@ -6,12 +6,20 @@ defmodule Ouroboros.Team do
   provider-neutral `Ouroboros.CodingSession` delegations. Its serializable aggregate
   checkpoint is the source of truth: a restarted team rebuilds runtime projections,
   re-subscribes to active task cursors, and retries terminal delivery idempotently.
+  A re-subscription that is refused falls back to polling the durable coding
+  checkpoint rather than compensating a run that is still healthy.
+
+  `add_worker/3` and `delegate/4` admit work that can reach another node, so both
+  are bounded by `:team_call_timeout` (default 60s) and return `{:error, :timeout}`
+  instead of blocking this caller behind a wedged peer. A timed-out request may
+  still have been accepted durably; `state/1` reports the outcome.
   """
 
   alias Ouroboros.Team.Server
 
   @type server :: GenServer.server()
   @supervisor Ouroboros.Team.Supervisor
+  @default_call_timeout 60_000
 
   @doc "Starts a team beneath the application-owned dynamic supervisor."
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
@@ -68,14 +76,14 @@ defmodule Ouroboros.Team do
   @doc "Adds a worker on this node or the connected node selected by `:node`."
   @spec add_worker(server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def add_worker(team, worker_id, opts \\ []) do
-    GenServer.call(team, {:add_worker, worker_id, opts}, :infinity)
+    control_call(team, {:add_worker, worker_id, opts})
   end
 
   @doc "Assigns an objective and starts a detached, provider-neutral coding run."
   @spec delegate(server(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def delegate(team, worker_id, objective, opts \\ []) do
-    GenServer.call(team, {:delegate, worker_id, objective, opts}, :infinity)
+    control_call(team, {:delegate, worker_id, objective, opts})
   end
 
   @doc "Durably requests cancellation; final worker delivery remains asynchronous."
@@ -115,4 +123,21 @@ defmodule Ouroboros.Team do
 
   defp normalize_start_or_get({:error, {:already_started, pid}}) when is_pid(pid), do: {:ok, pid}
   defp normalize_start_or_get(result), do: result
+
+  # Membership and delegation admit work that can reach a remote node. An
+  # unbounded call would let one wedged peer freeze this control plane, so the
+  # caller is released with an explicit timeout while the durable request stands.
+  defp control_call(team, message) do
+    GenServer.call(team, message, call_timeout())
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+  end
+
+  defp call_timeout do
+    case Application.get_env(:ouroboros, :team_call_timeout, @default_call_timeout) do
+      :infinity -> :infinity
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _other -> @default_call_timeout
+    end
+  end
 end
