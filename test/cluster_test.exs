@@ -489,7 +489,9 @@ defmodule Ouroboros.ClusterTest do
 
       File.write!(script, render_template("rel/env.sh.eex", %{}) <> probe)
 
-      assert {output, 1} = run_script(script, %{"RELEASE_COMMAND" => "start"})
+      # Asking for distribution without naming the node is the mistake this refuses; the
+      # bare environment is a different posture entirely and is covered below.
+      assert {output, 1} = run_script(script, %{"OUROBOROS_DIST" => "name"})
       assert output =~ "OUROBOROS_NODE must be set"
 
       assert {output, 1} =
@@ -519,6 +521,54 @@ defmodule Ouroboros.ClusterTest do
 
       # `version` neither starts nor reaches a node, so it needs no identity.
       assert {_output, 0} = run_script(script, %{"RELEASE_COMMAND" => "version"})
+    end
+
+    test "env.sh starts a told-nothing release without distribution at all" do
+      script = Path.join(tmp_dir!(), "env.sh")
+
+      probe = """
+
+      echo "NODE=$RELEASE_NODE"
+      echo "COOKIE=$RELEASE_COOKIE"
+      echo "DIST=$RELEASE_DISTRIBUTION"
+      """
+
+      File.write!(script, render_template("rel/env.sh.eex", %{}) <> probe)
+
+      # No name, no strategy, no OUROBOROS_DIST: the single-machine daemon. No node name
+      # and no cookie are exported, because there is no distribution for either to reach.
+      assert {output, 0} = run_script(script, %{})
+      assert output =~ "DIST=none"
+      assert output =~ "NODE=\n"
+      assert output =~ "COOKIE=\n"
+
+      # A cluster strategy is a request for distribution, so it takes the strict path and
+      # is refused for the name it was not given rather than defaulted into a node that
+      # can never join anything.
+      assert {output, 1} = run_script(script, %{"OUROBOROS_CLUSTER_STRATEGY" => "epmd"})
+      assert output =~ "OUROBOROS_NODE must be set"
+
+      # The refusal is a signpost: the posture that needs no variables is named in it.
+      assert output =~ "single-machine"
+      assert output =~ "ouro"
+
+      # An explicit OUROBOROS_DIST=none with a strategy is still the contradiction it was;
+      # the new default changes nothing an operator typed.
+      assert {output, 1} =
+               run_script(script, %{
+                 "OUROBOROS_DIST" => "none",
+                 "OUROBOROS_CLUSTER_STRATEGY" => "epmd"
+               })
+
+      assert output =~ "OUROBOROS_DIST=none disables distribution"
+
+      # And an explicit OUROBOROS_DIST=none on its own is exactly what the default now is.
+      assert {output, 0} = run_script(script, %{"OUROBOROS_DIST" => "none"})
+      assert output =~ "DIST=none"
+
+      # Naming the node is enough to take the strict path with OUROBOROS_DIST unset.
+      assert {output, 1} = run_script(script, %{"OUROBOROS_NODE" => "core-1@10.0.0.11"})
+      assert output =~ "OUROBOROS_COOKIE must be set"
     end
   end
 
@@ -599,9 +649,17 @@ defmodule Ouroboros.ClusterTest do
   end
 
   defp run_script(path, env) do
+    # Every variable the script reads is cleared first, so a host that exports one of them
+    # cannot make a test pass or fail for a reason the test never named.
     merged =
       Map.merge(
-        %{"OUROBOROS_NODE" => nil, "OUROBOROS_COOKIE" => nil, "RELEASE_COMMAND" => "start"},
+        %{
+          "OUROBOROS_NODE" => nil,
+          "OUROBOROS_COOKIE" => nil,
+          "OUROBOROS_DIST" => nil,
+          "OUROBOROS_CLUSTER_STRATEGY" => nil,
+          "RELEASE_COMMAND" => "start"
+        },
         env
       )
 

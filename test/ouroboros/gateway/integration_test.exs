@@ -2,6 +2,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
   use ExUnit.Case, async: false
 
   import Bitwise
+  import ExUnit.CaptureIO
 
   alias Ouroboros.Gateway
   alias Ouroboros.Gateway.Config
@@ -110,6 +111,70 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     # The path, and only the path. A client reads the file this names; anything that read
     # `gateway.json` would otherwise be holding the credential itself.
     refute published |> Map.values() |> Enum.any?(&(&1 == String.duplicate("t", 48)))
+  end
+
+  @tag :tmp_dir
+  test "a boot nobody configured says on stdout where it is and how to attach", %{
+    tmp_dir: tmp_dir
+  } do
+    # Its own directory: the gateway this module's setup started publishes into `tmp_dir`
+    # itself, and two listeners sharing a data directory would trade `gateway.json`.
+    data_dir = Path.join(tmp_dir, "defaulted")
+
+    config =
+      Config.new!(
+        token_file: Path.join(data_dir, "gateway.token"),
+        token_generate: true,
+        data_dir: data_dir,
+        scope: :operate,
+        port: 0
+      )
+
+    # The notice is written by the listener process, so it has to be started from this
+    # process for the captured group leader to be the one it inherits.
+    output =
+      capture_io(fn ->
+        {:ok, listener} =
+          Listener.start_link(
+            name: :gateway_notice_listener,
+            config: config,
+            conn_supervisor: :gateway_notice_conns,
+            task_supervisor: :gateway_notice_tasks
+          )
+
+        send(self(), {:bound, Listener.port(listener)})
+        GenServer.stop(listener)
+      end)
+
+    assert_received {:bound, port}
+
+    assert output =~ "single-machine"
+    assert output =~ data_dir
+    assert output =~ "127.0.0.1:#{port}"
+    assert output =~ "operate"
+    assert output =~ "gateway.json"
+    assert output =~ "gateway.token"
+    assert output =~ "ouro"
+
+    # Where to look, never what to present. The token is in the 0600 file this names.
+    refute output =~ config.token
+  end
+
+  test "a listener that was configured on purpose prints nothing to stdout", %{tmp_dir: tmp_dir} do
+    output =
+      capture_io(fn ->
+        {:ok, listener} =
+          Listener.start_link(
+            name: :gateway_quiet_listener,
+            config: Config.new!(token: @token, data_dir: Path.join(tmp_dir, "quiet"), port: 0),
+            conn_supervisor: :gateway_quiet_conns,
+            task_supervisor: :gateway_quiet_tasks
+          )
+
+        GenServer.stop(listener)
+      end)
+
+    assert output == ""
   end
 
   test "the publication is removed when the gateway stops gracefully", %{data_dir: data_dir} do

@@ -81,6 +81,78 @@ defmodule Ouroboros.Gateway.ConfigTest do
 
       assert error.message =~ "OUROBOROS_GATEWAY_TOKEN_FILE=#{path}"
       assert error.message =~ "no such file or directory"
+
+      # The generation flag is the only thing that changes this, and it is off unless the
+      # posture that chose the path also asked for it.
+      assert_raise ArgumentError, ~r/no such file or directory/, fn ->
+        Config.new!(token_file: path, token_generate: false, data_dir: "/tmp/x")
+      end
+    end
+  end
+
+  describe "generating a token" do
+    import Bitwise
+
+    @tag :tmp_dir
+    test "a first boot writes a 0600 credential and every boot after it reads that one", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "gateway.token")
+
+      config = Config.new!(token_file: path, token_generate: true, data_dir: tmp_dir)
+
+      assert File.exists?(path)
+      assert (File.stat!(path).mode &&& 0o777) == 0o600
+
+      # 32 random bytes as hex, which is the floor the struct enforces twice over.
+      assert byte_size(config.token) == 64
+      assert config.token =~ ~r/\A[0-9a-f]{64}\z/
+      assert File.read!(path) == config.token
+      assert config.token_file == path
+      assert config.token_generate == true
+
+      # The second boot is the one that matters: a daemon that re-keyed itself on restart
+      # would lock out the client holding the token from the first.
+      again = Config.new!(token_file: path, token_generate: true, data_dir: tmp_dir)
+
+      assert again.token == config.token
+
+      # Nothing is left behind in the directory the token is written into.
+      assert File.ls!(tmp_dir) == ["gateway.token"]
+    end
+
+    @tag :tmp_dir
+    test "an existing credential is never replaced, whatever wrote it", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "gateway.token")
+      existing = String.duplicate("e", 48)
+      File.write!(path, existing <> "\n")
+
+      config = Config.new!(token_file: path, token_generate: true, data_dir: tmp_dir)
+
+      assert config.token == existing
+      assert File.read!(path) == existing <> "\n"
+    end
+
+    @tag :tmp_dir
+    test "generation still holds every other rule the struct enforces", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "gateway.token")
+
+      # A generated token is not an excuse to leave loopback, and the refusal comes before
+      # anything is written.
+      assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_ALLOW_REMOTE/, fn ->
+        Config.new!(token_file: path, token_generate: true, data_dir: tmp_dir, bind: "0.0.0.0")
+      end
+
+      refute File.exists?(path)
+    end
+
+    @tag :tmp_dir
+    test "the flag alone generates nothing: there has to be a path to write", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_TOKEN_FILE/, fn ->
+        Config.new!(token_generate: true, data_dir: tmp_dir)
+      end
+
+      assert File.ls!(tmp_dir) == []
     end
   end
 
@@ -92,6 +164,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
       assert config.port == 0
       assert config.scope == :read
       assert config.allow_shutdown == false
+      assert config.token_generate == false
       assert config.max_frame == 1_048_576
       assert config.queue_limit == 1_000
     end
