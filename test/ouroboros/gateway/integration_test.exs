@@ -1,0 +1,222 @@
+defmodule Ouroboros.Gateway.IntegrationTest do
+  use ExUnit.Case, async: false
+
+  import Bitwise
+
+  alias Ouroboros.Gateway
+  alias Ouroboros.Gateway.Config
+  alias Ouroboros.Gateway.Listener
+  alias Ouroboros.Mesh
+  alias Ouroboros.Upgrade.NodeExecutor
+
+  @token String.duplicate("g", 48)
+  @receive_timeout 5_000
+
+  @moduletag :tmp_dir
+  @moduletag :capture_log
+
+  setup %{tmp_dir: tmp_dir} do
+    config = Config.new!(token: @token, data_dir: tmp_dir, port: 0)
+
+    start_supervised!({Gateway, config: config})
+
+    port = Listener.port()
+    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
+    on_exit(fn -> :gen_tcp.close(client) end)
+
+    %{client: client, port: port, data_dir: tmp_dir}
+  end
+
+  defp call(client, method, params \\ %{}, id \\ nil) do
+    id = id || System.unique_integer([:positive])
+
+    :ok =
+      :gen_tcp.send(client, [
+        JSON.encode_to_iodata!(%{
+          "jsonrpc" => "2.0",
+          "id" => id,
+          "method" => method,
+          "params" => params
+        }),
+        ?\n
+      ])
+
+    recv(client)
+  end
+
+  defp recv(client, timeout \\ @receive_timeout) do
+    :ok = :inet.setopts(client, packet: :line, active: false, buffer: 1_048_576)
+
+    case :gen_tcp.recv(client, 0, timeout) do
+      {:ok, line} -> JSON.decode!(String.trim_trailing(line, "\n"))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp hello(client) do
+    call(client, "hello", %{"token" => @token, "protocol" => 1, "client" => "integration"})
+  end
+
+  test "the bound port is published where a client can find it", %{
+    data_dir: data_dir,
+    port: port
+  } do
+    path = Listener.publication_path(data_dir)
+
+    assert File.exists?(path)
+
+    published = path |> File.read!() |> JSON.decode!()
+
+    assert published["port"] == port
+    assert published["protocol"] == 1
+    assert published["node"] == Atom.to_string(node())
+    assert published["scope"] == "read"
+    assert published["pid"] == String.to_integer(System.pid())
+
+    # The file names a live listener and sits next to durable state, so it is not
+    # readable by other users on the host.
+    assert (File.stat!(path).mode &&& 0o777) == 0o600
+  end
+
+  test "the publication is removed when the gateway stops gracefully", %{data_dir: data_dir} do
+    path = Listener.publication_path(data_dir)
+    assert File.exists?(path)
+
+    stop_supervised!(Gateway)
+
+    refute File.exists?(path)
+  end
+
+  test "hello then runtime.status returns a tree, not an opaque blob", %{client: client} do
+    id = "agent-#{System.unique_integer([:positive])}"
+    assert {:ok, _pid} = Mesh.start_agent(id, role: "reviewer")
+    on_exit(fn -> Mesh.stop_agent(id) end)
+
+    assert hello(client)["result"]["protocol"] == 1
+
+    status = call(client, "runtime.status")["result"]
+
+    assert status["node"] == Atom.to_string(node())
+    assert status["role"] == "core"
+
+    # The whole point of the per-leaf walk: `status` embeds `Mesh.list_agents/0`, whose
+    # maps carry pids. `Serializable.safe/1` would have replaced this entire tree with
+    # one string.
+    refute Map.has_key?(status, "_opaque")
+    assert is_map(status["availability"])
+    assert status["availability"]["mesh"] == "available"
+    assert status["availability"]["hot_upgrade"] == "available"
+
+    # Availability is tri-state, and the client renders all three; what matters here is
+    # that it arrives as a word rather than as an inspect string.
+    assert status["availability"]["control"] in ["available", "unavailable", "disabled"]
+
+    assert agent = Enum.find(status["agents"], &(&1["id"] == id))
+    assert agent["node"] == Atom.to_string(node())
+    assert agent["replicas"] == 1
+    assert agent["pid"]["_opaque"] =~ "#PID<"
+
+    assert is_list(status["coding_tasks"])
+    assert is_list(status["interactive_sessions"])
+    assert is_list(status["teams"])
+    assert is_binary(status["upgrade"]["mode"])
+  end
+
+  test "a plane that is not running is -32004 and the connection survives it", %{client: client} do
+    assert hello(client)["result"]
+
+    assert is_binary(call(client, "upgrade.status")["result"]["mode"])
+
+    executor = Process.whereis(NodeExecutor)
+
+    # `NodeExecutor.status/0` is a bare `GenServer.call`, so an absent executor *exits*
+    # the caller. Unregistering the name reproduces that precisely without terminating a
+    # supervised child and triggering the rest_for_one restarts below it.
+    Process.unregister(NodeExecutor)
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(NodeExecutor)), do: Process.register(executor, NodeExecutor)
+    end)
+
+    response = call(client, "upgrade.status")
+    assert response["error"]["code"] == -32004
+
+    # The exit reason survives as data rather than as a message a client has to parse.
+    assert ["noproc", ["GenServer", "call", _arguments]] = response["error"]["data"]
+
+    Process.register(executor, NodeExecutor)
+
+    # Same connection, immediately afterwards.
+    assert is_binary(call(client, "upgrade.status")["result"]["mode"])
+    assert is_list(call(client, "agents.list")["result"])
+  end
+
+  test "two clients are independent", %{port: port, client: client} do
+    {:ok, other} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
+    on_exit(fn -> :gen_tcp.close(other) end)
+
+    assert hello(client)["result"]
+    assert hello(other)["result"]
+
+    # One client presenting a bad token loses only its own socket.
+    {:ok, third} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
+
+    :ok =
+      :gen_tcp.send(third, [
+        JSON.encode_to_iodata!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "hello",
+          "params" => %{"token" => "wrong", "protocol" => 1}
+        }),
+        ?\n
+      ])
+
+    assert recv(third)["error"]["code"] == -32001
+    assert recv(third) == {:error, :closed}
+
+    # Both surviving connections still answer. What they answer is whatever the shared
+    # runtime holds at this moment, which the rest of the suite is free to change.
+    assert is_list(call(client, "agents.list")["result"])
+    assert is_list(call(other, "teams.list")["result"])
+  end
+
+  @documented_codes [
+    -32700,
+    -32600,
+    -32601,
+    -32602,
+    -32001,
+    -32002,
+    -32003,
+    -32004,
+    -32005,
+    -32006,
+    -32007
+  ]
+
+  test "the read set answers every method it advertises", %{client: client} do
+    methods = hello(client)["result"]["methods"]
+
+    # `hello` is answered by the connection and `runtime.providers` shells out; everything
+    # else is a plain read that has to come back as a result or as one of the documented
+    # error codes. A method in the handshake's list that answers -32601 is a table that
+    # drifted away from its handlers.
+    for method <- methods -- ["hello", "runtime.providers"] do
+      params = %{"id" => "absent", "principal" => "nobody", "module" => "Ouroboros"}
+      response = call(client, method, params)
+
+      case response do
+        %{"result" => _result} ->
+          :ok
+
+        %{"error" => error} ->
+          assert error["code"] != -32601, "#{method} is advertised but not served"
+          assert error["code"] in @documented_codes, "#{method} answered an undocumented code"
+
+        other ->
+          flunk("#{method} answered #{inspect(other)}")
+      end
+    end
+  end
+end

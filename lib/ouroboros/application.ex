@@ -141,7 +141,24 @@ defmodule Ouroboros.Application do
     # resolved once at boot and held outside the process tree. Leading the chain with it
     # would mean a discovery strategy's crash restarts every durable owner above, which
     # is a far worse trade than losing topology logging for a moment.
-    children ++ [Ouroboros.Cluster]
+    #
+    # The gateway sits after even that, at the absolute end. It is an operator surface:
+    # it projects what the planes already know and holds nothing they rebuild from, so
+    # its crash must restart nothing, and it must be the first thing to stop when the
+    # node comes down. It is also the only child here that a stranger can reach, which is
+    # one more reason for it to be downstream of everything rather than upstream of
+    # anything.
+    children ++ [Ouroboros.Cluster] ++ gateway_children()
+  end
+
+  # Absent configuration means no gateway at all — not a disabled one — so a test run, a
+  # `:builder`, and a `:signer` never acquire a listener by inheriting a default.
+  defp gateway_children do
+    if Ouroboros.Gateway.Config.enabled?() do
+      [Ouroboros.Gateway]
+    else
+      []
+    end
   end
 
   defp workspace_children do
