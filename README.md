@@ -410,6 +410,91 @@ This lane changes a running node only. Reboot-persistent changes and ERTS upgrad
 still require `.appup`/`.relup` release handling; Mix releases do not generate hot
 upgrades automatically. See [Architecture](docs/ARCHITECTURE.md).
 
+## Forging new capabilities
+
+The forge is the path from agent-authored *source* to a live agent module. It is one
+call, and every stage of it can refuse:
+
+```elixir
+{:ok, source} =
+  Ouroboros.Upgrade.Forge.Source.new(
+    module: Ouroboros.Capability.Echo,
+    author: "planner-agent",
+    source: capability_source,
+    test_source: capability_test_source
+  )
+
+{:ok, signed} = Ouroboros.Upgrade.Forge.forge(source, nodes: nodes, signer_id: "release-key")
+
+{:ok, rollout} = Ouroboros.Upgrade.Rollout.deploy(signed, Ouroboros.Capability.Echo, nodes)
+# => rollout.state == :live, and the module is running on every node in `nodes`
+```
+
+What happens between those two calls:
+
+1. **Parse-only hygiene.** `Forge.Source.validate/1` reads the module name, parses the
+   source and its tests with `Code.string_to_quoted/1`, and walks both ASTs for
+   constructs a capability has no business containing: `@on_load`, protocol definitions,
+   `Code.*`, `:code.*`, `File.*`, `System.cmd/2`, `Port`, `:os.cmd/1`, `Node.*`, `:erpc`,
+   `:rpc`, `Application.put_env/3`, `:persistent_term`, `:ets.give_away/3`,
+   `:erlang.load_nif/2`, and spawning onto a named node. Nothing is evaluated or
+   compiled, so a rejected source leaves `:code.which/1` answering `:non_existing`.
+2. **An isolated build peer.** `Forge.BuildPeer` starts an OTP `:peer` with
+   `connection: :standard_io` and `-start_epmd false`. That peer is not distributed —
+   `node()` inside it is `:nonode@nohost` — so the candidate compiles and runs its own
+   tests where the production cluster is unreachable. The peer is stopped in an `after`
+   block on every path, including the build deadline expiring
+   (`config :ouroboros, :forge_build_timeout`, 60s by default).
+3. **An epoch nobody can reuse.** `Ouroboros.Upgrade.Epoch.next/2` reads `last_epoch`
+   from every target node, allocates one above the highest, and writes that number
+   durably *before* returning it. A forge that dies between allocating and deploying
+   burns the number instead of reissuing it. A node whose status cannot be read is a
+   refusal, not a zero.
+4. **A signature the forge cannot produce for itself.** `config :ouroboros,
+   :forge_signer` names the module asked to sign the canonical manifest. The shipped
+   default, `Forge.Signer.Deny`, refuses everything.
+5. **A health-gated rollout.** `Rollout.deploy/4` checkpoints `:deploying` durably
+   before any node is touched, then deploys with
+   `health_check: {Rollout.Probe, :ready?, [module]}`. On each target the probe starts
+   the new module as a throwaway mesh agent, sends it one synthetic signal, checks the
+   answer, and stops it. One failing probe rolls the deployment back everywhere.
+
+The rollout is recorded in `Ouroboros.Upgrade.Rollout.Registry` as `:deploying`,
+`:live`, `:rolled_back`, or `:quarantined`. The last two are never confused: only a
+deployment whose every node *proved* it compensated is recorded as rolled back, and any
+ambiguity — a lost reply, a node that never answered — is recorded as quarantined.
+
+### Honest limits
+
+- **The deny list is hygiene, not a sandbox.** It catches accidents. It cannot catch a
+  macro that expands into the same constructs after the walk has finished, `apply/3`
+  with a runtime module, or a name built by `Module.concat/1`. The boundaries that do
+  work are the build peer's isolation, the verifier's checks on the loading node, and
+  the `Ouroboros.Capability.` namespace policy — and even those are policy, not a jail:
+  a loaded capability has exactly the same ambient VM authority as any other module.
+- **The build peer is process isolation, not OS isolation.** It runs as the same user
+  with the same filesystem and network reach. It cannot talk to the cluster; it can
+  still write files the build user can write. Compiling genuinely hostile source needs a
+  container or VM around the peer, on a host that is not the production host.
+- **The build peer must match its targets.** The artifact is verified against the
+  loading node's exact OTP release, Elixir version, and system architecture. Starting
+  the peer from this VM's own executable and code path is what makes that true here; a
+  remote build service has to establish it another way.
+- **Key custody belongs outside the patchable application.** `Forge.Signer.Local` reads
+  an Ed25519 key from configuration, which is fine for a dev loop and for tests. In
+  production it would put the key inside the blast radius of the code it authorizes: an
+  agent that can patch this application can read anything this application can read.
+  Configure a signer that calls a separate least-privileged service instead.
+- **One module per capability.** A forged capability is exactly one BEAM. The sandbox
+  rejects a source that compiles to more, because an artifact carrying one binary cannot
+  satisfy references to helper modules no target node has loaded. Helpers must already
+  exist on the targets — the shipped `Ouroboros.Agent.Worker.ReceiveMessage` action, for
+  example, is a legitimate route target for a forged agent.
+- **The probe is liveness, not acceptance.** It proves a capability starts, answers one
+  message, and stops. It says nothing about whether the capability is any good.
+  Behavioural comparison, cost and latency regression, and canary evidence are
+  evaluation gates that are not implemented.
+
 ## Durable OTP releases
 
 The release lane is distinct from fast BEAM patches:
@@ -452,6 +537,12 @@ export OUROBOROS_UPGRADE_TRUSTED_SIGNERS="release-key:$(base64 < release-key.pub
 MIX_ENV=prod mix release
 ```
 
+The forge signs with whatever `config :ouroboros, :forge_signer` names, and the shipped
+default refuses to sign anything. A production deployment that wants forged capabilities
+configures a signer that reaches a key held outside this application, and names that
+key's public half in `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. Configuring
+`Forge.Signer.Local` in production would let the agent approve its own code.
+
 Production fails closed on unsigned patches. `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` is the
 injection point for trusted Ed25519 public keys: comma-separated
 `signer_id:base64_ed25519_public_key` entries, each key exactly 32 raw bytes. A
@@ -491,6 +582,12 @@ single-owner atomic file checkpoints.
 - Autonomous evaluation is implemented with bounded revisions and step count, but
   aggregate token/cost/time budgets, independent policy approval, and behavioral
   regression scoring remain.
+- The forge compiles and tests candidate capabilities in an isolated, non-distributed
+  build peer, but that peer shares the build host's user, filesystem, and network. Real
+  OS sandboxing, an independent signing service, and evaluation gates comparing behavior
+  and cost before rollout are external. Capability rollout records accumulate; only
+  settled `:rolled_back` entries are pruned when the store exceeds
+  `:ouroboros, :capability_rollout_limit`.
 - Release metadata construction, archive inspection, authorization, and journaling are
   implemented; full tar assembly and a real `HandlerAdapter.OTP` reboot rehearsal are
   deployment gates.

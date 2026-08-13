@@ -1,0 +1,172 @@
+defmodule Ouroboros.Upgrade.Forge do
+  @moduledoc """
+  Turns agent-authored Elixir source into a signed artifact a node executor will accept.
+
+  One call, six stages, each with its own named failure:
+
+      Source.validate/1     {:error, {:source_rejected, reason}}
+      BuildPeer + Sandbox   {:error, {:build_failed, reason}}
+      Beam.introduce/3      {:error, {:beam_rejected, reason}}
+      Epoch.next/2          {:error, {:epoch_unavailable, reason}}
+      Artifact.build/2      {:error, {:artifact_failed, reason}}
+      Signer.sign/2         {:error, {:signing_failed, reason}}
+
+  The stage order is deliberate. Parse-only hygiene runs before anything compiles, the
+  compile happens in a peer that cannot reach the cluster, the compiled binary is held to
+  the same introduction rules the loading node will re-check, and only then is a number
+  allocated and a signature requested. Nothing after the build peer runs agent code.
+
+  The forge produces an artifact; it does not deploy one and cannot authorize one. The
+  signature comes from whatever `config :ouroboros, :forge_signer` names, which is
+  `Signer.Deny` unless an operator changed it, and the artifact is verified again on
+  every loading node against `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. This module lives under
+  `Ouroboros.Upgrade.` and is therefore in the protected set, so a capability forged here
+  can never patch the forge that made it.
+
+  What this does not establish: that the code is good. Its own tests passed in a peer
+  chosen to resemble the targets. Behavioural comparison, cost and latency regression,
+  and canary evidence are evaluation gates that live above this module and are not
+  implemented.
+  """
+
+  alias Ouroboros.Upgrade.{Artifact, Beam, Epoch}
+  alias Ouroboros.Upgrade.Forge.{BuildPeer, Signer, Source}
+
+  @type result :: {:ok, Artifact.t()} | {:error, term()}
+
+  @doc """
+  Forges one capability module into a signed, epoch-stamped artifact.
+
+  Options:
+
+    * `:nodes` - the nodes the artifact is destined for, used to allocate an epoch
+      above every one of them. Defaults to `[node()]`.
+    * `:signer_id` - the signer identity recorded in the signature envelope and covered
+      by the signing payload. Defaults to `config :ouroboros, :forge_signer_id`.
+    * `:timeout` - overall build deadline, defaulting to
+      `config :ouroboros, :forge_build_timeout`.
+    * `:storage` - explicit epoch storage, for tests.
+  """
+  @spec forge(Source.t(), keyword()) :: result()
+  def forge(source, opts \\ [])
+
+  def forge(%Source{} = source, opts) when is_list(opts) do
+    with {:ok, source} <- validate(source),
+         {:ok, build} <- build(source, opts),
+         {:ok, _beam} <- introduce(source, build),
+         {:ok, epoch} <- epoch(opts),
+         {:ok, artifact} <- assemble(source, build, epoch),
+         {:ok, signed} <- sign(artifact, opts) do
+      {:ok, signed}
+    end
+  end
+
+  def forge(source, _opts), do: {:error, {:source_rejected, {:invalid_source, source}}}
+
+  defp validate(source) do
+    case Source.validate(source) do
+      {:ok, source} -> {:ok, source}
+      {:error, reason} -> {:error, {:source_rejected, reason}}
+    end
+  end
+
+  defp build(source, opts) do
+    case BuildPeer.build(source.module, source.source, source.test_source, opts) do
+      {:ok, %{binary: binary} = build} when is_binary(binary) -> {:ok, build}
+      {:ok, unexpected} -> {:error, {:build_failed, {:invalid_build_result, unexpected}}}
+      {:error, reason} -> {:error, {:build_failed, reason}}
+    end
+  end
+
+  # The same gate the loading node applies, applied here so a binary that could never be
+  # introduced fails before an epoch is spent and a signature is requested.
+  defp introduce(source, build) do
+    case Beam.introduce(source.module, build.binary, filename: filename(source.module)) do
+      {:ok, beam} -> {:ok, beam}
+      {:error, reason} -> {:error, {:beam_rejected, reason}}
+    end
+  end
+
+  defp epoch(opts) do
+    nodes = Keyword.get(opts, :nodes, [node()])
+    epoch_opts = Keyword.take(opts, [:storage, :status_timeout, :lock_retries])
+
+    case Epoch.next(nodes, epoch_opts) do
+      {:ok, epoch} -> {:ok, epoch}
+      {:error, reason} -> {:error, {:epoch_unavailable, reason}}
+    end
+  end
+
+  defp assemble(source, build, epoch) do
+    entry =
+      {source.module, build.binary, disposition: :introduce, filename: filename(source.module)}
+
+    case Artifact.build([entry], epoch: epoch, metadata: metadata(source, build)) do
+      {:ok, artifact} -> {:ok, artifact}
+      {:error, reason} -> {:error, {:artifact_failed, reason}}
+    end
+  end
+
+  # Metadata is inside the signed manifest and travels to every node, so it records what
+  # provenance a reviewer needs and nothing that grows without bound. Failure output stays
+  # in the error tuple the forge returns; only counts are shipped.
+  defp metadata(source, build) do
+    %{
+      forge: %{
+        source_id: source.id,
+        source_sha256: source.sha256,
+        author: source.author,
+        created_at: source.created_at,
+        test_report: Map.get(build, :test_report, %{}),
+        peer_runtime: Map.get(build, :peer_runtime, %{})
+      }
+    }
+  end
+
+  defp sign(artifact, opts) do
+    {module, _signer_opts} = Signer.configured()
+
+    with {:ok, signer_id} <- signer_id(opts),
+         payload = Artifact.signing_payload(artifact, signer_id),
+         {:ok, signature} <- request_signature(module, payload, signer_id),
+         :ok <- validate_signature(signature) do
+      {:ok, %{artifact | signature: %{signer: signer_id, value: signature}}}
+    end
+  end
+
+  defp signer_id(opts) do
+    id =
+      Keyword.get_lazy(opts, :signer_id, fn ->
+        Application.get_env(:ouroboros, :forge_signer_id)
+      end)
+
+    if is_binary(id) and id != "" do
+      {:ok, id}
+    else
+      {:error, {:signing_failed, :signer_id_required}}
+    end
+  end
+
+  defp request_signature(module, payload, signer_id) do
+    case module.sign(payload, signer_id) do
+      {:ok, signature} -> {:ok, signature}
+      {:error, reason} -> {:error, {:signing_failed, reason}}
+      other -> {:error, {:signing_failed, {:invalid_signer_result, other}}}
+    end
+  rescue
+    error -> {:error, {:signing_failed, {:signer_exception, Exception.message(error)}}}
+  catch
+    kind, reason -> {:error, {:signing_failed, {:signer_failure, kind, inspect(reason)}}}
+  end
+
+  defp validate_signature(signature) when is_binary(signature) and byte_size(signature) == 64,
+    do: :ok
+
+  defp validate_signature(signature),
+    do: {:error, {:signing_failed, {:invalid_signature, byte_size_of(signature)}}}
+
+  defp byte_size_of(term) when is_binary(term), do: byte_size(term)
+  defp byte_size_of(term), do: {:not_a_binary, inspect(term)}
+
+  defp filename(module), do: "ouroboros://capability/#{inspect(module)}"
+end

@@ -11,6 +11,15 @@ config :ouroboros,
   control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
   release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
+  capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
+  epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
+  # The forge asks this module to sign what it builds. Refusing by default means a
+  # cluster acquires a signing capability only when an operator configures one, and
+  # never because a default was convenient. Key custody belongs outside this
+  # application; see `Ouroboros.Upgrade.Forge.Signer`.
+  forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
+  # Overall deadline for one isolated build peer: boot, compile, and capability tests.
+  forge_build_timeout: 60_000,
   control_enabled: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.

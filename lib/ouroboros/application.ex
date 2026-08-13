@@ -79,6 +79,7 @@ defmodule Ouroboros.Application do
         },
         Ouroboros.Mesh.Directory,
         Ouroboros.Upgrade.NodeExecutor,
+        Ouroboros.Upgrade.Rollout.Registry,
         Ouroboros.Coding.Store,
         Ouroboros.Interactive.Store,
         Ouroboros.Team.Store,
@@ -106,6 +107,10 @@ defmodule Ouroboros.Application do
     # downstream owner must restart and rebuild from its durable checkpoint.
     # Letting those owners continue under a fresh empty authority would bypass
     # leases or strand sessions.
+    #
+    # The capability rollout registry sits immediately after the node executor for the
+    # same reason: it is the deployment-level record of code the executor loaded, so it
+    # must not outlive the executor whose journal it describes.
     Supervisor.start_link(children, strategy: :rest_for_one, name: Ouroboros.Supervisor)
   end
 

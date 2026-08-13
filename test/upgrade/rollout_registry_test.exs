@@ -1,0 +1,218 @@
+defmodule Ouroboros.Upgrade.RolloutRegistryTest do
+  use ExUnit.Case, async: false
+
+  alias Ouroboros.Upgrade.Coordinator.{DeploymentReceipt, NodeReceipt}
+  alias Ouroboros.Upgrade.Rollout
+  alias Ouroboros.Upgrade.Rollout.Registry
+
+  @module Ouroboros.Capability.Recorded
+
+  test "records a rollout and refuses transitions that would lose information" do
+    registry = start_registry!()
+
+    assert {:ok, entry} = Registry.deploying(attrs(), registry)
+    assert entry.state == :deploying
+    assert entry.module == @module
+    assert entry.created_at == entry.updated_at
+
+    assert {:error, {:already_recorded, _id}} =
+             Registry.deploying(attrs(entry.artifact_id), registry)
+
+    assert {:error, {:unknown_rollout, "nope"}} = Registry.mark("nope", :live, [], registry)
+    assert {:error, {:invalid_state, :wat}} = Registry.mark(entry.artifact_id, :wat, [], registry)
+
+    assert {:ok, live} =
+             Registry.mark(entry.artifact_id, :live, [detail: %{note: "healthy"}], registry)
+
+    assert live.state == :live
+    assert live.detail == %{note: "healthy"}
+    assert live.updated_at >= live.created_at
+    assert Registry.live(registry) == [live]
+
+    # A live rollout can still be rolled back or discovered to be ambiguous later.
+    assert {:ok, rolled_back} = Registry.mark(entry.artifact_id, :rolled_back, [], registry)
+    assert rolled_back.state == :rolled_back
+    assert Registry.live(registry) == []
+
+    # Going backwards would claim knowledge nobody has: a rolled-back rollout that is
+    # somehow live again is a new deployment, not an edit to this record.
+    assert {:error, {:invalid_transition, :rolled_back, :live}} =
+             Registry.mark(entry.artifact_id, :live, [], registry)
+
+    assert {:ok, quarantined} = Registry.mark(entry.artifact_id, :quarantined, [], registry)
+    assert quarantined.state == :quarantined
+
+    # Quarantine has no automatic exit here, exactly as it has none in the node executor.
+    for state <- [:live, :rolled_back, :deploying] do
+      assert {:error, {:invalid_transition, :quarantined, ^state}} =
+               Registry.mark(entry.artifact_id, state, [], registry)
+    end
+
+    assert [%{artifact_id: id}] = Registry.history(@module, registry)
+    assert id == entry.artifact_id
+    assert Registry.history(Ouroboros.Capability.Unrelated, registry) == []
+  end
+
+  test "rejects malformed records rather than storing a rollout nobody can interpret" do
+    registry = start_registry!()
+
+    assert {:error, {:missing_attribute, :artifact_id}} =
+             Registry.deploying(Map.delete(attrs(), :artifact_id), registry)
+
+    assert {:error, {:invalid_attribute, :epoch, 0}} =
+             Registry.deploying(%{attrs() | epoch: 0}, registry)
+
+    assert {:error, {:invalid_attribute, :nodes, []}} =
+             Registry.deploying(%{attrs() | nodes: []}, registry)
+
+    assert {:error, {:invalid_attribute, :module, "not-a-module"}} =
+             Registry.deploying(%{attrs() | module: "not-a-module"}, registry)
+
+    assert Registry.list(registry) == []
+  end
+
+  test "a failed checkpoint is a failed rollout, not an in-memory one" do
+    directory = temporary_directory!()
+
+    hook = fn
+      :before_write -> {:error, :disk_full}
+      _event -> :ok
+    end
+
+    registry =
+      start_registry!(
+        storage: {Ouroboros.Storage.DurableFile, path: directory, durability_hook: hook}
+      )
+
+    # The caller must be able to treat this as "nothing happened", because the deployment
+    # it was about to authorize has not started.
+    assert {:error, {:rollout_checkpoint_failed, :disk_full}} =
+             Registry.deploying(attrs(), registry)
+
+    assert Registry.list(registry) == []
+    assert Registry.durability(registry) == :synced_checkpoint
+  end
+
+  test "a checkpoint this build cannot interpret is preserved, not overwritten" do
+    Process.flag(:trap_exit, true)
+    directory = temporary_directory!()
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    {adapter, adapter_opts} = storage
+
+    assert :ok =
+             adapter.put_checkpoint(
+               Registry.checkpoint_key(),
+               %{version: 99, rollouts: %{}},
+               adapter_opts
+             )
+
+    assert {:error, {:unsupported_rollout_checkpoint, 99}} =
+             Registry.start_link(name: unique_name(), storage: storage)
+
+    assert {:ok, %{version: 99}} =
+             adapter.get_checkpoint(Registry.checkpoint_key(), adapter_opts)
+  end
+
+  test "survives its own restart with the rollouts it recorded" do
+    directory = temporary_directory!()
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    name = unique_name()
+
+    {:ok, first} = Registry.start_link(name: name, storage: storage)
+    {:ok, entry} = Registry.deploying(attrs(), name)
+    {:ok, _live} = Registry.mark(entry.artifact_id, :live, [], name)
+    GenServer.stop(first)
+
+    {:ok, second} = Registry.start_link(name: name, storage: storage)
+    assert {:ok, restored} = Registry.get(entry.artifact_id, name)
+    assert restored.state == :live
+    assert restored.module == @module
+    GenServer.stop(second)
+  end
+
+  test "ambiguity is never recorded as a rollback" do
+    proven =
+      deployment(%{
+        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
+        b@host: %NodeReceipt{node: :b@host, recovery: :aborted}
+      })
+
+    assert {:rolled_back, detail} = Rollout.settled_state(proven)
+    assert detail.nodes == %{a@host: :rolled_back, b@host: :aborted}
+
+    # One node that never proved anything outranks every node that did.
+    ambiguous =
+      deployment(%{
+        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
+        b@host: %NodeReceipt{node: :b@host, recovery: :quarantined}
+      })
+
+    assert {:quarantined, _detail} = Rollout.settled_state(%{ambiguous | recovery: :quarantined})
+
+    # Even with every node reporting a proven recovery, a deployment whose own recovery
+    # is not complete is not a proven rollback.
+    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :incomplete})
+    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :quarantined})
+
+    # A recovery state this build does not recognize is treated as ambiguity, not as
+    # success: an unknown answer is not a proof.
+    unknown =
+      deployment(%{a@host: %NodeReceipt{node: :a@host, recovery: :something_new_and_unclear}})
+
+    assert {:quarantined, _detail} = Rollout.settled_state(unknown)
+  end
+
+  defp deployment(node_receipts) do
+    %DeploymentReceipt{
+      id: "deployment-#{System.unique_integer([:positive])}",
+      artifact_id: "artifact-#{System.unique_integer([:positive])}",
+      epoch: 1,
+      nodes: Map.keys(node_receipts),
+      node_receipts: node_receipts,
+      outcome: :health_failed,
+      recovery: :complete,
+      started_at: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+  end
+
+  defp attrs(artifact_id \\ nil) do
+    %{
+      artifact_id: artifact_id || "artifact-#{System.unique_integer([:positive])}",
+      module: @module,
+      epoch: System.unique_integer([:positive, :monotonic]),
+      nodes: [node()],
+      source_sha256: String.duplicate("a", 64),
+      test_report: %{total: 1, failures: 0}
+    }
+  end
+
+  defp start_registry!(opts \\ []) do
+    name = unique_name()
+
+    storage =
+      Keyword.get_lazy(opts, :storage, fn ->
+        {Jido.Storage.ETS,
+         table: String.to_atom("rollout_registry_#{System.unique_integer([:positive])}")}
+      end)
+
+    {:ok, pid} = Registry.start_link(name: name, storage: storage)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    name
+  end
+
+  defp unique_name do
+    String.to_atom("rollout_registry_server_#{System.unique_integer([:positive])}")
+  end
+
+  defp temporary_directory! do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-rollout-registry-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf(directory) end)
+    directory
+  end
+end

@@ -84,6 +84,11 @@ if config_env() == :prod do
     upgrade_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")},
     release_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "release-journal")},
+    capability_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "capabilities")},
+    # The epoch watermark must survive a crash between allocating a number and using it,
+    # or the same epoch could be handed out twice.
+    epoch_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "forge-epochs")},
     workspace_allowed_roots: workspace_roots,
     orchestration_max_concurrency: orchestration_concurrency,
     orchestration_team_id: System.get_env("OUROBOROS_ORCHESTRATION_TEAM_ID"),

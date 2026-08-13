@@ -15,12 +15,18 @@ This slice is complete when all of the following are executable and tested:
    revise within a fixed budget, and preserve cancellation intent across restart.
 5. A complete OTP upgrade archive can be inspected and its `:release_handler`
    lifecycle can be gated and journaled through an injected deterministic adapter.
-6. The documentation distinguishes those proofs from partition tolerance, full-host
-   provider durability, billing, real repository effects, and a real packaged-release
-   install/reboot rehearsal.
+6. Agent-authored source for a new capability module can be validated without being
+   evaluated, compiled and tested in an isolated non-distributed build peer, signed
+   through a seam the forge cannot satisfy itself, stamped with a durably allocated
+   epoch, deployed behind a per-node health probe, and — when that probe fails — rolled
+   back to absence on every node.
+7. The documentation distinguishes those proofs from partition tolerance, full-host
+   provider durability, billing, real repository effects, OS-level sandboxing of
+   generated code, independent signing custody, evaluation gates, and a real
+   packaged-release install/reboot rehearsal.
 
-The first five are local implementation claims backed by deterministic tests. None
-imply the external claims in item six.
+The first six are local implementation claims backed by deterministic tests. None
+imply the external claims in item seven.
 
 ## Planes and ownership
 
@@ -191,6 +197,51 @@ retaining the incomplete operation in quarantine. Post-mutation journal failures
 immediate compensation where possible and otherwise leave an explicit
 reconciliation-required quarantine.
 
+Above the coordinator, `Ouroboros.Upgrade.Forge` owns the path from agent-authored
+source to a signed artifact, and `Ouroboros.Upgrade.Rollout` owns the path from that
+artifact to a live, health-gated capability. Both live under `Ouroboros.Upgrade.*` and
+are therefore inside the protected set: what the forge produces can never patch the
+forge.
+
+Forge stages, each with its own named refusal:
+
+1. `Forge.Source.validate/1` is parse-only. It checks the `Ouroboros.Capability.` name,
+   parses source and tests with `Code.string_to_quoted/1`, requires exactly one
+   top-level module matching the declared one, and walks both ASTs for `@on_load`,
+   protocol definitions, `Code.*`, `:code.*`, `File.*`, `:file.*`, `System.cmd/shell`,
+   `Port`, `:os.cmd`, `Node.*`, `:erpc`, `:rpc`, `Application.put_env`,
+   `:persistent_term`, `:ets.give_away`, `:erlang.load_nif`, and node-explicit spawns.
+   Nothing is evaluated, so a rejected source has defined nothing.
+2. `Forge.BuildPeer` compiles and runs the candidate's own tests inside an OTP `:peer`
+   started with `connection: :standard_io` and `-start_epmd false`. That peer is not
+   distributed, so generated code has no distribution with which to reach the cluster.
+   One deadline covers boot, compile, and tests; the peer is stopped in an `after` block
+   on every path. `Forge.Sandbox` runs inside it and returns only plain serializable
+   terms.
+3. `Upgrade.Epoch.next/2` reads `last_epoch` from every target, allocates above the
+   maximum, and persists the allocation durably *before* returning it, so a crash
+   between allocation and use burns a number rather than reissuing one. An unreadable
+   node is a refusal, not a zero. `:global.trans/4` serializes allocations in a
+   connected cluster; it is not partition-safe, and the defence that does not depend on
+   coordination is the target's own epoch monotonicity check.
+4. `Forge.Signer` is the seam the agent cannot supply for itself. The forge never holds
+   a key; it asks the configured module and the default refuses everything.
+
+`Rollout.deploy/4` checkpoints `:deploying` in the durable `Rollout.Registry` before any
+node is mutated, deploys with `health_check: {Rollout.Probe, :ready?, [module]}`,
+promotes on success, and classifies failure from the deployment's own recovery evidence.
+The probe starts the introduced module as a throwaway mesh agent, sends one synthetic
+signal, checks the answer, and stops it — and converts every exception, exit, and throw
+into a health *result*, because an uncaught error would reach the coordinator as
+transport ambiguity and quarantine a node the probe merely failed to satisfy. Only a
+deployment whose every node proved compensation is recorded `:rolled_back`; anything
+ambiguous is `:quarantined`, which has no automatic exit.
+
+The isolation here is process-level and policy-level, never OS-level. The build peer
+shares the host's user, filesystem, and network; the deny list is defeated by any macro,
+`apply/3`, or runtime-built module name; and a forged capability that reaches a node runs
+with the same ambient authority as every other module on it.
+
 Quarantine is a refusal, not a warning: prepare, commit, rollback, and promote are all
 gated on it, so a node whose loaded code provably disagrees with its journal cannot be
 mutated further or have its preimages discarded by a promote.
@@ -229,6 +280,11 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Fast patch prepare reply is lost | Reservation is released by artifact id; no code was loaded | Done |
 | Introduced module is still running on rollback | `{:introduced_code_in_use, module}` and quarantine; never a brutal purge | Done |
 | Introduced module reappears after rollback | Restart reconciliation fails closed against the expected `:non_existing` identity | Done |
+| Forged capability fails its health probe | Every committed node is rolled back, the module is absent again, and the registry records `:rolled_back` | Done |
+| Capability rollout outcome is ambiguous anywhere | Registry records `:quarantined` and never `:rolled_back` | Operator reconciliation tooling |
+| Forge crashes between allocating an epoch and using it | The number is durably spent and never reissued | Done |
+| Build peer boot, compile, or tests hang | One deadline covers all three; the callback is killed and the peer stopped | Done |
+| Build peer compiles hostile source | The peer cannot reach the cluster; it can still reach the build host | Container/VM boundary with resource and network limits |
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
@@ -248,6 +304,12 @@ rehearsed lane can prove restart persistence or an ERTS change.
   rules are policy about names, not a sandbox: an introduced module is exactly as
   privileged as a replacement, and the gate only stops a new module from taking a name
   that already means something.
+- Forge source validation is parse-only hygiene against accidents, not a sandbox. Macro
+  expansion, `apply/3`, and runtime-built module names all defeat it by construction. The
+  build peer is isolated from the cluster, not from the build host.
+- The forge holds no signing key and constructs no signature. `:forge_signer` defaults to
+  a module that refuses, and a signer whose key lives in this application's configuration
+  lets the agent approve its own code.
 - Coding requests default to read-only and prompt approval. Write access is explicit.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.
@@ -288,12 +350,41 @@ through worker, coordinator, and network failures.
 
 ### Milestone 3: safe self-improvement
 
-- isolated build peers that compile and test candidate source changes;
-- policy review and signing outside the patchable agent application;
-- durable deployment-level cluster journal above the now durable node executors;
-- package assembly around the implemented `.appup`/`.relup` metadata/inspection lane,
-  followed by real embedded-release install and reboot rehearsal;
-- evaluation gates comparing behavior, cost, latency, and regressions before rollout.
+Implemented:
+
+- isolated build peers that compile and test candidate source changes
+  (`Forge.BuildPeer` + `Forge.Sandbox`: a non-distributed `:peer` with a bounded overall
+  deadline, always stopped, returning only serializable terms);
+- a signing seam the forge cannot satisfy for itself (`Forge.Signer`, defaulting to
+  `Deny`), with the artifact re-verified against trusted keys on every loading node;
+- durable, crash-safe epoch allocation above every target node's journal
+  (`Upgrade.Epoch`);
+- a durable deployment-level cluster journal above the durable node executors
+  (`Rollout.Registry`), checkpointed before any mutation, which never records ambiguity
+  as a rollback;
+- health-gated rollout with real rollback proof (`Rollout` + `Rollout.Probe`): a forged
+  capability starts as a mesh agent and answers a signal on every target, or the whole
+  deployment is compensated and the module is absent again everywhere.
+
+Still external:
+
+- **an independent signing/review service.** The seam exists and the default refuses,
+  but the only shipped implementation (`Signer.Local`) reads its key from this
+  application's configuration. A key an agent's own application can read is a key that
+  agent can use to approve itself; production custody belongs on a separate
+  least-privileged host, HSM, or review queue.
+- **real OS sandboxing.** The build peer is isolated from the *cluster*, not from the
+  *host*: same user, same filesystem, same network. Compiling untrusted source safely
+  needs a container or VM boundary with resource and network limits, on a build host
+  that is not a production host. The source deny list is hygiene against accidents and
+  is defeated by any macro expansion, `apply/3`, or runtime-constructed module name.
+- **evaluation gates.** The probe proves liveness, not merit: one agent start, one
+  signal, one sane answer. Behavioural comparison against the previous capability, cost
+  and latency regression, canary cohorts, and automatic promotion decisions are not
+  implemented.
+- **package assembly and reboot rehearsal** around the implemented `.appup`/`.relup`
+  metadata/inspection lane. A forged capability lives in the running VM only; a restart
+  boots the original release without it.
 
 Stop condition: the agent can propose a change, but cannot authorize its own patch;
 every rollout has a reproducible artifact, independent approval, canary evidence,
