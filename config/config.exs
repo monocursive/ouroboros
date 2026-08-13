@@ -38,6 +38,37 @@ config :ouroboros,
   # never because a default was convenient. Key custody belongs outside this
   # application; see `Ouroboros.Upgrade.Forge.Signer`.
   forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
+  # The `:signer` node `Forge.Signer.Remote` submits artifacts to, and how long it waits.
+  # `nil` means no remote signer is configured, which is what an unconfigured cluster
+  # should mean: the client refuses rather than guessing at a host.
+  signing_node: nil,
+  signing_call_timeout: 15_000,
+  # Everything below is read on the signer node itself, by
+  # `Ouroboros.Upgrade.Signing.Service`. The identity this node signs as — the id whose
+  # public key core nodes name in OUROBOROS_UPGRADE_TRUSTED_SIGNERS. It cannot be
+  # defaulted, and a `:signer` node refuses to boot without it; the key itself is never
+  # configuration, it is read at boot from OUROBOROS_SIGNER_KEY_PATH.
+  signer_id: nil,
+  # The independent gate applied to a full artifact before any signature exists. See
+  # `Ouroboros.Upgrade.Signing.Policy`.
+  signing_policy: Ouroboros.Upgrade.Signing.Policy.Default,
+  # Whether an artifact must carry a valid evaluation spec in `metadata.forge.eval` to be
+  # signed at all. False keeps the behaviour that existed before the signing service;
+  # production should set it true, because it is the one switch that makes "this
+  # capability declared how it would be judged" a precondition of a signature.
+  signing_require_eval: false,
+  # Admissions per requester per minute, refused beyond. This bounds accidents and retry
+  # storms; the requester is self-reported, so it is not a bound on an adversary.
+  signing_rate_limit_per_minute: 30,
+  # How many signing decisions — issued and refused alike — are retained.
+  signing_journal_limit: 500,
+  # The largest artifact a signer will accept over `:erpc` before reading any of it.
+  signing_max_artifact_bytes: 16 * 1024 * 1024,
+  # Where signing decisions are recorded. ETS in dev and test, a synced
+  # `Ouroboros.Storage.DurableFile` in production: a signature is never returned unless
+  # its journal entry was acknowledged first, so this adapter's durability is the
+  # durability of the audit trail.
+  signing_journal_storage: {Jido.Storage.ETS, table: :ouroboros_signing_journal},
   # Overall deadline for one isolated build peer: boot, compile, and capability tests.
   forge_build_timeout: 60_000,
   # Deadline for one node's evaluation run during a capability rollout. It bounds an

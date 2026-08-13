@@ -83,6 +83,65 @@ if config_env() == :prod do
       name -> String.to_atom(name)
     end
 
+  # A `:signer` node's whole reason to exist is holding a key this application cannot
+  # reach. Checking that here, before any module of this application is guaranteed
+  # loadable, means the misconfiguration an operator is most likely to make — deploying
+  # the signer role without mounting the key — stops the boot with a message naming the
+  # variable rather than with a supervisor start failure. The service re-reads and
+  # re-validates the file at init; this is the preflight, not the load.
+  signer_key_path = env_value.("OUROBOROS_SIGNER_KEY_PATH")
+  signer_id = env_value.("OUROBOROS_SIGNER_ID")
+
+  if node_role == :signer do
+    unless is_binary(signer_key_path) and Path.type(signer_key_path) == :absolute do
+      raise "OUROBOROS_SIGNER_KEY_PATH must be an absolute path to this signer's Ed25519 " <>
+              "seed file on a node booted with OUROBOROS_NODE_ROLE=signer"
+    end
+
+    unless File.regular?(signer_key_path) do
+      raise "OUROBOROS_SIGNER_KEY_PATH=#{signer_key_path} is not a readable file"
+    end
+
+    unless is_binary(signer_id) do
+      raise "OUROBOROS_SIGNER_ID must name the identity this signer signs as; it is the " <>
+              "id core nodes trust a public key under in OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
+    end
+  end
+
+  signing_call_timeout =
+    case Integer.parse(System.get_env("OUROBOROS_SIGNING_CALL_TIMEOUT_MS") || "15000") do
+      {value, ""} when value > 0 -> value
+      _other -> raise "OUROBOROS_SIGNING_CALL_TIMEOUT_MS must be a positive integer"
+    end
+
+  signing_rate_limit =
+    case Integer.parse(System.get_env("OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE") || "30") do
+      {value, ""} when value > 0 -> value
+      _other -> raise "OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE must be a positive integer"
+    end
+
+  # Requiring a signed evaluation spec is the recommended production posture: it makes
+  # "this capability declared, inside the signature, how it would be judged" a
+  # precondition of getting a signature at all. It defaults to off so that naming a
+  # signer node never silently changes what an existing artifact means.
+  signing_require_eval = System.get_env("OUROBOROS_SIGNING_REQUIRE_EVAL") == "true"
+
+  signing_node =
+    case env_value.("OUROBOROS_SIGNING_NODE") do
+      nil -> nil
+      name -> String.to_atom(name)
+    end
+
+  # Naming a signer node is the operator action that gives this cluster a signing
+  # capability. Without it the forge keeps the shipped refusal, so a production release
+  # still acquires signing deliberately rather than by default.
+  forge_signer =
+    if is_nil(signing_node) do
+      Ouroboros.Upgrade.Forge.Signer.Deny
+    else
+      {Ouroboros.Upgrade.Forge.Signer.Remote, [node: signing_node, timeout: signing_call_timeout]}
+    end
+
   workspace_roots =
     case System.get_env("OUROBOROS_WORKSPACE_ROOTS") do
       nil -> []
@@ -197,6 +256,17 @@ if config_env() == :prod do
     # The epoch watermark must survive a crash between allocating a number and using it,
     # or the same epoch could be handed out twice.
     epoch_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "forge-epochs")},
+    # A signature is never returned to a requester before its journal entry is
+    # acknowledged, so the durability of this adapter is the durability of the record of
+    # what this key has ever approved.
+    signing_journal_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "signing-journal")},
+    forge_signer: forge_signer,
+    signing_node: signing_node,
+    signing_call_timeout: signing_call_timeout,
+    signer_id: signer_id,
+    signing_require_eval: signing_require_eval,
+    signing_rate_limit_per_minute: signing_rate_limit,
     workspace_allowed_roots: workspace_roots,
     orchestration_max_concurrency: orchestration_concurrency,
     orchestration_team_id: System.get_env("OUROBOROS_ORCHESTRATION_TEAM_ID"),

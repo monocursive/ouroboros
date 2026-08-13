@@ -22,15 +22,18 @@ product. It currently proves:
 - optional symlink-safe workspace admission with read-sharing/write exclusion;
 - a bounded, signed BEAM hot-patch lane with a durable node journal, cluster health
   gates, rollback, promotion, restart reconciliation, and explicit quarantine;
+- a signing service on a role-isolated node: the key read at boot from a file that node
+  mounts, an independent policy applied to the whole artifact before any signature
+  exists, and a durable journal of every decision;
 - offline OTP release metadata/archive validation plus a deny-by-default,
   write-ahead-journaled `:release_handler` control boundary; and
 - real two-node behavior in tests using an OTP `:peer` OS process.
 
 It does **not** yet provide partition-safe placement, durable provider execution
-across a full BEAM/host restart, an independently operated build/signing service,
-aggregate cost budgets, or a polished terminal UI. The OTP release adapter is
-implemented, but a real packaged-release install/reboot rehearsal remains an external
-deployment gate.
+across a full BEAM/host restart, signing custody outside the cluster's distribution
+trust domain, aggregate cost budgets, or a polished terminal UI. The OTP release
+adapter is implemented, but a real packaged-release install/reboot rehearsal remains an
+external deployment gate.
 
 ## Why Jido
 
@@ -434,9 +437,9 @@ ambiguous *prepare* holds a reservation whose token the lost reply was carrying,
 compensation releases it by artifact id through
 `NodeExecutor.abort_prepared_reservation/2` instead of leaving the node unable to
 prepare anything again. Fast patches are fully privileged inside their VM: the
-verifier is a policy gate, not a security sandbox. Independent authorization and
-signing should live outside the patchable application, ideally on a separate loader
-node or service.
+verifier is a policy gate, not a security sandbox. Independent authorization and signing
+live outside the patchable application, on a `signer` node — see
+[The signing service](#the-signing-service).
 
 Epoch, receipts, expected module identities, write-ahead operations, and quarantine
 state are durably journaled. After a rolled-back introduction the expected identity is
@@ -504,8 +507,10 @@ What happens between those two calls:
    burns the number instead of reissuing it. A node whose status cannot be read is a
    refusal, not a zero.
 4. **A signature the forge cannot produce for itself.** `config :ouroboros,
-   :forge_signer` names the module asked to sign the canonical manifest. The shipped
-   default, `Forge.Signer.Deny`, refuses everything.
+   :forge_signer` names the module asked to sign. The shipped default,
+   `Forge.Signer.Deny`, refuses everything; `Forge.Signer.Remote` submits the whole
+   artifact to a signing service on a `:signer` node. See
+   [The signing service](#the-signing-service).
 5. **A health-gated rollout.** `Rollout.deploy/4` checkpoints `:deploying` durably
    before any node is touched, then deploys with
    `health_check: {Rollout.Probe, :ready?, [module]}`. On each target the probe starts
@@ -595,7 +600,9 @@ measuring the one it displaces discards the only baseline that will ever exist.
   an Ed25519 key from configuration, which is fine for a dev loop and for tests. In
   production it would put the key inside the blast radius of the code it authorizes: an
   agent that can patch this application can read anything this application can read.
-  Configure a signer that calls a separate least-privileged service instead.
+  [The signing service](#the-signing-service) is the shipped alternative — and it
+  narrows custody rather than achieving it, because a signer node is still a connected
+  cluster member.
 - **One module per capability.** A forged capability is exactly one BEAM. The sandbox
   rejects a source that compiles to more, because an artifact carrying one binary cannot
   satisfy references to helper modules no target node has loaded. Helpers must already
@@ -611,6 +618,123 @@ measuring the one it displaces discards the only baseline that will ever exist.
 - **An `:eval` override is not signed.** A spec in `metadata.forge.eval` is covered by
   the signature; one passed to `Rollout.deploy/4` is the caller's word. Both are
   validated identically, which is a statement about runnability, not about authority.
+
+## The signing service
+
+Everything above is the agent's side of the seam. This is the other side: the piece that
+makes "an agent cannot approve its own patch" a property of where code runs rather than a
+policy someone remembered to configure.
+
+`Ouroboros.Upgrade.Signing.Service` runs **only** on a `:signer`-role node, whose whole
+supervision tree is that process and cluster formation. It loads its key at boot, applies
+its own policy to the whole artifact, journals every decision durably, and only then
+answers.
+
+### Standing one up
+
+```sh
+# On the signer host — 32 raw bytes, or their base64. Never in config, never in a release.
+head -c 32 /dev/urandom > /etc/ouroboros/signer.seed && chmod 600 /etc/ouroboros/signer.seed
+
+OUROBOROS_NODE_ROLE=signer
+OUROBOROS_SIGNER_KEY_PATH=/etc/ouroboros/signer.seed
+OUROBOROS_SIGNER_ID=release-key
+OUROBOROS_SIGNING_REQUIRE_EVAL=true    # recommended; see below
+```
+
+A `:signer` node with no readable key, an unparseable key, no signer id, or an unusable
+journal **refuses to boot**. That is deliberate: a signer that starts anyway and errors
+per request is indistinguishable, from the outside, from a signer that is deliberately
+denying — and those two need very different responses.
+
+Ask it for the public half and give it to the core nodes:
+
+```elixir
+{:ok, info} = :erpc.call(:"signer-1@10.0.0.30", Ouroboros.Upgrade.Signing.Service, :public_info, [])
+info.trusted_signers_entry
+# => "release-key:aG93ZHkgdGhlcmUsIHRoaXMgaXMgbm90IGEgcmVhbCBrZXk="
+```
+
+```sh
+# On every core host.
+OUROBOROS_SIGNING_NODE=signer-1@10.0.0.30
+OUROBOROS_UPGRADE_TRUSTED_SIGNERS="release-key:aG93ZHkgdGhlcmUsIHRoaXMgaXMgbm90IGEgcmVhbCBrZXk="
+```
+
+Naming `OUROBOROS_SIGNING_NODE` is what configures `Forge.Signer.Remote`; leave it unset
+and the forge keeps the shipped `Deny`. Nothing else about forging changes.
+
+### What the signer checks before a signature exists
+
+The forge hands over the **whole artifact**, not just the payload it wants signed — a
+payload is a hash of a manifest, and a manifest is a set of claims. `Signing.Policy`
+recomputes the claims:
+
+- **the manifest against the bytes.** sha256, md5, module name, and `vsn` are recomputed
+  from every BEAM actually submitted (and from the pre-image of a `:replace`), and the
+  same offline gates the loading node applies are applied here: the `-on_load` probe via
+  `:code.prepare_loading/1`, static `:erlang.load_nif/2` imports, protocol markers. A
+  requester that precomputed a flattering manifest is refused on arithmetic;
+- **the namespace, structurally.** Every module must be under `Ouroboros.Capability.`.
+  There is no configuration that widens this, so there is no code path on a signer node
+  that produces a signature for a control-plane module, whoever asks and however they
+  ask;
+- **provenance.** `metadata.forge` must carry a `source_sha256` and a test report with
+  zero failures and at least one pass. Green-because-everything-was-skipped is refused;
+- **declared evaluation criteria**, when `:signing_require_eval` is on: the artifact must
+  carry a `Rollout.Evaluation` spec the signer can validate. This is the switch that
+  turns "this capability declared, inside its own signature, how it would be judged" into
+  a precondition of being signed at all;
+- **rate**, per requester per minute, in a sliding window.
+
+Every refusal is a typed `{:refused, reason}`, and every one of them is journaled.
+
+What the signer deliberately does **not** check is anything only a target VM knows: epoch
+*ordering* (a signer has no view of any cluster's watermark — it checks only that the
+number is a positive integer), whether a `:replace` pre-image is current, and whether an
+introduced module is really absent. Those belong to the node executor and survive the
+signature untouched.
+
+### Every decision, before every answer
+
+```elixir
+{:ok, decisions} = :erpc.call(signer, Ouroboros.Upgrade.Signing.Service, :decisions, [])
+# => [%{sequence: 1, artifact_id: "019f…", epoch: 42, decision: :issued,
+#       modules: [%{module: Ouroboros.Capability.Echo, disposition: :introduce, sha256: "…"}],
+#       requester: :"core-1@10.0.0.11", signer_id: "release-key", findings: %{…}, at: "…"}]
+```
+
+Refusals are recorded for the same reason issuances are: a log with only successes
+cannot tell "nobody asked" from "something asked two thousand times and was turned away".
+The entry is checkpointed through `:signing_journal_storage` — a synced
+`Storage.DurableFile` in production — **before** the signature is returned, and a journal
+that will not accept the entry is a refusal to sign. The one asymmetry is deliberate and
+one-directional: the journal may record an issuance whose reply was lost in transit,
+never a signature that reached a requester without a record.
+
+### Honest limits
+
+- **A signer node is still a connected cluster member.** Any node that completes the
+  distribution handshake — cookie, and TLS if configured — can `:erpc` into the signing
+  service exactly like the forge does, and can do everything else `:erpc` allows on that
+  host. What it gets from the service is a *policy decision*: the namespace rule has no
+  bypass for any caller. TLS distribution and role isolation narrow this surface. They do
+  not eliminate it, and true air-gapped custody — a key on a host that is not a cluster
+  member, reached over a narrow audited channel — remains outside this runtime.
+- **The requester is self-reported.** The client sends its own node name; the service
+  journals it as a claim. The per-requester rate limit therefore bounds accidents, retry
+  storms, and honest clients, not an adversary who can vary it.
+- **The policy cannot re-run the build.** It proves the submitted bytes are internally
+  consistent and correctly namespaced, and that a test report claiming green arrived with
+  them. The link between that report and those bytes is the forge's assertion, carried
+  inside the signed metadata.
+- **There is no human in it.** "Independent" here means independent of the patchable
+  application, not independent of the cluster. A review queue is a different thing, and
+  this is not one.
+- **Key material is redacted, not protected.** The keypair is wrapped in a struct whose
+  `Inspect` implementation prints `[REDACTED]`, so a crash report or a logged state
+  cannot leak it by accident. Anything running on the signer node can still read the
+  process state directly. The boundary that matters is the host, not the struct.
 
 ## Agent effects
 
@@ -733,10 +857,25 @@ Node identity, role, cluster formation, and distribution transport are covered
 separately in [Running a cluster](#running-a-cluster).
 
 The forge signs with whatever `config :ouroboros, :forge_signer` names, and the shipped
-default refuses to sign anything. A production deployment that wants forged capabilities
-configures a signer that reaches a key held outside this application, and names that
-key's public half in `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. Configuring
-`Forge.Signer.Local` in production would let the agent approve its own code.
+default refuses to sign anything. Set `OUROBOROS_SIGNING_NODE` to a `:signer` node and
+that becomes `Forge.Signer.Remote`, which submits the whole artifact to a key this
+application cannot read — see [The signing service](#the-signing-service) for standing
+one up. Configuring `Forge.Signer.Local` in production would instead put the key in the
+configuration of the application whose code it authorizes, which is the same as letting
+the agent approve its own code.
+
+| Variable                                  | Read by | Meaning                                                    |
+| ----------------------------------------- | ------- | ---------------------------------------------------------- |
+| `OUROBOROS_SIGNER_KEY_PATH`               | signer  | file holding the Ed25519 seed: 32 raw bytes or their base64 |
+| `OUROBOROS_SIGNER_ID`                     | signer  | the identity this node signs as; must match the trusted-signers entry |
+| `OUROBOROS_SIGNING_REQUIRE_EVAL`          | signer  | `true` refuses to sign an artifact declaring no evaluation spec |
+| `OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE` | signer  | admissions per requester per minute (default 30)           |
+| `OUROBOROS_SIGNING_NODE`                  | core    | the signer node the forge submits to; unset keeps `Signer.Deny` |
+| `OUROBOROS_SIGNING_CALL_TIMEOUT_MS`       | core    | signing deadline (default 15000)                           |
+
+A node booted with `OUROBOROS_NODE_ROLE=signer` refuses to start unless the key path
+names a readable file and the signer id is set — checked once in `config/runtime.exs`
+with a message naming the variable, and again by the service when it loads the key.
 
 Production fails closed on unsigned patches. `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` is the
 injection point for trusted Ed25519 public keys: comma-separated
@@ -761,14 +900,16 @@ A node boots exactly one role, from `OUROBOROS_NODE_ROLE` (default `core`):
 | --------- | -------------------------------------------------- | --------------------------------------- |
 | `core`    | the full runtime — mesh, teams, sessions, journals, scheduler, control plane | running work |
 | `builder` | cluster formation only                              | compiling forged capabilities off the production host |
-| `signer`  | cluster formation only                              | holding a signing seam nothing else on the host can reach |
+| `signer`  | cluster formation plus `Upgrade.Signing.Service`    | holding the signing key, policy, and decision journal where nothing else on the host can reach them |
 
 A `builder` and a `signer` run *this same release*, booted differently. That is not
 convenience: the forge's artifact is verified against the loading node's exact OTP
 release, Elixir version, and architecture, so a builder that is not runtime-identical to
 its targets produces BEAMs every target rejects. One artifact, one runtime, three roles.
 
-An unrecognized role refuses the boot rather than falling back to `core`.
+An unrecognized role refuses the boot rather than falling back to `core`. So does a
+`signer` whose key is missing or malformed — see
+[The signing service](#the-signing-service).
 
 ```sh
 OUROBOROS_NODE_ROLE=builder    # this host only compiles
@@ -938,9 +1079,12 @@ Topology churn is logged as it happens, with the arriving node's role, because
   the `Ouroboros.Capability.` namespace policy and the protected-module list.
 - **Roles reduce blast radius; they do not contain a compromise.** A builder holds no
   teams, sessions, journals, grants, or control plane, so compromising it yields a
-  compiler rather than a fleet. It is still a fully authorized cluster member. Real
-  containment needs the build host outside the cluster's trust domain entirely, reached
-  by something narrower than Erlang distribution.
+  compiler rather than a fleet. A signer holds one process, whose policy refuses a
+  control-plane patch to every caller alike — but the host is still a fully authorized
+  cluster member, so a connected node can call the signing service, and can reach the
+  signer's VM by every other route `:erpc` offers. Real containment needs the build and
+  signing hosts outside the cluster's trust domain entirely, reached by something
+  narrower than Erlang distribution.
 - **Formation is not fencing.** libcluster connects nodes. It has no quorum, no
   partition policy, and no opinion about a node that comes back with stale state.
   `:global.trans/2` narrows duplicate-start races in a *healthy connected* cluster and
@@ -988,9 +1132,18 @@ Topology churn is logged as it happens, with the arriving node's role, because
 - The forge compiles and tests candidate capabilities in an isolated, non-distributed
   build peer, and that peer can now run on a least-privileged `builder` node. It still
   shares that host's user, filesystem, and network, and a builder is still a fully
-  authorized cluster member. Real OS sandboxing and an independent signing service are
-  external. Capability rollout records accumulate; only settled `:rolled_back` entries
-  are pruned when the store exceeds `:ouroboros, :capability_rollout_limit`.
+  authorized cluster member. Real OS sandboxing is external. Capability rollout records
+  accumulate; only settled `:rolled_back` entries are pruned when the store exceeds
+  `:ouroboros, :capability_rollout_limit`.
+- Signing runs on a `signer` node: the key is read at boot from a file that host mounts,
+  an independent policy recomputes the full artifact and structurally refuses anything
+  outside `Ouroboros.Capability.`, and every decision is journaled durably before a
+  signature is returned. What is still external is custody *outside the distribution
+  trust domain* — a signer node is a connected cluster member, so any node that
+  completes the handshake can call the service and reach that VM by other routes. The
+  requester identity behind the rate limit is self-reported, and there is no human
+  review queue. Signing decisions accumulate up to
+  `:ouroboros, :signing_journal_limit`, then trim oldest-first.
 - Evaluation gates run a signed, declarative probe set on every target between commit
   and promotion, and champion/challenger holds a replacement to the version it displaces
   on pass count and total time. What that does not do: model cost, sample real traffic,

@@ -27,19 +27,25 @@ This slice is complete when all of the following are executable and tested:
    concrete target, identified from server-side agent state rather than the signal,
    bounded so no effect blocks the agent, and recorded whether it ran or was refused.
 8. Nodes form a cluster without anyone connecting them by hand, boot a role-shaped tree
-   (`:core` full, `:builder`/`:signer` formation-only), refuse to place work on a node
-   that cannot run it, relocate forge builds onto a least-privileged builder, and ship
-   as one release whose node identity, cookie, and distribution transport are explicit
-   and fail closed.
-9. The documentation distinguishes those proofs from partition tolerance, full-host
-   provider durability, billing, real repository effects, OS-level sandboxing of
-   generated code, independent signing custody, evaluation gates, a real
-   packaged-release install/reboot rehearsal, any claim that effect grants sandbox
-   loaded code, and any claim that node roles or placement checks constrain a node that
-   has already completed the distribution handshake.
+   (`:core` full, `:builder` formation-only, `:signer` formation plus the signing
+   service), refuse to place work on a node that cannot run it, relocate forge builds
+   onto a least-privileged builder, and ship as one release whose node identity, cookie,
+   and distribution transport are explicit and fail closed.
+9. The signing authority runs on a `:signer` node rather than inside the application it
+   authorizes: the key is read at boot from a file that node mounts, an independent
+   policy recomputes the whole submitted artifact and refuses anything outside
+   `Ouroboros.Capability.`, and every decision — issued and refused — is durably
+   journaled before any signature is returned.
+10. The documentation distinguishes those proofs from partition tolerance, full-host
+    provider durability, billing, real repository effects, OS-level sandboxing of
+    generated code, signing custody *outside the distribution trust domain*, evaluation
+    beyond a declared spec, a real packaged-release install/reboot rehearsal, any claim
+    that effect grants sandbox loaded code, and any claim that node roles, placement
+    checks, or signer isolation constrain a node that has already completed the
+    distribution handshake.
 
-The first eight are local implementation claims backed by deterministic tests. None
-imply the external claims in item nine.
+The first nine are local implementation claims backed by deterministic tests. None
+imply the external claims in item ten.
 
 ## Planes and ownership
 
@@ -50,9 +56,13 @@ and how it finds the others.
 
 Role (`:core`, `:builder`, `:signer`) is resolved once, at application start, before any
 child is supervised — an unrecognized role raises rather than booting the privileged
-tree. `:core` starts the full runtime; `:builder` and `:signer` start formation and
-nothing else, because neither lane needs a supervised process: a forge build is
-`:peer.start/1` plus a call, and signing is a function over a key.
+tree. `:core` starts the full runtime. `:builder` starts formation and nothing else,
+because a forge build is `:peer.start/1` plus a call. `:signer` starts formation and one
+process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy, and
+journals every decision. That process leads the `rest_for_one` chain on a signer, so the
+node is not askable before its key is loaded, and it refuses to boot — key missing,
+malformed, unidentified, or journal unusable — rather than starting into a state where
+denial and misconfiguration look identical.
 
 Formation is libcluster, off by default, selected by `OUROBOROS_CLUSTER_STRATEGY`. It
 sits at the *tail* of the application's `rest_for_one` chain on purpose: it connects and
@@ -289,7 +299,63 @@ Forge stages, each with its own named refusal:
    connected cluster; it is not partition-safe, and the defence that does not depend on
    coordination is the target's own epoch monotonicity check.
 4. `Forge.Signer` is the seam the agent cannot supply for itself. The forge never holds
-   a key; it asks the configured module and the default refuses everything.
+   a key; it asks the configured module and the default refuses everything. The
+   behaviour has two callbacks: `sign/2` takes the canonical payload, and the optional
+   `sign_artifact/2` takes the whole artifact. The forge prefers the second whenever a
+   signer exports it, because a payload is a hash of a manifest and a signer holding
+   only the hash cannot check the manifest against the bytes it describes.
+   `Forge.Signer.Remote` implements it; `Deny` and `Local` do not and are unchanged.
+
+### Signing plane
+
+`Upgrade.Signing.Service` is the other side of that seam, and it runs where the forge
+does not: on a `:signer`-role node whose supervision tree contains this process and
+cluster formation. Three properties make it independent rather than merely remote.
+
+**The key is outside the patchable application.** It is read at `init/1` from the file
+named by `OUROBOROS_SIGNER_KEY_PATH` (32 raw bytes or their base64), derived into an
+Ed25519 keypair, and held in process state wrapped in a struct whose `Inspect`
+implementation redacts it — so a crash report, a logged state, or an interpolated
+exception cannot print it. `public_info/0` publishes the public half and renders the
+exact `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` entry a core node needs; there is no accessor
+for the private half anywhere. `Forge.Signer.Local`, still shipped for dev loops, reads
+its key from the configuration of the application it authorizes, which is precisely the
+arrangement this replaces.
+
+**The policy sees the whole artifact.** `Signing.Policy.Default` recomputes every
+manifest claim from the BEAM bytes submitted — module name, sha256, md5, `vsn`, the
+`:code.prepare_loading/1` on-load probe, static `:erlang.load_nif/2` imports, protocol
+markers — for the new binary and, on a `:replace`, its pre-image. It requires every
+module to be under `Ouroboros.Capability.`, with no configuration that widens that; it
+requires `metadata.forge` to carry a `source_sha256` and a test report with no failures
+and at least one pass; and under `:signing_require_eval` it requires a
+`Rollout.Evaluation` spec it can validate. What it deliberately does *not* check is
+anything only a target VM knows: epoch ordering (a signer has no view of any cluster's
+watermark), pre-image currency, and module absence. Those stay with the executor and
+survive the signature entirely. Every failure is `{:refused, reason}`; nothing raises
+across the boundary, because an exception reaching the caller through `:erpc` would be
+indistinguishable from transport ambiguity.
+
+**Every decision is journaled before it is answered.** `Signing.Journal` is a bounded
+record of issuances *and* refusals — artifact id, epoch, modules and dispositions,
+requester, decision, reason, findings — checkpointed through
+`:signing_journal_storage` (`Storage.DurableFile` in production) before the reply is
+sent. A journal that will not accept the entry is a refusal to sign. The one asymmetry
+is deliberate: the journal may record an issuance whose reply was lost, never a
+signature that was returned without a record.
+
+`Forge.Signer.Remote` is the client. It resolves the target from `:node` or
+`:signing_node`, requires `Cluster.ensure_role(node, :signer)` before submitting, sends
+the artifact plus an advisory payload over a bounded `:erpc`, and converts every
+transport outcome into a typed error. The advisory payload is cross-checked and
+discarded: the signature is always over bytes the service derives itself, so a
+disagreement means version skew and stops the deployment rather than producing a
+signature over bytes the requester did not expect.
+
+Admission control sits in front of all of it: a per-requester sliding-window rate limit
+and a maximum submitted artifact size. The requester is self-reported and journaled as a
+claim, so the limit bounds accidents and retry storms rather than adversaries — see
+"Safety boundaries" for what a connected node can do regardless.
 
 `Rollout.deploy/4` checkpoints `:deploying` in the durable `Rollout.Registry` before any
 node is mutated, deploys with `health_check: {Rollout.Probe, :ready?, [module]}`,
@@ -455,7 +521,15 @@ rehearsed lane can prove restart persistence or an ERTS change.
   build peer is isolated from the cluster, not from the build host.
 - The forge holds no signing key and constructs no signature. `:forge_signer` defaults to
   a module that refuses, and a signer whose key lives in this application's configuration
-  lets the agent approve its own code.
+  (`Signer.Local`) lets the agent approve its own code. `Signing.Service` on a `:signer`
+  node moves the key onto a host the patchable application does not run on, applies an
+  independent policy to the full artifact before a signature exists, and journals every
+  decision durably before answering. That is a narrower blast radius, not custody: the
+  signer node is a connected cluster member, so any node that completes the distribution
+  handshake can call the same service the forge calls. What such a node gets is a policy
+  decision — the `Ouroboros.Capability.` namespace rule has no bypass for any caller,
+  and the per-requester rate limit is keyed on a self-reported claim. Custody outside the
+  distribution trust domain remains external.
 - Agent effect grants gate the *action layer* — the typed signals a well-behaved agent
   flow travels through — and are deny-by-default, durable, and checked against the
   concrete attempt. They are not a sandbox and not a capability system. Any loaded BEAM
@@ -489,11 +563,12 @@ rehearsed lane can prove restart persistence or an ERTS change.
   `:core` nodes, forge builds onto `:builder` nodes — are misconfiguration detection
   above that fact, in exactly the same sense as the `Ouroboros.Capability.` namespace
   policy. A hostile connected node never calls those functions at all.
-- Node role narrows blast radius rather than containing a compromise. A `:builder` or
-  `:signer` node boots cluster formation and nothing else, so it holds no teams,
-  sessions, journals, grants, or control plane; it remains a fully authorized member of
-  the cluster. Containment requires the build and signing hosts outside the cluster's
-  trust domain, reached through something narrower than Erlang distribution.
+- Node role narrows blast radius rather than containing a compromise. A `:builder` node
+  boots cluster formation and nothing else; a `:signer` node adds only the signing
+  service. Neither holds teams, sessions, journals, grants, or a control plane, and both
+  remain fully authorized members of the cluster. Containment requires the build and
+  signing hosts outside the cluster's trust domain, reached through something narrower
+  than Erlang distribution.
 - The OTP releases directory is deployment-owned infrastructure. Content addressing,
   exclusive links, and fsync do not defend against another OS principal that can replace
   files in that directory.
@@ -533,6 +608,14 @@ Implemented:
   deadline, always stopped, returning only serializable terms);
 - a signing seam the forge cannot satisfy for itself (`Forge.Signer`, defaulting to
   `Deny`), with the artifact re-verified against trusted keys on every loading node;
+- a signing *service* on the other side of that seam (`Upgrade.Signing.Service` on a
+  `:signer` node, reached by `Forge.Signer.Remote`): the key read at boot from a file
+  that node mounts and never leaves its process, an independent policy that recomputes
+  the whole submitted artifact and structurally refuses anything outside
+  `Ouroboros.Capability.`, an optional requirement that the artifact declare a valid
+  evaluation spec, a per-requester rate limit, and a durable journal of every decision
+  that must be acknowledged before a signature is returned. A signer node with no
+  readable key refuses to boot;
 - durable, crash-safe epoch allocation above every target node's journal
   (`Upgrade.Epoch`);
 - a durable deployment-level cluster journal above the durable node executors
@@ -573,14 +656,20 @@ Still external:
   rate or cost budget, and no durable effect log: the audit trail is a bounded ring in
   the acting agent's state and dies with it.
 
-- **an independent signing/review service.** The seam exists, the default refuses, and a
-  `:signer` node is now a real least-privileged host rather than a diagram. But the only
-  shipped implementation (`Signer.Local`) reads its key from this application's
-  configuration, and a signer node is still a fully authorized cluster member: any
-  connected node can `:erpc` it and read that configuration. A key an agent's own
-  cluster can read is a key that agent can use to approve itself. Production custody
-  belongs behind an HSM or a review queue reached by something narrower than Erlang
-  distribution.
+- **signing custody outside the distribution trust domain.** The service now exists and
+  is real: the key lives on a `:signer` node, in one process, read from a file that node
+  mounts, and an independent policy decides on the full artifact before any signature is
+  produced. An agent that patches a core node cannot read that key, and cannot obtain a
+  signature for a control-plane module at any price, because no code path on the signer
+  produces one. What remains external is the rest of custody. A signer node is still a
+  connected cluster member: a node that completes the distribution handshake can call
+  the signing service directly, and can also do everything else `:erpc` allows on that
+  host. Role isolation and TLS distribution narrow that surface; they do not close it.
+  The per-requester rate limit is keyed on a self-reported claim. And there is no human
+  in the loop — the policy is mechanical, so "independent" here means independent of the
+  patchable application, not independent of the cluster. An HSM, a review queue, or a
+  signing host reached over something narrower than Erlang distribution are all still
+  outside this codebase.
 - **real OS sandboxing.** The build peer is isolated from the *cluster*, not from the
   *host*: same user, same filesystem, same network. A `:builder` node moves that host
   off the production path, which is worth doing and is not containment — the builder
@@ -597,8 +686,10 @@ Still external:
   is a measurement of production behaviour: there is no cost model, no canary cohort on
   real traffic, no repetition, and wall-clock over a handful of probes carries little
   signal, which is why the regression budget is deliberately loose. An artifact that
-  declares no spec is still promoted on liveness alone; requiring one is a signer policy
-  this codebase makes possible and does not enforce.
+  declares no spec is still promoted on liveness alone — unless the signer was
+  configured with `:signing_require_eval`, which refuses to sign one at all. That switch
+  exists and defaults to off; what does not exist is any judgement about whether a
+  declared spec is a *good* spec.
 - **package assembly and reboot rehearsal** around the implemented `.appup`/`.relup`
   metadata/inspection lane. A forged capability lives in the running VM only; a restart
   boots the original release without it.
@@ -627,9 +718,10 @@ That architecture creates promising future capabilities:
 - evaluator-driven repair loops whose execution identity survives coordinator churn;
 - heterogeneous provider workers selected by capability or policy; and
 - build/sign/loader services an agent cannot self-approve. The least-privileged *roles*
-  exist and forge builds already relocate onto a builder node; what remains is moving
-  those hosts outside the distribution trust domain, so that reaching them is a narrow
-  request rather than full `:erpc` authority in both directions.
+  exist, forge builds already relocate onto a builder node, and the signing authority is
+  a real service on a signer node with its own key and its own policy; what remains is
+  moving those hosts outside the distribution trust domain, so that reaching them is a
+  narrow request rather than full `:erpc` authority in both directions.
 
 ## Primary references
 

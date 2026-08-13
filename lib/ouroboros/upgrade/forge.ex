@@ -148,8 +148,7 @@ defmodule Ouroboros.Upgrade.Forge do
     {module, _signer_opts} = Signer.configured()
 
     with {:ok, signer_id} <- signer_id(opts),
-         payload = Artifact.signing_payload(artifact, signer_id),
-         {:ok, signature} <- request_signature(module, payload, signer_id),
+         {:ok, signature} <- request_signature(module, artifact, signer_id),
          :ok <- validate_signature(signature) do
       {:ok, %{artifact | signature: %{signer: signer_id, value: signature}}}
     end
@@ -168,8 +167,21 @@ defmodule Ouroboros.Upgrade.Forge do
     end
   end
 
-  defp request_signature(module, payload, signer_id) do
-    case module.sign(payload, signer_id) do
+  # A signer that can decide on the whole artifact is asked for the whole artifact. That
+  # is not a convenience: a payload is a hash of a manifest, and a signer holding only the
+  # hash cannot check the manifest against the bytes it describes, which is precisely what
+  # an independent signer exists to do. Signers that implement only `sign/2` — `Deny`,
+  # `Local` — take the path they always took, and the bytes covered by the signature are
+  # identical either way.
+  defp request_signature(module, artifact, signer_id) do
+    result =
+      if Signer.artifact_signer?(module) do
+        module.sign_artifact(artifact, signer_id)
+      else
+        module.sign(Artifact.signing_payload(artifact, signer_id), signer_id)
+      end
+
+    case result do
       {:ok, signature} -> {:ok, signature}
       {:error, reason} -> {:error, {:signing_failed, reason}}
       other -> {:error, {:signing_failed, {:invalid_signer_result, other}}}

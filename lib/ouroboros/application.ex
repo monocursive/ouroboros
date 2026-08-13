@@ -76,13 +76,20 @@ defmodule Ouroboros.Application do
     Supervisor.start_link(children(role), strategy: :rest_for_one, name: Ouroboros.Supervisor)
   end
 
-  # A `:builder` or `:signer` node is a least-privileged member of the same release: it
-  # holds the code and the cluster membership needed to be asked for a build or a
-  # signature, and nothing else. Neither lane needs a supervised process — a forge build
-  # is `:peer.start/1` plus a call, and signing is a function over a key — so the honest
-  # minimum here is cluster formation alone. No teams, stores, schedulers, registries,
-  # workspaces, recovery loops, or control plane exist on those hosts to be reached.
-  defp children(role) when role in [:builder, :signer], do: [Ouroboros.Cluster]
+  # A `:builder` node is a least-privileged member of the same release: it holds the code
+  # and the cluster membership needed to be asked for a build, and nothing else. A forge
+  # build is `:peer.start/1` plus a call, so the honest minimum is cluster formation
+  # alone. No teams, stores, schedulers, registries, workspaces, recovery loops, or
+  # control plane exist on that host to be reached.
+  defp children(:builder), do: [Ouroboros.Cluster]
+
+  # A `:signer` node is the same posture plus the one process its role names. The service
+  # owns a key, a policy, and a durable decision journal; it refuses to boot without all
+  # three, so a signer host that is misconfigured fails here rather than at the first
+  # request. It leads the chain for the reason cluster formation trails it everywhere
+  # else: formation connects this node to a cluster that can then ask it for signatures,
+  # and there is no reason to be askable before the key is loaded.
+  defp children(:signer), do: [Ouroboros.Upgrade.Signing.Service, Ouroboros.Cluster]
 
   defp children(:core) do
     children =
