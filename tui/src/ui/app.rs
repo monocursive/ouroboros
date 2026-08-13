@@ -23,11 +23,13 @@
 //! `runtime.status` would fork a process per provider every three seconds.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::config::{Config, Defaults};
 use crate::model::{
     self, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event, EventType, Plane,
     ProviderEntry, RuntimeStatus, SessionInfo, StartRequest, StartedRef,
@@ -519,6 +521,91 @@ pub enum PromptKind {
     GrantsPrincipal,
 }
 
+/// How many rows an approval-mode cycler has: the four the schema declares, plus the
+/// "say nothing" row that is not one of them.
+pub const APPROVAL_ROWS: usize = ApprovalMode::ALL.len() + 1;
+
+/// The mode a cycler row means. Index 0 is "leave it to the plane", which is an *absent*
+/// parameter rather than `"default"` — the gateway's `default` is itself a value the
+/// schema declares, and sending it is a different statement from sending nothing.
+///
+/// Shared by the new-session dialog and the settings overlay so the two cannot disagree
+/// about what row zero means.
+pub fn approval_at(index: usize) -> Option<ApprovalMode> {
+    index
+        .checked_sub(1)
+        .and_then(|index| ApprovalMode::ALL.get(index).copied())
+}
+
+/// The inverse: where a stored mode sits in the cycler. An unknown mode lands on "unset",
+/// which is the only honest place for a value this build cannot name.
+pub fn approval_index(mode: Option<ApprovalMode>) -> usize {
+    match mode {
+        None => 0,
+        Some(mode) => ApprovalMode::ALL
+            .iter()
+            .position(|candidate| *candidate == mode)
+            .map(|index| index + 1)
+            .unwrap_or(0),
+    }
+}
+
+/// What a cycler row reads as.
+pub fn approval_label(index: usize) -> String {
+    match approval_at(index) {
+        None => "unset — the plane's own default".to_string(),
+        Some(mode) => format!("{} — {}", mode.as_str(), mode.describe()),
+    }
+}
+
+/// One row of a provider picker that has to be able to show a stored default the runtime
+/// does not report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderChoice {
+    /// No default: every session states its own provider, as it always did.
+    Unset,
+    /// A provider this runtime reports, and whether its probe found an executable.
+    Probed { name: String, ready: bool },
+    /// The config file names it and this runtime's provider list does not.
+    Unserved { name: String },
+}
+
+impl ProviderChoice {
+    /// The name to store, or `None` for the "unset" row.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Unset => None,
+            Self::Probed { name, .. } | Self::Unserved { name } => Some(name),
+        }
+    }
+}
+
+/// The rows the settings provider picker offers.
+///
+/// "unset" first, then whatever `runtime.providers` reported, then the stored default when
+/// this runtime does not report it. That last row is why this is a function rather than an
+/// index into the probe list: a config written on another machine — or before a provider
+/// was removed — names something the probe will not list, and a picker that silently
+/// dropped it would show an operator a default they no longer have.
+pub fn provider_choices(providers: &[ProviderEntry], stored: Option<&str>) -> Vec<ProviderChoice> {
+    let mut choices = vec![ProviderChoice::Unset];
+
+    choices.extend(providers.iter().map(|entry| ProviderChoice::Probed {
+        name: entry.provider.clone(),
+        ready: entry.ready(),
+    }));
+
+    if let Some(stored) = stored.map(str::trim).filter(|stored| !stored.is_empty()) {
+        if !providers.iter().any(|entry| entry.provider == stored) {
+            choices.push(ProviderChoice::Unserved {
+                name: stored.to_string(),
+            });
+        }
+    }
+
+    choices
+}
+
 /// One row of the new-session dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewField {
@@ -533,12 +620,16 @@ pub enum NewField {
 
 /// The dialog that turns "start a session" into a set of stated choices.
 ///
-/// Every field is a decision this client refuses to make on an operator's behalf, which is
-/// why they are all on screen at once rather than behind defaults. The provider list comes
-/// from `runtime.providers` — the same answer the Dashboard shows — and an entry whose
-/// probe found no executable is drawn dim but is **still selectable**: "installed" means a
-/// file exists, the runtime is the authority on whether a session can start, and refusing
-/// on a heuristic would be this client overruling it.
+/// Every field is on screen at once, and every one of them stays editable. What the config
+/// file supplies is where the *cursor starts*, never what gets sent: a prefilled provider
+/// is one the operator chose once, explicitly, in a file they can read, which is a
+/// different thing from a node's default deciding for them. With no config the dialog is
+/// exactly what it was — provider on row one, nothing preselected but the first entry.
+///
+/// The provider list comes from `runtime.providers` — the same answer the Dashboard shows
+/// — and an entry whose probe found no executable is drawn dim but is **still
+/// selectable**: "installed" means a file exists, the runtime is the authority on whether
+/// a session can start, and refusing on a heuristic would be this client overruling it.
 #[derive(Debug)]
 pub struct NewSession {
     pub field: NewField,
@@ -553,10 +644,18 @@ pub struct NewSession {
     /// Why the last attempt did not start a session. Shown here rather than in the notice
     /// line: the operator is still looking at the form that produced it.
     pub error: Option<String>,
+    /// The provider the config file names, until the probe list arrives and the cursor can
+    /// be put on it.
+    ///
+    /// A name rather than an index because the list it indexes into is fetched
+    /// asynchronously and may not exist when this dialog opens. Cleared the moment it is
+    /// placed — or the moment the operator moves the cursor themselves, so a providers
+    /// answer that lands late cannot move a choice they already made.
+    wanted_provider: Option<String>,
 }
 
 impl NewSession {
-    fn new(plane: Plane, workspace: String) -> Self {
+    fn new(plane: Plane, workspace: String, defaults: &Defaults) -> Self {
         Self {
             field: NewField::Provider,
             request: StartRequest {
@@ -564,11 +663,34 @@ impl NewSession {
                 ..StartRequest::new(plane)
             },
             provider: 0,
-            // `default` first: the honest starting point is "whatever the provider does",
-            // not a policy this dialog picked.
-            approval: 0,
+            approval: approval_index(defaults.approval_mode()),
             pending: false,
             error: None,
+            wanted_provider: defaults.provider.clone(),
+        }
+    }
+
+    /// Puts the cursor on the provider the config names, once the list is known.
+    ///
+    /// Answers the stored name back when this runtime does not serve it, so the caller can
+    /// say so rather than leaving the cursor somewhere the operator did not choose. Idle
+    /// on every later call — a default is applied once, and the cursor is the operator's
+    /// afterwards.
+    fn place_provider(&mut self, providers: &[ProviderEntry]) -> Option<String> {
+        let wanted = self.wanted_provider.clone()?;
+
+        if providers.is_empty() {
+            return None;
+        }
+
+        self.wanted_provider = None;
+
+        match providers.iter().position(|entry| entry.provider == wanted) {
+            Some(index) => {
+                self.provider = index;
+                None
+            }
+            None => Some(wanted),
         }
     }
 
@@ -585,24 +707,12 @@ impl NewSession {
     }
 
     pub fn approval_mode(&self) -> Option<ApprovalMode> {
-        // Index 0 is "leave it to the provider", which is an absent parameter rather than
-        // `"default"` — the gateway's `default` is itself a value the schema declares, and
-        // sending nothing is a different statement from sending it.
-        self.approval
-            .checked_sub(1)
-            .and_then(|index| ApprovalMode::ALL.get(index).copied())
+        approval_at(self.approval)
     }
 
     /// The approval row's label, including the "say nothing" option at index 0.
     pub fn approval_label(&self) -> String {
-        match self.approval_mode() {
-            None => "unset — the plane's own default".to_string(),
-            Some(mode) => format!("{} — {}", mode.as_str(), mode.describe()),
-        }
-    }
-
-    fn approval_len() -> usize {
-        ApprovalMode::ALL.len() + 1
+        approval_label(self.approval)
     }
 
     /// The request as the fields currently read.
@@ -645,13 +755,15 @@ impl NewSession {
                 }
             }
             NewField::Provider if providers > 0 => {
+                // The operator is choosing now, so a providers answer still in flight must
+                // not move the cursor out from under them afterwards.
+                self.wanted_provider = None;
                 self.provider =
                     (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
             }
             NewField::ApprovalMode => {
-                self.approval = (self.approval as isize + delta)
-                    .rem_euclid(Self::approval_len() as isize)
-                    as usize;
+                self.approval =
+                    (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
             }
             _ => {}
         }
@@ -666,9 +778,120 @@ impl NewSession {
     }
 }
 
+/// One editable row of the settings overlay. The facts above them are not rows: they are
+/// what the runtime reported, and nothing here can change them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsField {
+    Provider,
+    Workspace,
+    ApprovalMode,
+    Save,
+}
+
+impl SettingsField {
+    pub const ALL: [SettingsField; 4] = [
+        SettingsField::Provider,
+        SettingsField::Workspace,
+        SettingsField::ApprovalMode,
+        SettingsField::Save,
+    ];
+}
+
+/// The `,` overlay: what the runtime says, and what this client remembers.
+///
+/// The two halves are labelled separately and never mixed. Above the rows are facts read
+/// off the handshake and this process's own paths; the rows themselves are the config
+/// file's, and saving is the only thing that writes one. A settings screen that showed a
+/// stored provider beside a node name as if both came from the same place would be this
+/// client claiming the runtime confirmed a preference it has never been told about.
+#[derive(Debug)]
+pub struct Settings {
+    pub field: SettingsField,
+    /// Index into [`provider_choices`], where 0 is "unset".
+    pub provider: usize,
+    pub workspace: String,
+    pub approval: usize,
+    /// The stored provider, until the probe list arrives and the cursor can be put on it.
+    wanted_provider: Option<String>,
+    /// Whether anything has been typed or cycled, so closing can say what it discards.
+    pub edited: bool,
+}
+
+impl Settings {
+    fn place_provider(&mut self, choices: &[ProviderChoice]) {
+        let Some(wanted) = self.wanted_provider.clone() else {
+            return;
+        };
+
+        // One row is always present, so a list of one is a list that has not arrived.
+        if choices.len() < 2 {
+            return;
+        }
+
+        self.wanted_provider = None;
+
+        // `provider_choices` appends an unserved stored default rather than dropping it,
+        // so a stored name always has a row here — which is what makes this a `position`
+        // that cannot silently land on "unset".
+        if let Some(index) = choices
+            .iter()
+            .position(|choice| choice.name() == Some(wanted.as_str()))
+        {
+            self.provider = index;
+        }
+    }
+
+    pub fn approval_label(&self) -> String {
+        approval_label(self.approval)
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            SettingsField::Workspace => Some(&mut self.workspace),
+            _ => None,
+        }
+    }
+
+    fn move_field(&mut self, delta: isize) {
+        let index = SettingsField::ALL
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0) as isize;
+
+        let next = (index + delta).rem_euclid(SettingsField::ALL.len() as isize) as usize;
+        self.field = SettingsField::ALL[next];
+    }
+
+    fn cycle(&mut self, delta: isize, providers: usize) {
+        match self.field {
+            SettingsField::Provider if providers > 0 => {
+                self.wanted_provider = None;
+                self.edited = true;
+                self.provider =
+                    (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
+            }
+            SettingsField::ApprovalMode => {
+                self.edited = true;
+                self.approval =
+                    (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Overlay {
     Help,
+    /// The first-run panel: facts and a key legend, shown once and dismissed by any key.
+    ///
+    /// It asks nothing. There is no wizard here because there is nothing this client needs
+    /// an answer to before it can work — the runtime is already running by the time this
+    /// is drawn, and everything the panel says is something it, or this process, already
+    /// knows.
+    Welcome,
+    /// This client's own preferences, beside the facts the runtime reports.
+    Settings(Box<Settings>),
     Quit {
         options: Vec<(String, Quit)>,
         choice: usize,
@@ -787,9 +1010,24 @@ pub struct App {
     /// assumption. The runtime resolves it, not this process — an `ouro` attached over an
     /// SSH tunnel is naming a path on the *runtime's* filesystem.
     pub launch_dir: Option<String>,
+    /// This client's preferences, as the file said them plus whatever the settings overlay
+    /// has changed since. Never a runtime fact, and labelled as such wherever it is drawn.
+    pub config: Config,
+    /// Where [`config`](Self::config) is read from and written to. `None` only when there
+    /// is nowhere to keep preferences at all, which the settings overlay says out loud.
+    pub config_path: Option<PathBuf>,
+    /// The data directory this client told the runtime to use, when it started one.
+    ///
+    /// `None` in attach mode on purpose: a client that did not spawn this runtime does not
+    /// know where that runtime keeps its files, and a local path printed under a remote
+    /// node would be a guess wearing a fact's clothes.
+    pub data_dir: Option<String>,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
     dropped_seen: u64,
+    /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
+    /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
+    save_pending: bool,
 }
 
 impl App {
@@ -817,10 +1055,24 @@ impl App {
             quit: None,
             cursors: Cursors::default(),
             launch_dir: None,
+            config: Config::default(),
+            config_path: None,
+            data_dir: None,
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
             dropped_seen: 0,
+            save_pending: false,
         }
+    }
+
+    /// The config this App wants written, once. Drained by the driver, which owns the
+    /// filesystem; see [`super::persist`].
+    pub fn take_config_save(&mut self) -> Option<Config> {
+        if !std::mem::take(&mut self.save_pending) {
+            return None;
+        }
+
+        Some(self.config.clone())
     }
 
     /// Everything the driver should send, in order. Draining is the only way a request
@@ -1188,7 +1440,10 @@ impl App {
             Tag::Providers => match result {
                 Ok(value) => {
                     let providers = ProviderEntry::decode_list(&value);
-                    self.providers.ok(providers, ticks, PROVIDER_TICKS)
+                    self.providers.ok(providers, ticks, PROVIDER_TICKS);
+                    // A dialog opened before the list arrived has a default it could not
+                    // point at yet. This is the moment it can.
+                    self.place_default_provider();
                 }
                 Err(error) => self
                     .providers
@@ -1776,6 +2031,9 @@ impl App {
             KeyCode::Char('a') => self.reopen_approval(),
             KeyCode::Char('n') => self.open_new_session(),
             KeyCode::Char('x') => self.open_close_confirm(),
+            // `,` is free in every other dispatch here, and it is the punctuation a
+            // terminal reader already expects to mean "preferences".
+            KeyCode::Char(',') => self.open_settings(),
             _ => {}
         }
     }
@@ -2186,7 +2444,14 @@ impl App {
     /// Ctrl-C: the active turn, never this process.
     fn interrupt(&mut self) {
         if self.overlay.is_some() {
-            self.overlay = None;
+            // Closing the welcome panel is closing it, however the key was pressed. The
+            // marker is what stops it coming back, and it is written on every way out.
+            if matches!(self.overlay, Some(Overlay::Welcome)) {
+                self.dismiss_welcome();
+            } else {
+                self.overlay = None;
+            }
+
             return;
         }
 
@@ -2290,8 +2555,61 @@ impl App {
 
         self.overlay = Some(Overlay::New(Box::new(NewSession::new(
             Plane::Interactive,
-            self.launch_dir.clone().unwrap_or_default(),
+            self.default_workspace(),
+            &self.config.defaults,
         ))));
+
+        // The list may already be here, in which case the cursor can be placed now rather
+        // than on the next answer.
+        self.place_default_provider();
+    }
+
+    /// The workspace the `n` dialog and the settings overlay start from.
+    ///
+    /// A stored default first — it is the one the operator wrote down — then the directory
+    /// this client was launched in, which is a good guess and a bad assumption. Both are
+    /// prefilled and editable; neither is sent unless it is still there when start is
+    /// pressed.
+    fn default_workspace(&self) -> String {
+        self.config
+            .defaults
+            .workspace
+            .clone()
+            .or_else(|| self.launch_dir.clone())
+            .unwrap_or_default()
+    }
+
+    /// Points whichever picker is open at the provider the config names.
+    ///
+    /// Called both when a dialog opens and when a providers answer lands, because the two
+    /// can happen in either order and the cursor has to end up in the same place either
+    /// way.
+    fn place_default_provider(&mut self) {
+        let providers = self.providers.value.clone().unwrap_or_default();
+        let stored = self.config.defaults.provider.clone();
+
+        let unserved = match self.overlay.as_mut() {
+            Some(Overlay::New(dialog)) => dialog.place_provider(&providers),
+            Some(Overlay::Settings(settings)) => {
+                let choices = provider_choices(&providers, stored.as_deref());
+                settings.place_provider(&choices);
+                None
+            }
+            _ => None,
+        };
+
+        if let Some(name) = unserved {
+            // Said rather than silently ignored: a default that does not exist here is the
+            // operator's to know about, and the list on screen is what this runtime does
+            // serve.
+            self.inform(
+                format!(
+                    "the default provider {name:?} is not one this runtime reports; the list \
+                     here is what it does serve"
+                ),
+                NoticeKind::Warn,
+            );
+        }
     }
 
     /// Asks for the provider list if this connection has not got one yet.
@@ -2302,6 +2620,142 @@ impl App {
 
         self.providers.started();
         self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
+    }
+
+    // ----- onboarding ----------------------------------------------------------------
+
+    /// Shows the first-run panel, if this operator has not already seen it.
+    ///
+    /// The "once" lives here rather than at the call site so that what decides it is the
+    /// config file's marker and nothing else — a caller cannot show the panel to someone
+    /// who dismissed it, and cannot skip it for someone who has not.
+    ///
+    /// It asks nothing and blocks nothing: dismissing it is one keystroke, and the runtime
+    /// it describes is already running underneath it.
+    pub fn welcome(&mut self) {
+        if self.config.onboarding.welcomed || self.overlay.is_some() {
+            return;
+        }
+
+        // The panel names the providers this node reports, and only the Dashboard polls
+        // for them — on the Sessions tab, which is where `ouro new` lands, nothing would
+        // have asked.
+        self.fetch_providers();
+        self.overlay = Some(Overlay::Welcome);
+    }
+
+    /// Closes the panel and remembers that it was closed.
+    ///
+    /// One function for every way out of it — a key, or the ctrl-c that dismisses any
+    /// overlay — because a panel that came back after being dismissed the "wrong" way
+    /// would be a client that did not believe the operator the first time.
+    fn dismiss_welcome(&mut self) {
+        self.overlay = None;
+
+        if !self.config.onboarding.welcomed {
+            self.config.onboarding.welcomed = true;
+            self.save_pending = true;
+        }
+    }
+
+    /// `,`: this client's preferences, from any tab.
+    ///
+    /// No scope check and no `hello.methods` gate, unlike `n`: writing a file this process
+    /// owns is not a verb the gateway serves, and a `read` listener is no reason to stop
+    /// someone recording which provider they prefer.
+    fn open_settings(&mut self) {
+        if self.overlay.is_some() {
+            return;
+        }
+
+        // The picker lists what the runtime reports, and most tabs never ask for it.
+        self.fetch_providers();
+
+        self.overlay = Some(Overlay::Settings(Box::new(Settings {
+            field: SettingsField::Provider,
+            provider: 0,
+            workspace: self.default_workspace(),
+            approval: approval_index(self.config.defaults.approval_mode()),
+            wanted_provider: self.config.defaults.provider.clone(),
+            edited: false,
+        })));
+
+        self.place_default_provider();
+    }
+
+    fn settings_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let choices = provider_choices(
+            self.providers.value.as_deref().unwrap_or_default(),
+            self.config.defaults.provider.as_deref(),
+        );
+
+        let Some(Overlay::Settings(settings)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Tab | KeyCode::Down => settings.move_field(1),
+            KeyCode::BackTab | KeyCode::Up => settings.move_field(-1),
+            KeyCode::Left => settings.cycle(-1, choices.len()),
+            KeyCode::Right => settings.cycle(1, choices.len()),
+            KeyCode::Backspace => {
+                if let Some(text) = settings.text_mut() {
+                    text.pop();
+                    settings.edited = true;
+                }
+            }
+            KeyCode::Enter => {
+                if settings.field == SettingsField::Save {
+                    self.save_settings();
+                } else {
+                    // Enter never saves from a field row, for the same reason it never
+                    // starts a session from one: finishing a sentence in a text box is not
+                    // a decision to write a file.
+                    settings.move_field(1);
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(text) = settings.text_mut() {
+                    text.push(c);
+                    settings.edited = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes the rows as they read and asks the driver to write them.
+    ///
+    /// The file is rewritten whole from [`Config`], so what lands on disk is exactly what
+    /// the overlay showed — no merge with a file that may have changed underneath, which
+    /// would be this client guessing which of two answers the operator meant.
+    fn save_settings(&mut self) {
+        let choices = provider_choices(
+            self.providers.value.as_deref().unwrap_or_default(),
+            self.config.defaults.provider.as_deref(),
+        );
+
+        let Some(Overlay::Settings(settings)) = self.overlay.take() else {
+            return;
+        };
+
+        self.config.defaults.provider = choices
+            .get(settings.provider)
+            .and_then(ProviderChoice::name)
+            .map(str::to_string);
+
+        // A blank box is "no default", not `""`: the same statement an empty workspace
+        // makes in the start dialog.
+        let workspace = settings.workspace.trim();
+        self.config.defaults.workspace = (!workspace.is_empty()).then(|| workspace.to_string());
+
+        self.config.defaults.approval_mode =
+            approval_at(settings.approval).map(|mode| mode.as_str().to_string());
+
+        self.save_pending = true;
     }
 
     fn new_session_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -2545,6 +2999,19 @@ impl App {
             return;
         }
 
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            self.settings_key(key);
+            return;
+        }
+
+        // Any key. The panel states facts and asks nothing, so there is no keystroke it
+        // could be waiting for — and a first-run screen that had to be dismissed *just so*
+        // would be the opposite of what it is for.
+        if matches!(self.overlay, Some(Overlay::Welcome)) {
+            self.dismiss_welcome();
+            return;
+        }
+
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
@@ -2603,8 +3070,9 @@ impl App {
                 KeyCode::Enter => self.submit_prompt(),
                 _ => {}
             },
-            // Dispatched above, before this match could claim its printable keys.
-            Overlay::New(_) => {}
+            // All three are dispatched above, before this match could claim their
+            // printable keys.
+            Overlay::New(_) | Overlay::Settings(_) | Overlay::Welcome => {}
         }
     }
 

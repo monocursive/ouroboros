@@ -127,7 +127,12 @@ impl Paths {
     }
 }
 
-fn xdg_root(variable: &str, fallback: &str) -> Result<PathBuf> {
+/// One XDG root, read from the variable directly and falling back to a path under `$HOME`.
+///
+/// Public because [`crate::config`] resolves `XDG_CONFIG_HOME` by the same rule, and two
+/// implementations of "an absolute variable wins, otherwise the home fallback" would be
+/// two chances to disagree about what a relative value means.
+pub fn xdg_root(variable: &str, fallback: &str) -> Result<PathBuf> {
     if let Some(value) = std::env::var_os(variable) {
         let path = PathBuf::from(value);
 

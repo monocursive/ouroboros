@@ -13,8 +13,16 @@
 //! ordinary `Msg::Answer { tag: Tag::Resync { .. } }`. That is deliberately the exact
 //! message a lag-triggered replay produces, so reconnect, lag, a client-side notification
 //! drop, and a pruned cursor converge on one reconciliation in `App`, as §3.3 requires.
+//!
+//! ## The terminal is entered once
+//!
+//! [`Screen`] is taken over before the runtime is started, not after: [`boot`] draws the
+//! spawn into it and then hands the same live terminal to [`run`]. So the alternate screen
+//! is entered exactly once per process, and there is no window between the boot screen and
+//! the first frame in which a panic would land on a terminal nobody owns.
 
 pub mod app;
+pub mod boot;
 pub mod dashboard;
 pub mod explorer;
 pub mod logs;
@@ -127,14 +135,28 @@ pub fn hook() -> (Arc<dyn ReconnectHook>, UiChannel) {
     )
 }
 
-/// Raw mode and the alternate screen, restored however this function is left.
-struct Screen {
+/// Raw mode and the alternate screen, restored however the owner is dropped.
+///
+/// Public because the boot screen enters it before there is an App and hands it over
+/// afterwards. Owning it is the whole contract: whoever holds one is drawing, and dropping
+/// it puts the operator's shell back.
+pub struct Screen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl Screen {
-    fn enter() -> Result<Self> {
-        if !io::stdout().is_terminal() {
+    /// Whether stdout is something this client could take over, asked without taking it.
+    ///
+    /// [`boot::Boot`] needs the answer before it has anywhere to report a refusal, and a
+    /// pipe is a perfectly ordinary thing for `ouro daemon` or a redirect to be attached
+    /// to. [`enter`](Self::enter) is still the one that refuses, so the error text lives in
+    /// exactly one place.
+    pub fn available() -> bool {
+        io::stdout().is_terminal()
+    }
+
+    pub fn enter() -> Result<Self> {
+        if !Self::available() {
             bail!(
                 "the terminal UI needs a tty on stdout. Use `ouro attach --print` for a \
                  one-shot status page, or run this from a terminal"
@@ -159,6 +181,12 @@ impl Screen {
             .context("taking over the terminal")?;
 
         Ok(Self { terminal })
+    }
+
+    /// The terminal itself, for a caller that draws its own frames into it — which is the
+    /// boot screen, and nothing else.
+    pub fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        &mut self.terminal
     }
 }
 
@@ -199,8 +227,46 @@ fn input(sender: mpsc::UnboundedSender<Msg>) {
     });
 }
 
+/// Writes the config file the App asked to have written, and says where it went.
+///
+/// The App decides and this writes, for the same reason it emits [`Call`]s rather than
+/// making them: a state machine with a filesystem in it is one that cannot be driven by a
+/// test. It is synchronous on purpose — the file is a few hundred bytes into a directory
+/// this process already owns, and handing that to a task would buy a round trip through
+/// the message queue to save a write that costs less than the frame it happens in.
+pub fn persist(app: &mut App) {
+    let Some(config) = app.take_config_save() else {
+        return;
+    };
+
+    let Some(path) = app.config_path.clone() else {
+        app.inform(
+            "there is nowhere to keep preferences: neither XDG_CONFIG_HOME nor a home \
+             directory is set",
+            app::NoticeKind::Error,
+        );
+
+        return;
+    };
+
+    match config.save(&path) {
+        Ok(()) => app.inform(format!("saved {}", path.display()), app::NoticeKind::Info),
+        // The App keeps the change in memory either way: it is what the operator chose in
+        // this session. What it must not do is claim the file has it.
+        Err(error) => app.inform(
+            format!("{} could not be written: {error:#}", path.display()),
+            app::NoticeKind::Error,
+        ),
+    }
+}
+
 /// Runs the UI until the operator picks something from the quit dialog.
+///
+/// `screen` is the terminal the boot screen already took over, handed on rather than
+/// re-entered. `None` means there was no boot screen, and taking the terminal here is
+/// where a stdout that is not a tty becomes the error that says what to run instead.
 pub async fn run(
+    screen: Option<Screen>,
     mut app: App,
     client: Client,
     mut notifications: mpsc::Receiver<Notification>,
@@ -215,7 +281,11 @@ pub async fn run(
 
     app.cursors = cursors;
 
-    let mut screen = Screen::enter()?;
+    let mut screen = match screen {
+        Some(screen) => screen,
+        None => Screen::enter()?,
+    };
+
     input(sender.clone());
 
     let mut ticker = tokio::time::interval(TICK);
@@ -229,6 +299,10 @@ pub async fn run(
         for call in app.drain() {
             spawn_call(client.clone(), call, sender.clone());
         }
+
+        // Before the draw, so the notice naming the file is on the same frame as the
+        // settings overlay closing.
+        persist(&mut app);
 
         screen
             .terminal

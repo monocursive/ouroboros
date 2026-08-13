@@ -8,6 +8,7 @@
 //! does not move them.
 
 pub mod cli;
+pub mod config;
 pub mod model;
 pub mod proto;
 pub mod runtime;

@@ -11,10 +11,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::model::{Plane, ProviderEntry};
+use crate::model::{compact, Plane, ProviderEntry};
 
 use super::app::{
-    App, Connection, Mode, NewField, NewSession, NoticeKind, Overlay, Tab, APPROVAL_CHOICES,
+    provider_choices, App, Connection, Mode, NewField, NewSession, NoticeKind, Overlay,
+    ProviderChoice, Settings, SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::theme;
 
@@ -184,6 +185,357 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
+        Overlay::Welcome => welcome(frame, area, app),
+        Overlay::Settings(settings) => self_settings(frame, area, app, settings),
+    }
+}
+
+/// The first-run panel: what this machine is, where its state is, what it can run, and the
+/// four keys that matter. No questions — everything on it is already true.
+///
+/// Every line is labelled with where it came from, because two different kinds of fact are
+/// on one screen: the node and the providers are the *runtime's* answers, the data
+/// directory and the config file are this *client's* paths. A panel that ran them together
+/// would let a reader believe the runtime had confirmed something it was never asked.
+fn welcome(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered(area, 80, area.height.min(24));
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" ouroboros ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "one runtime, on this machine, that you started.",
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("as the runtime reports it", theme::label())),
+        field("node", &blank(&app.hello.node)),
+        field(
+            "scope",
+            &format!(
+                "{}{}",
+                blank(&app.hello.scope),
+                if app.hello.operates() {
+                    " — this client may start and stop work"
+                } else {
+                    " — every mutating verb is refused"
+                }
+            ),
+        ),
+        field("address", &app.address),
+        Line::from(""),
+        Line::from(Span::styled("this client's own paths", theme::label())),
+    ];
+
+    lines.push(field(
+        "state",
+        &match &app.data_dir {
+            Some(dir) => dir.clone(),
+            // Attach mode: this client did not choose where that runtime keeps anything.
+            None => "with whoever started this runtime — not this client".to_string(),
+        },
+    ));
+
+    lines.push(field(
+        "config",
+        &match &app.config_path {
+            Some(path) => path.display().to_string(),
+            None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".to_string(),
+        },
+    ));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "providers, as this runtime probed them",
+        theme::label(),
+    )));
+    lines.extend(provider_summary(app));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("n", Style::default().fg(theme::ACCENT)),
+        Span::raw(" start a session   "),
+        Span::styled("?", Style::default().fg(theme::ACCENT)),
+        Span::raw(" keys   "),
+        Span::styled(",", Style::default().fg(theme::ACCENT)),
+        Span::raw(" settings   "),
+        Span::styled("q", Style::default().fg(theme::ACCENT)),
+        Span::raw(" quit"),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "any key closes this; it is shown once",
+        Style::default().fg(theme::MUTED),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The provider lines the welcome panel shows: available ones marked, missing ones dim and
+/// naming the executable the runtime looked for.
+fn provider_summary(app: &App) -> Vec<Line<'static>> {
+    let Some(providers) = &app.providers.value else {
+        // A list that was asked for and refused is not the same fact as one nobody has
+        // asked for yet, and a panel that showed them the same way would be reporting a
+        // gateway that cannot answer as a gateway nobody has spoken to.
+        if let Some(error) = &app.providers.error {
+            return vec![Line::from(Span::styled(
+                format!("  runtime.providers was refused: {error}"),
+                Style::default().fg(theme::WARN),
+            ))];
+        }
+
+        return vec![Line::from(Span::styled(
+            if app.providers.pending {
+                "  asking the runtime which providers it serves"
+            } else {
+                "  not asked yet"
+            },
+            Style::default().fg(theme::MUTED),
+        ))];
+    };
+
+    if providers.is_empty() {
+        return vec![Line::from(Span::styled(
+            "  this runtime serves no coding providers, so there is nothing to start here",
+            Style::default().fg(theme::WARN),
+        ))];
+    }
+
+    let ready: Vec<&ProviderEntry> = providers.iter().filter(|entry| entry.ready()).collect();
+
+    // Two past the longest name, so the column after it is a column rather than a word
+    // touching the one before it.
+    let width = providers
+        .iter()
+        .map(|entry| entry.provider.len())
+        .max()
+        .unwrap_or(1)
+        + 2;
+
+    let mut lines: Vec<Line> = providers
+        .iter()
+        .map(|entry| {
+            match &entry.status {
+                Some(probe) if probe.installed && probe.compatible => Line::from(vec![
+                    Span::styled("  ✓ ", Style::default().fg(theme::GOOD)),
+                    Span::raw(format!("{:<width$}", entry.provider)),
+                    Span::styled(
+                        probe.version.clone().unwrap_or_default(),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ]),
+                Some(probe) => Line::from(vec![
+                    Span::styled("  · ", Style::default().fg(theme::MUTED)),
+                    Span::styled(
+                        format!("{:<width$}", entry.provider),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                    Span::styled(
+                        match &probe.executable {
+                            Some(executable) if !probe.installed => {
+                                format!("no {executable} on the runtime's PATH")
+                            }
+                            // Installed but not compatible is a version the harness will
+                            // not drive, which is a different sentence from a missing file.
+                            Some(executable) => {
+                                format!("{executable} is installed but not a version this harness drives")
+                            }
+                            None => "the runtime named no executable for it".to_string(),
+                        },
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ]),
+                // A probe that failed is not the same fact as a provider that is missing.
+                None => Line::from(vec![
+                    Span::styled("  ? ", Style::default().fg(theme::WARN)),
+                    Span::raw(format!("{:<width$}", entry.provider)),
+                    Span::styled(
+                        format!("probe failed: {}", compact(&entry.error)),
+                        Style::default().fg(theme::WARN),
+                    ),
+                ]),
+            }
+        })
+        .collect();
+
+    if ready.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  none of them found an executable. Install one of the CLIs above and press r \
+             on the Dashboard; the runtime decides, not this client.",
+            Style::default().fg(theme::WARN),
+        )));
+    }
+
+    lines
+}
+
+/// The `,` overlay. Facts above, preferences below, and the line between them labelled.
+fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
+    let popup = centered(area, 80, area.height.min(22));
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" settings ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let facts = vec![
+        Line::from(Span::styled(
+            "as reported by the runtime — not editable here",
+            theme::label(),
+        )),
+        field("address", &app.address),
+        field("node", &blank(&app.hello.node)),
+        field("scope", &blank(&app.hello.scope)),
+        field("protocol", &app.hello.protocol.to_string()),
+        field(
+            "data dir",
+            &match &app.data_dir {
+                Some(dir) => dir.clone(),
+                None => "not this client's — it attached to a runtime it did not start".into(),
+            },
+        ),
+        field(
+            "config",
+            &match &app.config_path {
+                Some(path) => path.display().to_string(),
+                None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".into(),
+            },
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "defaults this client remembers — they prefill `n`, nothing more",
+            theme::label(),
+        )),
+    ];
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(facts.len() as u16),
+            Constraint::Length(SettingsField::ALL.len() as u16),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(Paragraph::new(facts), chunks[0]);
+
+    let choices = provider_choices(
+        app.providers.value.as_deref().unwrap_or_default(),
+        app.config.defaults.provider.as_deref(),
+    );
+
+    let mut rows = Vec::new();
+
+    for row in SettingsField::ALL {
+        let focused = row == settings.field;
+
+        let (label, value, style) = match row {
+            SettingsField::Provider => {
+                let (value, style) = settings_provider_cell(&choices, settings.provider, app);
+                ("provider", value, style)
+            }
+            SettingsField::Workspace => (
+                "workspace",
+                text_or_hint(&settings.workspace, "unset — stated per session"),
+                hint_style(&settings.workspace),
+            ),
+            SettingsField::ApprovalMode => {
+                ("approval", settings.approval_label(), Style::default())
+            }
+            SettingsField::Save => (
+                "",
+                "[ save ]".to_string(),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(format!("{label:<11}"), theme::label()),
+            Span::styled(value, style),
+        ];
+
+        if focused && row == SettingsField::Workspace {
+            spans.push(Span::styled(
+                "_",
+                Style::default().add_modifier(Modifier::SLOW_BLINK),
+            ));
+        }
+
+        rows.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(rows), chunks[1]);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Tab/arrows move · left/right change · Enter on [ save ] writes the file · Esc \
+                 closes without saving",
+                Style::default().fg(theme::MUTED),
+            )),
+            Line::from(Span::styled(
+                if settings.edited {
+                    "changed, and not written yet"
+                } else {
+                    ""
+                },
+                Style::default().fg(theme::WARN),
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -> (String, Style) {
+    let Some(choice) = choices.get(index) else {
+        return (
+            if app.providers.pending {
+                "asking the runtime which providers it serves".to_string()
+            } else {
+                "unset — stated per session".to_string()
+            },
+            Style::default().fg(theme::MUTED),
+        );
+    };
+
+    let position = format!("({}/{})", index + 1, choices.len());
+
+    match choice {
+        ProviderChoice::Unset => (
+            format!("unset — stated per session {position}"),
+            Style::default().fg(theme::MUTED),
+        ),
+        ProviderChoice::Probed { name, ready: true } => (
+            format!("{name} {position}"),
+            Style::default().fg(theme::GOOD),
+        ),
+        ProviderChoice::Probed { name, ready: false } => (
+            format!("{name} — no executable found {position}"),
+            Style::default().fg(theme::MUTED),
+        ),
+        // The config names it and the runtime does not. Said, rather than dropped.
+        ProviderChoice::Unserved { name } => (
+            format!("{name} — from the config file; this runtime does not report it {position}"),
+            Style::default().fg(theme::WARN),
+        ),
     }
 }
 
@@ -342,6 +694,22 @@ fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, St
     )
 }
 
+/// A labelled fact, in the same shape the Dashboard's panes use so the two read as one UI.
+fn field(name: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {name:<10}"), theme::label()),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn blank(value: &str) -> String {
+    if value.is_empty() {
+        "unknown".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 fn text_or_hint(value: &str, hint: &str) -> String {
     if value.is_empty() {
         hint.to_string()
@@ -470,6 +838,10 @@ const KEYS: &[(&str, &str)] = &[
         "leave the composer, then the transcript, then the session",
     ),
     ("r", "refresh this tab now"),
+    (
+        ",",
+        "settings: this client's defaults, and where they are kept",
+    ),
     ("q", "quit dialog"),
     ("?", "this page"),
 ];
