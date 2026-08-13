@@ -90,7 +90,8 @@ New files under `lib/ouroboros/gateway/`:
 | `gateway.ex` | `Ouroboros.Gateway` | Supervisor; validates config at init (fail-closed, signer-style) |
 | `gateway/config.ex` | `Gateway.Config` | pure env→config parsing + validation (unit-testable) |
 | `gateway/listener.ex` | `Gateway.Listener` | `:gen_tcp` listen + accept loop; hands sockets to ConnSupervisor |
-| `gateway/conn.ex` | `Gateway.Conn` | per-connection GenServer: framing, auth, dispatch, subscriptions, outbound queue. Requests dispatch to supervised tasks (≤ 8 in flight per connection); responses correlate by id and may return out of order, so one slow method never blocks the event stream or other requests |
+| `gateway/conn.ex` | `Gateway.Conn` | per-connection GenServer: framing, auth, dispatch, subscriptions, outbound queue. Requests dispatch to supervised tasks (≤ 8 in flight, ≤ 64 waiting, per connection); responses correlate by id and may return out of order, so one slow method never blocks the event stream or other requests |
+| `gateway/writer.ex` | `Gateway.Writer` | the socket's single writer: a process spawned and linked by its `Conn` whose only job is the blocking `:gen_tcp.send/2` the `Conn` must not make (§2.6) |
 | `gateway/wire.ex` | `Gateway.Wire` | term → JSON-safe encoding (builds on `Orchestration.Serializable`) |
 | `gateway/methods.ex` | `Gateway.Methods` | method table: name → {scope, handler, timeout} |
 
@@ -116,7 +117,7 @@ posture ([runtime.exs signer preflight](../config/runtime.exs)).
 | `OUROBOROS_GATEWAY_SCOPE` | `read` | `read` \| `operate`; mutating methods refused under `read` |
 | `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN` | unset | `1` additionally enables `runtime.shutdown` (spawner sets it; server operators generally don't) |
 | `OUROBOROS_GATEWAY_MAX_FRAME` | `1048576` | max inbound line bytes; oversized → typed error, connection closed |
-| `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection outbound frame cap (see §2.6) |
+| `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection **outbound** frame cap (see §2.6). The inbound bound — requests accepted and not yet dispatched — is a fixed constant (64) in `Gateway.Conn`, not this variable: one name for two queues is a name an operator cannot reason about |
 
 Two placement facts the implementation must respect:
 
@@ -132,9 +133,19 @@ Two placement facts the implementation must respect:
 
 After binding, the gateway writes `Path.join(data_dir, "gateway.json")` —
 atomic tmp+rename, followed by an explicit `File.chmod!(path, 0o600)`:
-`{"port": .., "protocol": 1, "node": "..", "pid": <os_pid>, "scope": ".."}`.
+`{"port": .., "protocol": 1, "node": "..", "pid": <os_pid>, "scope": "..",
+"token_file": ".."}`.
 This is how spawn-mode `ouro` (and no-arg `ouro attach`) discovers the port;
 it also removes the bind-race of pre-choosing ephemeral ports.
+
+`token_file` is the **path** to the token file and is present exactly when
+`OUROBOROS_GATEWAY_TOKEN_FILE` supplied the token; a listener whose token came from
+`OUROBOROS_GATEWAY_TOKEN` omits the key entirely rather than naming a file that does not
+exist. It exists so a client that did not spawn the daemon — `ouro attach` with no
+arguments — reads the credential's location instead of guessing a convention. The token
+*value* is never in this file: `gateway.json` says where to look, and the 0600 file it
+points at is the thing that has to be readable. A deployment using the environment token
+is, by that same rule, not discoverable — which is one more reason the file is preferred.
 
 ### 2.3 Protocol
 
@@ -153,6 +164,13 @@ terminated line. Protocol version is a single integer, **1**.
 Result: `{server: "0.1.0", node, role, protocol: 1, scope, methods: [...]}`
 (`server` from `Application.spec(:ouroboros, :vsn)`; `methods` is the exact
 list this build serves, so the client feature-gates instead of guessing).
+
+**`hello.methods` is the feature gate, and it is the only one.** A client decides whether
+an optional verb exists by membership in that list, not by trying it and reading the
+error — `ouro`'s quit dialog offers `runtime.shutdown` when it is listed and falls back to
+SIGTERM when it is not. Note what the list does *not* encode: scope. A read listener
+still advertises the operate verbs it will refuse with `-32003`, because hiding them would
+make a deliberately less-authorized listener look like an older build.
 
 - Any frame before a successful `hello` → error `-32001 unauthenticated`,
   socket closed.
@@ -174,6 +192,20 @@ Malformed input is answered and survived, never crashed on. Honest caveat:
 ([ouroboros.ex:152](../lib/ouroboros.ex)), so a wedged-but-alive plane
 surfaces as `-32005`, not `-32004` — the TUI treats both as "plane
 unhealthy".
+
+Two error `data` payloads are **structured and branched on** rather than displayed,
+and the golden fixtures (§2.11) pin both: `-32006` carrying
+`{"reason": "cursor_pruned", "floor": N}` (§2.5), and `-32005` carrying
+`{"outcome": "unknown"}` on the verbs whose upstream call is `:infinity` (§2.4
+intro). Every other `data` is a `Wire`-encoded reason meant to be read, not matched.
+
+**`params` is an object or absent — never an array.** JSON-RPC 2.0 allows positional
+parameters; this subset does not, and an array answers `-32602` rather than being
+interpreted. Every method here names its parameters, and a positional form would be a
+second calling convention to keep correct in two languages. Likewise every request must
+carry an `id`: there are no client notifications, and a frame without one is `-32600`,
+because a request with nowhere to send an answer is a request the client cannot learn the
+fate of.
 
 **Inbound hygiene.** Client params are plain JSON. The dispatcher never calls
 `String.to_atom/1` on client data: methods dispatch via a literal map, enum
@@ -226,18 +258,32 @@ reading.
 
 | method | maps to |
 |---|---|
-| `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`provider`, `workspace`, `metadata`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
+| `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id` |
 | `interactive.steer` `{id, input}` | `steer/3` |
-| `interactive.respond_approval` `{id, request_id, response}` | response validated against allowlist |
+| `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
-| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | |
-| `teams.add_worker` / `teams.delegate` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s |
-| `teams.cancel` / `teams.close` | upstream is `:infinity` — gateway ceiling 60s with `"outcome": "unknown"` semantics (§2.4 intro) |
-| `control.submit` `{objective, opts}` / `control.cancel` `{id}` | |
+| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | same opts allowlist as `interactive.start`; ceiling 120s |
+| `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
+| `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
+| `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
 | `agents.stop` `{id}` | `Mesh.stop_agent/1` |
-| `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003` |
+| `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack |
+
+Every option a plane accepts is an atom, and none of them are built from client bytes:
+option keys come from one literal table in `Gateway.Methods`, enum values from the exact
+terms the upstream schema declares, provider names from the providers this node serves.
+An option outside a method's allowlist is `-32602` **naming it**, not silently dropped —
+a `sandboxMode` that was ignored would run the session under a policy nobody chose.
+
+Two spec corrections found while implementing, recorded rather than quietly dropped:
+`metadata` is *not* an option `InteractiveSession.start/1` accepts — the durable
+checkpoint rejects it ([coding/task_state.ex](../lib/ouroboros/coding/task_state.ex)
+`@accepted_options`) and the plane sets its own session metadata — so the allowlist above
+replaces it with options the plane really takes; and `env`, `mcp_config`, and
+`provider_options` stay out entirely, because the checkpoint refuses inline environment
+and MCP config outright and provider knobs are node configuration.
 
 Deliberately absent from v1: `agents.start` (arbitrary module start is a
 bigger authority than a TUI needs; revisit with an allowlisted spec registry),
@@ -258,42 +304,77 @@ emitted as notification `interactive.event` / `coding.event` with params
 field is `task_id`, not `session_id`). Both event structs carry `sequence` —
 the resync cursor.
 
-Two upstream behaviors the Conn must handle explicitly:
+The four subscription verbs are answered **by the `Conn` process itself**, not by a
+dispatch task, because both planes register `self()` as the subscriber. The cost is
+stated rather than hidden: those calls block the connection for as long as the plane's
+own control-plane bound allows (30s, `:session_call_timeout`), because a
+`GenServer.call` this process must make itself is not one it can put a gateway ceiling
+on. Everything else the connection does — every other method — still runs in a task.
+
+Three upstream behaviors the Conn must handle explicitly:
 
 - **Terminal sessions don't register subscribers.** `subscribe` on a terminal
   session returns the backlog but silently skips registration
-  ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex)). After a
+  ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex); the coding plane
+  mirrors it at [coding/task.ex:82](../lib/ouroboros/coding/task.ex)). After a
   successful subscribe the Conn checks the session's status; if terminal, it
-  emits `stream.ended {id, status}` after the backlog so the client renders a
+  emits `stream.ended {id, plane, status}` after the backlog so the client renders a
   finished session instead of waiting forever.
+- **The coordinator holding the registration can die.** It retires ~100ms after a
+  terminal session, and a crash restarts it *without* the subscription. So the Conn
+  monitors that process and emits `stream.ended {id, plane, status: "unknown"}` on its
+  `:DOWN`. Without it the events would simply stop with nothing said. (`plane` is
+  `"interactive"` or `"coding"`; it is on both stream notifications because their method
+  names, unlike `interactive.event`/`coding.event`, do not carry it.)
 - **`{:error, {:cursor_pruned, floor}}`** is a real return of both `subscribe`
   and `replay` ([interactive/task.ex:1069](../lib/ouroboros/interactive/task.ex))
-  — sessions retain a bounded event window. The gateway forwards it as a typed
-  error with the floor; resync behavior is the client's (§3.3).
+  — sessions retain a bounded event window. The gateway forwards it as
+  `-32006` with `data` `{"reason": "cursor_pruned", "floor": N}` — the one error whose
+  `data` a client branches on rather than displays. Resync behavior is the client's
+  (§3.3), and the shape is pinned by a golden fixture.
+
+**Subscriber cleanup needs nothing from the gateway on abnormal death.** Both planes
+`Process.monitor` the subscriber pid and drop it on `:DOWN`
+([interactive/task.ex:1087](../lib/ouroboros/interactive/task.ex),
+[coding/task.ex:554](../lib/ouroboros/coding/task.ex)), so a `Conn` that crashes is
+released by the plane itself. A graceful close still unsubscribes explicitly, under a
+total budget of 1s across all of a connection's subscriptions; the budget is what keeps
+a wedged coordinator from delaying an exit that the monitor would have handled anyway.
+A connection may hold at most 64 subscriptions.
 
 ### 2.6 Backpressure (non-negotiable)
 
 The Conn keeps one outbound queue. Frames are two classes:
 
-- **Responses** — never dropped. If a response cannot be enqueued under the
-  hard cap, the connection is closed (protocol error frame first, best-effort);
-  the client reconnects and resubscribes. A client that can't drain its own
-  RPC responses is broken, not throttled.
-- **Event notifications** — droppable. When queue length exceeds
+- **Responses and the two stream control notifications** — never dropped. The hard cap
+  is `OUROBOROS_GATEWAY_QUEUE_LIMIT` plus 72, which is exactly the number of responses
+  that can be outstanding at once (8 in flight + 64 waiting). Above it the connection is
+  closed (protocol error frame first, best-effort); the client reconnects and
+  resubscribes. A client that can't drain its own RPC responses is broken, not throttled.
+- **Event notifications** — droppable. When queue length reaches
   `OUROBOROS_GATEWAY_QUEUE_LIMIT`, new event frames for a session are counted
   and discarded. When the queue drains below half, one
-  `stream.lagged` `{id, dropped, last_sequence}` notification is sent;
-  the client calls `replay(cursor: its last seen sequence)` and reconciles.
+  `stream.lagged` `{id, plane, dropped, last_sequence}` notification is sent per lagged
+  session — `dropped` is how many frames were discarded, `last_sequence` the sequence of
+  the newest one discarded, which is how far ahead the session had run. The client calls
+  `replay(cursor: its last seen sequence)` and reconciles.
   Reconciliation is exact while the cursor is inside the retained window; if
   the client fell past it, `replay` answers `cursor_pruned` with the floor and
   the client restarts from the floor showing a "history truncated below N"
   marker (§3.3). Either way the terminal state is truthful — never silently
   missing events.
 
-Socket writes use `:gen_tcp.send` from a single writer (the Conn itself) with
-`send_timeout` set; a hung peer becomes a closed connection, not a stuck
-GenServer mailbox. This is the same unbounded-growth discipline applied
-everywhere else in the runtime after the 2026-08 review.
+Socket writes use `:gen_tcp.send` with `send_timeout` set, from a **single writer
+process** (`Gateway.Writer`) spawned and linked by its `Conn`, which monitors it in
+return so neither outlives the other. The `Conn` cannot make that call itself: it blocks,
+and a connection parked in `send` for the fifteen seconds of `send_timeout` would keep
+taking plane events into its mailbox the whole time — the real backlog would be
+unbounded, in the one place the bound cannot see it. Handing frames to a writer and
+counting the unacknowledged ones is what makes the queue depth a number this process can
+act on *while* the peer is still slow, which is the entire point of dropping events
+rather than accumulating them. A hung peer still becomes a closed connection
+(`send_timeout_close`), not a stuck GenServer mailbox. This is the same unbounded-growth
+discipline applied everywhere else in the runtime after the 2026-08 review.
 
 ### 2.7 Wire encoding (`Gateway.Wire`)
 
@@ -391,18 +472,43 @@ and clustering keeps the existing posture.
 - **Wire:** golden encoding of nasty terms — pids in nested maps, improper-ish
   tuples, structs, non-UTF-8 binaries, atom keys.
 - **Integration (real TCP, ephemeral port):** hello→status; subscribe→ live
-  event notifications from a real interactive session (echo provider);
-  lag: a deliberately unread client socket overflows the queue → `stream.lagged`
-  → replay(cursor) reconciles exactly; cursor below the retained floor →
-  `cursor_pruned` surfaces with the floor; subscribe to a terminal session →
-  backlog then `stream.ended`; `upgrade.status` with the executor stopped →
+  event notifications from a real interactive session (deterministic test adapter) and
+  from a real coding task; lag: the connection's writer is suspended so frames pile up
+  unacknowledged → event frames are dropped → `stream.lagged` → backlog + notifications
+  + replay(cursor) reconciles to the exact contiguous history. Suspending the writer
+  rather than relying on an unread socket is deliberate: it makes overflow a decision
+  the test makes rather than one a kernel buffer size makes. Also: a response flood
+  against a suspended writer closes the connection rather than dropping a response;
+  cursor below the retained floor → `cursor_pruned` surfaces with the floor and
+  resubscribing at the floor works; subscribe to a terminal session →
+  backlog then `stream.ended`; killing the coordinator under a live subscription →
+  `stream.ended`; `upgrade.status` with the executor stopped →
   `-32004`, connection alive; two clients, one slow, fast one unaffected;
   gateway.json appears with the bound port, 0600.
+- **Operate scope:** every method the table marks `:operate` is refused `-32003` on a
+  read listener — enumerated from the table, so a verb that loses its scope fails here;
+  each operate call leaves exactly one audit line carrying the method, a param digest,
+  and the peer, and carrying none of the parameters themselves; an unknown provider name
+  is `-32602` and creates no atom; `runtime.shutdown` is refused without
+  `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` and, with it, stops the node only after the
+  acknowledgement has been written.
 - **Verifier:** Gateway-namespace artifact rejected.
 - **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
-  `test/support/gateway_golden/*.json` (hello, status, event, lagged, errors).
+  `test/support/gateway_golden/*.json` from static, deterministic terms — no clock, no
+  random ids, no live plane, so a regeneration on another machine writes the same bytes.
+  Thirteen frames: `hello_result`, `runtime_status_result`,
+  `interactive_event_notification`, `coding_event_notification`,
+  `stream_lagged_notification`, `stream_ended_notification`, and the error frames
+  `error_unauthenticated` (−32001), `error_protocol_mismatch` (−32002),
+  `error_scope_denied` (−32003), `error_upstream_timeout_unknown` (−32005 with
+  `outcome: unknown`), `error_cursor_pruned` (−32006 with `reason`/`floor`),
+  `error_not_found` (−32007), `error_invalid_request` (−32600).
   These files are the cross-language contract — cargo tests decode the same
-  fixtures (§3.5).
+  fixtures (§3.5). Objects are written with sorted keys and two-space indent so a
+  regeneration that changed nothing is a zero-line diff and a change to the protocol is
+  a reviewable one. `golden_test.exs` re-derives every frame through the live
+  `Conn` envelope functions and `Wire` encoder and compares against the bytes on disk, so
+  a fixture cannot drift from the build that produced it.
 
 ---
 
@@ -469,6 +575,15 @@ of the polymorphism story. Concrete cases the types must carry: availability
 is tri-state (`available` / `unavailable` / `disabled` —
 [ouroboros.ex:140](../lib/ouroboros.ex)), and `interactive.list`/`info` return
 `Ouroboros.Interactive.State` structs (Wire-tagged), not bare maps.
+
+One shape worth stating because the source misleads: **`status.cluster` has no `mode`
+key.** `Ouroboros.Cluster.status/0` returns
+`{node, role, distributed, connected_nodes, roles, formation, security}`
+([cluster.ex:206](../lib/ouroboros/cluster.ex)); the `%{mode: :unavailable}` that appears
+next to it in [ouroboros.ex](../lib/ouroboros.ex) is the *fallback* used when the call
+fails, not the shape of a successful one. A client must therefore treat `cluster` as
+either — which is exactly what the "unknown fields ignored, fall back to the tree widget"
+rule already buys it. `runtime_status_result.json` pins the successful shape.
 
 Tabs (build order within §5): **1 Dashboard** (node/role, availability
 matrix from `status.availability`, connected nodes, providers), **2 Sessions**

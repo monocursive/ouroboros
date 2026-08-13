@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32003,
+    "message": "interactive.start mutates the runtime and this listener was started with OUROBOROS_GATEWAY_SCOPE=read"
+  },
+  "id": 3,
+  "jsonrpc": "2.0"
+}

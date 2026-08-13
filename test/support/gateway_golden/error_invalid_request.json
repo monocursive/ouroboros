@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32600,
+    "message": "every request must carry a string or number id; this protocol has no client notifications"
+  },
+  "id": null,
+  "jsonrpc": "2.0"
+}

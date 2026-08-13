@@ -10,6 +10,11 @@ defmodule Ouroboros.Gateway.Listener do
   the mode set on the temporary file *before* the rename so the token-adjacent facts in
   it are never briefly world-readable.
 
+  The file names the token *file* when there is one, so a client that did not spawn this
+  daemon can find the credential it must present instead of guessing a path by convention.
+  It never contains the token itself: this file says where to look, and the 0600 file it
+  points at is what has to be readable.
+
   A failure to publish stops this process, and therefore the boot. A listener nobody can
   find is not a degraded operator surface, it is an absent one, and it would be
   discovered at the worst possible moment.
@@ -146,14 +151,26 @@ defmodule Ouroboros.Gateway.Listener do
     path = publication_path(config.data_dir)
     tmp = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
 
-    contents =
-      JSON.encode_to_iodata!(%{
-        "port" => port,
-        "protocol" => @protocol,
-        "node" => Atom.to_string(node()),
-        "pid" => os_pid(),
-        "scope" => Atom.to_string(config.scope)
-      })
+    published = %{
+      "port" => port,
+      "protocol" => @protocol,
+      "node" => Atom.to_string(node()),
+      "pid" => os_pid(),
+      "scope" => Atom.to_string(config.scope)
+    }
+
+    # The path to the credential, never the credential. A client that did not spawn this
+    # daemon otherwise has to guess where the token file lives by convention, and a
+    # listener whose token came from the environment cannot be attached to at all — so the
+    # key is present exactly when there is a file to name, and absent when there is not.
+    # The value itself stays out of this file for the same reason it stays out of logs.
+    published =
+      case config.token_file do
+        path when is_binary(path) -> Map.put(published, "token_file", path)
+        nil -> published
+      end
+
+    contents = JSON.encode_to_iodata!(published)
 
     try do
       File.write!(tmp, contents)

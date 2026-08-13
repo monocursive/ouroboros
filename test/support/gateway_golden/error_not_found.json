@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32007,
+    "message": "no such record on this node"
+  },
+  "id": 6,
+  "jsonrpc": "2.0"
+}

@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "method": "stream.lagged",
+  "params": {
+    "dropped": 128,
+    "id": "session-0000000000000000000001",
+    "last_sequence": 512,
+    "plane": "interactive"
+  }
+}

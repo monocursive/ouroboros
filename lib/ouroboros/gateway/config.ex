@@ -28,6 +28,15 @@ defmodule Ouroboros.Gateway.Config do
   enough that it cannot call into this application, and the check that must be able to
   refuse the boot has to stand on `System` alone.
 
+  ## One variable, one queue
+
+  `:queue_limit` (`OUROBOROS_GATEWAY_QUEUE_LIMIT`) is the **outbound** event-frame cap and
+  nothing else. A connection also bounds what it will accept inbound and has not yet
+  dispatched, but that is a fixed constant in `Ouroboros.Gateway.Conn` rather than a
+  setting: the two queues fail differently — the outbound one drops events and tells the
+  client to replay, the inbound one refuses requests — and a single variable governing
+  both would be a number an operator could not reason about in either direction.
+
   ## Honest limits
 
   The token authenticates a transport. It is not a sandbox and this struct does not
@@ -43,7 +52,7 @@ defmodule Ouroboros.Gateway.Config do
   """
 
   @enforce_keys [:bind, :port, :token, :scope, :max_frame, :queue_limit, :data_dir]
-  defstruct @enforce_keys ++ [allow_remote: false, allow_shutdown: false]
+  defstruct @enforce_keys ++ [token_file: nil, allow_remote: false, allow_shutdown: false]
 
   @type scope :: :read | :operate
 
@@ -51,6 +60,7 @@ defmodule Ouroboros.Gateway.Config do
           bind: :inet.ip_address(),
           port: :inet.port_number(),
           token: binary(),
+          token_file: Path.t() | nil,
           scope: scope(),
           max_frame: pos_integer(),
           queue_limit: pos_integer(),
@@ -130,6 +140,10 @@ defmodule Ouroboros.Gateway.Config do
       bind: bind,
       port: port!(opts),
       token: token!(opts),
+      # The path, never the value. It is published in `gateway.json` so a client that was
+      # not the spawner can find the credential it is expected to present without
+      # guessing a convention, and a path is not a secret — the 0600 file it names is.
+      token_file: token_file(opts),
       scope: scope!(opts),
       max_frame: max_frame!(opts),
       queue_limit: queue_limit!(opts),
@@ -229,6 +243,16 @@ defmodule Ouroboros.Gateway.Config do
     end
   end
 
+  # Only when the file is what supplied the token. A listener configured with
+  # `OUROBOROS_GATEWAY_TOKEN` publishes no path, because there is no file to point at and
+  # inventing one would send a client looking for something that does not exist.
+  defp token_file(opts) do
+    case {Keyword.get(opts, :token_file), Keyword.get(opts, :token)} do
+      {path, _token} when is_binary(path) -> path
+      {_path, _token} -> nil
+    end
+  end
+
   defp read_token_file!(path) do
     case File.read(path) do
       {:ok, contents} ->
@@ -264,6 +288,12 @@ defmodule Ouroboros.Gateway.Config do
     end
   end
 
+  # The outbound event queue, and only that. Above this many frames waiting for a slow
+  # peer, session event notifications are counted and dropped and the client is told with
+  # `stream.lagged` so it can replay; responses are never dropped and the connection
+  # closes instead. The inbound side — requests accepted but not yet dispatched — is a
+  # fixed constant in `Ouroboros.Gateway.Conn`, because one variable naming two queues is
+  # a variable an operator cannot reason about.
   defp queue_limit!(opts) do
     case Keyword.get(opts, :queue_limit, @default_queue_limit) do
       limit when is_integer(limit) and limit > 0 ->
