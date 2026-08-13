@@ -573,9 +573,16 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
     _kind, _reason -> :ok
   end
 
+  # The id must be unique in the namespace it joins, and that namespace is the whole
+  # connected cluster: mesh groups propagate over `:pg`. `System.unique_integer/1` is
+  # only VM-unique, and two peers evaluating the same module concurrently — the normal
+  # case for a multi-node rollout — can collide, at which point both nodes' probes and
+  # state reads route to whichever twin sorts first. `node()` is the cluster-unique
+  # discriminator, so it is part of the id.
   defp evaluation_id(module) do
     "ouroboros-eval-" <>
       (module |> Atom.to_string() |> String.replace(".", "-")) <>
+      "-" <> Atom.to_string(node()) <>
       "-" <> Integer.to_string(System.unique_integer([:positive]))
   end
 

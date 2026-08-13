@@ -206,10 +206,15 @@ defmodule Ouroboros.Upgrade.Rollout do
 
   defp coordinator_options(opts), do: Keyword.drop(opts, @rollout_options)
 
+  # This module chose the health check, so it also sizes the transport budget to it:
+  # the coordinator's default `:health_timeout` is smaller than the probe's own bounded
+  # waits, which would report a loaded-but-healthy node as ambiguity. An explicit
+  # `:health_timeout` from the caller still wins.
   defp deploy_options(module, opts) do
     opts
     |> coordinator_options()
     |> Keyword.put(:health_check, {Probe, :ready?, [module]})
+    |> Keyword.put_new(:health_timeout, Probe.budget_ms())
   end
 
   ## Evaluation planning
@@ -487,11 +492,16 @@ defmodule Ouroboros.Upgrade.Rollout do
     end
   end
 
-  # A champion that finished in under a millisecond would otherwise set a ceiling no
-  # challenger can meet. This is a floor on the arithmetic, not a claim about precision:
-  # see the moduledoc on what timing this small is worth.
+  # A champion that finished in a few milliseconds would otherwise set a ceiling that
+  # ordinary scheduler jitter blows: the moduledoc is explicit that wall-clock at these
+  # timescales is not a measurement, so the ceiling refuses to treat it as one. Below
+  # the noise floor every champion is "as fast as we can honestly claim to know", and a
+  # regression verdict needs the challenger to exceed the floored baseline times the
+  # budget — which a genuinely slow challenger (hundreds of milliseconds) still does.
+  @latency_noise_floor_ms 100
+
   defp latency_ceiling(champion, plan) do
-    max(Map.get(champion, :total_ms, 0), 1) * plan.regression_budget
+    max(Map.get(champion, :total_ms, 0), @latency_noise_floor_ms) * plan.regression_budget
   end
 
   defp eval_report(results, plan) do

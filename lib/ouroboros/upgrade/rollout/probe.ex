@@ -38,6 +38,22 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   @visibility_retries 20
   @visibility_delay_ms 25
 
+  @doc """
+  The transport budget a coordinator should allow one `ready?/1` run.
+
+  The probe's own bounded waits — the message call and the visibility loop — already
+  total more than the coordinator's default `:health_timeout`, so a deadline sized
+  below this turns a probe that is still legitimately working into a transport fault,
+  and a transport fault during health is recorded as node-state ambiguity. The
+  multiplier absorbs the parts that are not individually bounded here (module load,
+  agent start and stop, scheduler delay on a loaded host): a slow-but-healthy node
+  answers inside the budget, and only a wedged one becomes ambiguity.
+  """
+  @spec budget_ms() :: pos_integer()
+  def budget_ms do
+    (@call_timeout + @visibility_retries * @visibility_delay_ms) * 4
+  end
+
   @doc "Starts, messages, and stops one throwaway instance of `module` on this node."
   @spec ready?(module()) :: :ok | {:error, term()}
   def ready?(module) when is_atom(module) and not is_nil(module) do
@@ -136,9 +152,15 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     _kind, _reason -> :ok
   end
 
+  # The id joins a cluster-wide `:pg` namespace, so it carries the cluster-unique
+  # discriminator — `node()` — alongside the VM-unique integer. Without it, two nodes
+  # health-checking the same module concurrently (every multi-node rollout) can collide
+  # and route each other's probe message and state reads to one twin, which reads as a
+  # capability answering with the wrong body.
   defp probe_id(module) do
     "ouroboros-probe-" <>
       (module |> Atom.to_string() |> String.replace(".", "-")) <>
+      "-" <> Atom.to_string(node()) <>
       "-" <> Integer.to_string(System.unique_integer([:positive]))
   end
 

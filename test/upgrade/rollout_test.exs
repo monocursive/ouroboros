@@ -1,6 +1,15 @@
 defmodule Ouroboros.Upgrade.RolloutTest do
   use ExUnit.Case, async: false
 
+  # Every test boots two full-application peer VMs in `setup`, and most bodies boot one
+  # or two more forge build peers. Each wait in that path is bounded on an explicit
+  # condition — node booted, application started — but its wall-clock cost scales with
+  # machine load, and under a loaded scheduler the default 60s per-test ceiling fires
+  # mid-setup (ExUnit.TimeoutError inside `:peer.start` or the `ensure_all_started`
+  # erpc) while every underlying wait is still making progress. The ceiling stays
+  # bounded so a wedged peer still fails the test; it is sized to the workload.
+  @moduletag timeout: 180_000
+
   alias Ouroboros.Mesh
   alias Ouroboros.Upgrade.Forge
   alias Ouroboros.Upgrade.Forge.{Signer, Source}
@@ -243,10 +252,14 @@ defmodule Ouroboros.Upgrade.RolloutTest do
     # as it refuses to claim a rollback nobody proved.
     ghost = :ouroboros_rollout_ghost@nowhere
 
+    # The ghost's ambiguity comes from unreachability — `:erpc` refuses the connection
+    # immediately — not from this deadline, so the deadline is sized for the *real*
+    # nodes: tight enough to bound the test, generous enough that a loaded host does
+    # not turn their honest evaluations into a second ambiguity.
     assert {:error, {:quarantined, outcome}} =
              Rollout.deploy(signed, @echo, nodes,
                eval_nodes: nodes ++ [ghost],
-               eval_timeout: 2_000
+               eval_timeout: 15_000
              )
 
     assert outcome.state == :quarantined
@@ -642,7 +655,10 @@ defmodule Ouroboros.Upgrade.RolloutTest do
     binary
   end
 
-  defp await_visible!(id, expected_node, attempts \\ 100) do
+  # 400 x 25ms: cross-node `:pg` propagation is typically milliseconds, but this is an
+  # eventual-consistency wait and a loaded scheduler stretches it; the ceiling exists to
+  # catch an agent that will never appear, not to race the propagation.
+  defp await_visible!(id, expected_node, attempts \\ 400) do
     case Mesh.whereis(id) do
       pid when is_pid(pid) and node(pid) == expected_node ->
         pid
@@ -690,7 +706,10 @@ defmodule Ouroboros.Upgrade.RolloutTest do
     peer_name = String.to_atom("ouroboros_rollout_peer_#{System.unique_integer([:positive])}")
     args = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
 
-    {:ok, peer, peer_node} = :peer.start(%{name: peer_name, args: args, wait_boot: 20_000})
+    # `wait_boot` is a hang guard, not a pacing assumption: a healthy boot takes about a
+    # second, and a loaded scheduler can honestly take tens of seconds. It stays inside
+    # the module's 180s ceiling so a genuinely wedged peer is still a bounded failure.
+    {:ok, peer, peer_node} = :peer.start(%{name: peer_name, args: args, wait_boot: 60_000})
     on_exit(fn -> :peer.stop(peer) end)
 
     :ok =
