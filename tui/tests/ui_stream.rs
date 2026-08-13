@@ -13,10 +13,47 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
 use ouro::model::Plane;
-use ouro::ui::app::Msg;
+use ouro::ui::app::{App, Msg, NewField, Overlay};
 
 use support::{config, listener, Harness, Peer};
+
+fn key(code: KeyCode) -> Msg {
+    Msg::Key(KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    })
+}
+
+fn press(c: char) -> Msg {
+    key(KeyCode::Char(c))
+}
+
+fn enter() -> Msg {
+    key(KeyCode::Enter)
+}
+
+/// Moves the new-session form to a named row rather than counting keystrokes.
+fn focus(app: &mut App, target: NewField) {
+    for _ in 0..12 {
+        let current = match &app.overlay {
+            Some(Overlay::New(dialog)) => Some(dialog.field),
+            _ => None,
+        };
+
+        if current == Some(target) {
+            return;
+        }
+
+        app.apply(key(KeyCode::Down));
+    }
+
+    panic!("the form never reached {target:?}");
+}
 
 const SESSION: &str = "session-1";
 
@@ -27,6 +64,8 @@ const METHODS: &[&str] = &[
     "interactive.list",
     "coding.list",
     "interactive.replay",
+    "interactive.start",
+    "interactive.send_message",
     "interactive.subscribe",
     "interactive.unsubscribe",
 ];
@@ -103,6 +142,104 @@ async fn opening_a_session_subscribes_and_then_tails_it_live() {
     assert!(screen.contains("line 1"), "{}", screen.text());
     assert!(screen.contains("line 2"));
     assert!(screen.contains("live"));
+
+    script.abort();
+}
+
+#[tokio::test]
+async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_transcript() {
+    let (server, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&server).await;
+        peer.hello(METHODS).await;
+
+        let providers = peer.request_for("runtime.providers").await;
+        peer.result(
+            &providers["id"],
+            json!([{
+                "provider": "ouroboros_test",
+                "spec": {},
+                "status": { "installed": true, "compatible": true, "authenticated": true },
+                "error": null
+            }]),
+        )
+        .await;
+
+        let start = peer.request_for("interactive.start").await;
+
+        // Exactly the allowlisted options, and no `id` — the plane mints that.
+        assert_eq!(start["params"]["provider"], "ouroboros_test");
+        assert_eq!(start["params"]["workspace"], "/srv/work");
+        assert_eq!(
+            start["params"].as_object().expect("an object").len(),
+            2,
+            "an option outside @start_options is -32602 naming it: {}",
+            start["params"]
+        );
+
+        peer.result(
+            &start["id"],
+            json!({
+                "_struct": "Ouroboros.Interactive.Ref",
+                "id": SESSION,
+                "node": "nonode@nohost"
+            }),
+        )
+        .await;
+
+        // The client watches what it just created, from the beginning of its history.
+        let subscribe = peer.request_for("interactive.subscribe").await;
+
+        assert_eq!(subscribe["params"]["id"], SESSION);
+        assert_eq!(subscribe["params"]["cursor"], 0);
+
+        peer.result(&subscribe["id"], json!([])).await;
+
+        peer.notify(
+            "interactive.event",
+            json!({ "id": SESSION, "event": event(1, "session ready") }),
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    });
+
+    let mut harness = Harness::connect(config(address), None).await;
+    harness.app.launch_dir = Some("/srv/work".into());
+
+    // The whole flow from a keystroke: `2` to the Sessions tab, `n` for the form, then
+    // straight to start with the defaults the form offered.
+    harness.app.apply(press('2'));
+    harness.app.apply(press('n'));
+    harness.settle().await;
+
+    focus(&mut harness.app, NewField::Start);
+    harness.app.apply(enter());
+
+    harness
+        .settle_until(|app| {
+            app.sessions
+                .open_watch()
+                .map(|watch| watch.cursor() == 1)
+                .unwrap_or(false)
+        })
+        .await;
+
+    assert_eq!(
+        harness.app.sessions.open,
+        Some((Plane::Interactive, SESSION.into()))
+    );
+
+    let screen = harness.screen(110, 26);
+
+    assert!(screen.contains("session ready"), "{}", screen.text());
+    // The composer is open, so the first message is the next thing typed.
+    assert!(
+        screen.contains("Enter sends, Esc cancels"),
+        "{}",
+        screen.text()
+    );
 
     script.abort();
 }

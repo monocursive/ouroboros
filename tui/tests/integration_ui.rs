@@ -9,15 +9,21 @@
 //! actually serves, the session lists it actually has, and the runtime's own log lines in
 //! the ring.
 //!
-//! **It starts no session, and that is a finding rather than a shortcut.** The
+//! **It starts no session today, and that is a finding rather than a shortcut.** The
 //! deterministic adapter this project tests the interactive plane with —
 //! `Ouroboros.Test.HarnessAdapter`, provider `:ouroboros_test` — lives in `test/support`,
 //! and [mix.exs](../../mix.exs) compiles that directory only under `MIX_ENV=test`. A
 //! `--dev` daemon therefore registers exactly `Jido.Harness.Registry`'s nine builtins —
 //! amp, claude, codex, gemini, kimi, opencode, grok, pi, zai — every one of which shells
-//! out to a real coding CLI and bills a real account. There is no harmless provider to
-//! start a session with, so this test asserts that the *refusals* are typed and readable
-//! instead, which is the part a UI has to get right anyway.
+//! out to a real coding CLI and bills a real account.
+//!
+//! So the create path is asserted in the one way that cannot reach a CLI: a provider name
+//! this node does not serve is refused inside `option_value(_, :provider, _)`, which is
+//! parameter validation — it happens *before* `InteractiveSession.start/1` is called at
+//! all. The test checks that the refusal is typed, names the parameter, and lists what
+//! would have been accepted. The branch that would start a real session is written and
+//! runs only if `:ouroboros_test` ever appears in the provider list, so this upgrades
+//! itself instead of being rewritten.
 //!
 //! The runtime is stopped through the same path the quit dialog's "shut down" takes:
 //! `runtime.shutdown` first, then `Daemon::terminate`'s SIGTERM → grace → SIGKILL.
@@ -29,7 +35,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use ouro::model::Plane;
+use ouro::model::{Plane, StartRequest, StartedRef};
 use ouro::runtime::{self, Launcher, Output};
 use ouro::transport::{self, TransportConfig};
 use ouro::ui::app::{App, Mode, Msg, NoticeKind, Tab};
@@ -225,30 +231,27 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
 
     // ----- runtime.providers, and why no session is started -------------------------
 
+    // Cloned rather than borrowed: the App is driven for the rest of this test, and the
+    // live provider list is what the assertions below are about.
     let providers =
-        app.providers.value.as_ref().unwrap_or_else(|| {
+        app.providers.value.clone().unwrap_or_else(|| {
             panic!("runtime.providers never decoded: {:?}", app.providers.error)
         });
 
-    let names: Vec<&str> = providers
+    let names: Vec<String> = providers
         .iter()
-        .map(|entry| entry.provider.as_str())
+        .map(|entry| entry.provider.clone())
         .collect();
 
     eprintln!("providers: {names:?}");
-
-    assert!(
-        !names.contains(&"ouroboros_test"),
-        "the deterministic adapter lives in test/support and mix.exs compiles that only \
-         under MIX_ENV=test; if this ever passes, the smoke below can start a real session"
+    eprintln!(
+        "installed: {:?}",
+        providers
+            .iter()
+            .filter(|entry| entry.ready())
+            .map(|entry| entry.provider.as_str())
+            .collect::<Vec<_>>()
     );
-
-    for name in &names {
-        assert!(
-            !matches!(*name, "ouroboros_test"),
-            "unexpected provider {name}"
-        );
-    }
 
     // ----- tab 2: empty lists, and a typed refusal ----------------------------------
 
@@ -319,6 +322,159 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     // And the client stopped asking rather than spinning against a session that is not
     // there.
     assert!(!app.has_outbound());
+
+    // ----- the new-session form, against the live provider list ---------------------
+
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('n'),
+        crossterm::event::KeyModifiers::NONE,
+    )));
+
+    settle(
+        &mut app,
+        &client,
+        &sender,
+        &mut receiver,
+        &mut notifications,
+    )
+    .await;
+
+    let screen = render(&mut app, 140, 34);
+    eprintln!("--- new session ---\n{}", screen.text());
+
+    assert!(screen.contains("new session"), "{}", screen.text());
+    assert!(
+        screen.contains(&format!("(1/{})", names.len())),
+        "the form lists the providers the runtime actually serves:\n{}",
+        screen.text()
+    );
+
+    // Every live provider is reachable by cycling, and each is drawn as installed or not
+    // from its own probe.
+    let mut seen = Vec::new();
+
+    for _ in 0..names.len() {
+        let screen = render(&mut app, 140, 34);
+        let row = screen.row("provider").to_string();
+
+        let name = names
+            .iter()
+            .find(|name| row.contains(*name))
+            .unwrap_or_else(|| panic!("no live provider on the provider row: {row}"));
+
+        seen.push((*name).to_string());
+
+        app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        )));
+    }
+
+    seen.sort();
+    let mut expected: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+    expected.sort();
+
+    assert_eq!(
+        seen, expected,
+        "the form must offer every provider, no more"
+    );
+
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    )));
+
+    // ----- creating a session, only where nothing real would be invoked -------------
+
+    let harmless = providers
+        .iter()
+        .find(|entry| entry.provider == "ouroboros_test");
+
+    match harmless {
+        // Only reachable if `test/support` is ever compiled into dev. Kept so the smoke
+        // upgrades itself rather than being rewritten when that changes.
+        Some(entry) => {
+            eprintln!(
+                "starting a session on the deterministic adapter {}",
+                entry.provider
+            );
+
+            let mut request = StartRequest::new(Plane::Interactive);
+            request.provider = entry.provider.clone();
+
+            let started = client
+                .call_with_timeout(
+                    &request.method(),
+                    request.params().expect("a valid start"),
+                    ouro::ui::app::START_TIMEOUT,
+                )
+                .await
+                .expect("the deterministic adapter starts");
+
+            let started = StartedRef::decode(&started).expect("a session reference");
+            eprintln!("started {}", started.id);
+
+            app.open_session(Plane::Interactive, started.id.clone());
+
+            settle(
+                &mut app,
+                &client,
+                &sender,
+                &mut receiver,
+                &mut notifications,
+            )
+            .await;
+
+            assert!(app.sessions.open_watch().is_some());
+
+            let _ = client
+                .call("interactive.kill", json!({ "id": started.id }))
+                .await;
+        }
+        // The real case today. A provider name this node does not serve is refused in
+        // `option_value(_, :provider, _)` — parameter validation, before
+        // `InteractiveSession.start` exists — so no coding CLI is reachable from here.
+        None => {
+            let mut request = StartRequest::new(Plane::Interactive);
+            request.provider = "not-a-provider-this-node-serves".into();
+
+            let params = request
+                .params()
+                .expect("this client does not second-guess a provider name");
+
+            let refusal = client
+                .call_with_timeout(&request.method(), params, ouro::ui::app::START_TIMEOUT)
+                .await
+                .expect_err("the runtime is the authority on provider names");
+
+            eprintln!("start refusal: {refusal}");
+
+            assert_eq!(
+                refusal.code(),
+                Some(ouro::proto::ErrorCode::InvalidParams),
+                "unexpected refusal: {refusal}"
+            );
+
+            let message = refusal.to_string();
+
+            assert!(
+                message.contains("params.provider"),
+                "the refusal has to name the parameter: {message}"
+            );
+
+            for name in &names {
+                assert!(
+                    message.contains(name.as_str()),
+                    "and list what it would have accepted ({name} missing): {message}"
+                );
+            }
+
+            assert!(
+                app.sessions.merged().is_empty(),
+                "a refused start creates nothing"
+            );
+        }
+    }
 
     // ----- the read tabs all draw from live answers ---------------------------------
 

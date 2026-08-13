@@ -411,6 +411,21 @@ pub fn write_token(path: &Path) -> Result<Secret> {
     Ok(secret)
 }
 
+/// Resolves a workspace path against the directory the operator typed it in.
+///
+/// A relative path is ambiguous across a socket: the runtime would resolve it against
+/// *its own* working directory, which for a spawned daemon is a release root and for a
+/// `--dev` one is the checkout — neither of which is where the person stood. Absolutising
+/// here makes the local case correct and the remote case explicit, because an absolute
+/// path is at least a claim the operator can check against the runtime's filesystem.
+pub fn resolve_workspace(path: &Path, base: &Path) -> String {
+    if path.is_absolute() {
+        return path.display().to_string();
+    }
+
+    base.join(path).display().to_string()
+}
+
 /// Reads a token file, trimming the trailing newline a human's editor adds. The gateway
 /// trims the same way.
 pub fn read_token(path: &Path) -> Result<Secret> {
@@ -990,6 +1005,26 @@ mod tests {
 
         assert_eq!(tail, vec!["line 2", "line 3", "line 4"]);
         assert_eq!(ring.dropped(), 2);
+    }
+
+    #[test]
+    fn a_relative_workspace_is_resolved_where_it_was_typed() {
+        assert_eq!(
+            resolve_workspace(Path::new("src"), Path::new("/home/operator/project")),
+            "/home/operator/project/src"
+        );
+
+        // Already absolute: the operator named a path on the runtime's filesystem, and
+        // rewriting it would be this client second-guessing that.
+        assert_eq!(
+            resolve_workspace(Path::new("/srv/work"), Path::new("/home/operator")),
+            "/srv/work"
+        );
+
+        assert_eq!(
+            resolve_workspace(Path::new("."), Path::new("/home/operator")),
+            "/home/operator/."
+        );
     }
 
     #[test]

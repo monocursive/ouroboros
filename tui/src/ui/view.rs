@@ -11,7 +11,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Connection, Mode, NoticeKind, Overlay, Tab, APPROVAL_CHOICES};
+use crate::model::{Plane, ProviderEntry};
+
+use super::app::{
+    App, Connection, Mode, NewField, NewSession, NoticeKind, Overlay, Tab, APPROVAL_CHOICES,
+};
 use super::theme;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -179,6 +183,178 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             *choice,
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
+        Overlay::New(dialog) => new_session(frame, area, app, dialog),
+    }
+}
+
+/// The new-session form: every choice on screen at once, none of them made for you.
+fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
+    let providers = app.providers.value.as_deref().unwrap_or_default();
+    let rows = dialog.fields();
+    let height = (rows.len() + 8).min(area.height as usize) as u16;
+    let popup = centered(area, 76, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" new session ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(rows.len() as u16),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let mut lines = Vec::new();
+
+    for field in &rows {
+        let focused = *field == dialog.field;
+
+        let (label, value, style) = match field {
+            NewField::Plane => (
+                "plane",
+                match dialog.request.plane {
+                    Plane::Interactive => {
+                        "interactive — a conversation you send messages to".to_string()
+                    }
+                    Plane::Coding => "coding — one objective, run to completion".to_string(),
+                },
+                Style::default(),
+            ),
+            NewField::Provider => provider_cell(providers, dialog.provider),
+            NewField::Objective => (
+                "objective",
+                text_or_hint(&dialog.request.objective, "required"),
+                hint_style(&dialog.request.objective),
+            ),
+            NewField::Workspace => (
+                "workspace",
+                text_or_hint(&dialog.request.workspace, "none — the plane decides"),
+                hint_style(&dialog.request.workspace),
+            ),
+            NewField::ApprovalMode => ("approval", dialog.approval_label(), Style::default()),
+            NewField::Start => (
+                "",
+                if dialog.pending {
+                    format!("starting {} ", theme::spinner(app.ticks))
+                } else {
+                    "[ start ]".to_string()
+                },
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(format!("{label:<11}"), theme::label()),
+            Span::styled(value, style),
+        ];
+
+        // The caret only where typing goes somewhere.
+        if focused && matches!(field, NewField::Workspace | NewField::Objective) && !dialog.pending
+        {
+            spans.push(Span::styled(
+                "_",
+                Style::default().add_modifier(Modifier::SLOW_BLINK),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Tab/arrows move · left/right change · Enter on [ start ] · Esc cancels",
+            Style::default().fg(theme::MUTED),
+        ))),
+        chunks[1],
+    );
+
+    let mut footer = Vec::new();
+
+    if let Some(error) = &dialog.error {
+        footer.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(theme::BAD),
+        )));
+    } else if providers.is_empty() {
+        footer.push(Line::from(Span::styled(
+            if app.providers.pending {
+                "asking the runtime which providers it serves"
+            } else {
+                "this runtime serves no coding providers, so there is nothing to start"
+            },
+            Style::default().fg(theme::WARN),
+        )));
+    } else if !providers
+        .get(dialog.provider)
+        .map(|entry| entry.ready())
+        .unwrap_or(true)
+    {
+        // Selectable anyway: "installed" means a probe found an executable, and the
+        // runtime is the authority on whether a session can start.
+        footer.push(Line::from(Span::styled(
+            "no executable was found for it — the runtime decides, not this probe",
+            Style::default().fg(theme::WARN),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), chunks[2]);
+}
+
+fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, String, Style) {
+    let Some(entry) = providers.get(index) else {
+        return (
+            "provider",
+            "none available".to_string(),
+            Style::default().fg(theme::WARN),
+        );
+    };
+
+    let position = format!("({}/{})", index + 1, providers.len());
+
+    if entry.ready() {
+        return (
+            "provider",
+            format!("{} {position}", entry.provider),
+            Style::default().fg(theme::GOOD),
+        );
+    }
+
+    (
+        "provider",
+        format!("{} — not installed {position}", entry.provider),
+        Style::default().fg(theme::MUTED),
+    )
+}
+
+fn text_or_hint(value: &str, hint: &str) -> String {
+    if value.is_empty() {
+        hint.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn hint_style(value: &str) -> Style {
+    if value.is_empty() {
+        Style::default().fg(theme::MUTED)
+    } else {
+        Style::default()
     }
 }
 
@@ -271,6 +447,7 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
 
 const KEYS: &[(&str, &str)] = &[
     ("1-7 / Tab", "switch tab"),
+    ("n", "start a new session (Sessions tab)"),
     ("j k / arrows", "move; in a transcript, scroll"),
     (
         "h l / arrows",
