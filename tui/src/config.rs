@@ -8,13 +8,18 @@
 //! screen that shows one of them says so. What is kept here is the small set of answers a
 //! person would otherwise retype into every `ouro new`: which provider, which workspace,
 //! which approval mode. They are *defaults for a form*, not decisions: every one of them
-//! is prefilled into the `n` dialog and stays editable there, and `ouro new` still accepts
-//! a flag that overrides the file.
+//! is prefilled into the quick-start screen and the `n` dialog and stays editable in both,
+//! and `ouro new` still accepts a flag that overrides the file.
 //!
 //! This is what keeps the "not a choice this client makes for you" rule intact while
 //! removing the retyping. The client still refuses to *invent* a provider. It will use one
 //! the operator chose, once, explicitly, in a file they can read — which is a different
-//! statement from a node's default silently deciding which vendor runs their code.
+//! statement from a node's default silently deciding which vendor runs their code. The
+//! quick-start screen writes `defaults.provider` for exactly that reason: pressing Enter
+//! on a model *is* choosing it, so the next run does not ask again.
+//!
+//! `[onboarding]` is the other half: what this operator has already seen, and whether they
+//! want the quick-start screen to keep opening itself.
 //!
 //! ## Reading is total; writing is atomic
 //!
@@ -115,15 +120,38 @@ impl Defaults {
     }
 }
 
-/// Whether the first-run panel has been shown and dismissed.
-///
-/// A marker rather than a timestamp: the only question it answers is "has this person
-/// already been told where things are", and a date would invite a client to decide the
-/// answer expires.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What this operator has already been shown, and what they want shown again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Onboarding {
+    /// Whether the quick-start screen has been reached once.
+    ///
+    /// A marker rather than a timestamp: the only question it answers is "has this person
+    /// seen this client introduce itself", and a date would invite a client to decide the
+    /// answer expires.
     #[serde(default)]
     pub welcomed: bool,
+    /// Whether the quick-start screen opens on its own when this node has no live session.
+    ///
+    /// On by default, because `ouro` in a workspace usually means "type and go" and the
+    /// screen is that path rather than a greeting. Off is a real answer: an operator who
+    /// lives on the Sessions tab has already made the choice it exists to ask for.
+    #[serde(default = "on")]
+    pub quick_start: bool,
+}
+
+/// The default for a flag whose absence must not read as "turned off". A missing key in a
+/// file written by an older `ouro` is silence, not a decision.
+fn on() -> bool {
+    true
+}
+
+impl Default for Onboarding {
+    fn default() -> Self {
+        Self {
+            welcomed: false,
+            quick_start: on(),
+        }
+    }
 }
 
 /// A config file as it was found: what it said, where it is, and what was wrong with it.
@@ -428,7 +456,10 @@ mod tests {
                 workspace: Some("/home/me/project".into()),
                 approval_mode: Some("auto_edit".into()),
             },
-            onboarding: Onboarding { welcomed: true },
+            onboarding: Onboarding {
+                welcomed: true,
+                quick_start: false,
+            },
         };
 
         config.save(&path).expect("a written config");
@@ -488,10 +519,40 @@ mod tests {
         assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
         assert!(loaded.config.onboarding.welcomed);
         assert!(
+            loaded.config.onboarding.quick_start,
+            "a flag the file does not mention is silence, not a decision to turn it off"
+        );
+        assert!(
             loaded.problems.is_empty(),
             "a newer file is not a broken one: {:?}",
             loaded.problems
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quick_start_is_on_unless_the_file_says_otherwise() {
+        let dir = scratch("quick-start");
+        let path = dir.join(CONFIG_FILE);
+
+        assert!(Config::default().onboarding.quick_start);
+        assert!(load(path.clone()).config.onboarding.quick_start);
+
+        fs::write(
+            &path,
+            "[onboarding]\nwelcomed = true\nquick_start = false\n",
+        )
+        .expect("a config that turns it off");
+
+        assert!(!load(path.clone()).config.onboarding.quick_start);
+
+        // And "off" survives a rewrite: a value the operator stated is not one a save may
+        // quietly restore to the default.
+        let loaded = load(path.clone());
+        loaded.config.save(&path).expect("a rewrite");
+
+        assert!(!load(path).config.onboarding.quick_start);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -577,7 +638,7 @@ mod tests {
                 provider: Some("claude".into()),
                 ..Defaults::default()
             },
-            onboarding: Onboarding { welcomed: false },
+            onboarding: Onboarding::default(),
         };
 
         first.save(&path).expect("a first write");
@@ -587,7 +648,10 @@ mod tests {
                 workspace: Some("/srv/work".into()),
                 ..Defaults::default()
             },
-            onboarding: Onboarding { welcomed: true },
+            onboarding: Onboarding {
+                welcomed: true,
+                ..Onboarding::default()
+            },
         };
 
         second.save(&path).expect("a second write");

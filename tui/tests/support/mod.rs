@@ -180,6 +180,21 @@ pub fn hello(methods: &[&str]) -> Hello {
     .expect("a handshake")
 }
 
+/// The same handshake at `read` scope: a listener that *advertises* the operate verbs and
+/// will refuse every one of them with `-32003`. Scope and `methods` are two separate gates
+/// and a client has to honour both.
+pub fn read_hello(methods: &[&str]) -> Hello {
+    serde_json::from_value(json!({
+        "server": "0.1.0",
+        "node": "ouroboros@golden",
+        "role": "core",
+        "protocol": 1,
+        "scope": "read",
+        "methods": methods,
+    }))
+    .expect("a handshake")
+}
+
 /// A gateway that serves everything the golden `hello` lists.
 pub fn full_hello() -> Hello {
     serde_json::from_value(fixture("hello_result")["result"].clone()).expect("a handshake")
