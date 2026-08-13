@@ -46,6 +46,11 @@ pub enum Command {
         /// used.
         #[arg(long, value_name = "PATH")]
         token_file: Option<PathBuf>,
+
+        /// Print one status page and exit instead of opening the terminal UI. This is the
+        /// path for a pipe, a log, or a terminal that is not a tty.
+        #[arg(long)]
+        print: bool,
     },
 
     /// Stop the runtime this client started.

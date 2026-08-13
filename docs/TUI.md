@@ -566,6 +566,41 @@ path also owns the `cursor_pruned` arm: restart from the returned floor and
 render a "history truncated below N" divider in the transcript, and treat
 `stream.ended` as a terminal marker (stop expecting live events).
 
+**"Last seen `sequence`" is the contiguous high-water mark, not the newest event.** Found
+while implementing, and it is the whole correctness of the resync: after a lag the newest
+sequence a client holds is a *live* event from after the hole, so replaying from it would
+step over the missing history and produce a transcript that looks complete and is not. The
+cursor is therefore the largest `N` such that every sequence in `(floor, N]` is held, and
+it is the same number for all three causes.
+
+There is a **fourth** cause, and it is the client's own: `Client::dropped_notifications`
+counts frames the gateway sent that this process could not take. It is indistinguishable
+from `stream.lagged` from the transcript's point of view, so it is repaired identically —
+except that the counter does not say *which* session lost frames, so every watched session
+is replayed.
+
+Two consequences of `subscribe`/`replay` both answering "the retained events after this
+cursor, in order":
+
+- A batch whose first entry is above `cursor + 1` **proves** the ones between are no
+  longer retained, and raises the floor without any `cursor_pruned` having been sent. The
+  gateway had no reason to send one — the cursor itself was still inside the window.
+  Without this the transcript would show a hole that can never fill.
+- A prune raises the floor but must **not** discard what the client already holds. Events
+  obtained before a prune are real history; the divider is placed where the hole is
+  instead of at the top. The same divider marks the client's own window when a long
+  session runs past it, so "history truncated below N" means one thing whichever side
+  dropped it.
+
+Two more facts the implementation had to add rather than discover at runtime: a second
+interruption arriving while a repair is in flight is *remembered*, because responses and
+notifications reach the UI on different channels and are not ordered against each other,
+and the answer already in flight was asked from a cursor that predates the new
+interruption. And the number of replay rounds one interruption may cost is bounded (40 ×
+500 events, more than the upstream retention window); past it the transcript keeps its
+visible gap rather than looping against a session producing history faster than a client
+can read it.
+
 ### 3.4 Model & UI (`src/model.rs`, `src/ui/`)
 
 Serde types for the golden-fixture shapes, all tolerant: unknown fields
@@ -595,6 +630,43 @@ tail, input box, approval modal), **3 Agents** (list + state tree +
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `Enter` send, `Ctrl-C` interrupt active
 turn (never the TUI), `a` approval modal, `s` steer, `q` quit dialog, `?` help.
+
+Corrections and additions found while building it, recorded rather than left to be
+rediscovered:
+
+- **`Enter` alone cannot mean "send".** Typing into an input box and `1`-`7` selecting a
+  tab are the same keystrokes, so there is an explicit composer: `i` (or `Enter` on an
+  already-open session) opens it, `Enter` sends, `Esc` closes it. Without the mode, the
+  letter `s` in a message would steer the session.
+- **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
+  node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
+  `x` closes or kills the open session behind a confirmation; `r` refreshes the visible
+  tab now.
+- **`Ctrl-C` on the coding plane is refused rather than translated.** That plane has no
+  interrupt — cancelling is what it offers, and cancelling is destructive enough to go
+  through the confirmation instead.
+- **The approval modal offers exactly four answers** — `approve`/`deny` × `once`/`session`
+  — because that is `Jido.Harness.ApprovalResponse`'s two enums crossed. It does **not**
+  offer the optional `reason` the gateway accepts; that is a gap, not an omission.
+- **Session *creation* is not in the UI.** `interactive.start`/`coding.start` need a
+  provider, a workspace, and an execution policy, and a terminal that guessed any of them
+  would start work under a policy nobody chose. Sessions are started elsewhere and
+  observed here.
+- **`runtime.providers` is not on the status cadence.** Each entry probes an installed
+  executable by shelling out ([methods.ex] `@provider_probe_timeout`), so polling it
+  beside `runtime.status` would fork a process per provider every three seconds. It
+  refreshes on tab entry, on `r`, and once a minute. Transcript data is never polled at
+  all — that is what the subscription is for.
+- **`hello.methods` gates the client's own calls, not just its dialogs.** A verb this
+  build does not serve is answered locally with `-32601` and the pane says which method is
+  missing, in the place the data would have been. A client that discovered the gap by
+  trying could not tell an older gateway from a broken one.
+- **A list the runtime *refused* says so where the rows would be.** "No control runs" and
+  "the control plane is not running on this node" are different facts, and a `-32004`
+  rendered as an empty list is the second reported as the first.
+- **The Logs tab exists in both modes.** In attach mode it says logs live with the
+  spawner, which is a truthful pane rather than a hidden tab; the gateway streams no logs
+  (§6 defers it).
 
 ### 3.5 Rust tests
 

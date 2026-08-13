@@ -151,12 +151,14 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
     );
 
     // A method the gateway does not serve must be a typed refusal, not a hang: this is
-    // the same path `ouro stop` takes to decide whether runtime.shutdown exists.
+    // the same path `ouro stop` and the quit dialog take to decide what exists.
+    // `mesh.send_message` is deliberately absent from v1 (§2.4) — its `from` is
+    // caller-supplied, and the effects plane made principals non-spoofable.
     let refusal = connected
         .client
-        .call("runtime.shutdown", json!({}))
+        .call("mesh.send_message", json!({}))
         .await
-        .expect_err("Slice 1 serves no mutating verbs");
+        .expect_err("a verb this build does not serve");
 
     assert_eq!(
         refusal.code(),
@@ -165,13 +167,25 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
     );
 
     assert!(
-        !connected.hello.serves("runtime.shutdown"),
+        !connected.hello.serves("mesh.send_message"),
         "hello must advertise exactly what this build serves"
     );
 
+    // The spawner asks for operate scope and sets OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1, so
+    // this build does serve the one verb `ouro stop` prefers over a signal.
+    assert!(connected.hello.operates());
+    assert!(connected.hello.serves("runtime.shutdown"));
+
+    match connected.client.call("runtime.shutdown", json!({})).await {
+        Ok(result) => eprintln!("runtime.shutdown: {result}"),
+        // The runtime stopping is what was asked for, and it may stop before it answers.
+        Err(error) => eprintln!("runtime.shutdown: {error}"),
+    }
+
     connected.client.stop().await;
 
-    // No runtime.shutdown in this build, so the graceful stop is the signal path.
+    // Already stopping, so this observes the exit rather than causing it; a runtime that
+    // ignored the acknowledged stop would still be signalled and killed here.
     let exit = daemon
         .terminate(Duration::from_secs(30))
         .await

@@ -27,6 +27,18 @@
 //! supervised mode that is what lets ctrl-c run an ordered SIGTERM → grace → SIGKILL
 //! instead of racing the shell; in `ouro daemon` it is what lets the runtime outlive the
 //! client that started it.
+//!
+//! ## Two clients, one data directory
+//!
+//! Reading `gateway.json` and then spawning is a check followed by an action, and two
+//! `ouro` processes started together both pass the check. The second daemon would bind a
+//! second port, overwrite the token the first one is authenticated with, and publish over
+//! the first one's file — leaving one runtime unreachable and its journals owned by a
+//! process nobody is watching. [`acquire_spawn_lock`] closes that window with `O_EXCL`:
+//! the loser is told which pid won rather than starting anything. The lock covers the
+//! spawn, not the session — a client that held it while attached would stop the next
+//! `ouro` from *adopting* the daemon it just started, which is the case the rendezvous
+//! exists to serve.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -61,6 +73,10 @@ pub const TOKEN_FILE: &str = "gateway.token";
 /// Where a detached daemon's output goes. A daemon that outlives its spawner cannot keep
 /// writing into the spawner's pipes.
 pub const DAEMON_LOG_FILE: &str = "daemon.log";
+
+/// Held for the duration of one spawn attempt. Contains the pid of the client holding it,
+/// which is the only useful thing to tell whoever loses the race.
+pub const SPAWN_LOCK_FILE: &str = "spawn.lock";
 
 const READY_POLL: Duration = Duration::from_millis(150);
 
@@ -100,6 +116,10 @@ impl Paths {
 
     pub fn daemon_log(&self) -> PathBuf {
         self.data_dir.join(DAEMON_LOG_FILE)
+    }
+
+    pub fn spawn_lock(&self) -> PathBuf {
+        self.data_dir.join(SPAWN_LOCK_FILE)
     }
 
     pub fn releases(&self) -> PathBuf {
@@ -216,6 +236,129 @@ pub fn send_signal(pid: i32, signal: i32) -> Result<()> {
     }
 
     Err(anyhow!("cannot signal pid {pid}: {error}"))
+}
+
+/// The exclusive right to spawn into one data directory, released when dropped.
+///
+/// A lock file rather than an advisory `flock`: the winner's pid has to be *readable* by
+/// the loser to be reportable, and it has to survive the loser's `open` failing, which is
+/// exactly what `O_EXCL` plus a pid inside the file gives.
+#[derive(Debug)]
+pub struct SpawnLock {
+    path: PathBuf,
+}
+
+impl SpawnLock {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SpawnLock {
+    fn drop(&mut self) {
+        // A lock this process cannot remove becomes a stale lock the next client clears,
+        // which is why staleness is decided by the pid inside rather than by the file
+        // existing. Failing loudly here would replace a recoverable state with a crash.
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Takes the spawn lock, clearing exactly one lock whose owner is gone.
+///
+/// Recovery is bounded at one retry on purpose. A second failure means another client won
+/// the race in the microseconds between the removal and the create, and reporting that is
+/// correct; looping would turn a lost race into a spin against a client that is behaving.
+pub fn acquire_spawn_lock(data_dir: &Path) -> Result<SpawnLock> {
+    fs::create_dir_all(data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
+
+    let path = data_dir.join(SPAWN_LOCK_FILE);
+
+    match try_create_lock(&path) {
+        Ok(lock) => return Ok(lock),
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            return Err(anyhow::Error::from(error).context(format!("writing {}", path.display())));
+        }
+        Err(_taken) => {}
+    }
+
+    let holder = read_lock_holder(&path)?;
+
+    if let Some(pid) = holder {
+        if pid_alive(pid) {
+            bail!(
+                "another ouro (pid {pid}) is starting a runtime in {}; wait for it to \
+                 publish {}, then attach — two daemons in one data directory would each \
+                 overwrite the other's token and publication",
+                data_dir.display(),
+                PUBLICATION_FILE
+            );
+        }
+    }
+
+    // Either the holder is dead or the file never named a pid this client can check. Both
+    // are the same fact: nothing is holding it, and the lock is removed once.
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context(format!("removing the stale spawn lock {}", path.display())))
+        }
+    }
+
+    try_create_lock(&path).map_err(|error| {
+        anyhow!(
+            "cannot take the spawn lock {} after clearing a stale one: {error}",
+            path.display()
+        )
+    })
+}
+
+fn try_create_lock(path: &Path) -> io::Result<SpawnLock> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+
+    io::Write::write_all(&mut file, std::process::id().to_string().as_bytes())?;
+    io::Write::flush(&mut file)?;
+
+    Ok(SpawnLock {
+        path: path.to_path_buf(),
+    })
+}
+
+/// The pid inside a lock file, or `None` when it holds nothing this client can act on.
+///
+/// A lock owned by another uid is refused rather than read: `ouro` would otherwise decide
+/// a pid it cannot verify is stale and remove a file it does not own.
+fn read_lock_holder(path: &Path) -> Result<Option<i32>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context(format!("reading {}", path.display())),
+    };
+
+    // SAFETY: geteuid cannot fail and touches no memory.
+    let us = unsafe { libc::geteuid() };
+
+    if metadata.uid() != us {
+        bail!(
+            "{} belongs to uid {}, not to uid {us}; this client will not clear a spawn \
+             lock it does not own",
+            path.display(),
+            metadata.uid()
+        );
+    }
+
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context(format!("reading {}", path.display())),
+    };
+
+    Ok(contents.trim().parse::<i32>().ok())
 }
 
 /// Writes a fresh token and returns it. 32 bytes of OS randomness rendered as hex, which
@@ -847,6 +990,64 @@ mod tests {
 
         assert_eq!(tail, vec!["line 2", "line 3", "line 4"]);
         assert_eq!(ring.dropped(), 2);
+    }
+
+    #[test]
+    fn only_one_client_may_hold_the_spawn_lock() {
+        let dir = scratch("lock");
+
+        let held = acquire_spawn_lock(&dir).expect("the first lock");
+
+        assert_eq!(held.path(), dir.join(SPAWN_LOCK_FILE));
+        assert_eq!(
+            fs::read_to_string(held.path()).expect("a readable lock"),
+            std::process::id().to_string(),
+            "the lock has to name its holder, because that is what the loser is told"
+        );
+
+        let refused = acquire_spawn_lock(&dir).expect_err("a second lock");
+        let message = format!("{refused:#}");
+
+        assert!(
+            message.contains(&format!("pid {}", std::process::id())),
+            "the loser must be told which pid won: {message}"
+        );
+
+        drop(held);
+
+        // Released, so the next attempt succeeds without any staleness reasoning.
+        let _next = acquire_spawn_lock(&dir).expect("a lock after the first was released");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lock_whose_holder_is_gone_is_cleared_once() {
+        let dir = scratch("stale-lock");
+        let path = dir.join(SPAWN_LOCK_FILE);
+
+        // Pid 2^31-1 is above every pid_max a Unix uses, so it names nothing.
+        fs::write(&path, "2147483647").expect("a stale lock");
+
+        let taken = acquire_spawn_lock(&dir).expect("a lock after clearing a dead holder");
+
+        assert_eq!(
+            fs::read_to_string(taken.path()).expect("a readable lock"),
+            std::process::id().to_string()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lock_holding_nothing_readable_is_also_cleared() {
+        let dir = scratch("garbage-lock");
+
+        fs::write(dir.join(SPAWN_LOCK_FILE), "not a pid").expect("a garbage lock");
+
+        let _taken = acquire_spawn_lock(&dir).expect("a lock after clearing an unreadable one");
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
