@@ -1,0 +1,33 @@
+<%
+  # The transport half of rel/vm.args.eex, for the short-lived hidden nodes that
+  # `bin/<name> remote`, `rpc`, `stop`, `restart`, and `pid` start. They have to speak
+  # the same distribution protocol as the running node or they cannot reach it at all,
+  # which is why the TLS block is repeated here.
+  #
+  # What is deliberately NOT repeated is the inet_dist_listen_min/max range: pinning a
+  # remote shell to the same port the running node already listens on makes every rpc
+  # fail with an address collision.
+  env = fn name ->
+    case System.get_env(name) do
+      value when is_binary(value) -> if String.trim(value) == "", do: nil, else: String.trim(value)
+      _absent -> nil
+    end
+  end
+
+  tls? = env.("OUROBOROS_DIST_TLS") == "1"
+  optfile = env.("OUROBOROS_DIST_TLS_OPTFILE")
+
+  if tls? and is_nil(optfile) do
+    raise "OUROBOROS_DIST_TLS=1 requires OUROBOROS_DIST_TLS_OPTFILE: the path, on the " <>
+            "deploy host, of the ssl_dist_optfile holding the distribution certificates"
+  end
+%>## Flags given to remote-command VMs for <%= @release.name %>.
+## -mode/-name/-sname/-setcookie are configured via env vars, do not set them here.
+##
+## Rendered by `mix release` from the build environment. See rel/remote.vm.args.eex.
+<%= if tls? do %>
+-proto_dist inet_tls
+-ssl_dist_optfile <%= optfile %>
+<% else %>
+## Cleartext TCP, matching the running node.
+<% end %>

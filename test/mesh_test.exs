@@ -22,6 +22,24 @@ defmodule Ouroboros.MeshTest do
       id = unique_id("unreachable")
       target = unreachable_node()
 
+      # A node that is not connected is refused before any remote call is attempted.
+      assert {:error, {:placement_refused, ^target, :node_not_connected}} =
+               Mesh.start_agent_on(target, id)
+
+      assert Mesh.whereis(id) == nil
+    end
+
+    test "an unreachable node still converts a transport fault instead of raising" do
+      id = unique_id("unreachable-unchecked")
+      target = unreachable_node()
+
+      # With the placement check off, the call reaches `:erpc` and fails there. That
+      # path must stay an error tuple: `:erpc` reports transport faults as `:error` but
+      # a remote exit as `:exit`, and catching only one used to crash the caller.
+      previous = Application.get_env(:ouroboros, :placement_role_check, true)
+      Application.put_env(:ouroboros, :placement_role_check, false)
+      on_exit(fn -> Application.put_env(:ouroboros, :placement_role_check, previous) end)
+
       assert {:error, {:remote_start_failed, ^target, {kind, _reason}}} =
                Mesh.start_agent_on(target, id)
 

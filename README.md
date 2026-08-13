@@ -154,10 +154,13 @@ claim a reservation. These leases are node-local admission, not distributed cons
   Ouroboros.Mesh.assign_task("root", "reviewer", "Find dependency risks")
 ```
 
-Start on a connected node with `Ouroboros.Mesh.start_agent_on/3`. The directory uses
-a named `:pg` scope and monitors local Jido processes. `:global.trans/2` narrows
-duplicate-start races in a healthy connected cluster; it is explicitly not a
-partition-safe consensus protocol.
+Start on a connected node with `Ouroboros.Mesh.start_agent_on/3`. The target is checked
+before anything is placed on it: it must be connected and running this runtime in the
+`core` role, or the call returns `{:error, {:placement_refused, node, reason}}` — see
+[Running a cluster](#running-a-cluster) for what that check is and, more importantly,
+what it is not. The directory uses a named `:pg` scope and monitors local Jido
+processes. `:global.trans/2` narrows duplicate-start races in a healthy connected
+cluster; it is explicitly not a partition-safe consensus protocol.
 
 Visibility is eventually consistent. `whereis/1` and `members/1` qualify a remote entry
 by node connectivity, not by remote process liveness, because probing the owner would
@@ -662,6 +665,9 @@ export OUROBOROS_UPGRADE_TRUSTED_SIGNERS="release-key:$(base64 < release-key.pub
 MIX_ENV=prod mix release
 ```
 
+Node identity, role, cluster formation, and distribution transport are covered
+separately in [Running a cluster](#running-a-cluster).
+
 The forge signs with whatever `config :ouroboros, :forge_signer` names, and the shipped
 default refuses to sign anything. A production deployment that wants forged capabilities
 configures a signer that reaches a key held outside this application, and names that
@@ -676,6 +682,209 @@ set, and an unset variable trusts nobody, so every artifact is rejected until ke
 supplied by the deployment's configuration boundary. Release and fast-patch journals use
 a file-and-parent-directory-synced checkpoint adapter; the other domain aggregates use
 single-owner atomic file checkpoints.
+
+## Running a cluster
+
+Until now every node in this README connected because something outside it said so.
+`Ouroboros.Cluster` owns the other half: which tree a node boots, and how it finds the
+others.
+
+### Node roles
+
+A node boots exactly one role, from `OUROBOROS_NODE_ROLE` (default `core`):
+
+| Role      | Supervision tree                                   | What it is for                          |
+| --------- | -------------------------------------------------- | --------------------------------------- |
+| `core`    | the full runtime — mesh, teams, sessions, journals, scheduler, control plane | running work |
+| `builder` | cluster formation only                              | compiling forged capabilities off the production host |
+| `signer`  | cluster formation only                              | holding a signing seam nothing else on the host can reach |
+
+A `builder` and a `signer` run *this same release*, booted differently. That is not
+convenience: the forge's artifact is verified against the loading node's exact OTP
+release, Elixir version, and architecture, so a builder that is not runtime-identical to
+its targets produces BEAMs every target rejects. One artifact, one runtime, three roles.
+
+An unrecognized role refuses the boot rather than falling back to `core`.
+
+```sh
+OUROBOROS_NODE_ROLE=builder    # this host only compiles
+```
+
+Point a core node at a builder and forge builds relocate with no other change:
+
+```sh
+OUROBOROS_FORGE_BUILDER_NODE=builder-1@builder-1
+```
+
+The build still happens inside a non-distributed `:peer` — it simply happens on the
+builder's host now. A builder that is unreachable, not running this runtime, or not
+actually in the `builder` role is refused with
+`{:error, {:forge_builder_refused, node, reason}}` rather than silently building
+locally.
+
+### Formation
+
+`OUROBOROS_CLUSTER_STRATEGY` is `none` by default; nothing forms until you name one.
+
+| Strategy | Variables                                                             |
+| -------- | --------------------------------------------------------------------- |
+| `none`   | —                                                                     |
+| `epmd`   | `OUROBOROS_CLUSTER_HOSTS` (comma-separated node names)                |
+| `gossip` | `OUROBOROS_CLUSTER_GOSSIP_SECRET`, `OUROBOROS_CLUSTER_GOSSIP_PORT` (both optional) |
+| `dns`    | `OUROBOROS_CLUSTER_DNS_QUERY`, `OUROBOROS_CLUSTER_DNS_BASENAME` (defaults to this node's name) |
+
+`OUROBOROS_CLUSTER_RECONNECT_MS` (default 5000) is the retry interval, not a deadline —
+it is what makes boot order irrelevant. A strategy that is named but missing its
+variables refuses the boot; it does not quietly run unformed.
+
+### Distribution TLS
+
+Cleartext Erlang distribution puts the shared cookie, and everything after it, on the
+wire. Generate a private CA and one certificate per node:
+
+```sh
+# One CA for the cluster. Only nodes holding a certificate it signed can handshake.
+openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+  -keyout ca.key -out ca.pem -subj "/CN=ouroboros-dist-ca"
+
+# One key and certificate per node.
+openssl req -newkey rsa:4096 -nodes -keyout core-1.key -out core-1.csr \
+  -subj "/CN=core-1"
+openssl x509 -req -in core-1.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -days 825 -sha256 -out core-1.pem
+```
+
+The `ssl_dist_optfile` is an Erlang term file — one list, ending in a period, with a
+`server` and a `client` section. Both sides must verify, or only half the handshake is
+authenticated:
+
+```erlang
+%% /etc/ouroboros/dist_tls.conf
+[{server, [{certfile, "/etc/ouroboros/tls/core-1.pem"},
+           {keyfile,  "/etc/ouroboros/tls/core-1.key"},
+           {cacertfile, "/etc/ouroboros/tls/ca.pem"},
+           {verify, verify_peer},
+           {fail_if_no_peer_cert, true},
+           {versions, ['tlsv1.3']}]},
+ {client, [{certfile, "/etc/ouroboros/tls/core-1.pem"},
+           {keyfile,  "/etc/ouroboros/tls/core-1.key"},
+           {cacertfile, "/etc/ouroboros/tls/ca.pem"},
+           {verify, verify_peer},
+           {versions, ['tlsv1.3']}]}].
+```
+
+`vm.args` is a static file the emulator reads with `-args_file`: it has no shell and no
+runtime interpolation. So the distribution flags are read from the **build**
+environment and baked into the artifact:
+
+```sh
+export OUROBOROS_DIST_TLS=1
+export OUROBOROS_DIST_TLS_OPTFILE=/etc/ouroboros/dist_tls.conf
+export OUROBOROS_DIST_PORT_MIN=9100   # optional: pin the listener for a firewall
+export OUROBOROS_DIST_PORT_MAX=9105
+MIX_ENV=prod mix release
+```
+
+`OUROBOROS_DIST_TLS=1` without an optfile fails the build rather than producing a
+release that cannot start distribution. The same flags are rendered into
+`remote.vm.args` so `bin/ouroboros remote`, `rpc`, and `stop` can still reach the node;
+the port pinning deliberately is not, because a remote shell must not bind the port the
+running node already holds.
+
+At boot, `config/runtime.exs` reads the transport the VM is actually running. A node
+that forms a cluster over cleartext distribution refuses to start unless
+`OUROBOROS_ALLOW_INSECURE_DIST=1` says that is intended.
+
+### Three nodes
+
+One image, three roles:
+
+```yaml
+# docker-compose.yml — built with OUROBOROS_DIST_TLS=1
+x-node: &node
+  image: ouroboros:0.1.0
+  command: ["/app/bin/ouroboros", "start"]
+  volumes: ["./tls:/etc/ouroboros/tls:ro", "./dist_tls.conf:/etc/ouroboros/dist_tls.conf:ro"]
+
+x-env: &env
+  OUROBOROS_COOKIE: ${OUROBOROS_COOKIE:?set a cookie}
+  OUROBOROS_DATA_DIR: /var/lib/ouroboros
+  OUROBOROS_CLUSTER_STRATEGY: epmd
+  OUROBOROS_CLUSTER_HOSTS: core-1@core-1,core-2@core-2,builder-1@builder-1
+
+services:
+  core-1:
+    <<: *node
+    hostname: core-1
+    environment:
+      <<: *env
+      OUROBOROS_NODE: core-1@core-1
+      OUROBOROS_NODE_ROLE: core
+      OUROBOROS_FORGE_BUILDER_NODE: builder-1@builder-1
+
+  core-2:
+    <<: *node
+    hostname: core-2
+    environment:
+      <<: *env
+      OUROBOROS_NODE: core-2@core-2
+      OUROBOROS_NODE_ROLE: core
+      OUROBOROS_FORGE_BUILDER_NODE: builder-1@builder-1
+
+  builder-1:
+    <<: *node
+    hostname: builder-1
+    environment:
+      <<: *env
+      OUROBOROS_NODE: builder-1@builder-1
+      OUROBOROS_NODE_ROLE: builder
+```
+
+`bin/ouroboros` refuses a blank `OUROBOROS_NODE` or `OUROBOROS_COOKIE` before the VM
+starts, and refuses a short name, because `RELEASE_DISTRIBUTION=name` needs `name@host`.
+Without that refusal the release would fall back to the release name and to the random
+cookie baked into `releases/COOKIE` at build time — a cluster secret nobody chose and
+nobody can rotate.
+
+Once up, `Ouroboros.status()` reports the local role, the roles it can see, the
+formation strategy, and the distribution posture (`security.cookie` is `:set` or
+`:unset`, never the cookie itself):
+
+```elixir
+Ouroboros.Cluster.role()               #=> :core
+Ouroboros.Cluster.nodes_by_role(:core) #=> [:"core-1@core-1", :"core-2@core-2"]
+Ouroboros.status().cluster.security    #=> %{distributed: true, proto_dist: :inet_tls, tls: true, cookie: :set}
+```
+
+Topology churn is logged as it happens, with the arriving node's role, because
+`Node.list/0` can show what is connected now but never what left.
+
+### Honest limits
+
+- **The cookie and TLS are transport authentication, not authorization.** They decide
+  who may complete the distribution handshake. They decide nothing about what a node
+  may then do — and the answer is *everything*. Any connected node can `:erpc` any
+  exported function on any other node, load code, read that node's application
+  environment (including a configured signing key), and kill its processes.
+- **Placement checks are misconfiguration detection.** `Mesh.start_agent_on/3` and a
+  team's `:node` option refuse a target that is not a connected `core` node running this
+  runtime, and the forge refuses a builder that is not in the `builder` role. That stops
+  work being sent where it cannot run. It stops nothing a hostile connected node decides
+  to do, because that node never has to call these functions at all. The same is true of
+  the `Ouroboros.Capability.` namespace policy and the protected-module list.
+- **Roles reduce blast radius; they do not contain a compromise.** A builder holds no
+  teams, sessions, journals, grants, or control plane, so compromising it yields a
+  compiler rather than a fleet. It is still a fully authorized cluster member. Real
+  containment needs the build host outside the cluster's trust domain entirely, reached
+  by something narrower than Erlang distribution.
+- **Formation is not fencing.** libcluster connects nodes. It has no quorum, no
+  partition policy, and no opinion about a node that comes back with stale state.
+  `:global.trans/2` narrows duplicate-start races in a *healthy connected* cluster and
+  is not partition-safe consensus.
+- **The distribution flags are baked at build time.** Changing TLS or the port range
+  means building a new release, or pointing `RELEASE_VM_ARGS` at a file you maintain.
+- **EPMD is still in the path** for the `epmd` and `dns` strategies: its port (4369)
+  has to be reachable even when the distribution listener is pinned elsewhere.
 
 ## Current limits
 
@@ -707,10 +916,16 @@ single-owner atomic file checkpoints.
 - Autonomous evaluation is implemented with bounded revisions and step count, but
   aggregate token/cost/time budgets, independent policy approval, and behavioral
   regression scoring remain.
+- Cluster formation is implemented (libcluster: static epmd, gossip, DNS polling) and
+  off by default, and nodes boot a role-shaped tree. Formation is not fencing: there is
+  no quorum, no partition policy, and no reconciliation of a node that returns with
+  stale state. Role separation reduces blast radius and does not contain a compromised
+  node, which retains full `:erpc` authority over every node it is connected to.
 - The forge compiles and tests candidate capabilities in an isolated, non-distributed
-  build peer, but that peer shares the build host's user, filesystem, and network. Real
-  OS sandboxing, an independent signing service, and evaluation gates comparing behavior
-  and cost before rollout are external. Capability rollout records accumulate; only
+  build peer, and that peer can now run on a least-privileged `builder` node. It still
+  shares that host's user, filesystem, and network, and a builder is still a fully
+  authorized cluster member. Real OS sandboxing, an independent signing service, and
+  evaluation gates comparing behavior and cost before rollout are external. Capability rollout records accumulate; only
   settled `:rolled_back` entries are pruned when the store exceeds
   `:ouroboros, :capability_rollout_limit`.
 - Agent effect grants are node-local, deny-by-default, and durable per node. They

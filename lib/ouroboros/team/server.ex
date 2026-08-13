@@ -344,13 +344,24 @@ defmodule Ouroboros.Team.Server do
         {:error, :invalid_worker_node}
 
       true ->
-        case Ouroboros.Mesh.start_agent_on(worker_node, worker_id,
-               role: role,
-               parent_id: state.coordinator_id
-             ) do
-          {:ok, pid} -> finish_add_worker(state, worker_id, worker_node, role, pid)
-          {:error, reason} -> {:error, reason}
+        # A named `:node` is a placement decision this server records durably, so the
+        # target is checked before the worker exists rather than after a remote start
+        # fails for an unnamed reason.
+        with :ok <- validate_worker_node(worker_node),
+             {:ok, pid} <-
+               Ouroboros.Mesh.start_agent_on(worker_node, worker_id,
+                 role: role,
+                 parent_id: state.coordinator_id
+               ) do
+          finish_add_worker(state, worker_id, worker_node, role, pid)
         end
+    end
+  end
+
+  defp validate_worker_node(worker_node) do
+    case Ouroboros.Cluster.ensure_placeable(worker_node) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_worker_node, worker_node, reason}}
     end
   end
 

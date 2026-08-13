@@ -69,6 +69,22 @@ defmodule Ouroboros.Application do
 
   @impl true
   def start(_type, _args) do
+    # Resolved before anything is supervised, because it decides what gets supervised.
+    # An unrecognized role raises here rather than booting the privileged tree.
+    role = Ouroboros.Cluster.boot_role!()
+
+    Supervisor.start_link(children(role), strategy: :rest_for_one, name: Ouroboros.Supervisor)
+  end
+
+  # A `:builder` or `:signer` node is a least-privileged member of the same release: it
+  # holds the code and the cluster membership needed to be asked for a build or a
+  # signature, and nothing else. Neither lane needs a supervised process — a forge build
+  # is `:peer.start/1` plus a call, and signing is a function over a key — so the honest
+  # minimum here is cluster formation alone. No teams, stores, schedulers, registries,
+  # workspaces, recovery loops, or control plane exist on those hosts to be reached.
+  defp children(role) when role in [:builder, :signer], do: [Ouroboros.Cluster]
+
+  defp children(:core) do
     children =
       [
         Ouroboros.Jido,
@@ -112,7 +128,13 @@ defmodule Ouroboros.Application do
     # The capability rollout registry sits immediately after the node executor for the
     # same reason: it is the deployment-level record of code the executor loaded, so it
     # must not outlive the executor whose journal it describes.
-    Supervisor.start_link(children, strategy: :rest_for_one, name: Ouroboros.Supervisor)
+    #
+    # Cluster formation is deliberately at the tail. It connects and observes; it is not
+    # an authority anything downstream rebuilds from, because this node's role is
+    # resolved once at boot and held outside the process tree. Leading the chain with it
+    # would mean a discovery strategy's crash restarts every durable owner above, which
+    # is a far worse trade than losing topology logging for a moment.
+    children ++ [Ouroboros.Cluster]
   end
 
   defp workspace_children do

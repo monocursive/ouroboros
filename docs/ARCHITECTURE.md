@@ -25,16 +25,43 @@ This slice is complete when all of the following are executable and tested:
    with every attempt authorized against a durable deny-by-default grant for the
    concrete target, identified from server-side agent state rather than the signal,
    bounded so no effect blocks the agent, and recorded whether it ran or was refused.
-8. The documentation distinguishes those proofs from partition tolerance, full-host
+8. Nodes form a cluster without anyone connecting them by hand, boot a role-shaped tree
+   (`:core` full, `:builder`/`:signer` formation-only), refuse to place work on a node
+   that cannot run it, relocate forge builds onto a least-privileged builder, and ship
+   as one release whose node identity, cookie, and distribution transport are explicit
+   and fail closed.
+9. The documentation distinguishes those proofs from partition tolerance, full-host
    provider durability, billing, real repository effects, OS-level sandboxing of
    generated code, independent signing custody, evaluation gates, a real
-   packaged-release install/reboot rehearsal, and any claim that effect grants sandbox
-   loaded code.
+   packaged-release install/reboot rehearsal, any claim that effect grants sandbox
+   loaded code, and any claim that node roles or placement checks constrain a node that
+   has already completed the distribution handshake.
 
-The first seven are local implementation claims backed by deterministic tests. None
-imply the external claims in item eight.
+The first eight are local implementation claims backed by deterministic tests. None
+imply the external claims in item nine.
 
 ## Planes and ownership
+
+### Cluster plane
+
+`Ouroboros.Cluster` owns two things nothing else may decide: which tree this node boots,
+and how it finds the others.
+
+Role (`:core`, `:builder`, `:signer`) is resolved once, at application start, before any
+child is supervised — an unrecognized role raises rather than booting the privileged
+tree. `:core` starts the full runtime; `:builder` and `:signer` start formation and
+nothing else, because neither lane needs a supervised process: a forge build is
+`:peer.start/1` plus a call, and signing is a function over a key.
+
+Formation is libcluster, off by default, selected by `OUROBOROS_CLUSTER_STRATEGY`. It
+sits at the *tail* of the application's `rest_for_one` chain on purpose: it connects and
+observes, and nothing downstream rebuilds state from it, so a discovery strategy's crash
+must not restart the durable owners above it.
+
+Invariant: role is a placement fact, not an authority boundary. Every check that reads a
+remote role also requires the target to be connected and running this runtime, and the
+answer is only ever an observation about a cooperative cluster — see "Safety
+boundaries".
 
 ### Team plane
 
@@ -413,7 +440,22 @@ rehearsed lane can prove restart persistence or an ERTS change.
   result tails are redacted before checkpointing. Objectives and provider-specific
   options are durable domain data and must not contain secrets.
 - Distribution must use authenticated, encrypted transport outside a trusted local
-  network; Erlang cookies alone are not an adequate internet-facing boundary.
+  network; Erlang cookies alone are not an adequate internet-facing boundary. The
+  release renders `-proto_dist inet_tls` and an `ssl_dist_optfile` when it is built with
+  `OUROBOROS_DIST_TLS=1`, and a node that forms a cluster over cleartext distribution
+  refuses to boot unless `OUROBOROS_ALLOW_INSECURE_DIST=1` says so.
+- Cookie and TLS are transport authentication, not authorization. They decide who may
+  complete the handshake and nothing about what follows: every connected node holds full
+  `:erpc` authority over every other, including loading code, reading application
+  environment, and killing processes. `Ouroboros.Cluster`'s role checks — placement onto
+  `:core` nodes, forge builds onto `:builder` nodes — are misconfiguration detection
+  above that fact, in exactly the same sense as the `Ouroboros.Capability.` namespace
+  policy. A hostile connected node never calls those functions at all.
+- Node role narrows blast radius rather than containing a compromise. A `:builder` or
+  `:signer` node boots cluster formation and nothing else, so it holds no teams,
+  sessions, journals, grants, or control plane; it remains a fully authorized member of
+  the cluster. Containment requires the build and signing hosts outside the cluster's
+  trust domain, reached through something narrower than Erlang distribution.
 - The OTP releases directory is deployment-owned infrastructure. Content addressing,
   exclusive links, and fsync do not defend against another OS principal that can replace
   files in that directory.
@@ -466,7 +508,19 @@ Implemented:
   concrete attempt, identifies the actor from server-side state rather than the signal,
   bounds every effect, and records each one. An agent driven only by signals can forge a
   capability, deploy it, start it, and message it — and can be refused at any of those
-  steps without dying.
+  steps without dying;
+- least-privileged builder and signer nodes (`Ouroboros.Cluster`): one release, one
+  runtime, three roles. A `:builder`/`:signer` node boots cluster formation and nothing
+  else — no teams, sessions, stores, scheduler, or control plane — and
+  `:forge_builder_node` relocates the build peer onto one without changing anything
+  about the build. The builder must be runtime-identical to its targets, because the
+  verifier checks the artifact's OTP/Elixir/architecture triple on every loading node;
+  that constraint is *why* a builder is a role of the same release rather than a
+  separate service;
+- formation itself (libcluster: static epmd, gossip, DNS polling), off by default, plus
+  a release whose distribution posture is explicit: long names, a refused blank
+  node/cookie, optional TLS distribution baked into `vm.args`, and a boot that fails
+  closed when a clustering node ends up on cleartext distribution.
 
 Still external:
 
@@ -475,16 +529,24 @@ Still external:
   rate or cost budget, and no durable effect log: the audit trail is a bounded ring in
   the acting agent's state and dies with it.
 
-- **an independent signing/review service.** The seam exists and the default refuses,
-  but the only shipped implementation (`Signer.Local`) reads its key from this
-  application's configuration. A key an agent's own application can read is a key that
-  agent can use to approve itself; production custody belongs on a separate
-  least-privileged host, HSM, or review queue.
+- **an independent signing/review service.** The seam exists, the default refuses, and a
+  `:signer` node is now a real least-privileged host rather than a diagram. But the only
+  shipped implementation (`Signer.Local`) reads its key from this application's
+  configuration, and a signer node is still a fully authorized cluster member: any
+  connected node can `:erpc` it and read that configuration. A key an agent's own
+  cluster can read is a key that agent can use to approve itself. Production custody
+  belongs behind an HSM or a review queue reached by something narrower than Erlang
+  distribution.
 - **real OS sandboxing.** The build peer is isolated from the *cluster*, not from the
-  *host*: same user, same filesystem, same network. Compiling untrusted source safely
-  needs a container or VM boundary with resource and network limits, on a build host
-  that is not a production host. The source deny list is hygiene against accidents and
-  is defeated by any macro expansion, `apply/3`, or runtime-constructed module name.
+  *host*: same user, same filesystem, same network. A `:builder` node moves that host
+  off the production path, which is worth doing and is not containment — the builder
+  remains inside the distribution trust domain. Compiling untrusted source safely needs
+  a container or VM boundary with resource and network limits. The source deny list is
+  hygiene against accidents and is defeated by any macro expansion, `apply/3`, or
+  runtime-constructed module name.
+- **partition behavior.** Formation connects nodes; it does not fence them. There is no
+  quorum, no partition policy, and no reconciliation for a node that returns with stale
+  state. Role and placement checks are observations about a *connected* cluster.
 - **evaluation gates.** The probe proves liveness, not merit: one agent start, one
   signal, one sane answer. Behavioural comparison against the previous capability, cost
   and latency regression, canary cohorts, and automatic promotion decisions are not
@@ -516,7 +578,10 @@ That architecture creates promising future capabilities:
 - canary or cohort rollout of a behavior patch with health gates and retained rollback;
 - evaluator-driven repair loops whose execution identity survives coordinator churn;
 - heterogeneous provider workers selected by capability or policy; and
-- remote, least-privileged build/sign/loader services that an agent cannot self-approve.
+- build/sign/loader services an agent cannot self-approve. The least-privileged *roles*
+  exist and forge builds already relocate onto a builder node; what remains is moving
+  those hosts outside the distribution trust domain, so that reaching them is a narrow
+  request rather than full `:erpc` authority in both directions.
 
 ## Primary references
 

@@ -1,0 +1,65 @@
+<%
+  # `vm.args` is a static file the emulator reads with -args_file: it has no shell and
+  # no runtime interpolation. So the distribution posture is read from the BUILD
+  # environment here and baked into the artifact. Changing it means building again, or
+  # pointing RELEASE_VM_ARGS at a file of your own.
+  #
+  # Ouroboros.Cluster reads the result back out of :init at boot, and config/runtime.exs
+  # refuses to start a clustering node that ended up on cleartext distribution.
+  env = fn name ->
+    case System.get_env(name) do
+      value when is_binary(value) -> if String.trim(value) == "", do: nil, else: String.trim(value)
+      _absent -> nil
+    end
+  end
+
+  tls? = env.("OUROBOROS_DIST_TLS") == "1"
+  optfile = env.("OUROBOROS_DIST_TLS_OPTFILE")
+
+  if tls? and is_nil(optfile) do
+    raise "OUROBOROS_DIST_TLS=1 requires OUROBOROS_DIST_TLS_OPTFILE: the path, on the " <>
+            "deploy host, of the ssl_dist_optfile holding the distribution certificates"
+  end
+
+  port = fn name ->
+    case env.(name) do
+      nil ->
+        nil
+
+      value ->
+        case Integer.parse(value) do
+          {port, ""} when port > 0 and port < 65_536 -> port
+          _other -> raise "#{name} must be a TCP port between 1 and 65535, got: #{value}"
+        end
+    end
+  end
+
+  port_min = port.("OUROBOROS_DIST_PORT_MIN")
+  port_max = port.("OUROBOROS_DIST_PORT_MAX")
+
+  if is_nil(port_min) != is_nil(port_max) do
+    raise "OUROBOROS_DIST_PORT_MIN and OUROBOROS_DIST_PORT_MAX must be set together"
+  end
+
+  if port_min && port_max && port_min > port_max do
+    raise "OUROBOROS_DIST_PORT_MIN must not exceed OUROBOROS_DIST_PORT_MAX"
+  end
+%>## Flags given to the VM for <%= @release.name %>: https://www.erlang.org/doc/man/erl.html
+## -mode/-name/-sname/-setcookie are configured via env vars, do not set them here.
+##
+## Rendered by `mix release` from the build environment. See rel/vm.args.eex.
+<%= if tls? do %>
+## Distribution runs over TLS. The cookie authenticates the handshake; the certificates
+## in the optfile below are what actually keep the cluster's traffic — and that cookie —
+## off the wire in cleartext.
+-proto_dist inet_tls
+-ssl_dist_optfile <%= optfile %>
+<% else %>
+## Distribution runs over cleartext TCP. Anything that completes the handshake has full
+## :erpc authority on this node, so this is only safe on a trusted network segment.
+## Build with OUROBOROS_DIST_TLS=1 and OUROBOROS_DIST_TLS_OPTFILE to change that.
+<% end %><%= if port_min do %>
+## Pin the distribution listener to a fixed range so a firewall can describe it.
+## EPMD's own port (4369) still has to be reachable separately.
+-kernel inet_dist_listen_min <%= port_min %> inet_dist_listen_max <%= port_max %>
+<% end %>

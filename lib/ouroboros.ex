@@ -13,7 +13,12 @@ defmodule Ouroboros do
   def status do
     %{
       node: node(),
+      # The role is what makes the rest of this snapshot legible: a `:builder` or
+      # `:signer` node reports most planes `:unavailable` because it never started them,
+      # which is a posture rather than a fault.
+      role: Ouroboros.Cluster.role(),
       connected_nodes: Node.list(),
+      cluster: safe_value(&Ouroboros.Cluster.status/0, %{mode: :unavailable}),
       availability: availability(),
       agents: safe_value(&Ouroboros.Mesh.list_agents/0, []),
       coding_tasks:
@@ -101,6 +106,7 @@ defmodule Ouroboros do
 
   defp availability do
     %{
+      cluster: process_group_state([Ouroboros.Cluster]),
       mesh: process_group_state([Ouroboros.Mesh.Directory]),
       coding:
         process_group_state([

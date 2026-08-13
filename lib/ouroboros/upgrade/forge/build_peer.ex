@@ -23,29 +23,68 @@ defmodule Ouroboros.Upgrade.Forge.BuildPeer do
   The peer must share ERTS, Elixir version, and system architecture with the deployment
   targets, because the BEAM it produces is checked against exactly those on the loading
   node (`Ouroboros.Upgrade.Verifier`). Starting the peer from this VM's own executable
-  and code path is what makes that true here; a remote build service has to establish it
-  some other way.
+  and code path is what makes that true here.
+
+  ## Building somewhere else
+
+  `config :ouroboros, :forge_builder_node` names a connected node to run the peer on.
+  Nothing about the build changes: the same callback runs inside the same kind of
+  non-distributed peer, and the same plain serializable terms come back. What changes is
+  which host compiles agent-authored source — the point of the `:builder` role, whose
+  supervision tree contains no teams, stores, sessions, or control plane to lose.
+
+  That relocation carries one hard constraint. The artifact's runtime triple is whatever
+  the *peer* observed, and `Ouroboros.Upgrade.Verifier` requires it to match every node
+  that loads the BEAM. So the builder must run the identical ERTS, Elixir version, and
+  system architecture as the deploy targets — which is exactly why a builder is a *role
+  of the same release* rather than a separate build service. A builder on a different
+  OTP or architecture does not produce a rejected deployment at rollout time by
+  accident; it produces one every time, deterministically, at the verifier.
+
+  The builder is refused unless it is connected, running this runtime, and in the
+  `:builder` role. `config :ouroboros, :forge_builder_allow_any_role` relaxes only the
+  role requirement, for tests that have a peer but not a role-shaped fleet.
 
   One deadline covers boot, the callback, and everything the callback does inside the
   peer. It comes from `config :ouroboros, :forge_build_timeout` and defaults to 60s. A
-  callback that outlives it is killed and the peer is stopped regardless.
+  callback that outlives it is killed and the peer is stopped regardless. A remote build
+  resolves that deadline here and hands it to the builder, so the builder's own
+  configuration cannot widen it, and waits a little longer than it so the builder's
+  typed timeout wins over an opaque transport one.
   """
 
+  alias Ouroboros.Cluster
   alias Ouroboros.Upgrade.Forge.Sandbox
 
   @default_timeout 60_000
   @default_boot_timeout 30_000
+  @remote_slack 10_000
 
   @type peer :: pid()
 
   @doc """
   Starts a build peer, applies `fun` to it, and always stops it.
 
-  Options: `:timeout` (overall deadline in milliseconds) and `:boot_timeout`.
+  Runs on `:forge_builder_node` when one is configured and usable, and on this node
+  otherwise. Options: `:timeout` (overall deadline in milliseconds), `:boot_timeout`,
+  and `:builder_node` (overrides the configured builder for one build).
   """
   @spec with_peer((peer() -> result), keyword()) :: result | {:error, term()}
         when result: term()
   def with_peer(fun, opts \\ []) when is_function(fun, 1) and is_list(opts) do
+    case builder_node(opts) do
+      {:ok, nil} -> with_local_peer(fun, opts)
+      {:ok, target} -> with_remote_peer(target, fun, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # The build itself, on whichever node is running this code. Named separately from
+  # `with_peer/2` so a builder can never re-dispatch to a builder.
+  @spec with_local_peer((peer() -> result), keyword()) :: result | {:error, term()}
+        when result: term()
+  def with_local_peer(fun, opts) when is_function(fun, 1) and is_list(opts) do
     deadline = deadline(opts)
     started_at = System.monotonic_time(:millisecond)
 
@@ -62,6 +101,51 @@ defmodule Ouroboros.Upgrade.Forge.BuildPeer do
         {:error, reason}
     end
   end
+
+  defp with_remote_peer(target, fun, opts) do
+    # The deadline is resolved here so the builder inherits the caller's bound rather
+    # than its own configuration, and the transport is given slack so the build's own
+    # typed `{:build_timeout, _}` arrives instead of an `:erpc` timeout.
+    remote_opts = Keyword.put(opts, :timeout, deadline(opts))
+
+    :erpc.call(
+      target,
+      __MODULE__,
+      :with_local_peer,
+      [fun, remote_opts],
+      deadline(opts) + @remote_slack
+    )
+  catch
+    kind, reason -> {:error, {:remote_build_failed, target, {kind, sanitize(reason)}}}
+  end
+
+  # `nil` means "build here". A builder that names itself is the same thing, and saying
+  # so explicitly avoids an `:erpc` round trip to this very node.
+  defp builder_node(opts) do
+    configured =
+      Keyword.get_lazy(opts, :builder_node, fn ->
+        Application.get_env(:ouroboros, :forge_builder_node)
+      end)
+
+    cond do
+      is_nil(configured) -> {:ok, nil}
+      not is_atom(configured) -> {:error, {:invalid_forge_builder_node, configured}}
+      configured == node() -> {:ok, nil}
+      true -> check_builder(configured)
+    end
+  end
+
+  defp check_builder(target) do
+    expected = if allow_any_builder_role?(), do: :any, else: :builder
+
+    case Cluster.ensure_role(target, expected) do
+      :ok -> {:ok, target}
+      {:error, reason} -> {:error, {:forge_builder_refused, target, reason}}
+    end
+  end
+
+  defp allow_any_builder_role?,
+    do: Application.get_env(:ouroboros, :forge_builder_allow_any_role, false) == true
 
   @doc """
   Compiles and tests one capability source in a fresh peer.

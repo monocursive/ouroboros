@@ -25,6 +25,64 @@ if config_env() == :prod do
     _ = File.rm(probe_target)
   end
 
+  # Everything below re-parses cluster environment variables that `Ouroboros.Cluster`
+  # also understands, rather than calling it. A config provider runs before this
+  # application's modules are guaranteed loadable, so a check that must be able to
+  # refuse the boot has to stand on `System` and `:init` alone.
+  env_value = fn name ->
+    case System.get_env(name) do
+      nil -> nil
+      value -> if String.trim(value) == "", do: nil, else: String.trim(value)
+    end
+  end
+
+  node_role =
+    case env_value.("OUROBOROS_NODE_ROLE") do
+      nil -> :core
+      "core" -> :core
+      "builder" -> :builder
+      "signer" -> :signer
+      other -> raise "OUROBOROS_NODE_ROLE must be core, builder, or signer, got: #{other}"
+    end
+
+  cluster_strategy = env_value.("OUROBOROS_CLUSTER_STRATEGY") || "none"
+
+  unless cluster_strategy in ["none", "epmd", "gossip", "dns"] do
+    raise "OUROBOROS_CLUSTER_STRATEGY must be one of none, epmd, gossip, dns, got: " <>
+            cluster_strategy
+  end
+
+  # `-proto_dist` reaches the emulator through vm.args, ELIXIR_ERL_OPTIONS, or the
+  # command line; all three land in `:init`, so this reads the transport the VM is
+  # actually running rather than the one someone intended to configure.
+  dist_tls? =
+    case :init.get_argument(:proto_dist) do
+      {:ok, [[proto] | _rest]} -> List.to_string(proto) in ["inet_tls", "inet6_tls"]
+      _absent -> false
+    end
+
+  # Forming a cluster over cleartext distribution puts the shared cookie — and every
+  # message after it — on the wire. Any node that completes the handshake gets full
+  # `:erpc` authority over this one, so this refuses the boot instead of warning, and
+  # the override has to be typed out on the host that wants it.
+  if cluster_strategy != "none" and not dist_tls? and
+       env_value.("OUROBOROS_ALLOW_INSECURE_DIST") != "1" do
+    raise """
+    OUROBOROS_CLUSTER_STRATEGY=#{cluster_strategy} forms a cluster, but this release is \
+    not running TLS distribution (-proto_dist is #{if dist_tls?, do: "tls", else: "cleartext"}).
+
+    Configure distribution TLS (see "Running a cluster" in the README: OUROBOROS_DIST_TLS=1 \
+    and OUROBOROS_DIST_TLS_OPTFILE at release build time), or set \
+    OUROBOROS_ALLOW_INSECURE_DIST=1 to accept a cleartext cluster on a trusted network.
+    """
+  end
+
+  forge_builder_node =
+    case env_value.("OUROBOROS_FORGE_BUILDER_NODE") do
+      nil -> nil
+      name -> String.to_atom(name)
+    end
+
   workspace_roots =
     case System.get_env("OUROBOROS_WORKSPACE_ROOTS") do
       nil -> []
@@ -120,6 +178,8 @@ if config_env() == :prod do
     end)
 
   config :ouroboros,
+    node_role: node_role,
+    forge_builder_node: forge_builder_node,
     coding_storage: {Jido.Storage.File, path: Path.join(data_dir, "coding")},
     interactive_storage: {Jido.Storage.File, path: Path.join(data_dir, "interactive")},
     team_storage: {Jido.Storage.File, path: Path.join(data_dir, "teams")},

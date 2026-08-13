@@ -8,7 +8,23 @@ defmodule Ouroboros.MixProject do
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      releases: releases()
+    ]
+  end
+
+  # One artifact for every node role. A `:builder` and a `:core` node must run the same
+  # ERTS, Elixir, and architecture or the verifier rejects what the builder produced on
+  # every target, so they are the same release booted with a different
+  # `OUROBOROS_NODE_ROLE` rather than separate builds. `rel/env.sh.eex` and
+  # `rel/vm.args.eex` carry the distribution posture; see the README's "Running a
+  # cluster".
+  defp releases do
+    [
+      ouroboros: [
+        include_executables_for: [:unix],
+        applications: [ouroboros: :permanent, runtime_tools: :permanent]
+      ]
     ]
   end
 
@@ -25,6 +41,10 @@ defmodule Ouroboros.MixProject do
     [
       {:jido, "~> 2.3"},
       {:jido_ai, "~> 2.3"},
+      # Cluster formation. The runtime's distribution semantics never depended on how
+      # nodes found each other; this is the discovery half, and it stays off unless
+      # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.
+      {:libcluster, "~> 3.5"},
       # Jido.Harness 2.0 is not on Hex yet. Pin the reviewed upstream commit so
       # provider protocol changes cannot enter the runtime implicitly.
       {:jido_harness,

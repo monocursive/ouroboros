@@ -51,10 +51,26 @@ defmodule Ouroboros.Mesh do
     end
   end
 
-  @doc "Starts an agent on a selected connected node."
+  @doc """
+  Starts an agent on a selected connected node.
+
+  The target is checked before anything is placed on it: it must be connected and must
+  be running this runtime in the `:core` role, because a `:builder` or `:signer` node
+  has no team, store, or scheduler for a placed agent to reach. The check is an
+  observation about configuration, not a security boundary — see `Ouroboros.Cluster` —
+  and `config :ouroboros, :placement_role_check` turns it off for callers that place
+  onto nodes this runtime cannot introspect.
+  """
   @spec start_agent_on(node(), agent_id(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent_on(target_node, id, opts \\ [])
       when is_atom(target_node) and is_binary(id) and is_list(opts) do
+    case Ouroboros.Cluster.ensure_placeable(target_node) do
+      :ok -> place_agent(target_node, id, opts)
+      {:error, reason} -> {:error, {:placement_refused, target_node, reason}}
+    end
+  end
+
+  defp place_agent(target_node, id, opts) do
     if target_node == node() do
       start_agent(id, opts)
     else
