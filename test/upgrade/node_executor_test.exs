@@ -155,6 +155,34 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     end
   end
 
+  test "refuses to patch the operator surface, whether it exists on this node or not" do
+    # The gateway decides which connections may drive this lane at all. An auth check that
+    # can be hot-patched is no auth at all, so the namespace is protected the same way the
+    # modules behind it are — including names this VM has never loaded, which is what a
+    # patch aimed at a node that has the gateway running would look like from here.
+    module = Ouroboros.Gateway.Sneak
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:ok, introduction} = introduce_artifact!(module, binary)
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(introduction, allow_unsigned: true)
+
+    # And once such a module is loaded, the replacement path refuses it on the same check,
+    # before anything about the binary is inspected.
+    assert {:module, ^module} = :code.load_binary(module, ~c"gateway_sneak.beam", binary)
+
+    assert {:ok, replacement} =
+             Artifact.build(
+               [{module, binary, old_binary: binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(replacement, allow_unsigned: true)
+  end
+
   test "rejects on-load code in the new binary and in the rollback preimage" do
     probe = Ouroboros.Test.OnLoadProbe
     plain_binary = compile_probe!(probe, "")

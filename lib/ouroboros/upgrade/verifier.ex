@@ -8,7 +8,9 @@ defmodule Ouroboros.Upgrade.Verifier do
   `Ouroboros.Storage.*` module (the synced journal writer a patch could turn into a
   silent no-op), every `Ouroboros.Release.*` module (the durable lane's authorizer
   and journal), every `Ouroboros.Control.*` module (which decides what is patched at
-  all), and the application root and its registry owner.
+  all), every `Ouroboros.Gateway.*` module (the operator surface, where an auth check
+  that can be hot-patched is no auth at all), and the application root and its registry
+  owner.
 
   Detection is a policy gate, not a security sandbox. On-load functions are detected
   soundly by asking the code server to prepare the batch. NIF loading is detected only
@@ -33,7 +35,8 @@ defmodule Ouroboros.Upgrade.Verifier do
     "Elixir.Ouroboros.Upgrade.",
     "Elixir.Ouroboros.Release.",
     "Elixir.Ouroboros.Storage.",
-    "Elixir.Ouroboros.Control."
+    "Elixir.Ouroboros.Control.",
+    "Elixir.Ouroboros.Gateway."
   ]
   @introduce_prefix "Elixir.Ouroboros.Capability."
 
