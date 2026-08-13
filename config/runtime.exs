@@ -1,11 +1,18 @@
 import Config
 
 if config_env() == :prod do
-  data_dir = System.get_env("OUROBOROS_DATA_DIR")
-
-  unless is_binary(data_dir) and String.trim(data_dir) != "" and Path.type(data_dir) == :absolute do
-    raise "OUROBOROS_DATA_DIR must be a nonblank absolute durable directory in production"
-  end
+  # `Ouroboros.DataDir` is the one module of this application this file calls, and it is
+  # written to be callable here: no application environment, no other module, no process.
+  # The derivation it holds is the cross-language contract with `tui/src/runtime.rs`
+  # (`Paths::discover`) — the client spawns this daemon and then reads `gateway.json` out
+  # of the directory it derived itself, so the two must agree on that path byte for byte
+  # or the client starts a daemon it can never find.
+  data_dir =
+    Ouroboros.DataDir.resolve!(
+      System.get_env("OUROBOROS_DATA_DIR"),
+      System.get_env("XDG_DATA_HOME"),
+      System.get_env("HOME")
+    )
 
   File.mkdir_p!(data_dir)
 
@@ -27,8 +34,10 @@ if config_env() == :prod do
 
   # Everything below re-parses cluster environment variables that `Ouroboros.Cluster`
   # also understands, rather than calling it. A config provider runs before this
-  # application's modules are guaranteed loadable, so a check that must be able to
-  # refuse the boot has to stand on `System` and `:init` alone.
+  # application's modules are guaranteed loadable, so a check that must be able to refuse
+  # the boot stands on `System` and `:init` alone. `Ouroboros.DataDir` above is the single
+  # exception, and it earns it by depending on nothing: `Ouroboros.Cluster` reaches the
+  # supervision tree, libcluster, and application environment.
   env_value = fn name ->
     case System.get_env(name) do
       nil -> nil
@@ -277,6 +286,47 @@ if config_env() == :prod do
       allow_unsigned: false,
       trusted_signers: trusted_signers
     ]
+
+  # The data directory has to outlive this file: the gateway publishes its bound port to
+  # `gateway.json` there at runtime, and that file is the only way a client finds this
+  # node. The section below writes it again from the environment variable, which is the
+  # only source it has in the environments this block never runs in.
+  config :ouroboros, :data_dir, data_dir
+
+  # A release told nothing at all is a single-machine daemon, and a single-machine daemon
+  # with no operator surface is a process nobody can talk to: `bin/ouroboros start` would
+  # boot, serve nobody, and offer nothing to attach to. This branch is the whole of that
+  # convenience and it is deliberately narrow — it runs only when no gateway, no node name
+  # and no cluster strategy were named, which is exactly the posture `rel/env.sh.eex`
+  # starts without distribution, without epmd, and without a cookie on the host.
+  #
+  # Nothing here reads an `OUROBOROS_GATEWAY_*` variable. Setting `OUROBOROS_GATEWAY` at
+  # all makes this branch unreachable, and that other path is where every one of those
+  # variables is read: a host that wants to tune the surface, or to bind it anywhere but
+  # loopback, sets `OUROBOROS_GATEWAY=1` and is held to the token requirement that comes
+  # with it.
+  if is_nil(env_value.("OUROBOROS_GATEWAY")) and is_nil(env_value.("OUROBOROS_NODE")) and
+       cluster_strategy == "none" do
+    config :ouroboros, :gateway,
+      enabled: true,
+      port: 0,
+      bind: "127.0.0.1",
+      allow_remote: false,
+      scope: :operate,
+      allow_shutdown: true,
+      token_file: Path.join(data_dir, "gateway.token"),
+      # The only posture allowed to create its own credential, and the only one that can
+      # be: an operator who sets `OUROBOROS_GATEWAY=1` names a token source and still gets
+      # the refusal when the file is missing, because a missing file there is a mistake.
+      # Nobody named one here, so there is nothing to have gotten wrong and no reason to
+      # make a first boot a two-step ceremony.
+      token_generate: true
+
+    # A client that spawns this node as a child process owns its stdout, and the notice
+    # the listener prints on a defaulted boot goes there. Routing the default handler to
+    # stderr keeps that stream a log stream and this one clean.
+    config :logger, :default_handler, config: [type: :standard_error]
+  end
 end
 
 # Everything above runs only in production. Everything below runs in every environment,
@@ -284,11 +334,12 @@ end
 # `mix run --no-halt`, and a section that only existed in a release would make the
 # development loop a different protocol than the shipped one.
 #
-# Like the production block, this stands on `System` and `:init` alone. A config provider
-# runs before this application's modules are guaranteed loadable, so a check that must be
-# able to refuse the boot cannot call `Ouroboros.Gateway.Config` — which re-validates all
-# of this at init, on purpose, for the operator who configures application environment
-# directly.
+# This stands on `System` alone. A config provider runs before this application's modules
+# are guaranteed loadable, so a check that must be able to refuse the boot cannot call
+# `Ouroboros.Gateway.Config` — which re-validates all of this at init, on purpose, for the
+# operator who configures application environment directly. The production block makes one
+# exception, `Ouroboros.DataDir`, and that module depends on nothing but `Path` and
+# `String` precisely so it can be the exception.
 gateway_value = fn name ->
   case System.get_env(name) do
     nil -> nil
@@ -296,10 +347,9 @@ gateway_value = fn name ->
   end
 end
 
-# `OUROBOROS_DATA_DIR` is a local variable in the production block above and has never
-# been persisted. The gateway needs it at runtime rather than at config time: the bound
-# port is published to `gateway.json` there, and that file is the only way a spawned
-# client finds the port it should connect to.
+# In production the block above has already persisted the data directory, including the
+# default it derives when the variable is unset. This is the same write for every other
+# environment, where the variable is the only source there is.
 gateway_data_dir = gateway_value.("OUROBOROS_DATA_DIR")
 
 if gateway_data_dir do

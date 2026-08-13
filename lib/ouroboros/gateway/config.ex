@@ -28,6 +28,16 @@ defmodule Ouroboros.Gateway.Config do
   enough that it cannot call into this application, and the check that must be able to
   refuse the boot has to stand on `System` alone.
 
+  ## The one credential this creates
+
+  `:token_generate` is the single exception to "no token, no listener", and it is set by
+  exactly one caller: the branch of `config/runtime.exs` that gives a release nobody
+  configured a loopback operator surface. There, `:token_file` is a path this system chose
+  rather than one an operator typed, so an absent file is a first boot rather than a
+  mistake, and the file is created with 32 random bytes at `0600` instead of stopping the
+  daemon. An existing file is read, never replaced. Every other configuration keeps the
+  refusal, because a named file that is not there is worth refusing over.
+
   ## One variable, one queue
 
   `:queue_limit` (`OUROBOROS_GATEWAY_QUEUE_LIMIT`) is the **outbound** event-frame cap and
@@ -52,7 +62,8 @@ defmodule Ouroboros.Gateway.Config do
   """
 
   @enforce_keys [:bind, :port, :token, :scope, :max_frame, :queue_limit, :data_dir]
-  defstruct @enforce_keys ++ [token_file: nil, allow_remote: false, allow_shutdown: false]
+  defstruct @enforce_keys ++
+              [token_file: nil, token_generate: false, allow_remote: false, allow_shutdown: false]
 
   @type scope :: :read | :operate
 
@@ -61,6 +72,7 @@ defmodule Ouroboros.Gateway.Config do
           port: :inet.port_number(),
           token: binary(),
           token_file: Path.t() | nil,
+          token_generate: boolean(),
           scope: scope(),
           max_frame: pos_integer(),
           queue_limit: pos_integer(),
@@ -73,6 +85,11 @@ defmodule Ouroboros.Gateway.Config do
   # 32 random bytes as hex; a human typing a token into a shell should be held to the
   # same floor rather than to whatever they had patience for.
   @min_token_bytes 32
+
+  # What a generated credential costs to write, in random bytes before hex encoding. It is
+  # the same 32 bytes `ouro` writes when it is the spawner, and hex doubles it, so a
+  # generated token clears @min_token_bytes with room to spare.
+  @generated_token_bytes 32
 
   # Below this a `hello` frame itself would be chopped, and every connection would fail
   # with an oversized-frame error that names the wrong cause.
@@ -128,9 +145,10 @@ defmodule Ouroboros.Gateway.Config do
   @doc """
   Validates one gateway configuration.
 
-  Recognized keys: `:port`, `:bind`, `:token`, `:token_file`, `:allow_remote`, `:scope`,
-  `:allow_shutdown`, `:max_frame`, `:queue_limit`, `:data_dir`. Unknown keys are ignored
-  so a later slice can add one without this raising on an older node.
+  Recognized keys: `:port`, `:bind`, `:token`, `:token_file`, `:token_generate`,
+  `:allow_remote`, `:scope`, `:allow_shutdown`, `:max_frame`, `:queue_limit`, `:data_dir`.
+  Unknown keys are ignored so a later slice can add one without this raising on an older
+  node.
   """
   @spec new!(keyword()) :: t()
   def new!(opts) when is_list(opts) do
@@ -144,6 +162,7 @@ defmodule Ouroboros.Gateway.Config do
       # not the spawner can find the credential it is expected to present without
       # guessing a convention, and a path is not a secret — the 0600 file it names is.
       token_file: token_file(opts),
+      token_generate: token_generate?(opts),
       scope: scope!(opts),
       max_frame: max_frame!(opts),
       queue_limit: queue_limit!(opts),
@@ -218,7 +237,7 @@ defmodule Ouroboros.Gateway.Config do
   defp token!(opts) do
     token =
       case {Keyword.get(opts, :token_file), Keyword.get(opts, :token)} do
-        {path, _token} when is_binary(path) -> read_token_file!(path)
+        {path, _token} when is_binary(path) -> read_token_file!(path, token_generate?(opts))
         {_path, token} when is_binary(token) -> String.trim(token)
         {_path, _token} -> nil
       end
@@ -253,15 +272,59 @@ defmodule Ouroboros.Gateway.Config do
     end
   end
 
-  defp read_token_file!(path) do
+  defp token_generate?(opts), do: Keyword.get(opts, :token_generate, false) == true
+
+  defp read_token_file!(path, generate?) do
     case File.read(path) do
       {:ok, contents} ->
         String.trim(contents)
+
+      {:error, :enoent} when generate? ->
+        generate_token_file!(path)
 
       {:error, reason} ->
         raise ArgumentError,
               "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} is not readable: " <>
                 (reason |> :file.format_error() |> List.to_string())
+    end
+  end
+
+  # Only reachable with `:token_generate`, which only the defaulted single-machine posture
+  # in `config/runtime.exs` sets. Every other configuration keeps the refusal above: a
+  # named token file that is not there is a mistake, and inventing a credential to paper
+  # over it would turn a fail-closed gateway into one that quietly re-keys itself.
+  #
+  # The mode is set on the temporary file before the secret is written into it, so the
+  # bytes never exist at a mode another user could read, and the rename is what publishes
+  # them. An existing file is never replaced — it is read instead — because the token in
+  # it may already be the one a running client holds.
+  defp generate_token_file!(path) do
+    File.mkdir_p!(Path.dirname(path))
+
+    tmp = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+    token = @generated_token_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+
+    try do
+      File.touch!(tmp)
+      File.chmod!(tmp, 0o600)
+      File.write!(tmp, token)
+
+      case File.read(path) do
+        {:error, :enoent} ->
+          File.rename!(tmp, path)
+          token
+
+        {:ok, contents} ->
+          String.trim(contents)
+
+        {:error, reason} ->
+          raise ArgumentError,
+                "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} appeared while a token was being " <>
+                  "generated and is not readable: " <>
+                  (reason |> :file.format_error() |> List.to_string())
+      end
+    after
+      _ = File.rm(tmp)
     end
   end
 

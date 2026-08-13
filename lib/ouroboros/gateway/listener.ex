@@ -23,6 +23,11 @@ defmodule Ouroboros.Gateway.Listener do
   node is killed, which is why it carries the OS pid: a stale file is detectable rather
   than misleading.
 
+  A release that was handed no configuration at all publishes the same way and then says
+  so on stdout — the directory, the bound address, and the two files a client needs to
+  find it. That notice is printed only for that posture, because it is the only one where
+  nobody chose the port or the path and so nobody already knows them.
+
   ## Accepting
 
   A linked acceptor process owns the blocking `:gen_tcp.accept/1` loop so this GenServer
@@ -143,6 +148,32 @@ defmodule Ouroboros.Gateway.Listener do
           "cleartext (OUROBOROS_GATEWAY_ALLOW_REMOTE=1 accepted this)"
       )
     end
+
+    if config.token_generate and is_binary(config.token_file) do
+      notice(config, port, path)
+    end
+  end
+
+  # `:token_generate` is set by one caller: the branch of `config/runtime.exs` that
+  # configures a release nobody configured. It is therefore also the marker for "nothing
+  # about this surface was typed by anyone", which is the only case where the port, the
+  # directory, and the client's name are facts the operator has not already got in front
+  # of them. This goes to stdout rather than the log, because a person who ran
+  # `bin/ouroboros start` in a terminal is reading stdout; the same branch of
+  # `config/runtime.exs` moves the default log handler to stderr so that this stream stays
+  # the daemon's own, whether a person or a client is holding it.
+  defp notice(config, port, path) do
+    distribution =
+      if Node.alive?(), do: "distribution on as #{node()}", else: "distribution off"
+
+    IO.puts("""
+    ouroboros: single-machine mode, #{distribution}
+      data dir  #{config.data_dir}
+      gateway   #{Config.bind_to_string(config.bind)}:#{port} at #{config.scope} scope
+      a client reads #{Path.basename(path)} and #{Path.basename(config.token_file)} \
+    in the data dir to find and authenticate to this node
+      `ouro` is that client; run it to attach\
+    """)
   end
 
   defp publish!(config, port) do
