@@ -29,8 +29,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::model::{
-    self, ApprovalDecision, ApprovalScope, CursorPruned, Event, EventType, Plane, ProviderEntry,
-    RuntimeStatus, SessionInfo,
+    self, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event, EventType, Plane,
+    ProviderEntry, RuntimeStatus, SessionInfo, StartRequest, StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -48,6 +48,11 @@ const UPGRADE_TICKS: u64 = 20; // 5s
 const DETAIL_TICKS: u64 = 40; // 10s: `Mesh.state/1` is a whole agent's state tree
 const PROVIDER_TICKS: u64 = 240; // 60s: each entry probes an executable
 const NOTICE_TICKS: u64 = 20;
+
+/// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
+/// readiness is `:infinity` upstream. This leaves room for the answer rather than racing
+/// it, and it is the one call the transport's 20s default cannot serve.
+pub const START_TIMEOUT: Duration = Duration::from_secs(130);
 
 /// The gateway refuses a replay limit above 500.
 const REPLAY_LIMIT: u64 = 500;
@@ -187,6 +192,16 @@ pub enum Tag {
     /// An operate verb. The label is what a failure names in the notice line.
     Action {
         label: &'static str,
+        plane: Plane,
+        id: String,
+    },
+    /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
+    /// answer carries the id of a session that did not exist when the request was made.
+    Start {
+        plane: Plane,
+    },
+    /// The first message of a session this client just started.
+    FirstMessage {
         plane: Plane,
         id: String,
     },
@@ -504,6 +519,153 @@ pub enum PromptKind {
     GrantsPrincipal,
 }
 
+/// One row of the new-session dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewField {
+    Plane,
+    Provider,
+    Workspace,
+    ApprovalMode,
+    /// Only reachable on the coding plane, where the objective is required.
+    Objective,
+    Start,
+}
+
+/// The dialog that turns "start a session" into a set of stated choices.
+///
+/// Every field is a decision this client refuses to make on an operator's behalf, which is
+/// why they are all on screen at once rather than behind defaults. The provider list comes
+/// from `runtime.providers` — the same answer the Dashboard shows — and an entry whose
+/// probe found no executable is drawn dim but is **still selectable**: "installed" means a
+/// file exists, the runtime is the authority on whether a session can start, and refusing
+/// on a heuristic would be this client overruling it.
+#[derive(Debug)]
+pub struct NewSession {
+    pub field: NewField,
+    pub request: StartRequest,
+    /// Index into the provider list, kept rather than the name so the cursor survives a
+    /// providers refresh that reordered nothing.
+    pub provider: usize,
+    pub approval: usize,
+    /// True while `*.start` is in flight — it declares a 120s ceiling, so this is a dialog
+    /// that legitimately waits.
+    pub pending: bool,
+    /// Why the last attempt did not start a session. Shown here rather than in the notice
+    /// line: the operator is still looking at the form that produced it.
+    pub error: Option<String>,
+}
+
+impl NewSession {
+    fn new(plane: Plane, workspace: String) -> Self {
+        Self {
+            field: NewField::Provider,
+            request: StartRequest {
+                workspace,
+                ..StartRequest::new(plane)
+            },
+            provider: 0,
+            // `default` first: the honest starting point is "whatever the provider does",
+            // not a policy this dialog picked.
+            approval: 0,
+            pending: false,
+            error: None,
+        }
+    }
+
+    /// The rows this plane has. `objective` exists only where the gateway accepts it.
+    pub fn fields(&self) -> Vec<NewField> {
+        let mut fields = vec![NewField::Plane, NewField::Provider];
+
+        if self.request.plane == Plane::Coding {
+            fields.push(NewField::Objective);
+        }
+
+        fields.extend([NewField::Workspace, NewField::ApprovalMode, NewField::Start]);
+        fields
+    }
+
+    pub fn approval_mode(&self) -> Option<ApprovalMode> {
+        // Index 0 is "leave it to the provider", which is an absent parameter rather than
+        // `"default"` — the gateway's `default` is itself a value the schema declares, and
+        // sending nothing is a different statement from sending it.
+        self.approval
+            .checked_sub(1)
+            .and_then(|index| ApprovalMode::ALL.get(index).copied())
+    }
+
+    /// The approval row's label, including the "say nothing" option at index 0.
+    pub fn approval_label(&self) -> String {
+        match self.approval_mode() {
+            None => "unset — the plane's own default".to_string(),
+            Some(mode) => format!("{} — {}", mode.as_str(), mode.describe()),
+        }
+    }
+
+    fn approval_len() -> usize {
+        ApprovalMode::ALL.len() + 1
+    }
+
+    /// The request as the fields currently read.
+    pub fn resolved(&self, providers: &[ProviderEntry]) -> StartRequest {
+        let mut request = self.request.clone();
+
+        request.provider = providers
+            .get(self.provider)
+            .map(|entry| entry.provider.clone())
+            .unwrap_or_default();
+
+        request.approval_mode = self.approval_mode();
+        request
+    }
+
+    fn move_field(&mut self, delta: isize) {
+        let fields = self.fields();
+
+        let index = fields
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0) as isize;
+
+        let next = (index + delta).rem_euclid(fields.len() as isize) as usize;
+        self.field = fields[next];
+    }
+
+    fn cycle(&mut self, delta: isize, providers: usize) {
+        match self.field {
+            NewField::Plane => {
+                self.request.plane = match self.request.plane {
+                    Plane::Interactive => Plane::Coding,
+                    Plane::Coding => Plane::Interactive,
+                };
+
+                // The objective row appears and disappears with the plane; the cursor
+                // must not be left pointing at a row that no longer exists.
+                if !self.fields().contains(&self.field) {
+                    self.field = NewField::Provider;
+                }
+            }
+            NewField::Provider if providers > 0 => {
+                self.provider =
+                    (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
+            }
+            NewField::ApprovalMode => {
+                self.approval = (self.approval as isize + delta)
+                    .rem_euclid(Self::approval_len() as isize)
+                    as usize;
+            }
+            _ => {}
+        }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            NewField::Workspace => Some(&mut self.request.workspace),
+            NewField::Objective => Some(&mut self.request.objective),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Overlay {
     Help,
@@ -531,6 +693,7 @@ pub enum Overlay {
         label: String,
         buffer: String,
     },
+    New(Box<NewSession>),
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
@@ -617,6 +780,13 @@ pub struct App {
     pub notice: Option<Notice>,
     pub quit: Option<Quit>,
     pub cursors: Cursors,
+    /// Where `ouro` was launched from, offered as the new-session workspace.
+    ///
+    /// A default rather than a decision: it is prefilled, visible, and editable, because
+    /// the directory a terminal happens to be sitting in is a good guess and a bad
+    /// assumption. The runtime resolves it, not this process — an `ouro` attached over an
+    /// SSH tunnel is naming a path on the *runtime's* filesystem.
+    pub launch_dir: Option<String>,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
     dropped_seen: u64,
@@ -646,6 +816,7 @@ impl App {
             notice: None,
             quit: None,
             cursors: Cursors::default(),
+            launch_dir: None,
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
             dropped_seen: 0,
@@ -1069,6 +1240,22 @@ impl App {
                 Ok(_value) => self.inform(format!("{label} accepted for {id}"), NoticeKind::Info),
                 Err(error) => self.action_failed(label, plane, &id, error),
             },
+            Tag::Start { plane } => match result {
+                Ok(value) => match StartedRef::decode(&value) {
+                    Some(started) => self.started(plane, started),
+                    // The session exists; this client just cannot address it. Saying so is
+                    // the only honest answer — retrying would start a second one.
+                    None => self.start_failed(ClientError::BadJson(format!(
+                        "the runtime started a session but answered a reference this build \
+                         cannot read: {value}"
+                    ))),
+                },
+                Err(error) => self.start_failed(error),
+            },
+            Tag::FirstMessage { plane, id } => match result {
+                Ok(_value) => {}
+                Err(error) => self.action_failed("send_message", plane, &id, error),
+            },
         }
     }
 
@@ -1133,6 +1320,7 @@ impl App {
                      working — read the session to see which it was"
                 )
             }
+            ClientError::Rpc(rpc) => format!("{label} on {id}: {}", refusal(rpc)),
             other => format!("{label} on {id} failed: {other}"),
         };
 
@@ -1586,6 +1774,7 @@ impl App {
             KeyCode::Char('i') => self.compose(ComposerVerb::Message),
             KeyCode::Char('s') => self.compose(ComposerVerb::Steer),
             KeyCode::Char('a') => self.reopen_approval(),
+            KeyCode::Char('n') => self.open_new_session(),
             KeyCode::Char('x') => self.open_close_confirm(),
             _ => {}
         }
@@ -2066,6 +2255,188 @@ impl App {
         }
     }
 
+    /// `n`: the dialog that starts a session.
+    ///
+    /// Only on the Sessions tab, because that is where the result appears, and only when
+    /// the gateway serves the verb — `hello.methods` is the feature gate (§2.3), and a
+    /// read listener advertises the operate verbs it will refuse, so scope is checked too.
+    fn open_new_session(&mut self) {
+        if self.tab != Tab::Sessions || self.overlay.is_some() {
+            return;
+        }
+
+        if !self.hello.serves("interactive.start") {
+            self.inform(
+                "this gateway does not serve interactive.start",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        if !self.hello.operates() {
+            self.inform(
+                format!(
+                    "starting a session mutates the runtime, and this listener runs at scope \
+                     `{}`",
+                    self.hello.scope
+                ),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        // The dialog is about to list providers, and the Sessions tab never polls them.
+        self.fetch_providers();
+
+        self.overlay = Some(Overlay::New(Box::new(NewSession::new(
+            Plane::Interactive,
+            self.launch_dir.clone().unwrap_or_default(),
+        ))));
+    }
+
+    /// Asks for the provider list if this connection has not got one yet.
+    fn fetch_providers(&mut self) {
+        if self.providers.value.is_some() || self.providers.pending {
+            return;
+        }
+
+        self.providers.started();
+        self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
+    }
+
+    fn new_session_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let providers = self
+            .providers
+            .value
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or_default();
+
+        let Some(Overlay::New(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        // A dialog whose start is in flight takes no edits: the parameters that produced
+        // the request are the ones its answer is about.
+        if dialog.pending {
+            if matches!(key.code, KeyCode::Esc) {
+                self.overlay = None;
+            }
+
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Tab | KeyCode::Down => dialog.move_field(1),
+            KeyCode::BackTab | KeyCode::Up => dialog.move_field(-1),
+            KeyCode::Left => dialog.cycle(-1, providers),
+            KeyCode::Right => dialog.cycle(1, providers),
+            KeyCode::Backspace => {
+                if let Some(text) = dialog.text_mut() {
+                    text.pop();
+                }
+            }
+            KeyCode::Enter => {
+                if dialog.field == NewField::Start {
+                    self.submit_new_session();
+                } else {
+                    // Enter never starts from a field row. A dialog that could be
+                    // submitted by finishing a sentence in the workspace box would start
+                    // sessions nobody asked for.
+                    dialog.move_field(1);
+                }
+            }
+            // On a picker row this is deliberately nothing: the printable keys that would
+            // mean something are the ones the arrows already do, and typing into a list
+            // would look like a search box that does not search.
+            KeyCode::Char(c) => {
+                if let Some(text) = dialog.text_mut() {
+                    text.push(c)
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn submit_new_session(&mut self) {
+        let providers = self.providers.value.clone().unwrap_or_default();
+
+        let Some(Overlay::New(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        let request = dialog.resolved(&providers);
+
+        let params = match request.params() {
+            Ok(params) => params,
+            Err(refusal) => {
+                // This client's own refusal, shown on the form that produced it.
+                dialog.error = Some(refusal.message());
+                return;
+            }
+        };
+
+        dialog.error = None;
+        dialog.pending = true;
+
+        let plane = request.plane;
+
+        // `interactive.start` and `coding.start` declare a 120s gateway ceiling: provider
+        // readiness is legitimately unbounded upstream and this is the one call that
+        // waits for it.
+        self.issue(
+            Call::new(Tag::Start { plane }, request.method(), params).with_timeout(START_TIMEOUT),
+        );
+    }
+
+    /// A session this client just created: watch it, focus it, and open the composer so
+    /// the next thing typed is the first message.
+    fn started(&mut self, plane: Plane, started: StartedRef) {
+        self.overlay = None;
+
+        // The lists are polled, and waiting up to three seconds for the row to appear
+        // under a session the operator is already looking at reads as a bug.
+        self.sessions.interactive.invalidate();
+        self.sessions.coding.invalidate();
+
+        self.open_session(plane, started.id.clone());
+
+        if plane == Plane::Interactive {
+            self.sessions.composer = Some(Composer {
+                verb: ComposerVerb::Message,
+                buffer: String::new(),
+            });
+        }
+
+        self.inform(
+            format!("started {} on the {plane} plane", started.id),
+            NoticeKind::Info,
+        );
+    }
+
+    fn start_failed(&mut self, error: ClientError) {
+        let message = match &error {
+            ClientError::Rpc(rpc) => refusal(rpc),
+            other => other.to_string(),
+        };
+
+        match self.overlay.as_mut() {
+            // The form is still on screen, so the refusal belongs on it rather than in a
+            // notice line that expires in five seconds.
+            Some(Overlay::New(dialog)) => {
+                dialog.pending = false;
+                dialog.error = Some(message);
+            }
+            _ => self.inform(
+                format!("starting a session failed: {message}"),
+                NoticeKind::Error,
+            ),
+        }
+    }
+
     fn open_close_confirm(&mut self) {
         if self.tab != Tab::Sessions {
             return;
@@ -2167,6 +2538,13 @@ impl App {
     fn overlay_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
+        // A form has its own key discipline — every printable character belongs to a text
+        // field — so it is dispatched before the choosers below can claim `j` and `k`.
+        if matches!(self.overlay, Some(Overlay::New(_))) {
+            self.new_session_key(key);
+            return;
+        }
+
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
@@ -2225,6 +2603,8 @@ impl App {
                 KeyCode::Enter => self.submit_prompt(),
                 _ => {}
             },
+            // Dispatched above, before this match could claim its printable keys.
+            Overlay::New(_) => {}
         }
     }
 
@@ -2284,6 +2664,21 @@ impl App {
         }
 
         self.poll_upgrade_section();
+    }
+}
+
+/// A gateway refusal with the reason it carried.
+///
+/// Most `-32006` messages are a sentence about the *shape* of the failure and the actual
+/// upstream reason is Wire-encoded into `data` — `{:error, {:invalid_workspace, path}}`
+/// becomes `["invalid_workspace", "/path"]` there. Dropping it leaves "the runtime refused
+/// the call", which tells an operator nothing they can act on. The two `data` payloads a
+/// client *branches* on are handled where they are branched on; this is for the rest,
+/// which §2.3 says are meant to be read.
+fn refusal(rpc: &RpcError) -> String {
+    match &rpc.data {
+        Some(data) if !data.is_null() => format!("{rpc} — {}", model::compact(data)),
+        _ => rpc.to_string(),
     }
 }
 

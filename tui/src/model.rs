@@ -763,6 +763,207 @@ impl ApprovalScope {
     }
 }
 
+/// The four values `interactive.start` and `coding.start` accept for `approval_mode`.
+///
+/// `Jido.Harness.RunRequest`'s enum, transcribed from `Gateway.Methods` `@approval_modes`
+/// rather than inferred. The gateway matches a client's string against those literal terms
+/// and answers `-32602` **naming the parameter** for anything else — an option that was
+/// silently dropped would run the session under a policy nobody chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalMode {
+    Default,
+    Prompt,
+    AutoEdit,
+    AutoApprove,
+}
+
+impl ApprovalMode {
+    pub const ALL: [ApprovalMode; 4] = [
+        ApprovalMode::Default,
+        ApprovalMode::Prompt,
+        ApprovalMode::AutoEdit,
+        ApprovalMode::AutoApprove,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Prompt => "prompt",
+            Self::AutoEdit => "auto_edit",
+            Self::AutoApprove => "auto_approve",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
+
+    /// What choosing it means, in the terms an operator is deciding in.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Default => "whatever the provider does on its own",
+            Self::Prompt => "ask before every action",
+            Self::AutoEdit => "edit files without asking; ask for anything else",
+            Self::AutoApprove => "never ask",
+        }
+    }
+}
+
+/// Why a start was refused before it was sent.
+///
+/// Local refusals are typed rather than free text because two of them are this client
+/// being *stricter* than the gateway, and a reader has to be able to tell which side said
+/// no. The gateway's own refusals arrive as `-32602` and are shown verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartError {
+    /// The gateway would accept a start with no provider and let the node's default
+    /// decide. This client will not: a terminal that silently picked a provider would be
+    /// choosing which vendor runs the operator's code.
+    NoProvider,
+    /// `coding.start` takes `objective` as a required nonempty string.
+    NoObjective,
+    /// `objective` is not in the interactive allowlist, so sending it would be `-32602`.
+    ObjectiveOnInteractive,
+    UnknownApprovalMode(String),
+}
+
+impl StartError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoProvider => "choose a provider: this client will not let the node pick \
+                                 which vendor runs your code"
+                .to_string(),
+            Self::NoObjective => {
+                "a coding task needs an objective; it runs that one thing to completion".to_string()
+            }
+            Self::ObjectiveOnInteractive => {
+                "an interactive session takes no objective — it takes messages".to_string()
+            }
+            Self::UnknownApprovalMode(name) => format!(
+                "approval_mode must be one of {}; the gateway refuses {name:?} by name",
+                ApprovalMode::ALL
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// One request to start a session, and the only place its parameters are built.
+///
+/// The gateway's allowlist for both start verbs is `id`, `provider`, `workspace`, `model`,
+/// `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`,
+/// `reasoning_effort` (`Gateway.Methods` `@start_options`), and an option outside it is
+/// `-32602` naming it rather than being ignored. This type emits a strict subset of that —
+/// the ones a terminal can honestly ask a person for — and **omits** every field it has no
+/// answer for rather than sending a placeholder: the gateway requires a *nonempty* string
+/// for `workspace`, so an empty box means "no workspace", not `""`.
+///
+/// `id` is deliberately not sent. The plane generates one, and a client-chosen id buys
+/// idempotency this dialog has no way to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRequest {
+    pub plane: Plane,
+    pub provider: String,
+    pub workspace: String,
+    pub approval_mode: Option<ApprovalMode>,
+    /// Required on the coding plane, refused on the interactive one.
+    pub objective: String,
+}
+
+impl StartRequest {
+    pub fn new(plane: Plane) -> Self {
+        Self {
+            plane,
+            provider: String::new(),
+            workspace: String::new(),
+            approval_mode: None,
+            objective: String::new(),
+        }
+    }
+
+    pub fn method(&self) -> String {
+        self.plane.method("start")
+    }
+
+    /// The exact `params` object, or the reason it was not built.
+    pub fn params(&self) -> Result<Value, StartError> {
+        let provider = self.provider.trim();
+
+        if provider.is_empty() {
+            return Err(StartError::NoProvider);
+        }
+
+        let mut params = serde_json::Map::new();
+        params.insert("provider".into(), Value::String(provider.to_string()));
+
+        let objective = self.objective.trim();
+
+        match self.plane {
+            Plane::Coding if objective.is_empty() => return Err(StartError::NoObjective),
+            Plane::Coding => {
+                params.insert("objective".into(), Value::String(objective.to_string()));
+            }
+            Plane::Interactive if !objective.is_empty() => {
+                return Err(StartError::ObjectiveOnInteractive)
+            }
+            Plane::Interactive => {}
+        }
+
+        let workspace = self.workspace.trim();
+
+        if !workspace.is_empty() {
+            params.insert("workspace".into(), Value::String(workspace.to_string()));
+        }
+
+        if let Some(mode) = self.approval_mode {
+            params.insert(
+                "approval_mode".into(),
+                Value::String(mode.as_str().to_string()),
+            );
+        }
+
+        Ok(Value::Object(params))
+    }
+}
+
+/// What a start answers: `Ouroboros.Interactive.Ref` / `Ouroboros.Coding.TaskRef`,
+/// Wire-encoded — `{id, node}` plus the struct tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedRef {
+    pub id: String,
+    pub node: Option<String>,
+}
+
+impl StartedRef {
+    pub fn decode(value: &Value) -> Option<Self> {
+        // A bare string is accepted too: the id is the only field this client needs, and
+        // a future gateway that answered one should not break session creation.
+        if let Some(id) = value.as_str() {
+            return Some(Self {
+                id: id.to_string(),
+                node: None,
+            });
+        }
+
+        let id = value.get("id")?.as_str()?;
+
+        if id.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            id: id.to_string(),
+            node: value
+                .get("node")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+}
+
 /// The exact `params` for one approval answer.
 ///
 /// Built here rather than at the call site so the allowlist the gateway enforces —
@@ -1149,6 +1350,125 @@ mod tests {
             "a failed probe is not a false negative"
         );
         assert_eq!(providers[1].error, "probe_timeout");
+    }
+
+    #[test]
+    fn a_start_sends_only_options_the_gateway_allowlists() {
+        let mut request = StartRequest::new(Plane::Interactive);
+        request.provider = "claude_code".into();
+        request.workspace = "/work".into();
+        request.approval_mode = Some(ApprovalMode::Prompt);
+
+        let params = request.params().expect("a valid start");
+        let fields = params.as_object().expect("an object");
+
+        assert_eq!(fields["provider"], "claude_code");
+        assert_eq!(fields["workspace"], "/work");
+        assert_eq!(fields["approval_mode"], "prompt");
+        assert_eq!(
+            fields.len(),
+            3,
+            "an option outside @start_options is -32602 naming it, so none is invented: \
+             {fields:?}"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_field_is_omitted_rather_than_sent_empty() {
+        let mut request = StartRequest::new(Plane::Interactive);
+        request.provider = "codex".into();
+
+        let params = request.params().expect("a valid start");
+        let fields = params.as_object().expect("an object");
+
+        // `option_value(_, :string, _)` requires a nonempty binary, so `""` would be a
+        // parameter error rather than "no workspace".
+        assert!(!fields.contains_key("workspace"));
+        assert!(!fields.contains_key("approval_mode"));
+        assert!(!fields.contains_key("objective"));
+        assert!(!fields.contains_key("id"), "the plane generates the id");
+        assert_eq!(fields.len(), 1);
+
+        // Whitespace is not an answer either.
+        request.workspace = "   ".into();
+        assert!(!request
+            .params()
+            .expect("still valid")
+            .as_object()
+            .unwrap()
+            .contains_key("workspace"));
+    }
+
+    #[test]
+    fn the_two_planes_disagree_about_objective_and_both_are_enforced_here() {
+        let mut coding = StartRequest::new(Plane::Coding);
+        coding.provider = "codex".into();
+
+        assert_eq!(coding.params(), Err(StartError::NoObjective));
+
+        coding.objective = "fix the build".into();
+        let params = coding.params().expect("a valid coding start");
+        assert_eq!(params["objective"], "fix the build");
+        assert_eq!(coding.method(), "coding.start");
+
+        // `objective` is not in the interactive allowlist, so sending it would be -32602.
+        let mut interactive = StartRequest::new(Plane::Interactive);
+        interactive.provider = "codex".into();
+        interactive.objective = "fix the build".into();
+
+        assert_eq!(
+            interactive.params(),
+            Err(StartError::ObjectiveOnInteractive)
+        );
+        assert_eq!(interactive.method(), "interactive.start");
+    }
+
+    #[test]
+    fn a_start_without_a_provider_is_refused_here_rather_than_guessed() {
+        let request = StartRequest::new(Plane::Interactive);
+
+        assert_eq!(request.params(), Err(StartError::NoProvider));
+        assert!(StartError::NoProvider.message().contains("which vendor"));
+    }
+
+    #[test]
+    fn the_approval_modes_are_the_ones_the_schema_declares() {
+        // Exactly `Gateway.Methods` @approval_modes. A fifth would be -32602.
+        assert_eq!(
+            ApprovalMode::ALL.map(ApprovalMode::as_str),
+            ["default", "prompt", "auto_edit", "auto_approve"]
+        );
+
+        for mode in ApprovalMode::ALL {
+            assert_eq!(ApprovalMode::parse(mode.as_str()), Some(mode));
+            assert!(!mode.describe().is_empty());
+        }
+
+        assert_eq!(ApprovalMode::parse("yolo"), None);
+        assert!(StartError::UnknownApprovalMode("yolo".into())
+            .message()
+            .contains("auto_approve"));
+    }
+
+    #[test]
+    fn a_started_session_is_read_out_of_the_wire_encoded_ref() {
+        let started = StartedRef::decode(&serde_json::json!({
+            "_struct": "Ouroboros.Interactive.Ref",
+            "id": "session-0000000000000000000001",
+            "node": "ouroboros@golden"
+        }))
+        .expect("a ref");
+
+        assert_eq!(started.id, "session-0000000000000000000001");
+        assert_eq!(started.node.as_deref(), Some("ouroboros@golden"));
+
+        assert_eq!(
+            StartedRef::decode(&serde_json::json!("bare-id")).map(|r| r.id),
+            Some("bare-id".to_string())
+        );
+
+        assert_eq!(StartedRef::decode(&serde_json::json!({})), None);
+        assert_eq!(StartedRef::decode(&serde_json::json!({ "id": "" })), None);
     }
 
     #[test]

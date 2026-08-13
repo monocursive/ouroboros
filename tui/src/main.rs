@@ -21,6 +21,7 @@ use clap::Parser;
 use serde_json::json;
 
 use ouro::cli::{Cli, Command};
+use ouro::model::{ApprovalMode, Plane, StartError, StartRequest, StartedRef};
 use ouro::proto::Hello;
 use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
 use ouro::transport::{
@@ -50,6 +51,24 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         None => attach_local(&paths, cli.dev).await,
+        Some(Command::New {
+            provider,
+            workspace,
+            approval_mode,
+            message,
+            print,
+        }) => {
+            new_session(
+                &paths,
+                cli.dev,
+                provider,
+                workspace,
+                approval_mode,
+                message,
+                print,
+            )
+            .await
+        }
         Some(Command::Daemon) => daemon(&paths, cli.dev).await,
         Some(Command::Attach {
             addr,
@@ -90,9 +109,155 @@ fn embedded_release() -> String {
 
 /// The default command: adopt a running runtime or start one, then draw it.
 async fn attach_local(paths: &Paths, dev: bool) -> Result<()> {
+    let (publication, token, daemon) = local_runtime(paths, dev).await?;
+
+    draw(
+        local_address(publication.port),
+        token,
+        supervision(&daemon),
+        daemon,
+        None,
+    )
+    .await
+}
+
+/// `ouro new`: state every choice, start the session, and attach to it.
+///
+/// The validation is [`StartRequest`]'s — the same code the `n` dialog runs — so a
+/// parameter this client would refuse in one surface is refused in both, and neither can
+/// invent an option the gateway's allowlist does not contain.
+#[allow(clippy::too_many_arguments)]
+async fn new_session(
+    paths: &Paths,
+    dev: bool,
+    provider: String,
+    workspace: Option<PathBuf>,
+    approval_mode: Option<String>,
+    message: Option<String>,
+    print: bool,
+) -> Result<()> {
+    let request = StartRequest {
+        plane: Plane::Interactive,
+        provider,
+        workspace: workspace.map(absolute).transpose()?.unwrap_or_default(),
+        approval_mode: match &approval_mode {
+            None => None,
+            Some(name) => Some(ApprovalMode::parse(name).ok_or_else(|| {
+                anyhow!(
+                    "{}",
+                    StartError::UnknownApprovalMode(name.clone()).message()
+                )
+            })?),
+        },
+        objective: String::new(),
+    };
+
+    // Refused before a runtime is started: a missing provider is not worth a daemon.
+    let params = request
+        .params()
+        .map_err(|refusal| anyhow!("{}", refusal.message()))?;
+
+    let (publication, token, mut daemon) = local_runtime(paths, dev).await?;
+    let address = local_address(publication.port);
+    let mode = supervision(&daemon);
+
+    let (hook, channel) = ui::hook();
+    let attached = attach_with(address, token, true, hook).await?;
+
+    if !attached.hello.serves(&request.method()) || !attached.hello.operates() {
+        bail!(
+            "this gateway does not serve {} at scope `{}`; starting a session mutates the \
+             runtime and needs OUROBOROS_GATEWAY_SCOPE=operate",
+            request.method(),
+            attached.hello.scope
+        );
+    }
+
+    let started = attached
+        .client
+        .call_with_timeout(&request.method(), params, ui::app::START_TIMEOUT)
+        .await
+        .map_err(|error| match &error {
+            // Most of what makes a start refusal actionable is Wire-encoded into `data`;
+            // the message alone is often "the runtime refused the call".
+            ClientError::Rpc(rpc) if rpc.data.as_ref().is_some_and(|data| !data.is_null()) => {
+                anyhow!(
+                    "{} was refused: {rpc} — {}",
+                    request.method(),
+                    ouro::model::compact(rpc.data.as_ref().expect("checked"))
+                )
+            }
+            other => anyhow!("{} was refused: {other}", request.method()),
+        })?;
+
+    let started = StartedRef::decode(&started).ok_or_else(|| {
+        anyhow!(
+            "the runtime started a session but answered a reference this build cannot read: \
+             {started}"
+        )
+    })?;
+
+    println!("{}", started.id);
+
+    if let Some(message) = message {
+        // `interactive.start` waits for provider readiness before it answers, so the
+        // session is ready to take this by the time it is sent.
+        attached
+            .client
+            .call(
+                "interactive.send_message",
+                json!({ "id": started.id, "input": message }),
+            )
+            .await
+            .map_err(|error| anyhow!("the session started but the message was refused: {error}"))?;
+    }
+
+    if print {
+        attached.client.stop().await;
+
+        // The session outlives this process only if the runtime does.
+        if let Some(daemon) = daemon.as_mut() {
+            let pid = daemon.pid();
+            daemon.detach();
+            println!("the runtime is still running (pid {pid}); `ouro` attaches to it");
+        }
+
+        return Ok(());
+    }
+
+    run_ui(
+        address,
+        mode,
+        daemon,
+        attached,
+        channel,
+        Some((Plane::Interactive, started.id)),
+    )
+    .await
+}
+
+fn absolute(path: PathBuf) -> Result<String> {
+    let here = std::env::current_dir().context("reading the working directory")?;
+
+    Ok(runtime::resolve_workspace(&path, &here))
+}
+
+/// Whether this client supervises the runtime it is about to draw.
+fn supervision(daemon: &Option<Daemon>) -> Mode {
+    match daemon {
+        Some(daemon) => Mode::Spawned { pid: daemon.pid() },
+        // An adopted daemon is not one this client has a `Child` for, so the quit dialog
+        // offers a disconnect rather than a shutdown it could not carry out. `ouro stop`
+        // is the verb that ends a daemon this process did not start.
+        None => Mode::Attached,
+    }
+}
+
+/// Adopts the runtime this data directory already has, or starts one.
+async fn local_runtime(paths: &Paths, dev: bool) -> Result<(Publication, Secret, Option<Daemon>)> {
     let existing = runtime::read_owned_publication(&paths.data_dir)?;
 
-    let (publication, token, daemon) = match existing {
+    match existing {
         Some(publication) if runtime::pid_alive(publication.pid) => {
             let token = runtime::read_token(&paths.token_file()).with_context(|| {
                 format!(
@@ -109,7 +274,7 @@ async fn attach_local(paths: &Paths, dev: bool) -> Result<()> {
                 publication.pid
             );
 
-            (publication, token, None)
+            Ok((publication, token, None))
         }
         other => {
             if other.is_some() {
@@ -117,21 +282,9 @@ async fn attach_local(paths: &Paths, dev: bool) -> Result<()> {
                 runtime::remove_publication(&paths.data_dir)?;
             }
 
-            start(paths, dev, Output::Ring).await?
+            start(paths, dev, Output::Ring).await
         }
-    };
-
-    let address = local_address(publication.port);
-
-    // An adopted daemon is not one this client supervises: it has no `Child` for it, so
-    // the quit dialog offers a disconnect rather than a shutdown it could not carry out.
-    // `ouro stop` is the verb that ends a daemon this process did not start.
-    let mode = match &daemon {
-        Some(daemon) => Mode::Spawned { pid: daemon.pid() },
-        None => Mode::Attached,
-    };
-
-    draw(address, token, mode, daemon).await
+    }
 }
 
 /// `ouro daemon`: start (or find) a runtime, say how to reach it, and exit.
@@ -212,7 +365,7 @@ async fn attach_remote(
         return print_page(address, attach_with(address, token, false, hook).await?).await;
     }
 
-    draw(address, token, Mode::Attached, None).await
+    draw(address, token, Mode::Attached, None, None).await
 }
 
 /// Connects and runs the terminal UI, then carries out whatever the quit dialog chose.
@@ -221,10 +374,27 @@ async fn draw(
     token: Secret,
     mode: Mode,
     daemon: Option<Daemon>,
+    open: Option<(Plane, String)>,
 ) -> Result<()> {
     let (hook, channel) = ui::hook();
     let attached = attach_with(address, token, true, hook).await?;
 
+    run_ui(address, mode, daemon, attached, channel, open).await
+}
+
+/// The UI half, on a connection the caller already has.
+///
+/// `open` focuses a session before the first frame, which is how `ouro new` hands off:
+/// the subscribe it queues is drained by the driver's first pass, so the transcript is
+/// live by the time anything is drawn.
+async fn run_ui(
+    address: SocketAddr,
+    mode: Mode,
+    daemon: Option<Daemon>,
+    attached: Connected,
+    channel: ui::UiChannel,
+    open: Option<(Plane, String)>,
+) -> Result<()> {
     let Connected {
         client,
         hello,
@@ -233,6 +403,16 @@ async fn draw(
 
     let logs = daemon.as_ref().map(Daemon::logs);
     let mut app = App::new(mode, address.to_string(), hello.clone(), logs);
+
+    // The workspace the new-session dialog offers. A default, not a decision: it is
+    // prefilled and editable, because the directory a terminal sits in is a good guess.
+    app.launch_dir = std::env::current_dir()
+        .ok()
+        .map(|here| here.display().to_string());
+
+    if let Some((plane, id)) = open {
+        app.open_session(plane, id);
+    }
 
     if hello.protocol != proto::PROTOCOL {
         app.inform(

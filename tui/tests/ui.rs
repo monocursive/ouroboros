@@ -13,7 +13,7 @@ use serde_json::json;
 
 use ouro::model::Plane;
 use ouro::transport::ClientError;
-use ouro::ui::app::{App, Call, Mode, Msg, NoticeKind, Tab, Tag};
+use ouro::ui::app::{App, Call, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag};
 
 use support::{app, fixture, full_hello, render};
 
@@ -595,6 +595,464 @@ fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
 
     let screen = render(&mut app, 120, 24);
     assert!(screen.contains("takes no input"), "{}", screen.text());
+}
+
+// ----- starting a session -------------------------------------------------------------
+
+/// Which row of the new-session form has focus.
+fn field(app: &App) -> Option<NewField> {
+    match &app.overlay {
+        Some(Overlay::New(dialog)) => Some(dialog.field),
+        _ => None,
+    }
+}
+
+/// Moves to a named row. Tests say which field they mean rather than counting keystrokes,
+/// because the row list changes with the plane.
+fn focus(app: &mut App, target: NewField) {
+    for _ in 0..12 {
+        if field(app) == Some(target) {
+            return;
+        }
+
+        app.apply(key(KeyCode::Down));
+    }
+
+    panic!("the form never reached {target:?}");
+}
+
+/// The Sessions tab with both lists answered and a provider list the modal can draw.
+fn ready_to_start() -> App {
+    let mut app = app(full_hello());
+    app.launch_dir = Some("/home/operator/project".into());
+
+    app.apply(key(KeyCode::Char('2')));
+    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+
+    answer(
+        &mut app,
+        Tag::Providers,
+        json!([
+            {
+                "provider": "claude_code",
+                "spec": {},
+                "status": { "installed": true, "compatible": true, "authenticated": true },
+                "error": null
+            },
+            {
+                "provider": "gemini",
+                "spec": {},
+                "status": { "installed": false, "compatible": false, "authenticated": "unknown" },
+                "error": null
+            }
+        ]),
+    );
+
+    let _ = app.drain();
+    app
+}
+
+#[test]
+fn n_opens_a_form_whose_every_choice_is_visible() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(screen.contains("new session"), "{}", screen.text());
+    assert!(screen.contains("plane"));
+    assert!(screen.contains("interactive — a conversation you send messages to"));
+    assert!(screen.contains("provider"));
+    assert!(screen.contains("workspace"));
+    assert!(screen.contains("approval"));
+    assert!(screen.contains("[ start ]"));
+
+    // The launch directory is offered, not assumed: it is on screen and editable.
+    assert!(
+        screen.contains("/home/operator/project"),
+        "{}",
+        screen.text()
+    );
+
+    // Nothing is sent by opening a dialog.
+    assert!(app.drain().is_empty());
+}
+
+#[test]
+fn the_provider_list_greys_an_uninstalled_provider_and_still_offers_it() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.row("claude_code").contains("(1/2)"),
+        "{}",
+        screen.text()
+    );
+    assert_eq!(screen.colour_of("claude_code", "claude_code"), Color::Green);
+
+    // Right moves to the uninstalled one, which is drawn dim and says why.
+    app.apply(key(KeyCode::Right));
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.row("gemini").contains("not installed"),
+        "{}",
+        screen.text()
+    );
+    assert_eq!(screen.colour_of("gemini", "gemini"), Color::DarkGray);
+    assert!(
+        screen.contains("the runtime decides, not this probe"),
+        "an installed-probe is a heuristic and the runtime is the authority:\n{}",
+        screen.text()
+    );
+
+    // Selectable anyway: this client does not overrule the runtime on a probe.
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("an uninstalled provider is still the operator's to try");
+
+    assert_eq!(call.params["provider"], "gemini");
+}
+
+#[test]
+fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    // provider stays claude_code; retype the workspace; pick `prompt`; start.
+    focus(&mut app, NewField::Workspace);
+    for _ in 0..40 {
+        app.apply(key(KeyCode::Backspace));
+    }
+    type_text(&mut app, "/srv/work");
+
+    focus(&mut app, NewField::ApprovalMode);
+    app.apply(key(KeyCode::Right));
+    app.apply(key(KeyCode::Right));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("prompt — ask before every action"),
+        "{}",
+        screen.text()
+    );
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a start");
+
+    assert_eq!(call.params["provider"], "claude_code");
+    assert_eq!(call.params["workspace"], "/srv/work");
+    assert_eq!(call.params["approval_mode"], "prompt");
+    assert_eq!(
+        call.params.as_object().expect("an object").len(),
+        3,
+        "an option outside @start_options is -32602 naming it, so none is invented: {:?}",
+        call.params
+    );
+
+    // The 120s gateway ceiling, not the transport's 20s default.
+    assert_eq!(call.timeout, Some(ouro::ui::app::START_TIMEOUT));
+}
+
+#[test]
+fn an_empty_workspace_is_omitted_rather_than_sent_blank() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::Workspace);
+    for _ in 0..60 {
+        app.apply(key(KeyCode::Backspace));
+    }
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("none — the plane decides"),
+        "{}",
+        screen.text()
+    );
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a start");
+
+    let fields = call.params.as_object().expect("an object");
+
+    assert!(
+        !fields.contains_key("workspace"),
+        "the gateway requires a nonempty string, so a blank box means no workspace: {fields:?}"
+    );
+    assert!(!fields.contains_key("approval_mode"));
+    assert_eq!(fields.len(), 1);
+}
+
+#[test]
+fn the_coding_plane_adds_an_objective_row_and_requires_it() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::Plane);
+    app.apply(key(KeyCode::Right));
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.contains("coding — one objective, run to completion"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("objective"), "{}", screen.text());
+
+    // Straight to start with no objective: refused here, on the form that produced it.
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.drain().is_empty(), "an invalid form sends nothing");
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("a coding task needs an objective"),
+        "{}",
+        screen.text()
+    );
+
+    // Fill it in and the start carries it.
+    focus(&mut app, NewField::Objective);
+    type_text(&mut app, "fix the build");
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "coding.start")
+        .expect("a coding start");
+
+    assert_eq!(call.params["objective"], "fix the build");
+    assert_eq!(call.params["provider"], "claude_code");
+}
+
+#[test]
+fn a_refused_start_stays_on_the_form_rather_than_flashing_past_in_a_notice() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app.drain().into_iter().next().expect("a start");
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("starting"),
+        "a start in flight says so: {}",
+        screen.text()
+    );
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Err(ClientError::Rpc(
+            serde_json::from_value(json!({
+                "code": -32602,
+                "message": "params.provider must name a provider this node serves: codex"
+            }))
+            .expect("an error"),
+        )),
+    });
+
+    let screen = render(&mut app, 130, 30);
+
+    assert!(
+        screen.contains("new session"),
+        "the form is still open: {}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("must name a provider this node serves"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("[ start ]"), "and it is submittable again");
+    assert!(app.sessions.open.is_none());
+}
+
+#[test]
+fn a_refusal_carries_the_reason_the_gateway_put_in_its_data() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app.drain().into_iter().next().expect("a start");
+
+    // The shape `{:error, {:invalid_workspace, path}}` Wire-encodes to. Most `-32006`
+    // messages describe the shape of the failure and put the actionable part in `data`.
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Err(ClientError::Rpc(
+            serde_json::from_value(json!({
+                "code": -32006,
+                "message": "the runtime refused the call",
+                "data": ["invalid_workspace", "/srv/nope"]
+            }))
+            .expect("an error"),
+        )),
+    });
+
+    let screen = render(&mut app, 130, 30);
+
+    assert!(
+        screen.contains("invalid_workspace"),
+        "a refusal whose reason is only in `data` is not a readable refusal:\n{}",
+        screen.text()
+    );
+    assert!(screen.contains("/srv/nope"), "{}", screen.text());
+}
+
+#[test]
+fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app.drain().into_iter().next().expect("a start");
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Ok(json!({
+            "_struct": "Ouroboros.Interactive.Ref",
+            "id": "session-new-1",
+            "node": "ouroboros@golden"
+        })),
+    });
+
+    assert!(app.overlay.is_none(), "the form closes on success");
+    assert_eq!(
+        app.sessions.open,
+        Some((Plane::Interactive, "session-new-1".into()))
+    );
+
+    // Subscribed at cursor 0, through the same resync path everything else uses.
+    let subscribe = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("a new session is watched immediately");
+
+    assert_eq!(subscribe.params["id"], "session-new-1");
+    assert_eq!(subscribe.params["cursor"], 0);
+
+    // The composer is open, so the next thing typed is the first message.
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("session-new-1"), "{}", screen.text());
+    assert!(
+        screen.contains("Enter sends, Esc cancels"),
+        "{}",
+        screen.text()
+    );
+
+    type_text(&mut app, "read the tests");
+    app.apply(key(KeyCode::Enter));
+
+    let message = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the composer was ready");
+
+    assert_eq!(message.params["id"], "session-new-1");
+    assert_eq!(message.params["input"], "read the tests");
+}
+
+#[test]
+fn a_read_listener_is_told_why_it_cannot_start_a_session() {
+    let mut app = app(support::hello(&[
+        "hello",
+        "interactive.start",
+        "interactive.list",
+    ]));
+    app.hello.scope = "read".into();
+    app.apply(key(KeyCode::Char('2')));
+    let _ = app.drain();
+
+    app.apply(key(KeyCode::Char('n')));
+
+    assert!(
+        app.overlay.is_none(),
+        "no form for a listener that would refuse it"
+    );
+
+    let screen = render(&mut app, 130, 30);
+    assert!(screen.contains("scope `read`"), "{}", screen.text());
+
+    // And a build that does not serve the verb at all says that instead.
+    let mut older = app_without_start();
+    older.apply(key(KeyCode::Char('2')));
+    let _ = older.drain();
+    older.apply(key(KeyCode::Char('n')));
+
+    let screen = render(&mut older, 130, 30);
+    assert!(
+        screen.contains("does not serve interactive.start"),
+        "{}",
+        screen.text()
+    );
+}
+
+fn app_without_start() -> App {
+    app(support::hello(&[
+        "hello",
+        "interactive.list",
+        "coding.list",
+    ]))
+}
+
+#[test]
+fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
+    let mut app = app(full_hello());
+    app.apply(key(KeyCode::Char('2')));
+
+    let polled: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
+    assert!(
+        !polled.contains(&"runtime.providers".to_string()),
+        "the Sessions tab does not poll a list that shells out per provider"
+    );
+
+    app.apply(key(KeyCode::Char('n')));
+
+    let asked: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
+    assert!(
+        asked.contains(&"runtime.providers".to_string()),
+        "but a form that lists providers has to have them: {asked:?}"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("asking the runtime which providers it serves"),
+        "{}",
+        screen.text()
+    );
 }
 
 // ----- the value tree ----------------------------------------------------------------

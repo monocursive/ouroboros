@@ -33,6 +33,34 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Start an interactive session and attach to it.
+    ///
+    /// Every option here is one the gateway's `interactive.start` allowlist accepts, and
+    /// nothing else is sent. `--provider` is required rather than defaulted: which vendor
+    /// runs your code is not a choice this client makes for you.
+    New {
+        /// A provider this runtime serves. `ouro attach --print` lists them.
+        #[arg(long, value_name = "NAME")]
+        provider: String,
+
+        /// The directory the session works in, resolved by the *runtime*. Omitted, the
+        /// plane decides.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// One of: default, prompt, auto_edit, auto_approve. Omitted, the plane decides.
+        #[arg(long, value_name = "MODE")]
+        approval_mode: Option<String>,
+
+        /// A first message, sent once the session is ready.
+        #[arg(long, short = 'm', value_name = "TEXT")]
+        message: Option<String>,
+
+        /// Print the session id and exit instead of opening the terminal UI.
+        #[arg(long)]
+        print: bool,
+    },
+
     /// Start a runtime, print how to reach it, and leave it running.
     Daemon,
 
