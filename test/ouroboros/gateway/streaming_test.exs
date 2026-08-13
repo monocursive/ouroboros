@@ -16,7 +16,10 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   @token String.duplicate("s", 48)
   @provider :ouroboros_test
-  @receive_timeout 5_000
+  # A ceiling, not a pace: every wait exits early on its condition. The full suite runs
+  # this file alongside 100+ seconds of sync tests, and a starved scheduler has pushed
+  # first-event latency past 5s before — the budget must absorb that without flaking.
+  @receive_timeout 15_000
 
   setup context do
     cleanup_sessions()
@@ -444,7 +447,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  defp await_lagging(client, attempts \\ 200)
+  defp await_lagging(client, attempts \\ 2_000)
   defp await_lagging(_client, 0), do: flunk("the outbound queue never overflowed")
 
   defp await_lagging(client, attempts) do
