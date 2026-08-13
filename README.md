@@ -246,6 +246,48 @@ or put a `worker_id` in each step's metadata, to execute ready steps through
 `Ouroboros.Orchestration.TeamExecutor`. Without an executor, callers can explicitly
 claim and complete steps through `Scheduler.start/4` and `complete/5`.
 
+### Heterogeneous plans
+
+A step declares a kind. `:coding` is the default; `:forge` compiles one capability
+module and deploys it through the upgrade lane:
+
+```elixir
+{:ok, plan} =
+  Plan.new("close-the-loop", [
+    %{id: "author", input: %{objective: "Write the capability and its tests"}},
+    %{
+      id: "build",
+      kind: :forge,
+      dependencies: ["author"],
+      input: %{
+        module: "Ouroboros.Capability.Echo",
+        source_path: "capabilities/echo.ex"
+      }
+    }
+  ])
+```
+
+A forge step says only *what* to build. Where source is read from, which nodes
+receive it, and which signer is asked stay in trusted runtime configuration:
+
+```elixir
+config :ouroboros,
+  orchestration_forge_options: [
+    workspace: "/srv/agent-worktrees/project",
+    nodes: [:"app@host-a", :"app@host-b"],
+    signer_id: "release-signer"
+  ]
+```
+
+Executors are resolved per kind, and `Scheduler.submit/2` refuses a plan naming a
+kind it cannot execute before persisting anything — so a forge step never reaches a
+deployment that has no forge executor. `Ouroboros.Orchestration.ForgeExecutor` reads
+the source under a shared-read workspace lease and uses the durable rollout registry
+as its reattachment anchor: a module already live with the same source digest on the
+same nodes completes the step without forging again, and an unsettled `:deploying`
+record fails the attempt rather than deploying a second time. Plans written before
+step kinds existed load as `:coding`.
+
 ## Autonomous control
 
 `Ouroboros.Control` adds a durable planner/evaluator loop above the scheduler. It is
@@ -281,7 +323,15 @@ config :ouroboros,
 Planning and evaluation requests, plan IDs, revision history, and cancellation intent
 are checkpointed. Model-produced steps may supply only a nonblank execution
 objective; provider, worker, sandbox, and approval policy stay in trusted runtime
-configuration. A run remains `:cancelling` while execution callbacks are pending;
+configuration.
+
+`control_allow_forge_steps: true` additionally lets a plan express a forge step
+carrying exactly a capability module name and a workspace-relative source path. The
+coding-step schema is unchanged by that flag, and the server validates an accepted
+plan against the same per-kind rules `Plan.new/3` applies. It is permission to
+*describe* a build, not to deploy one: the artifact is still signed by whatever
+`:forge_signer` names — the shipped default refuses — and still verified against each
+target node's trusted signers. A run remains `:cancelling` while execution callbacks are pending;
 its terminal cancellation evidence distinguishes no active work, a cancellation
 request accepted by the execution plane, and an unconfirmed request. Acceptance is
 not represented as proof that a provider process has stopped. Stable request IDs

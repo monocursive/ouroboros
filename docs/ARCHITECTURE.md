@@ -66,6 +66,26 @@ team delegation ID, from which Team derives the namespaced CodingSession identit
 This closes the local checkpoint/start retry window while the same Harness journal is
 queryable; it is not provider-side exactly-once billing across a full VM or host loss.
 
+A plan is heterogeneous. Each step declares a kind — `:coding`, or `:forge` for one
+compile-and-deploy of a capability module — and the scheduler resolves one executor per
+kind. Per-kind input schemas are enforced in `Plan`, so a forge step carries exactly a
+capability-namespaced module name and a contained relative source path and nothing that
+could choose a workspace, a node, or a signer. `submit/2` refuses a plan naming a kind
+this scheduler cannot execute before the plan is persisted; a scheduler with no
+executors is manual mode and accepts any kind because the caller drives every step.
+Snapshots written before kinds existed load as `:coding`, and a kind this build does not
+know is refused rather than coerced.
+
+`Ouroboros.Orchestration.ForgeExecutor` runs forge steps through `Upgrade.Forge` and
+`Upgrade.Rollout`, reading source under a shared-read workspace lease. Forging is not
+naturally idempotent, so the durable rollout registry is the reattachment anchor: a
+module already `:live` with the same source digest on the same nodes completes the step
+without a second build or epoch, and a `:deploying` record — ambiguity — fails the
+attempt with a retryable error rather than deploying twice. The check is not atomic with
+the build that follows it; what makes a lost race explicit rather than silent is
+underneath, in monotonic epochs and a node's refusal to introduce a module it already
+has.
+
 `Ouroboros.Control.Server` owns the objective-level loop. It checkpoints deterministic
 planning/evaluation request IDs, the candidate plan, revision history, and cancellation
 intent. Provider callbacks run outside the server so one slow inference does not block
@@ -76,6 +96,16 @@ but is opt-in and disabled at application startup by default. Cancellation remai
 pending until the scheduler has durable per-step callback evidence; that evidence says
 whether no execution existed, a request was accepted, or provider termination remains
 unconfirmed. It never equates request acceptance with an observed provider exit.
+
+`:control_allow_forge_steps` (default false) widens what a plan may express by exactly
+one shape: a step of kind `forge` whose input is a capability module name and a
+workspace-relative source path. The coding-step schema is unchanged by the flag, both
+planner branches refuse unrecognized keys, and the server re-validates the accepted plan
+against the same per-kind rules `Plan` applies. Enabling it grants no deployment
+authority: the forged artifact is still signed by whatever `:forge_signer` names —
+`Signer.Deny` in production unless an operator changed it — and still verified against
+each target node's trusted signers, and a scheduler with no forge executor refuses the
+plan outright.
 
 ### Coding execution plane
 

@@ -124,26 +124,50 @@ defmodule Ouroboros.Application do
   defp orchestration_scheduler do
     opts =
       [
-        max_concurrency: Application.get_env(:ouroboros, :orchestration_max_concurrency, 4)
+        max_concurrency: Application.get_env(:ouroboros, :orchestration_max_concurrency, 4),
+        executors: orchestration_executors()
       ]
 
-    opts =
-      case Application.get_env(:ouroboros, :orchestration_team_id) do
-        team_id when is_binary(team_id) and byte_size(team_id) > 0 ->
-          Keyword.put(opts, :executor, {
-            Ouroboros.Orchestration.TeamExecutor,
-            [
-              team_id: team_id,
-              worker_id: Application.get_env(:ouroboros, :orchestration_worker_id),
-              coding_options: Application.get_env(:ouroboros, :orchestration_coding_options, [])
-            ]
-          })
-
-        _other ->
-          opts
-      end
-
     {Ouroboros.Orchestration.Scheduler, opts}
+  end
+
+  # Each step kind gets its own executor. An explicit `:orchestration_executors`
+  # entry wins over the per-kind configuration below, so an operator can name an
+  # adapter this application does not know about. A kind with no executor is one
+  # the scheduler refuses to accept plans for, which is why forge dispatch stays
+  # off until `:orchestration_forge_options` says otherwise.
+  defp orchestration_executors do
+    configured = Application.get_env(:ouroboros, :orchestration_executors, %{})
+
+    %{}
+    |> put_executor(:coding, team_executor())
+    |> put_executor(:forge, forge_executor())
+    |> Map.merge(if(is_map(configured), do: configured, else: %{}))
+  end
+
+  defp put_executor(executors, _kind, nil), do: executors
+  defp put_executor(executors, kind, executor), do: Map.put(executors, kind, executor)
+
+  defp team_executor do
+    case Application.get_env(:ouroboros, :orchestration_team_id) do
+      team_id when is_binary(team_id) and byte_size(team_id) > 0 ->
+        {Ouroboros.Orchestration.TeamExecutor,
+         [
+           team_id: team_id,
+           worker_id: Application.get_env(:ouroboros, :orchestration_worker_id),
+           coding_options: Application.get_env(:ouroboros, :orchestration_coding_options, [])
+         ]}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp forge_executor do
+    case Application.get_env(:ouroboros, :orchestration_forge_options, []) do
+      [_ | _] = options -> {Ouroboros.Orchestration.ForgeExecutor, options}
+      _other -> nil
+    end
   end
 
   defp control_children do
