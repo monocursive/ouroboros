@@ -13,6 +13,15 @@
 //! Two first runs at once therefore produce one directory: whoever renames second finds
 //! the destination occupied, deletes its own temporary copy, and uses what is already
 //! there. A half-written release is never reachable under its real name.
+//!
+//! ## A start is a use, and collection counts uses
+//!
+//! The cache is keyed by the digest, so recognising an already-extracted release costs a
+//! directory lookup rather than a pass over the whole embedded payload — on a warm start,
+//! the difference between faulting in every embedded byte and faulting in none of them.
+//! Reuse restamps the directory, so [`gc`] keeps the two most recently
+//! *started* releases rather than the two most recently unpacked ones: a daemon running
+//! out of a release nobody has replaced twice is not something a later start collects.
 
 use std::fs;
 use std::io;
@@ -85,19 +94,25 @@ pub fn extract(
     version: &str,
     releases_dir: &Path,
 ) -> Result<PathBuf> {
+    // The digest the build recorded is what the directory is named after, so an existing
+    // one can be recognised without hashing the payload again. That is a lookup, not a
+    // trust decision: nothing below is *written* on the strength of the name, and the
+    // check that gates every write still runs on the bytes.
+    let expected = expected_sha256.to_ascii_lowercase();
+    let destination = releases_dir.join(directory_name(version, &expected));
+
+    if destination.is_dir() {
+        touch(&destination);
+        return Ok(destination);
+    }
+
     let actual = sha256_hex(bytes);
 
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
+    if actual != expected {
         bail!(
             "the embedded release does not match the digest recorded at build time \
              (expected {expected_sha256}, got {actual}); refusing to extract it"
         );
-    }
-
-    let destination = releases_dir.join(directory_name(version, &actual));
-
-    if destination.is_dir() {
-        return Ok(destination);
     }
 
     fs::create_dir_all(releases_dir)
@@ -148,8 +163,27 @@ fn unpack(bytes: &[u8], destination: &Path) -> Result<()> {
         .with_context(|| format!("unpacking the release into {}", destination.display()))
 }
 
+/// Restamps a release as used. Failure costs a suboptimal collection order and nothing
+/// else, so it is not worth failing a start over.
+fn touch(path: &Path) {
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+
+    // SAFETY: the pointer is valid for the call, and a null `times` is the documented way
+    // to ask for "now".
+    unsafe {
+        libc::utimes(path.as_ptr(), std::ptr::null());
+    }
+}
+
 /// Restores the executable bit on everything a release is started through. A tarball
 /// built elsewhere may carry modes this filesystem did not keep.
+///
+/// The scripts under `releases/<version>/` are named rather than swept: `bin/<release>`
+/// execs `releases/<version>/elixir`, but that directory also holds `sys.config`,
+/// `vm.args`, and the boot scripts, and marking configuration executable is not a mode
+/// this pass has any reason to hand out.
 fn make_executable(root: &Path) -> Result<()> {
     let mut directories = vec![root.join("bin")];
 
@@ -174,6 +208,19 @@ fn make_executable(root: &Path) -> Result<()> {
             if path.is_file() {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
                     .with_context(|| format!("making {} executable", path.display()))?;
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(root.join("releases")) {
+        for entry in entries.flatten() {
+            for script in ["elixir", "iex"] {
+                let path = entry.path().join(script);
+
+                if path.is_file() {
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                        .with_context(|| format!("making {} executable", path.display()))?;
+                }
             }
         }
     }
@@ -281,6 +328,29 @@ mod tests {
             .append_data(&mut version, "releases/start_erl.data", &b"1.2.3\n"[..])
             .expect("appending a release file");
 
+        // `bin/<release> start` execs this one, and it arrives unexecutable here on
+        // purpose: a tarball whose modes did not survive the trip is the case the
+        // executable-bit pass exists for.
+        let mut elixir = tar::Header::new_gnu();
+        elixir.set_size(21);
+        elixir.set_mode(0o644);
+        elixir.set_cksum();
+        builder
+            .append_data(
+                &mut elixir,
+                "releases/1.2.3/elixir",
+                &b"#!/bin/sh\nexec erl\n\n\n"[..],
+            )
+            .expect("appending the boot script");
+
+        let mut config = tar::Header::new_gnu();
+        config.set_size(4);
+        config.set_mode(0o644);
+        config.set_cksum();
+        builder
+            .append_data(&mut config, "releases/1.2.3/sys.config", &b"[].\n"[..])
+            .expect("appending release configuration");
+
         let encoder = builder.into_inner().expect("finishing the archive");
         encoder.finish().expect("flushing the archive")
     }
@@ -309,9 +379,81 @@ mod tests {
 
         assert!(release.join("releases").join("start_erl.data").is_file());
 
+        // The script `bin/<release> start` execs lives outside every directory the
+        // wholesale pass walks, and arrived unexecutable.
+        let boot = release.join("releases").join("1.2.3").join("elixir");
+        let mode = fs::metadata(&boot).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "the release launcher execs this script by path"
+        );
+
+        let config = release.join("releases").join("1.2.3").join("sys.config");
+        let mode = fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "configuration is not something to make executable"
+        );
+
         // A second extraction of the same bytes is a lookup, not a re-unpack.
         let again = extract(&bytes, &digest, "9.9.9", &dir).expect("the same release");
         assert_eq!(again, release);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The lookup that skips re-hashing is keyed by the *recorded* digest, so bytes that
+    /// were never verified must not be able to reach it.
+    #[test]
+    fn a_present_release_is_reused_without_rehashing_the_payload() {
+        let dir = scratch("reuse");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+
+        let release = extract(&bytes, &digest, "9.9.9", &dir).expect("an extracted release");
+
+        // Uppercase names the same digest, and must name the same directory.
+        let again = extract(&[], &digest.to_ascii_uppercase(), "9.9.9", &dir)
+            .expect("a release already on disk");
+
+        assert_eq!(again, release);
+
+        // Nothing on disk yet under this digest, so the bytes are hashed and refused.
+        let error = extract(&[], &digest, "8.8.8", &dir).expect_err("a refusal");
+        assert!(
+            error.to_string().contains("does not match the digest"),
+            "unexpected error: {error}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Collection keeps what was started most recently, not what was unpacked most
+    /// recently: a release two upgrades old that a daemon is still running out of would
+    /// otherwise be deleted underneath it.
+    #[test]
+    fn reuse_restamps_a_release_so_collection_spares_it() {
+        let dir = scratch("restamp");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+
+        let old = extract(&bytes, &digest, "1.0.0", &dir).expect("the running release");
+        filetime(&old, SystemTime::now() - Duration::from_secs(3_600));
+
+        for (age, name) in [(120, "2.0.0+aaaaaaaa"), (60, "3.0.0+bbbbbbbb")] {
+            let path = dir.join(name);
+            fs::create_dir_all(&path).unwrap();
+            filetime(&path, SystemTime::now() - Duration::from_secs(age));
+        }
+
+        // Starting out of it again is the use that has to count.
+        assert_eq!(extract(&bytes, &digest, "1.0.0", &dir).unwrap(), old);
+
+        gc(&dir, KEEP).expect("a collection");
+
+        assert!(old.is_dir(), "the release just started must survive");
+        assert!(!dir.join("2.0.0+aaaaaaaa").exists());
+        assert!(dir.join("3.0.0+bbbbbbbb").is_dir());
 
         fs::remove_dir_all(&dir).ok();
     }

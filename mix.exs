@@ -23,6 +23,11 @@ defmodule Ouroboros.MixProject do
     [
       ouroboros: [
         include_executables_for: [:unix],
+        # The tarball is not an extra artifact beside the assembled tree, it is the one
+        # both consumers take: a server deploy unpacks it, and `ouro` bakes it into the
+        # client binary. Assembling without it would leave the packaging step to a
+        # hand-written `tar` invocation whose contents nobody checks.
+        steps: [:assemble, :tar],
         applications: [ouroboros: :permanent, runtime_tools: :permanent]
       ]
     ]

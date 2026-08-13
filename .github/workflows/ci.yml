@@ -1,0 +1,115 @@
+# HONESTY NOTE, and it is not a formality: this repository has no git remote as of the
+# commit that adds this file, so nothing here has ever executed. It is written to be
+# correct — every command in it is one that passes locally on the same toolchain versions
+# — but "passes locally" and "passes on a runner" are different claims and only the first
+# has been made. Treat the first run as a debugging session, not a regression.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A push that lands while an older run is still going makes that run answer a question
+# nobody is asking any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The versions this project is developed on. `mix.exs` requires ~> 1.20, and the release
+  # bakes whatever ERTS built it, so a runner on a different OTP produces an artifact this
+  # project has never run.
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
+
+jobs:
+  elixir:
+    name: Elixir
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      # `jido_harness` is a git dependency pinned by ref, so the cache key has to move
+      # when the lock does or a stale checkout survives a re-pin.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - run: mix deps.get
+
+      # The tree is warning-free today, checked before this file was written. `--force`
+      # because a cached `_build` would otherwise hide a warning nothing recompiled.
+      - run: mix compile --force --warnings-as-errors
+
+      - run: mix test
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        working-directory: .
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tui/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: cargo fmt --check
+
+      # Both feature sets, because `embed` is off by default and the release extractor is
+      # not compiled without it. The build script needs no tarball to compile the
+      # extractor — only to bake bytes into it — so this stays independent of `mix`.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features embed -- -D warnings
+      - run: cargo test
+      - run: cargo test --features embed
+
+  golden:
+    name: Golden fixtures
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - run: mix deps.get
+
+      # The fixtures are the only thing the Elixir and Rust suites both read. Regenerating
+      # them from the live gateway and finding a diff means the protocol moved and one
+      # side has not been told, which is exactly the failure a shared fixture exists to
+      # produce early.
+      - name: Regenerate and check for drift
+        run: |
+          mix ouroboros.gateway.golden
+          git diff --exit-code test/support/gateway_golden

@@ -84,9 +84,23 @@ mod embedded {
             .or_else(|| name.strip_suffix(".tgz"))
             .unwrap_or(name);
 
-        match stem.rsplit_once('-') {
-            Some((_prefix, version)) if !version.is_empty() => version.to_string(),
-            _ => panic!(
+        // `mix release` names the tarball `<release>-<version>.tar.gz`, and a SemVer
+        // version may carry hyphens of its own: splitting from the right reads
+        // `ouroboros-0.2.0-rc.1` as version `rc.1`, which files a prerelease under a
+        // directory name that shares nothing with the release it holds. The release name
+        // is an atom that starts with a letter, so the first hyphen followed by a digit
+        // is the boundary — the only one that cannot be inside the name.
+        let boundary = stem.char_indices().find(|(index, character)| {
+            *character == '-'
+                && stem[index + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| next.is_ascii_digit())
+        });
+
+        match boundary {
+            Some((index, _hyphen)) => stem[index + 1..].to_string(),
+            None => panic!(
                 "cannot read a release version out of {name}; `mix release` names its tarball \
                  <release>-<version>.tar.gz. Set OUROBOROS_RELEASE_VERSION to name it explicitly"
             ),
