@@ -199,11 +199,14 @@ defmodule Ouroboros.Gateway.ConnTest do
     end
 
     test "a method this build does not serve is -32601", %{client: client} do
-      send_frame(client, %{"jsonrpc" => "2.0", "id" => 4, "method" => "runtime.shutdown"})
+      # Deliberately absent from the catalog rather than merely unimplemented: its `from`
+      # would be caller-supplied, and the effects plane made principals non-spoofable.
+      # "Not served" and "refused by scope" are different answers and stay different.
+      send_frame(client, %{"jsonrpc" => "2.0", "id" => 4, "method" => "mesh.send_message"})
 
       response = recv_frame(client)
       assert error_code(response) == -32601
-      assert response["error"]["message"] =~ "runtime.shutdown"
+      assert response["error"]["message"] =~ "mesh.send_message"
     end
 
     test "a required id parameter is validated before any plane is called", %{client: client} do

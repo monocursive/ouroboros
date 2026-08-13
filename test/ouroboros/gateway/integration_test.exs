@@ -73,9 +73,43 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert published["scope"] == "read"
     assert published["pid"] == String.to_integer(System.pid())
 
+    # This listener's token came from `OUROBOROS_GATEWAY_TOKEN`, so there is no file to
+    # name and the key is absent rather than present-and-wrong.
+    refute Map.has_key?(published, "token_file")
+
     # The file names a live listener and sits next to durable state, so it is not
     # readable by other users on the host.
     assert (File.stat!(path).mode &&& 0o777) == 0o600
+  end
+
+  @tag :tmp_dir
+  test "a token file is published by path so a client can find the credential", %{
+    tmp_dir: tmp_dir
+  } do
+    token_path = Path.join(tmp_dir, "token")
+    File.write!(token_path, String.duplicate("t", 48))
+    File.chmod!(token_path, 0o600)
+
+    data_dir = Path.join(tmp_dir, "published")
+
+    start_supervised!(
+      {Gateway,
+       name: :gateway_token_file_test,
+       listener: :gateway_token_file_test_listener,
+       conn_supervisor: :gateway_token_file_test_conns,
+       task_supervisor: :gateway_token_file_test_tasks,
+       config: Config.new!(token_file: token_path, data_dir: data_dir, port: 0)},
+      id: :gateway_token_file_test
+    )
+
+    published =
+      data_dir |> Listener.publication_path() |> File.read!() |> JSON.decode!()
+
+    assert published["token_file"] == token_path
+
+    # The path, and only the path. A client reads the file this names; anything that read
+    # `gateway.json` would otherwise be holding the credential itself.
+    refute published |> Map.values() |> Enum.any?(&(&1 == String.duplicate("t", 48)))
   end
 
   test "the publication is removed when the gateway stops gracefully", %{data_dir: data_dir} do
@@ -195,14 +229,17 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     -32007
   ]
 
-  test "the read set answers every method it advertises", %{client: client} do
+  test "every method this build advertises answers something documented", %{client: client} do
     methods = hello(client)["result"]["methods"]
 
-    # `hello` is answered by the connection and `runtime.providers` shells out; everything
-    # else is a plain read that has to come back as a result or as one of the documented
-    # error codes. A method in the handshake's list that answers -32601 is a table that
-    # drifted away from its handlers.
-    for method <- methods -- ["hello", "runtime.providers"] do
+    # `hello` is answered by the connection and `runtime.providers` shells out;
+    # `runtime.shutdown` is excluded because this listener is read-scoped *today* and a
+    # loop that calls every advertised verb must not become a loop that stops the node
+    # running the suite the day someone changes the scope in this setup. Everything else
+    # has to come back as a result or as one of the documented error codes — including the
+    # operate verbs, which this read listener answers -32003. A method in the handshake's
+    # list that answers -32601 is a table that drifted away from its handlers.
+    for method <- methods -- ["hello", "runtime.providers", "runtime.shutdown"] do
       params = %{"id" => "absent", "principal" => "nobody", "module" => "Ouroboros"}
       response = call(client, method, params)
 

@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "method": "coding.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Coding.Event",
+      "harness_sequence": 31,
+      "id": "evt-0000000000000000000000002",
+      "payload": {
+        "text": "objective satisfied"
+      },
+      "provider": "codex",
+      "provider_session_id": "provider-0000000000000002",
+      "sequence": 17,
+      "task_id": "task-0000000000000000000000002",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "type": "run_completed"
+    },
+    "id": "task-0000000000000000000000002"
+  }
+}

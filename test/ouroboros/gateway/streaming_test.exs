@@ -1,0 +1,574 @@
+defmodule Ouroboros.Gateway.StreamingTest do
+  use ExUnit.Case, async: false
+
+  alias Jido.Harness.Run
+  alias Jido.Harness.RunInfo
+  alias Jido.Harness.Session
+  alias Jido.Harness.SessionInfo
+  alias Ouroboros.Gateway
+  alias Ouroboros.Gateway.Config
+  alias Ouroboros.Gateway.Listener
+  alias Ouroboros.InteractiveSession
+  alias Ouroboros.Test.HarnessAdapter
+
+  @moduletag :tmp_dir
+  @moduletag :capture_log
+
+  @token String.duplicate("s", 48)
+  @provider :ouroboros_test
+  @receive_timeout 5_000
+
+  setup context do
+    cleanup_sessions()
+    cleanup_runs()
+
+    old_providers = Application.get_env(:jido_harness, :providers)
+    old_config = Application.get_env(:jido_harness, :provider_config)
+    journal_dir = unique_journal_dir()
+
+    Application.put_env(
+      :jido_harness,
+      :providers,
+      Map.put(Map.new(old_providers || %{}), @provider, HarnessAdapter)
+    )
+
+    Application.put_env(
+      :jido_harness,
+      :provider_config,
+      old_config
+      |> then(&Map.new(&1 || %{}))
+      |> Map.put(@provider, %{test_pid: self(), retention: %{journal_dir: journal_dir}})
+    )
+
+    config =
+      Config.new!(
+        token: @token,
+        data_dir: context.tmp_dir,
+        port: 0,
+        scope: :operate,
+        queue_limit: Map.get(context, :queue_limit, 1_000)
+      )
+
+    start_supervised!({Gateway, config: config})
+
+    {:ok, client} =
+      :gen_tcp.connect({127, 0, 0, 1}, Listener.port(), [:binary, active: false], 1_000)
+
+    on_exit(fn ->
+      :gen_tcp.close(client)
+      cleanup_sessions()
+      cleanup_runs()
+      restore_env(:providers, old_providers)
+      restore_env(:provider_config, old_config)
+      File.rm_rf(journal_dir)
+    end)
+
+    assert hello(client)["result"]["scope"] == "operate"
+
+    %{client: client}
+  end
+
+  describe "subscribing" do
+    test "returns the backlog and then streams live events as notifications", %{client: client} do
+      {ref, id} = start_session()
+
+      backlog = call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
+
+      # The backlog is the durable, redacted record after the cursor — the same events
+      # `interactive.replay` would answer with, delivered atomically with the registration
+      # so nothing can fall between the two.
+      assert Enum.map(backlog, & &1["type"]) == [
+               "session_started",
+               "session_ready",
+               "session_idle"
+             ]
+
+      assert Enum.map(backlog, & &1["sequence"]) == [1, 2, 3]
+      assert Enum.all?(backlog, &(&1["_struct"] == "Ouroboros.Interactive.Event"))
+      assert Enum.all?(backlog, &(&1["session_id"] == id))
+
+      adapter = send_message(ref, "look around")
+      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "all quiet"})
+
+      event = await_event(client, "interactive.event", "output_text_final")
+
+      assert event["params"]["id"] == id
+      assert event["params"]["event"]["payload"]["text"] == "all quiet"
+      assert event["params"]["event"]["sequence"] > 3
+
+      assert :ok = HarnessAdapter.finish(adapter)
+    end
+
+    test "a cursor above the backlog is honored rather than replayed from zero", %{
+      client: client
+    } do
+      {_ref, id} = start_session()
+
+      assert call(client, "interactive.subscribe", %{"id" => id, "cursor" => 2})["result"]
+             |> Enum.map(& &1["sequence"]) == [3]
+    end
+
+    test "unsubscribing stops the notifications", %{client: client} do
+      {ref, id} = start_session()
+
+      assert call(client, "interactive.subscribe", %{"id" => id})["result"]
+      assert call(client, "interactive.unsubscribe", %{"id" => id})["result"] == "ok"
+
+      adapter = send_message(ref, "quietly")
+      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "unheard"})
+      assert :ok = HarnessAdapter.finish(adapter)
+
+      # A round trip after the emission: if a notification were coming it would be ahead
+      # of this response in the socket, because one connection has one writer.
+      assert call(client, "interactive.list")["result"]
+    end
+
+    test "unsubscribing from a session this connection never watched starts nothing", %{
+      client: client
+    } do
+      # A durable session with no coordinator running. `InteractiveSession.unsubscribe/1`
+      # would start one to ask it to forget a registration it never had.
+      {ref, id} = start_session()
+      assert :ok = InteractiveSession.kill(ref)
+      await_terminal(id)
+      await_retired(id)
+
+      assert call(client, "interactive.unsubscribe", %{"id" => id})["result"] == "ok"
+      assert is_nil(Ouroboros.Interactive.Task.whereis(id))
+    end
+
+    test "an id that is not a session is a typed error, not a hang", %{client: client} do
+      response = call(client, "interactive.subscribe", %{"id" => "no-such-session"})
+
+      assert response["error"]["code"] in [-32004, -32006, -32007]
+    end
+
+    test "a malformed cursor is refused before the plane is called", %{client: client} do
+      response = call(client, "interactive.subscribe", %{"id" => "x", "cursor" => -1})
+
+      assert response["error"]["code"] == -32602
+      assert response["error"]["message"] =~ "cursor"
+    end
+  end
+
+  describe "the coding plane streams through the same machinery" do
+    test "its events arrive as coding.event and name the task the way its struct does", %{
+      client: client
+    } do
+      {ref, id} = start_coding_task()
+
+      backlog = call(client, "coding.subscribe", %{"id" => id, "cursor" => 0})["result"]
+      assert is_list(backlog)
+
+      assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
+      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "objective met"})
+
+      event = await_event(client, "coding.event", "output_text_final")
+
+      # The notification's `id` is the task, under the name every other method uses; the
+      # struct inside it calls the same value `task_id`. A client decoding these needs
+      # both spellings, which is why the golden fixture carries them.
+      assert event["params"]["id"] == id
+      assert event["params"]["event"]["task_id"] == id
+      assert event["params"]["event"]["_struct"] == "Ouroboros.Coding.Event"
+
+      assert call(client, "coding.unsubscribe", %{"id" => id})["result"] == "ok"
+      assert :ok = HarnessAdapter.finish(adapter)
+      _ = ref
+    end
+  end
+
+  describe "a stream that has already ended" do
+    test "a terminal session answers the backlog and then stream.ended", %{client: client} do
+      {ref, id} = start_session()
+      assert :ok = InteractiveSession.kill(ref)
+      status = await_terminal(id)
+
+      backlog = call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
+      assert is_list(backlog)
+
+      # The plane returns the backlog and silently declines the registration for a terminal
+      # session. Without this notification a client would render a live session forever.
+      ended = recv(client)
+
+      assert ended["method"] == "stream.ended"
+      assert ended["params"]["id"] == id
+      assert ended["params"]["plane"] == "interactive"
+      assert ended["params"]["status"] == Atom.to_string(status)
+    end
+
+    test "a coordinator that dies under a live subscription ends the stream", %{client: client} do
+      {ref, id} = start_session()
+
+      assert call(client, "interactive.subscribe", %{"id" => id})["result"]
+
+      # A crash rather than a retirement, because the registration is lost either way and
+      # the restarted coordinator has no memory of this connection. Nothing else would
+      # tell the client that the events simply stopped.
+      coordinator = Ouroboros.Interactive.Task.whereis(id)
+      Process.exit(coordinator, :kill)
+
+      ended = recv(client)
+
+      assert ended["method"] == "stream.ended"
+      assert ended["params"]["id"] == id
+      assert ended["params"]["status"] == "unknown"
+
+      # And the connection is fine: resubscribing is the client's next move.
+      assert call(client, "interactive.list")["result"]
+      _ = ref
+    end
+  end
+
+  describe "a cursor below the retained window" do
+    test "surfaces the floor so the client can restart from it", %{client: client} do
+      # `event_limit: 1` is the smallest retention the plane accepts, so the floor rises
+      # with every event and a cursor of zero is pruned almost immediately.
+      {_ref, id} = start_session(event_limit: 1)
+
+      pruned = call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})
+
+      assert pruned["error"]["code"] == -32006
+      assert pruned["error"]["data"]["reason"] == "cursor_pruned"
+      assert pruned["error"]["data"]["floor"] > 0
+
+      # `replay` answers the same shape, because a client's resync path and its subscribe
+      # path have to branch on one thing rather than two.
+      replayed = call(client, "interactive.replay", %{"id" => id, "cursor" => 0})
+
+      assert replayed["error"]["code"] == -32006
+      assert replayed["error"]["data"]["reason"] == "cursor_pruned"
+
+      # Resuming from the floor is accepted, which is what makes the error actionable.
+      assert is_list(
+               call(client, "interactive.subscribe", %{
+                 "id" => id,
+                 "cursor" => pruned["error"]["data"]["floor"]
+               })["result"]
+             )
+    end
+  end
+
+  describe "backpressure" do
+    @tag queue_limit: 4
+    test "events are dropped, counted, and reconciled exactly by replay", %{client: client} do
+      {ref, id} = start_session()
+
+      backlog = call(client, "interactive.subscribe", %{"id" => id})["result"]
+
+      # Suspending the writer is what a peer that stopped reading looks like from this
+      # process, without depending on a kernel buffer size to decide when. Frames pile up
+      # unacknowledged, the queue crosses the limit, and event frames start being dropped.
+      writer = writer_pid(client)
+      :erlang.suspend_process(writer)
+
+      adapter = send_message(ref, "say a lot")
+
+      for index <- 1..60 do
+        assert :ok =
+                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                   "text" => "chunk #{index} " <> String.duplicate("x", 512)
+                 })
+      end
+
+      assert :ok = HarnessAdapter.finish(adapter)
+      await_lagging(client)
+
+      :erlang.resume_process(writer)
+
+      {events, lagged} = drain_until_lagged(client)
+
+      assert lagged["params"]["id"] == id
+      assert lagged["params"]["plane"] == "interactive"
+      assert lagged["params"]["dropped"] > 0
+      assert lagged["params"]["last_sequence"] >= lagged["params"]["dropped"]
+
+      # The reconciliation the whole design turns on: the backlog the subscribe answered
+      # with, plus whatever notifications arrived, plus whatever `replay` answers from the
+      # last sequence actually seen, is the complete contiguous history. Not "roughly" —
+      # exactly, and with a gap in the middle that the client closed by asking.
+      seen =
+        Enum.map(backlog, & &1["sequence"]) ++
+          Enum.map(events, & &1["params"]["event"]["sequence"])
+
+      cursor = Enum.max(seen)
+
+      replayed =
+        call(client, "interactive.replay", %{"id" => id, "cursor" => cursor, "limit" => 500})[
+          "result"
+        ]
+
+      reconciled = seen ++ Enum.map(replayed, & &1["sequence"])
+
+      assert reconciled == Enum.sort(reconciled)
+      assert reconciled == Enum.to_list(1..Enum.max(reconciled))
+      assert length(reconciled) > 60
+    end
+
+    @tag queue_limit: 4
+    test "a client that stops reading stalls only itself", %{client: client} do
+      {ref, id} = start_session()
+
+      {:ok, other} =
+        :gen_tcp.connect({127, 0, 0, 1}, Listener.port(), [:binary, active: false], 1_000)
+
+      on_exit(fn -> :gen_tcp.close(other) end)
+      assert hello(other)["result"]
+
+      # Both watch the same session. There is no shared state between connections, and
+      # this is the test that says so out loud rather than leaving it to the diagram.
+      assert call(client, "interactive.subscribe", %{"id" => id})["result"]
+      assert call(other, "interactive.subscribe", %{"id" => id})["result"]
+
+      :erlang.suspend_process(writer_pid(client))
+
+      adapter = send_message(ref, "talk")
+
+      for index <- 1..40 do
+        assert :ok =
+                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                   "text" => "chunk #{index} " <> String.duplicate("y", 512)
+                 })
+      end
+
+      assert :ok = HarnessAdapter.finish(adapter)
+
+      # The healthy connection is unaffected: it receives its events and answers its
+      # requests while the other one's queue is overflowing.
+      assert await_event(other, "interactive.event", "output_text_final", 400)
+      assert is_list(call(other, "interactive.list")["result"])
+
+      :erlang.resume_process(writer_pid(client))
+    end
+
+    @tag queue_limit: 4
+    test "responses are never dropped, and a peer that stops reading them is closed", %{
+      client: client
+    } do
+      writer = writer_pid(client)
+      conn = conn_pid(client)
+      :erlang.suspend_process(writer)
+
+      # Every one of these is answered `-32004` immediately — the connection's inbound
+      # bound refuses them rather than queueing them — and every one of those answers is a
+      # response frame, which is never dropped. Past the hard cap the only honest move
+      # left is to close.
+      for index <- 1..400 do
+        :ok =
+          :gen_tcp.send(client, [
+            JSON.encode_to_iodata!(%{
+              "jsonrpc" => "2.0",
+              "id" => index,
+              "method" => "runtime.providers"
+            }),
+            ?\n
+          ])
+      end
+
+      monitor = Process.monitor(conn)
+      :erlang.resume_process(writer)
+
+      assert_receive {:DOWN, ^monitor, :process, ^conn, :normal}, @receive_timeout
+    end
+  end
+
+  defp start_session(opts \\ []) do
+    id = "gateway-stream-#{System.unique_integer([:positive, :monotonic])}"
+
+    assert {:ok, ref} =
+             InteractiveSession.start(
+               [
+                 id: id,
+                 provider: @provider,
+                 workspace: File.cwd!(),
+                 approval_mode: :prompt,
+                 sandbox_mode: :read_only
+               ] ++ opts
+             )
+
+    {ref, id}
+  end
+
+  defp start_coding_task do
+    id = "gateway-coding-#{System.unique_integer([:positive, :monotonic])}"
+
+    assert {:ok, ref} =
+             Ouroboros.CodingSession.start("inspect the workspace",
+               id: id,
+               provider: @provider,
+               workspace: File.cwd!()
+             )
+
+    {ref, id}
+  end
+
+  defp send_message(ref, input) do
+    assert {:ok, _turn} = InteractiveSession.send_message(ref, input)
+
+    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
+
+    adapter
+  end
+
+  defp await_event(client, method, type, attempts \\ 50)
+
+  defp await_event(_client, method, type, 0),
+    do: flunk("no #{method} of type #{type} arrived")
+
+  defp await_event(client, method, type, attempts) do
+    frame = recv(client)
+
+    if frame["method"] == method and frame["params"]["event"]["type"] == type do
+      frame
+    else
+      await_event(client, method, type, attempts - 1)
+    end
+  end
+
+  # Reads until the lag notification arrives, keeping every event frame seen on the way so
+  # the reconciliation can be checked against what the client actually received.
+  defp drain_until_lagged(client, events \\ [], attempts \\ 200)
+
+  defp drain_until_lagged(_client, _events, 0), do: flunk("no stream.lagged arrived")
+
+  defp drain_until_lagged(client, events, attempts) do
+    case recv(client) do
+      %{"method" => "stream.lagged"} = lagged ->
+        {Enum.reverse(events), lagged}
+
+      %{"method" => "interactive.event"} = event ->
+        drain_until_lagged(client, [event | events], attempts - 1)
+
+      _other ->
+        drain_until_lagged(client, events, attempts - 1)
+    end
+  end
+
+  defp await_lagging(client, attempts \\ 200)
+  defp await_lagging(_client, 0), do: flunk("the outbound queue never overflowed")
+
+  defp await_lagging(client, attempts) do
+    if :sys.get_state(conn_pid(client)).lagging == %{} do
+      Process.sleep(10)
+      await_lagging(client, attempts - 1)
+    else
+      :ok
+    end
+  end
+
+  # Found by the client socket's own local port rather than by taking the only child, so a
+  # test with two connections open addresses the one it means.
+  defp conn_pid(client) do
+    {:ok, {_address, port}} = :inet.sockname(client)
+
+    Ouroboros.Gateway.ConnSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
+    |> Enum.find(&match?({_address, ^port}, :sys.get_state(&1).peer))
+    |> case do
+      nil -> flunk("no connection is serving that client socket")
+      pid -> pid
+    end
+  end
+
+  defp writer_pid(client), do: :sys.get_state(conn_pid(client)).writer
+
+  defp await_terminal(id, attempts \\ 200)
+  defp await_terminal(_id, 0), do: flunk("the session never reached a terminal status")
+
+  defp await_terminal(id, attempts) do
+    case InteractiveSession.info(id) do
+      {:ok, %{status: status}} when status in [:closed, :failed, :cancelled, :lost] ->
+        status
+
+      _other ->
+        Process.sleep(10)
+        await_terminal(id, attempts - 1)
+    end
+  end
+
+  defp await_retired(id, attempts \\ 200)
+  defp await_retired(_id, 0), do: flunk("the coordinator never retired")
+
+  defp await_retired(id, attempts) do
+    if is_nil(Ouroboros.Interactive.Task.whereis(id)) do
+      :ok
+    else
+      Process.sleep(10)
+      await_retired(id, attempts - 1)
+    end
+  end
+
+  defp call(client, method, params \\ %{}) do
+    id = System.unique_integer([:positive])
+
+    :ok =
+      :gen_tcp.send(client, [
+        JSON.encode_to_iodata!(%{
+          "jsonrpc" => "2.0",
+          "id" => id,
+          "method" => method,
+          "params" => params
+        }),
+        ?\n
+      ])
+
+    await_response(client, id)
+  end
+
+  # Notifications interleave with responses on one socket, so a caller waiting for an
+  # answer has to skip past the stream rather than mistake it for one.
+  defp await_response(client, id, attempts \\ 200)
+  defp await_response(_client, id, 0), do: flunk("no response for request #{inspect(id)}")
+
+  defp await_response(client, id, attempts) do
+    case recv(client) do
+      %{"id" => ^id} = response -> response
+      _other -> await_response(client, id, attempts - 1)
+    end
+  end
+
+  defp recv(client, timeout \\ @receive_timeout) do
+    :ok = :inet.setopts(client, packet: :line, active: false, buffer: 1_048_576)
+
+    case :gen_tcp.recv(client, 0, timeout) do
+      {:ok, line} -> JSON.decode!(String.trim_trailing(line, "\n"))
+      {:error, reason} -> flunk("the connection answered #{inspect(reason)}")
+    end
+  end
+
+  defp hello(client) do
+    call(client, "hello", %{"token" => @token, "protocol" => 1, "client" => "streaming-test"})
+  end
+
+  defp cleanup_sessions do
+    Session.list()
+    |> Enum.each(fn info ->
+      unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
+      _ = Session.prune(info.session_id)
+    end)
+  end
+
+  defp cleanup_runs do
+    @provider
+    |> then(&Run.list(providers: [&1]))
+    |> Enum.each(fn info ->
+      unless RunInfo.terminal?(info) do
+        _ = Run.cancel(info.run_id)
+        _ = Run.await(info.run_id, 1_000)
+      end
+
+      _ = Run.prune(info.run_id)
+    end)
+  end
+
+  defp unique_journal_dir do
+    Path.join(
+      System.tmp_dir!(),
+      "ouroboros-gateway-stream-#{System.unique_integer([:positive, :monotonic])}"
+    )
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
+  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
+end

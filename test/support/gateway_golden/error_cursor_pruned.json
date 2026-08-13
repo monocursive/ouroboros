@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": -32006,
+    "data": {
+      "floor": 96,
+      "reason": "cursor_pruned"
+    },
+    "message": "the session no longer retains events at or below that cursor; replay from 96"
+  },
+  "id": 5,
+  "jsonrpc": "2.0"
+}

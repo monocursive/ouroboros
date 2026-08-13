@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "method": "stream.ended",
+  "params": {
+    "id": "session-0000000000000000000001",
+    "plane": "interactive",
+    "status": "closed"
+  }
+}

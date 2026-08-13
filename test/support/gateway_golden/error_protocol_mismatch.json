@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": -32002,
+    "data": {
+      "server_protocol": 1
+    },
+    "message": "this gateway speaks protocol 1, the client asked for 2"
+  },
+  "id": 1,
+  "jsonrpc": "2.0"
+}

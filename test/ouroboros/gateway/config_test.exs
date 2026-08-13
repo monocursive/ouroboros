@@ -104,6 +104,17 @@ defmodule Ouroboros.Gateway.ConfigTest do
       config = Config.new!(token_file: path, token: @token, data_dir: "/tmp/x")
 
       assert config.token == String.duplicate("f", 40)
+
+      # The path is kept because `gateway.json` publishes it: a client that did not spawn
+      # this daemon has to be told where the credential is, and a path is not one.
+      assert config.token_file == path
+    end
+
+    test "an environment token publishes no path, because there is no file to name" do
+      config = Config.new!(valid())
+
+      assert config.token == @token
+      assert is_nil(config.token_file)
     end
 
     test "a non-loopback bind is accepted once the override says so" do

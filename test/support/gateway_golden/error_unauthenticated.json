@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32001,
+    "message": "hello did not present the token this listener was started with"
+  },
+  "id": 1,
+  "jsonrpc": "2.0"
+}

@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": -32005,
+    "data": {
+      "outcome": "unknown"
+    },
+    "message": "teams.close exceeded the gateway ceiling of 60000ms; the runtime may still be working on it"
+  },
+  "id": 4,
+  "jsonrpc": "2.0"
+}
