@@ -200,10 +200,18 @@ runtime end with the same two files in the same place.
 
 On a tty, `ouro` boots inside the UI: the extract/start/publish sequence renders as
 live progress with the runtime's own output underneath it, and a failed boot shows its
-error where it happened instead of after the screen is torn down. The first successful
-attach shows a one-time welcome panel: which runtime this is, where its state lives,
-which providers the runtime found installed (and the executable names it probed for
-when it found none), and the keys that matter.
+error where it happened instead of after the screen is torn down. Then it opens on a
+quick-start screen — a model picker over the providers the runtime found installed
+(missing ones dim, naming the executable probed for; `r` re-probes after an install in
+another terminal) above a prompt box that already has focus. Type what you want done
+and press Enter: the chosen provider is stored as your default, a session starts in
+the directory you launched from, your prompt is sent, and the streaming transcript
+opens. An empty prompt starts the session with the composer ready; Esc goes to the
+dashboard instead; nothing asks a question.
+
+The same screen greets any later `ouro` that finds no live sessions — the daily flow
+is type-and-go, not just the first one — and `[onboarding] quick_start = false` in the
+config file turns that off.
 
 `,` opens settings: the runtime's facts as it reports them, and this client's own
 defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand

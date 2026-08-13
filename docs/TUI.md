@@ -710,15 +710,30 @@ rediscovered:
   the config file's `[defaults] provider` satisfies this by being a choice the
   operator made once, explicitly, and the form it prefills stays editable; and
   `objective` is required on the coding plane and refused on the interactive one.
-- **First run shows a welcome panel once.** `Overlay::Welcome` appears when the config
-  carries no `welcomed` marker: the runtime's facts, the providers it found (missing
-  ones dim, naming the executable probed for), and the keys that matter. Any dismiss
-  key persists the marker — including `Ctrl-C`, intercepted so it cannot dismiss
-  without writing — and nothing about it asks a question.
+- **The quick-start screen is the front door, and it starts sessions.**
+  `Overlay::QuickStart` opens on a true first run (no `welcomed` marker — immediately,
+  there is nothing to return to), and on any later attach that finds zero live
+  sessions across *both* `interactive.list` and `coding.list` — both, because one list
+  cannot say "nothing is happening here" on its own, a refused list settles the
+  question shut rather than guessing, and an unrecognised session status counts as
+  live (the safe direction). Gated by `[onboarding] quick_start` (default on); never
+  over `ouro new`, which already stated what it wants. The screen is a provider picker
+  (missing entries dim, naming the probed executable; `r`/`Ctrl-R` re-probes) above a
+  prompt box focused from the first frame — letters belong to the prompt, arrows and
+  `Ctrl-N`/`Ctrl-P` move the picker from either zone, `Tab` swaps zones. Enter runs
+  the `ouro new -m` sequence through the same `StartRequest`: persist the picked
+  provider as `[defaults] provider` plus the `welcomed` marker, `interactive.start`
+  in the launch directory, send the typed prompt once the session answers, open the
+  transcript. An empty prompt is a complete answer (start, open the composer); a
+  refusal renders on the screen that produced it and the held prompt is cleared so it
+  cannot leak into a later session; Esc reaches the dashboard with nothing started.
+  With nothing installed at all it is the setup surface: the probed executables and
+  hints are the content, and Enter refuses honestly.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
   this client's own `[defaults]` — provider picker over the same probed list the `n`
-  dialog uses, workspace, approval mode — with an explicit `[ save ]` row (the
-  `[ start ]` idiom) and "changed, and not written yet" stated until it is.
+  dialog uses, workspace, approval mode, and the quick-start toggle — with an explicit
+  `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
+  until it is.
 - **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`
   would land in the alternate buffer and be overdrawn; the id is on the boot screen,
   the notice line, and the Sessions tab. `--print` and any non-tty stdout print it
@@ -756,11 +771,16 @@ resubscribe logic against a scripted fake server; integration smoke gated by
 subscribe, one turn); config file round-trip, unknown-key tolerance,
 corrupt-file fallback, atomic save, and XDG resolution; the boot phase
 machine (`BootProgress`) and its pinned plain-line equivalents; the
-onboarding suite (welcome shown/suppressed/persisted, settings prefill,
-`ouro new` resolution order). Honest gaps: nothing in the suite allocates a
-pty — `Boot::begin/drive/fail/finish` and `Screen::enter` are exercised only
-by manual pty runs; a real successful spawn's phase sequence needs the
-integration gate; `persist`'s unwritable-path branch is untested.
+onboarding suite (the quick-start appearance decision as a pure function and
+its first-run/idle/live/unknown-status/flag-off/refused-list cases, zone key
+rules, Enter's full path including the persisted provider, empty-prompt
+Enter, refusal-in-place with no prompt leakage, settings prefill and the
+quick-start toggle round-tripping to disk, `ouro new` resolution order).
+Honest gaps: nothing in the suite allocates a pty — `Boot::begin/drive/fail/
+finish` and `Screen::enter` are exercised only by manual pty runs; a real
+successful spawn's phase sequence needs the integration gate; `ouro new`
+suppressing the quick-start screen is enforced in `run_ui` and verified by
+reading, not by a test; `persist`'s unwritable-path branch is untested.
 
 ---
 
@@ -876,4 +896,4 @@ from the settings overlay (editing the *runtime's* environment and offering
 a supervised restart — today settings edit only this client's defaults, and
 the daemon is configured by environment at boot); unknown-key preservation
 through config saves; automated pty-level tests for the boot screen and
-welcome panel.
+quick-start screen.
