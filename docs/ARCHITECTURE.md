@@ -18,8 +18,9 @@ This slice is complete when all of the following are executable and tested:
 6. Agent-authored source for a new capability module can be validated without being
    evaluated, compiled and tested in an isolated non-distributed build peer, signed
    through a seam the forge cannot satisfy itself, stamped with a durably allocated
-   epoch, deployed behind a per-node health probe, and — when that probe fails — rolled
-   back to absence on every node.
+   epoch, deployed behind a per-node health probe, held to a declarative evaluation spec
+   carried inside its own signature, and — when the probe or that spec fails — rolled
+   back to absence on every node, or quarantined when the evidence is ambiguous.
 7. An agent driven only by typed signals can do all of that itself — start and stop mesh
    agents, message them, delegate through a team, forge a capability and deploy it —
    with every attempt authorized against a durable deny-by-default grant for the
@@ -273,6 +274,39 @@ transport ambiguity and quarantine a node the probe merely failed to satisfy. On
 deployment whose every node proved compensation is recorded `:rolled_back`; anything
 ambiguous is `:quarantined`, which has no automatic exit.
 
+### Evaluation gates
+
+The probe answers "is it alive". `Rollout.Evaluation` answers "did it do what it was
+forged to do", which is the difference between a system that modifies itself and one
+that improves. A spec is a bounded map of probes — a portable input and a data
+expectation (`:any_reply`, `{:equals, v}`, `{:contains, s}`, `{:state_matches, k, v}`) —
+plus `budget_ms`, an optional `max_latency_ms` gate, and `required`. It is data because
+it lives in `metadata.forge.eval` *inside* the signed manifest: the criteria travel with
+the bytes they judge, a rewritten spec invalidates the signature, and a future external
+signer can require their presence. A closure could satisfy none of that.
+
+The gate runs between commit and promote, while every node still holds its rollback
+material. `Evaluation.run/3` starts one throwaway mesh agent per node and drives the
+probes through it in order, so state expectations mean something; it enforces the
+artifact's own budget, and — like the probe, and for the same reason — it converts every
+exception, exit, and throw into a probe *result* rather than letting one escape into
+`:erpc` and become transport ambiguity. `Rollout` then promotes if every node satisfied
+its spec, rolls back if any node did not, and quarantines if any node's answer was
+ambiguous — attempting compensation either way, but never recording an unevaluated
+rollout as cleanly withdrawn. The registry entry carries a bounded `eval_report`: counts,
+timings, and the first few failures per node, with an oversized or unportable report
+replaced by a marker rather than truncated into something that reads like evidence. That
+field is why the registry checkpoint is version 2; a version-1 checkpoint is widened on
+read (absent report becomes `nil`) and anything else is still refused.
+
+`compare: true` extends this to capability *upgrades*. A `:replace` beam for a live
+module is admitted through this path and no other: the same spec runs against the current
+version on every target first, and the challenger is promoted only if it passes at least
+as many probes within `:capability_eval_regression_budget` of the champion's total time.
+Both reports are recorded. This measures the declared probe set, twice, on a shared VM —
+not production behaviour, not cost, and not with enough samples for the timing half to
+mean much.
+
 The isolation here is process-level and policy-level, never OS-level. The build peer
 shares the host's user, filesystem, and network; the deny list is defeated by any macro,
 `apply/3`, or runtime-built module name; and a forged capability that reaches a node runs
@@ -357,6 +391,10 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Introduced module is still running on rollback | `{:introduced_code_in_use, module}` and quarantine; never a brutal purge | Done |
 | Introduced module reappears after rollback | Restart reconciliation fails closed against the expected `:non_existing` identity | Done |
 | Forged capability fails its health probe | Every committed node is rolled back, the module is absent again, and the registry records `:rolled_back` | Done |
+| Forged capability fails its signed evaluation spec | Rolled back before promotion, while the rollback material still exists, with the failing report recorded | Done |
+| Evaluation is unreachable, slow, or answers a shape this build cannot read | Compensation is attempted and the registry records `:quarantined`, never `:rolled_back` | Operator reconciliation tooling |
+| Challenger capability regresses the probe set against the live champion | Rolled back with both reports; the champion keeps running | Cost models, canary cohorts, statistical significance |
+| Evaluation criteria are rewritten after signing | The manifest signature fails on every loading node | Done |
 | Capability rollout outcome is ambiguous anywhere | Registry records `:quarantined` and never `:rolled_back` | Operator reconciliation tooling |
 | Forge crashes between allocating an epoch and using it | The number is durably spent and never reissued | Done |
 | Build peer boot, compile, or tests hang | One deadline covers all three; the callback is killed and the peer stopped | Done |
@@ -461,6 +499,12 @@ Implemented:
 - health-gated rollout with real rollback proof (`Rollout` + `Rollout.Probe`): a forged
   capability starts as a mesh agent and answers a signal on every target, or the whole
   deployment is compensated and the module is absent again everywhere;
+- declarative, signed evaluation gates between commit and promotion
+  (`Rollout.Evaluation`): a probe set that lives inside the signed manifest, is run on
+  every target while rollback material still exists, and decides promote, rollback, or —
+  on any ambiguous answer — quarantine; plus champion/challenger comparison for
+  capability upgrades, holding a replacement to the pass count and total time of the
+  version it displaces;
 - an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
   durable deny-by-default authority (`Control.Grants`) that is checked against the
   concrete attempt, identifies the actor from server-side state rather than the signal,
@@ -485,10 +529,14 @@ Still external:
   needs a container or VM boundary with resource and network limits, on a build host
   that is not a production host. The source deny list is hygiene against accidents and
   is defeated by any macro expansion, `apply/3`, or runtime-constructed module name.
-- **evaluation gates.** The probe proves liveness, not merit: one agent start, one
-  signal, one sane answer. Behavioural comparison against the previous capability, cost
-  and latency regression, canary cohorts, and automatic promotion decisions are not
-  implemented.
+- **evaluation beyond the declared spec.** The gate that exists runs criteria somebody
+  wrote and signed, on a throwaway instance, on each target, once. It decides promotion
+  automatically and compares a challenger to its champion, which is real. What it is not
+  is a measurement of production behaviour: there is no cost model, no canary cohort on
+  real traffic, no repetition, and wall-clock over a handful of probes carries little
+  signal, which is why the regression budget is deliberately loose. An artifact that
+  declares no spec is still promoted on liveness alone; requiring one is a signer policy
+  this codebase makes possible and does not enforce.
 - **package assembly and reboot rehearsal** around the implemented `.appup`/`.relup`
   metadata/inspection lane. A forged capability lives in the running VM only; a restart
   boots the original release without it.

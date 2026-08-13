@@ -24,13 +24,18 @@ defmodule Ouroboros.Upgrade.Forge do
   can never patch the forge that made it.
 
   What this does not establish: that the code is good. Its own tests passed in a peer
-  chosen to resemble the targets. Behavioural comparison, cost and latency regression,
-  and canary evidence are evaluation gates that live above this module and are not
-  implemented.
+  chosen to resemble the targets. What it can carry is the *criteria* by which someone
+  else will decide: `:eval` embeds a validated
+  `Ouroboros.Upgrade.Rollout.Evaluation` spec in `metadata.forge.eval`, inside the
+  signed manifest, so a rollout's gates are tamper-evident and an external signer can
+  refuse to sign an artifact that declares none. The forge still does not run them; that
+  happens on the target nodes, between commit and promotion. Cost regression and canary
+  cohorts remain external.
   """
 
   alias Ouroboros.Upgrade.{Artifact, Beam, Epoch}
   alias Ouroboros.Upgrade.Forge.{BuildPeer, Signer, Source}
+  alias Ouroboros.Upgrade.Rollout.Evaluation
 
   @type result :: {:ok, Artifact.t()} | {:error, term()}
 
@@ -46,16 +51,20 @@ defmodule Ouroboros.Upgrade.Forge do
     * `:timeout` - overall build deadline, defaulting to
       `config :ouroboros, :forge_build_timeout`.
     * `:storage` - explicit epoch storage, for tests.
+    * `:eval` - an `Ouroboros.Upgrade.Rollout.Evaluation` spec, validated here and
+      embedded in `metadata.forge.eval` so it is covered by the signature. Omitting it
+      produces exactly the metadata this forge produced before evaluation existed.
   """
   @spec forge(Source.t(), keyword()) :: result()
   def forge(source, opts \\ [])
 
   def forge(%Source{} = source, opts) when is_list(opts) do
     with {:ok, source} <- validate(source),
+         {:ok, eval} <- eval_spec(opts),
          {:ok, build} <- build(source, opts),
          {:ok, _beam} <- introduce(source, build),
          {:ok, epoch} <- epoch(opts),
-         {:ok, artifact} <- assemble(source, build, epoch),
+         {:ok, artifact} <- assemble(source, build, epoch, eval),
          {:ok, signed} <- sign(artifact, opts) do
       {:ok, signed}
     end
@@ -67,6 +76,16 @@ defmodule Ouroboros.Upgrade.Forge do
     case Source.validate(source) do
       {:ok, source} -> {:ok, source}
       {:error, reason} -> {:error, {:source_rejected, reason}}
+    end
+  end
+
+  # Checked before a peer is booted: a spec nobody could run is not worth a build, and a
+  # spec that only fails at deploy time would already be inside a signature.
+  defp eval_spec(opts) do
+    case Keyword.fetch(opts, :eval) do
+      :error -> {:ok, nil}
+      {:ok, nil} -> {:ok, nil}
+      {:ok, spec} -> Evaluation.validate(spec)
     end
   end
 
@@ -97,11 +116,11 @@ defmodule Ouroboros.Upgrade.Forge do
     end
   end
 
-  defp assemble(source, build, epoch) do
+  defp assemble(source, build, epoch, eval) do
     entry =
       {source.module, build.binary, disposition: :introduce, filename: filename(source.module)}
 
-    case Artifact.build([entry], epoch: epoch, metadata: metadata(source, build)) do
+    case Artifact.build([entry], epoch: epoch, metadata: metadata(source, build, eval)) do
       {:ok, artifact} -> {:ok, artifact}
       {:error, reason} -> {:error, {:artifact_failed, reason}}
     end
@@ -109,18 +128,20 @@ defmodule Ouroboros.Upgrade.Forge do
 
   # Metadata is inside the signed manifest and travels to every node, so it records what
   # provenance a reviewer needs and nothing that grows without bound. Failure output stays
-  # in the error tuple the forge returns; only counts are shipped.
-  defp metadata(source, build) do
-    %{
-      forge: %{
-        source_id: source.id,
-        source_sha256: source.sha256,
-        author: source.author,
-        created_at: source.created_at,
-        test_report: Map.get(build, :test_report, %{}),
-        peer_runtime: Map.get(build, :peer_runtime, %{})
-      }
+  # in the error tuple the forge returns; only counts are shipped. An absent `:eval` key
+  # is absent rather than nil: an artifact forged without gates has the metadata it
+  # always had, and a reader can tell "declared no gates" from "declared empty gates".
+  defp metadata(source, build, eval) do
+    forge = %{
+      source_id: source.id,
+      source_sha256: source.sha256,
+      author: source.author,
+      created_at: source.created_at,
+      test_report: Map.get(build, :test_report, %{}),
+      peer_runtime: Map.get(build, :peer_runtime, %{})
     }
+
+    %{forge: if(is_nil(eval), do: forge, else: Map.put(forge, :eval, eval))}
   end
 
   defp sign(artifact, opts) do
