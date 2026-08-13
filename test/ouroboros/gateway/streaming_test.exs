@@ -24,6 +24,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
   setup context do
     cleanup_sessions()
     cleanup_runs()
+    cleanup_stores()
 
     old_providers = Application.get_env(:jido_harness, :providers)
     old_config = Application.get_env(:jido_harness, :provider_config)
@@ -61,6 +62,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       :gen_tcp.close(client)
       cleanup_sessions()
       cleanup_runs()
+      cleanup_stores()
       restore_env(:providers, old_providers)
       restore_env(:provider_config, old_config)
       File.rm_rf(journal_dir)
@@ -275,6 +277,16 @@ defmodule Ouroboros.Gateway.StreamingTest do
       end
 
       assert :ok = HarnessAdapter.finish(adapter)
+
+      # `finish` returned when the stub accepted it, not when the plane has the turn:
+      # the coordinator ingests events from the harness on poll ticks, and under load
+      # that replay lags the adapter by whole seconds. The reconciliation below is
+      # answered from the plane's retained history, so the history must hold every
+      # output and the turn's completion before the count is taken. Once it does,
+      # mailbox order does the rest: each event notification reaches the connection
+      # ahead of any writer acknowledgement the resume releases, so every drop is
+      # counted before the queue drains and `stream.lagged` is flushed.
+      await_ingested(id, 60)
       await_lagging(client)
 
       :erlang.resume_process(writer)
@@ -350,12 +362,16 @@ defmodule Ouroboros.Gateway.StreamingTest do
     } do
       writer = writer_pid(client)
       conn = conn_pid(client)
+      monitor = Process.monitor(conn)
       :erlang.suspend_process(writer)
 
-      # Every one of these is answered `-32004` immediately — the connection's inbound
-      # bound refuses them rather than queueing them — and every one of those answers is a
-      # response frame, which is never dropped. Past the hard cap the only honest move
-      # left is to close.
+      # Beyond the inbound bound each of these is refused `-32004`, and every answer —
+      # refusal or result — is a response frame, which is never dropped. With the writer
+      # suspended the whole way, 400 unacknowledged responses must cross the hard cap, and
+      # past it the only honest move left is to close. The suspension holds until the
+      # close is observed: a writer resumed mid-flood acknowledges frames as fast as the
+      # connection queues them, the cap is never crossed, and staying open becomes the
+      # correct behavior rather than the failure this test exists to rule out.
       for index <- 1..400 do
         :ok =
           :gen_tcp.send(client, [
@@ -368,10 +384,11 @@ defmodule Ouroboros.Gateway.StreamingTest do
           ])
       end
 
-      monitor = Process.monitor(conn)
-      :erlang.resume_process(writer)
-
       assert_receive {:DOWN, ^monitor, :process, ^conn, :normal}, @receive_timeout
+
+      # Released only now, so the suspended writer can drain, fail its write against the
+      # closed socket, and exit rather than leak.
+      :erlang.resume_process(writer)
     end
   end
 
@@ -499,6 +516,94 @@ defmodule Ouroboros.Gateway.StreamingTest do
     else
       Process.sleep(10)
       await_retired(id, attempts - 1)
+    end
+  end
+
+  # The harness cleanup is asynchronous from the planes' point of view: a coordinator
+  # only notices its harness session vanished on a poll tick, and until that tick lands
+  # its store record is non-terminal. The stores' ETS belongs to :jido, not :ouroboros,
+  # so such a record outlives this module and every restart of the application — and
+  # ApplicationRecoveryTest boots Workspace.Manager against each non-terminal record it
+  # finds, under allowed roots that do not include the workspace these sessions ran in.
+  # One leaked record fails that boot and everything after it. So every record is driven
+  # terminal, its coordinator retired, and the record deleted before the module lets go.
+  defp cleanup_stores do
+    Enum.each(Ouroboros.Interactive.Store.list(), fn session ->
+      unless Ouroboros.Interactive.State.terminal?(session) do
+        _ = InteractiveSession.kill(session.id)
+        await_terminal(session.id)
+      end
+
+      await_retired(session.id)
+      _ = Ouroboros.Interactive.Store.delete(session.id)
+    end)
+
+    Enum.each(Ouroboros.Coding.Store.list(), fn task ->
+      unless Ouroboros.Coding.TaskState.terminal?(task) do
+        _ = Ouroboros.CodingSession.cancel(task.id)
+        await_coding_terminal(task.id)
+      end
+
+      await_coding_retired(task.id)
+      _ = Ouroboros.Coding.Store.delete(task.id)
+    end)
+  end
+
+  defp await_coding_terminal(id, attempts \\ 200)
+  defp await_coding_terminal(_id, 0), do: flunk("the coding task never reached a terminal status")
+
+  defp await_coding_terminal(id, attempts) do
+    case Ouroboros.Coding.Store.get(id) do
+      {:ok, task} ->
+        if Ouroboros.Coding.TaskState.terminal?(task) do
+          :ok
+        else
+          Process.sleep(10)
+          await_coding_terminal(id, attempts - 1)
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp await_coding_retired(id, attempts \\ 200)
+  defp await_coding_retired(_id, 0), do: flunk("the coding coordinator never retired")
+
+  defp await_coding_retired(id, attempts) do
+    if is_nil(Ouroboros.Coding.Task.whereis(id)) do
+      :ok
+    else
+      Process.sleep(10)
+      await_coding_retired(id, attempts - 1)
+    end
+  end
+
+  # Polls the plane's durable record until the whole turn is there: every output the
+  # adapter emitted and the turn's own completion. 1,500 attempts is the same ceiling
+  # philosophy as @receive_timeout — the wait exits on its condition, and the budget
+  # only has to absorb a starved scheduler without flaking.
+  defp await_ingested(id, outputs, attempts \\ 1_500)
+  defp await_ingested(_id, _outputs, 0), do: flunk("the plane never ingested the whole turn")
+
+  defp await_ingested(id, outputs, attempts) do
+    ingested? =
+      case Ouroboros.Interactive.Store.get(id) do
+        {:ok, session} ->
+          Enum.count(session.events, &(&1.type == :output_text_final)) >= outputs and
+            Enum.any?(session.turns, fn {_turn_id, turn} ->
+              Ouroboros.Interactive.State.terminal_turn?(turn)
+            end)
+
+        _other ->
+          false
+      end
+
+    if ingested? do
+      :ok
+    else
+      Process.sleep(10)
+      await_ingested(id, outputs, attempts - 1)
     end
   end
 
