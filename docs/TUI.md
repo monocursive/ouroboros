@@ -525,6 +525,8 @@ process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
 ouro                  spawn (or adopt via gateway.json) + attach UI
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
+ouro new --provider NAME [--workspace PATH] [--approval-mode MODE] [--message TEXT] [--print]
+                      start an interactive session, then attach focused on it
 ouro stop             graceful stop of the locally spawned daemon
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed)
@@ -628,8 +630,9 @@ tail, input box, approval modal), **3 Agents** (list + state tree +
 (rollouts, history, signing decisions, grants-by-principal prompt), **7 Logs**
 (spawn mode only; attach mode shows "logs live with the spawner").
 
-Keys: `1-7`/`Tab` tabs, `j/k` move, `Enter` send, `Ctrl-C` interrupt active
-turn (never the TUI), `a` approval modal, `s` steer, `q` quit dialog, `?` help.
+Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
+`Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
+`s` steer, `q` quit dialog, `?` help with the authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:
@@ -648,10 +651,24 @@ rediscovered:
 - **The approval modal offers exactly four answers** — `approve`/`deny` × `once`/`session`
   — because that is `Jido.Harness.ApprovalResponse`'s two enums crossed. It does **not**
   offer the optional `reason` the gateway accepts; that is a gap, not an omission.
-- **Session *creation* is not in the UI.** `interactive.start`/`coding.start` need a
-  provider, a workspace, and an execution policy, and a terminal that guessed any of them
-  would start work under a policy nobody chose. Sessions are started elsewhere and
-  observed here.
+- **Session creation states its choices rather than defaulting them.** `n` on the
+  Sessions tab opens a form carrying plane, provider, workspace and approval mode;
+  `ouro new` is the same request from a shell. Both build their parameters through one
+  `model::StartRequest`, which emits a strict subset of `Gateway.Methods`
+  `@start_options` — `provider`, `workspace`, `approval_mode`, and `objective` on the
+  coding plane — omits anything unanswered (an empty workspace box is *no* workspace,
+  not `""`, which `option_value(_, :string, _)` would refuse), and never sends `id`.
+  Two places the client is stricter than the gateway, both stated in the refusal: a
+  start with no provider is refused here, because letting the node's default decide
+  would be a terminal choosing which vendor runs the operator's code; and `objective`
+  is required on the coding plane and refused on the interactive one.
+- **An uninstalled provider is drawn dim and stays selectable.** "Installed" is a probe
+  finding an executable; the runtime is the authority on whether a session can start,
+  and refusing on a heuristic would be this client overruling it.
+- **A refusal is shown on the form that produced it, with the reason from its `data`.**
+  Most `-32006` messages describe the shape of the failure and leave the actionable
+  part in `data`; a client that dropped it would show "the runtime refused the call"
+  where `["invalid_workspace", "/srv/nope"]` was available.
 - **`runtime.providers` is not on the status cadence.** Each entry probes an installed
   executable by shelling out ([methods.ex] `@provider_probe_timeout`), so polling it
   beside `runtime.status` would fork a process per provider every three seconds. It

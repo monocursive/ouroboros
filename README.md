@@ -159,6 +159,7 @@ ouro                    # spawn a runtime, or adopt one already running here, th
 ouro daemon             # spawn only: print the port, pid, and token file, then exit
 ouro attach             # connect to the runtime published in this data directory
 ouro attach --addr 127.0.0.1:4560 --token-file ~/.ouro-token
+ouro new --provider claude --workspace .   # start a session and drop into the UI
 ouro stop               # ask the runtime this client started to shut down
 ouro version            # client version, embedded release version and digest, protocol
 ouro --dev              # start `mix run --no-halt` in this checkout instead
