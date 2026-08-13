@@ -26,14 +26,16 @@ product. It currently proves:
   mounts, an independent policy applied to the whole artifact before any signature
   exists, and a durable journal of every decision;
 - offline OTP release metadata/archive validation plus a deny-by-default,
-  write-ahead-journaled `:release_handler` control boundary; and
+  write-ahead-journaled `:release_handler` control boundary;
+- a token-authenticated loopback operator gateway, and `ouro` — one binary that carries
+  a release, extracts it, starts it, and attaches to it, or attaches to one already
+  running somewhere else; and
 - real two-node behavior in tests using an OTP `:peer` OS process.
 
 It does **not** yet provide partition-safe placement, durable provider execution
 across a full BEAM/host restart, signing custody outside the cluster's distribution
-trust domain, aggregate cost budgets, or a polished terminal UI. The OTP release
-adapter is implemented, but a real packaged-release install/reboot rehearsal remains an
-external deployment gate.
+trust domain, or aggregate cost budgets. The OTP release adapter is implemented, but a
+real packaged-release install/reboot rehearsal remains an external deployment gate.
 
 ## Why Jido
 
@@ -144,6 +146,115 @@ Read-only tasks default to `:shared_read`; write-capable tasks to `:exclusive`.
 Nonterminal durable tasks reserve their roots while a coordinator, registry, or the
 workspace manager is being rebuilt, and only the exact registered recovery owner can
 claim a reservation. These leases are node-local admission, not distributed consensus.
+
+## Terminal UI
+
+`ouro` is the terminal client, in `tui/`. It does two different jobs and the difference
+matters: it can **spawn** a runtime — start one as a child process, own its lifecycle,
+and attach to it — or it can **attach** to one somebody else started, on this host or
+through a tunnel.
+
+```sh
+ouro                    # spawn a runtime, or adopt one already running here, then attach
+ouro daemon             # spawn only: print the port, pid, and token file, then exit
+ouro attach             # connect to the runtime published in this data directory
+ouro attach --addr 127.0.0.1:4560 --token-file ~/.ouro-token
+ouro stop               # ask the runtime this client started to shut down
+ouro version            # client version, embedded release version and digest, protocol
+ouro --dev              # start `mix run --no-halt` in this checkout instead
+```
+
+Build it from a checkout. ERTS is not cross-compiled, so the binary is only valid for
+the machine that built it:
+
+```sh
+make ouro    # mix release, then that tarball baked into tui/target/release/ouro
+make dist    # the same, copied to dist/ouro-<version>-<target triple>
+```
+
+There is no `--token` flag anywhere, deliberately: a secret on a command line is
+readable by every process on the host for as long as the command runs. A spawning client
+writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells the
+gateway the path.
+
+### How a client finds a runtime
+
+The runtime binds an ephemeral port and publishes it to `gateway.json` in
+`OUROBOROS_DATA_DIR`, alongside its pid, protocol version, and scope. Nothing
+pre-chooses a port, so two daemons cannot race for a number one of them picked in
+advance. That file is removed on graceful shutdown and left behind by a kill, which is
+why it carries a pid: a publication whose pid is dead is stale and is replaced, and a
+publication whose pid is *alive* is never overwritten — a daemon this client cannot talk
+to is something to report, not something to resolve by starting a second one on top of
+it.
+
+A `--dev` daemon gets its own data directory (`ouroboros-dev`), because a development
+runtime and a real one that shared `gateway.json` would each be discoverable as the
+other.
+
+### Attaching to a server over SSH
+
+The gateway is cleartext and binds loopback. The supported way to reach a remote one is
+to forward the port rather than to open the listener:
+
+```sh
+# On the server, once: note the port and the token file.
+ouro daemon
+
+# On the laptop.
+ssh -N -L 4560:127.0.0.1:<port> ops@host &
+scp ops@host:~/.local/share/ouroboros/gateway.token /tmp/remote.token
+ouro attach --addr 127.0.0.1:4560 --token-file /tmp/remote.token
+```
+
+`OUROBOROS_GATEWAY_BIND` can put the listener on a real interface, but the runtime
+refuses that boot unless `OUROBOROS_GATEWAY_ALLOW_REMOTE=1` is also set, because the
+token and every payload after it would cross the wire in the clear. The refusal names
+the tunnel first on purpose.
+
+### What a spawned runtime inherits
+
+`ouro` sets the gateway posture (`OUROBOROS_GATEWAY=1`, scope `operate`, port `0`, the
+token file path, `OUROBOROS_DATA_DIR`) and otherwise hands the child the environment it
+was called with. On a laptop it also sets `OUROBOROS_DIST=none`: no epmd, no
+distribution listener, no cookie on the host at all.
+
+That default steps aside for a real deployment. If the calling environment already
+carries `OUROBOROS_CLUSTER_STRATEGY` or `OUROBOROS_NODE`, the cluster variables pass
+through untouched and distribution stays on — `rel/env.sh.eex` refuses the combination
+of clustering and `OUROBOROS_DIST=none` outright, and an operator who configured a
+cluster did not ask a terminal client to reconsider it. Everything else about an
+existing server workflow is unchanged, because nothing else is set.
+
+### Keys
+
+`?` opens the help with the current key map. It is the authority; a README that listed
+bindings would be the second place they are written down and the first place they go
+stale.
+
+### Honest limits
+
+- **The token is transport authentication, not a sandbox.** It decides who may open a
+  connection and at what scope. It does not constrain what the runtime does once a
+  connection is open: an `operate`-scope client can drive sessions and agents, and the
+  gateway's authority is the runtime's authority.
+- **Loopback is the security boundary.** The protocol has no transport encryption.
+  `OUROBOROS_GATEWAY_ALLOW_REMOTE=1` does not add any — it only stops the runtime from
+  refusing to bind a non-loopback address. Use the tunnel.
+- **The view is single-node.** The client speaks to exactly one gateway and renders that
+  node's state. Connected peers appear as names; their sessions, agents, and plans do
+  not. Cross-node listing is deferred, not hidden.
+- **In attach mode there are no logs.** A spawning client pipes the runtime's output
+  into a bounded ring it can show you. A client that attached to a process it did not
+  start has no access to that process's stdout — the logs live wherever the spawner put
+  them (`journalctl`, `daemon.log`, a container log driver).
+- **`ouro attach` with no arguments only finds runtimes that published locally.** A
+  deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
+  one whose `OUROBOROS_DATA_DIR` this user cannot read, is reachable only by naming
+  `--addr` and `--token-file` explicitly. There is no discovery beyond the file.
+- The UI is new. The gateway protocol has one version and one implementation of each
+  half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
+  both numbers rather than guessing.
 
 ## Agent mesh
 
@@ -1158,8 +1269,16 @@ Topology churn is logged as it happens, with the arriving node's role, because
 - Release metadata construction, archive inspection, authorization, and journaling are
   implemented; full tar assembly and a real `HandlerAdapter.OTP` reboot rehearsal are
   deployment gates.
-- There is no polished terminal UX yet. `Ouroboros.status/0` is the inspectable API
-  snapshot and reports per-plane availability separately from empty result lists.
+- The terminal client is new, and it is a client: `ouro` renders one node through the
+  gateway, at the scope that node's listener was booted with, over a cleartext loopback
+  socket. Its token authenticates a connection and sandboxes nothing; there is no
+  cross-node view, no log stream to an attached client, and no discovery beyond
+  `gateway.json`. `Ouroboros.status/0` remains the inspectable API snapshot underneath
+  it, and still reports per-plane availability separately from empty result lists.
+- CI exists as two GitHub Actions workflows and has never run: this repository has no
+  git remote, so no push, pull request, or tag has ever reached a runner. The four-target
+  release matrix is a statement about ERTS — a release is only valid on the OS and
+  architecture that built it — not a record of four builds that happened.
 
 The next architecture steps and stop conditions are tracked in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

@@ -609,18 +609,56 @@ subscribe, one turn).
 
 ## 4. Packaging & distribution
 
-- `justfile`: `dev` (mix + `ouro --dev`), `test` (mix test; cargo test; fmt;
-  clippy), `golden` (regen + diff fixtures), `release` (`MIX_ENV=prod mix
-  release` → tarball → `OUROBOROS_RELEASE_TARBALL=… cargo build --release`).
-- **CI matrix** builds per target — the release must be built on (or for) the
-  exact OS/arch because ERTS is not cross-compiled: `macos-arm64`,
-  `macos-x64`, `linux-x64`, `linux-arm64`. Artifact: `ouro-<version>-<triple>`.
-  This is the same ERTS/arch identity constraint the forge verifier already
-  enforces for artifacts ([mix.exs](../mix.exs) release comment). Note the
-  repo has **no CI at all today** (no `.github/`) — this is greenfield, not an
-  amendment, and Slice 4's sizing includes it. `.gitignore` gains the release
-  tarball glob (`*.tar.gz`; today only bare `ouroboros-*.tar` is covered) and
-  `tui/target/`.
+**Built, not a justfile.** [`Makefile`](../Makefile), because `just` is not a
+dependency this repository already has and a second build tool is a worse tax
+than a plainer syntax. Same verbs: `dev` (deps if absent + `cargo run -- --dev`),
+`test` (mix test; cargo test/fmt/clippy, *twice* — `embed` is off by default, so
+one pass never compiles the extractor at all), `golden` (regen + `git diff
+--exit-code`), `release-tarball`, `ouro`, `dist`. Recipes compute the version and
+target triple in the shell, so the file needs no GNU extensions and the version of
+record stays the name `mix release` gave the tarball.
+
+**The tar step.** [`mix.exs`](../mix.exs) gained `steps: [:assemble, :tar]`, which
+is what produces `_build/prod/ouroboros-<version>.tar.gz`. `make ouro` passes that
+path absolute in `OUROBOROS_RELEASE_TARBALL`; `build.rs` reads the bytes,
+sha256s them, and writes `include_bytes!` plus the digest and version into
+`OUT_DIR`. The version is parsed from the filename at the first hyphen *followed by
+a digit* — splitting from the right reads `ouroboros-0.2.0-rc.1` as version
+`rc.1`, which files a prerelease under a directory name sharing nothing with the
+release inside it.
+
+**Measured, on a real release** (Apple M-series laptop, OTP 29 / erts-17.0.2,
+release 0.1.0):
+
+| | |
+|---|---|
+| release tarball | 18 MB (2,841 entries, ERTS included) |
+| `ouro` with it baked in | 20 MB stripped (19,765,728 bytes) |
+| extracted release on disk | 53 MB |
+| cold `ouro daemon` (extract + boot + publish) | 2.8–4.0 s |
+| warm `ouro daemon` (cache hit + boot + publish) | 1.1 s |
+| `ouro attach` start → `runtime.status` rendered | 7 ms |
+
+The warm path does not hash the payload: the cache is keyed by the digest the
+build recorded, so recognising an extracted release is a directory lookup rather
+than a pass over eighteen megabytes of the binary. Reuse restamps the directory,
+so the GC's "newest two" means most recently *started*, not most recently
+unpacked — otherwise the release a daemon is running out of ages out from under
+it after two upgrades.
+
+- **CI matrix** builds per target — the release must be built on the exact OS/arch
+  because ERTS is not cross-compiled: `macos-14` (aarch64-apple-darwin),
+  `macos-13` (x86_64-apple-darwin), `ubuntu-24.04` (x86_64-unknown-linux-gnu),
+  `ubuntu-24.04-arm` (aarch64-unknown-linux-gnu). Artifact:
+  `dist/ouro-<version>-<triple>`, e.g. `ouro-0.1.0-aarch64-apple-darwin`, produced
+  by `make dist` so CI and a laptop cannot drift. This is the same ERTS/arch
+  identity constraint the forge verifier already enforces for artifacts
+  ([mix.exs](../mix.exs) release comment).
+  **Status: written, never executed.** `.github/workflows/{ci,release}.yml` exist
+  as of Slice 4, and this repository still has no git remote — no push, pull
+  request, or tag has ever reached a runner. Every command in them passes locally
+  on the same toolchain versions; that is a different claim and both files say so
+  at the top. `.gitignore` covers `*.tar.gz`, `/tui/target/`, and `/dist/`.
 - Servers keep deploying the plain release tarball from the same commit; the
   embedded copy inside `ouro` is a convenience for laptops/edge, not a new
   deployment path.
@@ -628,12 +666,14 @@ subscribe, one turn).
   → the TUI prints both versions and the one-line fix. The runtime's own
   modules may change hourly under the upgrade lanes — the protocol integer is
   what moves slowly and deliberately.
-- README: new "Terminal UI" section (spawn vs attach, keys, env passthrough,
-  SSH-tunnel recipe) and an **Honest limits** block (token ≠ sandbox; loopback
-  boundary; single-node view; logs-with-spawner). Two lines to update when
-  Slice 3 lands, not one: the intro's "or a polished terminal UI"
-  (README.md:34) and "There is no polished terminal UX yet" under Current
-  limits (README.md:1161).
+- README: a "Terminal UI" section (spawn vs attach, how a client finds a runtime,
+  SSH-tunnel recipe, env passthrough, keys deferred to the in-app `?`) and an
+  **Honest limits** block (token ≠ sandbox; loopback boundary and what
+  `ALLOW_REMOTE` does *not* add; single-node view; logs-with-spawner;
+  env-token deployments not discoverable by a bare `ouro attach`). Both stale
+  lines are gone: the intro no longer lists a terminal UI among what this does
+  not provide, and "There is no polished terminal UX yet" under Current limits is
+  now a description of what the client is and is not, plus the never-run CI.
 
 ---
 
@@ -653,9 +693,17 @@ subscribe, one turn).
    end-to-end on the laptop; golden decode tests green; reconnect/resubscribe
    test green.
 4. **Full surface + packaging.** Tabs 3–7, embed + extract + GC, `ouro stop`/
-   `daemon`/`attach`, justfile, CI matrix, README. Gate: single downloaded
+   `daemon`/`attach`, Makefile, CI matrix, README. Gate: single downloaded
    binary on a clean machine reaches the Dashboard in one command; `ouro
    attach` over an SSH tunnel against a server release.
+   *Packaging landed against a real release rather than a fixture:* `mix release`
+   → tarball → `cargo build --features embed` → the binary run on a scratch
+   `XDG_DATA_HOME`/`XDG_CACHE_HOME`, extracting, spawning `bin/ouroboros start`,
+   publishing `gateway.json`, answering `hello` and `runtime.status`, surviving
+   `ouro attach`, and stopping through `runtime.shutdown`. Collection was proven
+   the same way: three releases through one cache, the third start collecting the
+   first. The SSH-tunnel half of the gate is still untested — no server has been
+   attached to over a real tunnel.
 
 Rough sizing: S1 ≈ 1.5–2k LOC (heavy on tests), S2 ≈ 1k, S3 ≈ 2–3k Rust,
 S4 ≈ 1.5–2k mixed (includes greenfield CI across four targets). Each slice is

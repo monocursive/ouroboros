@@ -1,0 +1,68 @@
+# HONESTY NOTE: this repository has no git remote as of the commit that adds this file.
+# No tag has ever been pushed, this workflow has never executed, and no artifact it
+# describes has ever been produced by a runner. The four-target matrix reflects a real
+# constraint rather than an aspiration — see below — but the YAML itself is unproven.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # ERTS is not cross-compiled. `mix release` bakes the runtime system of the machine that
+  # ran it, and `ouro` carries that release inside itself, so a binary is only ever valid
+  # for the OS and architecture that built it. That is the same identity constraint the
+  # forge verifier enforces between a builder node and a core node, and it is why this is
+  # a matrix of real machines rather than a cross-compile matrix.
+  build:
+    name: ${{ matrix.triple }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            triple: aarch64-apple-darwin
+          - runner: macos-13
+            triple: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            triple: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+
+      - run: rustup toolchain install stable --profile minimal
+
+      - run: mix deps.get
+
+      # `make dist` is the same target a laptop runs, on purpose: a release built by a
+      # command CI alone knows is a release nobody can reproduce when it breaks. It emits
+      # dist/ouro-<version>-<host triple>, and the host triple is the matrix triple
+      # because the runner is the target.
+      - run: make dist
+
+      - name: Check the artifact is named for this target
+        run: test -f "dist/ouro-$(ls _build/prod/ouroboros-*.tar.gz | head -1 | sed -e 's|.*/ouroboros-||' -e 's|\.tar\.gz$||')-${{ matrix.triple }}"
+
+      # The client is asked what it carries. A binary that cannot report its own embedded
+      # release version has not proven it has one, and finding that out here is cheaper
+      # than finding it out on somebody's laptop.
+      - run: ./tui/target/release/ouro version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ouro-${{ matrix.triple }}
+          path: dist/ouro-*
+          if-no-files-found: error

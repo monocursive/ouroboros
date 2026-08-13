@@ -30,3 +30,7 @@ ouroboros-*.tar
 
 # The Rust TUI crate's build directory.
 /tui/target/
+
+# Where `make dist` names a built client for the platform it can run on. The artifact of
+# record is the one a tagged build uploads, not a copy somebody made locally.
+/dist/
