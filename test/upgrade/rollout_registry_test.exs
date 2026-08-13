@@ -131,7 +131,15 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
 
     name = unique_name()
     {:ok, pid} = Registry.start_link(name: name, storage: storage)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    # The registry is linked to the test process, so it can die between an
+    # aliveness check and the stop; catching the exit is the only raceless form.
+    on_exit(fn ->
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
 
     assert {:ok, restored} = Registry.get(legacy.artifact_id, name)
     assert restored.state == :live
@@ -295,7 +303,16 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       end)
 
     {:ok, pid} = Registry.start_link(name: name, storage: storage)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    # The registry is linked to the test process, so it can die between an
+    # aliveness check and the stop; catching the exit is the only raceless form.
+    on_exit(fn ->
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
     name
   end
 
