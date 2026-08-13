@@ -31,6 +31,10 @@ ratatui = "0.30"
 rand = { version = "0.9", default-features = false, features = ["os_rng"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The client's own config file, and nothing else. Default features only: `preserve_order`
+# would make the written file's key order depend on an index map rather than on the
+# structs below, and a config this client rewrites should diff as a one-line change.
+toml = "0.9"
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "net",
