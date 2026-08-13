@@ -278,3 +278,136 @@ if config_env() == :prod do
       trusted_signers: trusted_signers
     ]
 end
+
+# Everything above runs only in production. Everything below runs in every environment,
+# because the gateway is how a laptop attaches to a runtime it started with
+# `mix run --no-halt`, and a section that only existed in a release would make the
+# development loop a different protocol than the shipped one.
+#
+# Like the production block, this stands on `System` and `:init` alone. A config provider
+# runs before this application's modules are guaranteed loadable, so a check that must be
+# able to refuse the boot cannot call `Ouroboros.Gateway.Config` — which re-validates all
+# of this at init, on purpose, for the operator who configures application environment
+# directly.
+gateway_value = fn name ->
+  case System.get_env(name) do
+    nil -> nil
+    value -> if String.trim(value) == "", do: nil, else: String.trim(value)
+  end
+end
+
+# `OUROBOROS_DATA_DIR` is a local variable in the production block above and has never
+# been persisted. The gateway needs it at runtime rather than at config time: the bound
+# port is published to `gateway.json` there, and that file is the only way a spawned
+# client finds the port it should connect to.
+gateway_data_dir = gateway_value.("OUROBOROS_DATA_DIR")
+
+if gateway_data_dir do
+  config :ouroboros, :data_dir, gateway_data_dir
+end
+
+if System.get_env("OUROBOROS_GATEWAY") == "1" do
+  gateway_port =
+    case Integer.parse(gateway_value.("OUROBOROS_GATEWAY_PORT") || "0") do
+      {value, ""} when value >= 0 and value <= 65_535 ->
+        value
+
+      _other ->
+        raise "OUROBOROS_GATEWAY_PORT must be an integer between 0 and 65535; 0 binds an " <>
+                "ephemeral port and publishes it in gateway.json"
+    end
+
+  gateway_bind = gateway_value.("OUROBOROS_GATEWAY_BIND") || "127.0.0.1"
+
+  gateway_bind_address =
+    case :inet.parse_address(String.to_charlist(gateway_bind)) do
+      {:ok, address} ->
+        address
+
+      {:error, _reason} ->
+        raise "OUROBOROS_GATEWAY_BIND must be a literal IPv4 or IPv6 address, got: " <>
+                gateway_bind
+    end
+
+  gateway_loopback? =
+    case gateway_bind_address do
+      {127, _, _, _} -> true
+      {0, 0, 0, 0, 0, 0, 0, 1} -> true
+      _other -> false
+    end
+
+  gateway_allow_remote = System.get_env("OUROBOROS_GATEWAY_ALLOW_REMOTE") == "1"
+
+  # The gateway protocol is cleartext and carries the token in its first frame. Leaving
+  # loopback therefore puts an operator credential on the network, so this refuses the
+  # boot instead of warning, and the override has to be typed out on the host that wants
+  # it — the same posture OUROBOROS_ALLOW_INSECURE_DIST takes toward distribution.
+  if not gateway_loopback? and not gateway_allow_remote do
+    raise """
+    OUROBOROS_GATEWAY_BIND=#{gateway_bind} puts the gateway on a network interface, and \
+    the gateway protocol is cleartext: the token and every status payload after it cross \
+    the wire in the clear.
+
+    Attach over an SSH tunnel instead (ssh -L 4560:127.0.0.1:4560 host), or set \
+    OUROBOROS_GATEWAY_ALLOW_REMOTE=1 to accept a cleartext operator surface on a trusted \
+    network.
+    """
+  end
+
+  gateway_token_file = gateway_value.("OUROBOROS_GATEWAY_TOKEN_FILE")
+  gateway_token = gateway_value.("OUROBOROS_GATEWAY_TOKEN")
+
+  # No token, no listener. The token file is preferred and is what the spawner writes:
+  # the value of OUROBOROS_GATEWAY_TOKEN stays in application environment for the life of
+  # the node and is readable by every process this user runs, while a path is just a path.
+  if is_nil(gateway_token_file) and is_nil(gateway_token) do
+    raise "OUROBOROS_GATEWAY=1 enables an operator surface, so it requires a token. Set " <>
+            "OUROBOROS_GATEWAY_TOKEN_FILE to a 0600 file holding at least 32 bytes, or " <>
+            "OUROBOROS_GATEWAY_TOKEN for a development loop."
+  end
+
+  if is_nil(gateway_data_dir) do
+    raise "OUROBOROS_GATEWAY=1 requires OUROBOROS_DATA_DIR: the bound port, protocol " <>
+            "version, and scope are published to gateway.json there, and that file is " <>
+            "how a client finds this node."
+  end
+
+  gateway_scope =
+    case gateway_value.("OUROBOROS_GATEWAY_SCOPE") || "read" do
+      "read" -> :read
+      "operate" -> :operate
+      other -> raise "OUROBOROS_GATEWAY_SCOPE must be read or operate, got: " <> other
+    end
+
+  gateway_max_frame =
+    case Integer.parse(gateway_value.("OUROBOROS_GATEWAY_MAX_FRAME") || "1048576") do
+      {value, ""} when value >= 1_024 ->
+        value
+
+      _other ->
+        raise "OUROBOROS_GATEWAY_MAX_FRAME must be an integer of at least 1024 bytes"
+    end
+
+  gateway_queue_limit =
+    case Integer.parse(gateway_value.("OUROBOROS_GATEWAY_QUEUE_LIMIT") || "1000") do
+      {value, ""} when value > 0 -> value
+      _other -> raise "OUROBOROS_GATEWAY_QUEUE_LIMIT must be a positive integer"
+    end
+
+  config :ouroboros, :gateway,
+    enabled: true,
+    port: gateway_port,
+    bind: gateway_bind,
+    allow_remote: gateway_allow_remote,
+    token_file: gateway_token_file,
+    token: gateway_token,
+    scope: gateway_scope,
+    allow_shutdown: System.get_env("OUROBOROS_GATEWAY_ALLOW_SHUTDOWN") == "1",
+    max_frame: gateway_max_frame,
+    queue_limit: gateway_queue_limit
+
+  # A client that spawns this node as a child process owns its stdout. Routing the
+  # default handler to stderr keeps that stream a log stream and this one clean, rather
+  # than interleaving `Logger` output with anything the daemon is asked to print.
+  config :logger, :default_handler, config: [type: :standard_error]
+end
