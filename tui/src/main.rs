@@ -610,6 +610,8 @@ async fn run_ui(
         );
     }
 
+    let opened = open.is_some();
+
     if let Some((plane, id)) = open {
         app.open_session(plane, id);
     }
@@ -625,10 +627,12 @@ async fn run_ui(
         );
     }
 
-    // Once per operator, on whichever command first got them here. Whether it is shown at
-    // all is the marker's decision, made inside `welcome`; dismissing it is what writes
-    // the marker that stops it coming back.
-    app.welcome();
+    // `open` is `Some` only for `ouro new`, which stated on its command line exactly what
+    // the quick-start screen exists to ask. Offering it a screen to start a session on
+    // would be offering it the thing it just did.
+    if !opened {
+        app.offer_quick_start();
+    }
 
     let mut daemon = daemon;
 

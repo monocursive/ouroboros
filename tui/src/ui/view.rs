@@ -15,7 +15,7 @@ use crate::model::{compact, Plane, ProviderEntry};
 
 use super::app::{
     provider_choices, App, Connection, Mode, NewField, NewSession, NoticeKind, Overlay,
-    ProviderChoice, Settings, SettingsField, Tab, APPROVAL_CHOICES,
+    ProviderChoice, QuickStart, QuickZone, Settings, SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::theme;
 
@@ -185,20 +185,157 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
-        Overlay::Welcome => welcome(frame, area, app),
+        Overlay::QuickStart(quick) => quick_start(frame, area, app, quick),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
     }
 }
 
-/// The first-run panel: what this machine is, where its state is, what it can run, and the
-/// four keys that matter. No questions — everything on it is already true.
+/// The quick-start screen: pick a model, say what it should do, press Enter.
 ///
-/// Every line is labelled with where it came from, because two different kinds of fact are
-/// on one screen: the node and the providers are the *runtime's* answers, the data
-/// directory and the config file are this *client's* paths. A panel that ran them together
-/// would let a reader believe the runtime had confirmed something it was never asked.
-fn welcome(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered(area, 80, area.height.min(24));
+/// The shortest honest path from an open terminal to a running agent, on one surface. Only
+/// two things are *asked*, because only two of them are things nobody else can answer:
+/// which model, and what for. Everything else is **stated**, with where it came from — a
+/// screen that asked for a workspace it could already work out would be adding a decision
+/// rather than removing one.
+///
+/// The two kinds of fact stay apart here as everywhere: the provider rows are the
+/// runtime's own probe, the paths under them are this client's. A first run adds those
+/// paths; a returning operator has seen them and is not shown them again.
+fn quick_start(frame: &mut Frame, area: Rect, app: &App, quick: &QuickStart) {
+    let picker = provider_rows(app, quick);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "pick a model, say what it should do, and press Enter.",
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("model", theme::label()),
+            Span::styled(
+                if app.providers.pending {
+                    format!("  {} probing", theme::spinner(app.ticks))
+                } else {
+                    String::new()
+                },
+                Style::default().fg(theme::MUTED),
+            ),
+        ]),
+    ];
+
+    lines.extend(picker);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "what should it do?",
+        theme::label(),
+    )));
+    lines.push(prompt_row(quick));
+    lines.push(Line::from(""));
+
+    // Stated, not asked — and each one says where it came from, because "the directory this
+    // terminal is in" and "the default you stored" are different claims.
+    lines.push(field(
+        "workspace",
+        &match (&app.config.defaults.workspace, &app.launch_dir) {
+            (Some(stored), _) => format!("{stored} — your stored default"),
+            (None, Some(here)) => format!("{here} — this terminal's directory"),
+            (None, None) => "none — the plane decides".to_string(),
+        },
+    ));
+
+    lines.push(field(
+        "approval",
+        &match app.config.defaults.approval_mode() {
+            Some(mode) => format!("{} — your stored default", mode.as_str()),
+            None => "unset — the plane's own default".to_string(),
+        },
+    ));
+
+    // Said before Enter rather than after it. `hello.methods` is the feature gate (§2.3),
+    // so this is knowable from the handshake, and a screen that let someone type a prompt
+    // into a listener that will refuse to start anything would be wasting their sentence.
+    if !app.hello.serves("interactive.start") {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "this gateway does not serve interactive.start, so Enter has nothing to call",
+            Style::default().fg(theme::WARN),
+        )));
+    } else if !app.hello.operates() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "this listener runs at scope `{}`; starting a session mutates the runtime \
+                 and will be refused with -32003",
+                app.hello.scope
+            ),
+            Style::default().fg(theme::WARN),
+        )));
+    }
+
+    if let Some(error) = &quick.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(theme::BAD),
+        )));
+    }
+
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        if quick.pending {
+            format!("starting {} ", theme::spinner(app.ticks))
+        } else {
+            "Tab swaps zones · ↑↓ or ctrl-n/ctrl-p pick a model · r (ctrl-r anywhere) \
+             probes again · Enter starts · Esc to the dashboard"
+                .to_string()
+        },
+        if quick.pending {
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::MUTED)
+        },
+    )));
+
+    lines.push(Line::from(Span::styled(
+        "n opens the full dialog (plane, workspace, approval) · , settings · ? keys",
+        Style::default().fg(theme::MUTED),
+    )));
+
+    if quick.first_run {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "first run — where this client keeps things",
+            theme::label(),
+        )));
+
+        lines.push(field(
+            "state",
+            &match &app.data_dir {
+                Some(dir) => dir.clone(),
+                // Attach mode: this client did not choose where that runtime keeps
+                // anything, and will not print a local path under a remote node.
+                None => "with whoever started this runtime — not this client".to_string(),
+            },
+        ));
+
+        lines.push(field(
+            "config",
+            &match &app.config_path {
+                Some(path) => path.display().to_string(),
+                None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".to_string(),
+            },
+        ));
+    }
+
+    // Sized to what it actually holds, wrapping included. A constant height would either
+    // clip the last line of a long provider list or float a short one in empty space, and
+    // the line most likely to be clipped is the one naming a path — which is exactly the
+    // kind of line a panel must not half-show.
+    let rows = wrapped(&lines, inner_width(area, QUICK_WIDTH));
+    let popup = centered(area, QUICK_WIDTH, (rows + 2).min(area.height));
 
     frame.render_widget(Clear, popup);
 
@@ -209,80 +346,92 @@ fn welcome(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "one runtime, on this machine, that you started.",
-            Style::default().fg(theme::MUTED),
-        )),
-        Line::from(""),
-        Line::from(Span::styled("as the runtime reports it", theme::label())),
-        field("node", &blank(&app.hello.node)),
-        field(
-            "scope",
-            &format!(
-                "{}{}",
-                blank(&app.hello.scope),
-                if app.hello.operates() {
-                    " — this client may start and stop work"
-                } else {
-                    " — every mutating verb is refused"
-                }
-            ),
-        ),
-        field("address", &app.address),
-        Line::from(""),
-        Line::from(Span::styled("this client's own paths", theme::label())),
-    ];
-
-    lines.push(field(
-        "state",
-        &match &app.data_dir {
-            Some(dir) => dir.clone(),
-            // Attach mode: this client did not choose where that runtime keeps anything.
-            None => "with whoever started this runtime — not this client".to_string(),
-        },
-    ));
-
-    lines.push(field(
-        "config",
-        &match &app.config_path {
-            Some(path) => path.display().to_string(),
-            None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".to_string(),
-        },
-    ));
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "providers, as this runtime probed them",
-        theme::label(),
-    )));
-    lines.extend(provider_summary(app));
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("n", Style::default().fg(theme::ACCENT)),
-        Span::raw(" start a session   "),
-        Span::styled("?", Style::default().fg(theme::ACCENT)),
-        Span::raw(" keys   "),
-        Span::styled(",", Style::default().fg(theme::ACCENT)),
-        Span::raw(" settings   "),
-        Span::styled("q", Style::default().fg(theme::ACCENT)),
-        Span::raw(" quit"),
-    ]));
-    lines.push(Line::from(Span::styled(
-        "any key closes this; it is shown once",
-        Style::default().fg(theme::MUTED),
-    )));
-
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// The provider lines the welcome panel shows: available ones marked, missing ones dim and
-/// naming the executable the runtime looked for.
-fn provider_summary(app: &App) -> Vec<Line<'static>> {
+/// How wide the quick-start panel is, as a percentage of the frame. Named because its
+/// height is computed against the same number and the two must not drift apart.
+const QUICK_WIDTH: u16 = 82;
+
+/// How wide the settings overlay is, for the same reason.
+const SETTINGS_WIDTH: u16 = 80;
+
+/// The drawable width inside a popup of `percent`, which is what a line has to fit in.
+fn inner_width(area: Rect, percent: u16) -> usize {
+    ((area.width as usize) * (percent as usize) / 100).saturating_sub(2)
+}
+
+/// How many terminal rows these lines occupy once `Wrap` has had them.
+///
+/// An estimate of ratatui's own wrapping rather than a call into it: `Paragraph` will not
+/// say how tall it wants to be, and a panel sized to `lines.len()` silently loses whatever
+/// wrapped — which on these screens is a line naming a path, the worst kind to half-show.
+///
+/// Deliberately one row long for anything that wraps at all. `Wrap` breaks on words, so a
+/// label followed by an unbreakable 140-character path takes *three* rows where the
+/// character count says two: the path does not fit beside the label, so it starts on a row
+/// of its own. Erring long costs blank space in a popup that is clamped to the frame
+/// anyway; erring short costs the path.
+fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
+    if inner == 0 {
+        return lines.len() as u16;
+    }
+
+    lines
+        .iter()
+        .map(|line| {
+            let width = line.width();
+
+            if width <= inner {
+                1
+            } else {
+                width.div_ceil(inner) as u16 + 1
+            }
+        })
+        .sum()
+}
+
+/// The typed prompt, with a caret where typing goes and a hint where it has not started.
+fn prompt_row(quick: &QuickStart) -> Line<'static> {
+    let focused = quick.zone == QuickZone::Prompt && !quick.pending;
+
+    let mut spans = vec![Span::styled(
+        if focused { "> " } else { "  " },
+        Style::default().fg(theme::ACCENT),
+    )];
+
+    if quick.prompt.is_empty() {
+        // An empty prompt is a complete answer, and saying so is what stops the box reading
+        // as a required field.
+        spans.push(Span::styled(
+            "optional — Enter with nothing here just opens a session",
+            Style::default().fg(theme::MUTED),
+        ));
+    } else {
+        spans.push(Span::raw(quick.prompt.clone()));
+    }
+
+    if focused {
+        spans.push(Span::styled(
+            "_",
+            Style::default().add_modifier(Modifier::SLOW_BLINK),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// The selectable model list: what `runtime.providers` reported, with the cursor on it.
+///
+/// An entry whose probe found no executable is drawn dim and names the executable that was
+/// looked for — that hint *is* the setup instruction, and it is why this screen stays
+/// useful on a machine with nothing installed. It stays selectable regardless: "installed"
+/// is a probe finding a file, the runtime is the authority on whether a session can start,
+/// and refusing on a heuristic would be this client overruling it.
+fn provider_rows(app: &App, quick: &QuickStart) -> Vec<Line<'static>> {
     let Some(providers) = &app.providers.value else {
         // A list that was asked for and refused is not the same fact as one nobody has
-        // asked for yet, and a panel that showed them the same way would be reporting a
+        // asked for yet, and a screen that showed them the same way would be reporting a
         // gateway that cannot answer as a gateway nobody has spoken to.
         if let Some(error) = &app.providers.error {
             return vec![Line::from(Span::styled(
@@ -308,7 +457,8 @@ fn provider_summary(app: &App) -> Vec<Line<'static>> {
         ))];
     }
 
-    let ready: Vec<&ProviderEntry> = providers.iter().filter(|entry| entry.ready()).collect();
+    let focused = quick.zone == QuickZone::Picker;
+    let anything_ready = providers.iter().any(|entry| entry.ready());
 
     // Two past the longest name, so the column after it is a column rather than a word
     // touching the one before it.
@@ -321,54 +471,25 @@ fn provider_summary(app: &App) -> Vec<Line<'static>> {
 
     let mut lines: Vec<Line> = providers
         .iter()
-        .map(|entry| {
-            match &entry.status {
-                Some(probe) if probe.installed && probe.compatible => Line::from(vec![
-                    Span::styled("  ✓ ", Style::default().fg(theme::GOOD)),
-                    Span::raw(format!("{:<width$}", entry.provider)),
-                    Span::styled(
-                        probe.version.clone().unwrap_or_default(),
-                        Style::default().fg(theme::MUTED),
-                    ),
-                ]),
-                Some(probe) => Line::from(vec![
-                    Span::styled("  · ", Style::default().fg(theme::MUTED)),
-                    Span::styled(
-                        format!("{:<width$}", entry.provider),
-                        Style::default().fg(theme::MUTED),
-                    ),
-                    Span::styled(
-                        match &probe.executable {
-                            Some(executable) if !probe.installed => {
-                                format!("no {executable} on the runtime's PATH")
-                            }
-                            // Installed but not compatible is a version the harness will
-                            // not drive, which is a different sentence from a missing file.
-                            Some(executable) => {
-                                format!("{executable} is installed but not a version this harness drives")
-                            }
-                            None => "the runtime named no executable for it".to_string(),
-                        },
-                        Style::default().fg(theme::MUTED),
-                    ),
-                ]),
-                // A probe that failed is not the same fact as a provider that is missing.
-                None => Line::from(vec![
-                    Span::styled("  ? ", Style::default().fg(theme::WARN)),
-                    Span::raw(format!("{:<width$}", entry.provider)),
-                    Span::styled(
-                        format!("probe failed: {}", compact(&entry.error)),
-                        Style::default().fg(theme::WARN),
-                    ),
-                ]),
-            }
+        .enumerate()
+        .map(|(index, entry)| {
+            // A marker rather than a reversed row: the row's own colour is carrying the
+            // probe result, and inverting it would make the one fact on the line unreadable
+            // exactly where the cursor is.
+            let mut spans = vec![Span::styled(
+                if index == quick.provider { "> " } else { "  " },
+                Style::default().fg(if focused { theme::ACCENT } else { theme::MUTED }),
+            )];
+
+            spans.extend(provider_cells(entry, width));
+            Line::from(spans)
         })
         .collect();
 
-    if ready.is_empty() {
+    if !anything_ready {
         lines.push(Line::from(Span::styled(
-            "  none of them found an executable. Install one of the CLIs above and press r \
-             on the Dashboard; the runtime decides, not this client.",
+            "  none found an executable. Install one of the CLIs above and press r — the \
+             runtime decides, not this probe, so any of them is still yours to try.",
             Style::default().fg(theme::WARN),
         )));
     }
@@ -376,19 +497,52 @@ fn provider_summary(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
+/// One provider's cells: the mark, the name, and the one line that says why it is dim.
+fn provider_cells(entry: &ProviderEntry, width: usize) -> Vec<Span<'static>> {
+    match &entry.status {
+        Some(probe) if probe.installed && probe.compatible => vec![
+            Span::styled("✓ ", Style::default().fg(theme::GOOD)),
+            Span::raw(format!("{:<width$}", entry.provider)),
+            Span::styled(
+                probe.version.clone().unwrap_or_default(),
+                Style::default().fg(theme::MUTED),
+            ),
+        ],
+        Some(probe) => vec![
+            Span::styled("· ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("{:<width$}", entry.provider),
+                Style::default().fg(theme::MUTED),
+            ),
+            Span::styled(
+                match &probe.executable {
+                    Some(executable) if !probe.installed => {
+                        format!("no {executable} on the runtime's PATH")
+                    }
+                    // Installed but not compatible is a version the harness will not drive,
+                    // which is a different sentence from a missing file.
+                    Some(executable) => {
+                        format!("{executable} is installed but not a version this harness drives")
+                    }
+                    None => "the runtime named no executable for it".to_string(),
+                },
+                Style::default().fg(theme::MUTED),
+            ),
+        ],
+        // A probe that failed is not the same fact as a provider that is missing.
+        None => vec![
+            Span::styled("? ", Style::default().fg(theme::WARN)),
+            Span::raw(format!("{:<width$}", entry.provider)),
+            Span::styled(
+                format!("probe failed: {}", compact(&entry.error)),
+                Style::default().fg(theme::WARN),
+            ),
+        ],
+    }
+}
+
 /// The `,` overlay. Facts above, preferences below, and the line between them labelled.
 fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
-    let popup = centered(area, 80, area.height.min(22));
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" settings ", theme::heading()));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
     let facts = vec![
         Line::from(Span::styled(
             "as reported by the runtime — not editable here",
@@ -414,21 +568,39 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "defaults this client remembers — they prefill `n`, nothing more",
+            "defaults this client remembers — they prefill the start screens, nothing more",
             theme::label(),
         )),
     ];
 
+    // The facts wrap, because the one most likely to overflow is the path of the file this
+    // overlay writes — and a half-shown path is a path nobody can act on.
+    let width = inner_width(area, SETTINGS_WIDTH);
+    let fact_rows = wrapped(&facts, width);
+
+    // Two footer rows plus a blank, on top of the facts and the editable rows.
+    let height = fact_rows + SettingsField::ALL.len() as u16 + 5;
+    let popup = centered(area, SETTINGS_WIDTH, height.min(area.height));
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" settings ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(facts.len() as u16),
+            Constraint::Length(fact_rows),
             Constraint::Length(SettingsField::ALL.len() as u16),
             Constraint::Min(1),
         ])
         .split(inner);
 
-    frame.render_widget(Paragraph::new(facts), chunks[0]);
+    frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[0]);
 
     let choices = provider_choices(
         app.providers.value.as_deref().unwrap_or_default(),
@@ -453,6 +625,15 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             SettingsField::ApprovalMode => {
                 ("approval", settings.approval_label(), Style::default())
             }
+            SettingsField::QuickStart => (
+                "quick start",
+                if settings.quick_start {
+                    "on — opens when this node has nothing running".to_string()
+                } else {
+                    "off — go straight to the dashboard".to_string()
+                },
+                Style::default(),
+            ),
             SettingsField::Save => (
                 "",
                 "[ save ]".to_string(),
@@ -467,7 +648,9 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 if focused { "> " } else { "  " },
                 Style::default().fg(theme::ACCENT),
             ),
-            Span::styled(format!("{label:<11}"), theme::label()),
+            // Twelve, not eleven: `quick start` is eleven characters, and a label column
+            // exactly as wide as its widest label leaves a value touching it.
+            Span::styled(format!("{label:<12}"), theme::label()),
             Span::styled(value, style),
         ];
 
@@ -697,7 +880,9 @@ fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, St
 /// A labelled fact, in the same shape the Dashboard's panes use so the two read as one UI.
 fn field(name: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {name:<10}"), theme::label()),
+        // Padded to line up with the editable rows beneath them on the settings overlay:
+        // two for the cursor gutter plus the same twelve-wide label column.
+        Span::styled(format!("  {name:<12}"), theme::label()),
         Span::raw(value.to_string()),
     ])
 }

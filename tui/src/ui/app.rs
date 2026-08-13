@@ -778,6 +778,107 @@ impl NewSession {
     }
 }
 
+/// Which half of the quick-start screen the keyboard belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickZone {
+    Picker,
+    Prompt,
+}
+
+impl QuickZone {
+    fn other(self) -> Self {
+        match self {
+            Self::Picker => Self::Prompt,
+            Self::Prompt => Self::Picker,
+        }
+    }
+}
+
+/// The screen that turns "I want an agent to do a thing" into a running session in one
+/// keystroke.
+///
+/// It exists because the shortest honest path is *pick a model, say what you want, go* —
+/// not a page of facts to acknowledge before any of that can start. Everything on it that
+/// is not the picker or the prompt is **stated**, never asked: the workspace and the
+/// approval mode are shown with where they came from, and changing either is what the `n`
+/// dialog and `,` are for.
+///
+/// It is not a wizard. There is exactly one screen, Enter does the whole path, and Esc
+/// leaves for the Dashboard with nothing started.
+#[derive(Debug)]
+pub struct QuickStart {
+    pub zone: QuickZone,
+    /// Index into `runtime.providers`, which is the same list the Dashboard and the `n`
+    /// dialog draw.
+    pub provider: usize,
+    pub prompt: String,
+    /// True while `interactive.start` is in flight. It declares a 120s ceiling, so this is
+    /// a screen that legitimately waits.
+    pub pending: bool,
+    /// Why the last attempt did not start a session, shown on the screen that produced it
+    /// rather than in a notice line that expires.
+    pub error: Option<String>,
+    /// Whether this is the operator's first run, which is the only time the screen also
+    /// says where this client keeps its files.
+    pub first_run: bool,
+    /// Whether the cursor has been put where the defaults say. False until the provider
+    /// list arrives; true forever after, including once the operator moves it themselves.
+    placed: bool,
+    wanted_provider: Option<String>,
+}
+
+impl QuickStart {
+    /// Puts the cursor on the provider to start from, once the list is known.
+    ///
+    /// The stored default when this runtime reports it; otherwise the first entry whose
+    /// probe found an executable, because a quick start that opened on one the runtime
+    /// cannot run would be one keystroke from a refusal. When nothing is ready it lands on
+    /// the first row anyway — the list stays the operator's to pick from, and the runtime
+    /// is the authority on whether a start works.
+    ///
+    /// Answers the stored name back when this runtime does not serve it, so the caller can
+    /// say so.
+    fn place_provider(&mut self, providers: &[ProviderEntry]) -> Option<String> {
+        if self.placed || providers.is_empty() {
+            return None;
+        }
+
+        self.placed = true;
+        let first_ready = providers
+            .iter()
+            .position(|entry| entry.ready())
+            .unwrap_or(0);
+
+        let Some(wanted) = self.wanted_provider.take() else {
+            self.provider = first_ready;
+            return None;
+        };
+
+        match providers.iter().position(|entry| entry.provider == wanted) {
+            Some(index) => {
+                self.provider = index;
+                None
+            }
+            None => {
+                self.provider = first_ready;
+                Some(wanted)
+            }
+        }
+    }
+
+    fn move_provider(&mut self, delta: isize, providers: usize) {
+        if providers == 0 {
+            return;
+        }
+
+        // Choosing now, so a providers answer still in flight must not move the cursor out
+        // from under the operator afterwards.
+        self.placed = true;
+        self.wanted_provider = None;
+        self.provider = (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
+    }
+}
+
 /// One editable row of the settings overlay. The facts above them are not rows: they are
 /// what the runtime reported, and nothing here can change them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,14 +886,16 @@ pub enum SettingsField {
     Provider,
     Workspace,
     ApprovalMode,
+    QuickStart,
     Save,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 4] = [
+    pub const ALL: [SettingsField; 5] = [
         SettingsField::Provider,
         SettingsField::Workspace,
         SettingsField::ApprovalMode,
+        SettingsField::QuickStart,
         SettingsField::Save,
     ];
 }
@@ -811,6 +914,8 @@ pub struct Settings {
     pub provider: usize,
     pub workspace: String,
     pub approval: usize,
+    /// Whether the quick-start screen opens on its own when this node has nothing live.
+    pub quick_start: bool,
     /// The stored provider, until the probe list arrives and the cursor can be put on it.
     wanted_provider: Option<String>,
     /// Whether anything has been typed or cycled, so closing can say what it discards.
@@ -875,6 +980,10 @@ impl Settings {
                 self.approval =
                     (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
             }
+            SettingsField::QuickStart => {
+                self.edited = true;
+                self.quick_start = !self.quick_start;
+            }
             _ => {}
         }
     }
@@ -883,13 +992,8 @@ impl Settings {
 #[derive(Debug)]
 pub enum Overlay {
     Help,
-    /// The first-run panel: facts and a key legend, shown once and dismissed by any key.
-    ///
-    /// It asks nothing. There is no wizard here because there is nothing this client needs
-    /// an answer to before it can work — the runtime is already running by the time this
-    /// is drawn, and everything the panel says is something it, or this process, already
-    /// knows.
-    Welcome,
+    /// Pick a model, say what you want, press Enter.
+    QuickStart(Box<QuickStart>),
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
     Quit {
@@ -941,6 +1045,30 @@ pub struct Notice {
     pub text: String,
     pub kind: NoticeKind,
     pub until: u64,
+}
+
+/// Whether the quick-start screen opens, and the whole of the rule.
+///
+/// A first run opens it whatever else is true: there is nothing to go back to, and the
+/// screen *is* how this client introduces itself. Afterwards it stops being a greeting and
+/// becomes the "type and go" path, so it opens only when this node has nothing live to
+/// return to — and only while the operator leaves it on. Both halves matter: a screen that
+/// appeared over a running session would be interrupting work to offer to start some.
+pub fn should_quick_start(first_run: bool, enabled: bool, live_sessions: usize) -> bool {
+    first_run || (enabled && live_sessions == 0)
+}
+
+/// How far the quick-start decision has got. It is made at most once per process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickIntent {
+    /// Nobody has asked. `ouro new` leaves it here: that invocation already knows what it
+    /// wants, and a screen offering to start a session over the one it just started would
+    /// be absurd.
+    Unasked,
+    /// Wanted, waiting on the session lists to say whether there is anything live.
+    Waiting,
+    /// Decided, whichever way it went. Never asked again in this session.
+    Settled,
 }
 
 /// The last seen sequence per watched session, shared with the reconnect hook.
@@ -1028,6 +1156,10 @@ pub struct App {
     /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
     /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
     save_pending: bool,
+    quick_intent: QuickIntent,
+    /// The quick-start screen's prompt, held between `*.start` being issued and its answer
+    /// arriving. There is nothing to send it to until the session exists.
+    first_message: Option<String>,
 }
 
 impl App {
@@ -1062,6 +1194,8 @@ impl App {
             in_flight: HashSet::new(),
             dropped_seen: 0,
             save_pending: false,
+            quick_intent: QuickIntent::Unasked,
+            first_message: None,
         }
     }
 
@@ -1461,6 +1595,10 @@ impl App {
                     }
                     Err(error) => panel.failed(error.to_string(), ticks, LIST_TICKS),
                 }
+
+                // Whether this node has live work is the other half of the quick-start
+                // question, and this is the only place it becomes knowable.
+                self.settle_quick_start();
             }
             Tag::Agents => Self::fill_rows(&mut self.agents, result, ticks, project_agent),
             Tag::Teams => Self::fill_rows(&mut self.teams, result, ticks, project_team),
@@ -2444,10 +2582,12 @@ impl App {
     /// Ctrl-C: the active turn, never this process.
     fn interrupt(&mut self) {
         if self.overlay.is_some() {
-            // Closing the welcome panel is closing it, however the key was pressed. The
-            // marker is what stops it coming back, and it is written on every way out.
-            if matches!(self.overlay, Some(Overlay::Welcome)) {
-                self.dismiss_welcome();
+            // Leaving the quick-start screen is leaving it, however the key was pressed:
+            // ctrl-c takes the same exit Esc does, so the marker is written and the
+            // Dashboard is what appears, rather than a bare overlay dismissal that would
+            // leave the screen able to come back.
+            if matches!(self.overlay, Some(Overlay::QuickStart(_))) {
+                self.leave_quick_start();
             } else {
                 self.overlay = None;
             }
@@ -2590,6 +2730,7 @@ impl App {
 
         let unserved = match self.overlay.as_mut() {
             Some(Overlay::New(dialog)) => dialog.place_provider(&providers),
+            Some(Overlay::QuickStart(quick)) => quick.place_provider(&providers),
             Some(Overlay::Settings(settings)) => {
                 let choices = provider_choices(&providers, stored.as_deref());
                 settings.place_provider(&choices);
@@ -2622,40 +2763,327 @@ impl App {
         self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
     }
 
-    // ----- onboarding ----------------------------------------------------------------
-
-    /// Shows the first-run panel, if this operator has not already seen it.
+    /// Probes again, whatever the list already says.
     ///
-    /// The "once" lives here rather than at the call site so that what decides it is the
-    /// config file's marker and nothing else — a caller cannot show the panel to someone
-    /// who dismissed it, and cannot skip it for someone who has not.
-    ///
-    /// It asks nothing and blocks nothing: dismissing it is one keystroke, and the runtime
-    /// it describes is already running underneath it.
-    pub fn welcome(&mut self) {
-        if self.config.onboarding.welcomed || self.overlay.is_some() {
+    /// The quick-start screen's `r`, and the whole of the "install the CLI in another
+    /// terminal, then come back" story: a probe is a fact about a moment, and the moment
+    /// this client asked is not the moment the operator finished installing.
+    fn refetch_providers(&mut self) {
+        if self.providers.pending {
             return;
         }
 
-        // The panel names the providers this node reports, and only the Dashboard polls
-        // for them — on the Sessions tab, which is where `ouro new` lands, nothing would
-        // have asked.
-        self.fetch_providers();
-        self.overlay = Some(Overlay::Welcome);
+        self.providers.started();
+        self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
     }
 
-    /// Closes the panel and remembers that it was closed.
-    ///
-    /// One function for every way out of it — a key, or the ctrl-c that dismisses any
-    /// overlay — because a panel that came back after being dismissed the "wrong" way
-    /// would be a client that did not believe the operator the first time.
-    fn dismiss_welcome(&mut self) {
-        self.overlay = None;
+    // ----- quick start ----------------------------------------------------------------
 
+    /// Offers the quick-start screen, if this is an invocation that should get one.
+    ///
+    /// Called once by the driver, before the first frame, and only where a session was not
+    /// already asked for — `ouro new` states what it wants on the command line, and a
+    /// screen offering to start one over the session it just started would be absurd.
+    ///
+    /// A first run opens it now rather than waiting on anything: there is nothing to
+    /// return to by definition. Every other run has to know whether this node has live
+    /// work, which only the two session lists can say, so they are asked for here — the
+    /// Dashboard never polls them.
+    pub fn offer_quick_start(&mut self) {
+        if self.quick_intent != QuickIntent::Unasked {
+            return;
+        }
+
+        if !self.config.onboarding.welcomed {
+            self.quick_intent = QuickIntent::Settled;
+            self.open_quick_start(true);
+            return;
+        }
+
+        if !self.config.onboarding.quick_start {
+            self.quick_intent = QuickIntent::Settled;
+            return;
+        }
+
+        self.quick_intent = QuickIntent::Waiting;
+        self.issue_if_due(
+            Tag::Sessions(Plane::Interactive),
+            "interactive.list",
+            json!({}),
+            LIST_TICKS,
+        );
+        self.issue_if_due(
+            Tag::Sessions(Plane::Coding),
+            "coding.list",
+            json!({}),
+            LIST_TICKS,
+        );
+    }
+
+    /// Decides the steady-state case, once both lists have answered.
+    ///
+    /// Both, not either: a node with no interactive sessions may still be running a coding
+    /// task, and "nothing is happening here" is not something one list can say on its own.
+    /// A list that was *refused* is not a list that said none, so a refusal settles the
+    /// question shut rather than opening a screen on a guess.
+    fn settle_quick_start(&mut self) {
+        if self.quick_intent != QuickIntent::Waiting {
+            return;
+        }
+
+        let refused =
+            self.sessions.interactive.error.is_some() || self.sessions.coding.error.is_some();
+
+        let (Some(interactive), Some(coding)) = (
+            self.sessions.interactive.value.as_ref(),
+            self.sessions.coding.value.as_ref(),
+        ) else {
+            if refused {
+                self.quick_intent = QuickIntent::Settled;
+            }
+
+            return;
+        };
+
+        // A closed session is not work to return to. `SessionStatus::terminal` is
+        // deliberately false for a status this build does not recognise, so an unknown one
+        // counts as live — the safe direction, because it keeps a screen off a node that
+        // may be busy.
+        let live = interactive
+            .iter()
+            .chain(coding.iter())
+            .filter(|session| !session.status.terminal())
+            .count();
+
+        self.quick_intent = QuickIntent::Settled;
+
+        if should_quick_start(false, self.config.onboarding.quick_start, live) {
+            self.open_quick_start(false);
+        }
+    }
+
+    fn open_quick_start(&mut self, first_run: bool) {
+        if self.overlay.is_some() {
+            return;
+        }
+
+        // The picker is the provider list, and no tab has necessarily asked for it yet.
+        self.fetch_providers();
+
+        self.overlay = Some(Overlay::QuickStart(Box::new(QuickStart {
+            // The prompt, so the first thing a person can do is the thing they came to do.
+            zone: QuickZone::Prompt,
+            provider: 0,
+            prompt: String::new(),
+            pending: false,
+            error: None,
+            first_run,
+            placed: false,
+            wanted_provider: self.config.defaults.provider.clone(),
+        })));
+
+        self.place_default_provider();
+    }
+
+    /// Esc, or the ctrl-c that leaves any overlay: to the Dashboard, with nothing started.
+    ///
+    /// The marker is written on the way out because reaching the screen is what it records.
+    /// Nothing else is stored — a provider the cursor happened to be on is not a choice the
+    /// operator made, and only Enter is.
+    fn leave_quick_start(&mut self) {
+        self.overlay = None;
+        self.tab = Tab::Dashboard;
+        self.mark_welcomed();
+        self.poll();
+    }
+
+    fn mark_welcomed(&mut self) {
         if !self.config.onboarding.welcomed {
             self.config.onboarding.welcomed = true;
             self.save_pending = true;
         }
+    }
+
+    /// The keyboard, split between the two zones.
+    ///
+    /// The rule is that **letters belong to the prompt**, because typing what you want is
+    /// the point of the screen and a picker that swallowed a `j` would be a text box that
+    /// silently is not one. So: the arrows always move the picker, `ctrl-n`/`ctrl-p` always
+    /// move it too — for hands that are already in the prompt — `Tab` swaps which zone has
+    /// focus, and `j`/`k` move it only where the picker itself has focus. `r` re-probes
+    /// from the picker zone and `ctrl-r` from either. All of it is on the footer.
+    fn quick_start_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let providers = self
+            .providers
+            .value
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or_default();
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        let Some(Overlay::QuickStart(quick)) = self.overlay.as_ref() else {
+            return;
+        };
+
+        let (zone, pending) = (quick.zone, quick.pending);
+
+        // A start in flight takes no edits: the parameters that produced the request are
+        // the ones its answer is about. Esc still leaves.
+        if pending {
+            if matches!(key.code, KeyCode::Esc) {
+                self.leave_quick_start();
+            }
+
+            return;
+        }
+
+        if matches!(key.code, KeyCode::Char('r')) && (ctrl || zone == QuickZone::Picker) {
+            self.refetch_providers();
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => return self.leave_quick_start(),
+            KeyCode::Enter => return self.submit_quick_start(),
+            _ => {}
+        }
+
+        let Some(Overlay::QuickStart(quick)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => quick.zone = quick.zone.other(),
+            KeyCode::Up => quick.move_provider(-1, providers),
+            KeyCode::Down => quick.move_provider(1, providers),
+            KeyCode::Char('n') if ctrl => quick.move_provider(1, providers),
+            KeyCode::Char('p') if ctrl => quick.move_provider(-1, providers),
+            KeyCode::Backspace if zone == QuickZone::Prompt => {
+                quick.prompt.pop();
+            }
+            KeyCode::Char(c) if !ctrl => match zone {
+                QuickZone::Prompt => quick.prompt.push(c),
+                // On a list, the printable keys worth having are the ones the arrows
+                // already do; typing into it would look like a search box that does not
+                // search.
+                QuickZone::Picker => match c {
+                    'j' => quick.move_provider(1, providers),
+                    'k' => quick.move_provider(-1, providers),
+                    _ => {}
+                },
+            },
+            _ => {}
+        }
+    }
+
+    /// Enter: the whole efficient path, in the order `ouro new -m` already uses.
+    ///
+    /// Records the provider as the stored default — pressing Enter on it *is* the operator
+    /// stating it — starts an interactive session through the same [`StartRequest`] the `n`
+    /// dialog builds, and leaves the typed prompt where [`App::started`] will send it as
+    /// soon as there is a session to send it to. An empty prompt is a complete answer: the
+    /// session starts and the composer opens.
+    fn submit_quick_start(&mut self) {
+        let providers = self.providers.value.clone().unwrap_or_default();
+        let nothing_to_start = self.no_provider_refusal();
+        let workspace = self.default_workspace();
+        let approval_mode = self.config.defaults.approval_mode();
+
+        let (request, prompt) = {
+            let Some(Overlay::QuickStart(quick)) = self.overlay.as_mut() else {
+                return;
+            };
+
+            let Some(entry) = providers.get(quick.provider) else {
+                quick.error = Some(nothing_to_start);
+                return;
+            };
+
+            (
+                StartRequest {
+                    plane: Plane::Interactive,
+                    provider: entry.provider.clone(),
+                    workspace,
+                    approval_mode,
+                    objective: String::new(),
+                },
+                quick.prompt.trim().to_string(),
+            )
+        };
+
+        let params = match request.params() {
+            Ok(params) => params,
+            Err(refusal) => {
+                // This client's own refusal, shown on the screen that produced it.
+                if let Some(Overlay::QuickStart(quick)) = self.overlay.as_mut() {
+                    quick.error = Some(refusal.message());
+                }
+
+                return;
+            }
+        };
+
+        if let Some(Overlay::QuickStart(quick)) = self.overlay.as_mut() {
+            quick.error = None;
+            quick.pending = true;
+        }
+
+        self.first_message = (!prompt.is_empty()).then_some(prompt);
+        self.config.defaults.provider = Some(request.provider.clone());
+        self.mark_welcomed();
+        self.save_pending = true;
+
+        self.issue(
+            Call::new(
+                Tag::Start {
+                    plane: Plane::Interactive,
+                },
+                request.method(),
+                params,
+            )
+            .with_timeout(START_TIMEOUT),
+        );
+    }
+
+    /// Why there is nothing to start, in the terms the probe reported.
+    ///
+    /// Names what the runtime looked for rather than telling an operator to "install a
+    /// provider": the probe already knows which executables it could not find, and that is
+    /// the actionable half. No key-entry surface is offered because the provider CLIs own
+    /// their own auth — this client has nowhere to put a secret that would help.
+    fn no_provider_refusal(&self) -> String {
+        if let Some(error) = &self.providers.error {
+            return format!("runtime.providers was refused: {error}");
+        }
+
+        let Some(providers) = &self.providers.value else {
+            return "still asking the runtime which providers it serves".to_string();
+        };
+
+        if providers.is_empty() {
+            return "this runtime serves no coding providers, so there is nothing to start"
+                .to_string();
+        }
+
+        let probed: Vec<&str> = providers
+            .iter()
+            .filter_map(|entry| entry.status.as_ref()?.executable.as_deref())
+            .collect();
+
+        if probed.is_empty() {
+            return "no provider on this list can be started; the runtime reported no \
+                    executable for any of them"
+                .to_string();
+        }
+
+        format!(
+            "no provider is ready. The runtime looked for {} on its own PATH; install one \
+             and press r to probe again",
+            probed.join(", ")
+        )
     }
 
     /// `,`: this client's preferences, from any tab.
@@ -2676,6 +3104,7 @@ impl App {
             provider: 0,
             workspace: self.default_workspace(),
             approval: approval_index(self.config.defaults.approval_mode()),
+            quick_start: self.config.onboarding.quick_start,
             wanted_provider: self.config.defaults.provider.clone(),
             edited: false,
         })));
@@ -2754,6 +3183,8 @@ impl App {
 
         self.config.defaults.approval_mode =
             approval_at(settings.approval).map(|mode| mode.as_str().to_string());
+
+        self.config.onboarding.quick_start = settings.quick_start;
 
         self.save_pending = true;
     }
@@ -2865,6 +3296,37 @@ impl App {
             });
         }
 
+        // The quick-start screen's prompt. Sent here rather than beside the start, because
+        // until this answer arrived there was no session to send it to — the same order
+        // `ouro new -m` uses, and for the same reason: `*.start` waits for provider
+        // readiness before it answers, so the session is ready to take this.
+        if let Some(input) = self.first_message.take() {
+            let method = plane.method("send_message");
+
+            if self.hello.serves(&method) {
+                self.issue(Call::new(
+                    Tag::FirstMessage {
+                        plane,
+                        id: started.id.clone(),
+                    },
+                    method,
+                    json!({ "id": started.id, "input": input }),
+                ));
+            } else {
+                // The session exists and the message does not. Saying which is the only
+                // honest answer; the composer below is where it can be retyped.
+                self.inform(
+                    format!(
+                        "{} started, but this gateway does not serve {method}",
+                        started.id
+                    ),
+                    NoticeKind::Warn,
+                );
+
+                return;
+            }
+        }
+
         self.inform(
             format!("started {} on the {plane} plane", started.id),
             NoticeKind::Info,
@@ -2877,12 +3339,20 @@ impl App {
             other => other.to_string(),
         };
 
+        // A prompt whose session never existed has nowhere to go, and must not be sent to
+        // the next session this client starts.
+        self.first_message = None;
+
         match self.overlay.as_mut() {
             // The form is still on screen, so the refusal belongs on it rather than in a
             // notice line that expires in five seconds.
             Some(Overlay::New(dialog)) => {
                 dialog.pending = false;
                 dialog.error = Some(message);
+            }
+            Some(Overlay::QuickStart(quick)) => {
+                quick.pending = false;
+                quick.error = Some(message);
             }
             _ => self.inform(
                 format!("starting a session failed: {message}"),
@@ -3004,11 +3474,8 @@ impl App {
             return;
         }
 
-        // Any key. The panel states facts and asks nothing, so there is no keystroke it
-        // could be waiting for — and a first-run screen that had to be dismissed *just so*
-        // would be the opposite of what it is for.
-        if matches!(self.overlay, Some(Overlay::Welcome)) {
-            self.dismiss_welcome();
+        if matches!(self.overlay, Some(Overlay::QuickStart(_))) {
+            self.quick_start_key(key);
             return;
         }
 
@@ -3072,7 +3539,7 @@ impl App {
             },
             // All three are dispatched above, before this match could claim their
             // printable keys.
-            Overlay::New(_) | Overlay::Settings(_) | Overlay::Welcome => {}
+            Overlay::New(_) | Overlay::Settings(_) | Overlay::QuickStart(_) => {}
         }
     }
 
