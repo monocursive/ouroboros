@@ -1,11 +1,19 @@
 defmodule Ouroboros.Agent.Worker do
   @moduledoc """
-  The inspectable state projection for one coding subagent.
+  The inspectable state projection for one coding subagent, and its effect surface.
 
   `Ouroboros.Team.Server` connects these typed assignments to detached provider runs
   through `Ouroboros.CodingSession`; this agent retains the worker-facing task and
   result state in a supervised BEAM process.
+
+  The task and message actions are pure state projections. The effect actions from
+  `Ouroboros.Agent.Effects` are not: they start and stop mesh agents, delegate through
+  teams, and drive the forge. Every one of them is deny-by-default and gated by
+  `Ouroboros.Control.Grants` against this agent's own server-side identity, and every
+  outcome — refusals included — lands in `last_effects`.
   """
+
+  alias Ouroboros.Agent.Effects
 
   use Jido.Agent,
     name: "ouroboros_worker",
@@ -20,13 +28,35 @@ defmodule Ouroboros.Agent.Worker do
       messages_received: [type: :non_neg_integer, default: 0],
       last_message: [type: :any, default: nil],
       last_answer: [type: :any, default: nil],
+      # The bounded audit trail of everything this agent tried to do to the world,
+      # newest first, alongside the effects still running and the artifacts it forged.
+      # All three are lists because Jido merges an action's result into agent state
+      # deeply: a key removed from a returned map is merged back in, a replaced list is
+      # not, and settling an effect has to be able to forget it.
+      last_effects: [type: :list, default: []],
+      effects_in_flight: [type: :list, default: []],
+      forged: [type: :list, default: []],
       error: [type: :any, default: nil]
     ],
     signal_routes: [
       {"ouroboros.agent.message", __MODULE__.ReceiveMessage},
       {"ouroboros.agent.task.assigned", __MODULE__.AssignTask},
-      {"ouroboros.agent.task.completed", __MODULE__.CompleteTask}
+      {"ouroboros.agent.task.completed", __MODULE__.CompleteTask},
+      {"ouroboros.agent.effect.start_agent", Ouroboros.Agent.Effects.StartAgent},
+      {"ouroboros.agent.effect.stop_agent", Ouroboros.Agent.Effects.StopAgent},
+      {"ouroboros.agent.effect.send_message", Ouroboros.Agent.Effects.SendMessage},
+      {"ouroboros.agent.effect.delegate", Ouroboros.Agent.Effects.DelegateTask},
+      {"ouroboros.agent.effect.forge", Ouroboros.Agent.Effects.ForgeCapability},
+      {"ouroboros.agent.effect.deploy", Ouroboros.Agent.Effects.DeployCapability},
+      {"ouroboros.agent.effect.settled", Ouroboros.Agent.Effects.RecordEffect}
     ]
+
+  @doc "Every action this agent can execute, effect actions included."
+  def actions do
+    super() ++
+      [__MODULE__.ReceiveMessage, __MODULE__.AssignTask, __MODULE__.CompleteTask] ++
+      Effects.actions()
+  end
 
   defmodule ReceiveMessage do
     @moduledoc false

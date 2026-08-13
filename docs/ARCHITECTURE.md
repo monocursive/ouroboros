@@ -20,13 +20,19 @@ This slice is complete when all of the following are executable and tested:
    through a seam the forge cannot satisfy itself, stamped with a durably allocated
    epoch, deployed behind a per-node health probe, and — when that probe fails — rolled
    back to absence on every node.
-7. The documentation distinguishes those proofs from partition tolerance, full-host
+7. An agent driven only by typed signals can do all of that itself — start and stop mesh
+   agents, message them, delegate through a team, forge a capability and deploy it —
+   with every attempt authorized against a durable deny-by-default grant for the
+   concrete target, identified from server-side agent state rather than the signal,
+   bounded so no effect blocks the agent, and recorded whether it ran or was refused.
+8. The documentation distinguishes those proofs from partition tolerance, full-host
    provider durability, billing, real repository effects, OS-level sandboxing of
-   generated code, independent signing custody, evaluation gates, and a real
-   packaged-release install/reboot rehearsal.
+   generated code, independent signing custody, evaluation gates, a real
+   packaged-release install/reboot rehearsal, and any claim that effect grants sandbox
+   loaded code.
 
-The first six are local implementation claims backed by deterministic tests. None
-imply the external claims in item seven.
+The first seven are local implementation claims backed by deterministic tests. None
+imply the external claims in item eight.
 
 ## Planes and ownership
 
@@ -250,6 +256,46 @@ current state, journaling the transition when everything matches and returning
 diagnostics when it does not. The operations log is bounded, except for pending
 write-ahead records and records still carrying rollback material.
 
+### Agent effect plane
+
+`Ouroboros.Agent.Effects` is the layer at which an agent acts rather than projects. Six
+Jido actions — start agent, stop agent, send message, delegate, forge, deploy — are
+routed from typed signals on `Ouroboros.Agent.Worker` and call the same public APIs an
+operator would. Everything else the agent does remains a pure state projection.
+
+Each effect run is the same four steps, owned by `Ouroboros.Agent.Effects.Runner`:
+
+1. The principal is `context.agent.id`, read from the agent struct the agent server
+   owns. Jido drops `:agent`, `:state`, `:signal`, and `:agent_server_pid` from any
+   caller-supplied action context, so the identity cannot be supplied by the sender. The
+   signal's `from` is recorded as `claimed_from` and authorizes nothing.
+2. `Ouroboros.Control.Grants.granted?/3` is asked about the concrete attempt — this
+   module, this team, these nodes. It is deny-by-default: no entry, an attempt outside
+   the allow-list, an attempt that does not name what the allow-list reads, a malformed
+   call, and an unreachable authority are all refusals. Grants are checkpointed before
+   they are acknowledged, and a revocation whose write fails leaves the grant standing
+   rather than forgetting something it could not durably forget.
+3. The work runs in a supervised task bounded by `:ouroboros, :effect_timeout`, never on
+   the agent's own process. A forge boots a build peer, compiles, and runs a
+   capability's tests; that is far longer than an agent server should block and longer
+   than Jido's own action deadline.
+4. The outcome settles back as `Ouroboros.Signals.EffectSettled`. Delivering it as a
+   call is what orders it: a call arriving while the requesting call is still in flight
+   queues behind it, so the in-flight registration written by the request's return value
+   is always applied before the outcome that settles it. Refusals never start a runner
+   and are cast instead, because a nested call would queue behind the very call it is
+   inside.
+
+Grants live under `Ouroboros.Control.` deliberately. That prefix is in the verifier's
+protected set, so the fast lane refuses an artifact that would replace or introduce the
+authority gating it: a capability an agent forged cannot patch the thing that decided it
+could forge.
+
+`state.forged` is what a `:deploy` resolves, and it is written only by settling an
+in-flight effect this agent minted. A deploy therefore cannot ship bytes that arrived
+any other way — and even then the artifact is re-verified and its signature re-checked
+on every loading node.
+
 The durable lane is separate. `Release.Metadata` builds and validates `.rel`, `.appup`,
 and `relup` terms; `RelupBuilder` invokes `:systools.make_relup` without writing;
 `Release.Artifact` validates a completed archive offline. `Release.Runtime` then gates
@@ -285,6 +331,11 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Forge crashes between allocating an epoch and using it | The number is durably spent and never reissued | Done |
 | Build peer boot, compile, or tests hang | One deadline covers all three; the callback is killed and the peer stopped | Done |
 | Build peer compiles hostile source | The peer cannot reach the cluster; it can still reach the build host | Container/VM boundary with resource and network limits |
+| Ungranted agent requests an effect | Refused as `{:effect_denied, effect, reason}` and recorded; the agent stays alive and nothing reaches the world | Done |
+| Effect signal claims another agent's identity | The principal comes from server-side agent state; the claim is recorded as `claimed_from` and buys nothing | Done |
+| Effect outruns its deadline | The work is killed at `:effect_timeout` and settles as a failure; the agent's process was never blocked | Done |
+| Grant checkpoint write fails | The grant is refused and never applied; a failed revocation leaves the grant standing and reports the error | Operator retry tooling |
+| Effect authority is unreachable | Every attempt is refused; there is no path that fails open | Replicated policy authority |
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
@@ -310,6 +361,21 @@ rehearsed lane can prove restart persistence or an ERTS change.
 - The forge holds no signing key and constructs no signature. `:forge_signer` defaults to
   a module that refuses, and a signer whose key lives in this application's configuration
   lets the agent approve its own code.
+- Agent effect grants gate the *action layer* — the typed signals a well-behaved agent
+  flow travels through — and are deny-by-default, durable, and checked against the
+  concrete attempt. They are not a sandbox and not a capability system. Any loaded BEAM
+  can call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Upgrade.Forge.forge/2`, or
+  `Ouroboros.Control.Grants.grant/3` directly without passing an effect action at all,
+  because it retains full ambient VM authority. The hard boundaries remain the verifier's
+  namespace policy, artifact signing whose production default refuses, and the isolated
+  build peer.
+- No effect exists for granting, so an agent cannot widen its own authority through this
+  surface. That is a property of the surface, not of the VM, which is why the authority
+  itself is fast-patch-protected and why signing approval belongs outside this
+  application.
+- The authority is node-local: one `Grants` process per node over that node's own
+  checkpoint. An agent granted an effect on one node is not granted it on another, and
+  nothing replicates or reconciles the two.
 - Coding requests default to read-only and prompt approval. Write access is explicit.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.
@@ -364,9 +430,20 @@ Implemented:
   as a rollback;
 - health-gated rollout with real rollback proof (`Rollout` + `Rollout.Probe`): a forged
   capability starts as a mesh agent and answers a signal on every target, or the whole
-  deployment is compensated and the module is absent again everywhere.
+  deployment is compensated and the module is absent again everywhere;
+- an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
+  durable deny-by-default authority (`Control.Grants`) that is checked against the
+  concrete attempt, identifies the actor from server-side state rather than the signal,
+  bounds every effect, and records each one. An agent driven only by signals can forge a
+  capability, deploy it, start it, and message it — and can be refused at any of those
+  steps without dying.
 
 Still external:
+
+- **authority that is not node-local.** `Control.Grants` is one process per node over
+  that node's own checkpoint. There is no replicated policy service, no per-principal
+  rate or cost budget, and no durable effect log: the audit trail is a bounded ring in
+  the acting agent's state and dies with it.
 
 - **an independent signing/review service.** The seam exists and the default refuses,
   but the only shipped implementation (`Signer.Local`) reads its key from this

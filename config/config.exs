@@ -9,6 +9,7 @@ config :ouroboros,
   team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
   orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
   control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
+  grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
   upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
   release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
@@ -20,6 +21,9 @@ config :ouroboros,
   forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
   # Overall deadline for one isolated build peer: boot, compile, and capability tests.
   forge_build_timeout: 60_000,
+  # Deadline for one agent effect. Effects run off the agent's process, but they still
+  # hold a supervised task and an in-flight audit entry, so every one of them ends.
+  effect_timeout: 120_000,
   control_enabled: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.

@@ -81,6 +81,10 @@ if config_env() == :prod do
     team_storage: {Jido.Storage.File, path: Path.join(data_dir, "teams")},
     orchestration_storage: {Jido.Storage.File, path: Path.join(data_dir, "orchestration")},
     control_storage: {Jido.Storage.File, path: Path.join(data_dir, "control")},
+    # The effect authority decides what agents may do to the cluster, so it is held to
+    # the same synced write the mutation journals use: a grant that was acknowledged
+    # must survive the crash that follows it, and a revocation must too.
+    grants_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "grants")},
     upgrade_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")},
     release_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "release-journal")},

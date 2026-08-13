@@ -495,6 +495,81 @@ ambiguity — a lost reply, a node that never answered — is recorded as quaran
   Behavioural comparison, cost and latency regression, and canary evidence are
   evaluation gates that are not implemented.
 
+## Agent effects
+
+Everything above is something an *operator* can call. `Ouroboros.Agent.Effects` is the
+same set of powers reached by an agent, from inside a signal handler, one grant at a
+time:
+
+```elixir
+# Nothing is permitted until somebody says so, effect by effect and target by target.
+{:ok, _grant} = Ouroboros.Control.Grants.grant("planner", :forge, modules: [Ouroboros.Capability.Echo])
+{:ok, _grant} = Ouroboros.Control.Grants.grant("planner", :deploy, nodes: nodes)
+{:ok, _grant} = Ouroboros.Control.Grants.grant("planner", :start_agent, modules: [Ouroboros.Capability.Echo])
+
+{:ok, signal} =
+  Ouroboros.Signals.EffectForgeCapability.new(%{
+    from: "planner",
+    module: Ouroboros.Capability.Echo,
+    source: capability_source,
+    test_source: capability_test_source,
+    nodes: nodes
+  })
+
+{:ok, _agent} = Jido.AgentServer.call(Ouroboros.Mesh.whereis("planner"), signal)
+```
+
+Six effects, each with the one allow-list it is checked against: `:start_agent` and
+`:forge` take `modules:`, `:stop_agent` and `:send_message` take `agents:`, `:delegate`
+takes `teams:`, and `:deploy` takes `nodes:`. Every value may be `:any` or an explicit
+list. `granted?/3` is asked about the *concrete attempt*, so a grant to forge
+`Ouroboros.Capability.Echo` refuses a request to forge anything else, and a deploy is
+refused unless every named node is admitted.
+
+What each effect run does, in order:
+
+1. **Identifies the actor from server-side state.** The principal is the agent's own
+   `id`, read from the agent struct the agent server holds. The `from` field on the
+   signal is recorded as `claimed_from` and authorizes nothing, so one agent cannot
+   spend another's grants by claiming its name.
+2. **Asks the authority.** `Ouroboros.Control.Grants` is deny-by-default and durable:
+   ETS in development, a synced file checkpoint in production, written before it is
+   acknowledged. A refusal is `{:error, {:effect_denied, effect, reason}}`, which Jido
+   turns into an error directive — the agent logs it and keeps running.
+3. **Runs it off the agent's process, under a deadline.** Effects execute in a
+   supervised task bounded by `config :ouroboros, :effect_timeout` (120s). A forge takes
+   longer than an agent server should ever sit still, so the signal returns immediately
+   and the outcome arrives later.
+4. **Records it.** Every attempt — permitted, refused, failed, or timed out — lands in
+   the agent's `last_effects` ring alongside the principal, the attempt, and the
+   outcome. Artifacts a forge produced are kept in `state.forged`, which is what a
+   later `:deploy` resolves; a deploy cannot ship bytes that arrived any other way.
+
+Grants are also why `Ouroboros.Control.Grants` lives where it does. The fast patch lane
+refuses to load an artifact naming any `Ouroboros.Control.*` module, so a capability an
+agent forged cannot patch the authority that decided it could forge.
+
+### Honest limits
+
+- **This is not a sandbox, and grants are not a capability system.** They gate the
+  action layer: the signals a well-behaved agent flow travels through. Any loaded BEAM
+  can call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Upgrade.Forge.forge/2`, or
+  `Ouroboros.Control.Grants.grant/3` directly, without an effect action anywhere in
+  sight. The boundaries that hold against code that does not cooperate are the
+  verifier's namespace policy, artifact signing, and the isolated build peer.
+- **An agent cannot widen its own authority through this surface**, because no grant
+  effect exists. That is a property of the surface, not of the VM.
+- **The authority is node-local.** Each node runs its own `Grants` process over its own
+  checkpoint, so an agent granted `:forge` on one node is not granted it on another.
+  Like every other store here, that is single-node ownership rather than a replicated
+  policy service.
+- **A failed revocation leaves the grant standing** and says so. An authority that
+  forgot a grant it could not durably forget would hand it back at the next restart, so
+  an unacknowledged revocation has not happened.
+- **The trail is a ring, not a ledger.** `last_effects` keeps the most recent 20
+  entries and `state.forged` the most recent 5 artifacts; both die with the agent.
+  Durable effect audit belongs in a store, and is not implemented.
+
 ## Durable OTP releases
 
 The release lane is distinct from fast BEAM patches:
@@ -588,6 +663,11 @@ single-owner atomic file checkpoints.
   and cost before rollout are external. Capability rollout records accumulate; only
   settled `:rolled_back` entries are pruned when the store exceeds
   `:ouroboros, :capability_rollout_limit`.
+- Agent effect grants are node-local, deny-by-default, and durable per node. They
+  constrain the agent action layer and nothing below it: loaded code reaches the same
+  public APIs directly. The effect audit trail is a bounded in-memory ring on the acting
+  agent, so it does not survive that agent. Per-principal rate and cost budgets, a
+  replicated policy authority, and a durable effect log are not implemented.
 - Release metadata construction, archive inspection, authorization, and journaling are
   implemented; full tar assembly and a real `HandlerAdapter.OTP` reboot rehearsal are
   deployment gates.

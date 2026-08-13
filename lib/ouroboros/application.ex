@@ -85,6 +85,7 @@ defmodule Ouroboros.Application do
         Ouroboros.Team.Store,
         Ouroboros.Orchestration.Store,
         Ouroboros.Control.Store,
+        Ouroboros.Control.Grants,
         release_runtime()
       ] ++
         workspace_children() ++
