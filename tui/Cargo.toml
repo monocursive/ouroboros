@@ -1,0 +1,50 @@
+[workspace]
+
+[package]
+name = "ouro"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Terminal client for an Ouroboros runtime"
+publish = false
+
+[[bin]]
+name = "ouro"
+path = "src/main.rs"
+
+[features]
+default = []
+# Compiles the release extractor. The embedded bytes themselves arrive separately, via
+# OUROBOROS_RELEASE_TARBALL at build time, so the extractor stays testable without a
+# `mix release` having run.
+embed = ["dep:flate2", "dep:tar", "dep:sha2"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+libc = "0.2"
+rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "net",
+  "process",
+  "signal",
+  "io-util",
+  "time",
+  "sync",
+  "macros",
+] }
+zeroize = "1"
+
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[build-dependencies]
+sha2 = { version = "0.10", optional = true }
+
+[profile.release]
+strip = true
