@@ -1,0 +1,554 @@
+# Ouroboros TUI & Distribution — Design Spec
+
+Status: proposed (2026-08-13). Companion to [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## 0. Summary
+
+One Rust binary, `ouro`, is the product a person downloads. It embeds the Elixir
+release, extracts and supervises it as a child daemon, and renders a Ratatui
+terminal UI over a narrow, token-authenticated, loopback-default TCP protocol.
+The BEAM runtime keeps everything that makes Ouroboros what it is — hot loading,
+forged `Ouroboros.Capability.*` modules, cluster roles, the upgrade lanes. The
+TUI is a projection, never an authority the runtime depends on.
+
+Design invariants, in the codebase's own idiom:
+
+1. **The gateway is an operator surface and says so.** It is not "an observer".
+   Its mutating verbs are scoped, off by default, and audited. Honest claims
+   only.
+2. **Fail closed.** No token, no listener. Non-loopback bind requires a typed
+   override, exactly like `OUROBOROS_ALLOW_INSECURE_DIST` in
+   [config/runtime.exs](../config/runtime.exs).
+3. **Bounded everything.** The planes are *not* uniformly bounded upstream —
+   `InteractiveSession.start/1` waits `:infinity` for provider readiness
+   ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)),
+   `Team.cancel/2` and `close/1` call at `:infinity`
+   ([team.ex:92](../lib/ouroboros/team.ex)), `add_worker`/`delegate` bound at
+   60s. So the gateway imposes its own per-method ceiling on every call it
+   makes (§2.4), runs each request in a supervised task, and answers
+   `-32005` when the ceiling passes. Every per-connection queue is bounded
+   with an explicit overflow behavior. No `:infinity` escapes onto the wire.
+4. **Polymorphism survives as data.** Wire payloads are self-describing trees.
+   A forged capability that appears tomorrow renders through the TUI's generic
+   value-tree widget today, with zero Rust changes.
+5. **The gateway is unpatchable.** `Elixir.Ouroboros.Gateway.` joins
+   `@protected_prefixes` in
+   [verifier.ex:32](../lib/ouroboros/upgrade/verifier.ex). A runtime that can
+   author code must not be able to author its own operator-auth away.
+
+---
+
+## 1. Architecture
+
+```
+ouro (Rust, single binary)
+├─ embeds: ouroboros release tarball (per-target, sha256-pinned at build)
+├─ spawn mode: extract → supervise `bin/ouroboros start` → connect
+├─ attach mode: connect only (--addr/--token-file, or local gateway.json)
+└─ ratatui UI ── line-framed JSON-RPC 2.0 ── 127.0.0.1 TCP ──┐
+                                                             │
+ouroboros release (BEAM, unchanged planes)                   │
+└─ Ouroboros.Gateway (new, :core role only, tail of tree) ◄──┘
+   ├─ Gateway.Listener      (:gen_tcp acceptor)
+   ├─ Gateway.ConnSupervisor (DynamicSupervisor)
+   └─ Gateway.Conn × N      (per-connection handler; owns socket,
+                             subscriptions, bounded outbound queue)
+```
+
+Zero new Elixir deps (Elixir ≥ 1.18 ships `JSON`; the project pins `~> 1.20` in
+[mix.exs](../mix.exs)). Zero shared state between connections. One slow client
+stalls only itself.
+
+### Trust model (honest limits, up front)
+
+- The token is **transport authentication, not a sandbox**. A connection with
+  `operate` scope is an operator console, comparable to a remote shell minus
+  raw `:erpc`.
+- Loopback is the security boundary by default. Remote attach is **SSH tunnel**
+  (`ssh -L 4560:127.0.0.1:4560 host`). `OUROBOROS_GATEWAY_ALLOW_REMOTE=1`
+  exists for trusted networks and is cleartext — the refusal message says so.
+- Event payloads are already redacted at construction
+  ([interactive/event.ex:37](../lib/ouroboros/interactive/event.ex)); the
+  gateway adds no new raw surface. Status/state maps may still carry workspace
+  paths and objectives — same trust domain as the operator.
+- v1 is a **single-node view**: the gateway reports the node it runs on plus
+  whatever `Ouroboros.status/0` says about the cluster.
+  `InteractiveSession.list/0` is deliberately local
+  ([interactive_session.ex:68](../lib/ouroboros/interactive_session.ex)).
+  Cross-node fan-out is future work.
+
+---
+
+## 2. Elixir side: `Ouroboros.Gateway`
+
+### 2.1 Supervision & placement
+
+New files under `lib/ouroboros/gateway/`:
+
+| file | module | role |
+|---|---|---|
+| `gateway.ex` | `Ouroboros.Gateway` | Supervisor; validates config at init (fail-closed, signer-style) |
+| `gateway/config.ex` | `Gateway.Config` | pure env→config parsing + validation (unit-testable) |
+| `gateway/listener.ex` | `Gateway.Listener` | `:gen_tcp` listen + accept loop; hands sockets to ConnSupervisor |
+| `gateway/conn.ex` | `Gateway.Conn` | per-connection GenServer: framing, auth, dispatch, subscriptions, outbound queue. Requests dispatch to supervised tasks (≤ 8 in flight per connection); responses correlate by id and may return out of order, so one slow method never blocks the event stream or other requests |
+| `gateway/wire.ex` | `Gateway.Wire` | term → JSON-safe encoding (builds on `Orchestration.Serializable`) |
+| `gateway/methods.ex` | `Gateway.Methods` | method table: name → {scope, handler, timeout} |
+
+Started only in `children(:core)`
+([application.ex:94](../lib/ouroboros/application.ex)), **at the absolute
+tail, after `Ouroboros.Cluster`**. Under `rest_for_one` a gateway crash
+restarts nothing; nothing rebuilds from it. `:builder`/`:signer` nodes never
+run it.
+
+Enabled only when `OUROBOROS_GATEWAY=1`. Refuses to start (raises at init,
+naming the variable) when enabled without a token source — the signer-boot
+posture ([runtime.exs signer preflight](../config/runtime.exs)).
+
+### 2.2 Configuration (config/runtime.exs additions, same inline-parse style)
+
+| env | default | meaning |
+|---|---|---|
+| `OUROBOROS_GATEWAY` | unset | `1` enables the listener (core role only) |
+| `OUROBOROS_GATEWAY_PORT` | `0` | `0` = ephemeral; the bound port is published via `gateway.json` |
+| `OUROBOROS_GATEWAY_BIND` | `127.0.0.1` | non-loopback additionally requires `OUROBOROS_GATEWAY_ALLOW_REMOTE=1`, else raise |
+| `OUROBOROS_GATEWAY_TOKEN_FILE` | — | preferred: file (0600) containing ≥32-byte token; `Inspect`-redacted like the signer key |
+| `OUROBOROS_GATEWAY_TOKEN` | — | fallback for dev; discouraged in docs (env is visible to same-user processes) |
+| `OUROBOROS_GATEWAY_SCOPE` | `read` | `read` \| `operate`; mutating methods refused under `read` |
+| `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN` | unset | `1` additionally enables `runtime.shutdown` (spawner sets it; server operators generally don't) |
+| `OUROBOROS_GATEWAY_MAX_FRAME` | `1048576` | max inbound line bytes; oversized → typed error, connection closed |
+| `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection outbound frame cap (see §2.6) |
+
+Two placement facts the implementation must respect:
+
+- **Everything in [config/runtime.exs](../config/runtime.exs) today sits
+  inside `if config_env() == :prod`** (line 3). Gateway env parsing goes in a
+  new section *outside* that guard so `ouro --dev` (`mix run --no-halt`) works
+  — `runtime.exs` is evaluated in every env.
+- **`OUROBOROS_DATA_DIR` is currently a local variable in that prod block,
+  never persisted to app env.** The gateway section persists
+  `config :ouroboros, :data_dir, …` and requires it whenever
+  `OUROBOROS_GATEWAY=1` (raise naming the variable otherwise). The spawner
+  always sets it, so this costs nothing in practice.
+
+After binding, the gateway writes `Path.join(data_dir, "gateway.json")` —
+atomic tmp+rename, followed by an explicit `File.chmod!(path, 0o600)`:
+`{"port": .., "protocol": 1, "node": "..", "pid": <os_pid>, "scope": ".."}`.
+This is how spawn-mode `ouro` (and no-arg `ouro attach`) discovers the port;
+it also removes the bind-race of pre-choosing ephemeral ports.
+
+### 2.3 Protocol
+
+Line-delimited JSON-RPC 2.0 subset over TCP: requests `{jsonrpc, id, method,
+params}`, responses `{jsonrpc, id, result | error}`, server notifications
+`{jsonrpc, method, params}` (no id). No batches. One JSON object per `\n`-
+terminated line. Protocol version is a single integer, **1**.
+
+**Handshake.** First frame must be `hello`:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"hello",
+ "params":{"token":"…","protocol":1,"client":"ouro 0.1.0"}}
+```
+
+Result: `{server: "0.1.0", node, role, protocol: 1, scope, methods: [...]}`
+(`server` from `Application.spec(:ouroboros, :vsn)`; `methods` is the exact
+list this build serves, so the client feature-gates instead of guessing).
+
+- Any frame before a successful `hello` → error `-32001 unauthenticated`,
+  socket closed.
+- Token check: `:crypto.hash_equals(:crypto.hash(:sha256, presented),
+  :crypto.hash(:sha256, expected))` — hashing first makes lengths equal, so
+  `hash_equals/2` can neither raise nor leak length.
+- `protocol != 1` → error `-32002 protocol_mismatch` with `{server_protocol:
+  1}`, socket closed. The client renders the upgrade hint.
+- Hello not completed within 10s → close.
+
+**Errors** are JSON-RPC standard (`-32700` parse, `-32601` unknown method,
+`-32602` invalid params) plus application codes: `-32001 unauthenticated`,
+`-32002 protocol_mismatch`, `-32003 scope_denied`, `-32004 unavailable`
+(plane down / not configured), `-32005 upstream_timeout`, `-32006
+upstream_error` (with `Wire`-encoded reason), `-32007 not_found` (e.g.
+`Scheduler.get/2` returns a bare `:not_found`, not an error tuple).
+Malformed input is answered and survived, never crashed on. Honest caveat:
+`status.availability` is process liveness
+([ouroboros.ex:152](../lib/ouroboros.ex)), so a wedged-but-alive plane
+surfaces as `-32005`, not `-32004` — the TUI treats both as "plane
+unhealthy".
+
+**Inbound hygiene.** Client params are plain JSON. The dispatcher never calls
+`String.to_atom/1` on client data: methods dispatch via a literal map, enum
+params (e.g. approval responses) validate against explicit allowlists, ids
+stay binaries (every plane API already takes string ids).
+
+### 2.4 Method catalog (v1)
+
+Every handler runs in a supervised task under a per-method gateway timeout
+(default **15_000ms**; exceptions in the table). Timeout → `-32005`. Every
+upstream call is made in the `safe_call` posture (`try/rescue/catch :exit`) —
+several planes exit rather than error when down (e.g.
+`NodeExecutor.status/1`'s bare `GenServer.call`,
+[node_executor.ex:240](../lib/ouroboros/upgrade/node_executor.ex); `Ouroboros.status/0`
+itself only survives via its own `safe_value/2`) — a `:noproc`/`:timeout`
+exit becomes `-32004`/`-32005`, never a dead Conn.
+
+For verbs whose upstream call is `:infinity` (`teams.cancel`, `teams.close`),
+a gateway timeout does **not** cancel the upstream operation — it may still
+complete. The response says so (`"outcome": "unknown"`), and the verbs are
+observable after the fact via `teams.state`, so the client reconciles by
+reading.
+
+**`read` scope**
+
+| method | maps to |
+|---|---|
+| `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
+| `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task |
+| `agents.list` | `Mesh.list_agents/0` |
+| `agents.state` `{id}` | `Mesh.state/1` |
+| `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0` |
+| `interactive.info` `{id}` | `InteractiveSession.info/1` |
+| `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
+| `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
+| `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
+| `coding.info/replay/subscribe/unsubscribe` | `CodingSession` equivalents (`{:ouroboros_coding_event, id, event}`) |
+| `teams.list` | `Team.Store.list/0`, projected as in `status/0` |
+| `teams.state` `{id}` | `Team.state/1` via `Team.whereis/1` |
+| `plans.list` / `plans.get` `{id}` | `Orchestration.Scheduler.list/0` / `Scheduler.get/2` (server is the *first* arg with a default; bare `:not_found` → `-32007`) |
+| `control.list` / `control.get` `{id}` | `Ouroboros.Control.list/0`, `get/1` |
+| `upgrade.status` | `Upgrade.NodeExecutor.status/0` (exits when the executor is down — safe_call wrapper mandatory) |
+| `upgrade.rollouts` | `Upgrade.Rollout.Registry.list/0` |
+| `upgrade.history` `{module}` | `Registry.history/1` — module resolved via `String.to_existing_atom` inside a rescue; unknown → `-32602` |
+| `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
+| `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
+
+**`operate` scope** (additionally require `scope=operate`; each call emits one
+`Logger` audit line: method, param digest, connection peer)
+
+| method | maps to |
+|---|---|
+| `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`provider`, `workspace`, `metadata`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
+| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id` |
+| `interactive.steer` `{id, input}` | `steer/3` |
+| `interactive.respond_approval` `{id, request_id, response}` | response validated against allowlist |
+| `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
+| `interactive.close` / `interactive.kill` `{id}` | |
+| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | |
+| `teams.add_worker` / `teams.delegate` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s |
+| `teams.cancel` / `teams.close` | upstream is `:infinity` — gateway ceiling 60s with `"outcome": "unknown"` semantics (§2.4 intro) |
+| `control.submit` `{objective, opts}` / `control.cancel` `{id}` | |
+| `agents.stop` `{id}` | `Mesh.stop_agent/1` |
+| `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003` |
+
+Deliberately absent from v1: `agents.start` (arbitrary module start is a
+bigger authority than a TUI needs; revisit with an allowlisted spec registry),
+`mesh.send_message` (its `from` is caller-supplied — the effects plane made
+principals non-spoofable and the gateway won't reintroduce spoofing),
+upgrade `prepare/commit/promote/rollback` (stay in the remote console where
+they belong).
+
+### 2.5 Event streaming
+
+On `interactive.subscribe` / `coding.subscribe`, the Conn process becomes the
+subscriber. Each arriving `{:ouroboros_interactive_event, id, %Interactive.Event{}}`
+(delivered at [interactive/task.ex:1003](../lib/ouroboros/interactive/task.ex)) /
+`{:ouroboros_coding_event, id, %Coding.Event{}}`
+([coding/task.ex:520](../lib/ouroboros/coding/task.ex)) is Wire-encoded and
+emitted as notification `interactive.event` / `coding.event` with params
+`{id, event}` (`id` is the session/task id; note the coding struct's own
+field is `task_id`, not `session_id`). Both event structs carry `sequence` —
+the resync cursor.
+
+Two upstream behaviors the Conn must handle explicitly:
+
+- **Terminal sessions don't register subscribers.** `subscribe` on a terminal
+  session returns the backlog but silently skips registration
+  ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex)). After a
+  successful subscribe the Conn checks the session's status; if terminal, it
+  emits `stream.ended {id, status}` after the backlog so the client renders a
+  finished session instead of waiting forever.
+- **`{:error, {:cursor_pruned, floor}}`** is a real return of both `subscribe`
+  and `replay` ([interactive/task.ex:1069](../lib/ouroboros/interactive/task.ex))
+  — sessions retain a bounded event window. The gateway forwards it as a typed
+  error with the floor; resync behavior is the client's (§3.3).
+
+### 2.6 Backpressure (non-negotiable)
+
+The Conn keeps one outbound queue. Frames are two classes:
+
+- **Responses** — never dropped. If a response cannot be enqueued under the
+  hard cap, the connection is closed (protocol error frame first, best-effort);
+  the client reconnects and resubscribes. A client that can't drain its own
+  RPC responses is broken, not throttled.
+- **Event notifications** — droppable. When queue length exceeds
+  `OUROBOROS_GATEWAY_QUEUE_LIMIT`, new event frames for a session are counted
+  and discarded. When the queue drains below half, one
+  `stream.lagged` `{id, dropped, last_sequence}` notification is sent;
+  the client calls `replay(cursor: its last seen sequence)` and reconciles.
+  Reconciliation is exact while the cursor is inside the retained window; if
+  the client fell past it, `replay` answers `cursor_pruned` with the floor and
+  the client restarts from the floor showing a "history truncated below N"
+  marker (§3.3). Either way the terminal state is truthful — never silently
+  missing events.
+
+Socket writes use `:gen_tcp.send` from a single writer (the Conn itself) with
+`send_timeout` set; a hung peer becomes a closed connection, not a stuck
+GenServer mailbox. This is the same unbounded-growth discipline applied
+everywhere else in the runtime after the 2026-08 review.
+
+### 2.7 Wire encoding (`Gateway.Wire`)
+
+Rendering-oriented, lossy by design, documented as such.
+
+**`Orchestration.Serializable.safe/1` cannot be the mechanism.** It is
+all-or-nothing at the top level
+([serializable.ex:26](../lib/ouroboros/orchestration/serializable.ex)): one
+pid anywhere in a tree replaces the *entire* term with a 20-element-truncated
+inspect string. And pids are everywhere by construction —
+`Mesh.list_agents/0` returns `%{id, pid, node, replicas}` maps
+([mesh.ex:118](../lib/ouroboros/mesh.ex)), which `Ouroboros.status/0` embeds,
+and `Mesh.state/1` returns a `%Jido.AgentServer.State{}` dense with pids,
+refs, `:queue` tuples, and functions. `safe/1` applied naively would reduce
+`runtime.status` — the Dashboard's whole data source — to one opaque string.
+
+So `Gateway.Wire` implements its own recursive walk, replacing at the leaf:
+
+1. pid/port/ref/function → `{"_opaque": inspect(term)}` (the per-leaf analogue
+   of `safe/1`'s sentinel); `:queue` and other opaque record tuples fall out
+   of this naturally as tuples-of-lists.
+2. structs → `Map.from_struct` plus `"_struct": "Ouroboros.Interactive.Event"`,
+   then recurse; DateTime/NaiveDateTime → ISO-8601 strings first.
+3. atoms → strings; tuples → lists; map keys → strings; non-UTF-8 binaries →
+   `{"_b64": …}`; depth cap 32 and node-count cap (protects the Conn from
+   pathological state trees) → `{"_truncated": true}` beyond either.
+4. `JSON.encode!/1` (stdlib — Elixir 1.20/OTP 29, no new dep).
+
+This transform is exactly why a forged `Ouroboros.Capability.*` agent's novel
+state renders in the TUI the moment it exists: everything is a tree of
+strings, numbers, lists, and maps, and the TUI has a generic tree widget.
+
+### 2.8 Verifier protection
+
+Add to [verifier.ex](../lib/ouroboros/upgrade/verifier.ex):
+
+```elixir
+@protected_prefixes [
+  "Elixir.Ouroboros.Upgrade.",
+  "Elixir.Ouroboros.Release.",
+  "Elixir.Ouroboros.Storage.",
+  "Elixir.Ouroboros.Control.",
+  "Elixir.Ouroboros.Gateway."   # operator surface: patchable auth is no auth
+]
+```
+
+Plus a verifier test proving a `Gateway.`-targeting artifact is rejected. The
+signing policy's hard Capability-namespace rule already refuses to sign such a
+patch; this is the second, independent gate, consistent with how the other
+control-plane namespaces are treated.
+
+### 2.9 Logging
+
+When `OUROBOROS_GATEWAY=1`, route the default logger to stderr so stdout stays
+clean and the spawner owns the log stream. Elixir ≥ 1.15 idiom (not the legacy
+`:console` backend):
+
+```elixir
+config :logger, :default_handler, config: [type: :standard_error]
+```
+
+### 2.10 Distribution-off spawn mode (env.sh.eex change)
+
+[rel/env.sh.eex](../rel/env.sh.eex) currently hard-requires `OUROBOROS_NODE` +
+`OUROBOROS_COOKIE` and always sets `RELEASE_DISTRIBUTION=name`. Add a third
+posture for the laptop daemon:
+
+- `OUROBOROS_DIST=none` → `RELEASE_DISTRIBUTION=none`, node/cookie not
+  required, **no epmd, no dist listener, no cookie on the host at all**.
+- Refuse the combination `OUROBOROS_DIST=none` + `OUROBOROS_CLUSTER_STRATEGY`
+  ≠ `none` at preflight (they contradict; name both variables in the error).
+- The existing `version | "")` exemption arm covers *both* `version` and the
+  empty command ([env.sh.eex:9](../rel/env.sh.eex)) — the patch preserves both.
+
+Forge builds keep working: `BuildPeer` runs `:peer` over `standard_io` with
+`-start_epmd false` ([build_peer.ex:177](../lib/ouroboros/upgrade/forge/build_peer.ex)),
+non-distributed by design, and the local deploy path short-circuits on
+`target == node()`. **Known risk to test first:** `Upgrade.Epoch` allocates
+under `:global.trans` ([epoch.ex:81](../lib/ouroboros/upgrade/epoch.ex));
+`:global` on a `:nonode@nohost` VM should degrade to the local node but this
+is the single most likely failure point of the dist-off posture.
+**Acceptance test:** the full forge → sign(Local) → deploy → run loop passes
+on a `RELEASE_DISTRIBUTION=none` node. Remote builders/signers and
+`start_on/2` placement legitimately require distribution — that's clustering,
+and clustering keeps the existing posture.
+
+### 2.11 Elixir tests (`test/ouroboros/gateway/`)
+
+- **Config:** every env combination that must raise, raises with the variable
+  named (no token; non-loopback without ALLOW_REMOTE; dist contradiction).
+- **Conn protocol:** drive `Gateway.Conn` with a fake transport — bad token
+  closes; pre-hello frames refused; protocol mismatch; unknown method −32601;
+  malformed JSON −32700 answered not crashed; oversized frame; scope_denied on
+  operate methods under read scope; shutdown refused without the extra flag.
+- **Wire:** golden encoding of nasty terms — pids in nested maps, improper-ish
+  tuples, structs, non-UTF-8 binaries, atom keys.
+- **Integration (real TCP, ephemeral port):** hello→status; subscribe→ live
+  event notifications from a real interactive session (echo provider);
+  lag: a deliberately unread client socket overflows the queue → `stream.lagged`
+  → replay(cursor) reconciles exactly; cursor below the retained floor →
+  `cursor_pruned` surfaces with the floor; subscribe to a terminal session →
+  backlog then `stream.ended`; `upgrade.status` with the executor stopped →
+  `-32004`, connection alive; two clients, one slow, fast one unaffected;
+  gateway.json appears with the bound port, 0600.
+- **Verifier:** Gateway-namespace artifact rejected.
+- **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
+  `test/support/gateway_golden/*.json` (hello, status, event, lagged, errors).
+  These files are the cross-language contract — cargo tests decode the same
+  fixtures (§3.5).
+
+---
+
+## 3. Rust side: `tui/` crate, binary `ouro`
+
+Rust ≥ 1.75, 2021 edition. Deps: `ratatui`, `crossterm`, `tokio` (rt +net +
+process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
+`dirs`, `rand`, `zeroize`, `sha2`. Unix-only in v1 (the release itself is
+`include_executables_for: [:unix]`).
+
+### 3.1 CLI
+
+```
+ouro                  spawn (or adopt via gateway.json) + attach UI
+ouro daemon           spawn only; print port/token-file path; exit
+ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
+ouro stop             graceful stop of the locally spawned daemon
+ouro version          client version, embedded release version+sha, protocol
+ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed)
+```
+
+Spawn-mode environment assembly: `OUROBOROS_GATEWAY=1`, `_SCOPE=operate`,
+`_ALLOW_SHUTDOWN=1`, `_PORT=0`, token: 32 random bytes hex → file 0600 in the
+data dir (zeroized in memory after write), `OUROBOROS_DATA_DIR=$XDG_DATA_HOME/
+ouroboros`, `OUROBOROS_DIST=none` — **unless** the caller's environment already
+carries `OUROBOROS_CLUSTER_STRATEGY`/`OUROBOROS_NODE`, in which case cluster
+vars pass through untouched and dist stays on. Existing server workflows are
+unchanged by construction.
+
+### 3.2 Runtime supervisor (`src/runtime.rs`)
+
+- Embedded tarball via `build.rs`: `OUROBOROS_RELEASE_TARBALL` env at compile
+  time; its sha256 and the release version are baked in as consts. No tarball
+  env → the crate builds in attach/dev-only mode (embed feature off) so cargo
+  iteration never waits on `mix release`.
+- Extract to `$XDG_CACHE_HOME/ouroboros/releases/<version>+<sha8>/`:
+  verify sha256 of the embedded bytes, unpack to `.tmp-<pid>`, rename
+  atomically, `chmod +x` bin. Concurrent first-runs are safe (rename loser
+  just deletes its tmp). GC keeps the newest 2 versions.
+- Spawn `bin/ouroboros start`; stdout/stderr piped. stderr → bounded ring
+  buffer (Logs tab). Child exit → prominent status change + last stderr page.
+- Readiness: poll for `gateway.json` (with a deadline), then TCP hello.
+- Quit: in spawn mode the quit dialog offers **detach** (leave daemon
+  running) or **shutdown** (`runtime.shutdown`, then SIGTERM after grace,
+  SIGKILL last). In attach mode quit just disconnects.
+
+### 3.3 Transport (`src/transport.rs`)
+
+Tokio TCP; newline codec with an inbound size guard; JSON-RPC correlation map
+(u64 ids); notification fan-out to the UI event loop; auto-reconnect with
+exponential backoff; on reconnect, re-`hello`, re-subscribe every watched
+session with its last seen `sequence` as cursor, and reconcile via `replay`.
+`stream.lagged` triggers the same replay path — one code path for both. That
+path also owns the `cursor_pruned` arm: restart from the returned floor and
+render a "history truncated below N" divider in the transcript, and treat
+`stream.ended` as a terminal marker (stop expecting live events).
+
+### 3.4 Model & UI (`src/model.rs`, `src/ui/`)
+
+Serde types for the golden-fixture shapes, all tolerant: unknown fields
+ignored, every enum has an `Other(String)` arm, and any payload can fall back
+to `serde_json::Value` rendered by the **generic tree widget** — the Rust half
+of the polymorphism story. Concrete cases the types must carry: availability
+is tri-state (`available` / `unavailable` / `disabled` —
+[ouroboros.ex:140](../lib/ouroboros.ex)), and `interactive.list`/`info` return
+`Ouroboros.Interactive.State` structs (Wire-tagged), not bare maps.
+
+Tabs (build order within §5): **1 Dashboard** (node/role, availability
+matrix from `status.availability`, connected nodes, providers), **2 Sessions**
+(interactive + coding lists; focused session = scrollback via replay + live
+tail, input box, approval modal), **3 Agents** (list + state tree +
+`last_effects` if present), **4 Teams**, **5 Plans/Control**, **6 Upgrade**
+(rollouts, history, signing decisions, grants-by-principal prompt), **7 Logs**
+(spawn mode only; attach mode shows "logs live with the spawner").
+
+Keys: `1-7`/`Tab` tabs, `j/k` move, `Enter` send, `Ctrl-C` interrupt active
+turn (never the TUI), `a` approval modal, `s` steer, `q` quit dialog, `?` help.
+
+### 3.5 Rust tests
+
+Codec framing (split/joined/oversized lines); golden-fixture decode (the
+files from `mix ouroboros.gateway.golden` — CI fails if either side drifts);
+extractor against a tiny fixture tarball (sha mismatch refuses); reconnect
+resubscribe logic against a scripted fake server; integration smoke gated by
+`OUROBOROS_TUI_INTEGRATION=1` (spawns a real dev daemon: hello, status,
+subscribe, one turn).
+
+---
+
+## 4. Packaging & distribution
+
+- `justfile`: `dev` (mix + `ouro --dev`), `test` (mix test; cargo test; fmt;
+  clippy), `golden` (regen + diff fixtures), `release` (`MIX_ENV=prod mix
+  release` → tarball → `OUROBOROS_RELEASE_TARBALL=… cargo build --release`).
+- **CI matrix** builds per target — the release must be built on (or for) the
+  exact OS/arch because ERTS is not cross-compiled: `macos-arm64`,
+  `macos-x64`, `linux-x64`, `linux-arm64`. Artifact: `ouro-<version>-<triple>`.
+  This is the same ERTS/arch identity constraint the forge verifier already
+  enforces for artifacts ([mix.exs](../mix.exs) release comment). Note the
+  repo has **no CI at all today** (no `.github/`) — this is greenfield, not an
+  amendment, and Slice 4's sizing includes it. `.gitignore` gains the release
+  tarball glob (`*.tar.gz`; today only bare `ouroboros-*.tar` is covered) and
+  `tui/target/`.
+- Servers keep deploying the plain release tarball from the same commit; the
+  embedded copy inside `ouro` is a convenience for laptops/edge, not a new
+  deployment path.
+- Version skew: `hello.protocol` is the only compatibility contract. Mismatch
+  → the TUI prints both versions and the one-line fix. The runtime's own
+  modules may change hourly under the upgrade lanes — the protocol integer is
+  what moves slowly and deliberately.
+- README: new "Terminal UI" section (spawn vs attach, keys, env passthrough,
+  SSH-tunnel recipe) and an **Honest limits** block (token ≠ sandbox; loopback
+  boundary; single-node view; logs-with-spawner). Two lines to update when
+  Slice 3 lands, not one: the intro's "or a polished terminal UI"
+  (README.md:34) and "There is no polished terminal UX yet" under Current
+  limits (README.md:1161).
+
+---
+
+## 5. Execution plan (four PR-sized slices, each green before the next)
+
+1. **Gateway core (Elixir).** `Gateway.{Config,Wire,Listener,Conn,Methods}`,
+   read-scope methods, auth + scopes, runtime.exs wiring, logger-to-stderr,
+   `env.sh.eex` dist-none posture, verifier prefix + test, gateway.json.
+   Gate: full ExUnit suite incl. protocol/integration tests; forge loop passes
+   with `RELEASE_DISTRIBUTION=none`.
+2. **Streaming + operate scope.** Subscriptions, bounded queue + `stream.lagged`
+   + replay-resync integration test, operate methods + audit lines, golden
+   fixture mix task. Gate: lag test proves exact reconciliation; slow client
+   isolation test.
+3. **`ouro` client.** Transport, model, runtime spawner (dev mode first),
+   CLI, Dashboard + Sessions tabs. Gate: `ouro --dev` drives a real session
+   end-to-end on the laptop; golden decode tests green; reconnect/resubscribe
+   test green.
+4. **Full surface + packaging.** Tabs 3–7, embed + extract + GC, `ouro stop`/
+   `daemon`/`attach`, justfile, CI matrix, README. Gate: single downloaded
+   binary on a clean machine reaches the Dashboard in one command; `ouro
+   attach` over an SSH tunnel against a server release.
+
+Rough sizing: S1 ≈ 1.5–2k LOC (heavy on tests), S2 ≈ 1k, S3 ≈ 2–3k Rust,
+S4 ≈ 1.5–2k mixed (includes greenfield CI across four targets). Each slice is
+independently mergeable and leaves main releasable.
+
+## 6. Deferred (recorded so they're chosen, not forgotten)
+
+Cross-node session listing/fan-out; `agents.start` behind a spec allowlist;
+a read-only web dashboard reusing the same gateway; multi-cluster attach
+profiles in `ouro`; Windows; log streaming to attach-mode clients; per-token
+scopes (today scope is per-listener, set at boot).
