@@ -1,138 +1,26 @@
 //! The client driven against a scripted server that speaks the gateway's protocol.
 //!
-//! This pins client behaviour without the Elixir side: every path here is one the
-//! gateway can produce — the handshake and its two refusals, out-of-order responses,
-//! a typed method error, a notification, an oversized frame, a lost connection — and the
-//! test says what the client must do about it. The real runtime is exercised separately,
-//! by the integration test behind `OUROBOROS_TUI_INTEGRATION=1`.
+//! This pins *transport* behaviour without the Elixir side: the handshake and its two
+//! refusals, out-of-order responses, a typed method error, a notification, an oversized
+//! frame, a lost connection — and what the client must do about each. The UI driven over
+//! the same scripted server lives in `ui_stream.rs`; the scaffolding both use is in
+//! `support`, so there is one implementation of the protocol harness rather than two that
+//! can disagree. The real runtime is exercised by the tests behind
+//! `OUROBOROS_TUI_INTEGRATION=1`.
 
-use std::net::SocketAddr;
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use ouro::proto::ErrorCode;
 use ouro::proto::Hello;
-use ouro::transport::{
-    self, Client, ClientError, HookFuture, NoReconnectHook, ReconnectHook, Secret, TransportConfig,
-};
+use ouro::transport::{self, Client, ClientError, HookFuture, NoReconnectHook, ReconnectHook};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const PATIENCE: Duration = Duration::from_secs(5);
-
-/// One accepted connection, with the frame helpers a script needs.
-struct Peer {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
-}
-
-impl Peer {
-    async fn accept(listener: &TcpListener) -> Self {
-        let (socket, _peer) = listener.accept().await.expect("a connection");
-        Self::from_stream(socket)
-    }
-
-    fn from_stream(socket: TcpStream) -> Self {
-        let (read, write) = socket.into_split();
-
-        Self {
-            reader: BufReader::new(read),
-            writer: write,
-        }
-    }
-
-    /// The next request frame. `None` when the client hung up.
-    async fn request(&mut self) -> Option<Value> {
-        let mut line = String::new();
-
-        match self.reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(serde_json::from_str(&line).expect("a JSON request")),
-        }
-    }
-
-    async fn hello(&mut self, methods: &[&str]) -> Value {
-        let request = self.request().await.expect("a hello");
-
-        assert_eq!(request["method"], "hello");
-        assert_eq!(request["params"]["protocol"], 1);
-        assert_eq!(request["params"]["token"], TOKEN);
-        assert!(request["params"]["client"]
-            .as_str()
-            .expect("a client name")
-            .starts_with("ouro "));
-
-        self.result(
-            &request["id"],
-            json!({
-                "server": "0.1.0",
-                "node": "nonode@nohost",
-                "role": "core",
-                "protocol": 1,
-                "scope": "operate",
-                "methods": methods,
-                "a_field_this_client_has_never_heard_of": true
-            }),
-        )
-        .await;
-
-        request
-    }
-
-    async fn result(&mut self, id: &Value, result: Value) {
-        self.frame(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-            .await;
-    }
-
-    async fn error(&mut self, id: &Value, code: i64, message: &str, data: Option<Value>) {
-        let mut error = json!({ "code": code, "message": message });
-
-        if let Some(data) = data {
-            error["data"] = data;
-        }
-
-        self.frame(json!({ "jsonrpc": "2.0", "id": id, "error": error }))
-            .await;
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) {
-        self.frame(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .await;
-    }
-
-    async fn frame(&mut self, value: Value) {
-        let mut bytes = serde_json::to_vec(&value).expect("encodable");
-        bytes.push(b'\n');
-        self.raw(&bytes).await;
-    }
-
-    async fn raw(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).await.expect("a writable peer");
-        self.writer.flush().await.expect("a flushable peer");
-    }
-}
-
-async fn listener() -> (TcpListener, SocketAddr) {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("an ephemeral port");
-    let address = listener.local_addr().expect("a bound address");
-
-    (listener, address)
-}
-
-fn config(address: SocketAddr) -> TransportConfig {
-    let mut config = TransportConfig::new(address, Secret::new(TOKEN.to_string()));
-    config.reconnect = false;
-    config.request_timeout = Duration::from_secs(2);
-    config.connect_timeout = Duration::from_secs(2);
-    config
-}
+use support::{config, listener, Peer, PATIENCE};
 
 fn hook() -> Arc<dyn ReconnectHook> {
     Arc::new(NoReconnectHook)

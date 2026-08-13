@@ -1,11 +1,14 @@
 //! `ouro`: start or find an Ouroboros runtime and speak its operator protocol.
 //!
-//! Slice 3a is the plumbing half. "Attaching" here means connecting, completing the
-//! handshake, printing one page of status, and holding the connection open until ctrl-c
-//! — the ratatui UI replaces that page in Slice 3b without changing anything under it.
-//! Notifications are routed to a channel and drained, not interpreted: event streaming
-//! does not exist in the gateway yet, and a client that pretended to consume it would be
-//! claiming something untrue.
+//! This file owns process lifecycle and nothing else. Attaching means connecting,
+//! completing the handshake, and handing the connection to [`ouro::ui`], which draws it
+//! until the operator picks something from the quit dialog; what happens to the runtime
+//! afterwards is that choice, executed here.
+//!
+//! The non-UI commands are unchanged and deliberately so: `ouro daemon` still starts and
+//! exits, `ouro stop` still prefers `runtime.shutdown` and falls back to a signal for a
+//! pid it can prove it owns, and `ouro attach --print` renders the same one-shot page for
+//! a pipe or a terminal that is not a tty.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -23,6 +26,7 @@ use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
 use ouro::transport::{
     Client, ClientError, Connected, NoReconnectHook, ReconnectHook, Secret, TransportConfig,
 };
+use ouro::ui::{self, App, Mode, Quit};
 use ouro::{proto, runtime, status, transport};
 
 /// How long a runtime is given to stop before it is killed. `System.stop/0` and a
@@ -47,7 +51,11 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => attach_local(&paths, cli.dev).await,
         Some(Command::Daemon) => daemon(&paths, cli.dev).await,
-        Some(Command::Attach { addr, token_file }) => attach_remote(&paths, addr, token_file).await,
+        Some(Command::Attach {
+            addr,
+            token_file,
+            print,
+        }) => attach_remote(&paths, addr, token_file, print).await,
         Some(Command::Stop) => stop(&paths).await,
         Some(Command::Version) => {
             print!("{}", version());
@@ -80,7 +88,7 @@ fn embedded_release() -> String {
     "none embedded; --dev or attach".into()
 }
 
-/// The default command: adopt a running runtime or start one, then attach.
+/// The default command: adopt a running runtime or start one, then draw it.
 async fn attach_local(paths: &Paths, dev: bool) -> Result<()> {
     let existing = runtime::read_owned_publication(&paths.data_dir)?;
 
@@ -109,44 +117,21 @@ async fn attach_local(paths: &Paths, dev: bool) -> Result<()> {
                 runtime::remove_publication(&paths.data_dir)?;
             }
 
-            let (publication, token, daemon) = start(paths, dev, Output::Ring).await?;
-            (publication, token, Some(daemon))
+            start(paths, dev, Output::Ring).await?
         }
     };
 
     let address = local_address(publication.port);
-    let attached = attach(address, token, true).await?;
 
-    // Held for the rest of this function: dropping it would close the connection the
-    // command exists to hold open.
-    let _client = present(address, attached).await?;
+    // An adopted daemon is not one this client supervises: it has no `Child` for it, so
+    // the quit dialog offers a disconnect rather than a shutdown it could not carry out.
+    // `ouro stop` is the verb that ends a daemon this process did not start.
+    let mode = match &daemon {
+        Some(daemon) => Mode::Spawned { pid: daemon.pid() },
+        None => Mode::Attached,
+    };
 
-    match daemon {
-        None => {
-            println!("attached; ctrl-c disconnects and leaves the runtime running");
-            wait_for_exit(None).await?;
-        }
-        Some(mut daemon) => {
-            println!("attached; ctrl-c stops the runtime this client started");
-
-            match wait_for_exit(Some(&mut daemon)).await? {
-                Exit::ChildExited(reason) => {
-                    println!("the runtime exited on its own: {reason}");
-                    print!("{}", daemon.log_tail(40));
-                }
-                Exit::Interrupted => {
-                    println!("stopping the runtime (pid {})", daemon.pid());
-
-                    match daemon.terminate(SHUTDOWN_GRACE).await? {
-                        Some(status) => println!("the runtime exited: {status}"),
-                        None => println!("the runtime had already exited"),
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    draw(address, token, mode, daemon).await
 }
 
 /// `ouro daemon`: start (or find) a runtime, say how to reach it, and exit.
@@ -168,11 +153,13 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
         runtime::remove_publication(&paths.data_dir)?;
     }
 
-    let (publication, _token, mut child) =
-        start(paths, dev, Output::File(paths.daemon_log())).await?;
+    let (publication, _token, child) = start(paths, dev, Output::File(paths.daemon_log())).await?;
 
-    // Detached: this process is about to exit and the runtime must not go with it.
-    child.detach();
+    // Detached: this process is about to exit and the runtime must not go with it. A
+    // `None` here is a runtime that appeared under the spawn lock, which nothing owns.
+    if let Some(mut child) = child {
+        child.detach();
+    }
 
     println!(
         "runtime started\n  port        {}\n  pid         {}\n  node        {}\n  scope       {}\n  token-file  {}\n  log         {}",
@@ -192,6 +179,7 @@ async fn attach_remote(
     paths: &Paths,
     addr: Option<String>,
     token_file: Option<PathBuf>,
+    print: bool,
 ) -> Result<()> {
     let address = match addr {
         Some(addr) => resolve(&addr).await?,
@@ -218,26 +206,104 @@ async fn attach_remote(
         )
     })?;
 
-    let attached = attach(address, token, true).await?;
-    let _client = present(address, attached).await?;
+    if print {
+        let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
 
-    println!("attached; ctrl-c disconnects and leaves the runtime running");
+        return print_page(address, attach_with(address, token, false, hook).await?).await;
+    }
 
-    wait_for_exit(None).await?;
-
-    Ok(())
+    draw(address, token, Mode::Attached, None).await
 }
 
-/// The one page Slice 3a shows in place of a UI, and the notification drain behind it.
-///
-/// The returned [`Client`] is the connection: a caller that drops it disconnects, so
-/// every command that means to stay attached holds it for as long as it does.
-async fn present(address: SocketAddr, attached: Connected) -> Result<Client> {
+/// Connects and runs the terminal UI, then carries out whatever the quit dialog chose.
+async fn draw(
+    address: SocketAddr,
+    token: Secret,
+    mode: Mode,
+    daemon: Option<Daemon>,
+) -> Result<()> {
+    let (hook, channel) = ui::hook();
+    let attached = attach_with(address, token, true, hook).await?;
+
     let Connected {
         client,
         hello,
         notifications,
     } = attached;
+
+    let logs = daemon.as_ref().map(Daemon::logs);
+    let mut app = App::new(mode, address.to_string(), hello.clone(), logs);
+
+    if hello.protocol != proto::PROTOCOL {
+        app.inform(
+            format!(
+                "the gateway completed a handshake but reports protocol {}, not {}",
+                hello.protocol,
+                proto::PROTOCOL
+            ),
+            ouro::ui::app::NoticeKind::Warn,
+        );
+    }
+
+    let mut daemon = daemon;
+
+    let quit = ui::run(app, client.clone(), notifications, channel, daemon.as_mut()).await?;
+
+    finish(quit, &client, &hello, daemon).await
+}
+
+/// The quit dialog's choice, executed through the same paths the CLI already used: an
+/// acknowledged `runtime.shutdown` where the gateway serves it, then SIGTERM, then
+/// SIGKILL, all of which `Daemon::terminate` already sequences.
+async fn finish(quit: Quit, client: &Client, hello: &Hello, daemon: Option<Daemon>) -> Result<()> {
+    let Some(mut daemon) = daemon else {
+        client.stop().await;
+        println!("disconnected; the runtime keeps running");
+
+        return Ok(());
+    };
+
+    match quit {
+        Quit::Detach | Quit::Disconnect => {
+            let pid = daemon.pid();
+            daemon.detach();
+            println!("detached; the runtime is still running (pid {pid})");
+        }
+        Quit::Shutdown => {
+            if hello.serves("runtime.shutdown") && hello.operates() {
+                match client.call("runtime.shutdown", json!({})).await {
+                    Ok(_result) => println!("the runtime accepted runtime.shutdown"),
+                    // The runtime stopping is what was asked for, and it may stop before
+                    // it can answer.
+                    Err(ClientError::ConnectionClosed) => {
+                        println!("the runtime accepted runtime.shutdown and closed the connection")
+                    }
+                    Err(error) => println!("runtime.shutdown failed ({error}); signalling instead"),
+                }
+            } else {
+                println!(
+                    "this build does not serve runtime.shutdown at this scope; signalling pid {}",
+                    daemon.pid()
+                );
+            }
+
+            client.stop().await;
+
+            match daemon.terminate(SHUTDOWN_GRACE).await? {
+                Some(status) => println!("the runtime exited: {status}"),
+                None => println!("the runtime had already exited"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The one-shot page `ouro attach --print` renders, for a pipe or a terminal without a
+/// tty. It is the whole of what this client showed before there was a UI, kept because a
+/// status page that can be redirected into a file is not the same tool as a UI.
+async fn print_page(address: SocketAddr, attached: Connected) -> Result<()> {
+    let Connected { client, hello, .. } = attached;
 
     print!("{}", status::render_hello(&address.to_string(), &hello));
     print_protocol_warning(&hello);
@@ -249,11 +315,10 @@ async fn present(address: SocketAddr, attached: Connected) -> Result<Client> {
         .context("calling runtime.status")?;
 
     print!("{}", status::render_status(&status));
-    println!();
 
-    drain_notifications(notifications);
+    client.stop().await;
 
-    Ok(client)
+    Ok(())
 }
 
 /// `ouro stop`: ask the runtime this client started to exit, and fall back to a signal
@@ -283,7 +348,8 @@ async fn stop(paths: &Paths) -> Result<()> {
 
     // Reconnect is off: this connection exists to end the thing on the other side of it,
     // so the close that follows is the answer rather than a fault to repair.
-    let attached = attach(address, token, false).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let attached = attach_with(address, token, false, hook).await?;
 
     if attached.hello.node != publication.node {
         bail!(
@@ -339,8 +405,43 @@ async fn stop(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Starts a runtime and waits for it to publish a port.
-async fn start(paths: &Paths, dev: bool, output: Output) -> Result<(Publication, Secret, Daemon)> {
+/// Starts a runtime and waits for it to publish a port, under the spawn lock.
+///
+/// `None` for the daemon means another `ouro` published one while this call was taking
+/// the lock: the check the caller made and the spawn it asked for are not one operation,
+/// and the lock is where that gap is closed. Adopting is the right answer there — a
+/// second runtime in the same data directory would overwrite the first one's token.
+async fn start(
+    paths: &Paths,
+    dev: bool,
+    output: Output,
+) -> Result<(Publication, Secret, Option<Daemon>)> {
+    // Held until this function returns, which is the whole spawn window: check, spawn,
+    // and wait for the publication. Not longer — a client that held it while attached
+    // would stop the next `ouro` from adopting the daemon it just started.
+    let _lock = runtime::acquire_spawn_lock(&paths.data_dir)?;
+
+    if let Some(publication) = runtime::read_owned_publication(&paths.data_dir)? {
+        if runtime::pid_alive(publication.pid) {
+            let token = runtime::read_token(&paths.token_file()).with_context(|| {
+                format!(
+                    "another client started a runtime here (pid {}), but its token is not \
+                     readable by this one",
+                    publication.pid
+                )
+            })?;
+
+            println!(
+                "adopted the runtime another client just started (pid {})",
+                publication.pid
+            );
+
+            return Ok((publication, token, None));
+        }
+
+        runtime::remove_publication(&paths.data_dir)?;
+    }
+
     let launcher = launcher(dev, paths)?;
     let token_path = paths.token_file();
     let token = runtime::write_token(&token_path)?;
@@ -361,7 +462,7 @@ async fn start(paths: &Paths, dev: bool, output: Output) -> Result<(Publication,
         );
     }
 
-    Ok((publication, token, daemon))
+    Ok((publication, token, Some(daemon)))
 }
 
 fn launcher(dev: bool, paths: &Paths) -> Result<Launcher> {
@@ -401,11 +502,14 @@ fn release_launcher(_paths: &Paths) -> Result<Launcher> {
     )
 }
 
-async fn attach(address: SocketAddr, token: Secret, reconnect: bool) -> Result<Connected> {
+async fn attach_with(
+    address: SocketAddr,
+    token: Secret,
+    reconnect: bool,
+    hook: Arc<dyn ReconnectHook>,
+) -> Result<Connected> {
     let mut config = TransportConfig::new(address, token);
     config.reconnect = reconnect;
-
-    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
 
     transport::connect(config, hook)
         .await
@@ -429,43 +533,6 @@ fn print_protocol_warning(hello: &Hello) {
             hello.protocol,
             proto::PROTOCOL
         );
-    }
-}
-
-/// Slice 3a consumes no events. Draining is still routing: the channel exists, it is
-/// read, and anything that arrives is printed rather than silently discarded.
-fn drain_notifications(mut notifications: tokio::sync::mpsc::Receiver<proto::Notification>) {
-    tokio::spawn(async move {
-        while let Some(notification) = notifications.recv().await {
-            println!("notification {}", notification.method);
-        }
-    });
-}
-
-enum Exit {
-    Interrupted,
-    ChildExited(String),
-}
-
-/// Waits for ctrl-c, or for a supervised child to exit first.
-async fn wait_for_exit(daemon: Option<&mut Daemon>) -> Result<Exit> {
-    let Some(daemon) = daemon else {
-        tokio::signal::ctrl_c().await?;
-        return Ok(Exit::Interrupted);
-    };
-
-    loop {
-        tokio::select! {
-            interrupted = tokio::signal::ctrl_c() => {
-                interrupted?;
-                return Ok(Exit::Interrupted);
-            }
-            _tick = tokio::time::sleep(Duration::from_millis(250)) => {
-                if let Some(status) = daemon.exited() {
-                    return Ok(Exit::ChildExited(status.to_string()));
-                }
-            }
-        }
     }
 }
 
