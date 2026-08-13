@@ -14,9 +14,15 @@ TUI is a projection, never an authority the runtime depends on.
 Design invariants, in the codebase's own idiom:
 
 1. **The gateway is an operator surface and says so.** It is not "an observer".
-   Its mutating verbs are scoped, off by default, and audited. Honest claims
-   only.
-2. **Fail closed.** No token, no listener. Non-loopback bind requires a typed
+   Its mutating verbs are scoped and audited. A configured deployment gets the
+   listener only by asking (`OUROBOROS_GATEWAY=1`); the one exception is the
+   told-nothing prod release — no gateway, node, or cluster variables at all —
+   which enables the loopback surface itself, because a single-machine daemon
+   nobody can talk to serves nobody. Honest claims only.
+2. **Fail closed.** No token, no listener. The defaulted single-machine posture
+   satisfies this rather than escaping it: it generates a 0600 `gateway.token`
+   before the listener starts, so a credential always exists — the exception is
+   who typed it, not whether it is required. Non-loopback bind requires a typed
    override, exactly like `OUROBOROS_ALLOW_INSECURE_DIST` in
    [config/runtime.exs](../config/runtime.exs).
 3. **Bounded everything.** The planes are *not* uniformly bounded upstream —
@@ -101,15 +107,19 @@ tail, after `Ouroboros.Cluster`**. Under `rest_for_one` a gateway crash
 restarts nothing; nothing rebuilds from it. `:builder`/`:signer` nodes never
 run it.
 
-Enabled only when `OUROBOROS_GATEWAY=1`. Refuses to start (raises at init,
-naming the variable) when enabled without a token source — the signer-boot
-posture ([runtime.exs signer preflight](../config/runtime.exs)).
+Enabled when `OUROBOROS_GATEWAY=1`, and by the defaulted single-machine prod
+posture (no gateway, node, or cluster variables set), where
+[config/runtime.exs](../config/runtime.exs) enables it at `operate` scope
+itself. Explicitly enabled without a token source it refuses to start (raises
+at init, naming the variable) — the signer-boot posture; the defaulted posture
+instead generates `<data_dir>/gateway.token` (0600, never overwriting an
+existing file) because nobody named a source there to have gotten wrong.
 
 ### 2.2 Configuration (config/runtime.exs additions, same inline-parse style)
 
 | env | default | meaning |
 |---|---|---|
-| `OUROBOROS_GATEWAY` | unset | `1` enables the listener (core role only) |
+| `OUROBOROS_GATEWAY` | unset | `1` enables the listener (core role only). Unset on a prod release that also has no node or cluster variables → enabled by default at `operate` scope, `allow_shutdown` on, with a generated token: the single-machine posture. That branch reads no other `OUROBOROS_GATEWAY_*` variable — tuning anything means setting `OUROBOROS_GATEWAY=1` and being held to the token requirement |
 | `OUROBOROS_GATEWAY_PORT` | `0` | `0` = ephemeral; the bound port is published via `gateway.json` |
 | `OUROBOROS_GATEWAY_BIND` | `127.0.0.1` | non-loopback additionally requires `OUROBOROS_GATEWAY_ALLOW_REMOTE=1`, else raise |
 | `OUROBOROS_GATEWAY_TOKEN_FILE` | — | preferred: file (0600) containing ≥32-byte token; `Inspect`-redacted like the signer key |
@@ -125,11 +135,14 @@ Two placement facts the implementation must respect:
   inside `if config_env() == :prod`** (line 3). Gateway env parsing goes in a
   new section *outside* that guard so `ouro --dev` (`mix run --no-halt`) works
   — `runtime.exs` is evaluated in every env.
-- **`OUROBOROS_DATA_DIR` is currently a local variable in that prod block,
-  never persisted to app env.** The gateway section persists
-  `config :ouroboros, :data_dir, …` and requires it whenever
-  `OUROBOROS_GATEWAY=1` (raise naming the variable otherwise). The spawner
-  always sets it, so this costs nothing in practice.
+- **`OUROBOROS_DATA_DIR` is persisted to app env in every environment.** The
+  prod block persists the directory it resolved — including the derived
+  default (`Ouroboros.DataDir`: `$XDG_DATA_HOME/ouroboros`, else
+  `$HOME/.local/share/ouroboros`, the byte-for-byte contract with
+  `Paths::discover` in [tui/src/runtime.rs](../tui/src/runtime.rs)) — and the
+  gateway section below persists the variable in the environments the prod
+  block never runs in. `OUROBOROS_GATEWAY=1` still requires it (raise naming
+  the variable otherwise); the spawner always sets it.
 
 After binding, the gateway writes `Path.join(data_dir, "gateway.json")` —
 atomic tmp+rename, followed by an explicit `File.chmod!(path, 0o600)`:
@@ -138,8 +151,9 @@ atomic tmp+rename, followed by an explicit `File.chmod!(path, 0o600)`:
 This is how spawn-mode `ouro` (and no-arg `ouro attach`) discovers the port;
 it also removes the bind-race of pre-choosing ephemeral ports.
 
-`token_file` is the **path** to the token file and is present exactly when
-`OUROBOROS_GATEWAY_TOKEN_FILE` supplied the token; a listener whose token came from
+`token_file` is the **path** to the token file and is present exactly when a file
+supplied the token — `OUROBOROS_GATEWAY_TOKEN_FILE`, or the defaulted posture's own
+`gateway.token`, generated there if absent; a listener whose token came from
 `OUROBOROS_GATEWAY_TOKEN` omits the key entirely rather than naming a file that does not
 exist. It exists so a client that did not spawn the daemon — `ouro attach` with no
 arguments — reads the credential's location instead of guessing a convention. The token
@@ -428,26 +442,38 @@ control-plane namespaces are treated.
 
 ### 2.9 Logging
 
-When `OUROBOROS_GATEWAY=1`, route the default logger to stderr so stdout stays
-clean and the spawner owns the log stream. Elixir ≥ 1.15 idiom (not the legacy
-`:console` backend):
+Whenever the gateway is on — `OUROBOROS_GATEWAY=1` or the defaulted
+single-machine posture — route the default logger to stderr so the spawner
+owns the log stream. stdout is not clean in the defaulted posture, it is
+deliberate: the listener prints a plain notice there (mode, data dir, bound
+address, how a client attaches), because a person who ran
+`bin/ouroboros start` in a terminal is reading stdout. Elixir ≥ 1.15 idiom
+(not the legacy `:console` backend):
 
 ```elixir
 config :logger, :default_handler, config: [type: :standard_error]
 ```
 
-### 2.10 Distribution-off spawn mode (env.sh.eex change)
+### 2.10 Distribution-off mode (env.sh.eex)
 
-[rel/env.sh.eex](../rel/env.sh.eex) currently hard-requires `OUROBOROS_NODE` +
-`OUROBOROS_COOKIE` and always sets `RELEASE_DISTRIBUTION=name`. Add a third
-posture for the laptop daemon:
+[rel/env.sh.eex](../rel/env.sh.eex) picks between two postures:
 
 - `OUROBOROS_DIST=none` → `RELEASE_DISTRIBUTION=none`, node/cookie not
-  required, **no epmd, no dist listener, no cookie on the host at all**.
-- Refuse the combination `OUROBOROS_DIST=none` + `OUROBOROS_CLUSTER_STRATEGY`
-  ≠ `none` at preflight (they contradict; name both variables in the error).
+  required, **no epmd, no dist listener, no cookie on the host at all**. This
+  is also the **default**: a release with no `OUROBOROS_NODE`, no
+  `OUROBOROS_CLUSTER_STRATEGY`, and no `OUROBOROS_DIST` boots this posture
+  rather than refusing — the refusal existed to block the fallback to the
+  baked shared cookie, and a posture with no cookie at all blocks it harder.
+- Anything that asks for distribution — `OUROBOROS_NODE` set, `OUROBOROS_DIST`
+  set to other than `none`, or a cluster strategy named — takes the strict
+  path: long name and cookie required before the VM starts, refusals
+  signposting the standalone posture.
+- The combination `OUROBOROS_DIST=none` + `OUROBOROS_CLUSTER_STRATEGY` ≠
+  `none` is refused at preflight (they contradict; both variables named in the
+  error). A strategy *alone* is not that contradiction — it asks for
+  distribution and is refused for the node name it was not given.
 - The existing `version | "")` exemption arm covers *both* `version` and the
-  empty command ([env.sh.eex:9](../rel/env.sh.eex)) — the patch preserves both.
+  empty command ([env.sh.eex](../rel/env.sh.eex)) — preserved.
 
 Forge builds keep working: `BuildPeer` runs `:peer` over `standard_io` with
 `-start_epmd false` ([build_peer.ex:177](../lib/ouroboros/upgrade/forge/build_peer.ex)),
@@ -525,8 +551,11 @@ process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
 ouro                  spawn (or adopt via gateway.json) + attach UI
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
-ouro new --provider NAME [--workspace PATH] [--approval-mode MODE] [--message TEXT] [--print]
-                      start an interactive session, then attach focused on it
+ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE] [--message TEXT] [--print]
+                      start an interactive session, then attach focused on it;
+                      provider/workspace/approval resolve flag first, then the
+                      config file's [defaults]; only a provider neither names
+                      is refused, naming both places
 ouro stop             graceful stop of the locally spawned daemon
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed)
@@ -540,6 +569,15 @@ carries `OUROBOROS_CLUSTER_STRATEGY`/`OUROBOROS_NODE`, in which case cluster
 vars pass through untouched and dist stays on. Existing server workflows are
 unchanged by construction.
 
+Client-side preferences live in `$XDG_CONFIG_HOME/ouroboros/config.toml`
+(else `~/.config/ouroboros/config.toml`): `[defaults]`
+provider/workspace/approval_mode and `[onboarding] welcomed`. Loading is
+total — a parse failure yields defaults plus a Notice naming the file, never
+a crash; unknown keys are ignored on read (and **not** preserved through a
+save, stated in the file's own header); saves are temp+fsync+rename at 0600.
+This file is user preference, not daemon state: the runtime is configured by
+environment, and nothing in this file reaches the spawn env.
+
 ### 3.2 Runtime supervisor (`src/runtime.rs`)
 
 - Embedded tarball via `build.rs`: `OUROBOROS_RELEASE_TARBALL` env at compile
@@ -552,7 +590,15 @@ unchanged by construction.
   just deletes its tmp). GC keeps the newest 2 versions.
 - Spawn `bin/ouroboros start`; stdout/stderr piped. stderr → bounded ring
   buffer (Logs tab). Child exit → prominent status change + last stderr page.
-- Readiness: poll for `gateway.json` (with a deadline), then TCP hello.
+- Readiness: poll for `gateway.json` (with a deadline), then TCP hello. On a
+  tty this sequence is visible: the client enters the alternate screen first
+  and renders the phases (prepare → spawn → publish → connect) as a boot
+  screen with the child's own output tailing beneath them, then hands the
+  live terminal to the App; a failed boot shows its error and log tail in
+  place, waits for a key, and exits nonzero with the error on stderr after
+  restore. Every non-tty surface (`daemon`, `--print`, a pipe) emits exactly
+  the plain lines it always did — `BootEvent::plain()` is pinned to them by
+  test.
 - Quit: in spawn mode the quit dialog offers **detach** (leave daemon
   running) or **shutdown** (`runtime.shutdown`, then SIGTERM after grace,
   SIGKILL last). In attach mode quit just disconnects.
@@ -632,7 +678,7 @@ tail, input box, approval modal), **3 Agents** (list + state tree +
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `q` quit dialog, `?` help with the authoritative key map.
+`s` steer, `,` settings, `q` quit dialog, `?` help with the authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:
@@ -659,9 +705,24 @@ rediscovered:
   coding plane — omits anything unanswered (an empty workspace box is *no* workspace,
   not `""`, which `option_value(_, :string, _)` would refuse), and never sends `id`.
   Two places the client is stricter than the gateway, both stated in the refusal: a
-  start with no provider is refused here, because letting the node's default decide
-  would be a terminal choosing which vendor runs the operator's code; and `objective`
-  is required on the coding plane and refused on the interactive one.
+  start with no provider from any source is refused here, because letting the node's
+  default decide would be a terminal choosing which vendor runs the operator's code —
+  the config file's `[defaults] provider` satisfies this by being a choice the
+  operator made once, explicitly, and the form it prefills stays editable; and
+  `objective` is required on the coding plane and refused on the interactive one.
+- **First run shows a welcome panel once.** `Overlay::Welcome` appears when the config
+  carries no `welcomed` marker: the runtime's facts, the providers it found (missing
+  ones dim, naming the executable probed for), and the keys that matter. Any dismiss
+  key persists the marker — including `Ctrl-C`, intercepted so it cannot dismiss
+  without writing — and nothing about it asks a question.
+- **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
+  this client's own `[defaults]` — provider picker over the same probed list the `n`
+  dialog uses, workspace, approval mode — with an explicit `[ save ]` row (the
+  `[ start ]` idiom) and "changed, and not written yet" stated until it is.
+- **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`
+  would land in the alternate buffer and be overdrawn; the id is on the boot screen,
+  the notice line, and the Sessions tab. `--print` and any non-tty stdout print it
+  exactly as before.
 - **An uninstalled provider is drawn dim and stays selectable.** "Installed" is a probe
   finding an executable; the runtime is the authority on whether a session can start,
   and refusing on a heuristic would be this client overruling it.
@@ -692,7 +753,14 @@ files from `mix ouroboros.gateway.golden` — CI fails if either side drifts);
 extractor against a tiny fixture tarball (sha mismatch refuses); reconnect
 resubscribe logic against a scripted fake server; integration smoke gated by
 `OUROBOROS_TUI_INTEGRATION=1` (spawns a real dev daemon: hello, status,
-subscribe, one turn).
+subscribe, one turn); config file round-trip, unknown-key tolerance,
+corrupt-file fallback, atomic save, and XDG resolution; the boot phase
+machine (`BootProgress`) and its pinned plain-line equivalents; the
+onboarding suite (welcome shown/suppressed/persisted, settings prefill,
+`ouro new` resolution order). Honest gaps: nothing in the suite allocates a
+pty — `Boot::begin/drive/fail/finish` and `Screen::enter` are exercised only
+by manual pty runs; a real successful spawn's phase sequence needs the
+integration gate; `persist`'s unwritable-path branch is untested.
 
 ---
 
@@ -803,4 +871,9 @@ independently mergeable and leaves main releasable.
 Cross-node session listing/fan-out; `agents.start` behind a spec allowlist;
 a read-only web dashboard reusing the same gateway; multi-cluster attach
 profiles in `ouro`; Windows; log streaming to attach-mode clients; per-token
-scopes (today scope is per-listener, set at boot).
+scopes (today scope is per-listener, set at boot); daemon reconfiguration
+from the settings overlay (editing the *runtime's* environment and offering
+a supervised restart — today settings edit only this client's defaults, and
+the daemon is configured by environment at boot); unknown-key preservation
+through config saves; automated pty-level tests for the boot screen and
+welcome panel.

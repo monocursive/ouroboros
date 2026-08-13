@@ -49,7 +49,22 @@ admission, and upgrade policy.
 
 ## Run it
 
-The project currently targets Elixir 1.20 and OTP 29.
+The fastest path is the terminal client: build `ouro` once and run it. It carries the
+runtime inside it, starts it with zero configuration, and attaches — the first run shows
+a welcome panel naming what it set up, and `n` starts a session.
+
+```sh
+make ouro
+./tui/target/release/ouro
+```
+
+The raw release is self-sufficient too: `bin/ouroboros start` with nothing set boots a
+single-machine daemon — distribution off, data under `~/.local/share/ouroboros`, a
+loopback gateway with a token it generates itself — and prints how to attach. Joining a
+cluster is a deliberate, explicit configuration; see
+[Running a cluster](#running-a-cluster).
+
+For the library from a checkout, the project currently targets Elixir 1.20 and OTP 29.
 
 ```sh
 mix deps.get
@@ -160,6 +175,7 @@ ouro daemon             # spawn only: print the port, pid, and token file, then 
 ouro attach             # connect to the runtime published in this data directory
 ouro attach --addr 127.0.0.1:4560 --token-file ~/.ouro-token
 ouro new --provider claude --workspace .   # start a session and drop into the UI
+ouro new -m "fix the tests"                # the same, with configured defaults filling the rest
 ouro stop               # ask the runtime this client started to shut down
 ouro version            # client version, embedded release version and digest, protocol
 ouro --dev              # start `mix run --no-halt` in this checkout instead
@@ -176,12 +192,34 @@ make dist    # the same, copied to dist/ouro-<version>-<target triple>
 There is no `--token` flag anywhere, deliberately: a secret on a command line is
 readable by every process on the host for as long as the command runs. A spawning client
 writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells the
-gateway the path.
+gateway the path. A release started bare does the same thing for itself — it generates
+`gateway.token` in its data directory if none exists — so both ways of starting a
+runtime end with the same two files in the same place.
+
+### First run and configuration
+
+On a tty, `ouro` boots inside the UI: the extract/start/publish sequence renders as
+live progress with the runtime's own output underneath it, and a failed boot shows its
+error where it happened instead of after the screen is torn down. The first successful
+attach shows a one-time welcome panel: which runtime this is, where its state lives,
+which providers the runtime found installed (and the executable names it probed for
+when it found none), and the keys that matter.
+
+`,` opens settings: the runtime's facts as it reports them, and this client's own
+defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand
+in for `ouro new` flags. They live in `~/.config/ouroboros/config.toml`
+(`$XDG_CONFIG_HOME` honored), which is user preference, not runtime state: the runtime
+itself is configured by environment, exactly as before. `ouro new` resolves provider,
+workspace, and approval mode as flag first, then configured default; only a provider
+that neither names is refused, and the refusal says where both live.
 
 ### How a client finds a runtime
 
-The runtime binds an ephemeral port and publishes it to `gateway.json` in
-`OUROBOROS_DATA_DIR`, alongside its pid, protocol version, and scope. Nothing
+The runtime binds an ephemeral port and publishes it to `gateway.json` in its data
+directory — `OUROBOROS_DATA_DIR`, or when that is unset, the same derived default the
+client uses (`$XDG_DATA_HOME/ouroboros`, else `~/.local/share/ouroboros`), so a
+bare-started release and a spawned one publish in the same place — alongside its pid,
+protocol version, and scope. Nothing
 pre-chooses a port, so two daemons cannot race for a number one of them picked in
 advance. That file is removed on graceful shutdown and left behind by a kill, which is
 why it carries a pid: a publication whose pid is dead is stale and is replaced, and a
@@ -218,7 +256,9 @@ the tunnel first on purpose.
 `ouro` sets the gateway posture (`OUROBOROS_GATEWAY=1`, scope `operate`, port `0`, the
 token file path, `OUROBOROS_DATA_DIR`) and otherwise hands the child the environment it
 was called with. On a laptop it also sets `OUROBOROS_DIST=none`: no epmd, no
-distribution listener, no cookie on the host at all.
+distribution listener, no cookie on the host at all. That posture is also what the
+release defaults to when told nothing; `ouro` states it explicitly anyway, because a
+stated contract survives a change of default.
 
 That default steps aside for a real deployment. If the calling environment already
 carries `OUROBOROS_CLUSTER_STRATEGY` or `OUROBOROS_NODE`, the cluster variables pass
@@ -249,10 +289,12 @@ stale.
   into a bounded ring it can show you. A client that attached to a process it did not
   start has no access to that process's stdout — the logs live wherever the spawner put
   them (`journalctl`, `daemon.log`, a container log driver).
-- **`ouro attach` with no arguments only finds runtimes that published locally.** A
-  deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
-  one whose `OUROBOROS_DATA_DIR` this user cannot read, is reachable only by naming
-  `--addr` and `--token-file` explicitly. There is no discovery beyond the file.
+- **`ouro attach` with no arguments only finds runtimes that published locally.** That
+  includes a bare `bin/ouroboros start`, which publishes to the derived data directory
+  this client also reads. A deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the
+  service environment, or one whose data directory this user cannot read, is reachable
+  only by naming `--addr` and `--token-file` explicitly. There is no discovery beyond
+  the file.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.
@@ -956,7 +998,9 @@ reboot permanence. Those require a deployment-specific release fixture and rehea
 
 ## Production configuration
 
-Production startup requires a durable directory:
+Production startup uses a durable directory. Unset, it derives
+`$XDG_DATA_HOME/ouroboros` (else `~/.local/share/ouroboros`) — right for a
+single-machine daemon, wrong for a server, so a deployment names its own:
 
 ```sh
 export OUROBOROS_DATA_DIR=/var/lib/ouroboros
@@ -1157,11 +1201,14 @@ services:
       OUROBOROS_NODE_ROLE: builder
 ```
 
-`bin/ouroboros` refuses a blank `OUROBOROS_NODE` or `OUROBOROS_COOKIE` before the VM
-starts, and refuses a short name, because `RELEASE_DISTRIBUTION=name` needs `name@host`.
-Without that refusal the release would fall back to the release name and to the random
-cookie baked into `releases/COOKIE` at build time — a cluster secret nobody chose and
-nobody can rotate.
+On the distributed path — anything set among `OUROBOROS_NODE`, `OUROBOROS_DIST`, or a
+cluster strategy — `bin/ouroboros` refuses a blank `OUROBOROS_NODE` or
+`OUROBOROS_COOKIE` before the VM starts, and refuses a short name, because
+`RELEASE_DISTRIBUTION=name` needs `name@host`. Without that refusal the release would
+fall back to the release name and to the random cookie baked into `releases/COOKIE` at
+build time — a cluster secret nobody chose and nobody can rotate. Told nothing at all,
+the release boots the standalone single-machine posture instead: distribution off, no
+cookie in existence anywhere.
 
 Once up, `Ouroboros.status()` reports the local role, the roles it can see, the
 formation strategy, and the distribution posture (`security.cookie` is `:set` or

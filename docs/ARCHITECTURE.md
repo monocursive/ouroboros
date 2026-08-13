@@ -30,7 +30,9 @@ This slice is complete when all of the following are executable and tested:
    (`:core` full, `:builder` formation-only, `:signer` formation plus the signing
    service), refuse to place work on a node that cannot run it, relocate forge builds
    onto a least-privileged builder, and ship as one release whose node identity, cookie,
-   and distribution transport are explicit and fail closed.
+   and distribution transport are explicit and fail closed on the distributed path —
+   told nothing at all, the release boots a standalone single-machine posture instead,
+   with distribution off and no cookie in existence.
 9. The signing authority runs on a `:signer` node rather than inside the application it
    authorizes: the key is read at boot from a file that node mounts, an independent
    policy recomputes the whole submitted artifact and refuses anything outside
