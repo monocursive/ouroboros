@@ -113,6 +113,97 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
              adapter.get_checkpoint(Registry.checkpoint_key(), adapter_opts)
   end
 
+  test "a checkpoint written before evaluation existed is widened, not refused" do
+    directory = temporary_directory!()
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    {adapter, adapter_opts} = storage
+
+    # Exactly what a version-1 build wrote: an entry with no `eval_report` field at all.
+    legacy = %{Map.delete(entry!(), :eval_report) | state: :live}
+    refute Map.has_key?(legacy, :eval_report)
+
+    :ok =
+      adapter.put_checkpoint(
+        Registry.checkpoint_key(),
+        %{version: 1, rollouts: %{legacy.artifact_id => legacy}},
+        adapter_opts
+      )
+
+    name = unique_name()
+    {:ok, pid} = Registry.start_link(name: name, storage: storage)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {:ok, restored} = Registry.get(legacy.artifact_id, name)
+    assert restored.state == :live
+    assert restored.module == @module
+    assert restored.source_sha256 == legacy.source_sha256
+    assert restored.created_at == legacy.created_at
+
+    # `nil` is the honest value: that rollout was never evaluated, because nothing could
+    # evaluate it. It is not an empty report and does not read like one.
+    assert restored.eval_report == nil
+
+    assert {:ok, marked} =
+             Registry.mark(legacy.artifact_id, :rolled_back, [eval_report: %{passed: 0}], name)
+
+    assert marked.eval_report == %{passed: 0}
+  end
+
+  test "an entry this build cannot read is refused rather than repaired" do
+    Process.flag(:trap_exit, true)
+    directory = temporary_directory!()
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    {adapter, adapter_opts} = storage
+
+    # A version this build has never heard of, and a version-1 entry that is not an entry:
+    # neither is something to coerce into a rollout record nobody wrote.
+    for rollouts <- [
+          %{"a" => %{artifact_id: "a", state: :live}},
+          %{"a" => Map.delete(entry!("a"), :state)}
+        ] do
+      :ok =
+        adapter.put_checkpoint(
+          Registry.checkpoint_key(),
+          %{version: 1, rollouts: rollouts},
+          adapter_opts
+        )
+
+      assert {:error, :invalid_rollout_checkpoint} =
+               Registry.start_link(name: unique_name(), storage: storage)
+    end
+  end
+
+  test "an eval report the store cannot hold is marked as such, never truncated" do
+    registry = start_registry!()
+    {:ok, entry} = Registry.deploying(attrs(), registry)
+
+    oversized = %{results: List.duplicate(%{reason: String.duplicate("x", 1_000)}, 50)}
+
+    assert {:ok, live} =
+             Registry.mark(entry.artifact_id, :live, [eval_report: oversized], registry)
+
+    assert %{eval_report: :too_large, bytes: bytes} = live.eval_report
+    assert bytes > 32_768
+
+    # A report holding something only this VM can interpret is not a report a durable
+    # store may keep pretending to hold.
+    assert {:ok, rolled_back} =
+             Registry.mark(
+               entry.artifact_id,
+               :rolled_back,
+               [eval_report: %{owner: self()}],
+               registry
+             )
+
+    assert %{eval_report: :unportable, rendered: rendered} = rolled_back.eval_report
+    assert is_binary(rendered)
+
+    # Marking again without a report keeps the one that justified the previous mark
+    # rather than quietly erasing the evidence.
+    assert {:ok, quarantined} = Registry.mark(entry.artifact_id, :quarantined, [], registry)
+    assert quarantined.eval_report == rolled_back.eval_report
+  end
+
   test "survives its own restart with the rollouts it recorded" do
     directory = temporary_directory!()
     storage = {Ouroboros.Storage.DurableFile, path: directory}
@@ -173,6 +264,14 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       recovery: :complete,
       started_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
+  end
+
+  # A fully-formed entry built the way the registry itself builds one, so a checkpoint
+  # test is about the checkpoint rather than about hand-written struct literals.
+  defp entry!(artifact_id \\ nil) do
+    registry = start_registry!()
+    {:ok, entry} = Registry.deploying(attrs(artifact_id), registry)
+    entry
   end
 
   defp attrs(artifact_id \\ nil) do

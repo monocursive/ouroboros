@@ -511,11 +511,69 @@ What happens between those two calls:
    `health_check: {Rollout.Probe, :ready?, [module]}`. On each target the probe starts
    the new module as a throwaway mesh agent, sends it one synthetic signal, checks the
    answer, and stops it. One failing probe rolls the deployment back everywhere.
+6. **An evaluation gate, when the artifact declares one.** Between commit and promotion,
+   `Rollout.Evaluation.run/3` drives the artifact's own probe set on every target.
 
 The rollout is recorded in `Ouroboros.Upgrade.Rollout.Registry` as `:deploying`,
 `:live`, `:rolled_back`, or `:quarantined`. The last two are never confused: only a
 deployment whose every node *proved* it compensated is recorded as rolled back, and any
 ambiguity — a lost reply, a node that never answered — is recorded as quarantined.
+
+### Evaluation gates
+
+A health probe proves the new module is alive. That is enough to *modify* a running
+system and not enough to *improve* one. An evaluation spec is the missing evidence, and
+it is data rather than code, so it can live inside the signed manifest next to the bytes
+it judges:
+
+```elixir
+eval = %{
+  probes: [
+    %{input: %{op: "ping"}, expect: {:contains, "ping"}},
+    %{input: "again", expect: {:state_matches, :messages_received, 2}}
+  ],
+  budget_ms: 5_000,
+  max_latency_ms: 2_000,
+  required: :all
+}
+
+{:ok, signed} = Forge.forge(source, nodes: nodes, signer_id: "release-key", eval: eval)
+signed.metadata.forge.eval
+# => the validated spec, inside the manifest the signature covers
+
+{:ok, rollout} = Rollout.deploy(signed, Ouroboros.Capability.Echo, nodes)
+rollout.eval_report.nodes[hd(nodes)]
+# => %{passed: 2, failed: 0, total_ms: 3, satisfied?: true, failures: [], ...}
+```
+
+Expectations are terms, not functions: `:any_reply`, `{:equals, value}`,
+`{:contains, substring}` on the rendered reply, and `{:state_matches, key, value}` read
+out of the agent's state through `Ouroboros.Mesh.state/1`. Every probe input and
+expectation must be portable, the whole spec is size-bounded, and anything else is
+refused by `Evaluation.validate/1` before a build peer boots.
+
+`Rollout.deploy/4` runs the spec on every target through a bounded `:erpc` after the
+commit and before the promote — while the rollback material still exists — and then
+
+- every node satisfies its spec → `Coordinator.promote/2`, registry `:live`, report
+  recorded;
+- any node does not → `Coordinator.rollback/2`, and the usual proof rule decides
+  `:rolled_back` or `:quarantined`;
+- any node's answer is *ambiguous* — transport fault, deadline, unrecognized shape →
+  compensation is still attempted and the record is `:quarantined` regardless of how
+  cleanly it succeeded. An evaluation nobody received is not evidence of anything.
+
+With no spec, none of this runs and the behaviour is exactly what it was.
+
+### Champion and challenger
+
+`compare: true` deploys a capability *upgrade*: a `:replace` beam for a module already
+live. The same spec runs against the current version on every target first, and the
+challenger is promoted only if it passes at least as many probes and stays within
+`config :ouroboros, :capability_eval_regression_budget` (1.2×) of the champion's total
+time. Both reports land in the registry entry. A replacement is accepted through this
+path and no other, because promoting a new version of a live capability without
+measuring the one it displaces discards the only baseline that will ever exist.
 
 ### Honest limits
 
@@ -543,10 +601,16 @@ ambiguity — a lost reply, a node that never answered — is recorded as quaran
   satisfy references to helper modules no target node has loaded. Helpers must already
   exist on the targets — the shipped `Ouroboros.Agent.Worker.ReceiveMessage` action, for
   example, is a legitimate route target for a forged agent.
-- **The probe is liveness, not acceptance.** It proves a capability starts, answers one
-  message, and stops. It says nothing about whether the capability is any good.
-  Behavioural comparison, cost and latency regression, and canary evidence are
-  evaluation gates that are not implemented.
+- **The probe is liveness; the evaluation is the declared spec and nothing more.** The
+  probe proves a capability starts, answers one message, and stops. A report proves the
+  probes somebody wrote held, once, on each target, against a throwaway instance. It
+  says nothing about inputs nobody wrote a probe for, and `total_ms` is wall-clock on a
+  shared VM — a champion/challenger comparison over a handful of probes measures the
+  probe set, not production behaviour. Cost models, canary cohorts on real traffic, and
+  statistical significance are still external.
+- **An `:eval` override is not signed.** A spec in `metadata.forge.eval` is covered by
+  the signature; one passed to `Rollout.deploy/4` is the caller's word. Both are
+  validated identically, which is a statement about runnability, not about authority.
 
 ## Agent effects
 
@@ -924,10 +988,15 @@ Topology churn is logged as it happens, with the arriving node's role, because
 - The forge compiles and tests candidate capabilities in an isolated, non-distributed
   build peer, and that peer can now run on a least-privileged `builder` node. It still
   shares that host's user, filesystem, and network, and a builder is still a fully
-  authorized cluster member. Real OS sandboxing, an independent signing service, and
-  evaluation gates comparing behavior and cost before rollout are external. Capability rollout records accumulate; only
-  settled `:rolled_back` entries are pruned when the store exceeds
-  `:ouroboros, :capability_rollout_limit`.
+  authorized cluster member. Real OS sandboxing and an independent signing service are
+  external. Capability rollout records accumulate; only settled `:rolled_back` entries
+  are pruned when the store exceeds `:ouroboros, :capability_rollout_limit`.
+- Evaluation gates run a signed, declarative probe set on every target between commit
+  and promotion, and champion/challenger holds a replacement to the version it displaces
+  on pass count and total time. What that does not do: model cost, sample real traffic,
+  run a canary cohort, or say anything statistically meaningful about wall-clock over a
+  handful of probes. `:capability_eval_regression_budget` defaults to 1.2× for that
+  reason, and a report is evidence about the declared spec and nothing else.
 - Agent effect grants are node-local, deny-by-default, and durable per node. They
   constrain the agent action layer and nothing below it: loaded code reaches the same
   public APIs directly. The effect audit trail is a bounded in-memory ring on the acting

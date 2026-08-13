@@ -40,6 +40,15 @@ config :ouroboros,
   forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
   # Overall deadline for one isolated build peer: boot, compile, and capability tests.
   forge_build_timeout: 60_000,
+  # Deadline for one node's evaluation run during a capability rollout. It bounds an
+  # `:erpc` into `Ouroboros.Upgrade.Rollout.Evaluation`, which enforces the artifact's
+  # own `budget_ms` internally; this is the outer limit on a node that stops answering,
+  # and exceeding it is ambiguity, so it must be comfortably above any spec's budget.
+  capability_eval_timeout: 30_000,
+  # How much slower than the version it replaces a challenger capability may run its
+  # probe set and still be promoted under `compare: true`. Wall-clock over a handful of
+  # probes on a shared VM is noisy; a budget near 1.0 rejects honest challengers.
+  capability_eval_regression_budget: 1.2,
   # Deadline for one agent effect. Effects run off the agent's process, but they still
   # hold a supervised task and an in-flight audit entry, so every one of them ends.
   effect_timeout: 120_000,

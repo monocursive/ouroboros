@@ -26,14 +26,31 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   synced `Ouroboros.Storage.DurableFile` in production. As with every other store here,
   ETS means the record dies with the VM, and the durability level is reported rather
   than assumed.
+
+  ## `eval_report`, and the checkpoint version that carries it
+
+  An entry also holds whatever `Ouroboros.Upgrade.Rollout.Evaluation` proved on the way
+  to this state: counts, timings, and the first few failures per node, never full probe
+  transcripts. A rollout record that grew with the size of the specs it ran would be a
+  durable store nobody can bound, so an oversized or unportable report is replaced by a
+  marker saying so rather than truncated into something that reads like evidence.
+
+  That field is why the checkpoint is version 2. A version-1 checkpoint is *upgraded* on
+  read — every entry keeps what it recorded and gains `eval_report: nil`, which is the
+  truth: those rollouts were never evaluated. Anything else is still refused rather than
+  coerced, the way the node executor's journal refuses a shape it cannot interpret.
   """
 
   use GenServer
 
+  alias Ouroboros.Upgrade.Beam
+
   @store_key {:ouroboros, :capability_rollouts, 1}
-  @checkpoint_version 1
+  @checkpoint_version 2
+  @upgradable_versions [1]
   @states [:deploying, :live, :rolled_back, :quarantined]
   @default_limit 200
+  @max_eval_report_bytes 32_768
 
   @transitions %{
     deploying: [:live, :rolled_back, :quarantined],
@@ -46,7 +63,9 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     @moduledoc "One capability rollout and everything known about its outcome."
 
     @enforce_keys [:artifact_id, :module, :epoch, :nodes, :state, :created_at, :updated_at]
-    defstruct @enforce_keys ++ [source_sha256: nil, test_report: %{}, detail: nil]
+
+    defstruct @enforce_keys ++
+                [source_sha256: nil, test_report: %{}, detail: nil, eval_report: nil]
 
     @type state :: :deploying | :live | :rolled_back | :quarantined
     @type t :: %__MODULE__{
@@ -58,6 +77,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
             source_sha256: String.t() | nil,
             test_report: map(),
             detail: term(),
+            eval_report: map() | nil,
             created_at: String.t(),
             updated_at: String.t()
           }
@@ -79,12 +99,21 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     GenServer.call(server, {:deploying, Map.new(attrs)})
   end
 
-  @doc "Moves a rollout to a new state, refusing transitions that would lose information."
+  @doc """
+  Moves a rollout to a new state, refusing transitions that would lose information.
+
+  `:detail` records the evidence for the transition. `:eval_report` records what an
+  evaluation gate proved on the way to it; omitting it keeps whatever the entry already
+  held, so marking an entry twice cannot erase the report that justified the first mark.
+  """
   @spec mark(String.t(), Entry.state(), keyword(), GenServer.server()) ::
           {:ok, Entry.t()} | {:error, term()}
   def mark(artifact_id, state, opts \\ [], server \\ __MODULE__)
       when is_binary(artifact_id) and is_atom(state) and is_list(opts) do
-    GenServer.call(server, {:mark, artifact_id, state, Keyword.get(opts, :detail)})
+    GenServer.call(
+      server,
+      {:mark, artifact_id, state, Keyword.get(opts, :detail), Keyword.get(opts, :eval_report)}
+    )
   end
 
   @spec get(String.t(), GenServer.server()) :: {:ok, Entry.t()} | :not_found
@@ -141,10 +170,19 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
-  def handle_call({:mark, artifact_id, next, detail}, _from, state) do
+  def handle_call({:mark, artifact_id, next, detail, eval_report}, _from, state) do
     with {:ok, entry} <- fetch(state, artifact_id),
          :ok <- ensure_transition(entry.state, next) do
-      persist(%{entry | state: next, detail: detail, updated_at: now()}, state)
+      persist(
+        %{
+          entry
+          | state: next,
+            detail: detail,
+            eval_report: bound_report(eval_report) || entry.eval_report,
+            updated_at: now()
+        },
+        state
+      )
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -182,6 +220,25 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          created_at: timestamp,
          updated_at: timestamp
        }}
+    end
+  end
+
+  # A report is somebody else's summary of somebody else's node, so it is admitted on
+  # this store's terms or not at all: portable, and small enough that a bounded registry
+  # stays bounded. A rejected report leaves a marker rather than a half-report, because a
+  # truncated map still reads like evidence.
+  defp bound_report(nil), do: nil
+
+  defp bound_report(report) do
+    cond do
+      not Beam.portable_term?(report) ->
+        %{eval_report: :unportable, rendered: inspect(report, limit: 5, printable_limit: 200)}
+
+      byte_size(:erlang.term_to_binary(report)) > @max_eval_report_bytes ->
+        %{eval_report: :too_large, bytes: byte_size(:erlang.term_to_binary(report))}
+
+      true ->
+        report
     end
   end
 
@@ -250,10 +307,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       :not_found ->
         {:ok, %{}}
 
-      {:ok, %{version: @checkpoint_version, rollouts: rollouts}} when is_map(rollouts) ->
-        if valid_rollouts?(rollouts),
-          do: {:ok, rollouts},
-          else: {:error, :invalid_rollout_checkpoint}
+      {:ok, %{version: version, rollouts: rollouts}} when is_map(rollouts) ->
+        upgrade(version, rollouts)
 
       # A checkpoint this build cannot interpret is preserved, not overwritten. The same
       # rule the node executor's journal follows: refuse rather than coerce.
@@ -271,10 +326,39 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
+  defp upgrade(@checkpoint_version, rollouts), do: accept(rollouts)
+
+  # Widening an entry is the one migration that loses nothing: every field a version-1
+  # rollout recorded is kept, and the field it never had becomes `nil`, which is exactly
+  # what "this rollout was never evaluated" means. A newer checkpoint is still refused,
+  # because a field this build would silently drop is not a field it may rewrite.
+  defp upgrade(version, rollouts) when version in @upgradable_versions do
+    rollouts
+    |> Map.new(fn
+      {id, %Entry{} = entry} -> {id, struct(Entry, Map.from_struct(entry))}
+      {id, other} -> {id, other}
+    end)
+    |> accept()
+  end
+
+  defp upgrade(version, _rollouts), do: {:error, {:unsupported_rollout_checkpoint, version}}
+
+  defp accept(rollouts) do
+    if valid_rollouts?(rollouts),
+      do: {:ok, rollouts},
+      else: {:error, :invalid_rollout_checkpoint}
+  end
+
+  # Field access is deliberately by `Map.get/2`: a struct-shaped term missing a key is a
+  # checkpoint to refuse, not an exception to raise out of `init/1`.
   defp valid_rollouts?(rollouts) do
     Enum.all?(rollouts, fn
-      {id, %Entry{artifact_id: id} = entry} when is_binary(id) -> entry.state in @states
-      _other -> false
+      {id, %Entry{} = entry} when is_binary(id) ->
+        Map.get(entry, :artifact_id) == id and Map.get(entry, :state) in @states and
+          Map.has_key?(entry, :eval_report)
+
+      _other ->
+        false
     end)
   end
 
