@@ -10,6 +10,24 @@ defmodule Ouroboros.Orchestration.Scheduler do
   Failure is fail-fast: descendants become `:blocked`; other unfinished work is
   cancelled, and running sibling executions receive the optional asynchronous
   executor cancellation callback.
+
+  ## Heterogeneous plans
+
+  Executors are resolved per step kind from the `:executors` map
+  (`%{coding: {module, opts}, forge: {module, opts}}`). The older single
+  `:executor` option still works and means the `:coding` executor; an explicit
+  `:executors` entry wins over it.
+
+  `submit/2` refuses a plan containing a kind this scheduler cannot execute,
+  before the plan is persisted, so a forge step never reaches a scheduler that
+  would have nothing to run it with. A scheduler configured with no executors at
+  all is the documented manual mode: it dispatches nothing and accepts any plan,
+  because the caller drives every step through `start/4` and `complete/5`.
+
+  A ready step whose kind became unresolvable after submission — configuration
+  changed under a plan already in flight — is skipped rather than handed to the
+  wrong executor or failed. It stays `:ready` for a manual claim or for a
+  corrected configuration.
   """
 
   use GenServer
@@ -98,7 +116,8 @@ defmodule Ouroboros.Orchestration.Scheduler do
          {:ok, max_concurrency} <- positive_integer(Keyword.get(opts, :max_concurrency, 4)),
          {:ok, cancel_timeout} <-
            positive_integer(Keyword.get(opts, :cancel_timeout, @default_cancel_timeout)),
-         {:ok, executor} <- normalize_executor(Keyword.get(opts, :executor)),
+         {:ok, executors} <-
+           normalize_executors(Keyword.get(opts, :executors), Keyword.get(opts, :executor)),
          store <- Keyword.get(opts, :store, Store),
          callback_server <- Keyword.get(opts, :name, __MODULE__) || self(),
          {:ok, plans} <- safe_store_list(store),
@@ -108,7 +127,7 @@ defmodule Ouroboros.Orchestration.Scheduler do
         callback_server: callback_server,
         max_concurrency: max_concurrency,
         cancel_timeout: cancel_timeout,
-        executor: executor,
+        executors: executors,
         owner_refs: %{},
         owners: %{},
         cancellation_ops: %{},
@@ -133,13 +152,12 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
   @impl true
   def handle_call({:submit, %Plan{} = plan}, _from, state) do
-    case Store.create(state.store, plan) do
-      :ok ->
-        state = dispatch_available(state)
-        {:reply, Store.get(state.store, plan.id), state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    with :ok <- ensure_executor_coverage(state, plan),
+         :ok <- Store.create(state.store, plan) do
+      state = dispatch_available(state)
+      {:reply, Store.get(state.store, plan.id), state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -292,23 +310,29 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
-  defp dispatch_available(%{executor: nil} = state), do: state
+  # Manual mode: nothing is dispatched, so nothing needs an executor.
+  defp dispatch_available(%{executors: executors} = state) when map_size(executors) == 0,
+    do: state
 
   defp dispatch_available(state) do
     if running_count(state.store) < state.max_concurrency do
-      case ready_steps(state.store) do
-        [] -> state
-        [{plan, step} | _rest] -> dispatch_step(state, plan, step)
+      case Enum.find(ready_steps(state.store), fn {_plan, step} -> executable?(state, step) end) do
+        nil -> state
+        {plan, step} -> dispatch_step(state, plan, step)
       end
     else
       state
     end
   end
 
+  defp executable?(state, step), do: Map.has_key?(state.executors, step.kind)
+
   defp dispatch_step(state, plan, step) do
+    executor = Map.fetch!(state.executors, step.kind)
+
     with {:ok, updated_plan, execution} <- claim(plan, step),
          :ok <- Store.put(state.store, updated_plan) do
-      case invoke_start(state.executor, execution, state.callback_server) do
+      case invoke_start(executor, execution, state.callback_server) do
         {:ok, owner} when is_pid(owner) ->
           state
           |> monitor_owner(execution, owner)
@@ -614,6 +638,7 @@ defmodule Ouroboros.Orchestration.Scheduler do
       step_id: step.id,
       token: step.execution_token,
       input: step.input,
+      kind: step.kind,
       attempt: step.attempt,
       state: step.state,
       metadata: %{plan: plan.metadata, step: step.metadata},
@@ -668,12 +693,18 @@ defmodule Ouroboros.Orchestration.Scheduler do
     Enum.reduce(executions, state, &launch_cancellation(&2, &1))
   end
 
-  defp launch_cancellation(%{executor: nil} = state, execution) do
-    record_cancellation_outcome(state.store, execution, :not_supported)
-    state
+  defp launch_cancellation(state, execution) do
+    case Map.get(state.executors, execution.kind) do
+      nil ->
+        record_cancellation_outcome(state.store, execution, :not_supported)
+        state
+
+      executor ->
+        launch_cancellation(state, execution, executor)
+    end
   end
 
-  defp launch_cancellation(%{executor: {module, opts}} = state, execution) do
+  defp launch_cancellation(state, execution, {module, opts}) do
     if function_exported?(module, :cancel, 3) do
       operation_id = make_ref()
       parent = self()
@@ -860,6 +891,63 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
   defp persist_if_changed(_store, plan, plan), do: :ok
   defp persist_if_changed(store, _old_plan, new_plan), do: Store.put(store, new_plan)
+
+  # The single `:executor` option predates heterogeneous plans and has always
+  # meant the coding executor, so that is exactly what it becomes. An explicit
+  # `:executors` entry for the same kind wins: configuration that names a kind
+  # outranks configuration that could not.
+  defp normalize_executors(nil, legacy), do: legacy_executors(legacy)
+
+  defp normalize_executors(executors, legacy) when is_map(executors) do
+    with {:ok, base} <- legacy_executors(legacy),
+         {:ok, resolved} <- resolve_executors(executors) do
+      {:ok, Map.merge(base, resolved)}
+    end
+  end
+
+  defp normalize_executors(executors, _legacy), do: {:error, {:invalid_executors, executors}}
+
+  defp legacy_executors(nil), do: {:ok, %{}}
+
+  defp legacy_executors(executor) do
+    case normalize_executor(executor) do
+      {:ok, nil} -> {:ok, %{}}
+      {:ok, resolved} -> {:ok, %{coding: resolved}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp resolve_executors(executors) do
+    Enum.reduce_while(executors, {:ok, %{}}, fn {kind, executor}, {:ok, acc} ->
+      if kind in Step.kinds() do
+        case normalize_executor(executor) do
+          {:ok, nil} -> {:halt, {:error, {:invalid_executor, kind}}}
+          {:ok, resolved} -> {:cont, {:ok, Map.put(acc, kind, resolved)}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      else
+        {:halt, {:error, {:unknown_executor_kind, kind}}}
+      end
+    end)
+  end
+
+  # Persist-before-dispatch has a submit-time counterpart: a plan this scheduler
+  # could never finish is refused before it is stored, not discovered later by a
+  # step that nothing picks up.
+  defp ensure_executor_coverage(%{executors: executors}, _plan) when map_size(executors) == 0,
+    do: :ok
+
+  defp ensure_executor_coverage(state, plan) do
+    missing =
+      plan.steps
+      |> Map.values()
+      |> Enum.map(& &1.kind)
+      |> Enum.uniq()
+      |> Enum.reject(&Map.has_key?(state.executors, &1))
+      |> Enum.sort()
+
+    if missing == [], do: :ok, else: {:error, {:unsupported_step_kinds, missing}}
+  end
 
   defp normalize_executor(nil), do: {:ok, nil}
 

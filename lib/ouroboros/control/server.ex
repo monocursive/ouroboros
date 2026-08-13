@@ -5,12 +5,32 @@ defmodule Ouroboros.Control.Server do
   The server checkpoints intent before each external callback or scheduler
   submission. Planning and evaluation request IDs and orchestration plan IDs
   are deterministic, so restart recovery resumes the same logical operation.
+
+  ## What a model may express
+
+  A planned step carries an execution objective and graph dependencies. Nothing
+  else: no provider, worker, workspace, sandbox, or approval policy, and no
+  metadata. That is the trust boundary, and it is enforced here on the accepted
+  plan rather than only in the prompt.
+
+  `config :ouroboros, :control_allow_forge_steps` (default `false`) widens it by
+  exactly one shape. When it is on, a step may declare `kind: "forge"` and carry
+  an input of exactly `module` and `source_path`, validated against the same
+  rules `Ouroboros.Orchestration.Plan` applies. The coding-step shape is
+  untouched either way, and with the flag off a `kind` field is an unknown field
+  like any other.
+
+  Enabling the flag lets a plan *express* a forge step. It grants no authority to
+  deploy: the forged artifact is still signed by whatever `:forge_signer` names —
+  `Signer.Deny` unless an operator changed it — and still verified against each
+  target node's trusted signers. A scheduler with no forge executor refuses the
+  plan outright.
   """
 
   use GenServer
 
   alias Ouroboros.Control.{Run, Store}
-  alias Ouroboros.Orchestration.{Plan, Scheduler, Serializable}
+  alias Ouroboros.Orchestration.{Plan, Scheduler, Serializable, Step}
 
   @terminal_plan_statuses [:completed, :failed, :blocked, :cancelled]
   @allowed_options [:name, :store, :scheduler, :planner, :evaluator, :poll_interval]
@@ -791,7 +811,7 @@ defmodule Ouroboros.Control.Server do
   end
 
   defp build_plan(run_id, revision, planner_request_id, specs) do
-    fingerprint = Run.fingerprint(specs)
+    fingerprint = Run.fingerprint(fingerprint_specs(specs))
 
     Plan.new(Run.plan_id(run_id, revision), specs,
       metadata: %{
@@ -801,6 +821,23 @@ defmodule Ouroboros.Control.Server do
         planner_request_id: planner_request_id
       }
     )
+  end
+
+  # The fingerprint covers exactly what is recomputed from the durable plan:
+  # id, dependencies, input, and metadata. Kind is deliberately not part of it.
+  # A control-produced plan's kind is already determined by the input schema its
+  # validation enforced — a coding step cannot carry a forge input, or the other
+  # way round — so including it would add no discrimination while changing the
+  # fingerprint of every run checkpointed by an earlier build.
+  defp fingerprint_specs(specs) do
+    Enum.map(specs, fn spec ->
+      %{
+        id: spec.id,
+        dependencies: spec.dependencies,
+        input: spec.input,
+        metadata: spec.metadata
+      }
+    end)
   end
 
   defp owned_plan?(%Plan{} = plan, run) do
@@ -850,42 +887,82 @@ defmodule Ouroboros.Control.Server do
 
   defp normalize_step_spec(spec) when is_map(spec) do
     allowed = ["id", "dependencies", "input", "metadata", :id, :dependencies, :input, :metadata]
+    allowed = if forge_steps_allowed?(), do: ["kind", :kind | allowed], else: allowed
 
     if Enum.any?(Map.keys(spec), &(&1 not in allowed)) do
       {:error, :unknown_step_field}
     else
-      {:ok,
-       %{
-         id: field(spec, :id),
-         dependencies: field(spec, :dependencies, []),
-         input: field(spec, :input),
-         metadata: field(spec, :metadata, %{})
-       }}
+      with {:ok, kind} <- Step.normalize_kind(field(spec, :kind)) do
+        normalized = %{
+          id: field(spec, :id),
+          dependencies: field(spec, :dependencies, []),
+          input: field(spec, :input),
+          metadata: field(spec, :metadata, %{})
+        }
+
+        {:ok, put_step_kind(normalized, kind)}
+      end
     end
   end
 
   defp normalize_step_spec(_other), do: {:error, :invalid_step}
 
+  # A coding step's spec keeps exactly the shape it has always had, so the plan
+  # fingerprint of an in-flight run written by an earlier build still matches
+  # after this upgrade. Only a non-default kind adds a key.
+  defp put_step_kind(spec, :coding), do: spec
+  defp put_step_kind(spec, kind), do: Map.put(spec, :kind, kind)
+
   defp validate_executable_steps(specs) do
     Enum.reduce_while(specs, :ok, fn spec, :ok ->
-      input = spec.input
-      objective = if is_map(input), do: field(input, :objective)
-
-      cond do
-        not is_binary(objective) or String.trim(objective) == "" ->
-          {:halt, {:error, {:objective_required, spec.id}}}
-
-        MapSet.new(Map.keys(input)) not in [MapSet.new([:objective]), MapSet.new(["objective"])] ->
-          {:halt, {:error, {:runtime_policy_not_allowed, spec.id}}}
-
-        map_size(spec.metadata) > 0 ->
-          {:halt, {:error, {:runtime_policy_not_allowed, spec.id}}}
-
-        true ->
-          {:cont, :ok}
+      case Map.get(spec, :kind, :coding) do
+        :coding -> validate_coding_step(spec)
+        kind -> validate_planned_step(kind, spec)
       end
     end)
   end
+
+  defp validate_coding_step(spec) do
+    input = spec.input
+    objective = if is_map(input), do: field(input, :objective)
+
+    cond do
+      not is_binary(objective) or String.trim(objective) == "" ->
+        {:halt, {:error, {:objective_required, spec.id}}}
+
+      MapSet.new(Map.keys(input)) not in [MapSet.new([:objective]), MapSet.new(["objective"])] ->
+        {:halt, {:error, {:runtime_policy_not_allowed, spec.id}}}
+
+      map_size(spec.metadata) > 0 ->
+        {:halt, {:error, {:runtime_policy_not_allowed, spec.id}}}
+
+      true ->
+        {:cont, :ok}
+    end
+  end
+
+  # The gate is re-checked on the accepted plan, not only where the field was
+  # parsed, so no future normalization path can smuggle a kind past a disabled
+  # flag. Input rules are the plan's own, so both entry points agree by
+  # construction.
+  defp validate_planned_step(kind, spec) do
+    cond do
+      not forge_steps_allowed?() ->
+        {:halt, {:error, {:step_kind_not_allowed, spec.id, kind}}}
+
+      map_size(spec.metadata) > 0 ->
+        {:halt, {:error, {:runtime_policy_not_allowed, spec.id}}}
+
+      true ->
+        case Step.validate_input(kind, spec.input) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:invalid_step_input, spec.id, reason}}}
+        end
+    end
+  end
+
+  defp forge_steps_allowed?,
+    do: Application.get_env(:ouroboros, :control_allow_forge_steps, false) == true
 
   defp normalize_decision(:accept), do: {:ok, :accept, :accepted}
   defp normalize_decision({:accept, result}), do: serializable_decision(:accept, result)

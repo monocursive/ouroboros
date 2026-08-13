@@ -41,6 +41,125 @@ defmodule Ouroboros.Orchestration.PlanTest do
              ])
   end
 
+  test "builds a heterogeneous plan and defaults every step to the coding kind" do
+    assert {:ok, plan} =
+             Plan.new("self-improvement", [
+               %{id: "write", input: %{objective: "Write the capability"}},
+               %{
+                 id: "build",
+                 kind: :forge,
+                 dependencies: ["write"],
+                 input: %{
+                   module: "Ouroboros.Capability.Echo",
+                   source_path: "capabilities/echo.ex"
+                 }
+               }
+             ])
+
+    assert plan.steps["write"].kind == :coding
+    assert plan.steps["build"].kind == :forge
+    assert plan.steps["build"].state == :pending
+    assert Plan.validate(plan) == :ok
+
+    # A model-normalized plan arrives with string keys and a string kind. No new
+    # atom is created for either.
+    assert {:ok, from_json} =
+             Plan.new("from-json", [
+               %{
+                 id: "build",
+                 kind: "forge",
+                 input: %{
+                   "module" => "Ouroboros.Capability.Echo",
+                   "source_path" => "capabilities/echo.ex"
+                 }
+               }
+             ])
+
+    assert from_json.steps["build"].kind == :forge
+  end
+
+  test "rejects unknown step kinds" do
+    assert {:error, {:invalid_step_kind, "a", {:unknown_step_kind, :deploy}}} =
+             Plan.new("p", [%{id: "a", kind: :deploy}])
+
+    assert {:error, {:invalid_step_kind, "a", {:unknown_step_kind, "forge "}}} =
+             Plan.new("p", [%{id: "a", kind: "forge "}])
+
+    assert {:error, {:invalid_step_kind, "a", {:unknown_step_kind, false}}} =
+             Plan.new("p", [%{id: "a", kind: false}])
+  end
+
+  test "holds forge steps to the capability namespace and a contained relative path" do
+    assert {:error, {:invalid_step_input, "a", {:invalid_forge_input, [:module]}}} =
+             Plan.new("p", [%{id: "a", kind: :forge, input: %{module: "Ouroboros.Capability.X"}}])
+
+    assert {:error, {:invalid_step_input, "a", {:invalid_forge_input, keys}}} =
+             Plan.new("p", [
+               %{
+                 id: "a",
+                 kind: :forge,
+                 input: %{
+                   module: "Ouroboros.Capability.X",
+                   source_path: "x.ex",
+                   nodes: [:node@host]
+                 }
+               }
+             ])
+
+    assert keys == [:module, :nodes, :source_path]
+
+    for module <- [
+          "Ouroboros.Upgrade.Forge.Sneak",
+          "Ouroboros.Control.Server",
+          "Elixir.Ouroboros.Capability.X",
+          "Ouroboros.Capability",
+          "ouroboros.capability.x",
+          :"Ouroboros.Capability.X"
+        ] do
+      assert {:error, {:invalid_step_input, "a", {:invalid_capability_module, ^module}}} =
+               Plan.new("p", [
+                 %{id: "a", kind: :forge, input: %{module: module, source_path: "x.ex"}}
+               ])
+    end
+
+    for path <- [
+          "../outside.ex",
+          "capabilities/../../outside.ex",
+          "/etc/passwd",
+          "./x.ex",
+          "capabilities//x.ex",
+          "capabilities/",
+          "",
+          <<"x", 0, ".ex">>,
+          :x
+        ] do
+      assert {:error, {:invalid_step_input, "a", {:invalid_source_path, ^path}}} =
+               Plan.new("p", [
+                 %{
+                   id: "a",
+                   kind: :forge,
+                   input: %{module: "Ouroboros.Capability.X", source_path: path}
+                 }
+               ])
+    end
+
+    # A persisted step is held to the same schema, so a snapshot that was edited
+    # under the store cannot describe work the plan API would have refused.
+    {:ok, plan} =
+      Plan.new("p", [
+        %{
+          id: "a",
+          kind: :forge,
+          input: %{module: "Ouroboros.Capability.X", source_path: "x.ex"}
+        }
+      ])
+
+    tampered =
+      put_in(plan.steps["a"].input, %{module: "Kernel", source_path: "../../etc/passwd"})
+
+    assert {:error, {:invalid_step, "a"}} = Plan.validate(tampered)
+  end
+
   test "rejects runtime handles nested in public plan data" do
     assert {:error, {:unserializable_input, "a"}} =
              Plan.new("p", [%{id: "a", input: %{nested: [self()]}}])

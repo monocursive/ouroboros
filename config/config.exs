@@ -25,6 +25,24 @@ config :ouroboros,
   # hold a supervised task and an in-flight audit entry, so every one of them ends.
   effect_timeout: 120_000,
   control_enabled: false,
+  # A durable plan is heterogeneous: every step declares a kind and the scheduler
+  # resolves one executor per kind. `:orchestration_executors` names them
+  # explicitly and overrides what the application derives from
+  # `:orchestration_team_id` (the `:coding` executor) and
+  # `:orchestration_forge_options` (the `:forge` executor). A kind with no
+  # executor is a kind the scheduler refuses to accept plans for, so leaving
+  # forge options empty keeps forge steps unschedulable.
+  orchestration_executors: %{},
+  # Trusted runtime policy for `Ouroboros.Orchestration.ForgeExecutor`: which
+  # workspace source is read from, which nodes receive the capability, and which
+  # signer identity is requested. A forge step supplies only a module name and a
+  # workspace-relative path. Empty means no forge executor.
+  orchestration_forge_options: [],
+  # Whether a planner may express a forge step at all. This widens what a model
+  # can *say*, never what it can deploy: the artifact is still signed by
+  # `:forge_signer` (`Signer.Deny` by default) and still verified against each
+  # target node's trusted signers.
+  control_allow_forge_steps: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.
   session_call_timeout: 30_000,

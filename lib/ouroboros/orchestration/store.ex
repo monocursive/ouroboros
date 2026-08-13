@@ -105,16 +105,30 @@ defmodule Ouroboros.Orchestration.Store do
     end
   end
 
+  # A checkpoint written by an earlier build is upgraded to this build's shape
+  # before it is validated, and only then. `Plan.upgrade/1` fills in defaults it
+  # can prove (a step with no kind has always been `:coding`) and refuses shapes
+  # it cannot interpret, so a checkpoint from a *newer* build still fails closed
+  # rather than being read as something it is not.
   defp validate_loaded(plans, adapter, opts, key) do
-    valid? =
-      Enum.all?(plans, fn
-        {id, %Plan{id: id} = plan} when is_binary(id) -> Plan.validate(plan) == :ok
-        _other -> false
+    upgraded =
+      Enum.reduce_while(plans, {:ok, %{}}, fn
+        {id, %Plan{id: id} = plan}, {:ok, acc} when is_binary(id) ->
+          with {:ok, upgraded} <- Plan.upgrade(plan),
+               :ok <- Plan.validate(upgraded) do
+            {:cont, {:ok, Map.put(acc, id, upgraded)}}
+          else
+            {:error, _reason} -> {:halt, :invalid}
+          end
+
+        _other, {:ok, _acc} ->
+          {:halt, :invalid}
       end)
 
-    if valid?,
-      do: {:ok, %{adapter: adapter, opts: opts, key: key, plans: plans}},
-      else: {:stop, :invalid_orchestration_checkpoint}
+    case upgraded do
+      {:ok, plans} -> {:ok, %{adapter: adapter, opts: opts, key: key, plans: plans}}
+      :invalid -> {:stop, :invalid_orchestration_checkpoint}
+    end
   end
 
   defp persist(plans, state) do

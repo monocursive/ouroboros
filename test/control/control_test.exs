@@ -203,6 +203,148 @@ defmodule Ouroboros.ControlTest do
              ])
   end
 
+  test "a planned forge step is refused while the control plane disallows it", context do
+    refute Application.get_env(:ouroboros, :control_allow_forge_steps, false)
+
+    forge_step = %{
+      "id" => "build",
+      "kind" => "forge",
+      "dependencies" => [],
+      "input" => %{
+        "module" => "Ouroboros.Capability.Planned",
+        "source_path" => "capabilities/planned.ex"
+      }
+    }
+
+    # The step field itself is unknown while the flag is off, which is the same
+    # refusal any other unrecognized field gets.
+    assert {:error, :unknown_step_field} =
+             Server.normalize_plan("blocked", 0, Run.request_id("blocked", :plan, 0), %{
+               "steps" => [forge_step]
+             })
+
+    start_control(context, plans: %{{"blocked", 0} => %{"steps" => [forge_step]}}, decisions: %{})
+
+    assert {:ok, %Run{status: :planning}} =
+             Server.submit(context.server, "blocked", "forge without permission", 0)
+
+    blocked = await_run(context.server, "blocked", &(&1.status == :failed))
+    assert blocked.failure == {:invalid_plan, :unknown_step_field}
+    assert {:ok, []} = Scheduler.list(context.scheduler)
+  end
+
+  test "an allowed forge step is validated, submitted, and dispatched as a forge step",
+       context do
+    allow_forge_steps!()
+
+    stop_supervised!(Scheduler)
+
+    start_supervised!(
+      {Scheduler,
+       name: context.scheduler,
+       store: context.orchestration_store,
+       executors: %{
+         coding: {Ouroboros.Orchestration.TestExecutor, test_pid: self()},
+         forge: {Ouroboros.Orchestration.TestExecutor, test_pid: self()}
+       }}
+    )
+
+    request_id = Run.request_id("forge-run", :plan, 0)
+
+    output = %{
+      "steps" => [
+        %{
+          "id" => "author",
+          "dependencies" => [],
+          "input" => %{"objective" => "Write the capability source"}
+        },
+        %{
+          "id" => "build",
+          "kind" => "forge",
+          "dependencies" => ["author"],
+          "input" => %{
+            "module" => "Ouroboros.Capability.Planned",
+            "source_path" => "capabilities/planned.ex"
+          }
+        }
+      ]
+    }
+
+    assert {:ok, normalized} = Server.normalize_plan("forge-run", 0, request_id, output)
+    assert normalized.steps["author"].kind == :coding
+    assert normalized.steps["build"].kind == :forge
+    assert Plan.validate(normalized) == :ok
+
+    # The same per-kind rules the plan applies are applied to the accepted plan:
+    # runtime policy stays out of a forge step exactly as it stays out of a
+    # coding step.
+    assert {:error, {:invalid_step_input, "build", {:invalid_capability_module, "Kernel"}}} =
+             Server.normalize_plan("forge-run", 0, request_id, [
+               %{
+                 id: "build",
+                 kind: "forge",
+                 input: %{module: "Kernel", source_path: "capabilities/planned.ex"}
+               }
+             ])
+
+    assert {:error, {:invalid_step_input, "build", {:invalid_source_path, "../escape.ex"}}} =
+             Server.normalize_plan("forge-run", 0, request_id, [
+               %{
+                 id: "build",
+                 kind: "forge",
+                 input: %{
+                   module: "Ouroboros.Capability.Planned",
+                   source_path: "../escape.ex"
+                 }
+               }
+             ])
+
+    assert {:error, {:runtime_policy_not_allowed, "build"}} =
+             Server.normalize_plan("forge-run", 0, request_id, [
+               %{
+                 id: "build",
+                 kind: "forge",
+                 input: %{
+                   module: "Ouroboros.Capability.Planned",
+                   source_path: "capabilities/planned.ex"
+                 },
+                 metadata: %{nodes: [:node@host]}
+               }
+             ])
+
+    start_control(context, plans: %{{"forge-run", 0} => output}, decisions: %{})
+
+    assert {:ok, %Run{status: :planning}} =
+             Server.submit(context.server, "forge-run", "forge a capability", 0)
+
+    run = await_run(context.server, "forge-run", &(&1.status in [:running, :failed]))
+    assert run.status == :running, inspect(run.failure)
+    assert {:ok, plan} = Scheduler.get(context.scheduler, run.current_plan_id)
+    assert plan.steps["build"].kind == :forge
+
+    assert plan.steps["build"].input == %{
+             "module" => "Ouroboros.Capability.Planned",
+             "source_path" => "capabilities/planned.ex"
+           }
+
+    assert_receive {:execution_started, authoring}
+    assert authoring.step_id == "author"
+    assert authoring.kind == :coding
+
+    assert {:ok, _plan} =
+             Scheduler.complete(
+               context.scheduler,
+               run.current_plan_id,
+               "author",
+               authoring.token,
+               :authored
+             )
+
+    assert_receive {:execution_started, forge}
+    assert forge.step_id == "build"
+    assert forge.kind == :forge
+  end
+
   test "JidoAI correlates requests to the logical control run" do
     request_id = Run.request_id("logical-run", :plan, 0)
 
@@ -783,6 +925,19 @@ defmodule Ouroboros.ControlTest do
 
   defp start_control(context, adapter_opts) do
     start_supervised!({Server, control_opts(context, adapter_opts)})
+  end
+
+  defp allow_forge_steps! do
+    previous = Application.get_env(:ouroboros, :control_allow_forge_steps)
+    Application.put_env(:ouroboros, :control_allow_forge_steps, true)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:ouroboros, :control_allow_forge_steps)
+      else
+        Application.put_env(:ouroboros, :control_allow_forge_steps, previous)
+      end
+    end)
   end
 
   defp start_blocking_control(context, adapter_opts) do

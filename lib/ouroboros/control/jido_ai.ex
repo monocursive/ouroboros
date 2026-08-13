@@ -11,6 +11,14 @@ defmodule Ouroboros.Control.JidoAI do
   deduplication, but ReqLLM does not promise provider-side exactly-once calls.
   A VM crash after a response and before the next checkpoint can repeat and
   bill the same planning or evaluation request during recovery.
+
+  The planning schema admits coding steps only, each with a nonblank objective
+  and nothing else. When `config :ouroboros, :control_allow_forge_steps` is
+  enabled it gains a second, separate branch for forge steps carrying exactly a
+  capability module and a workspace-relative source path. The coding branch is
+  unchanged by that flag, both branches refuse unrecognized keys, and the
+  server re-validates whatever comes back — a schema is a request, not a
+  guarantee.
   """
 
   @behaviour Ouroboros.Control.Planner
@@ -53,38 +61,29 @@ defmodule Ouroboros.Control.JidoAI do
   defp planning_params(objective, context, opts) do
     previous = summarize_previous(context.previous_plan)
 
-    prompt = """
-    Objective: #{objective}
-    Revision: #{context.revision}
-    Stable request id: #{context.request_id}
-    Evaluator feedback: #{inspect(context.feedback)}
-    Previous plan summary: #{inspect(previous)}
+    prompt =
+      """
+      Objective: #{objective}
+      Revision: #{context.revision}
+      Stable request id: #{context.request_id}
+      Evaluator feedback: #{inspect(context.feedback)}
+      Previous plan summary: #{inspect(previous)}
 
-    Return a dependency DAG. Each step id must match
-    [A-Za-z0-9][A-Za-z0-9._:-]{0,127}. Dependencies must reference step ids in
-    this same response. Every step input must contain a nonblank `objective`
-    describing that step's executable work and must contain no other fields.
-    Metadata must be empty if present. Do not choose providers, models, worker
-    IDs, sandboxes, or coding/runtime options; those are injected by runtime
-    policy. Keep the graph acyclic and within
-    #{Keyword.get(opts, :max_steps, 12)} steps.
-    """
+      Return a dependency DAG. Each step id must match
+      [A-Za-z0-9][A-Za-z0-9._:-]{0,127}. Dependencies must reference step ids in
+      this same response. Every step input must contain a nonblank `objective`
+      describing that step's executable work and must contain no other fields.
+      Metadata must be empty if present. Do not choose providers, models, worker
+      IDs, sandboxes, or coding/runtime options; those are injected by runtime
+      policy. Keep the graph acyclic and within
+      #{Keyword.get(opts, :max_steps, 12)} steps.
+      """ <> forge_instructions()
 
     schema =
       Zoi.object(%{
         steps:
           Zoi.list(
-            Zoi.object(%{
-              id: Zoi.string(),
-              dependencies: Zoi.list(Zoi.string()),
-              input:
-                Zoi.object(%{objective: Zoi.string() |> Zoi.min(1)},
-                  unrecognized_keys: :error
-                ),
-              metadata:
-                Zoi.object(%{}, unrecognized_keys: :error)
-                |> Zoi.optional()
-            }),
+            step_schema(),
             min_length: 1,
             max_length: Keyword.get(opts, :max_steps, 12)
           )
@@ -98,6 +97,69 @@ defmodule Ouroboros.Control.JidoAI do
        "Create only the requested provider-neutral orchestration DAG. Runtime policy owns all provider and coding options."
      )}
   end
+
+  # The coding branch is exactly what it was before forge steps existed, and is
+  # the only branch unless an operator opted in. The forge branch is separate
+  # rather than a widening of the coding input, so no coding step can acquire a
+  # field by being described alongside one.
+  defp step_schema do
+    coding = coding_step_schema()
+
+    if forge_steps_allowed?(), do: Zoi.union([coding, forge_step_schema()]), else: coding
+  end
+
+  defp coding_step_schema do
+    Zoi.object(%{
+      id: Zoi.string(),
+      dependencies: Zoi.list(Zoi.string()),
+      input:
+        Zoi.object(%{objective: Zoi.string() |> Zoi.min(1)},
+          unrecognized_keys: :error
+        ),
+      metadata:
+        Zoi.object(%{}, unrecognized_keys: :error)
+        |> Zoi.optional()
+    })
+  end
+
+  defp forge_step_schema do
+    Zoi.object(
+      %{
+        id: Zoi.string(),
+        kind: Zoi.literal("forge"),
+        dependencies: Zoi.list(Zoi.string()),
+        input:
+          Zoi.object(
+            %{
+              module: Zoi.string() |> Zoi.min(1),
+              source_path: Zoi.string() |> Zoi.min(1)
+            },
+            unrecognized_keys: :error
+          )
+      },
+      unrecognized_keys: :error
+    )
+  end
+
+  defp forge_instructions do
+    if forge_steps_allowed?() do
+      """
+
+      A step may instead be a build step. A build step sets "kind" to "forge",
+      has no objective, and its input contains exactly `module`, an
+      `Ouroboros.Capability.`-prefixed module name that does not exist yet, and
+      `source_path`, a workspace-relative path to the Elixir source that defines
+      exactly that module. Do not choose nodes, signers, or workspaces; runtime
+      policy owns them. Use a build step only when new code must be compiled and
+      deployed, and depend on it from any step that needs the capability.
+      """
+    else
+      ""
+    end
+  end
+
+  defp forge_steps_allowed?,
+    do: Application.get_env(:ouroboros, :control_allow_forge_steps, false) == true
 
   defp evaluation_params(%{plan: %Plan{} = plan} = context, opts) do
     prompt = """

@@ -4,6 +4,20 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
   alias Ouroboros.Orchestration.{Plan, Scheduler, Store}
   alias Ouroboros.Orchestration.TestExecutor
 
+  defmodule KindExecutor do
+    @behaviour Ouroboros.Orchestration.Executor
+
+    @impl true
+    def start(execution, _scheduler, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:kind_executor_started, Keyword.fetch!(opts, :tag), execution}
+      )
+
+      :ok
+    end
+  end
+
   setup do
     {:ok, _applications} = Application.ensure_all_started(:jido)
 
@@ -249,6 +263,156 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
              Store.put(context.store, conflicting)
 
     assert {:ok, ^current} = Store.get(context.store, "versioned")
+  end
+
+  test "a snapshot written before step kinds existed loads as coding", context do
+    plan = plan!("legacy", [%{id: "one"}, %{id: "two", dependencies: ["one"]}])
+
+    legacy = %{
+      plan
+      | steps: Map.new(plan.steps, fn {id, step} -> {id, Map.delete(step, :kind)} end)
+    }
+
+    refute Map.has_key?(legacy.steps["one"], :kind)
+
+    stop_supervised!(Store)
+
+    assert :ok =
+             Jido.Storage.ETS.put_checkpoint(context.key, %{"legacy" => legacy},
+               table: context.table
+             )
+
+    start_supervised!(
+      {Store,
+       name: context.store, storage: {Jido.Storage.ETS, table: context.table}, key: context.key}
+    )
+
+    assert {:ok, loaded} = Store.get(context.store, "legacy")
+    assert loaded.steps["one"].kind == :coding
+    assert loaded.steps["two"].kind == :coding
+
+    # The upgraded aggregate is a normal current-shape plan: it validates, and a
+    # transition on top of it is accepted at the next version.
+    assert Plan.validate(loaded) == :ok
+    assert :ok = Store.put(context.store, %{loaded | version: loaded.version + 1})
+  end
+
+  test "a snapshot naming a kind this build does not know fails closed", context do
+    plan = plan!("future", [%{id: "one"}])
+
+    future = %{
+      plan
+      | steps: Map.new(plan.steps, fn {id, step} -> {id, Map.put(step, :kind, :teleport)} end)
+    }
+
+    stop_supervised!(Store)
+
+    assert :ok =
+             Jido.Storage.ETS.put_checkpoint(context.key, %{"future" => future},
+               table: context.table
+             )
+
+    test_pid = self()
+
+    spawn(fn ->
+      Process.flag(:trap_exit, true)
+
+      result =
+        Store.start_link(
+          name: nil,
+          storage: {Jido.Storage.ETS, table: context.table},
+          key: context.key
+        )
+
+      send(test_pid, {:future_store_start, result})
+    end)
+
+    assert_receive {:future_store_start, {:error, :invalid_orchestration_checkpoint}}
+  end
+
+  test "submit refuses a plan whose kinds this scheduler cannot execute", context do
+    start_scheduler(context, executor: true)
+
+    forge_plan =
+      plan!("forge-only", [
+        %{
+          id: "build",
+          kind: :forge,
+          input: %{module: "Ouroboros.Capability.Echo", source_path: "capabilities/echo.ex"}
+        }
+      ])
+
+    assert {:error, {:unsupported_step_kinds, [:forge]}} =
+             Scheduler.submit(context.scheduler, forge_plan)
+
+    # Refused before the aggregate was persisted, so nothing has to be cleaned up.
+    assert {:ok, []} = Scheduler.list(context.scheduler)
+    assert :not_found = Store.get(context.store, "forge-only")
+
+    assert {:ok, _plan} =
+             Scheduler.submit(context.scheduler, plan!("coding-only", [%{id: "work"}]))
+  end
+
+  test "a scheduler with no executors accepts any kind and dispatches nothing", context do
+    start_scheduler(context)
+
+    plan =
+      plan!("manual-forge", [
+        %{
+          id: "build",
+          kind: :forge,
+          input: %{module: "Ouroboros.Capability.Echo", source_path: "capabilities/echo.ex"}
+        }
+      ])
+
+    assert {:ok, _plan} = Scheduler.submit(context.scheduler, plan)
+    assert {:ok, execution} = Scheduler.start(context.scheduler, "manual-forge", "build")
+    assert execution.kind == :forge
+
+    assert {:ok, completed} =
+             Scheduler.complete(
+               context.scheduler,
+               "manual-forge",
+               "build",
+               execution.token,
+               :done
+             )
+
+    assert completed.status == :completed
+  end
+
+  test "dispatch resolves the executor from the step kind", context do
+    start_scheduler(context,
+      executors: %{
+        coding: {KindExecutor, test_pid: self(), tag: :coding_adapter},
+        forge: {KindExecutor, test_pid: self(), tag: :forge_adapter}
+      }
+    )
+
+    plan =
+      plan!("mixed", [
+        %{id: "code", input: %{objective: "write it"}},
+        %{
+          id: "build",
+          kind: :forge,
+          dependencies: ["code"],
+          input: %{module: "Ouroboros.Capability.Echo", source_path: "capabilities/echo.ex"}
+        }
+      ])
+
+    assert {:ok, _plan} = Scheduler.submit(context.scheduler, plan)
+
+    assert_receive {:kind_executor_started, :coding_adapter, coding}
+    assert coding.step_id == "code"
+    assert coding.kind == :coding
+    refute_receive {:kind_executor_started, :forge_adapter, _execution}, 20
+
+    assert {:ok, _plan} =
+             Scheduler.complete(context.scheduler, "mixed", "code", coding.token, :written)
+
+    assert_receive {:kind_executor_started, :forge_adapter, forge}
+    assert forge.step_id == "build"
+    assert forge.kind == :forge
   end
 
   test "store fails closed on a corrupt checkpoint", context do

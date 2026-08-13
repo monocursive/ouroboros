@@ -5,6 +5,12 @@ defmodule Ouroboros.Orchestration.Plan do
   Plan and step IDs are caller supplied and deliberately constrained to a
   stable, transport-safe character set. `step_order` preserves deterministic
   scheduling while `steps` provides direct lookup.
+
+  A plan is heterogeneous: each step declares a `:kind` (`:coding` by default,
+  `:forge` for a compile-and-deploy of one capability module) and its input is
+  validated against that kind's schema here, before anything is persisted or
+  dispatched. `Ouroboros.Orchestration.Step` owns the per-kind rules so the
+  control plane can apply exactly the same ones to a model-produced plan.
   """
 
   alias Ouroboros.Orchestration.{Serializable, Step}
@@ -103,18 +109,50 @@ defmodule Ouroboros.Orchestration.Plan do
   @spec valid_id?(term()) :: boolean()
   def valid_id?(id), do: is_binary(id) and Regex.match?(@id_regex, id)
 
+  @doc """
+  Restores a plan decoded from a durable snapshot.
+
+  Only step shape has changed so far: a snapshot written before `:kind` existed
+  loads as `:coding`. A kind this build does not know is refused, so an older
+  node never reinterprets a newer plan as something it can run.
+  """
+  @spec upgrade(t()) :: {:ok, t()} | {:error, term()}
+  def upgrade(%__MODULE__{} = plan) do
+    with true <- is_map(plan.steps) or {:error, :invalid_plan_steps},
+         {:ok, steps} <- upgrade_steps(plan.steps) do
+      {:ok, %{plan | steps: steps}}
+    else
+      false -> {:error, :invalid_plan}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def upgrade(_other), do: {:error, :invalid_plan}
+
+  defp upgrade_steps(steps) do
+    Enum.reduce_while(steps, {:ok, %{}}, fn {id, step}, {:ok, acc} ->
+      case Step.upgrade(step) do
+        {:ok, upgraded} -> {:cont, {:ok, Map.put(acc, id, upgraded)}}
+        {:error, reason} -> {:halt, {:error, {:invalid_step, id, reason}}}
+      end
+    end)
+  end
+
   defp build_steps(specs) do
     Enum.reduce_while(specs, {:ok, %{}, []}, fn spec, {:ok, steps, order} ->
       with {:ok, spec} <- normalize_spec(spec),
            id <- Map.get(spec, :id),
            :ok <- validate_id(id),
            :ok <- ensure_unique_step_id(steps, id),
+           {:ok, kind} <- validate_kind(Map.get(spec, :kind), id),
            {:ok, dependencies} <- validate_dependency_list(Map.get(spec, :dependencies, [])),
            {:ok, metadata} <- validate_metadata(Map.get(spec, :metadata, %{})),
            input <- Map.get(spec, :input),
-           true <- Serializable.valid?(input) or {:error, {:unserializable_input, id}} do
+           true <- Serializable.valid?(input) or {:error, {:unserializable_input, id}},
+           :ok <- validate_step_input(kind, input, id) do
         step = %Step{
           id: id,
+          kind: kind,
           dependencies: dependencies,
           input: input,
           metadata: metadata
@@ -125,6 +163,20 @@ defmodule Ouroboros.Orchestration.Plan do
         {:error, _reason} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp validate_kind(kind, id) do
+    case Step.normalize_kind(kind) do
+      {:ok, kind} -> {:ok, kind}
+      {:error, reason} -> {:error, {:invalid_step_kind, id, reason}}
+    end
+  end
+
+  defp validate_step_input(kind, input, id) do
+    case Step.validate_input(kind, input) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_step_input, id, reason}}
+    end
   end
 
   defp normalize_spec(spec) when is_map(spec), do: {:ok, spec}
