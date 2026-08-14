@@ -27,6 +27,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 use ratatui::Frame;
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme;
 
@@ -390,13 +391,35 @@ fn one_line(text: &str) -> String {
     truncate(flattened.trim(), 160)
 }
 
+/// Cuts `text` to `limit` *terminal cells*, not characters.
+///
+/// A CJK ideograph or an emoji occupies two cells, and a combining mark occupies none.
+/// Counting characters here would hand the renderer a string twice as wide as the pane it
+/// was measured for, which ratatui then clips — so the right half of a Japanese path or a
+/// filename with an emoji in it would simply not be drawn.
 pub fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
+    if text.width() <= limit {
         return text.to_string();
     }
 
-    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
-    format!("{kept}…")
+    // The ellipsis is itself one cell.
+    let budget = limit.saturating_sub(1);
+    let mut kept = String::new();
+    let mut used = 0;
+
+    for character in text.chars() {
+        let cells = character.width().unwrap_or(0);
+
+        if used + cells > budget {
+            break;
+        }
+
+        kept.push(character);
+        used += cells;
+    }
+
+    kept.push('…');
+    kept
 }
 
 #[cfg(test)]
@@ -558,6 +581,27 @@ mod tests {
         assert!(!text.summary.contains('\n'));
         assert!(text.summary.chars().count() <= 160);
         assert!(text.summary.ends_with('…'));
+    }
+
+    #[test]
+    fn truncation_is_measured_in_terminal_cells() {
+        // Ten ideographs are twenty cells wide. A character-counting cut would hand the
+        // renderer a string twice the width it was asked for, and the pane would clip it.
+        let wide = "設定を確認してから".to_string();
+        assert_eq!(wide.width(), 18);
+
+        let cut = truncate(&wide, 10);
+        assert!(cut.width() <= 10, "{cut:?} is {} cells", cut.width());
+        assert!(cut.ends_with('…'));
+
+        // Combining marks cost nothing, so nothing is cut off a string that already fits.
+        let combining = "e\u{301}".repeat(6);
+        assert_eq!(truncate(&combining, 6), combining);
+
+        // Anything that fits is returned whole, ellipsis and all.
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("🚀🚀🚀", 6), "🚀🚀🚀");
+        assert!(truncate("🚀🚀🚀", 5).width() <= 5);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Event, EventType, Plane, SessionInfo};
 
@@ -444,7 +445,7 @@ fn event_style(kind: &EventType) -> Style {
 
 fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
     let text = super::tree::truncate(text, width.saturating_sub(8));
-    let rule = width.saturating_sub(text.chars().count() + 6);
+    let rule = width.saturating_sub(text.width() + 6);
 
     Line::from(vec![
         Span::styled("──── ".to_string(), Style::default().fg(colour)),
@@ -459,6 +460,9 @@ fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'sta
 /// Wrapping done here rather than by `Paragraph` so the scroll offset counts the same
 /// lines the reader sees. A transcript whose scroll position is a guess is a transcript
 /// that jumps.
+///
+/// Measured in terminal cells, like everything else this client lays out by hand: a line
+/// of CJK counted by character is twice as wide as the pane it was measured for.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -472,7 +476,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         for word in source.split(' ') {
             if current.is_empty() {
                 current.push_str(word);
-            } else if current.chars().count() + 1 + word.chars().count() <= width {
+            } else if current.width() + 1 + word.width() <= width {
                 current.push(' ');
                 current.push_str(word);
             } else {
@@ -480,12 +484,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
                 current.push_str(word);
             }
 
-            // A single word longer than the pane is cut rather than allowed to overflow.
-            while current.chars().count() > width {
-                let head: String = current.chars().take(width).collect();
-                let tail: String = current.chars().skip(width).collect();
-                lines.push(head);
-                current = tail;
+            // A single word wider than the pane is cut rather than allowed to overflow.
+            while current.width() > width {
+                let split = cell_split(&current, width);
+                let tail = current.split_off(split);
+                lines.push(std::mem::replace(&mut current, tail));
             }
         }
 
@@ -493,6 +496,23 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     }
 
     lines
+}
+
+/// The byte offset at which `text` has occupied as many cells as will fit in `width`.
+fn cell_split(text: &str, width: usize) -> usize {
+    let mut used = 0;
+
+    for (at, character) in text.char_indices() {
+        let cells = character.width().unwrap_or(0);
+
+        if used + cells > width {
+            return at;
+        }
+
+        used += cells;
+    }
+
+    text.len()
 }
 
 fn composer(frame: &mut Frame, area: Rect, app: &App) {

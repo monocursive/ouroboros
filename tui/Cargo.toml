@@ -35,6 +35,11 @@ serde_json = "1"
 # would make the written file's key order depend on an index map rather than on the
 # structs below, and a config this client rewrites should diff as a one-line change.
 toml = "0.9"
+# The same two crates `ratatui` measures and segments with, named directly because this
+# client wraps and truncates its own text: a transcript whose scroll offset counts
+# characters where the terminal counts cells is a transcript that clips CJK and emoji.
+unicode-segmentation = "1"
+unicode-width = "0.2"
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "net",
