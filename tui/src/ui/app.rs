@@ -1221,6 +1221,11 @@ pub struct App {
     /// know where that runtime keeps its files, and a local path printed under a remote
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
+    /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
+    /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
+    /// advertise the binding only where it exists, because in every other terminal that
+    /// keystroke sends the message.
+    pub keyboard_enhanced: bool,
     /// The first-class harness composer before a session exists.
     pub home_draft: Editor,
     pub home_pending: bool,
@@ -1269,6 +1274,7 @@ impl App {
             config: Config::default(),
             config_path: None,
             data_dir: None,
+            keyboard_enhanced: false,
             home_draft: Editor::default(),
             home_pending: false,
             home_error: None,

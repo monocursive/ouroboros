@@ -163,6 +163,10 @@ impl Editor {
                     EditorAction::Cancel
                 }
             }
+            // Only reachable where the terminal reports the modifier at all: without the
+            // kitty keyboard protocol, `Shift+Enter` arrives as a bare `Enter` and submits.
+            // The footers advertise it on exactly that condition; `Ctrl+J` below is the
+            // newline every terminal can send.
             KeyCode::Enter if shift || alt => {
                 self.insert("\n");
                 EditorAction::None

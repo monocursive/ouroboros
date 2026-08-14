@@ -37,13 +37,18 @@ pub mod view;
 
 use std::io::{self, IsTerminal, Stdout};
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, Clear, ClearType,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
@@ -149,6 +154,21 @@ pub struct Screen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
+/// Whether this process pushed the keyboard-enhancement flags and the terminal took them.
+///
+/// A process-wide atomic rather than state on [`Screen`], because [`restore`] runs from the
+/// panic hook, which has no handle on anything.
+static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
+
+/// Whether this terminal can tell `Shift+Enter` from `Enter`.
+///
+/// Without the kitty protocol the two are the same bytes — Terminal.app, iTerm2's default
+/// profile, and tmux without passthrough all send a bare `CR` for both. A footer that
+/// advertised `Shift+Enter` there would be telling someone to press send.
+pub fn keyboard_enhanced() -> bool {
+    ENHANCED_KEYBOARD.load(Ordering::SeqCst)
+}
+
 impl Screen {
     /// Whether stdout is something this client could take over, asked without taking it.
     ///
@@ -184,6 +204,22 @@ impl Screen {
             .execute(EnableBracketedPaste)
             .context("enabling bracketed paste")?;
 
+        // Asked rather than assumed, and only claimed where the terminal answered yes: the
+        // composer advertises `Shift+Enter` for a newline, and in a terminal without this
+        // protocol that keystroke is indistinguishable from `Enter` and would send.
+        //
+        // Not an error when it is refused. A terminal that does not speak the kitty
+        // protocol is an ordinary terminal, and `Ctrl+J` is the binding that always works.
+        if matches!(supports_keyboard_enhancement(), Ok(true))
+            && io::stdout()
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                ))
+                .is_ok()
+        {
+            ENHANCED_KEYBOARD.store(true, Ordering::SeqCst);
+        }
+
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
             .context("taking over the terminal")?;
 
@@ -204,6 +240,14 @@ impl Drop for Screen {
 }
 
 fn restore() {
+    // Popped before the screen is left, and exactly as many times as it was pushed — the
+    // terminal keeps a stack, and a process that exited without unwinding its own entry
+    // would leave the operator's shell reporting keys the way this client wanted them.
+    // `swap` because the panic hook and `Drop` can both reach here.
+    if ENHANCED_KEYBOARD.swap(false, Ordering::SeqCst) {
+        let _ = io::stdout().execute(PopKeyboardEnhancementFlags);
+    }
+
     let _ = disable_raw_mode();
     let _ = io::stdout()
         .execute(DisableBracketedPaste)
@@ -337,6 +381,10 @@ pub async fn run(
         Some(screen) => screen,
         None => Screen::enter()?,
     };
+
+    // The terminal has been taken over by now, so whether it distinguishes `Shift+Enter`
+    // from `Enter` is settled, and the footers can say which binding actually exists here.
+    app.keyboard_enhanced = keyboard_enhanced();
 
     // The boot renderer and the harness share one alternate screen, but they do not share
     // one frame layout. Clear the physical terminal at the handoff so sparse areas of the

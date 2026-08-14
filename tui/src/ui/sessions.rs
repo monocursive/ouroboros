@@ -590,9 +590,17 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         .and_then(|composer| composer.editor.completion())
         .is_some()
     {
-        "↑↓ choose · Tab complete · Esc close       Shift+Enter/Ctrl+J newline · Enter sends"
+        key_footer(
+            "↑↓ choose · Tab complete · Esc close",
+            app.keyboard_enhanced,
+            "sends",
+        )
     } else {
-        "@ paths · / commands · ↑ history          Shift+Enter/Ctrl+J newline · Enter sends"
+        key_footer(
+            "@ paths · / commands · ↑ history",
+            app.keyboard_enhanced,
+            "sends",
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -687,20 +695,45 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         ))
     } else if app.home_draft.completion().is_some() {
         Line::from(Span::styled(
-            "↑↓ choose · Tab complete · Esc close       Shift+Enter/Ctrl+J newline · Enter starts",
+            key_footer(
+                "↑↓ choose · Tab complete · Esc close",
+                app.keyboard_enhanced,
+                "starts",
+            ),
+            Style::default().fg(theme::MUTED),
+        ))
+    } else if ready {
+        Line::from(Span::styled(
+            key_footer(
+                "@ paths · / commands · ↑ history",
+                app.keyboard_enhanced,
+                "starts",
+            ),
             Style::default().fg(theme::MUTED),
         ))
     } else {
         Line::from(Span::styled(
-            if ready {
-                "@ paths · / commands · ↑ history          Shift+Enter/Ctrl+J newline · Enter starts"
-            } else {
-                "/ commands                                               Enter connects"
-            },
+            "/ commands                                               Enter connects",
             Style::default().fg(theme::MUTED),
         ))
     };
     frame.render_widget(Paragraph::new(footer), rows[2]);
+}
+
+/// A composer footer, naming only the newline bindings this terminal actually has.
+///
+/// `Shift+Enter` needs the kitty keyboard protocol to be distinguishable from `Enter` at
+/// all. Where it is not — Terminal.app, iTerm2's default profile, tmux without passthrough
+/// — a footer offering it would be telling someone that the key which sends their
+/// half-written message inserts a newline. `Ctrl+J` always works, so it is always named.
+fn key_footer(left: &str, enhanced: bool, verb: &str) -> String {
+    let newline = if enhanced {
+        "Shift+Enter/Ctrl+J"
+    } else {
+        "Ctrl+J"
+    };
+
+    format!("{left:<42}{newline} newline · Enter {verb}")
 }
 
 fn completion_height(editor: Option<&Editor>) -> u16 {

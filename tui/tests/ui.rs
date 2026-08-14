@@ -684,6 +684,53 @@ fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
     assert!(open_watch(&app).follow, "{}", open_watch(&app).scroll);
 }
 
+/// `Shift+Enter` is only distinguishable from `Enter` where the terminal speaks the kitty
+/// keyboard protocol. Everywhere else — Terminal.app, iTerm2's default profile, tmux
+/// without passthrough — advertising it tells someone that the key which sends their
+/// half-written message inserts a newline.
+#[test]
+fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
+    let mut app = with_open_session();
+    app.apply(key(KeyCode::Char('i')));
+
+    app.keyboard_enhanced = false;
+    let plain = render(&mut app, 120, 30);
+    assert!(
+        plain.contains("Ctrl+J newline · Enter sends"),
+        "{}",
+        plain.text()
+    );
+    assert!(!plain.contains("Shift+Enter"), "{}", plain.text());
+
+    app.keyboard_enhanced = true;
+    let enhanced = render(&mut app, 120, 30);
+    assert!(
+        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter sends"),
+        "{}",
+        enhanced.text()
+    );
+
+    // The same rule on the home composer, whose Enter starts rather than sends.
+    let mut home = shell(full_hello());
+    home.config.defaults.provider = Some("claude".into());
+
+    let plain = render(&mut home, 120, 30);
+    assert!(
+        plain.contains("Ctrl+J newline · Enter starts"),
+        "{}",
+        plain.text()
+    );
+    assert!(!plain.contains("Shift+Enter"), "{}", plain.text());
+
+    home.keyboard_enhanced = true;
+    let enhanced = render(&mut home, 120, 30);
+    assert!(
+        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter starts"),
+        "{}",
+        enhanced.text()
+    );
+}
+
 #[test]
 fn streamed_output_is_one_agent_message_when_the_final_text_arrives() {
     let mut app = with_open_session();
