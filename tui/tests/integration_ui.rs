@@ -195,8 +195,16 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     let mut notifications = connected.notifications;
     let client = connected.client.clone();
 
+    // The harness now opens where a user can begin coding immediately. The rest of this
+    // smoke still visits the runtime dashboard explicitly so it can exercise every live
+    // read surface without weakening the coding-first startup contract.
+    assert_eq!(app.tab, Tab::Sessions);
+    let screen = render(&mut app, 140, 34);
+    assert!(screen.contains("New coding session"), "{}", screen.text());
+
     // ----- tab 1: the Dashboard, from live data -------------------------------------
 
+    app.tab = Tab::Dashboard;
     app.apply(Msg::Tick);
     settle(
         &mut app,
@@ -279,9 +287,8 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
 
     let screen = render(&mut app, 140, 34);
     eprintln!("--- Sessions ---\n{}", screen.text());
-    // Wrapped across the narrow pane, so only the head of the sentence is one row.
     assert!(
-        screen.contains("no interactive sessions"),
+        screen.contains("Ready in this workspace"),
         "{}",
         screen.text()
     );
@@ -323,66 +330,33 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     // there.
     assert!(!app.has_outbound());
 
-    // ----- the new-session form, against the live provider list ---------------------
+    // Leave the deliberately invalid transcript and return to the harness home. One Esc
+    // moves from detail to list; the second closes the selected transcript.
+    for _ in 0..2 {
+        app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        )));
+    }
+    assert!(app.sessions.open.is_none());
+
+    // ----- the coding-first composer, with no provider form in the way ---------------
 
     app.apply(Msg::Key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('n'),
         crossterm::event::KeyModifiers::NONE,
     )));
 
-    settle(
-        &mut app,
-        &client,
-        &sender,
-        &mut receiver,
-        &mut notifications,
-    )
-    .await;
-
     let screen = render(&mut app, 140, 34);
-    eprintln!("--- new session ---\n{}", screen.text());
-
-    assert!(screen.contains("new session"), "{}", screen.text());
-    assert!(
-        screen.contains(&format!("(1/{})", names.len())),
-        "the form lists the providers the runtime actually serves:\n{}",
-        screen.text()
-    );
-
-    // Every live provider is reachable by cycling, and each is drawn as installed or not
-    // from its own probe.
-    let mut seen = Vec::new();
-
-    for _ in 0..names.len() {
-        let screen = render(&mut app, 140, 34);
-        let row = screen.row("provider").to_string();
-
-        let name = names
-            .iter()
-            .find(|name| row.contains(*name))
-            .unwrap_or_else(|| panic!("no live provider on the provider row: {row}"));
-
-        seen.push((*name).to_string());
-
-        app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Right,
-            crossterm::event::KeyModifiers::NONE,
-        )));
-    }
-
-    seen.sort();
-    let mut expected: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
-    expected.sort();
-
-    assert_eq!(
-        seen, expected,
-        "the form must offer every provider, no more"
-    );
+    eprintln!("--- coding composer ---\n{}", screen.text());
+    assert_eq!(app.home_draft, "n");
+    assert!(screen.contains("New coding session"), "{}", screen.text());
 
     app.apply(Msg::Key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Esc,
         crossterm::event::KeyModifiers::NONE,
     )));
+    assert!(app.home_draft.is_empty());
 
     // ----- creating a session, only where nothing real would be invoked -------------
 
@@ -478,17 +452,12 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
 
     // ----- the read tabs all draw from live answers ---------------------------------
 
-    for (digit, tab) in [
-        ('3', Tab::Agents),
-        ('4', Tab::Teams),
-        ('5', Tab::Plans),
-        ('6', Tab::Upgrade),
-        ('7', Tab::Logs),
-    ] {
-        app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(digit),
-            crossterm::event::KeyModifiers::NONE,
-        )));
+    for tab in [Tab::Agents, Tab::Teams, Tab::Plans, Tab::Upgrade, Tab::Logs] {
+        // Navigation is command-palette driven in the product shell. The palette itself
+        // is covered by deterministic interaction tests; here we select each public tab
+        // directly so this live-runtime smoke stays focused on decoding and rendering.
+        app.tab = tab;
+        app.apply(Msg::Tick);
 
         settle(
             &mut app,

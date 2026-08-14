@@ -219,8 +219,10 @@ quick-start screen — a model picker over the providers the runtime found insta
 another terminal) above a prompt box that already has focus. Type what you want done
 and press Enter: the chosen provider is stored as your default, a session starts in
 the directory you launched from, your prompt is sent, and the streaming transcript
-opens. An empty prompt starts the session with the composer ready; Esc goes to the
-dashboard instead; nothing asks a question.
+opens as a user/agent conversation. Lifecycle, provider, usage, and other normalized
+events stay behind `Ctrl-E` in the complete event-details view. An empty prompt starts
+the session with the composer ready; Esc goes to the dashboard instead; nothing asks a
+question.
 
 The same screen greets any later `ouro` that finds no live sessions — the daily flow
 is type-and-go, not just the first one — and `[onboarding] quick_start = false` in the

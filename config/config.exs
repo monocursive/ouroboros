@@ -110,4 +110,9 @@ config :ouroboros,
   terminal_retention_ms: 7 * 24 * 60 * 60 * 1_000,
   # How long a closed provider session may keep a dispatched turn unresolved before
   # the turn is settled as ambiguous so the session can reach its terminal state.
-  interactive_unresolved_turn_deadline_ms: 10 * 60 * 1_000
+  interactive_unresolved_turn_deadline_ms: 10 * 60 * 1_000,
+  codex_account_adapter:
+    if(config_env() == :test,
+      do: Ouroboros.Test.CodexAccountAdapter,
+      else: Ouroboros.Provider.CodexAppServer
+    )

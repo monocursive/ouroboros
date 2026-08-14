@@ -51,6 +51,7 @@ fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
 /// An App on the Dashboard holding the golden `runtime.status`.
 fn dashboard() -> App {
     let mut app = app(full_hello());
+    app.tab = Tab::Dashboard;
 
     answer(
         &mut app,
@@ -176,7 +177,10 @@ fn availability_is_three_colours_and_disabled_is_not_one_of_the_alarming_ones() 
     // the colour.
     assert_eq!(screen.colour_of("mesh", "available"), Color::Green);
     assert_eq!(screen.colour_of("control ", "disabled"), Color::DarkGray);
-    assert_eq!(screen.colour_of("workspace", "disabled"), Color::DarkGray);
+    assert_eq!(
+        screen.colour_of("workspace      disabled", "disabled"),
+        Color::DarkGray
+    );
 
     let mut down = app;
     answer(
@@ -220,6 +224,7 @@ fn a_provider_probe_that_failed_is_not_reported_as_a_missing_provider() {
 #[test]
 fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
     let mut app = app(full_hello());
+    app.tab = Tab::Dashboard;
     let screen = render(&mut app, 120, 30);
 
     assert!(
@@ -232,6 +237,7 @@ fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
 #[test]
 fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
     let mut app = app(full_hello());
+    app.tab = Tab::Dashboard;
 
     app.apply(Msg::Answer {
         tag: Tag::Status,
@@ -253,6 +259,15 @@ fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
 // ----- tab 2 -------------------------------------------------------------------------
 
 #[test]
+fn the_coding_home_carries_the_terminal_logo() {
+    let mut app = app(full_hello());
+    let screen = render(&mut app, 100, 24);
+
+    assert!(screen.contains("▄█▄ ▄▄▄▄"), "{}", screen.text());
+    assert!(screen.contains("▀▄▄▄▄▄▄▄▄▀"), "{}", screen.text());
+}
+
+#[test]
 fn the_sessions_list_merges_both_planes_and_tags_each_row() {
     let mut app = app(full_hello());
     app.apply(key(KeyCode::Char('2')));
@@ -271,13 +286,10 @@ fn the_sessions_list_merges_both_planes_and_tags_each_row() {
                  "updated_at": "2026-01-01T00:00:01.000000Z" }]),
     );
 
+    app.overlay = Some(Overlay::SessionPicker { choice: 0 });
     let screen = render(&mut app, 120, 20);
 
-    assert!(
-        screen.row("session-1").starts_with("│int  "),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.row("session-1").contains("int"), "{}", screen.text());
     assert!(screen.row("task-2").contains("code "));
     assert!(screen.row("session-1").contains("awaiting_approval"));
 
@@ -312,10 +324,11 @@ fn the_transcript_renders_the_golden_interactive_event() {
 
     let screen = render(&mut app, 120, 24);
 
-    assert!(screen.contains("output_text_final"), "{}", screen.text());
+    assert!(screen.contains("Agent chat"), "{}", screen.text());
+    assert!(screen.contains("Agent"), "{}", screen.text());
     assert!(screen.contains("the workspace is clean"));
     assert!(
-        screen.contains("history truncated below 41"),
+        screen.contains("Earlier conversation is no longer available"),
         "{}",
         screen.text()
     );
@@ -323,12 +336,138 @@ fn the_transcript_renders_the_golden_interactive_event() {
     // The gateway redacts at construction; the client shows exactly what it was given.
     assert!(screen.contains("[REDACTED]") || screen.contains("the workspace is clean"));
 
-    // The header states the resync cursor, which is the number every repair uses.
-    assert!(screen.contains("cursor 42"), "{}", screen.text());
+    assert!(
+        !screen.contains("output_text_final") && !screen.contains("cursor 42"),
+        "protocol details stay out of the default chat:\n{}",
+        screen.text()
+    );
+
+    // The complete event ledger remains one key away.
+    app.apply(ctrl('e'));
+    let details = render(&mut app, 120, 24);
+    assert!(details.contains("Event details"), "{}", details.text());
+    assert!(details.contains("output_text_final"), "{}", details.text());
+    assert!(details.contains("cursor 42"), "{}", details.text());
+    assert!(
+        details.contains("history truncated below 41"),
+        "{}",
+        details.text()
+    );
 
     // And the hole is gone: it was never a hole, it was the start of history.
     assert!(!screen.contains("events missing"), "{}", screen.text());
     assert!(app.drain().is_empty(), "nothing more to ask for");
+}
+
+#[test]
+fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
+    let mut app = with_open_session();
+
+    notify(
+        &mut app,
+        event(1, "session_started", "cwd=/Users/person/project"),
+    );
+    notify(&mut app, event(2, "input_accepted", "please fix the tests"));
+    notify(
+        &mut app,
+        event(3, "provider_event", "internal provider diagnostic"),
+    );
+    notify(
+        &mut app,
+        event(4, "output_text_final", "The tests are fixed."),
+    );
+    notify(&mut app, event(5, "usage", "input_tokens=21088"));
+
+    let chat = render(&mut app, 120, 26);
+    assert!(chat.contains("You"), "{}", chat.text());
+    assert!(chat.contains("please fix the tests"), "{}", chat.text());
+    assert!(chat.contains("Agent"), "{}", chat.text());
+    assert!(chat.contains("The tests are fixed."), "{}", chat.text());
+
+    for hidden in [
+        "session_started",
+        "provider_event",
+        "internal provider diagnostic",
+        "output_text_final",
+        "usage",
+        "input_tokens=21088",
+    ] {
+        assert!(
+            !chat.contains(hidden),
+            "{hidden:?} leaked into the default chat:\n{}",
+            chat.text()
+        );
+    }
+
+    // The details shortcut works even while the message composer owns printable keys.
+    app.apply(key(KeyCode::Char('i')));
+    assert!(app.sessions.composer.is_some());
+    app.apply(ctrl('e'));
+    let details = render(&mut app, 120, 26);
+    assert!(details.contains("session_started"), "{}", details.text());
+    assert!(details.contains("provider_event"), "{}", details.text());
+    assert!(details.contains("input_tokens=21088"), "{}", details.text());
+}
+
+#[test]
+fn sending_a_message_animates_the_logo_until_agent_text_arrives() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "please inspect this");
+    app.apply(key(KeyCode::Enter));
+
+    let send = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the composer sends the message");
+
+    let waiting = render(&mut app, 120, 30);
+    assert!(
+        waiting.contains("waiting for agent reply"),
+        "{}",
+        waiting.text()
+    );
+    assert!(waiting.contains("▄█▄ ▄▄▄▄"), "{}", waiting.text());
+
+    answer(&mut app, send.tag, json!({ "status": "running" }));
+    notify(&mut app, event(1, "input_accepted", "please inspect this"));
+
+    let accepted = render(&mut app, 120, 30);
+    assert!(
+        accepted.contains("waiting for agent reply"),
+        "{}",
+        accepted.text()
+    );
+
+    notify(&mut app, event(2, "output_text_delta", "I am checking"));
+
+    let replying = render(&mut app, 120, 30);
+    assert!(replying.contains("I am checking"), "{}", replying.text());
+    assert!(
+        !replying.contains("waiting for agent reply"),
+        "{}",
+        replying.text()
+    );
+}
+
+#[test]
+fn streamed_output_is_one_agent_message_when_the_final_text_arrives() {
+    let mut app = with_open_session();
+
+    notify(&mut app, event(1, "output_text_delta", "Hello "));
+    notify(&mut app, event(2, "output_text_delta", "there"));
+    notify(&mut app, event(3, "output_text_final", "Hello there"));
+
+    let chat = render(&mut app, 120, 24);
+    assert_eq!(
+        chat.text().matches("Hello there").count(),
+        1,
+        "delta rows must collapse into the final message:\n{}",
+        chat.text()
+    );
+    assert!(!chat.contains("output_text_delta"), "{}", chat.text());
 }
 
 #[test]
@@ -358,18 +497,21 @@ fn a_lag_divider_renders_with_the_hole_it_left() {
     let screen = render(&mut app, 120, 24);
 
     assert!(
-        screen.contains("the gateway dropped 4 event frames here"),
+        screen.contains("Some live updates were missed by the gateway"),
         "{}",
         screen.text()
     );
     assert!(
-        screen.contains("4 events missing (3..6)"),
+        screen.contains("Restoring 4 missing updates"),
         "the hole itself has to be visible, not just the cause:\n{}",
         screen.text()
     );
 
-    // The resync cursor stayed at the contiguous prefix, not the newest event.
-    assert!(screen.contains("cursor 2"), "{}", screen.text());
+    // The technical resync cursor stays out of chat and remains visible in details.
+    assert!(!screen.contains("cursor 2"), "{}", screen.text());
+    app.apply(ctrl('e'));
+    let details = render(&mut app, 120, 24);
+    assert!(details.contains("cursor 2"), "{}", details.text());
 
     // And the repair asked for exactly that.
     let calls = app.drain();
@@ -406,7 +548,7 @@ fn a_pruned_cursor_restarts_from_the_floor_and_marks_the_transcript() {
     let screen = render(&mut app, 120, 24);
 
     assert!(
-        screen.contains("history truncated below 96"),
+        screen.contains("Earlier conversation is no longer available"),
         "{}",
         screen.text()
     );
@@ -433,7 +575,7 @@ fn stream_ended_marks_the_session_finished() {
     let screen = render(&mut app, 120, 24);
 
     assert!(
-        screen.contains("stream ended (closed) — no further events"),
+        screen.contains("Session ended (closed)"),
         "{}",
         screen.text()
     );
@@ -966,11 +1108,7 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
     // The composer is open, so the next thing typed is the first message.
     let screen = render(&mut app, 120, 30);
     assert!(screen.contains("session-new-1"), "{}", screen.text());
-    assert!(
-        screen.contains("Enter sends, Esc cancels"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("Enter sends"), "{}", screen.text());
 
     type_text(&mut app, "read the tests");
     app.apply(key(KeyCode::Enter));
@@ -1261,7 +1399,8 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
 
 #[test]
 fn every_tab_draws_without_any_data_at_all() {
-    // A gateway that has answered nothing must still produce seven readable tabs.
+    // A gateway that has answered nothing must still produce every secondary panel even
+    // though the persistent tab bar has moved behind the command palette.
     for digit in '1'..='7' {
         let mut app = app(full_hello());
         app.apply(key(KeyCode::Char(digit)));
@@ -1269,8 +1408,11 @@ fn every_tab_draws_without_any_data_at_all() {
         let screen = render(&mut app, 100, 24);
 
         assert!(
-            screen.rows.iter().any(|row| row.contains("Dashboard")),
-            "tab {digit} lost its tab bar"
+            screen.contains("ouroboros")
+                && (screen.contains("Runtime & distribution")
+                    || screen.contains("New coding session")),
+            "surface {digit} lost its shell:\n{}",
+            screen.text()
         );
     }
 }
@@ -1329,7 +1471,7 @@ fn the_help_overlay_states_the_honest_limits() {
     assert!(screen.contains("scope `read`"));
 
     app.apply(key(KeyCode::Esc));
-    assert!(render(&mut app, 130, 30).contains("waiting for runtime.status"));
+    assert!(render(&mut app, 130, 30).contains("Connect ChatGPT to start coding"));
 }
 
 #[test]
@@ -1345,7 +1487,10 @@ fn a_notice_replaces_the_status_line_and_expires() {
 
     let screen = render(&mut app, 120, 20);
     assert!(!screen.contains("something happened"), "{}", screen.text());
-    assert!(screen.contains("scope"), "the status line comes back");
+    assert!(
+        screen.contains("ctrl+p commands"),
+        "the shell footer comes back"
+    );
 }
 
 #[test]
@@ -1355,18 +1500,15 @@ fn the_visible_tab_is_the_only_one_polled() {
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
 
-    assert!(methods.contains(&"runtime.status".to_string()));
-    assert!(methods.contains(&"runtime.providers".to_string()));
-    assert!(
-        !methods.iter().any(|method| method.ends_with(".list")),
-        "the Dashboard must not poll the lists of tabs nobody is looking at: {methods:?}"
-    );
-
-    app.apply(key(KeyCode::Char('2')));
-
-    let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
     assert!(methods.contains(&"interactive.list".to_string()));
     assert!(methods.contains(&"coding.list".to_string()));
+    assert!(!methods.contains(&"runtime.status".to_string()));
+
+    app.apply(key(KeyCode::Char('1')));
+
+    let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
+    assert!(methods.contains(&"runtime.status".to_string()));
+    assert!(methods.contains(&"runtime.providers".to_string()));
 }
 
 #[test]
@@ -1416,7 +1558,7 @@ fn one_question_is_outstanding_at_a_time() {
 fn tabs_wrap_in_both_directions() {
     let mut app = app(full_hello());
 
-    assert_eq!(app.tab, Tab::Dashboard);
+    assert_eq!(app.tab, Tab::Sessions);
 
     app.apply(Msg::Key(KeyEvent {
         code: KeyCode::BackTab,
@@ -1425,8 +1567,8 @@ fn tabs_wrap_in_both_directions() {
         state: crossterm::event::KeyEventState::NONE,
     }));
 
-    assert_eq!(app.tab, Tab::Logs);
+    assert_eq!(app.tab, Tab::Dashboard);
 
     app.apply(key(KeyCode::Tab));
-    assert_eq!(app.tab, Tab::Dashboard);
+    assert_eq!(app.tab, Tab::Sessions);
 }

@@ -3,6 +3,10 @@
   "jsonrpc": "2.0",
   "result": {
     "methods": [
+      "account.login.cancel",
+      "account.login.start",
+      "account.logout",
+      "account.read",
       "agents.list",
       "agents.state",
       "agents.stop",

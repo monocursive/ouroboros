@@ -1,21 +1,22 @@
-//! The frame: the tab bar, the status line, the overlays, and which tab draws the middle.
+//! The transcript-first harness shell, its command palette, and secondary operator panels.
 //!
 //! Drawing is a pure function of [`App`] plus mutable tree/scroll state, so a `TestBackend`
 //! renders exactly what a terminal does. Nothing here calls the runtime, and nothing here
 //! decides anything: a panel that is empty because a method failed says which method and
 //! why, because "no agents" and "agents.list was refused" are different facts.
 
-use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::model::{compact, Plane, ProviderEntry};
 
 use super::app::{
-    provider_choices, App, Connection, Mode, NewField, NewSession, NoticeKind, Overlay,
-    ProviderChoice, QuickStart, QuickZone, Settings, SettingsField, Tab, APPROVAL_CHOICES,
+    provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, Mode, NewField,
+    NewSession, NoticeKind, Overlay, ProviderChoice, QuickStart, QuickZone, Settings,
+    SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::theme;
 
@@ -23,13 +24,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(frame.area());
 
-    tab_bar(frame, rows[0], app);
+    shell_header(frame, rows[0], app);
 
     match app.tab {
         Tab::Dashboard => super::dashboard::draw(frame, rows[1], app),
@@ -44,24 +45,78 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     overlay(frame, frame.area(), app);
 }
 
-fn tab_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = Tab::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, tab)| {
-            Line::from(vec![
-                Span::styled(format!("{} ", index + 1), Style::default().fg(theme::MUTED)),
-                Span::raw(tab.title()),
-            ])
-        })
-        .collect();
+fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(theme::MUTED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let columns =
+        Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(inner);
+
+    let workspace = app
+        .launch_dir
+        .as_deref()
+        .map(|path| super::tree::truncate(path, 42))
+        .unwrap_or_else(|| "workspace unset".to_string());
+
+    let context = if app.tab == Tab::Sessions {
+        match &app.sessions.open {
+            Some((_plane, id)) => format!("Session: {}", super::tree::truncate(id, 36)),
+            None => "New coding session".to_string(),
+        }
+    } else {
+        format!("Runtime & distribution: {}", app.tab.title())
+    };
 
     frame.render_widget(
-        Tabs::new(titles)
-            .select(app.tab.index())
-            .highlight_style(theme::heading())
-            .divider("│"),
-        area,
+        Paragraph::new(Line::from(vec![
+            Span::styled("ouroboros", theme::heading()),
+            Span::styled("  │  ", Style::default().fg(theme::MUTED)),
+            Span::styled(workspace, Style::default().fg(theme::MUTED)),
+            Span::styled("  │  ", Style::default().fg(theme::MUTED)),
+            Span::raw(context),
+        ])),
+        columns[0],
+    );
+
+    let account = if let Some(state) = &app.account.value {
+        if let Some(identity) = &state.account {
+            let plan = state
+                .plan_label()
+                .map(|plan| format!(" {plan}"))
+                .unwrap_or_default();
+            let identity = identity
+                .email
+                .as_deref()
+                .map(|email| format!("  • {email}"))
+                .unwrap_or_default();
+            Line::from(vec![
+                Span::styled(format!("ChatGPT{plan}"), Style::default().fg(theme::GOOD)),
+                Span::styled(identity, Style::default().fg(theme::MUTED)),
+            ])
+        } else {
+            Line::from(Span::styled(
+                "ChatGPT not connected",
+                Style::default().fg(theme::WARN),
+            ))
+        }
+    } else if app.account.pending {
+        Line::from(Span::styled(
+            format!("{} checking ChatGPT", theme::spinner(app.ticks)),
+            Style::default().fg(theme::MUTED),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "ChatGPT unavailable",
+            Style::default().fg(theme::WARN),
+        ))
+    };
+
+    frame.render_widget(
+        Paragraph::new(account).alignment(Alignment::Right),
+        columns[1],
     );
 }
 
@@ -88,41 +143,14 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut spans = vec![
-        Span::styled(app.address.clone(), Style::default().fg(theme::MUTED)),
-        Span::raw("  "),
-        Span::raw(if app.hello.node.is_empty() {
-            "unknown node".to_string()
+    let mut spans = vec![Span::styled(
+        if app.tab == Tab::Sessions {
+            "ctrl+p commands  ·  ctrl+q quit  ·  ctrl+c interrupt"
         } else {
-            app.hello.node.clone()
-        }),
-        Span::raw("  scope "),
-        Span::styled(
-            if app.hello.scope.is_empty() {
-                "unknown".to_string()
-            } else {
-                app.hello.scope.clone()
-            },
-            if app.hello.operates() {
-                Style::default().fg(theme::WARN)
-            } else {
-                Style::default().fg(theme::MUTED)
-            },
-        ),
-    ];
-
-    match &app.mode {
-        Mode::Spawned { pid } => {
-            spans.push(Span::styled(
-                format!("  spawned pid {pid}"),
-                Style::default().fg(theme::MUTED),
-            ));
-        }
-        Mode::Attached => spans.push(Span::styled(
-            "  attached",
-            Style::default().fg(theme::MUTED),
-        )),
-    }
+            "ctrl+p commands  ·  Esc returns to coding  ·  r refresh"
+        },
+        Style::default().fg(theme::MUTED),
+    )];
 
     if let Connection::Lost { reason } = &app.connection {
         spans.push(Span::styled(
@@ -130,11 +158,6 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::BAD),
         ));
     }
-
-    spans.push(Span::styled(
-        "   ? keys   q quit",
-        Style::default().fg(theme::MUTED),
-    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -145,6 +168,9 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     match overlay {
+        Overlay::Commands(palette) => command_palette(frame, area, palette),
+        Overlay::Account(dialog) => account_dialog(frame, area, app, dialog),
+        Overlay::SessionPicker { choice } => session_picker(frame, area, app, *choice),
         Overlay::Help => help(frame, area, app),
         Overlay::Quit { options, choice } => chooser(
             frame,
@@ -195,6 +221,265 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         Overlay::QuickStart(quick) => quick_start(frame, area, app, quick),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
     }
+}
+
+fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
+    let commands = palette.visible();
+    let width = if area.width >= 110 {
+        area.width * 40 / 100
+    } else {
+        area.width.saturating_sub(4)
+    };
+    let height = 28.min(area.height.saturating_sub(4));
+    let popup = Rect::new(
+        area.right().saturating_sub(width + 2),
+        area.y
+            .saturating_add(5)
+            .min(area.bottom().saturating_sub(height)),
+        width,
+        height,
+    );
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            " ctrl+p commands ",
+            Style::default().fg(theme::MUTED),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                " navigate   enter select   esc close",
+                Style::default().fg(theme::MUTED),
+            ),
+        ]))
+        .alignment(Alignment::Right),
+        rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  search  ", Style::default().fg(theme::MUTED)),
+            Span::raw(if palette.query.is_empty() {
+                "type a command".to_string()
+            } else {
+                palette.query.clone()
+            }),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]))
+        .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let mut lines = Vec::new();
+    let mut previous_group = "";
+    let content_width = rows[2].width as usize;
+
+    for (index, command) in commands.iter().enumerate() {
+        if command.group() != previous_group {
+            if !previous_group.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                command.group(),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            previous_group = command.group();
+        }
+
+        let selected = index == palette.selected;
+        let prefix = if selected { "  › " } else { "    " };
+        let start = format!("{prefix}{}", command.label());
+        let gap = content_width
+            .saturating_sub(start.chars().count() + command.shortcut().chars().count());
+        let row = format!(
+            "{start}{}{shortcut}",
+            " ".repeat(gap),
+            shortcut = command.shortcut()
+        );
+
+        lines.push(if selected {
+            Line::styled(row, theme::selected())
+        } else {
+            Line::from(vec![
+                Span::raw(row[..row.len().saturating_sub(command.shortcut().len())].to_string()),
+                Span::styled(command.shortcut(), Style::default().fg(theme::MUTED)),
+            ])
+        });
+    }
+
+    frame.render_widget(Paragraph::new(lines), rows[2]);
+}
+
+fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDialog) {
+    let connected = app.chatgpt_connected();
+    let popup = centered(area, 58, if connected { 10 } else { 14 });
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" ChatGPT account ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+
+    if connected {
+        let account = app
+            .account
+            .value
+            .as_ref()
+            .and_then(|state| state.account.as_ref());
+        let plan = app
+            .account
+            .value
+            .as_ref()
+            .and_then(|state| state.plan_label())
+            .unwrap_or_else(|| "connected".to_string());
+        lines.push(Line::from(Span::styled(
+            format!("ChatGPT {plan}"),
+            Style::default()
+                .fg(theme::GOOD)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(email) = account.and_then(|account| account.email.as_deref()) {
+            lines.push(Line::from(Span::styled(
+                email.to_string(),
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Codex keeps the subscription credentials on the runtime host.",
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Enter/Esc closes  ·  l disconnects",
+            Style::default().fg(theme::MUTED),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            match dialog.flow {
+                AccountFlow::Browser => "Connect your ChatGPT subscription in the browser.",
+                AccountFlow::DeviceCode => {
+                    "Connect ChatGPT to the runtime host with a device code."
+                }
+            },
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+
+        if let Some(url) = &dialog.url {
+            lines.push(Line::from(vec![
+                Span::styled("Open  ", theme::label()),
+                Span::styled(url.clone(), Style::default().fg(theme::ACCENT)),
+            ]));
+        }
+        if let Some(code) = &dialog.code {
+            lines.push(Line::from(vec![
+                Span::styled("Code  ", theme::label()),
+                Span::styled(
+                    code.clone(),
+                    Style::default()
+                        .fg(theme::WARN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        if dialog.url.is_none() && dialog.pending {
+            lines.push(Line::from(Span::styled(
+                format!("{} preparing a secure sign-in", theme::spinner(app.ticks)),
+                Style::default().fg(theme::ACCENT),
+            )));
+        } else if dialog.pending {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{} waiting for ChatGPT", theme::spinner(app.ticks)),
+                Style::default().fg(theme::ACCENT),
+            )));
+        }
+
+        if let Some(error) = &dialog.error {
+            lines.push(Line::from(""));
+            lines.extend(refusal_lines(error));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Esc cancels. Ouroboros never receives or stores your token.",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn session_picker(frame: &mut Frame, area: Rect, app: &App, choice: usize) {
+    let sessions = app.sessions.merged();
+    let height = (sessions.len() + 5).clamp(7, 20) as u16;
+    let popup = centered(area, 62, height);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" switch session ", theme::heading()));
+
+    if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                if app.sessions.interactive.pending || app.sessions.coding.pending {
+                    "Listing sessions…"
+                } else {
+                    "No sessions yet. Esc closes; use New session from ctrl+p."
+                },
+                Style::default().fg(theme::MUTED),
+            ))
+            .block(block),
+            popup,
+        );
+        return;
+    }
+
+    let items = sessions
+        .iter()
+        .map(|session| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<6}", session.plane.tag()),
+                    Style::default().fg(theme::MUTED),
+                ),
+                Span::raw(super::tree::truncate(&session.id, 42)),
+                Span::styled(
+                    format!("  {}", session.status.as_str()),
+                    theme::session_status(&session.status),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(choice));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(theme::selected()),
+        popup,
+        &mut state,
+    );
 }
 
 /// The quick-start screen: pick a model, say what it should do, press Enter.
@@ -1037,6 +1322,10 @@ const KEYS: &[(&str, &str)] = &[
     ("i", "compose a message for the open session"),
     ("s", "steer the open session"),
     ("a", "reopen the pending approval"),
+    (
+        "ctrl+e",
+        "toggle between agent chat and complete event details",
+    ),
     ("x", "close or kill the open session (confirmed)"),
     (
         "ctrl-c",

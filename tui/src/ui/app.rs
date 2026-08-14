@@ -31,8 +31,8 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults};
 use crate::model::{
-    self, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event, EventType, Plane,
-    ProviderEntry, RuntimeStatus, SessionInfo, StartRequest, StartedRef,
+    self, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event,
+    EventType, Plane, ProviderEntry, RuntimeStatus, SessionInfo, StartRequest, StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -49,6 +49,8 @@ const LIST_TICKS: u64 = 12; // 3s
 const UPGRADE_TICKS: u64 = 20; // 5s
 const DETAIL_TICKS: u64 = 40; // 10s: `Mesh.state/1` is a whole agent's state tree
 const PROVIDER_TICKS: u64 = 240; // 60s: each entry probes an executable
+const ACCOUNT_TICKS: u64 = 120; // 30s; 1s while a managed login is pending
+const ACCOUNT_LOGIN_TICKS: u64 = 4;
 const NOTICE_TICKS: u64 = 20;
 
 /// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
@@ -162,6 +164,10 @@ impl Call {
 /// tag, so a slow runtime cannot make the UI queue a second copy of the same question.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tag {
+    Account,
+    AccountLogin,
+    AccountCancel,
+    AccountLogout,
     Status,
     Providers,
     Sessions(Plane),
@@ -376,8 +382,14 @@ pub struct SessionsTab {
     pub watches: HashMap<(Plane, String), Watch>,
     pub composer: Option<Composer>,
     pub focus: Pane,
+    /// The complete normalized event ledger is an operator detail, not the default chat.
+    /// It remains one key away and is never discarded from the watch.
+    pub show_event_details: bool,
     /// Per-session resync rounds since the last interruption, bounded.
     rounds: HashMap<(Plane, String), u32>,
+    /// Requests accepted by this client that have not produced their first lifecycle
+    /// event yet. The Watch takes over as soon as input/turn/run state reaches the stream.
+    pending_replies: HashSet<(Plane, String)>,
 }
 
 impl SessionsTab {
@@ -414,6 +426,14 @@ impl SessionsTab {
     fn open_watch_mut(&mut self) -> Option<&mut Watch> {
         let key = self.open.clone()?;
         self.watches.get_mut(&key)
+    }
+
+    fn mark_reply_pending(&mut self, plane: Plane, id: &str) {
+        self.pending_replies.insert((plane, id.to_string()));
+    }
+
+    fn clear_reply_pending(&mut self, plane: Plane, id: &str) {
+        self.pending_replies.remove(&(plane, id.to_string()));
     }
 }
 
@@ -989,8 +1009,146 @@ impl Settings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    NewSession,
+    SwitchSession,
+    SessionDetails,
+    ConnectChatGpt,
+    Runtime,
+    Agents,
+    Teams,
+    Nodes,
+    Plans,
+    Upgrades,
+    Logs,
+    Settings,
+}
+
+impl Command {
+    pub const ALL: [Self; 12] = [
+        Self::NewSession,
+        Self::SwitchSession,
+        Self::SessionDetails,
+        Self::ConnectChatGpt,
+        Self::Runtime,
+        Self::Agents,
+        Self::Teams,
+        Self::Nodes,
+        Self::Plans,
+        Self::Upgrades,
+        Self::Logs,
+        Self::Settings,
+    ];
+
+    pub fn group(self) -> &'static str {
+        match self {
+            Self::NewSession
+            | Self::SwitchSession
+            | Self::SessionDetails
+            | Self::ConnectChatGpt => "Coding",
+            _ => "Runtime & distribution",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NewSession => "New session",
+            Self::SwitchSession => "Switch session",
+            Self::SessionDetails => "Toggle session details",
+            Self::ConnectChatGpt => "Connect ChatGPT",
+            Self::Runtime => "Runtime & distribution",
+            Self::Agents => "Agents",
+            Self::Teams => "Teams",
+            Self::Nodes => "Nodes",
+            Self::Plans => "Plans & control",
+            Self::Upgrades => "Upgrades",
+            Self::Logs => "Logs",
+            Self::Settings => "Settings",
+        }
+    }
+
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            Self::NewSession => "n",
+            Self::SwitchSession => "s",
+            Self::SessionDetails => "ctrl+e",
+            Self::ConnectChatGpt => "c",
+            Self::Runtime => "dist",
+            Self::Agents => "ag",
+            Self::Teams => "tm",
+            Self::Nodes => "nd",
+            Self::Plans => "pl",
+            Self::Upgrades => "up",
+            Self::Logs => "lg",
+            Self::Settings => "st",
+        }
+    }
+
+    fn matches(self, query: &str) -> bool {
+        let query = query.trim().to_ascii_lowercase();
+        query.is_empty()
+            || self.label().to_ascii_lowercase().contains(&query)
+            || self.group().to_ascii_lowercase().contains(&query)
+            || self.shortcut().contains(&query)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CommandPalette {
+    pub query: String,
+    pub selected: usize,
+}
+
+impl CommandPalette {
+    pub fn visible(&self) -> Vec<Command> {
+        Command::ALL.to_vec()
+    }
+
+    fn first_match(&self) -> usize {
+        Command::ALL
+            .iter()
+            .position(|command| command.matches(&self.query))
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountFlow {
+    Browser,
+    DeviceCode,
+}
+
+#[derive(Debug)]
+pub struct AccountDialog {
+    pub pending: bool,
+    pub flow: AccountFlow,
+    pub login_id: Option<String>,
+    pub url: Option<String>,
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
+impl AccountDialog {
+    fn new(flow: AccountFlow) -> Self {
+        Self {
+            pending: true,
+            flow,
+            login_id: None,
+            url: None,
+            code: None,
+            error: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Overlay {
+    Commands(CommandPalette),
+    Account(Box<AccountDialog>),
+    SessionPicker {
+        choice: usize,
+    },
     Help,
     /// Pick a model, say what you want, press Enter.
     QuickStart(Box<QuickStart>),
@@ -1115,6 +1273,7 @@ pub struct App {
     pub connection: Connection,
     pub tab: Tab,
     pub ticks: u64,
+    pub account: Loadable<AccountState>,
     pub status: Loadable<RuntimeStatus>,
     pub providers: Loadable<Vec<ProviderEntry>>,
     pub sessions: SessionsTab,
@@ -1150,6 +1309,10 @@ pub struct App {
     /// know where that runtime keeps its files, and a local path printed under a remote
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
+    /// The first-class harness composer before a session exists.
+    pub home_draft: String,
+    pub home_pending: bool,
+    pub home_error: Option<String>,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
     dropped_seen: u64,
@@ -1160,6 +1323,9 @@ pub struct App {
     /// The quick-start screen's prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<String>,
+    /// A URL the I/O driver should open in the operator's browser. Kept out of notices so
+    /// a managed login URL is never copied into logs by accident.
+    open_url_pending: Option<String>,
 }
 
 impl App {
@@ -1169,8 +1335,9 @@ impl App {
             address,
             hello,
             connection: Connection::Live,
-            tab: Tab::Dashboard,
+            tab: Tab::Sessions,
             ticks: 0,
+            account: Loadable::default(),
             status: Loadable::default(),
             providers: Loadable::default(),
             sessions: SessionsTab::default(),
@@ -1190,13 +1357,29 @@ impl App {
             config: Config::default(),
             config_path: None,
             data_dir: None,
+            home_draft: String::new(),
+            home_pending: false,
+            home_error: None,
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
             dropped_seen: 0,
             save_pending: false,
             quick_intent: QuickIntent::Unasked,
             first_message: None,
+            open_url_pending: None,
         }
+    }
+
+    pub fn take_open_url(&mut self) -> Option<String> {
+        self.open_url_pending.take()
+    }
+
+    pub fn chatgpt_connected(&self) -> bool {
+        self.account
+            .value
+            .as_ref()
+            .map(AccountState::connected)
+            .unwrap_or(false)
     }
 
     /// The config this App wants written, once. Drained by the driver, which owns the
@@ -1225,6 +1408,34 @@ impl App {
     /// practice means a test — asks here.
     pub fn busy(&self) -> bool {
         !self.in_flight.is_empty()
+    }
+
+    /// Whether the open transcript is waiting for its first user-visible agent text.
+    ///
+    /// The local marker covers the narrow RPC-to-first-event gap. After that, the ordered
+    /// durable event ledger is authoritative. A lost connection or an unresolved replay
+    /// gap suppresses the animation rather than implying progress this client cannot see.
+    pub fn waiting_for_open_agent_reply(&self) -> bool {
+        if !matches!(self.connection, Connection::Live) {
+            return false;
+        }
+
+        let Some(key) = self.sessions.open.as_ref() else {
+            return false;
+        };
+        let Some(watch) = self.sessions.watches.get(key) else {
+            return false;
+        };
+
+        if watch.ended.is_some() {
+            return false;
+        }
+
+        if self.sessions.pending_replies.contains(key) {
+            return true;
+        }
+
+        !watch.resyncing && !watch.has_gap() && watch.waiting_for_reply()
     }
 
     pub fn spawned(&self) -> bool {
@@ -1269,6 +1480,24 @@ impl App {
     /// Issues the polls the visible tab is due for. Only the visible tab: a Dashboard
     /// nobody is looking at is not a reason to keep a runtime answering.
     fn poll(&mut self) {
+        // Account identity belongs to the shell, not a secondary operator panel. Keep it
+        // fresh on every surface, with a tighter cadence while a browser/device login is
+        // waiting for Codex's completion notification.
+        let account_cadence = if self
+            .account
+            .value
+            .as_ref()
+            .map(|account| account.login.status == "pending")
+            .unwrap_or(false)
+            || matches!(self.overlay, Some(Overlay::Account(_)))
+        {
+            ACCOUNT_LOGIN_TICKS
+        } else {
+            ACCOUNT_TICKS
+        };
+
+        self.issue_if_due(Tag::Account, "account.read", json!({}), account_cadence);
+
         match self.tab {
             Tab::Dashboard => {
                 self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
@@ -1440,6 +1669,7 @@ impl App {
 
     fn issue_if_due(&mut self, tag: Tag, method: &str, params: Value, _cadence: u64) {
         let due = match &tag {
+            Tag::Account => self.account.due(self.ticks),
             Tag::Status => self.status.due(self.ticks),
             Tag::Providers => self.providers.due(self.ticks),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.due(self.ticks),
@@ -1458,6 +1688,7 @@ impl App {
         }
 
         match &tag {
+            Tag::Account => self.account.started(),
             Tag::Status => self.status.started(),
             Tag::Providers => self.providers.started(),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.started(),
@@ -1560,6 +1791,75 @@ impl App {
         let ticks = self.ticks;
 
         match tag {
+            Tag::Account => match result {
+                Ok(value) => match AccountState::decode(&value) {
+                    Ok(account) => {
+                        let connected = account.connected();
+                        let cadence = if account.login.status == "pending" {
+                            ACCOUNT_LOGIN_TICKS
+                        } else {
+                            ACCOUNT_TICKS
+                        };
+
+                        self.account.ok(account, ticks, cadence);
+
+                        if connected {
+                            if self.config.defaults.provider.is_none() {
+                                self.config.defaults.provider = Some("codex".to_string());
+                                self.save_pending = true;
+                            }
+
+                            if matches!(self.overlay, Some(Overlay::Account(_))) {
+                                self.overlay = None;
+                                self.inform(
+                                    "ChatGPT is connected. Type a request to start coding.",
+                                    NoticeKind::Info,
+                                );
+                            }
+                        } else if let Some(Overlay::Account(dialog)) = self.overlay.as_mut() {
+                            if let Some(account) = self.account.value.as_ref() {
+                                dialog.login_id = account.login.login_id.clone();
+                                if account.login.status == "failed" {
+                                    dialog.pending = false;
+                                    dialog.error = account.login.error.clone().or_else(|| {
+                                        Some("ChatGPT sign-in did not complete".to_string())
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => self.account.failed(
+                        format!("account.read did not decode: {error}"),
+                        ticks,
+                        ACCOUNT_TICKS,
+                    ),
+                },
+                Err(error) => self.account.failed(error.to_string(), ticks, ACCOUNT_TICKS),
+            },
+            Tag::AccountLogin => self.account_login_answered(result),
+            Tag::AccountCancel => {
+                self.account.invalidate();
+                self.poll();
+
+                if let Err(error) = result {
+                    self.inform(
+                        format!("cancelling ChatGPT sign-in failed: {error}"),
+                        NoticeKind::Error,
+                    );
+                }
+            }
+            Tag::AccountLogout => {
+                self.account.invalidate();
+                self.poll();
+
+                match result {
+                    Ok(_) => self.inform("ChatGPT was disconnected", NoticeKind::Info),
+                    Err(error) => self.inform(
+                        format!("disconnecting ChatGPT failed: {error}"),
+                        NoticeKind::Error,
+                    ),
+                }
+            }
             Tag::Status => match result {
                 Ok(value) => match RuntimeStatus::decode(&value) {
                     Ok(status) => self.status.ok(status, ticks, STATUS_TICKS),
@@ -1631,7 +1931,12 @@ impl App {
             } => self.resync_answered(plane, id, cursor, subscribe, result),
             Tag::Action { label, plane, id } => match result {
                 Ok(_value) => self.inform(format!("{label} accepted for {id}"), NoticeKind::Info),
-                Err(error) => self.action_failed(label, plane, &id, error),
+                Err(error) => {
+                    if label == "send_message" && !Self::reply_outcome_unknown(&error) {
+                        self.sessions.clear_reply_pending(plane, &id);
+                    }
+                    self.action_failed(label, plane, &id, error);
+                }
             },
             Tag::Start { plane } => match result {
                 Ok(value) => match StartedRef::decode(&value) {
@@ -1647,7 +1952,12 @@ impl App {
             },
             Tag::FirstMessage { plane, id } => match result {
                 Ok(_value) => {}
-                Err(error) => self.action_failed("send_message", plane, &id, error),
+                Err(error) => {
+                    if !Self::reply_outcome_unknown(&error) {
+                        self.sessions.clear_reply_pending(plane, &id);
+                    }
+                    self.action_failed("send_message", plane, &id, error);
+                }
             },
         }
     }
@@ -1696,6 +2006,61 @@ impl App {
         }
     }
 
+    fn account_login_answered(&mut self, result: Result<Value, ClientError>) {
+        if !matches!(self.overlay, Some(Overlay::Account(_))) {
+            // The operator dismissed the modal before Codex returned its login id. Once
+            // that id exists, cancel it rather than leaving an invisible managed login
+            // alive on the runtime host.
+            if let Ok(value) = result {
+                if let Some(login_id) = value.get("loginId").and_then(Value::as_str) {
+                    self.issue(Call::new(
+                        Tag::AccountCancel,
+                        "account.login.cancel",
+                        json!({ "login_id": login_id }),
+                    ));
+                }
+            }
+            return;
+        }
+
+        let Some(Overlay::Account(dialog)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match result {
+            Ok(value) => {
+                dialog.pending = true;
+                dialog.login_id = value
+                    .get("loginId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                dialog.url = value
+                    .get("authUrl")
+                    .or_else(|| value.get("verificationUrl"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                dialog.code = value
+                    .get("userCode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                dialog.error = None;
+
+                if let Some(url) = dialog.url.as_deref() {
+                    if url.starts_with("https://") {
+                        self.open_url_pending = Some(url.to_string());
+                    }
+                }
+
+                self.account.invalidate();
+                self.poll();
+            }
+            Err(error) => {
+                dialog.pending = false;
+                dialog.error = Some(error.to_string());
+            }
+        }
+    }
+
     /// A refused operate verb, said in the terms the gateway used.
     fn action_failed(&mut self, label: &str, _plane: Plane, id: &str, error: ClientError) {
         let text = match &error {
@@ -1718,6 +2083,34 @@ impl App {
         };
 
         self.inform(text, NoticeKind::Error);
+    }
+
+    fn reply_outcome_unknown(error: &ClientError) -> bool {
+        matches!(
+            error,
+            ClientError::Rpc(rpc)
+                if rpc.code == ErrorCode::UpstreamTimeout
+                    && model::outcome_unknown(rpc.data.as_ref())
+        )
+    }
+
+    fn event_acknowledges_reply_request(event: &Event) -> bool {
+        matches!(
+            event.kind,
+            EventType::RunStarted
+                | EventType::RunCompleted
+                | EventType::RunFailed
+                | EventType::RunCancelled
+                | EventType::InputAccepted
+                | EventType::TurnQueued
+                | EventType::TurnStarted
+                | EventType::OutputTextDelta
+                | EventType::OutputTextFinal
+                | EventType::TurnCompleted
+                | EventType::TurnFailed
+                | EventType::TurnInterrupted
+                | EventType::ApprovalRequested
+        )
     }
 
     // ----- streaming -----------------------------------------------------------------
@@ -1744,11 +2137,11 @@ impl App {
 
         let key = (plane, id.to_string());
 
-        let Some(watch) = self.sessions.watches.get_mut(&key) else {
+        if !self.sessions.watches.contains_key(&key) {
             // An event for a session this client stopped watching. The gateway drops the
             // registration on unsubscribe, so this is the one frame that can cross it.
             return;
-        };
+        }
 
         let Some(event) = params.get("event") else {
             return;
@@ -1757,10 +2150,18 @@ impl App {
         match Event::decode(event) {
             Ok(event) => {
                 let approval = matches!(event.kind, EventType::ApprovalRequested);
+                let acknowledges_reply = Self::event_acknowledges_reply_request(&event);
+                let Some(watch) = self.sessions.watches.get_mut(&key) else {
+                    return;
+                };
                 watch.absorb(vec![event]);
 
                 let cursor = watch.cursor();
                 let gap = watch.has_gap();
+
+                if acknowledges_reply {
+                    self.sessions.clear_reply_pending(plane, id);
+                }
 
                 self.cursors.set(plane, id, cursor);
 
@@ -1774,7 +2175,11 @@ impl App {
                     self.open_approval(plane, id.to_string());
                 }
             }
-            Err(_undecodable) => watch.undecodable += 1,
+            Err(_undecodable) => {
+                if let Some(watch) = self.sessions.watches.get_mut(&key) {
+                    watch.undecodable += 1;
+                }
+            }
         }
     }
 
@@ -1827,6 +2232,8 @@ impl App {
         if let Some(watch) = self.sessions.watches.get_mut(&key) {
             watch.end(ended.status.clone());
         }
+
+        self.sessions.clear_reply_pending(plane, &ended.id);
 
         self.cursors.forget(plane, &ended.id);
     }
@@ -1953,6 +2360,7 @@ impl App {
                 let approvals = events
                     .iter()
                     .any(|event| matches!(event.kind, EventType::ApprovalRequested));
+                let acknowledges_reply = events.iter().any(Self::event_acknowledges_reply_request);
 
                 // Both verbs answer "the retained events after this cursor, in order". A
                 // first entry above `cursor + 1` therefore *proves* the ones between are
@@ -1973,6 +2381,10 @@ impl App {
                 let progressed = cursor > before;
                 let more = batch >= REPLAY_LIMIT || watch.has_gap();
                 let again = std::mem::take(&mut watch.resync_again);
+
+                if acknowledges_reply {
+                    self.sessions.clear_reply_pending(plane, &id);
+                }
 
                 self.cursors.set(plane, &id, cursor);
 
@@ -2126,10 +2538,31 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        if ctrl && matches!(key.code, KeyCode::Char('p')) {
+            if matches!(self.overlay, Some(Overlay::Commands(_))) {
+                self.overlay = None;
+            } else if self.overlay.is_none() {
+                self.overlay = Some(Overlay::Commands(CommandPalette::default()));
+            }
+            return;
+        }
+
+        if ctrl && matches!(key.code, KeyCode::Char('q')) {
+            self.open_quit();
+            return;
+        }
+
         // Never the TUI. §3.4 is explicit: ctrl-c interrupts the active turn, and `q` is
         // the only thing that quits.
         if ctrl && matches!(key.code, KeyCode::Char('c')) {
             self.interrupt();
+            return;
+        }
+
+        // Event details must remain reachable while the composer owns printable keys.
+        // This is handled before overlays/composers for the same reason as ctrl+p.
+        if ctrl && matches!(key.code, KeyCode::Char('e')) && self.overlay.is_none() {
+            self.toggle_session_details();
             return;
         }
 
@@ -2140,6 +2573,15 @@ impl App {
 
         if self.sessions.composer.is_some() && self.tab == Tab::Sessions {
             self.composer_key(key);
+            return;
+        }
+
+        if self.tab == Tab::Sessions
+            && self.sessions.open.is_none()
+            && (self.chatgpt_connected()
+                || matches!(key.code, KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc))
+        {
+            self.home_key(key);
             return;
         }
 
@@ -2468,6 +2910,11 @@ impl App {
     }
 
     fn escape(&mut self) {
+        if self.tab != Tab::Sessions {
+            self.select_tab(Tab::Sessions);
+            return;
+        }
+
         if self.tab == Tab::Sessions {
             if self.sessions.composer.is_some() {
                 self.sessions.composer = None;
@@ -2481,6 +2928,160 @@ impl App {
 
             self.sessions.open = None;
         }
+    }
+
+    // ----- harness home --------------------------------------------------------------
+
+    fn home_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if self.home_pending {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Enter => self.submit_home(),
+            KeyCode::Backspace => {
+                self.home_draft.pop();
+                self.home_error = None;
+            }
+            KeyCode::Esc => {
+                self.home_draft.clear();
+                self.home_error = None;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.home_draft.push(c);
+                self.home_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn submit_home(&mut self) {
+        if !self.chatgpt_connected() {
+            self.open_account();
+            return;
+        }
+
+        let prompt = self.home_draft.trim().to_string();
+
+        if prompt.is_empty() {
+            self.home_error = Some("Type what you want the agent to do.".to_string());
+            return;
+        }
+
+        if !self.hello.serves("interactive.start") {
+            self.home_error = Some("this gateway does not serve interactive.start".to_string());
+            return;
+        }
+
+        if !self.hello.operates() {
+            self.home_error = Some(format!(
+                "starting a session mutates the runtime, and this listener runs at scope `{}`",
+                self.hello.scope
+            ));
+            return;
+        }
+
+        let request = StartRequest {
+            plane: Plane::Interactive,
+            provider: "codex".to_string(),
+            workspace: self.default_workspace(),
+            approval_mode: self.config.defaults.approval_mode(),
+            objective: String::new(),
+        };
+
+        let params = match request.params() {
+            Ok(params) => params,
+            Err(refusal) => {
+                self.home_error = Some(refusal.message());
+                return;
+            }
+        };
+
+        self.home_pending = true;
+        self.home_error = None;
+        self.first_message = Some(prompt);
+        self.config.defaults.provider = Some("codex".to_string());
+        self.mark_welcomed();
+        self.save_pending = true;
+
+        self.issue(
+            Call::new(
+                Tag::Start {
+                    plane: Plane::Interactive,
+                },
+                request.method(),
+                params,
+            )
+            .with_timeout(START_TIMEOUT),
+        );
+    }
+
+    fn open_account(&mut self) {
+        if self.chatgpt_connected() {
+            let flow = if self.spawned() {
+                AccountFlow::Browser
+            } else {
+                AccountFlow::DeviceCode
+            };
+
+            self.overlay = Some(Overlay::Account(Box::new(AccountDialog {
+                pending: false,
+                flow,
+                login_id: None,
+                url: None,
+                code: None,
+                error: None,
+            })));
+            return;
+        }
+
+        if !self.hello.serves("account.login.start") {
+            self.home_error = Some(
+                "this gateway does not expose managed ChatGPT sign-in; update the runtime"
+                    .to_string(),
+            );
+            return;
+        }
+
+        if !self.hello.operates() {
+            self.home_error = Some(format!(
+                "ChatGPT sign-in changes the runtime host, and this listener runs at scope `{}`",
+                self.hello.scope
+            ));
+            return;
+        }
+
+        let flow = if self.spawned() {
+            AccountFlow::Browser
+        } else {
+            AccountFlow::DeviceCode
+        };
+
+        self.overlay = Some(Overlay::Account(Box::new(AccountDialog::new(flow))));
+
+        self.issue(Call::new(
+            Tag::AccountLogin,
+            "account.login.start",
+            json!({
+                "flow": match flow {
+                    AccountFlow::Browser => "browser",
+                    AccountFlow::DeviceCode => "device_code",
+                }
+            }),
+        ));
+    }
+
+    fn new_home(&mut self) {
+        self.overlay = None;
+        self.tab = Tab::Sessions;
+        self.sessions.open = None;
+        self.sessions.composer = None;
+        self.sessions.focus = Pane::Detail;
+        self.home_draft.clear();
+        self.home_error = None;
+        self.poll();
     }
 
     // ----- session verbs -------------------------------------------------------------
@@ -2528,12 +3129,33 @@ impl App {
         });
     }
 
+    fn toggle_session_details(&mut self) {
+        if self.tab != Tab::Sessions || self.sessions.open.is_none() {
+            self.inform(
+                "open a session before viewing its event details",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        self.sessions.show_event_details = !self.sessions.show_event_details;
+
+        if let Some(watch) = self.sessions.open_watch_mut() {
+            // Chat and event rows wrap differently. Returning to the newest content avoids
+            // carrying a line-based scroll offset into a view where it means something else.
+            watch.follow = true;
+            watch.scroll = 0;
+        }
+    }
+
     fn composer_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
         match key.code {
             KeyCode::Esc => self.sessions.composer = None,
             KeyCode::Enter => self.submit_composer(),
+            KeyCode::PageUp | KeyCode::Up => self.move_by(-1),
+            KeyCode::PageDown | KeyCode::Down => self.move_by(1),
             KeyCode::Backspace => {
                 if let Some(composer) = self.sessions.composer.as_mut() {
                     composer.buffer.pop();
@@ -2549,24 +3171,31 @@ impl App {
     }
 
     fn submit_composer(&mut self) {
-        let Some(composer) = self.sessions.composer.take() else {
+        let Some(composer) = self.sessions.composer.as_mut() else {
             return;
         };
 
         let input = composer.buffer.trim().to_string();
+        let verb = composer.verb;
 
         if input.is_empty() {
             return;
         }
 
+        composer.buffer.clear();
+
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
         };
 
-        let (label, method) = match composer.verb {
+        let (label, method) = match verb {
             ComposerVerb::Message => ("send_message", plane.method("send_message")),
             ComposerVerb::Steer => ("steer", plane.method("steer")),
         };
+
+        if verb == ComposerVerb::Message {
+            self.sessions.mark_reply_pending(plane, &id);
+        }
 
         self.issue(Call::new(
             Tag::Action {
@@ -2589,7 +3218,19 @@ impl App {
             if matches!(self.overlay, Some(Overlay::QuickStart(_))) {
                 self.leave_quick_start();
             } else {
+                let login_id = match self.overlay.as_ref() {
+                    Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
+                    _ => None,
+                };
                 self.overlay = None;
+
+                if let Some(login_id) = login_id {
+                    self.issue(Call::new(
+                        Tag::AccountCancel,
+                        "account.login.cancel",
+                        json!({ "login_id": login_id }),
+                    ));
+                }
             }
 
             return;
@@ -2794,18 +3435,12 @@ impl App {
             return;
         }
 
-        if !self.config.onboarding.welcomed {
-            self.quick_intent = QuickIntent::Settled;
-            self.open_quick_start(true);
-            return;
-        }
-
-        if !self.config.onboarding.quick_start {
-            self.quick_intent = QuickIntent::Settled;
-            return;
-        }
-
-        self.quick_intent = QuickIntent::Waiting;
+        // The transcript-first shell is the onboarding. There is no modal to dismiss and
+        // no provider picker between `ouro` and the composer: account state, recent
+        // sessions, and the current workspace arrive behind the first frame.
+        self.quick_intent = QuickIntent::Settled;
+        self.tab = Tab::Sessions;
+        self.issue_if_due(Tag::Account, "account.read", json!({}), ACCOUNT_TICKS);
         self.issue_if_due(
             Tag::Sessions(Plane::Interactive),
             "interactive.list",
@@ -3281,6 +3916,9 @@ impl App {
     /// the next thing typed is the first message.
     fn started(&mut self, plane: Plane, started: StartedRef) {
         self.overlay = None;
+        self.home_pending = false;
+        self.home_error = None;
+        self.home_draft.clear();
 
         // The lists are polled, and waiting up to three seconds for the row to appear
         // under a session the operator is already looking at reads as a bug.
@@ -3304,6 +3942,7 @@ impl App {
             let method = plane.method("send_message");
 
             if self.hello.serves(&method) {
+                self.sessions.mark_reply_pending(plane, &started.id);
                 self.issue(Call::new(
                     Tag::FirstMessage {
                         plane,
@@ -3342,6 +3981,7 @@ impl App {
         // A prompt whose session never existed has nowhere to go, and must not be sent to
         // the next session this client starts.
         self.first_message = None;
+        self.home_pending = false;
 
         match self.overlay.as_mut() {
             // The form is still on screen, so the refusal belongs on it rather than in a
@@ -3353,6 +3993,9 @@ impl App {
             Some(Overlay::QuickStart(quick)) => {
                 quick.pending = false;
                 quick.error = Some(message);
+            }
+            _ if self.tab == Tab::Sessions && self.sessions.open.is_none() => {
+                self.home_error = Some(message)
             }
             _ => self.inform(
                 format!("starting a session failed: {message}"),
@@ -3462,6 +4105,21 @@ impl App {
     fn overlay_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
+        if matches!(self.overlay, Some(Overlay::Commands(_))) {
+            self.command_palette_key(key);
+            return;
+        }
+
+        if matches!(self.overlay, Some(Overlay::Account(_))) {
+            self.account_key(key);
+            return;
+        }
+
+        if matches!(self.overlay, Some(Overlay::SessionPicker { .. })) {
+            self.session_picker_key(key);
+            return;
+        }
+
         // A form has its own key discipline — every printable character belongs to a text
         // field — so it is dispatched before the choosers below can claim `j` and `k`.
         if matches!(self.overlay, Some(Overlay::New(_))) {
@@ -3539,7 +4197,177 @@ impl App {
             },
             // All three are dispatched above, before this match could claim their
             // printable keys.
-            Overlay::New(_) | Overlay::Settings(_) | Overlay::QuickStart(_) => {}
+            Overlay::Commands(_)
+            | Overlay::Account(_)
+            | Overlay::SessionPicker { .. }
+            | Overlay::New(_)
+            | Overlay::Settings(_)
+            | Overlay::QuickStart(_) => {}
+        }
+    }
+
+    fn command_palette_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if matches!(key.code, KeyCode::Esc) || (ctrl && matches!(key.code, KeyCode::Char('p'))) {
+            self.overlay = None;
+            return;
+        }
+
+        let selected_command = match self.overlay.as_ref() {
+            Some(Overlay::Commands(palette)) if matches!(key.code, KeyCode::Enter) => {
+                palette.visible().get(palette.selected).copied()
+            }
+            _ => None,
+        };
+
+        if let Some(command) = selected_command {
+            self.activate_command(command);
+            return;
+        }
+
+        let Some(Overlay::Commands(palette)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Down => {
+                let len = palette.visible().len();
+                palette.selected = (palette.selected + 1).min(len.saturating_sub(1));
+            }
+            KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+            KeyCode::Backspace => {
+                palette.query.pop();
+                palette.selected = palette.first_match();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                palette.query.push(c);
+                palette.selected = palette.first_match();
+            }
+            _ => {}
+        }
+    }
+
+    fn activate_command(&mut self, command: Command) {
+        match command {
+            Command::NewSession => self.new_home(),
+            Command::SwitchSession => {
+                self.overlay = Some(Overlay::SessionPicker { choice: 0 });
+                self.sessions.interactive.invalidate();
+                self.sessions.coding.invalidate();
+                self.poll();
+            }
+            Command::SessionDetails => {
+                self.overlay = None;
+                self.toggle_session_details();
+            }
+            Command::ConnectChatGpt => {
+                self.overlay = None;
+                self.open_account();
+            }
+            Command::Runtime | Command::Nodes => {
+                self.overlay = None;
+                self.select_tab(Tab::Dashboard);
+            }
+            Command::Agents => {
+                self.overlay = None;
+                self.select_tab(Tab::Agents);
+            }
+            Command::Teams => {
+                self.overlay = None;
+                self.select_tab(Tab::Teams);
+            }
+            Command::Plans => {
+                self.overlay = None;
+                self.select_tab(Tab::Plans);
+            }
+            Command::Upgrades => {
+                self.overlay = None;
+                self.select_tab(Tab::Upgrade);
+            }
+            Command::Logs => {
+                self.overlay = None;
+                self.select_tab(Tab::Logs);
+            }
+            Command::Settings => {
+                self.overlay = None;
+                self.open_settings();
+            }
+        }
+    }
+
+    fn session_picker_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        if matches!(key.code, KeyCode::Esc) {
+            self.overlay = None;
+            return;
+        }
+
+        let len = self.sessions.merged().len();
+
+        let Some(Overlay::SessionPicker { choice }) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                *choice = (*choice + 1).min(len.saturating_sub(1))
+            }
+            KeyCode::Up | KeyCode::Char('k') => *choice = choice.saturating_sub(1),
+            KeyCode::Enter => {
+                let selected = *choice;
+                let session = self
+                    .sessions
+                    .merged()
+                    .get(selected)
+                    .map(|session| (session.plane, session.id.clone()));
+
+                self.overlay = None;
+                if let Some((plane, id)) = session {
+                    self.open_session(plane, id);
+                    if plane == Plane::Interactive {
+                        self.sessions.composer = Some(Composer {
+                            verb: ComposerVerb::Message,
+                            buffer: String::new(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn account_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let connected = self.chatgpt_connected();
+
+        match key.code {
+            KeyCode::Esc => {
+                let login_id = match self.overlay.as_ref() {
+                    Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
+                    _ => None,
+                };
+
+                self.overlay = None;
+
+                if let Some(login_id) = login_id {
+                    self.issue(Call::new(
+                        Tag::AccountCancel,
+                        "account.login.cancel",
+                        json!({ "login_id": login_id }),
+                    ));
+                }
+            }
+            KeyCode::Enter if connected => self.overlay = None,
+            KeyCode::Char('l') if connected && self.hello.serves("account.logout") => {
+                self.overlay = None;
+                self.issue(Call::new(Tag::AccountLogout, "account.logout", json!({})));
+            }
+            _ => {}
         }
     }
 

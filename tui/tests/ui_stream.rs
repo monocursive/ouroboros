@@ -235,11 +235,7 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
 
     assert!(screen.contains("session ready"), "{}", screen.text());
     // The composer is open, so the first message is the next thing typed.
-    assert!(
-        screen.contains("Enter sends, Esc cancels"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("Enter sends"), "{}", screen.text());
 
     script.abort();
 }
@@ -300,11 +296,7 @@ async fn a_reconnect_resubscribes_every_watched_session_at_its_cursor() {
     let screen = harness.screen(110, 24);
 
     // The interruption is recorded rather than smoothed over.
-    assert!(
-        screen.contains("the connection was re-established here"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("Connection restored"), "{}", screen.text());
     assert!(screen.contains("line 4"), "{}", screen.text());
 
     script.abort();
@@ -384,7 +376,7 @@ async fn a_lag_replays_from_the_contiguous_cursor_and_fills_the_hole() {
     let screen = harness.screen(110, 30);
 
     assert!(
-        screen.contains("the gateway dropped 4 event frames here"),
+        screen.contains("Some live updates were missed by the gateway"),
         "{}",
         screen.text()
     );
@@ -449,7 +441,7 @@ async fn a_pruned_cursor_restarts_from_the_floor_through_the_same_path() {
     let screen = harness.screen(110, 24);
 
     assert!(
-        screen.contains("history truncated below 96"),
+        screen.contains("Earlier conversation is no longer available"),
         "a transcript that lost history has to say so:\n{}",
         screen.text()
     );
@@ -475,10 +467,15 @@ async fn stream_ended_stops_the_client_expecting_more() {
         )
         .await;
 
-        // Nothing else is served: a client that kept asking would be answered by the
-        // request below never arriving, and this test would hang rather than fail.
-        if let Some(request) = peer.request().await {
-            panic!("a finished stream must not be asked about again: {request}");
+        // Session-list polling is independent of this stream. Serve those ordinary tab
+        // refreshes, but fail if the client subscribes to or replays the ended stream.
+        while let Some(request) = peer.request().await {
+            match request["method"].as_str() {
+                Some("interactive.list" | "coding.list") => {
+                    peer.result(&request["id"], json!([])).await
+                }
+                _ => panic!("a finished stream must not be asked about again: {request}"),
+            }
         }
     });
 
@@ -508,7 +505,7 @@ async fn stream_ended_stops_the_client_expecting_more() {
 
     let screen = harness.screen(110, 24);
     assert!(
-        screen.contains("stream ended (closed)"),
+        screen.contains("Session ended (closed)"),
         "{}",
         screen.text()
     );
@@ -567,6 +564,12 @@ async fn a_notification_this_client_could_not_take_is_repaired_like_a_lag() {
     assert_eq!(watch.cursor(), 5);
     assert_eq!(watch.dropped, 3);
 
+    // The interruption is old enough to have scrolled above the compact chat viewport;
+    // the complete ledger must retain it exactly.
+    harness.app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::CONTROL,
+    )));
     let screen = harness.screen(110, 24);
 
     assert!(

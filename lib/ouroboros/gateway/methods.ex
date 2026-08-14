@@ -84,6 +84,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
+  alias Ouroboros.Provider.CodexAppServer
   alias Ouroboros.Team
   alias Ouroboros.Upgrade.NodeExecutor
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
@@ -143,6 +144,7 @@ defmodule Ouroboros.Gateway.Methods do
     "hello" => %{scope: :read, timeout: @hello_deadline},
     "runtime.status" => %{scope: :read, timeout: @default_timeout},
     "runtime.providers" => %{scope: :read, timeout: @default_timeout},
+    "account.read" => %{scope: :read, timeout: @default_timeout},
     "agents.list" => %{scope: :read, timeout: @default_timeout},
     "agents.state" => %{scope: :read, timeout: @default_timeout},
     "interactive.list" => %{scope: :read, timeout: @default_timeout},
@@ -167,6 +169,9 @@ defmodule Ouroboros.Gateway.Methods do
     "signing.decisions" => %{scope: :read, timeout: @default_timeout},
     "grants.list" => %{scope: :read, timeout: @default_timeout},
     "interactive.start" => %{scope: :operate, timeout: @start_timeout},
+    "account.login.start" => %{scope: :operate, timeout: @default_timeout},
+    "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
+    "account.logout" => %{scope: :operate, timeout: @default_timeout},
     "interactive.send_message" => %{scope: :operate, timeout: @default_timeout},
     "interactive.follow_up" => %{scope: :operate, timeout: @default_timeout},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
@@ -375,6 +380,40 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
 
   def invoke("runtime.providers", _params), do: safe(fn -> {:ok, providers()} end)
+
+  def invoke("account.read", params) do
+    with :ok <- only_keys(params, []) do
+      safe(fn -> reply(account_adapter().read()) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("account.login.start", params) do
+    with :ok <- only_keys(params, ["flow"]),
+         {:ok, flow} <- account_flow(Map.get(params, "flow", "browser")) do
+      safe(fn -> reply(account_adapter().login(flow)) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("account.login.cancel", params) do
+    with :ok <- only_keys(params, ["login_id"]),
+         {:ok, login_id} <- fetch_string(params, "login_id") do
+      safe(fn -> reply(account_adapter().cancel(login_id)) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("account.logout", params) do
+    with :ok <- only_keys(params, []) do
+      safe(fn -> reply(account_adapter().logout()) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
 
   def invoke("agents.list", _params), do: safe(fn -> reply(Mesh.list_agents()) end)
 
@@ -908,6 +947,26 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
+  defp only_keys(params, allowed) when is_map(params) do
+    case Map.keys(params) -- allowed do
+      [] ->
+        :ok
+
+      unknown ->
+        {:invalid, "params contains unsupported fields: #{Enum.sort(unknown) |> Enum.join(", ")}"}
+    end
+  end
+
+  defp account_flow("browser"), do: {:ok, :browser}
+  defp account_flow("device_code"), do: {:ok, :device_code}
+
+  defp account_flow(_other),
+    do: {:invalid, "params.flow must be browser or device_code"}
+
+  defp account_adapter do
+    Application.get_env(:ouroboros, :codex_account_adapter, CodexAppServer)
+  end
+
   # An absent optional string is `nil` rather than an error; a present one is held to the
   # same rule as a required one, so `""` is a mistake and not a silent default.
   defp fetch_optional_string(params, key) do
@@ -997,6 +1056,14 @@ defmodule Ouroboros.Gateway.Methods do
     {:error, code(:upstream_timeout), "the runtime did not answer in time",
      %{"outcome" => "unknown"}}
   end
+
+  defp reply({:error, {:timeout, operation}}),
+    do: {:error, code(:upstream_timeout), "Codex app-server timed out during #{operation}"}
+
+  defp reply({:error, {:unavailable, message}}) when is_binary(message), do: unavailable(message)
+
+  defp reply({:error, {:upstream, message}}) when is_binary(message),
+    do: upstream_error({:codex_app_server, message})
 
   defp reply({:error, reason}),
     do: {:error, code(:upstream_error), "the runtime refused the call", Wire.to_json(reason)}

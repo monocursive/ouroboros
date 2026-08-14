@@ -25,6 +25,7 @@ pub mod app;
 pub mod boot;
 pub mod dashboard;
 pub mod explorer;
+pub mod logo;
 pub mod logs;
 pub mod sessions;
 pub mod theme;
@@ -33,12 +34,14 @@ pub mod tree;
 pub mod view;
 
 use std::io::{self, IsTerminal, Stdout};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use crossterm::cursor::MoveTo;
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
@@ -260,6 +263,44 @@ pub fn persist(app: &mut App) {
     }
 }
 
+fn open_pending_url(app: &mut App) {
+    let Some(url) = app.take_open_url() else {
+        return;
+    };
+
+    if !url.starts_with("https://") {
+        app.inform(
+            "the account service returned a non-HTTPS sign-in URL; it was not opened",
+            app::NoticeKind::Error,
+        );
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let result = ProcessCommand::new("open").arg(&url).spawn();
+
+    #[cfg(target_os = "linux")]
+    let result = ProcessCommand::new("xdg-open").arg(&url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let result = ProcessCommand::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this platform has no configured browser opener",
+    ));
+
+    if let Err(error) = result {
+        app.inform(
+            format!("could not open the ChatGPT sign-in page: {error}"),
+            app::NoticeKind::Error,
+        );
+    }
+}
+
 /// Runs the UI until the operator picks something from the quit dialog.
 ///
 /// `screen` is the terminal the boot screen already took over, handed on rather than
@@ -286,6 +327,18 @@ pub async fn run(
         None => Screen::enter()?,
     };
 
+    // The boot renderer and the harness share one alternate screen, but they do not share
+    // one frame layout. Clear the physical terminal at the handoff so sparse areas of the
+    // first transcript frame cannot retain boot copy that Ratatui's fresh buffer already
+    // assumes is blank.
+    screen
+        .terminal
+        .backend_mut()
+        .execute(Clear(ClearType::All))
+        .context("clearing the boot screen before the harness")?
+        .execute(MoveTo(0, 0))
+        .context("positioning the first harness frame")?;
+
     input(sender.clone());
 
     let mut ticker = tokio::time::interval(TICK);
@@ -303,6 +356,7 @@ pub async fn run(
         // Before the draw, so the notice naming the file is on the same frame as the
         // settings overlay closing.
         persist(&mut app);
+        open_pending_url(&mut app);
 
         screen
             .terminal

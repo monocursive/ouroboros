@@ -28,7 +28,10 @@ pub fn label() -> Style {
 }
 
 pub fn selected() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+    Style::default()
+        .fg(Color::White)
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// A pane that does not have focus still shows its selection, dimmed, because losing the

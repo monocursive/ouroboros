@@ -667,6 +667,75 @@ impl ProviderEntry {
     }
 }
 
+/// The non-secret account metadata exposed by Codex app-server's `account/read`.
+///
+/// Ouroboros never receives or stores an access token. The runtime keeps Codex's auth
+/// material; this shape is only enough for the shell to say whether the coding provider
+/// is ready and which ChatGPT plan is connected.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountState {
+    #[serde(default)]
+    pub account: Option<AccountIdentity>,
+    #[serde(default)]
+    pub requires_openai_auth: bool,
+    #[serde(default)]
+    pub login: AccountLoginState,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountIdentity {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub plan_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountLoginState {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub login_id: Option<String>,
+    #[serde(default)]
+    pub flow: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl AccountState {
+    pub fn decode(value: &Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value.clone())
+    }
+
+    pub fn connected(&self) -> bool {
+        self.account
+            .as_ref()
+            .map(|account| account.kind == "chatgpt")
+            .unwrap_or(false)
+    }
+
+    pub fn plan_label(&self) -> Option<String> {
+        self.account.as_ref().and_then(|account| {
+            account
+                .plan_type
+                .as_deref()
+                .filter(|plan| !plan.is_empty())
+                .map(|plan| {
+                    let mut chars = plan.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+        })
+    }
+}
+
 /// `stream.lagged`: the gateway dropped event frames for this session and says how many.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Lagged {

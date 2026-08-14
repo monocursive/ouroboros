@@ -326,14 +326,20 @@ defmodule Ouroboros.Interactive.Task do
   defp persist_harness_events(runtime, harness_events) do
     projected = Enum.map(harness_events, &Event.from_harness(runtime.session.id, &1))
 
+    # Harness deliberately records only that input was accepted. Ouroboros already owns
+    # the durable turn request, so correlate the Harness turn id and copy its prompt
+    # through Redaction into the projected event. This gives every replaying client the
+    # user side of the chat without changing Harness or inventing client-local rows.
+    reconciled = reconcile_turn_ids(runtime.session, projected)
+    projected = Enum.map(projected, &enrich_chat_input(&1, reconciled))
+
     session =
-      Enum.reduce(projected, runtime.session, fn event, session ->
+      Enum.reduce(projected, reconciled, fn event, session ->
         session
         |> Map.put(:cursor, event.sequence)
         |> maybe_provider_session(event.provider_session_id)
         |> append_event(event)
       end)
-      |> reconcile_turn_ids(projected)
       |> apply_turn_event_statuses(projected)
       |> mark_gap_ambiguities(projected)
       |> State.touch()
@@ -343,6 +349,20 @@ defmodule Ouroboros.Interactive.Task do
       {:error, runtime} -> schedule_poll(runtime, @poll_interval)
     end
   end
+
+  defp enrich_chat_input(
+         %Event{type: :input_accepted, payload: %{"kind" => "message"}} = event,
+         session
+       ) do
+    with turn when is_map(turn) <- find_turn_by_harness_id(session, event.turn_id),
+         prompt when is_binary(prompt) <- get_in(turn, [:request, :prompt]) do
+      %{event | payload: Map.put(event.payload, "text", Jido.Harness.Redaction.redact(prompt))}
+    else
+      _missing -> event
+    end
+  end
+
+  defp enrich_chat_input(event, _session), do: event
 
   defp refresh_session(runtime) do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do

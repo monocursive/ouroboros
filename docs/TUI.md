@@ -670,15 +670,24 @@ rule already buys it. `runtime_status_result.json` pins the successful shape.
 
 Tabs (build order within §5): **1 Dashboard** (node/role, availability
 matrix from `status.availability`, connected nodes, providers), **2 Sessions**
-(interactive + coding lists; focused session = scrollback via replay + live
-tail, input box, approval modal), **3 Agents** (list + state tree +
+(interactive + coding lists; focused session = conversation-first scrollback via replay +
+live tail, input box, approval modal), **3 Agents** (list + state tree +
 `last_effects` if present), **4 Teams**, **5 Plans/Control**, **6 Upgrade**
 (rollouts, history, signing decisions, grants-by-principal prompt), **7 Logs**
 (spawn mode only; attach mode shows "logs live with the spawner").
 
+The focused session opens as **Agent chat**. It renders durable `input_accepted` text as
+the user's message, collapses output deltas into the corresponding final agent message,
+and keeps lifecycle, provider stderr, usage, reasoning, tool, and bookkeeping events out
+of the reading path. `Ctrl-E` toggles the complete normalized event ledger without
+discarding anything. Gaps, pruning, lag, terminal state, approvals, and actual failures
+remain visible in chat because hiding them would make an incomplete or failed
+conversation look healthy.
+
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `,` settings, `q` quit dialog, `?` help with the authoritative key map.
+`s` steer, `Ctrl-E` chat/event details, `,` settings, `q` quit dialog, `?` help with the
+authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:

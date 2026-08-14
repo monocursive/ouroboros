@@ -109,6 +109,7 @@ defmodule Ouroboros.Application do
         Ouroboros.Orchestration.Store,
         Ouroboros.Control.Store,
         Ouroboros.Control.Grants,
+        Ouroboros.Provider.CodexAppServer,
         release_runtime()
       ] ++
         workspace_children() ++

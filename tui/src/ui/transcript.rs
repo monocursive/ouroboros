@@ -144,6 +144,10 @@ pub struct Watch {
     /// Events a replay answered that this build could not decode. Counted rather than
     /// hidden: the alternative is a transcript with unexplained holes.
     pub undecodable: usize,
+    /// Whether at least one accepted turn has not produced user-visible agent text yet.
+    /// Rebuilt from the ordered event ledger after every absorb, so a late replay cannot
+    /// move this state backwards by arriving after a newer live event.
+    waiting_for_reply: bool,
 }
 
 impl Watch {
@@ -163,6 +167,7 @@ impl Watch {
             follow: true,
             scroll: 0,
             undecodable: 0,
+            waiting_for_reply: false,
         }
     }
 
@@ -181,6 +186,10 @@ impl Watch {
 
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+
+    pub fn waiting_for_reply(&self) -> bool {
+        self.ended.is_none() && self.waiting_for_reply
     }
 
     /// The newest sequence held, contiguous or not.
@@ -209,6 +218,7 @@ impl Watch {
 
         self.trim();
         self.recompute_cursor();
+        self.recompute_waiting_for_reply();
     }
 
     /// Records that history at or below `floor` will never arrive.
@@ -246,6 +256,7 @@ impl Watch {
         self.ended = Some(status);
         self.resyncing = false;
         self.resync_again = false;
+        self.waiting_for_reply = false;
     }
 
     pub fn resolve_approval(&mut self, request_id: &str) {
@@ -376,6 +387,69 @@ impl Watch {
 
         self.cursor = cursor;
     }
+
+    fn recompute_waiting_for_reply(&mut self) {
+        #[derive(Debug, Default)]
+        struct ReplyState {
+            pending: bool,
+            responded: bool,
+            paused: bool,
+        }
+
+        let mut turns: BTreeMap<String, ReplyState> = BTreeMap::new();
+
+        for event in self.events.values() {
+            let turn = event
+                .turn_id
+                .clone()
+                .unwrap_or_else(|| "__session__".to_string());
+
+            match event.kind {
+                EventType::RunStarted
+                | EventType::InputAccepted
+                | EventType::TurnQueued
+                | EventType::TurnStarted => {
+                    let state = turns.entry(turn).or_default();
+                    state.pending = true;
+                    state.responded = false;
+                    state.paused = false;
+                }
+                EventType::OutputTextDelta | EventType::OutputTextFinal
+                    if event
+                        .payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(|text| !text.trim().is_empty())
+                        .unwrap_or(false) =>
+                {
+                    turns.entry(turn).or_default().responded = true;
+                }
+                EventType::ApprovalRequested => {
+                    turns.entry(turn).or_default().paused = true;
+                }
+                EventType::ApprovalResolved => {
+                    turns.entry(turn).or_default().paused = false;
+                }
+                EventType::RunCompleted
+                | EventType::RunFailed
+                | EventType::RunCancelled
+                | EventType::TurnCompleted
+                | EventType::TurnFailed
+                | EventType::TurnInterrupted => {
+                    turns.entry(turn).or_default().pending = false;
+                }
+                EventType::SessionIdle
+                | EventType::SessionClosed
+                | EventType::SessionFailed
+                | EventType::SessionCancelled => turns.clear(),
+                _ => {}
+            }
+        }
+
+        self.waiting_for_reply = turns
+            .values()
+            .any(|state| state.pending && !state.responded && !state.paused);
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +481,19 @@ mod tests {
         .expect("an approval event")
     }
 
+    fn lifecycle(sequence: u64, kind: &str, turn_id: &str, text: &str) -> Event {
+        Event::decode(&json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": kind,
+            "timestamp": "2026-01-01T00:00:00.000000Z",
+            "turn_id": turn_id,
+            "request_id": if kind.starts_with("approval_") { Some("req-a") } else { None },
+            "payload": { "text": text }
+        }))
+        .expect("a lifecycle event")
+    }
+
     fn watch() -> Watch {
         Watch::new(Plane::Interactive, "s1".into())
     }
@@ -433,6 +520,42 @@ mod tests {
         watch.absorb((4..=8).map(event).collect());
         assert_eq!(watch.cursor(), 10);
         assert!(!watch.has_gap());
+    }
+
+    #[test]
+    fn reply_waiting_follows_turn_text_approval_and_terminal_events() {
+        let mut watch = watch();
+
+        watch.absorb(vec![lifecycle(1, "input_accepted", "turn-1", "fix it")]);
+        assert!(watch.waiting_for_reply());
+
+        watch.absorb(vec![lifecycle(2, "output_text_delta", "turn-1", "")]);
+        assert!(
+            watch.waiting_for_reply(),
+            "an empty transport delta is not a visible reply"
+        );
+
+        watch.absorb(vec![lifecycle(3, "output_text_delta", "turn-1", "Working")]);
+        assert!(!watch.waiting_for_reply());
+
+        // A queued follow-up still waits even though the preceding turn has replied.
+        watch.absorb(vec![lifecycle(4, "turn_queued", "turn-2", "")]);
+        assert!(watch.waiting_for_reply());
+
+        watch.absorb(vec![lifecycle(5, "approval_requested", "turn-2", "bash")]);
+        assert!(
+            !watch.waiting_for_reply(),
+            "the runtime is waiting on the user"
+        );
+
+        watch.absorb(vec![lifecycle(6, "approval_resolved", "turn-2", "")]);
+        assert!(
+            watch.waiting_for_reply(),
+            "the agent resumed without replying yet"
+        );
+
+        watch.absorb(vec![lifecycle(7, "turn_failed", "turn-2", "boom")]);
+        assert!(!watch.waiting_for_reply());
     }
 
     #[test]

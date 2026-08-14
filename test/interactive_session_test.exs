@@ -94,6 +94,14 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert Enum.map(events, & &1.sequence) == Enum.to_list(1..length(events))
     assert Enum.count(events, &(&1.type == :turn_completed)) == 2
 
+    assert Enum.any?(events, fn event ->
+             event.type == :input_accepted and event.payload["text"] == "inspect"
+           end)
+
+    assert Enum.any?(events, fn event ->
+             event.type == :input_accepted and event.payload["text"] == "then explain"
+           end)
+
     cursor = events |> Enum.find(&(&1.type == :output_text_final)) |> Map.fetch!(:sequence)
     assert {:ok, after_cursor} = InteractiveSession.replay(ref, cursor: cursor)
     assert Enum.all?(after_cursor, &(&1.sequence > cursor))
