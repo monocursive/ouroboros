@@ -22,6 +22,8 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   use GenServer
 
+  require Logger
+
   @request_timeout 12_000
   @initialize_id 0
 
@@ -334,6 +336,58 @@ defmodule Ouroboros.Provider.CodexAppServer do
       {:error, {:unavailable, "the Codex app-server stopped accepting requests"}}
   end
 
+  # A frame that names a method is something the app-server is asking of this client, and
+  # that is true whether or not it also carries an id. Routing on the id first read every
+  # such request as a response: id 0 looked like a failed initialize and tore the
+  # connection down, an id that collided with an in-flight request completed that caller
+  # with somebody else's params, and any other id was dropped while Codex waited for an
+  # answer that was never coming.
+  defp frame(%{"method" => method} = request, state) when is_map_key(request, "id") do
+    Logger.warning(
+      "the Codex app-server requested #{inspect(method)}, which this client " <>
+        "does not serve"
+    )
+
+    # JSON-RPC's method-not-found. Codex learns immediately that nothing here will answer
+    # it, instead of holding a request open against a client that has no such method.
+    reply = %{
+      "id" => request["id"],
+      "error" => %{
+        "code" => -32601,
+        "message" => "Ouroboros serves no app-server methods on this connection"
+      }
+    }
+
+    case send_frame(state.port, reply) do
+      :ok -> state
+      {:error, reason} -> reset(reply_all(state, reason), reason)
+    end
+  end
+
+  defp frame(%{"method" => "account/login/completed", "params" => params}, state) do
+    login = %{
+      "status" => if(params["success"], do: "succeeded", else: "failed"),
+      "loginId" => params["loginId"],
+      "flow" => state.login["flow"],
+      "error" => params["error"]
+    }
+
+    %{state | login: login}
+  end
+
+  defp frame(%{"method" => "account/updated", "params" => params}, state) do
+    # The next `account/read` remains the source of account identity. This notification
+    # only makes a completed sign-in visible immediately while that read is in flight.
+    login =
+      if params["authMode"] do
+        %{state.login | "status" => "succeeded", "error" => nil}
+      else
+        @idle_login
+      end
+
+    %{state | login: login}
+  end
+
   defp frame(%{"id" => @initialize_id} = response, state) do
     {pending, rest} = Map.pop(state.pending, @initialize_id)
     cancel_timer(pending)
@@ -371,31 +425,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
     end
   end
 
-  defp frame(%{"method" => "account/login/completed", "params" => params}, state) do
-    login = %{
-      "status" => if(params["success"], do: "succeeded", else: "failed"),
-      "loginId" => params["loginId"],
-      "flow" => state.login["flow"],
-      "error" => params["error"]
-    }
-
-    %{state | login: login}
-  end
-
-  defp frame(%{"method" => "account/updated", "params" => params}, state) do
-    # The next `account/read` remains the source of account identity. This notification
-    # only makes a completed sign-in visible immediately while that read is in flight.
-    login =
-      if params["authMode"] do
-        %{state.login | "status" => "succeeded", "error" => nil}
-      else
-        @idle_login
-      end
-
-    %{state | login: login}
-  end
-
-  defp frame(_notification, state), do: state
+  defp frame(_unroutable, state), do: state
 
   defp complete(%{from: from, kind: :account_read}, result, state) do
     GenServer.reply(from, {:ok, Map.put(account(result), "login", state.login)})

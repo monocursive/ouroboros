@@ -1,6 +1,9 @@
 defmodule Ouroboros.Provider.CodexAppServerTest do
   use ExUnit.Case, async: false
 
+  # Every failure path this file drives is one the connection is supposed to log about.
+  @moduletag :capture_log
+
   alias Ouroboros.Provider.CodexAppServer
 
   # `rest_for_one` makes child order a blast radius. This process owns a port to a program
@@ -116,6 +119,51 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     assert message =~ "Codex is not installed on the runtime host"
   end
 
+  describe "a frame is routed by what it is, not by whether it has an id" do
+    test "a server-to-client request is refused as method-not-found, not read as a response" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            ;;
+          *'"method":"account/read"'*)
+            echo '{"id":0,"method":"applyPatchApproval","params":{"callId":"c1"}}'
+            echo '{"id":1,"method":"execCommandApproval","params":{"callId":"c2"}}'
+            echo '{"id":1,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      # Neither request may be mistaken for a response: id 0 would have looked like a
+      # failed initialize and torn the connection down, and id 1 would have completed
+      # this caller with an approval request's params.
+      assert {:ok, %{"account" => %{"type" => "chatgpt"}}} = CodexAppServer.read(server)
+
+      assert eventually(fn -> length(refusals(executable)) == 2 end),
+             "the app-server was left waiting for a reply it will never get"
+
+      for refusal <- refusals(executable) do
+        assert refusal["error"]["code"] == -32601
+      end
+
+      assert Enum.map(refusals(executable), & &1["id"]) == [0, 1]
+    end
+
+    test "a notification without an id still reaches its handler" do
+      executable = fake_app_server()
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      assert {:ok, %{"login" => %{"status" => "idle"}}} = CodexAppServer.read(server)
+      assert {:ok, %{"loginId" => "login-1"}} = CodexAppServer.login(:device_code, server)
+
+      # `account/login/completed` carries no id; the connection learns the login finished
+      # from the notification alone.
+      assert {:ok, %{"login" => %{"status" => "succeeded"}}} = CodexAppServer.read(server)
+    end
+  end
+
   describe "a failed connection leaves nothing running" do
     test "an app-server that never answers initialize is timed out and closed" do
       executable = fake_app_server("")
@@ -223,6 +271,21 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     listing
     |> String.split("\n", trim: true)
     |> Enum.filter(&String.contains?(&1, executable))
+  end
+
+  # Every fake records the frames it was sent, so the client half of the protocol is
+  # observable: these are the error replies this connection wrote back.
+  defp refusals(executable) do
+    case File.read(executable <> ".log") do
+      {:ok, contents} ->
+        contents
+        |> String.split("\n", trim: true)
+        |> Enum.map(&JSON.decode!/1)
+        |> Enum.filter(&Map.has_key?(&1, "error"))
+
+      {:error, _reason} ->
+        []
+    end
   end
 
   defp eventually(condition, attempts \\ 40) do
