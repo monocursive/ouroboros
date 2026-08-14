@@ -338,6 +338,55 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert_eventually(fn -> Workspace.list() == [] end)
   end
 
+  test "an interactive session this build cannot run fails alone at adoption", %{
+    workspace: workspace
+  } do
+    session_id = unique_id("version-skew-session")
+
+    profile =
+      Ouroboros.AgentProfile.new!(id: "skewed-session", base_prompt: "Act as a coding agent.")
+
+    assert {:ok, session} =
+             Ouroboros.Interactive.State.new(session_id,
+               provider: @provider,
+               workspace: workspace,
+               agent_profile: profile
+             )
+
+    skewed = %{
+      session
+      | status: :idle,
+        updated_at: aged_timestamp(),
+        prompt_trace: Map.put(session.prompt_trace, :version, 99)
+    }
+
+    stop_application()
+
+    assert :ok =
+             Jido.Storage.ETS.put_checkpoint(
+               {:ouroboros, :interactive_sessions, 1},
+               %{session_id => skewed},
+               table: :ouroboros_interactive
+             )
+
+    assert {:ok, _started} = Application.ensure_all_started(:ouroboros)
+    assert is_pid(Process.whereis(Ouroboros.Interactive.Store))
+
+    failed =
+      assert_eventually(fn ->
+        case Ouroboros.Interactive.Store.get(session_id) do
+          {:ok, %Ouroboros.Interactive.State{status: :failed} = state} -> state
+          _other -> false
+        end
+      end)
+
+    assert failed.error ==
+             {:unrequestable_session_state, {:unsupported_prompt_trace_version, 99}}
+
+    refute_receive {:ouroboros_test_adapter_started, _run_id, _request, _adapter}, 100
+    assert_eventually(fn -> Workspace.list() == [] end)
+  end
+
   test "a permanently refused checkpoint ends the task instead of polling forever", %{
     workspace: workspace
   } do
