@@ -332,6 +332,32 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert Process.alive?(server)
     end
 
+    test "a line that never ends is a protocol failure, not an unbounded buffer" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+      caller = Task.async(fn -> CodexAppServer.read(server) end)
+
+      assert eventually(fn -> server_ports(server) != [] end)
+      [port] = server_ports(server)
+
+      # The port's own line limit is 1MB, so a longer line arrives as unterminated chunks.
+      # Delivering one large enough to breach the cap is the same thing an app-server
+      # streaming into this buffer would do, minus the wait.
+      send(server, {port, {:data, {:noeol, :binary.copy("x", 5 * 1024 * 1024)}}})
+
+      assert {:error, {:unavailable, message}} = Task.await(caller, 5_000)
+      assert message =~ "without ending it"
+      assert Process.alive?(server)
+      assert server_ports(server) == []
+      assert_no_orphans(executable)
+    end
+
     test "three refused reads leave three fewer processes than they started" do
       executable =
         fake_app_server("""

@@ -44,9 +44,6 @@ defmodule Ouroboros.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # The Codex app-server account boundary is newline-delimited JSON. Declare Jason
-      # directly rather than relying on Jido's transitive dependency for product code.
-      {:jason, "~> 1.4"},
       {:jido, "~> 2.3"},
       {:jido_ai, "~> 2.3"},
       # Cluster formation. The runtime's distribution semantics never depended on how

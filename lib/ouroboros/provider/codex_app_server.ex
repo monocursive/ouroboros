@@ -27,6 +27,8 @@ defmodule Ouroboros.Provider.CodexAppServer do
   @request_timeout 12_000
   @initialize_id 0
   @excerpt_bytes 200
+  @line_bytes 1_048_576
+  @max_line_bytes 4 * @line_bytes
 
   @idle_login %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}
 
@@ -151,14 +153,28 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   @impl true
   def handle_info({port, {:data, {:noeol, bytes}}}, %{port: port} = state) do
-    {:noreply, %{state | partial: state.partial <> bytes}}
+    partial = state.partial <> bytes
+
+    # A line this long is not a frame from the account surface, whose largest result is a
+    # login URL and a code. Something upstream is streaming into a buffer this process
+    # would hold until it ran out of memory, so it is a protocol failure like any other.
+    if byte_size(partial) > @max_line_bytes do
+      reason =
+        {:unavailable,
+         "the Codex app-server sent a line over #{div(@max_line_bytes, 1024 * 1024)}MB " <>
+           "without ending it"}
+
+      {:noreply, reset(reply_all(%{state | partial: ""}, reason), reason)}
+    else
+      {:noreply, %{state | partial: partial}}
+    end
   end
 
   def handle_info({port, {:data, {:eol, bytes}}}, %{port: port} = state) do
     line = state.partial <> bytes
     state = %{state | partial: ""}
 
-    case Jason.decode(line) do
+    case JSON.decode(line) do
       {:ok, frame} when is_map(frame) ->
         {:noreply, frame(frame, state)}
 
@@ -306,7 +322,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
           :use_stdio,
           :stderr_to_stdout,
           {:args, [~c"app-server", ~c"--stdio"]},
-          {:line, 1_048_576}
+          {:line, @line_bytes}
         ]
       )
 
@@ -349,7 +365,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
   # port is already gone — the child died between two frames — which is the transport
   # disappearing rather than the app-server refusing anything, so it is named as such.
   defp send_frame(port, frame) do
-    Port.command(port, [Jason.encode_to_iodata!(frame), "\n"])
+    Port.command(port, [JSON.encode_to_iodata!(frame), "\n"])
     :ok
   rescue
     ArgumentError ->
