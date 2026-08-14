@@ -85,6 +85,12 @@ pub enum Cell {
         detail: String,
         tone: Tone,
     },
+    /// A muted entry in the conversation itself: something the ledger recorded happening
+    /// without recording what was said. Not a divider — nothing was interrupted — and not a
+    /// message, because nobody's words are being quoted.
+    ChatNote {
+        text: String,
+    },
     Divider {
         text: String,
         tone: Tone,
@@ -140,6 +146,21 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     cells.push(Cell::Message {
                         speaker: Speaker::You,
                         text,
+                    });
+                }
+                PresentationEvent::UserSteer(text) => {
+                    flush_agent(&mut cells, &mut pending);
+                    cells.push(Cell::ChatNote {
+                        text: match text {
+                            Some(text) => format!("You steered the agent: {text}"),
+                            None => "You steered the agent".to_string(),
+                        },
+                    });
+                }
+                PresentationEvent::UnrecordedInput => {
+                    flush_agent(&mut cells, &mut pending);
+                    cells.push(Cell::ChatNote {
+                        text: "[message not recorded]".to_string(),
                     });
                 }
                 PresentationEvent::AgentText {
@@ -258,6 +279,7 @@ pub fn render_cells(cells: &[Cell], width: usize) -> Vec<Line<'static>> {
                 detail,
                 tone,
             } => render_status(&mut lines, label, detail, colour(*tone), width),
+            Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
             Cell::Divider { text, tone } => lines.push(divider(text, width, colour(*tone))),
         }
     }
@@ -613,6 +635,17 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
                 Style::default().fg(theme::MUTED),
             ),
         ]));
+    }
+}
+
+fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    separate(lines);
+
+    for line in wrap_limited(text, width.max(8), MESSAGE_LINES) {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(theme::MUTED),
+        )));
     }
 }
 
@@ -1437,6 +1470,43 @@ mod tests {
         assert_eq!(wrap("alpha beta", 7), vec!["alpha", "beta"]);
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("a  b\n", 10), vec!["a  b", ""]);
+    }
+
+    #[test]
+    fn an_input_the_ledger_did_not_record_still_appears_in_the_chat() {
+        let unrecorded = event(1, "input_accepted", json!({"kind": "message"}));
+        let steer = event(2, "input_accepted", json!({"kind": "steer"}));
+        let told = event(
+            3,
+            "input_accepted",
+            json!({"kind": "steer", "text": "use the smaller fixture"}),
+        );
+
+        let cells = project(vec![
+            Entry::Event(&unrecorded),
+            Entry::Event(&steer),
+            Entry::Event(&told),
+        ]);
+
+        assert_eq!(
+            cells,
+            vec![
+                Cell::ChatNote {
+                    text: "[message not recorded]".into()
+                },
+                Cell::ChatNote {
+                    text: "You steered the agent".into()
+                },
+                Cell::ChatNote {
+                    text: "You steered the agent: use the smaller fixture".into()
+                },
+            ]
+        );
+
+        let text = plain(&render_cells(&cells, 80));
+        assert!(text.contains("[message not recorded]"), "{text}");
+        assert!(text.contains("You steered the agent"), "{text}");
+        assert!(text.contains("use the smaller fixture"), "{text}");
     }
 
     #[test]
