@@ -99,7 +99,15 @@ defmodule Ouroboros.Interactive.State do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
            {:ok, base} <-
-             TaskState.new(id, "interactive coding session", Keyword.drop(opts, @session_options)),
+             TaskState.new(
+               id,
+               "interactive coding session",
+               Keyword.drop(opts, @session_options),
+               # The transport decides which normalized options a session may carry, so
+               # the capability lookup needs the one this session will select. It is a
+               # session option and therefore dropped from the base's own options.
+               {:interactive, Keyword.get(opts, :transport)}
+             ),
            :ok <- validate_serializable_options(opts) do
         now = timestamp()
 
