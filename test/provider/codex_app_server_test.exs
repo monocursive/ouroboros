@@ -109,6 +109,30 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert_no_orphans(executable)
     end
 
+    test "an app-server that dies between frames answers its callers instead of crashing" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            exit 0
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      # Whether the acknowledging frame or the request after it is the one that finds the
+      # port gone, the caller is owed a sentence rather than an exit from a match failure.
+      assert {:error, {:unavailable, message}} = CodexAppServer.read(server)
+      assert message =~ "Codex app-server"
+      assert Process.alive?(server)
+      assert server_ports(server) == []
+      assert_no_orphans(executable)
+
+      # The connection is resettable, not poisoned: the next call tries again.
+      assert {:error, {:unavailable, _message}} = CodexAppServer.read(server)
+      assert Process.alive?(server)
+    end
+
     test "three refused reads leave three fewer processes than they started" do
       executable =
         fake_app_server("""

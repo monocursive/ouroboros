@@ -111,6 +111,12 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   @impl true
   def init(opts) do
+    # The port is linked to this process, and a port whose child has died mid-write ends
+    # with `:epipe` — an exit signal, not a message. Trapping is what turns that into
+    # something this module can answer its callers about, rather than a GenServer crash
+    # that hands them a raw exit and restarts the connection under them.
+    Process.flag(:trap_exit, true)
+
     executable =
       Keyword.get(opts, :executable) ||
         System.get_env("CODEX_PATH") ||
@@ -148,7 +154,12 @@ defmodule Ouroboros.Provider.CodexAppServer do
   end
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
-    reason = {:unavailable, "Codex app-server exited with status #{status}"}
+    reason = {:unavailable, "the Codex app-server exited with status #{status}"}
+    {:noreply, reset(reply_all(state, reason), reason)}
+  end
+
+  def handle_info({:EXIT, port, exit_reason}, %{port: port} = state) do
+    reason = {:unavailable, port_failure(exit_reason)}
     {:noreply, reset(reply_all(state, reason), reason)}
   end
 
@@ -185,6 +196,15 @@ defmodule Ouroboros.Provider.CodexAppServer do
   end
 
   defp close_port(_port), do: :ok
+
+  # A dead port reaches this process two ways, and neither of them is the caller's fault:
+  # `:epipe` when a frame was written into a child that had already gone, and the port's
+  # own termination otherwise.
+  defp port_failure(:epipe), do: "the Codex app-server stopped reading its input"
+  defp port_failure(:normal), do: "the Codex app-server connection closed"
+
+  defp port_failure(reason),
+    do: "the Codex app-server connection failed: #{inspect(reason)}"
 
   defp ensure_started(%{port: port} = state) when is_port(port), do: {:ok, state}
 
@@ -293,14 +313,15 @@ defmodule Ouroboros.Provider.CodexAppServer do
     end
   end
 
+  # `Port.command/2` answers `true` or raises; it has no false. It raises exactly when the
+  # port is already gone — the child died between two frames — which is the transport
+  # disappearing rather than the app-server refusing anything, so it is named as such.
   defp send_frame(port, frame) do
-    encoded = [Jason.encode_to_iodata!(frame), "\n"]
-
-    if Port.command(port, encoded),
-      do: :ok,
-      else: {:error, {:unavailable, "Codex app-server closed its input"}}
+    Port.command(port, [Jason.encode_to_iodata!(frame), "\n"])
+    :ok
   rescue
-    error -> {:error, {:upstream, Exception.message(error)}}
+    ArgumentError ->
+      {:error, {:unavailable, "the Codex app-server stopped accepting requests"}}
   end
 
   defp frame(%{"id" => @initialize_id} = response, state) do
@@ -308,8 +329,16 @@ defmodule Ouroboros.Provider.CodexAppServer do
     cancel_timer(pending)
 
     if Map.has_key?(response, "result") do
-      :ok = send_frame(state.port, %{"method" => "initialized", "params" => %{}})
-      flush(%{state | initialized?: true, pending: rest})
+      # The child can die between the frame it answered and the one that acknowledges it.
+      # Every caller is owed the same honest answer as any other transport failure; a
+      # match here would crash this process and hand them a raw exit instead.
+      case send_frame(state.port, %{"method" => "initialized", "params" => %{}}) do
+        :ok ->
+          flush(%{state | initialized?: true, pending: rest})
+
+        {:error, reason} ->
+          reset(reply_all(%{state | pending: rest}, reason), reason)
+      end
     else
       reason = {:upstream, app_server_error(response)}
       reset(reply_queued(%{state | pending: rest}, reason), reason)
