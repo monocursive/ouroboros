@@ -392,9 +392,14 @@ impl Editor {
     }
 
     fn refresh_completion(&mut self, catalog: &CompletionCatalog) {
+        // Scanned as characters, not bytes: a non-breaking space (Option+Space, and every
+        // browser paste) or an ideographic space is whitespace that is two or three bytes
+        // wide, and `at + 1` past one of them lands mid-character. Slicing there panics.
         let start = self.text[..self.cursor]
-            .rfind(char::is_whitespace)
-            .map_or(0, |at| at + 1);
+            .char_indices()
+            .rev()
+            .find(|(_at, character)| character.is_whitespace())
+            .map_or(0, |(at, character)| at + character.len_utf8());
         let end = self.text[self.cursor..]
             .find(char::is_whitespace)
             .map_or(self.text.len(), |at| self.cursor + at);
@@ -645,5 +650,62 @@ mod tests {
         let mut editor = Editor::default();
         editor.paste("a\r\nb\rc", &CompletionCatalog::default());
         assert_eq!(editor.text(), "a\nb\nc");
+    }
+
+    /// Option+Space on macOS. The completion scan used to step one byte past it and slice
+    /// through the middle of the character.
+    #[test]
+    fn a_typed_non_breaking_space_does_not_split_a_character() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.handle_key(key(KeyCode::Char('a')), &catalog);
+        editor.handle_key(key(KeyCode::Char('\u{a0}')), &catalog);
+        editor.handle_key(key(KeyCode::Char('b')), &catalog);
+
+        assert_eq!(editor.text(), "a\u{a0}b");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn pasted_text_containing_a_non_breaking_space_survives_a_later_keystroke() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("review the\u{a0}diff", &catalog);
+        editor.handle_key(key(KeyCode::Char('!')), &catalog);
+
+        assert_eq!(editor.text(), "review the\u{a0}diff!");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    /// The word separator a Japanese or Chinese IME produces.
+    #[test]
+    fn an_ideographic_space_is_whitespace_rather_than_a_byte_offset() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("直す\u{3000}/set", &catalog);
+
+        assert_eq!(editor.text(), "直す\u{3000}/set");
+        // The `/` follows whitespace but not the start of the line, so it is a path-like
+        // token rather than a command: what matters here is that scanning it did not panic.
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn a_completed_path_with_a_unicode_space_takes_the_next_keystroke() {
+        let mut catalog = CompletionCatalog::default();
+        catalog.set_files(vec!["notes\u{a0}draft.md".into()]);
+        let mut editor = Editor::default();
+
+        editor.paste("@notes", &catalog);
+        editor.handle_key(key(KeyCode::Tab), &catalog);
+        assert_eq!(editor.text(), "@notes\u{a0}draft.md ");
+
+        editor.handle_key(key(KeyCode::Backspace), &catalog);
+
+        assert_eq!(editor.text(), "@notes\u{a0}draft.md");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
     }
 }
