@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::transcript::{Diff, FileChange, PresentationEvent, ToolCall, ToolResult};
 
@@ -84,6 +85,12 @@ pub enum Cell {
         detail: String,
         tone: Tone,
     },
+    /// A muted entry in the conversation itself: something the ledger recorded happening
+    /// without recording what was said. Not a divider — nothing was interrupted — and not a
+    /// message, because nobody's words are being quoted.
+    ChatNote {
+        text: String,
+    },
     Divider {
         text: String,
         tone: Tone,
@@ -139,6 +146,21 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     cells.push(Cell::Message {
                         speaker: Speaker::You,
                         text,
+                    });
+                }
+                PresentationEvent::UserSteer(text) => {
+                    flush_agent(&mut cells, &mut pending);
+                    cells.push(Cell::ChatNote {
+                        text: match text {
+                            Some(text) => format!("You steered the agent: {text}"),
+                            None => "You steered the agent".to_string(),
+                        },
+                    });
+                }
+                PresentationEvent::UnrecordedInput => {
+                    flush_agent(&mut cells, &mut pending);
+                    cells.push(Cell::ChatNote {
+                        text: "[message not recorded]".to_string(),
                     });
                 }
                 PresentationEvent::AgentText {
@@ -257,6 +279,7 @@ pub fn render_cells(cells: &[Cell], width: usize) -> Vec<Line<'static>> {
                 detail,
                 tone,
             } => render_status(&mut lines, label, detail, colour(*tone), width),
+            Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
             Cell::Divider { text, tone } => lines.push(divider(text, width, colour(*tone))),
         }
     }
@@ -615,6 +638,17 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
     }
 }
 
+fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    separate(lines);
+
+    for line in wrap_limited(text, width.max(8), MESSAGE_LINES) {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+}
+
 fn render_status(
     lines: &mut Vec<Line<'static>>,
     label: &str,
@@ -826,7 +860,7 @@ fn separate(lines: &mut Vec<Line<'static>>) {
 
 fn divider(text: &str, width: usize, colour: Color) -> Line<'static> {
     let text = super::tree::truncate(text, width.saturating_sub(8));
-    let rule = width.saturating_sub(text.chars().count() + 6);
+    let rule = width.saturating_sub(text.width() + 6);
 
     Line::from(vec![
         Span::styled("──── ".to_string(), Style::default().fg(colour)),
@@ -1042,9 +1076,33 @@ fn wrap_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
                 current_width = 0;
             }
             character => {
-                word.push(character);
-                word_width += 1;
+                let cells = character.width().unwrap_or(0);
 
+                // Measured in terminal cells: a CJK ideograph and most emoji occupy two,
+                // and a combining mark occupies none — so counting characters would build
+                // lines twice the pane's width, which the renderer then clips in half.
+                if word_width > 0 && word_width + cells > width {
+                    if !current.is_empty() {
+                        if !push_wrapped_line(&mut lines, std::mem::take(&mut current), max_lines) {
+                            return lines;
+                        }
+                        current_width = 0;
+                    }
+
+                    // The word already fills the pane. Emitting it here rather than growing
+                    // it is what keeps a multi-megabyte token costing `max_lines` of work
+                    // rather than the length of the token.
+                    if !push_wrapped_line(&mut lines, std::mem::take(&mut word), max_lines) {
+                        return lines;
+                    }
+                    word_width = 0;
+                }
+
+                word.push(character);
+                word_width += cells;
+
+                // One character wider than the whole pane. There is nowhere narrower to put
+                // it, so it gets a row of its own rather than pushing everything after it.
                 if word_width > width {
                     if !current.is_empty() {
                         if !push_wrapped_line(&mut lines, std::mem::take(&mut current), max_lines) {
@@ -1053,15 +1111,10 @@ fn wrap_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
                         current_width = 0;
                     }
 
-                    // `word` held exactly `width` characters before this one. Split at the
-                    // newest character's byte boundary, so long tokens are processed once and
-                    // the buffer never grows with the token.
-                    let overflow = word.split_off(word.len() - character.len_utf8());
                     if !push_wrapped_line(&mut lines, std::mem::take(&mut word), max_lines) {
                         return lines;
                     }
-                    word = overflow;
-                    word_width = 1;
+                    word_width = 0;
                 }
             }
         }
@@ -1319,7 +1372,49 @@ mod tests {
         let wrapped = wrap_limited(&token, 79, TOOL_OUTPUT_LINES + 1);
 
         assert_eq!(wrapped.len(), TOOL_OUTPUT_LINES + 1);
-        assert!(wrapped.iter().all(|line| line.chars().count() == 79));
+        // 39 ideographs, not 79: the pane is measured in cells, and each of these takes
+        // two. A line of 79 of them would be drawn 158 cells wide and clipped in half.
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| line.width() == 78 && line.chars().count() == 39),
+            "{:?}",
+            wrapped.first()
+        );
+    }
+
+    #[test]
+    fn a_cjk_line_wraps_to_the_cells_the_pane_actually_has() {
+        let wrapped = wrap("設定を確認してから、テストを実行してください", 12);
+
+        assert!(wrapped.iter().all(|line| line.width() <= 12), "{wrapped:?}");
+        assert!(wrapped.len() > 1, "{wrapped:?}");
+        assert_eq!(
+            wrapped.concat(),
+            "設定を確認してから、テストを実行してください"
+        );
+    }
+
+    #[test]
+    fn emoji_wrap_by_cell_and_a_single_one_still_gets_a_row() {
+        let wrapped = wrap("🚀🚀🚀🚀🚀", 4);
+
+        assert!(wrapped.iter().all(|line| line.width() <= 4), "{wrapped:?}");
+        assert_eq!(wrapped.concat(), "🚀🚀🚀🚀🚀");
+
+        // Narrower than one glyph: it gets a row rather than being dropped or looping.
+        let narrow = wrap("🚀🚀", 1);
+        assert_eq!(narrow.concat(), "🚀🚀");
+    }
+
+    #[test]
+    fn combining_marks_ride_with_the_character_they_modify() {
+        // e + U+0301 is one cell, so eight of them fit a pane of eight.
+        let text = "e\u{301}".repeat(8);
+        let wrapped = wrap(&text, 8);
+
+        assert_eq!(wrapped, vec![text.clone()]);
+        assert_eq!(wrapped[0].width(), 8);
     }
 
     #[test]
@@ -1375,6 +1470,43 @@ mod tests {
         assert_eq!(wrap("alpha beta", 7), vec!["alpha", "beta"]);
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("a  b\n", 10), vec!["a  b", ""]);
+    }
+
+    #[test]
+    fn an_input_the_ledger_did_not_record_still_appears_in_the_chat() {
+        let unrecorded = event(1, "input_accepted", json!({"kind": "message"}));
+        let steer = event(2, "input_accepted", json!({"kind": "steer"}));
+        let told = event(
+            3,
+            "input_accepted",
+            json!({"kind": "steer", "text": "use the smaller fixture"}),
+        );
+
+        let cells = project(vec![
+            Entry::Event(&unrecorded),
+            Entry::Event(&steer),
+            Entry::Event(&told),
+        ]);
+
+        assert_eq!(
+            cells,
+            vec![
+                Cell::ChatNote {
+                    text: "[message not recorded]".into()
+                },
+                Cell::ChatNote {
+                    text: "You steered the agent".into()
+                },
+                Cell::ChatNote {
+                    text: "You steered the agent: use the smaller fixture".into()
+                },
+            ]
+        );
+
+        let text = plain(&render_cells(&cells, 80));
+        assert!(text.contains("[message not recorded]"), "{text}");
+        assert!(text.contains("You steered the agent"), "{text}");
+        assert!(text.contains("use the smaller fixture"), "{text}");
     }
 
     #[test]

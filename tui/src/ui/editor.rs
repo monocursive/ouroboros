@@ -9,6 +9,8 @@ use std::fs;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const HISTORY_LIMIT: usize = 100;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
@@ -115,6 +117,26 @@ impl Editor {
         !self.text.is_empty() || !self.history.is_empty()
     }
 
+    /// What has been submitted through this editor, oldest first.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Adopts a history from a previous editor over the same conversation. The composer is
+    /// rebuilt every time it opens, and an Up arrow that forgot everything typed before the
+    /// last Esc is a recall that cannot be relied on.
+    pub fn restore_history(&mut self, history: Vec<String>) {
+        self.history = history;
+
+        if self.history.len() > HISTORY_LIMIT {
+            let excess = self.history.len() - HISTORY_LIMIT;
+            self.history.drain(..excess);
+        }
+
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
     pub fn clear_text(&mut self) {
         self.text.clear();
         self.cursor = 0;
@@ -163,6 +185,10 @@ impl Editor {
                     EditorAction::Cancel
                 }
             }
+            // Only reachable where the terminal reports the modifier at all: without the
+            // kitty keyboard protocol, `Shift+Enter` arrives as a bare `Enter` and submits.
+            // The footers advertise it on exactly that condition; `Ctrl+J` below is the
+            // newline every terminal can send.
             KeyCode::Enter if shift || alt => {
                 self.insert("\n");
                 EditorAction::None
@@ -242,7 +268,10 @@ impl Editor {
             }
             KeyCode::PageUp => EditorAction::Scroll(-1),
             KeyCode::PageDown => EditorAction::Scroll(1),
-            KeyCode::Char(c) if !ctrl => {
+            // ALT is excluded as well as CONTROL: a terminal reports Alt-B and Alt-F as
+            // `Char('b')`/`Char('f')` with the modifier set, and inserting the letter turns
+            // a word-motion chord into typing.
+            KeyCode::Char(c) if !ctrl && !alt => {
                 self.insert(&c.to_string());
                 EditorAction::None
             }
@@ -320,7 +349,7 @@ impl Editor {
         let end = self.text[self.cursor..]
             .find('\n')
             .map_or(self.text.len(), |at| self.cursor + at);
-        let column = self.text[start..self.cursor].chars().count();
+        let column = column_of(&self.text[start..self.cursor]);
         let wanted = self.preferred_column.unwrap_or(column);
 
         let target = if delta < 0 {
@@ -341,7 +370,7 @@ impl Editor {
             (next_start, next_end)
         };
 
-        self.cursor = byte_at_char(&self.text, target.0, target.1, wanted);
+        self.cursor = byte_at_column(&self.text, target.0, target.1, wanted);
         self.preferred_column = Some(wanted);
         true
     }
@@ -392,9 +421,14 @@ impl Editor {
     }
 
     fn refresh_completion(&mut self, catalog: &CompletionCatalog) {
+        // Scanned as characters, not bytes: a non-breaking space (Option+Space, and every
+        // browser paste) or an ideographic space is whitespace that is two or three bytes
+        // wide, and `at + 1` past one of them lands mid-character. Slicing there panics.
         let start = self.text[..self.cursor]
-            .rfind(char::is_whitespace)
-            .map_or(0, |at| at + 1);
+            .char_indices()
+            .rev()
+            .find(|(_at, character)| character.is_whitespace())
+            .map_or(0, |(at, character)| at + character.len_utf8());
         let end = self.text[self.cursor..]
             .find(char::is_whitespace)
             .map_or(self.text.len(), |at| self.cursor + at);
@@ -501,21 +535,47 @@ fn matching_files(query: &str, files: &[String]) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Motion and deletion step by *grapheme cluster*, not by `char`.
+///
+/// `e` + U+0301 and a ZWJ emoji sequence are each one thing on screen and several `char`s
+/// in memory. Stepping by `char` put the cursor inside them, so one Left moved nowhere
+/// visible and one Backspace left a stray combining mark attached to whatever preceded it.
 fn previous_boundary(text: &str, cursor: usize) -> Option<usize> {
-    text[..cursor].char_indices().next_back().map(|(at, _)| at)
+    text[..cursor]
+        .grapheme_indices(true)
+        .next_back()
+        .map(|(at, _cluster)| at)
 }
 
 fn next_boundary(text: &str, cursor: usize) -> Option<usize> {
-    let mut chars = text[cursor..].char_indices();
-    chars.next()?;
-    chars.next().map(|(at, _)| cursor + at).or(Some(text.len()))
+    let mut clusters = text[cursor..].grapheme_indices(true);
+    clusters.next()?;
+    clusters
+        .next()
+        .map(|(at, _cluster)| cursor + at)
+        .or(Some(text.len()))
 }
 
-fn byte_at_char(text: &str, start: usize, end: usize, column: usize) -> usize {
-    text[start..end]
-        .char_indices()
-        .nth(column)
-        .map_or(end, |(at, _)| start + at)
+/// The display column of the text before the cursor, which is what a vertical move should
+/// preserve: a line of CJK above a line of ASCII is twice as many columns as it is
+/// characters, and counting characters would land the cursor half a line early.
+fn column_of(text: &str) -> usize {
+    text.width()
+}
+
+/// The grapheme boundary in `text[start..end]` nearest `column` without passing it.
+fn byte_at_column(text: &str, start: usize, end: usize, column: usize) -> usize {
+    let mut used = 0;
+
+    for (at, cluster) in text[start..end].grapheme_indices(true) {
+        if used + cluster.width() > column {
+            return start + at;
+        }
+
+        used += cluster.width();
+    }
+
+    end
 }
 
 /// Builds a deterministic, bounded local index without following directory symlinks.
@@ -645,5 +705,125 @@ mod tests {
         let mut editor = Editor::default();
         editor.paste("a\r\nb\rc", &CompletionCatalog::default());
         assert_eq!(editor.text(), "a\nb\nc");
+    }
+
+    /// Option+Space on macOS. The completion scan used to step one byte past it and slice
+    /// through the middle of the character.
+    #[test]
+    fn a_typed_non_breaking_space_does_not_split_a_character() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.handle_key(key(KeyCode::Char('a')), &catalog);
+        editor.handle_key(key(KeyCode::Char('\u{a0}')), &catalog);
+        editor.handle_key(key(KeyCode::Char('b')), &catalog);
+
+        assert_eq!(editor.text(), "a\u{a0}b");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn pasted_text_containing_a_non_breaking_space_survives_a_later_keystroke() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("review the\u{a0}diff", &catalog);
+        editor.handle_key(key(KeyCode::Char('!')), &catalog);
+
+        assert_eq!(editor.text(), "review the\u{a0}diff!");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    /// The word separator a Japanese or Chinese IME produces.
+    #[test]
+    fn an_ideographic_space_is_whitespace_rather_than_a_byte_offset() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("直す\u{3000}/set", &catalog);
+
+        assert_eq!(editor.text(), "直す\u{3000}/set");
+        // The `/` follows whitespace but not the start of the line, so it is a path-like
+        // token rather than a command: what matters here is that scanning it did not panic.
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    /// One thing on screen is one thing to the cursor, however many `char`s it is made of.
+    #[test]
+    fn motion_and_deletion_step_by_grapheme_cluster() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        // A ZWJ family emoji: five chars, one cluster.
+        editor.paste("ok 👨‍👩‍👧", &catalog);
+        assert_eq!(editor.text().chars().count(), 8);
+        assert_eq!(editor.text().graphemes(true).count(), 4);
+
+        editor.handle_key(key(KeyCode::Backspace), &catalog);
+        assert_eq!(
+            editor.text(),
+            "ok ",
+            "one Backspace removes the whole emoji, not its last codepoint"
+        );
+
+        // A base letter and its combining acute.
+        editor.clear_text();
+        editor.paste("cafe\u{301}", &catalog);
+        editor.handle_key(key(KeyCode::Left), &catalog);
+        assert_eq!(editor.cursor(), 3, "Left clears the accent with its letter");
+
+        editor.handle_key(key(KeyCode::Right), &catalog);
+        assert_eq!(editor.cursor(), editor.text().len());
+
+        editor.handle_key(key(KeyCode::Backspace), &catalog);
+        assert_eq!(editor.text(), "caf");
+    }
+
+    /// A vertical move keeps the *column*, and a line of CJK is twice as many columns as it
+    /// is characters.
+    #[test]
+    fn vertical_movement_counts_display_columns() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("設定確認\nabcdefgh", &catalog);
+        // End of the second line, column 8.
+        assert_eq!(editor.cursor(), editor.text().len());
+
+        editor.handle_key(key(KeyCode::Up), &catalog);
+
+        // Column 8 on the first line is four ideographs in, which is its end.
+        assert_eq!(&editor.text()[..editor.cursor()], "設定確認");
+
+        editor.handle_key(key(KeyCode::Down), &catalog);
+        assert_eq!(editor.cursor(), editor.text().len());
+    }
+
+    #[test]
+    fn alt_chords_are_not_typed_into_the_draft() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("word", &catalog);
+        editor.handle_key(modified(KeyCode::Char('b'), KeyModifiers::ALT), &catalog);
+        editor.handle_key(modified(KeyCode::Char('f'), KeyModifiers::ALT), &catalog);
+
+        assert_eq!(editor.text(), "word");
+    }
+
+    #[test]
+    fn a_completed_path_with_a_unicode_space_takes_the_next_keystroke() {
+        let mut catalog = CompletionCatalog::default();
+        catalog.set_files(vec!["notes\u{a0}draft.md".into()]);
+        let mut editor = Editor::default();
+
+        editor.paste("@notes", &catalog);
+        editor.handle_key(key(KeyCode::Tab), &catalog);
+        assert_eq!(editor.text(), "@notes\u{a0}draft.md ");
+
+        editor.handle_key(key(KeyCode::Backspace), &catalog);
+
+        assert_eq!(editor.text(), "@notes\u{a0}draft.md");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
     }
 }

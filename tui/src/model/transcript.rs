@@ -23,6 +23,13 @@ const DIFF_TRUNCATION: &str = "\n… diff truncated; full diff is available in e
 #[derive(Debug, Clone, PartialEq)]
 pub enum PresentationEvent {
     UserMessage(String),
+    /// A steer. The text is optional because a checkpointed event from before the runtime
+    /// carried it, and every recovered turn, arrives without one.
+    UserSteer(Option<String>),
+    /// An accepted input whose words this ledger does not hold. Named rather than dropped:
+    /// a chat that silently omits a turn the operator remembers typing is a chat that
+    /// cannot be trusted about the turns it does show.
+    UnrecordedInput,
     AgentText {
         turn_id: Option<String>,
         text: String,
@@ -88,10 +95,7 @@ pub struct Diff {
 impl PresentationEvent {
     pub fn from_event(event: &Event) -> Self {
         match event.kind {
-            EventType::InputAccepted => raw_text(&event.payload, &["text"])
-                .filter(|text| !text.trim().is_empty())
-                .map(Self::UserMessage)
-                .unwrap_or(Self::Ignore),
+            EventType::InputAccepted => input_accepted(&event.payload),
             EventType::OutputTextDelta | EventType::OutputTextFinal => {
                 let Some(text) = raw_text(&event.payload, &["text"]) else {
                     return Self::Ignore;
@@ -158,6 +162,25 @@ impl PresentationEvent {
             }
             _ => Self::Ignore,
         }
+    }
+}
+
+/// What one accepted input was, given that the ledger does not always carry its words.
+///
+/// The text is missing for every event checkpointed before the runtime recorded it and for
+/// every recovered turn, and those events are not going away. Mapping them to `Ignore`
+/// deleted real turns from the chat — including every steer, which is the one kind of turn
+/// an operator is most likely to be looking for afterwards.
+fn input_accepted(payload: &Value) -> PresentationEvent {
+    let words = raw_text(payload, &["text"]).filter(|words| !words.trim().is_empty());
+    let steered = text(payload, &["kind"])
+        .map(|kind| kind == "steer")
+        .unwrap_or(false);
+
+    match (steered, words) {
+        (true, words) => PresentationEvent::UserSteer(words),
+        (false, Some(words)) => PresentationEvent::UserMessage(words),
+        (false, None) => PresentationEvent::UnrecordedInput,
     }
 }
 
@@ -635,6 +658,47 @@ mod tests {
         let diff = update.diff.expect("a diff");
         assert_eq!(diff.path.as_deref(), Some("lib/a.ex"));
         assert_eq!((diff.additions, diff.deletions), (2, 1));
+    }
+
+    /// Checkpointed events written before the runtime carried the text, and every recovered
+    /// turn, arrive without one. Dropping them deleted real turns from the chat.
+    #[test]
+    fn an_accepted_input_without_text_is_named_rather_than_dropped() {
+        assert_eq!(
+            PresentationEvent::from_event(&event("input_accepted", json!({"kind": "message"}))),
+            PresentationEvent::UnrecordedInput
+        );
+
+        // No `kind` either — an older event that says only that something was accepted.
+        assert_eq!(
+            PresentationEvent::from_event(&event("input_accepted", json!({}))),
+            PresentationEvent::UnrecordedInput
+        );
+
+        assert_eq!(
+            PresentationEvent::from_event(&event("input_accepted", json!({"kind": "steer"}))),
+            PresentationEvent::UserSteer(None)
+        );
+    }
+
+    #[test]
+    fn a_steer_carries_its_text_once_the_runtime_sends_one() {
+        assert_eq!(
+            PresentationEvent::from_event(&event(
+                "input_accepted",
+                json!({"kind": "steer", "text": "stop and run the tests first"})
+            )),
+            PresentationEvent::UserSteer(Some("stop and run the tests first".into()))
+        );
+
+        // An ordinary message is still an ordinary message.
+        assert_eq!(
+            PresentationEvent::from_event(&event(
+                "input_accepted",
+                json!({"kind": "message", "text": "fix the flaky test"})
+            )),
+            PresentationEvent::UserMessage("fix the flaky test".into())
+        );
     }
 
     #[test]

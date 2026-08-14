@@ -957,6 +957,8 @@ dependencies = [
  "tar",
  "tokio",
  "toml",
+ "unicode-segmentation",
+ "unicode-width",
  "zeroize",
 ]
 

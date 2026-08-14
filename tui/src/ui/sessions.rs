@@ -11,6 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Event, EventType, Plane, SessionInfo};
 
@@ -42,7 +43,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        7 + completion_height(
+        7 + completion_rows(
             app.sessions
                 .composer
                 .as_ref()
@@ -65,7 +66,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    let composer_height = 7 + completion_height(Some(&app.home_draft));
+    let composer_height = 7 + completion_rows(Some(&app.home_draft));
     let rows =
         Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
     let ready = app.home_ready();
@@ -171,17 +172,17 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let Some(watch) = app.sessions.watches.get(&(plane, id.clone())) else {
+    let ticks = app.ticks;
+    let show_event_details = app.sessions.show_event_details;
+
+    // Sized before the header is built, because the header states whether the transcript is
+    // scrolled back and that is only settled once this frame's rows have been counted. A
+    // block's inner area does not depend on its title.
+    let inner = pane(Line::from(""), focused).inner(area);
+
+    let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
-
-    let show_event_details = app.sessions.show_event_details;
-    let block = pane(
-        header(watch, &id, plane, app.ticks, show_event_details),
-        focused,
-    );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     let width = inner.width.max(8) as usize;
     let entries = watch.entries();
@@ -192,8 +193,18 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     if !show_event_details && waiting_for_reply {
-        push_typing_indicator(&mut lines, app.ticks);
+        push_typing_indicator(&mut lines, ticks);
     }
+
+    // The renderer is the only thing that knows how many rows this wrapped to, so it is
+    // the only thing that can hold a scrolled-back viewport still while the tail grows.
+    watch.measured(lines.len(), inner.height as usize);
+
+    let block = pane(
+        header(watch, &id, plane, ticks, show_event_details),
+        focused,
+    );
+    frame.render_widget(block, area);
 
     if lines.is_empty() {
         frame.render_widget(
@@ -214,13 +225,10 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let height = inner.height as usize;
     let max_scroll = lines.len().saturating_sub(height);
 
-    let scroll = if watch.follow {
-        0
-    } else {
-        watch.scroll.min(max_scroll)
-    };
+    // `measured` already clamped this against exactly these numbers.
+    let scroll = if watch.follow { 0 } else { watch.scroll };
 
-    let start = max_scroll - scroll;
+    let start = max_scroll.saturating_sub(scroll);
     let end = (start + height).min(lines.len());
 
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);
@@ -444,7 +452,7 @@ fn event_style(kind: &EventType) -> Style {
 
 fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
     let text = super::tree::truncate(text, width.saturating_sub(8));
-    let rule = width.saturating_sub(text.chars().count() + 6);
+    let rule = width.saturating_sub(text.width() + 6);
 
     Line::from(vec![
         Span::styled("──── ".to_string(), Style::default().fg(colour)),
@@ -459,6 +467,9 @@ fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'sta
 /// Wrapping done here rather than by `Paragraph` so the scroll offset counts the same
 /// lines the reader sees. A transcript whose scroll position is a guess is a transcript
 /// that jumps.
+///
+/// Measured in terminal cells, like everything else this client lays out by hand: a line
+/// of CJK counted by character is twice as wide as the pane it was measured for.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -472,7 +483,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         for word in source.split(' ') {
             if current.is_empty() {
                 current.push_str(word);
-            } else if current.chars().count() + 1 + word.chars().count() <= width {
+            } else if current.width() + 1 + word.width() <= width {
                 current.push(' ');
                 current.push_str(word);
             } else {
@@ -480,12 +491,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
                 current.push_str(word);
             }
 
-            // A single word longer than the pane is cut rather than allowed to overflow.
-            while current.chars().count() > width {
-                let head: String = current.chars().take(width).collect();
-                let tail: String = current.chars().skip(width).collect();
-                lines.push(head);
-                current = tail;
+            // A single word wider than the pane is cut rather than allowed to overflow.
+            while current.width() > width {
+                let split = cell_split(&current, width);
+                let tail = current.split_off(split);
+                lines.push(std::mem::replace(&mut current, tail));
             }
         }
 
@@ -493,6 +503,23 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     }
 
     lines
+}
+
+/// The byte offset at which `text` has occupied as many cells as will fit in `width`.
+fn cell_split(text: &str, width: usize) -> usize {
+    let mut used = 0;
+
+    for (at, character) in text.char_indices() {
+        let cells = character.width().unwrap_or(0);
+
+        if used + cells > width {
+            return at;
+        }
+
+        used += cells;
+    }
+
+    text.len()
 }
 
 fn composer(frame: &mut Frame, area: Rect, app: &App) {
@@ -530,13 +557,9 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let completion_rows = active
-        .and_then(|composer| composer.editor.completion())
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0);
     let rows = Layout::vertical([
         Constraint::Min(2),
-        Constraint::Length(completion_rows),
+        Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
@@ -563,9 +586,17 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         .and_then(|composer| composer.editor.completion())
         .is_some()
     {
-        "↑↓ choose · Tab complete · Esc close       Shift+Enter/Ctrl+J newline · Enter sends"
+        key_footer(
+            "↑↓ choose · Tab complete · Esc close",
+            app.keyboard_enhanced,
+            "sends",
+        )
     } else {
-        "@ paths · / commands · ↑ history          Shift+Enter/Ctrl+J newline · Enter sends"
+        key_footer(
+            "@ paths · / commands · ↑ history",
+            app.keyboard_enhanced,
+            "sends",
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -615,14 +646,9 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         ]));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let completion_rows = app
-        .home_draft
-        .completion()
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0);
     let rows = Layout::vertical([
         Constraint::Min(2),
-        Constraint::Length(completion_rows),
+        Constraint::Length(completion_rows(Some(&app.home_draft))),
         Constraint::Length(1),
     ])
     .split(inner);
@@ -660,27 +686,59 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         ))
     } else if app.home_draft.completion().is_some() {
         Line::from(Span::styled(
-            "↑↓ choose · Tab complete · Esc close       Shift+Enter/Ctrl+J newline · Enter starts",
+            key_footer(
+                "↑↓ choose · Tab complete · Esc close",
+                app.keyboard_enhanced,
+                "starts",
+            ),
+            Style::default().fg(theme::MUTED),
+        ))
+    } else if ready {
+        Line::from(Span::styled(
+            key_footer(
+                "@ paths · / commands · ↑ history",
+                app.keyboard_enhanced,
+                "starts",
+            ),
             Style::default().fg(theme::MUTED),
         ))
     } else {
         Line::from(Span::styled(
-            if ready {
-                "@ paths · / commands · ↑ history          Shift+Enter/Ctrl+J newline · Enter starts"
-            } else {
-                "/ commands                                               Enter connects"
-            },
+            "/ commands                                               Enter connects",
             Style::default().fg(theme::MUTED),
         ))
     };
     frame.render_widget(Paragraph::new(footer), rows[2]);
 }
 
-fn completion_height(editor: Option<&Editor>) -> u16 {
+/// A composer footer, naming only the newline bindings this terminal actually has.
+///
+/// `Shift+Enter` needs the kitty keyboard protocol to be distinguishable from `Enter` at
+/// all. Where it is not — Terminal.app, iTerm2's default profile, tmux without passthrough
+/// — a footer offering it would be telling someone that the key which sends their
+/// half-written message inserts a newline. `Ctrl+J` always works, so it is always named.
+fn key_footer(left: &str, enhanced: bool, verb: &str) -> String {
+    let newline = if enhanced {
+        "Shift+Enter/Ctrl+J"
+    } else {
+        "Ctrl+J"
+    };
+
+    format!("{left:<42}{newline} newline · Enter {verb}")
+}
+
+/// How many matches the popup lists before it stops listing and starts counting.
+const COMPLETION_ROWS: usize = 3;
+
+/// The height the completion popup needs: the listed rows, plus one for the line that says
+/// how many are not listed.
+fn completion_rows(editor: Option<&Editor>) -> u16 {
     editor
         .and_then(Editor::completion)
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0)
+        .map(|menu| {
+            menu.items.len().min(COMPLETION_ROWS) + usize::from(menu.items.len() > COMPLETION_ROWS)
+        })
+        .unwrap_or(0) as u16
 }
 
 fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &str) {
@@ -739,12 +797,22 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
     let Some(menu) = editor.completion() else {
         return;
     };
-    let count = area.height as usize;
+
+    // A `@` on its own matches up to fifty paths and three of them fit. Showing three with
+    // nothing to say the rest exist reads as "these are your matches", so the row that would
+    // have been a fourth match counts them instead.
+    let hidden = menu.items.len().saturating_sub(COMPLETION_ROWS);
+    let count = (area.height as usize).saturating_sub(usize::from(hidden > 0));
+
+    if count == 0 {
+        return;
+    }
+
     let start = menu
         .selected
         .saturating_sub(count.saturating_sub(1))
         .min(menu.items.len().saturating_sub(count));
-    let lines = menu
+    let mut lines = menu
         .items
         .iter()
         .enumerate()
@@ -767,6 +835,16 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
             ))
         })
         .collect::<Vec<_>>();
+
+    if hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(
+                &format!("  +{hidden} more — keep typing to narrow, ↑↓ to move"),
+                area.width as usize,
+            ),
+            Style::default().fg(theme::MUTED),
+        )));
+    }
 
     frame.render_widget(Paragraph::new(lines), area);
 }

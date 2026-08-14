@@ -208,6 +208,12 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
     let mut harness = Harness::connect(config(address), None).await;
     harness.app.launch_dir = Some("/srv/work".into());
 
+    // The first poll, and its `account.read`, before any key is pressed: the home composer
+    // owns the keyboard while that answer is in flight, so a `2` typed before it lands is a
+    // `2` in the draft rather than a tab switch.
+    harness.tick();
+    harness.settle().await;
+
     // The whole flow from a keystroke: `2` to the Sessions tab, `n` for the form, then
     // straight to start with the defaults the form offered.
     harness.app.apply(press('2'));

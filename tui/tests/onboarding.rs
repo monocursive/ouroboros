@@ -62,7 +62,7 @@ fn account(connected: bool) -> serde_json::Value {
 fn harness(connected: bool) -> App {
     let mut app = app(full_hello());
     app.launch_dir = Some("/work/ouroboros".into());
-    app.offer_quick_start();
+    app.open_home();
     answer(&mut app, Tag::Account, account(connected));
     let _ = app.drain();
     app
@@ -133,6 +133,134 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
     assert!(calls
         .iter()
         .all(|call| call.method != "account.login.start"));
+}
+
+/// `account.read` is a round trip, and the composer is on screen with the caret in it from
+/// the first frame. Gating the draft on *readiness* meant typing "quick fix" a moment too
+/// early sent the `q` to the quit dialog.
+#[test]
+fn the_first_keystrokes_land_in_the_draft_while_the_account_answer_is_in_flight() {
+    let mut app = app(full_hello());
+    app.launch_dir = Some("/work/ouroboros".into());
+    app.open_home();
+    let _ = app.drain();
+
+    // Nothing has answered `account.read` yet.
+    assert!(!app.chatgpt_connected());
+
+    type_text(&mut app, "quick fix for the parser");
+
+    assert!(app.overlay.is_none(), "no dialog was asked for");
+    assert_eq!(app.home_draft.text(), "quick fix for the parser");
+
+    // And the draft survives the answer that says the home is not ready.
+    answer(&mut app, Tag::Account, account(false));
+    assert_eq!(app.home_draft.text(), "quick fix for the parser");
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("quick fix for the parser"),
+        "{}",
+        screen.text()
+    );
+}
+
+/// Once the runtime has answered, an unauthenticated home is a surface whose printable keys
+/// belong to the shell, and it says so on screen. That half is deliberate and stays.
+#[test]
+fn a_resolved_unauthenticated_home_still_gives_printable_keys_to_the_shell() {
+    let mut app = harness(false);
+    assert!(app.home_draft.is_empty());
+
+    app.apply(key(KeyCode::Char('q')));
+
+    assert!(app.home_draft.is_empty());
+    assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
+}
+
+/// An install whose Codex credential is an API key on the runtime host reports no ChatGPT
+/// identity and `requiresOpenaiAuth: false`. Reading only the identity left it looking at
+/// "Connect ChatGPT" forever, with Enter pushing a login it neither needs nor can complete.
+#[test]
+fn an_api_key_codex_install_is_ready_without_a_chatgpt_sign_in() {
+    let mut app = app(full_hello());
+    app.launch_dir = Some("/work/ouroboros".into());
+    app.open_home();
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": serde_json::Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
+    let _ = app.drain();
+
+    assert!(!app.chatgpt_connected(), "there is no subscription to name");
+    assert!(app.codex_usable());
+    assert!(app.home_ready());
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Ready in this workspace"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("Codex ready"), "{}", screen.text());
+    assert!(
+        !screen.contains("ChatGPT not connected"),
+        "{}",
+        screen.text()
+    );
+
+    type_text(&mut app, "rename the module");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    assert!(
+        calls.iter().any(|call| call.method == "interactive.start"),
+        "Enter starts work rather than a login it cannot complete"
+    );
+    assert!(calls
+        .iter()
+        .all(|call| call.method != "account.login.start"));
+}
+
+/// The three states of `requiresOpenaiAuth`, and the conservative reading of the third.
+#[test]
+fn an_absent_requires_openai_auth_is_treated_as_sign_in_required() {
+    let ready = |value: serde_json::Value| {
+        let mut app = app(full_hello());
+        app.open_home();
+        answer(&mut app, Tag::Account, value);
+        let _ = app.drain();
+        app.home_ready()
+    };
+
+    // Connected: ready whatever the flag says.
+    assert!(ready(account(true)));
+
+    // Stated as not required: ready with no identity at all.
+    assert!(ready(json!({
+        "account": serde_json::Value::Null,
+        "requiresOpenaiAuth": false
+    })));
+
+    // Absent: not a statement. Offering a login nobody needed costs one keystroke; hiding
+    // the only way in from someone who did need it costs them the client.
+    assert!(!ready(json!({ "account": serde_json::Value::Null })));
+
+    let mut app = app(full_hello());
+    app.open_home();
+    answer(&mut app, Tag::Account, json!({}));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "account.login.start"));
 }
 
 #[test]
@@ -240,6 +368,47 @@ fn an_attached_client_uses_the_device_code_flow_for_the_runtime_host() {
     let screen = render(&mut app, 120, 34);
     assert!(screen.contains("ABCD-1234"), "{}", screen.text());
     assert!(screen.contains("runtime host"));
+}
+
+/// The code is the one string a person has to carry to another device. It used to be drawn
+/// after the URL, and on an 80-column terminal a long verification URL wrapped far enough to
+/// push it out of a fixed-height popup.
+#[test]
+fn the_device_code_is_readable_on_an_eighty_column_terminal() {
+    let mut app = harness(false);
+    app.mode = Mode::Attached;
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    answer(
+        &mut app,
+        Tag::AccountLogin,
+        json!({
+            "type": "chatgptDeviceCode",
+            "loginId": "device-1",
+            "verificationUrl": "https://auth.openai.com/codex/device?flow=ouroboros&\
+                                request=01JQ8Z2K5V7N3M9P4T6R8W0Y2A&redirect=cli",
+            "userCode": "ABCD-1234"
+        }),
+    );
+
+    let screen = render(&mut app, 80, 24);
+
+    assert!(screen.contains("ABCD-1234"), "{}", screen.text());
+    assert!(screen.contains("press o to open"), "{}", screen.text());
+    // Cut to one row rather than wrapped over three.
+    assert!(
+        screen.contains("https://auth.openai.com"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.row("Open").contains('…'), "{}", screen.text());
+
+    // And `o` asks the driver to open it again, for a browser that never came forward.
+    app.apply(key(KeyCode::Char('o')));
+    assert!(app
+        .take_open_url()
+        .is_some_and(|url| url.starts_with("https://auth.openai.com/codex/device")));
 }
 
 #[test]

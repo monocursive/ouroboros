@@ -15,11 +15,12 @@
 //! removing the retyping. The client still refuses to *invent* a provider. It will use one
 //! the operator chose, once, explicitly, in a file they can read — which is a different
 //! statement from a node's default silently deciding which vendor runs their code. The
-//! the coding home writes `defaults.provider` for exactly that reason: pressing Enter with
-//! a displayed provider is choosing it, so the next run does not ask again.
+//! coding home writes `defaults.provider` for exactly that reason: pressing Enter with a
+//! displayed provider is choosing it, so the next run does not ask again.
 //!
 //! `[onboarding]` retains the schema-1 welcome marker. Its former quick-start toggle is
-//! accepted for compatibility but ignored by the transcript-first shell.
+//! gone: unknown keys are ignored on read, so a file that still names it loads unchanged
+//! and the next save simply omits it.
 //!
 //! ## Reading is total; writing is atomic
 //!
@@ -120,8 +121,8 @@ impl Defaults {
     }
 }
 
-/// What this operator has already been shown, and what they want shown again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What this operator has already been shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Onboarding {
     /// Whether the coding home has been reached once.
     ///
@@ -130,26 +131,6 @@ pub struct Onboarding {
     /// answer expires.
     #[serde(default)]
     pub welcomed: bool,
-    /// Legacy schema-1 preference accepted so an older file still loads. The
-    /// transcript-first shell no longer has an onboarding modal, so this is ignored and
-    /// omitted on the next save.
-    #[serde(default = "on", skip_serializing)]
-    pub quick_start: bool,
-}
-
-/// The default for a flag whose absence must not read as "turned off". A missing key in a
-/// file written by an older `ouro` is silence, not a decision.
-fn on() -> bool {
-    true
-}
-
-impl Default for Onboarding {
-    fn default() -> Self {
-        Self {
-            welcomed: false,
-            quick_start: on(),
-        }
-    }
 }
 
 /// A config file as it was found: what it said, where it is, and what was wrong with it.
@@ -454,10 +435,7 @@ mod tests {
                 workspace: Some("/home/me/project".into()),
                 approval_mode: Some("auto_edit".into()),
             },
-            onboarding: Onboarding {
-                welcomed: true,
-                quick_start: true,
-            },
+            onboarding: Onboarding { welcomed: true },
         };
 
         config.save(&path).expect("a written config");
@@ -517,10 +495,6 @@ mod tests {
         assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
         assert!(loaded.config.onboarding.welcomed);
         assert!(
-            loaded.config.onboarding.quick_start,
-            "a flag the file does not mention is silence, not a decision to turn it off"
-        );
-        assert!(
             loaded.problems.is_empty(),
             "a newer file is not a broken one: {:?}",
             loaded.problems
@@ -529,28 +503,36 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// The quick-start screen is gone and so is its toggle. A file that still names it is
+    /// an ordinary file with a key this build does not know, which is the one thing
+    /// [`load`] must never refuse.
     #[test]
-    fn the_legacy_quick_start_preference_loads_but_is_retired_on_save() {
+    fn a_config_naming_the_retired_quick_start_toggle_still_loads() {
         let dir = scratch("quick-start");
         let path = dir.join(CONFIG_FILE);
 
-        assert!(Config::default().onboarding.quick_start);
-        assert!(load(path.clone()).config.onboarding.quick_start);
-
         fs::write(
             &path,
-            "[onboarding]\nwelcomed = true\nquick_start = false\n",
+            "[defaults]\nprovider = \"codex\"\n\
+             [onboarding]\nwelcomed = true\nquick_start = false\n",
         )
-        .expect("a config that turns it off");
-
-        assert!(!load(path.clone()).config.onboarding.quick_start);
+        .expect("a config from a build that had the screen");
 
         let loaded = load(path.clone());
-        loaded.config.save(&path).expect("a rewrite");
 
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert!(loaded.config.onboarding.welcomed);
+        assert!(
+            loaded.problems.is_empty(),
+            "a retired key is not a broken file: {:?}",
+            loaded.problems
+        );
+
+        // And the next save simply stops writing it.
+        loaded.config.save(&path).expect("a rewrite");
         let text = fs::read_to_string(&path).expect("the rewritten config");
         assert!(!text.contains("quick_start"), "{text}");
-        assert!(load(path).config.onboarding.quick_start);
+        assert!(load(path).config.onboarding.welcomed);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -646,10 +628,7 @@ mod tests {
                 workspace: Some("/srv/work".into()),
                 ..Defaults::default()
             },
-            onboarding: Onboarding {
-                welcomed: true,
-                ..Onboarding::default()
-            },
+            onboarding: Onboarding { welcomed: true },
         };
 
         second.save(&path).expect("a second write");

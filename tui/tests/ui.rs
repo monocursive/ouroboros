@@ -57,9 +57,34 @@ fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
     });
 }
 
+/// An App whose `account.read` has already been answered — as "no ChatGPT subscription, and
+/// this install wants one".
+///
+/// Every real client has that answer within the first frames, and until it arrives the home
+/// composer owns the keyboard rather than letting a keystroke fall through to a global
+/// binding. These tests are about the surfaces past the home, so they start from the
+/// resolved state instead of the in-flight one.
+fn shell(hello: ouro::proto::Hello) -> App {
+    let mut app = app(hello);
+    resolve_account(&mut app);
+    app
+}
+
+fn resolve_account(app: &mut App) {
+    answer(
+        app,
+        Tag::Account,
+        json!({
+            "account": serde_json::Value::Null,
+            "requiresOpenaiAuth": true,
+            "login": { "status": "idle" }
+        }),
+    );
+}
+
 /// An App on the Dashboard holding the golden `runtime.status`.
 fn dashboard() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
 
     answer(
@@ -73,7 +98,7 @@ fn dashboard() -> App {
 
 /// An App on the Sessions tab with one interactive session open and watched.
 fn with_open_session() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     app.apply(key(KeyCode::Char('2')));
 
@@ -136,6 +161,43 @@ fn event(sequence: u64, kind: &str, text: &str) -> serde_json::Value {
             }
         }
     })
+}
+
+fn event_with(sequence: u64, kind: &str, payload: serde_json::Value) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "interactive.event",
+        "params": {
+            "id": "session-0000000000000000000001",
+            "event": {
+                "_struct": "Ouroboros.Interactive.Event",
+                "id": format!("evt-{sequence}"),
+                "session_id": "session-0000000000000000000001",
+                "sequence": sequence,
+                "type": kind,
+                "timestamp": "2026-01-01T00:00:00.000000Z",
+                "payload": payload
+            }
+        }
+    })
+}
+
+/// Every visible transcript row that carries one of the numbered messages, with the screen
+/// row it landed on. Two of these being equal is the whole claim of "the viewport did not
+/// move under the reader".
+fn message_rows(screen: &support::Screen) -> Vec<(usize, String)> {
+    screen
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_index, row)| row.contains("message-"))
+        .map(|(index, row)| (index, row.trim_end().to_string()))
+        .collect()
+}
+
+fn open_watch(app: &App) -> &ouro::ui::transcript::Watch {
+    let key = app.sessions.open.clone().expect("an open session");
+    app.sessions.watches.get(&key).expect("a watch")
 }
 
 fn notify(app: &mut App, frame: serde_json::Value) {
@@ -236,7 +298,7 @@ fn a_provider_probe_that_failed_is_not_reported_as_a_missing_provider() {
 
 #[test]
 fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
     let screen = render(&mut app, 120, 30);
 
@@ -249,7 +311,7 @@ fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
 
 #[test]
 fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
 
     app.apply(Msg::Answer {
@@ -273,7 +335,7 @@ fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
 
 #[test]
 fn the_coding_home_carries_the_terminal_logo() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     let screen = render(&mut app, 100, 24);
 
     assert!(screen.contains("▄█▄ ▄▄▄▄"), "{}", screen.text());
@@ -282,7 +344,7 @@ fn the_coding_home_carries_the_terminal_logo() {
 
 #[test]
 fn the_sessions_list_merges_both_planes_and_tags_each_row() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(
@@ -468,6 +530,207 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
     assert!(!replying.contains("⟳"), "{}", replying.text());
 }
 
+/// A transcript is drawn bottom-anchored, so anything appended moves every row up by as
+/// much. For a reader who has scrolled back into history that is the transcript sliding out
+/// from under them — and the typing indicator alone adds and removes three rows on every
+/// turn.
+#[test]
+fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
+    let mut app = with_open_session();
+
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    // The first frame is what tells the scroll keys how tall this content is.
+    render(&mut app, 120, 24);
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Char('k')));
+    }
+
+    let before = render(&mut app, 120, 24);
+    assert!(before.contains("scrolled back"), "{}", before.text());
+    let anchored = message_rows(&before);
+    assert!(!anchored.is_empty(), "{}", before.text());
+
+    // A queued follow-up appends the three rows of the typing indicator below the viewport.
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "please inspect this");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    assert!(app.waiting_for_open_agent_reply());
+    let waiting = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&waiting), anchored, "{}", waiting.text());
+
+    // And removes them again when the agent replies, in a turn the reader is not looking at.
+    notify(&mut app, event(41, "output_text_delta", "on it"));
+    assert!(!app.waiting_for_open_agent_reply());
+
+    let replying = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&replying), anchored, "{}", replying.text());
+}
+
+/// The harder case: a cell already in the transcript is rewritten in place, so the rows do
+/// not merely grow at the end — a running tool becomes a completed one with output under it.
+#[test]
+fn a_scrolled_back_transcript_holds_still_when_a_running_tool_completes() {
+    let mut app = with_open_session();
+
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    notify(
+        &mut app,
+        event_with(
+            41,
+            "tool_call",
+            json!({"call_id": "call-1", "name": "bash", "input": {"command": "mix test"}}),
+        ),
+    );
+
+    render(&mut app, 120, 24);
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Char('k')));
+    }
+
+    let before = render(&mut app, 120, 24);
+    let anchored = message_rows(&before);
+    assert!(!anchored.is_empty(), "{}", before.text());
+
+    notify(
+        &mut app,
+        event_with(
+            42,
+            "tool_result",
+            json!({
+                "call_id": "call-1",
+                "output": {"text": "3 tests, 0 failures\nfinished in 0.4s"},
+                "is_error": false
+            }),
+        ),
+    );
+
+    let after = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&after), anchored, "{}", after.text());
+}
+
+/// Scrolling back was unbounded, so holding PageUp on a transcript with nothing above the
+/// viewport bought hundreds of keypresses that did nothing — and then hundreds more to get
+/// back to the bottom.
+#[test]
+fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
+    let mut app = with_open_session();
+    notify(&mut app, event(1, "output_text_final", "the only message"));
+
+    render(&mut app, 120, 40);
+    for _ in 0..50 {
+        app.apply(key(KeyCode::PageUp));
+    }
+
+    let watch = open_watch(&app);
+    assert_eq!(watch.scroll, 0);
+    assert_eq!(watch.max_scroll(), 0);
+    assert!(
+        watch.follow,
+        "there is nothing above the viewport to scroll back to"
+    );
+
+    let screen = render(&mut app, 120, 40);
+    assert!(!screen.contains("scrolled back"), "{}", screen.text());
+
+    // And on a transcript that does have history, the offset stops at the top rather than
+    // climbing: returning costs the pages that exist, not the keys that were pressed.
+    let mut app = with_open_session();
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    render(&mut app, 120, 24);
+    for _ in 0..200 {
+        app.apply(key(KeyCode::PageUp));
+    }
+
+    let top = open_watch(&app).max_scroll();
+    assert!(top > 0);
+    assert_eq!(open_watch(&app).scroll, top);
+
+    for _ in 0..top.div_ceil(10) {
+        app.apply(key(KeyCode::PageDown));
+    }
+
+    assert!(open_watch(&app).follow, "{}", open_watch(&app).scroll);
+}
+
+/// `Shift+Enter` is only distinguishable from `Enter` where the terminal speaks the kitty
+/// keyboard protocol. Everywhere else — Terminal.app, iTerm2's default profile, tmux
+/// without passthrough — advertising it tells someone that the key which sends their
+/// half-written message inserts a newline.
+#[test]
+fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
+    let mut app = with_open_session();
+    app.apply(key(KeyCode::Char('i')));
+
+    app.keyboard_enhanced = false;
+    let plain = render(&mut app, 120, 30);
+    assert!(
+        plain.contains("Ctrl+J newline · Enter sends"),
+        "{}",
+        plain.text()
+    );
+    assert!(!plain.contains("Shift+Enter"), "{}", plain.text());
+
+    app.keyboard_enhanced = true;
+    let enhanced = render(&mut app, 120, 30);
+    assert!(
+        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter sends"),
+        "{}",
+        enhanced.text()
+    );
+
+    // The same rule on the home composer, whose Enter starts rather than sends.
+    let mut home = shell(full_hello());
+    home.config.defaults.provider = Some("claude".into());
+
+    let plain = render(&mut home, 120, 30);
+    assert!(
+        plain.contains("Ctrl+J newline · Enter starts"),
+        "{}",
+        plain.text()
+    );
+    assert!(!plain.contains("Shift+Enter"), "{}", plain.text());
+
+    home.keyboard_enhanced = true;
+    let enhanced = render(&mut home, 120, 30);
+    assert!(
+        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter starts"),
+        "{}",
+        enhanced.text()
+    );
+}
+
 #[test]
 fn streamed_output_is_one_agent_message_when_the_final_text_arrives() {
     let mut app = with_open_session();
@@ -577,6 +840,101 @@ fn a_pruned_cursor_restarts_from_the_floor_and_marks_the_transcript() {
         .expect("a pruned cursor restarts");
 
     assert_eq!(replay.params["cursor"], 96);
+}
+
+/// The composer is rebuilt on every `i`, so its history died with it: Esc-then-i gave you
+/// an Up arrow that had forgotten everything you had sent.
+#[test]
+fn composer_history_survives_closing_and_reopening_the_composer() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "run the focused test");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    app.apply(key(KeyCode::Esc));
+    assert!(app.sessions.composer.is_none());
+
+    app.apply(key(KeyCode::Char('i')));
+    app.apply(key(KeyCode::Up));
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .map(|composer| composer.editor.text()),
+        Some("run the focused test")
+    );
+}
+
+/// `interactive.steer` is idempotent on the caller's turn id, exactly like the other two
+/// input verbs. This pins the shape the runtime is served.
+#[test]
+fn steering_sends_an_id_an_input_and_a_turn_id() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('s')));
+    type_text(&mut app, "stop and run the tests first");
+    app.apply(key(KeyCode::Enter));
+
+    let steer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.steer")
+        .expect("a steer call");
+
+    assert_eq!(steer.params["id"], "session-0000000000000000000001");
+    assert_eq!(steer.params["input"], "stop and run the tests first");
+    assert!(
+        steer.params["turn_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{}",
+        steer.params
+    );
+    assert_eq!(
+        steer.params.as_object().expect("an object").len(),
+        3,
+        "{}",
+        steer.params
+    );
+}
+
+/// Bracketed paste was dropped whenever an overlay was open. The workspace box of the `n`
+/// dialog is the field most likely to receive a path off the clipboard, and it looked
+/// broken in a way nothing on screen explained.
+#[test]
+fn a_paste_reaches_the_focused_field_of_an_overlay() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Workspace);
+
+    app.apply(Msg::Paste("/srv/pasted\n".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("/srv/pasted"), "{}", screen.text());
+
+    // The palette takes one too, and re-derives its selection from the query.
+    let mut app = shell(full_hello());
+    app.apply(ctrl('p'));
+    app.apply(Msg::Paste("settings".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("settings"), "{}", screen.text());
+    assert!(screen.contains("Settings"), "{}", screen.text());
+
+    // An overlay with no text field says so rather than swallowing it.
+    let mut app = shell(full_hello());
+    app.apply(key(KeyCode::Char('?')));
+    app.apply(Msg::Paste("anything".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("nothing here is taking text"),
+        "{}",
+        screen.text()
+    );
 }
 
 #[test]
@@ -927,7 +1285,7 @@ fn x_confirms_before_ending_a_session() {
 
 #[test]
 fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
@@ -977,7 +1335,7 @@ fn focus(app: &mut App, target: NewField) {
 
 /// The Sessions tab with both lists answered and a provider list the modal can draw.
 fn ready_to_start() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.launch_dir = Some("/home/operator/project".into());
 
     app.apply(key(KeyCode::Char('2')));
@@ -1337,7 +1695,7 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
 
 #[test]
 fn a_read_listener_is_told_why_it_cannot_start_a_session() {
-    let mut app = app(support::hello(&[
+    let mut app = shell(support::hello(&[
         "hello",
         "interactive.start",
         "interactive.list",
@@ -1371,7 +1729,7 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
 }
 
 fn app_without_start() -> App {
-    app(support::hello(&[
+    shell(support::hello(&[
         "hello",
         "interactive.list",
         "coding.list",
@@ -1380,7 +1738,7 @@ fn app_without_start() -> App {
 
 #[test]
 fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     let polled: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
@@ -1409,7 +1767,7 @@ fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
 
 #[test]
 fn the_value_tree_names_every_wire_marker() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('3')));
 
     answer(
@@ -1451,7 +1809,7 @@ fn the_value_tree_names_every_wire_marker() {
 
 #[test]
 fn a_tree_node_opens_and_closes_under_the_cursor() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('4')));
 
     answer(
@@ -1485,7 +1843,7 @@ fn a_tree_node_opens_and_closes_under_the_cursor() {
 
 #[test]
 fn plans_and_control_are_two_lists_on_one_tab() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('5')));
 
     answer(
@@ -1510,7 +1868,7 @@ fn plans_and_control_are_two_lists_on_one_tab() {
 
 #[test]
 fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('6')));
 
     // Down to `effect grants`.
@@ -1547,7 +1905,7 @@ fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
 
 #[test]
 fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them() {
-    let mut app = app(support::hello(&[
+    let mut app = shell(support::hello(&[
         "hello",
         "runtime.status",
         "upgrade.status",
@@ -1575,6 +1933,7 @@ fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them
 #[test]
 fn the_logs_tab_says_where_logs_are_when_this_client_did_not_start_the_runtime() {
     let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    resolve_account(&mut app);
 
     app.apply(key(KeyCode::Char('7')));
     let screen = render(&mut app, 120, 20);
@@ -1601,6 +1960,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
         Some(ring),
     );
 
+    resolve_account(&mut app);
     app.apply(key(KeyCode::Char('7')));
     let screen = render(&mut app, 120, 20);
 
@@ -1614,7 +1974,7 @@ fn every_tab_draws_without_any_data_at_all() {
     // A gateway that has answered nothing must still produce every secondary panel even
     // though the persistent tab bar has moved behind the command palette.
     for digit in '1'..='7' {
-        let mut app = app(full_hello());
+        let mut app = shell(full_hello());
         app.apply(key(KeyCode::Char(digit)));
 
         let screen = render(&mut app, 100, 24);
@@ -1631,7 +1991,7 @@ fn every_tab_draws_without_any_data_at_all() {
 
 #[test]
 fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('q')));
 
     let screen = render(&mut app, 120, 24);
@@ -1651,6 +2011,7 @@ fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
 
     // Attach mode has one honest option.
     let mut attached = App::new(Mode::Attached, "a".into(), full_hello(), None);
+    resolve_account(&mut attached);
     attached.apply(key(KeyCode::Char('q')));
 
     let screen = render(&mut attached, 120, 24);
@@ -1665,12 +2026,12 @@ fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
 }
 
 fn app_without_shutdown() -> App {
-    app(support::hello(&["hello", "runtime.status"]))
+    shell(support::hello(&["hello", "runtime.status"]))
 }
 
 #[test]
 fn the_help_overlay_states_the_honest_limits() {
-    let mut app = app(support::hello(&["hello", "runtime.status"]));
+    let mut app = shell(support::hello(&["hello", "runtime.status"]));
     // A read listener, so the scope warning applies.
     app.hello.scope = "read".into();
 
@@ -1688,7 +2049,7 @@ fn the_help_overlay_states_the_honest_limits() {
 
 #[test]
 fn a_notice_replaces_the_status_line_and_expires() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.inform("something happened", NoticeKind::Warn);
 
     assert!(render(&mut app, 120, 20).contains("something happened"));
@@ -1707,7 +2068,7 @@ fn a_notice_replaces_the_status_line_and_expires() {
 
 #[test]
 fn the_visible_tab_is_the_only_one_polled() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(Msg::Tick);
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
@@ -1749,7 +2110,7 @@ fn a_transcript_is_never_polled() {
 
 #[test]
 fn one_question_is_outstanding_at_a_time() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     app.apply(Msg::Tick);
     let first = app.drain();
@@ -1768,7 +2129,7 @@ fn one_question_is_outstanding_at_a_time() {
 
 #[test]
 fn tabs_wrap_in_both_directions() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     assert_eq!(app.tab, Tab::Sessions);
 
