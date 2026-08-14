@@ -1,0 +1,649 @@
+//! A small, I/O-free editor for the two conversational input surfaces.
+//!
+//! The terminal driver supplies paste events and a bounded workspace file index. This
+//! type only edits text and derives completion state, which keeps key behaviour testable
+//! without a terminal or filesystem.
+
+use std::collections::VecDeque;
+use std::fs;
+use std::path::Path;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+const HISTORY_LIMIT: usize = 100;
+pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
+
+const COMMANDS: [(&str, &str); 14] = [
+    ("/new", "start a new coding session"),
+    ("/switch", "switch sessions"),
+    ("/details", "toggle normalized event details"),
+    ("/connect", "connect or inspect ChatGPT"),
+    ("/runtime", "open runtime and distribution"),
+    ("/agents", "open agents"),
+    ("/teams", "open teams"),
+    ("/plans", "open plans and control"),
+    ("/upgrades", "open upgrades"),
+    ("/logs", "open runtime logs"),
+    ("/settings", "open settings"),
+    ("/help", "show keyboard help"),
+    ("/quit", "detach, disconnect, or stop the runtime"),
+    ("/clear", "clear this draft"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionKind {
+    Command,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionItem {
+    pub value: String,
+    pub detail: String,
+    pub kind: CompletionKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionMenu {
+    pub items: Vec<CompletionItem>,
+    pub selected: usize,
+    start: usize,
+    end: usize,
+}
+
+impl CompletionMenu {
+    pub fn selected(&self) -> Option<&CompletionItem> {
+        self.items.get(self.selected)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompletionCatalog {
+    files: Vec<String>,
+}
+
+impl CompletionCatalog {
+    pub fn set_files(&mut self, mut files: Vec<String>) {
+        files.sort();
+        files.dedup();
+        self.files = files;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorAction {
+    None,
+    Submit,
+    Cancel,
+    Scroll(isize),
+}
+
+/// Cursor positions are UTF-8 byte offsets and are always kept on a character boundary.
+#[derive(Debug, Clone, Default)]
+pub struct Editor {
+    text: String,
+    cursor: usize,
+    preferred_column: Option<usize>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Option<(String, usize)>,
+    completion: Option<CompletionMenu>,
+}
+
+impl Editor {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn completion(&self) -> Option<&CompletionMenu> {
+        self.completion.as_ref()
+    }
+
+    pub fn update_completions(&mut self, catalog: &CompletionCatalog) {
+        self.refresh_completion(catalog);
+    }
+
+    pub fn has_state(&self) -> bool {
+        !self.text.is_empty() || !self.history.is_empty()
+    }
+
+    pub fn clear_text(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.preferred_column = None;
+        self.history_index = None;
+        self.history_draft = None;
+        self.completion = None;
+    }
+
+    pub fn submission(&self) -> Option<String> {
+        let value = self.text.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    /// Records and clears a successfully accepted draft.
+    pub fn accept_submission(&mut self) -> Option<String> {
+        let value = self.submission()?;
+
+        if self.history.last() != Some(&value) {
+            self.history.push(value.clone());
+            if self.history.len() > HISTORY_LIMIT {
+                self.history.remove(0);
+            }
+        }
+
+        self.clear_text();
+        Some(value)
+    }
+
+    pub fn paste(&mut self, text: &str, catalog: &CompletionCatalog) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.insert(&normalized);
+        self.refresh_completion(catalog);
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, catalog: &CompletionCatalog) -> EditorAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        let action = match key.code {
+            KeyCode::Esc => {
+                if self.completion.take().is_some() {
+                    EditorAction::None
+                } else {
+                    EditorAction::Cancel
+                }
+            }
+            KeyCode::Enter if shift || alt => {
+                self.insert("\n");
+                EditorAction::None
+            }
+            KeyCode::Enter => EditorAction::Submit,
+            KeyCode::Char('j') if ctrl => {
+                self.insert("\n");
+                EditorAction::None
+            }
+            KeyCode::Tab if self.apply_completion() => EditorAction::None,
+            KeyCode::Tab => EditorAction::None,
+            KeyCode::BackTab if self.completion.is_some() => {
+                self.select_completion(-1);
+                EditorAction::None
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+                EditorAction::None
+            }
+            KeyCode::Delete => {
+                self.delete();
+                EditorAction::None
+            }
+            KeyCode::Left => {
+                self.move_left();
+                EditorAction::None
+            }
+            KeyCode::Char('b') if ctrl => {
+                self.move_left();
+                EditorAction::None
+            }
+            KeyCode::Right => {
+                self.move_right();
+                EditorAction::None
+            }
+            KeyCode::Char('f') if ctrl => {
+                self.move_right();
+                EditorAction::None
+            }
+            KeyCode::Home => {
+                self.move_line_start();
+                EditorAction::None
+            }
+            KeyCode::Char('a') if ctrl => {
+                self.move_line_start();
+                EditorAction::None
+            }
+            KeyCode::End => {
+                self.move_line_end();
+                EditorAction::None
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.move_line_end();
+                EditorAction::None
+            }
+            KeyCode::Up if self.completion.is_some() => {
+                self.select_completion(-1);
+                EditorAction::None
+            }
+            KeyCode::Down if self.completion.is_some() => {
+                self.select_completion(1);
+                EditorAction::None
+            }
+            KeyCode::Up => {
+                if !self.move_vertical(-1) {
+                    self.history_previous();
+                }
+                EditorAction::None
+            }
+            KeyCode::Down => {
+                if self.history_index.is_some() {
+                    self.history_next();
+                } else {
+                    self.move_vertical(1);
+                }
+                EditorAction::None
+            }
+            KeyCode::PageUp => EditorAction::Scroll(-1),
+            KeyCode::PageDown => EditorAction::Scroll(1),
+            KeyCode::Char(c) if !ctrl => {
+                self.insert(&c.to_string());
+                EditorAction::None
+            }
+            _ => return EditorAction::None,
+        };
+
+        if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
+            && !matches!(
+                action,
+                EditorAction::Submit | EditorAction::Cancel | EditorAction::Scroll(_)
+            )
+        {
+            self.refresh_completion(catalog);
+        }
+
+        action
+    }
+
+    fn insert(&mut self, value: &str) {
+        self.detach_history();
+        self.text.insert_str(self.cursor, value);
+        self.cursor += value.len();
+        self.preferred_column = None;
+    }
+
+    fn backspace(&mut self) {
+        let Some(previous) = previous_boundary(&self.text, self.cursor) else {
+            return;
+        };
+
+        self.detach_history();
+        self.text.drain(previous..self.cursor);
+        self.cursor = previous;
+        self.preferred_column = None;
+    }
+
+    fn delete(&mut self) {
+        let Some(next) = next_boundary(&self.text, self.cursor) else {
+            return;
+        };
+
+        self.detach_history();
+        self.text.drain(self.cursor..next);
+        self.preferred_column = None;
+    }
+
+    fn move_left(&mut self) {
+        if let Some(previous) = previous_boundary(&self.text, self.cursor) {
+            self.cursor = previous;
+            self.preferred_column = None;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if let Some(next) = next_boundary(&self.text, self.cursor) {
+            self.cursor = next;
+            self.preferred_column = None;
+        }
+    }
+
+    fn move_line_start(&mut self) {
+        self.cursor = self.text[..self.cursor].rfind('\n').map_or(0, |at| at + 1);
+        self.preferred_column = None;
+    }
+
+    fn move_line_end(&mut self) {
+        self.cursor = self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |at| self.cursor + at);
+        self.preferred_column = None;
+    }
+
+    fn move_vertical(&mut self, delta: isize) -> bool {
+        let start = self.text[..self.cursor].rfind('\n').map_or(0, |at| at + 1);
+        let end = self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |at| self.cursor + at);
+        let column = self.text[start..self.cursor].chars().count();
+        let wanted = self.preferred_column.unwrap_or(column);
+
+        let target = if delta < 0 {
+            if start == 0 {
+                return false;
+            }
+            let previous_end = start - 1;
+            let previous_start = self.text[..previous_end].rfind('\n').map_or(0, |at| at + 1);
+            (previous_start, previous_end)
+        } else {
+            if end == self.text.len() {
+                return false;
+            }
+            let next_start = end + 1;
+            let next_end = self.text[next_start..]
+                .find('\n')
+                .map_or(self.text.len(), |at| next_start + at);
+            (next_start, next_end)
+        };
+
+        self.cursor = byte_at_char(&self.text, target.0, target.1, wanted);
+        self.preferred_column = Some(wanted);
+        true
+    }
+
+    fn history_previous(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+
+        let next = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = Some((self.text.clone(), self.cursor));
+                self.history.len() - 1
+            }
+        };
+
+        self.history_index = Some(next);
+        self.text = self.history[next].clone();
+        self.cursor = self.text.len();
+        self.preferred_column = None;
+    }
+
+    fn history_next(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+
+        if index + 1 < self.history.len() {
+            let next = index + 1;
+            self.history_index = Some(next);
+            self.text = self.history[next].clone();
+            self.cursor = self.text.len();
+        } else {
+            self.history_index = None;
+            let (draft, cursor) = self.history_draft.take().unwrap_or_default();
+            self.text = draft;
+            self.cursor = cursor.min(self.text.len());
+        }
+
+        self.preferred_column = None;
+    }
+
+    fn detach_history(&mut self) {
+        if self.history_index.take().is_some() {
+            self.history_draft = None;
+        }
+    }
+
+    fn refresh_completion(&mut self, catalog: &CompletionCatalog) {
+        let start = self.text[..self.cursor]
+            .rfind(char::is_whitespace)
+            .map_or(0, |at| at + 1);
+        let end = self.text[self.cursor..]
+            .find(char::is_whitespace)
+            .map_or(self.text.len(), |at| self.cursor + at);
+        let token = &self.text[start..self.cursor];
+        let old_value = self
+            .completion
+            .as_ref()
+            .and_then(CompletionMenu::selected)
+            .map(|item| item.value.clone());
+
+        let items = if let Some(query) = token.strip_prefix('/') {
+            if !self.text[..start].trim().is_empty() {
+                Vec::new()
+            } else {
+                matching_commands(query)
+            }
+        } else if let Some(query) = token.strip_prefix('@') {
+            matching_files(query, &catalog.files)
+        } else {
+            Vec::new()
+        };
+
+        if items.is_empty() {
+            self.completion = None;
+            return;
+        }
+
+        let selected = old_value
+            .and_then(|value| items.iter().position(|item| item.value == value))
+            .unwrap_or(0);
+
+        self.completion = Some(CompletionMenu {
+            items,
+            selected,
+            start,
+            end,
+        });
+    }
+
+    fn select_completion(&mut self, delta: isize) {
+        let Some(menu) = self.completion.as_mut() else {
+            return;
+        };
+
+        menu.selected =
+            (menu.selected as isize + delta).rem_euclid(menu.items.len() as isize) as usize;
+    }
+
+    fn apply_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.take() else {
+            return false;
+        };
+        let Some(item) = menu.selected().cloned() else {
+            return false;
+        };
+
+        self.detach_history();
+        self.text.replace_range(menu.start..menu.end, &item.value);
+        self.cursor = menu.start + item.value.len();
+
+        if item.kind == CompletionKind::File {
+            self.text.insert(self.cursor, ' ');
+            self.cursor += 1;
+        }
+
+        self.preferred_column = None;
+        true
+    }
+}
+
+impl PartialEq<&str> for Editor {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+fn matching_commands(query: &str) -> Vec<CompletionItem> {
+    let query = query.to_ascii_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|(name, detail)| {
+            name[1..].to_ascii_lowercase().contains(&query)
+                || detail.to_ascii_lowercase().contains(&query)
+        })
+        .map(|(name, detail)| CompletionItem {
+            value: (*name).to_string(),
+            detail: (*detail).to_string(),
+            kind: CompletionKind::Command,
+        })
+        .collect()
+}
+
+fn matching_files(query: &str, files: &[String]) -> Vec<CompletionItem> {
+    let query = query.to_ascii_lowercase();
+    files
+        .iter()
+        .filter(|path| path.to_ascii_lowercase().contains(&query))
+        .take(50)
+        .map(|path| CompletionItem {
+            value: format!("@{path}"),
+            detail: "local workspace path".to_string(),
+            kind: CompletionKind::File,
+        })
+        .collect()
+}
+
+fn previous_boundary(text: &str, cursor: usize) -> Option<usize> {
+    text[..cursor].char_indices().next_back().map(|(at, _)| at)
+}
+
+fn next_boundary(text: &str, cursor: usize) -> Option<usize> {
+    let mut chars = text[cursor..].char_indices();
+    chars.next()?;
+    chars.next().map(|(at, _)| cursor + at).or(Some(text.len()))
+}
+
+fn byte_at_char(text: &str, start: usize, end: usize, column: usize) -> usize {
+    text[start..end]
+        .char_indices()
+        .nth(column)
+        .map_or(end, |(at, _)| start + at)
+}
+
+/// Builds a deterministic, bounded local index without following directory symlinks.
+pub fn index_workspace(root: &Path) -> Vec<String> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+
+    while let Some(directory) = pending.pop_front() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+
+            if kind.is_dir() {
+                if !matches!(
+                    name.as_ref(),
+                    ".git" | "node_modules" | "target" | "deps" | "_build"
+                ) {
+                    pending.push_back(path);
+                }
+                continue;
+            }
+
+            if kind.is_file() || kind.is_symlink() {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    files.push(path_string(relative));
+                    if files.len() == WORKSPACE_FILE_LIMIT {
+                        files.sort();
+                        return files;
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+    files
+}
+
+fn path_string(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn cursor_edits_unicode_and_multiple_lines() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("one\ntrès", &catalog);
+        editor.handle_key(key(KeyCode::Left), &catalog);
+        editor.handle_key(key(KeyCode::Backspace), &catalog);
+        editor.handle_key(key(KeyCode::Home), &catalog);
+        editor.handle_key(key(KeyCode::Char('✓')), &catalog);
+
+        assert_eq!(editor.text(), "one\n✓trs");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+
+        editor.handle_key(modified(KeyCode::Enter, KeyModifiers::SHIFT), &catalog);
+        assert_eq!(editor.text(), "one\n✓\ntrs");
+    }
+
+    #[test]
+    fn history_restores_the_draft_after_the_newest_entry() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        editor.paste("first", &catalog);
+        assert_eq!(editor.accept_submission().as_deref(), Some("first"));
+        editor.paste("unfinished", &catalog);
+        editor.handle_key(key(KeyCode::Up), &catalog);
+        assert_eq!(editor.text(), "first");
+        editor.handle_key(key(KeyCode::Down), &catalog);
+        assert_eq!(editor.text(), "unfinished");
+    }
+
+    #[test]
+    fn command_and_file_completion_replace_the_active_token() {
+        let mut catalog = CompletionCatalog::default();
+        catalog.set_files(vec!["src/ui/app.rs".into(), "src/main.rs".into()]);
+        let mut editor = Editor::default();
+
+        editor.paste("/sett", &catalog);
+        assert_eq!(
+            editor.completion().unwrap().selected().unwrap().value,
+            "/settings"
+        );
+        editor.handle_key(key(KeyCode::Tab), &catalog);
+        assert_eq!(editor.text(), "/settings");
+
+        editor.clear_text();
+        editor.paste("inspect @ui/app", &catalog);
+        editor.handle_key(key(KeyCode::Tab), &catalog);
+        assert_eq!(editor.text(), "inspect @src/ui/app.rs ");
+    }
+
+    #[test]
+    fn paste_normalizes_terminal_line_endings() {
+        let mut editor = Editor::default();
+        editor.paste("a\r\nb\rc", &CompletionCatalog::default());
+        assert_eq!(editor.text(), "a\nb\nc");
+    }
+}

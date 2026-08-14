@@ -7,6 +7,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
+  alias Ouroboros.Workspace.Path, as: WorkspacePath
 
   @poll_interval 25
   @replay_limit 100
@@ -533,6 +534,7 @@ defmodule Ouroboros.Interactive.Task do
     with :ok <- validate_turn_id(id),
          true <- Keyword.keyword?(opts) || {:error, :invalid_turn_options},
          {:ok, request} <- build_turn_request(input, opts),
+         {:ok, request} <- authorize_turn_attachments(request, runtime.session.workspace),
          :ok <- ensure_serializable(request),
          :ok <- ensure_secret_free_options(request),
          turn = State.new_turn(id, mode, request) do
@@ -668,6 +670,53 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  defp authorize_turn_attachments(%TurnRequest{attachments: []} = request, _workspace),
+    do: {:ok, request}
+
+  defp authorize_turn_attachments(%TurnRequest{} = request, workspace) do
+    with {:ok, root} <- WorkspacePath.canonicalize(workspace),
+         {:ok, attachments} <- canonical_attachments(request.attachments, root) do
+      {:ok, %{request | attachments: attachments}}
+    else
+      {:error, {:attachment_outside_workspace, _path} = reason} -> {:error, reason}
+      {:error, {:invalid_attachment, _path, _reason} = reason} -> {:error, reason}
+      {:error, reason} -> {:error, {:invalid_attachment_workspace, reason}}
+    end
+  end
+
+  defp canonical_attachments(attachments, root) do
+    Enum.reduce_while(attachments, {:ok, []}, fn path, {:ok, authorized} ->
+      candidate =
+        if Path.type(path) == :absolute,
+          do: path,
+          else: Path.join(root, path)
+
+      lexical = Path.expand(candidate)
+
+      cond do
+        not WorkspacePath.within?(lexical, root) ->
+          {:halt, {:error, {:attachment_outside_workspace, path}}}
+
+        true ->
+          case WorkspacePath.canonicalize_file(candidate) do
+            {:ok, canonical} ->
+              if WorkspacePath.within?(canonical, root) do
+                {:cont, {:ok, [canonical | authorized]}}
+              else
+                {:halt, {:error, {:attachment_outside_workspace, path}}}
+              end
+
+            {:error, reason} ->
+              {:halt, {:error, {:invalid_attachment, path, reason}}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, authorized} -> {:ok, Enum.reverse(authorized)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp finish_turn(runtime, turn_id, result) do
     case Map.fetch(runtime.session.turns, turn_id) do
       :error ->
@@ -728,13 +777,14 @@ defmodule Ouroboros.Interactive.Task do
       when info.state == :idle and is_nil(info.active_turn_id) and info.queued_turns == 0 ->
         turn = Map.fetch!(runtime.session.turns, turn_id)
 
-        case TurnRequest.new(turn.request) do
-          {:ok, request} ->
-            case dispatch_persisted_turn(runtime, turn, request) do
-              {:ok, _turn, runtime} -> runtime
-              {:error, _reason, runtime} -> runtime
-            end
-
+        with {:ok, request} <- TurnRequest.new(turn.request),
+             {:ok, request} <-
+               authorize_turn_attachments(request, runtime.session.workspace) do
+          case dispatch_persisted_turn(runtime, turn, request) do
+            {:ok, _turn, runtime} -> runtime
+            {:error, _reason, runtime} -> runtime
+          end
+        else
           {:error, reason} ->
             mark_turn_ambiguous(runtime, turn_id, {:invalid_checkpointed_turn_request, reason})
         end

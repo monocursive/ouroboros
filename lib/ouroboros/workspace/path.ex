@@ -17,6 +17,21 @@ defmodule Ouroboros.Workspace.Path do
 
   def canonicalize(path), do: {:error, {:invalid_workspace_path, path}}
 
+  @doc false
+  @spec canonicalize_file(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def canonicalize_file(path) when is_binary(path) and byte_size(path) > 0 do
+    with {:ok, absolute} <- make_absolute(path),
+         {:ok, canonical} <- resolve("/", split(absolute), MapSet.new(), 0),
+         {:ok, %File.Stat{type: :regular}} <- File.stat(canonical) do
+      {:ok, canonical}
+    else
+      {:ok, %File.Stat{}} -> {:error, {:not_a_regular_file, path}}
+      {:error, reason} -> {:error, normalize_file_error(reason, path)}
+    end
+  end
+
+  def canonicalize_file(path), do: {:error, {:invalid_attachment_path, path}}
+
   @spec within?(String.t(), String.t()) :: boolean()
   def within?(candidate, "/") when is_binary(candidate), do: String.starts_with?(candidate, "/")
 
@@ -63,7 +78,7 @@ defmodule Ouroboros.Workspace.Path do
         resolve(candidate, rest, seen, count)
 
       {:ok, %File.Stat{}} when rest == [] ->
-        {:error, {:not_a_directory, candidate}}
+        {:ok, candidate}
 
       {:ok, %File.Stat{}} ->
         {:error, {:not_a_directory, candidate}}

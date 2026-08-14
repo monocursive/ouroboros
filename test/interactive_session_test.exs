@@ -209,6 +209,48 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.close(ref)
   end
 
+  test "turn attachments are canonical files contained by the leased workspace", %{id: id} do
+    base =
+      Path.join(
+        File.cwd!(),
+        ".ouro-attachment-test-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace = Path.join(base, "workspace")
+    outside = Path.join(base, "outside.txt")
+    inside = Path.join(workspace, "inside.txt")
+    escape = Path.join(workspace, "escape.txt")
+    File.mkdir_p!(workspace)
+    File.write!(inside, "inside")
+    File.write!(outside, "outside")
+    File.ln_s!(outside, escape)
+    on_exit(fn -> File.rm_rf!(base) end)
+
+    assert {:ok, ref} =
+             InteractiveSession.start(id: id, provider: @provider, workspace: workspace)
+
+    assert {:error, {:attachment_outside_workspace, "../outside.txt"}} =
+             InteractiveSession.send_message(ref, "inspect",
+               id: unique_id("traversal-attachment"),
+               attachments: ["../outside.txt"]
+             )
+
+    assert {:error, {:attachment_outside_workspace, "escape.txt"}} =
+             InteractiveSession.send_message(ref, "inspect",
+               id: unique_id("symlink-attachment"),
+               attachments: ["escape.txt"]
+             )
+
+    assert {:error, {:invalid_attachment, "missing.txt", _reason}} =
+             InteractiveSession.send_message(ref, "inspect",
+               id: unique_id("missing-attachment"),
+               attachments: ["missing.txt"]
+             )
+
+    refute_receive {:ouroboros_test_adapter_started, _run, _request, _adapter}, 100
+    assert :ok = InteractiveSession.close(ref)
+  end
+
   test "public snapshots hide turn requests and secret-bearing turn options are rejected", %{
     id: id
   } do

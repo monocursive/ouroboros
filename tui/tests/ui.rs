@@ -35,6 +35,15 @@ fn ctrl(c: char) -> Msg {
     })
 }
 
+fn modified(code: KeyCode, modifiers: KeyModifiers) -> Msg {
+    Msg::Key(KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    })
+}
+
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         app.apply(key(KeyCode::Char(c)));
@@ -78,6 +87,10 @@ fn with_open_session() -> App {
             "provider": "claude_code",
             "workspace": "/tmp/w",
             "status": "running",
+            "options": {
+                "approval_mode": "auto_edit",
+                "sandbox_mode": null
+            },
             "created_at": "2026-01-01T00:00:00.000000Z",
             "updated_at": "2026-01-01T00:00:00.000000Z"
         }]),
@@ -410,7 +423,7 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
 }
 
 #[test]
-fn sending_a_message_animates_the_logo_until_agent_text_arrives() {
+fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrives() {
     let mut app = with_open_session();
 
     app.apply(key(KeyCode::Char('i')));
@@ -420,36 +433,39 @@ fn sending_a_message_animates_the_logo_until_agent_text_arrives() {
     let send = app
         .drain()
         .into_iter()
-        .find(|call| call.method == "interactive.send_message")
-        .expect("the composer sends the message");
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the composer queues the follow-up");
 
     let waiting = render(&mut app, 120, 30);
+    assert!(waiting.contains("Agent"), "{}", waiting.text());
+    assert!(waiting.contains("⟳  • · ·"), "{}", waiting.text());
+    assert!(!waiting.contains("▄█▄ ▄▄▄▄"), "{}", waiting.text());
     assert!(
-        waiting.contains("waiting for agent reply"),
+        !waiting.contains("waiting for agent reply"),
         "{}",
         waiting.text()
     );
-    assert!(waiting.contains("▄█▄ ▄▄▄▄"), "{}", waiting.text());
+
+    app.ticks = 2;
+    let advanced = render(&mut app, 120, 30);
+    assert!(advanced.contains("⟳  · • ·"), "{}", advanced.text());
 
     answer(&mut app, send.tag, json!({ "status": "running" }));
     notify(&mut app, event(1, "input_accepted", "please inspect this"));
 
     let accepted = render(&mut app, 120, 30);
     assert!(
-        accepted.contains("waiting for agent reply"),
+        accepted.contains("please inspect this"),
         "{}",
         accepted.text()
     );
+    assert!(accepted.contains("⟳  · • ·"), "{}", accepted.text());
 
     notify(&mut app, event(2, "output_text_delta", "I am checking"));
 
     let replying = render(&mut app, 120, 30);
     assert!(replying.contains("I am checking"), "{}", replying.text());
-    assert!(
-        !replying.contains("waiting for agent reply"),
-        "{}",
-        replying.text()
-    );
+    assert!(!replying.contains("⟳"), "{}", replying.text());
 }
 
 #[test]
@@ -659,12 +675,38 @@ fn the_approval_modal_renders_and_produces_the_right_respond_approval_params() {
         "provider_options is deliberately not accepted by the gateway"
     );
 
-    // Cleared locally so the next event does not reopen it before `approval_resolved`.
+    assert!(matches!(
+        call.tag,
+        Tag::Approval {
+            ref request_id,
+            ..
+        } if request_id == "req-17"
+    ));
+
+    // Hidden while this exact response is in flight, but retained until the runtime emits
+    // `approval_resolved` so a refusal can make it retryable.
     assert!(app.sessions.open_watch().unwrap().next_approval().is_none());
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Err(ClientError::Rpc(ouro::proto::RpcError {
+            code: ouro::proto::ErrorCode::InvalidParams,
+            message: "approval was not accepted".into(),
+            data: None,
+        })),
+    });
+    assert_eq!(
+        app.sessions
+            .open_watch()
+            .unwrap()
+            .next_approval()
+            .map(|request| request.request_id.as_str()),
+        Some("req-17")
+    );
 }
 
 #[test]
-fn the_composer_sends_a_message_and_ctrl_c_interrupts_rather_than_quitting() {
+fn the_composer_queues_while_running_and_ctrl_c_interrupts_rather_than_quitting() {
     let mut app = with_open_session();
 
     app.apply(key(KeyCode::Char('i')));
@@ -674,8 +716,8 @@ fn the_composer_sends_a_message_and_ctrl_c_interrupts_rather_than_quitting() {
     let call = app
         .drain()
         .into_iter()
-        .find(|call| call.method == "interactive.send_message")
-        .expect("a message");
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("a queued follow-up");
 
     assert_eq!(call.params["id"], "session-0000000000000000000001");
     assert_eq!(call.params["input"], "look at the tests");
@@ -690,6 +732,176 @@ fn the_composer_sends_a_message_and_ctrl_c_interrupts_rather_than_quitting() {
 
     assert_eq!(call.params["id"], "session-0000000000000000000001");
     assert!(app.quit.is_none(), "ctrl-c must never quit the client");
+}
+
+#[test]
+fn the_composer_edits_and_sends_a_multiline_bracketed_paste() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    app.apply(Msg::Paste("first\r\nthird".into()));
+    app.apply(key(KeyCode::Up));
+    app.apply(modified(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut app, "second");
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "first\nsecond\nthird"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("a multiline follow-up");
+
+    assert_eq!(call.params["input"], "first\nsecond\nthird");
+}
+
+#[test]
+fn the_open_composer_names_the_actual_provider_and_queues_every_later_request() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    let screen = render(&mut app, 180, 30);
+    assert!(screen.contains("claude_code"), "{}", screen.text());
+    assert!(!screen.contains("PROVIDER Codex"), "{}", screen.text());
+    assert!(screen.contains("workspace /tmp/w"), "{}", screen.text());
+    assert!(screen.contains("APPROVAL auto_edit"), "{}", screen.text());
+    assert!(
+        screen.contains("SANDBOX provider default"),
+        "{}",
+        screen.text()
+    );
+
+    type_text(&mut app, "first queued request");
+    app.apply(key(KeyCode::Enter));
+    type_text(&mut app, "second queued request");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.follow_up")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].params["input"], "first queued request");
+    assert_eq!(calls[1].params["input"], "second queued request");
+}
+
+#[test]
+fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
+    let mut app = with_open_session();
+    app.config.defaults.provider = Some("codex".into());
+    app.config.defaults.workspace = Some("/wrong/client-default".into());
+    app.launch_dir = Some("/wrong/local-cwd".into());
+
+    // The transcript/watch can outlive a delayed or refreshed list snapshot. Until that
+    // authoritative session row returns, the shell must name the fact as unknown.
+    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
+
+    let screen = render(&mut app, 160, 30);
+    assert!(
+        screen.contains("session workspace unknown"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("Provider unknown"), "{}", screen.text());
+    assert!(
+        !screen.contains("/wrong/client-default"),
+        "{}",
+        screen.text()
+    );
+    assert!(!screen.contains("/wrong/local-cwd"), "{}", screen.text());
+    assert!(
+        !screen.contains("ChatGPT not connected"),
+        "{}",
+        screen.text()
+    );
+}
+
+#[test]
+fn composer_history_restores_the_unsent_draft() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "previous request");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    type_text(&mut app, "unfinished draft");
+    app.apply(key(KeyCode::Up));
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "previous request"
+    );
+
+    app.apply(key(KeyCode::Down));
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "unfinished draft"
+    );
+}
+
+#[test]
+fn slash_commands_and_workspace_mentions_complete_in_the_composer() {
+    let mut app = with_open_session();
+    app.apply(Msg::WorkspaceFiles(vec![
+        "src/ui/app.rs".into(),
+        "src/ui/view.rs".into(),
+    ]));
+    app.apply(key(KeyCode::Char('i')));
+
+    type_text(&mut app, "/sett");
+    let commands = render(&mut app, 120, 30);
+    assert!(commands.contains("/settings"), "{}", commands.text());
+    assert!(commands.contains("command"), "{}", commands.text());
+
+    app.apply(key(KeyCode::Tab));
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        matches!(app.overlay, Some(Overlay::Settings(_))),
+        "a completed local command must not be sent to the provider"
+    );
+    assert!(
+        app.drain().into_iter().all(|call| {
+            call.method != "interactive.send_message" && call.method != "interactive.follow_up"
+        }),
+        "a slash command is a local action, not model input"
+    );
+
+    app.apply(key(KeyCode::Esc));
+    type_text(&mut app, "inspect @ui/app");
+    let files = render(&mut app, 120, 30);
+    assert!(files.contains("@src/ui/app.rs"), "{}", files.text());
+    assert!(files.contains("local workspace path"), "{}", files.text());
+
+    app.apply(key(KeyCode::Tab));
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "inspect @src/ui/app.rs "
+    );
 }
 
 #[test]

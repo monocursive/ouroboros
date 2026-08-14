@@ -24,9 +24,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults};
@@ -38,6 +40,7 @@ use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
 use crate::transport::ClientError;
 
+use super::editor::{CompletionCatalog, Editor, EditorAction};
 use super::transcript::{Note, Watch};
 use super::tree::TreeState;
 
@@ -52,6 +55,7 @@ const PROVIDER_TICKS: u64 = 240; // 60s: each entry probes an executable
 const ACCOUNT_TICKS: u64 = 120; // 30s; 1s while a managed login is pending
 const ACCOUNT_LOGIN_TICKS: u64 = 4;
 const NOTICE_TICKS: u64 = 20;
+static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
 /// readiness is `:infinity` upstream. This leaves room for the answer rather than racing
@@ -202,6 +206,16 @@ pub enum Tag {
         label: &'static str,
         plane: Plane,
         id: String,
+        /// Composer calls carry their logical turn id here, making simultaneous queued
+        /// follow-ups distinct in the in-flight set. Other one-at-a-time actions use nil.
+        turn_id: Option<String>,
+    },
+    /// One approval response, keyed by the runtime request id so parallel prompts cannot
+    /// collapse into one in-flight action.
+    Approval {
+        plane: Plane,
+        id: String,
+        request_id: String,
     },
     /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
     /// answer carries the id of a session that did not exist when the request was made.
@@ -212,12 +226,18 @@ pub enum Tag {
     FirstMessage {
         plane: Plane,
         id: String,
+        turn_id: String,
+        input: String,
     },
 }
 
 #[derive(Debug)]
 pub enum Msg {
     Key(crossterm::event::KeyEvent),
+    /// Bracketed paste is a single edit, including any embedded newlines.
+    Paste(String),
+    /// A local, bounded index produced by the I/O driver for `@` completion.
+    WorkspaceFiles(Vec<String>),
     Tick,
     Notification(Notification),
     Answer {
@@ -345,9 +365,10 @@ impl Explorer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ComposerVerb {
     Message,
+    FollowUp,
     Steer,
 }
 
@@ -355,6 +376,7 @@ impl ComposerVerb {
     pub fn title(self) -> &'static str {
         match self {
             Self::Message => "message",
+            Self::FollowUp => "follow-up",
             Self::Steer => "steer",
         }
     }
@@ -362,6 +384,7 @@ impl ComposerVerb {
     fn method(self) -> &'static str {
         match self {
             Self::Message => "send_message",
+            Self::FollowUp => "follow_up",
             Self::Steer => "steer",
         }
     }
@@ -370,7 +393,16 @@ impl ComposerVerb {
 #[derive(Debug)]
 pub struct Composer {
     pub verb: ComposerVerb,
-    pub buffer: String,
+    pub editor: Editor,
+    /// A restored first message retries with the same logical id after an ambiguous or
+    /// refused response. Ordinary submissions mint one when they leave the editor.
+    next_turn_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct PendingFirstMessage {
+    input: String,
+    turn_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -421,6 +453,21 @@ impl SessionsTab {
 
     pub fn open_watch(&self) -> Option<&Watch> {
         self.watches.get(self.open.as_ref()?)
+    }
+
+    /// The list snapshot for the session whose transcript is open, when the latest poll
+    /// has observed it. The watch stays authoritative for events; this is presentation and
+    /// interaction context such as provider and whether a new turn must be queued.
+    pub fn open_info(&self) -> Option<&SessionInfo> {
+        let (plane, id) = self.open.as_ref()?;
+        let sessions = match plane {
+            Plane::Interactive => self.interactive.value.as_ref()?,
+            Plane::Coding => self.coding.value.as_ref()?,
+        };
+
+        sessions
+            .iter()
+            .find(|session| session.plane == *plane && session.id == *id)
     }
 
     fn open_watch_mut(&mut self) -> Option<&mut Watch> {
@@ -906,16 +953,14 @@ pub enum SettingsField {
     Provider,
     Workspace,
     ApprovalMode,
-    QuickStart,
     Save,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 5] = [
+    pub const ALL: [SettingsField; 4] = [
         SettingsField::Provider,
         SettingsField::Workspace,
         SettingsField::ApprovalMode,
-        SettingsField::QuickStart,
         SettingsField::Save,
     ];
 }
@@ -934,8 +979,6 @@ pub struct Settings {
     pub provider: usize,
     pub workspace: String,
     pub approval: usize,
-    /// Whether the quick-start screen opens on its own when this node has nothing live.
-    pub quick_start: bool,
     /// The stored provider, until the probe list arrives and the cursor can be put on it.
     wanted_provider: Option<String>,
     /// Whether anything has been typed or cycled, so closing can say what it discards.
@@ -999,10 +1042,6 @@ impl Settings {
                 self.edited = true;
                 self.approval =
                     (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
-            }
-            SettingsField::QuickStart => {
-                self.edited = true;
-                self.quick_start = !self.quick_start;
             }
             _ => {}
         }
@@ -1310,9 +1349,10 @@ pub struct App {
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
     /// The first-class harness composer before a session exists.
-    pub home_draft: String,
+    pub home_draft: Editor,
     pub home_pending: bool,
     pub home_error: Option<String>,
+    completion_catalog: CompletionCatalog,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
     dropped_seen: u64,
@@ -1322,7 +1362,7 @@ pub struct App {
     quick_intent: QuickIntent,
     /// The quick-start screen's prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
-    first_message: Option<String>,
+    first_message: Option<PendingFirstMessage>,
     /// A URL the I/O driver should open in the operator's browser. Kept out of notices so
     /// a managed login URL is never copied into logs by accident.
     open_url_pending: Option<String>,
@@ -1357,9 +1397,10 @@ impl App {
             config: Config::default(),
             config_path: None,
             data_dir: None,
-            home_draft: String::new(),
+            home_draft: Editor::default(),
             home_pending: false,
             home_error: None,
+            completion_catalog: CompletionCatalog::default(),
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
             dropped_seen: 0,
@@ -1380,6 +1421,21 @@ impl App {
             .as_ref()
             .map(AccountState::connected)
             .unwrap_or(false)
+    }
+
+    /// Whether the coding home can start its configured provider now. Codex keeps its
+    /// first-class managed ChatGPT gate; every other explicit provider owns its own auth
+    /// and must not be blocked by an unrelated OpenAI account state.
+    pub fn home_ready(&self) -> bool {
+        self.home_provider() != "codex" || self.chatgpt_connected()
+    }
+
+    pub fn home_provider(&self) -> &str {
+        self.config.defaults.provider.as_deref().unwrap_or("codex")
+    }
+
+    pub fn home_workspace(&self) -> String {
+        self.default_workspace()
     }
 
     /// The config this App wants written, once. Drained by the driver, which owns the
@@ -1445,6 +1501,14 @@ impl App {
     pub fn apply(&mut self, message: Msg) {
         match message {
             Msg::Key(key) => self.key(key),
+            Msg::Paste(text) => self.paste(&text),
+            Msg::WorkspaceFiles(files) => {
+                self.completion_catalog.set_files(files);
+                self.home_draft.update_completions(&self.completion_catalog);
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.editor.update_completions(&self.completion_catalog);
+                }
+            }
             Msg::Tick => {
                 self.ticks += 1;
                 self.expire_notice();
@@ -1929,13 +1993,33 @@ impl App {
                 cursor,
                 subscribe,
             } => self.resync_answered(plane, id, cursor, subscribe, result),
-            Tag::Action { label, plane, id } => match result {
+            Tag::Action {
+                label, plane, id, ..
+            } => match result {
                 Ok(_value) => self.inform(format!("{label} accepted for {id}"), NoticeKind::Info),
                 Err(error) => {
-                    if label == "send_message" && !Self::reply_outcome_unknown(&error) {
+                    if matches!(label, "send_message" | "follow_up")
+                        && !Self::reply_outcome_unknown(&error)
+                    {
                         self.sessions.clear_reply_pending(plane, &id);
                     }
                     self.action_failed(label, plane, &id, error);
+                }
+            },
+            Tag::Approval {
+                plane,
+                id,
+                request_id,
+            } => match result {
+                Ok(_value) => self.inform(
+                    format!("approval response accepted for {id}"),
+                    NoticeKind::Info,
+                ),
+                Err(error) => {
+                    if let Some(watch) = self.sessions.watches.get_mut(&(plane, id.clone())) {
+                        watch.retry_approval_response(&request_id);
+                    }
+                    self.action_failed("respond_approval", plane, &id, error);
                 }
             },
             Tag::Start { plane } => match result {
@@ -1950,12 +2034,18 @@ impl App {
                 },
                 Err(error) => self.start_failed(error),
             },
-            Tag::FirstMessage { plane, id } => match result {
-                Ok(_value) => {}
+            Tag::FirstMessage {
+                plane,
+                id,
+                turn_id,
+                input,
+            } => match result {
+                Ok(_value) => self.accept_first_message(plane, &id, &turn_id, &input),
                 Err(error) => {
                     if !Self::reply_outcome_unknown(&error) {
                         self.sessions.clear_reply_pending(plane, &id);
                     }
+                    self.restore_first_message(plane, &id, input, turn_id);
                     self.action_failed("send_message", plane, &id, error);
                 }
             },
@@ -2578,8 +2668,12 @@ impl App {
 
         if self.tab == Tab::Sessions
             && self.sessions.open.is_none()
-            && (self.chatgpt_connected()
-                || matches!(key.code, KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc))
+            && (self.home_ready()
+                || !self.home_draft.text().is_empty()
+                || matches!(
+                    key.code,
+                    KeyCode::Char('/') | KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc
+                ))
         {
             self.home_key(key);
             return;
@@ -2933,42 +3027,47 @@ impl App {
     // ----- harness home --------------------------------------------------------------
 
     fn home_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-
         if self.home_pending {
             return;
         }
 
-        match key.code {
-            KeyCode::Enter => self.submit_home(),
-            KeyCode::Backspace => {
-                self.home_draft.pop();
+        match self.home_draft.handle_key(key, &self.completion_catalog) {
+            EditorAction::Submit => self.submit_home(),
+            EditorAction::Cancel => {
+                self.home_draft.clear_text();
                 self.home_error = None;
             }
-            KeyCode::Esc => {
-                self.home_draft.clear();
+            EditorAction::None => {
                 self.home_error = None;
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.home_draft.push(c);
-                self.home_error = None;
-            }
-            _ => {}
+            EditorAction::Scroll(_) => {}
         }
     }
 
     fn submit_home(&mut self) {
-        if !self.chatgpt_connected() {
+        let provider = self.home_provider().to_string();
+        let prompt = self.home_draft.submission();
+
+        // Navigation and account commands remain usable before Codex authentication. The
+        // draft is accepted only when the command itself was handled, so ordinary work text
+        // survives the login overlay and can be submitted unchanged afterwards.
+        if prompt
+            .as_deref()
+            .is_some_and(|prompt| self.activate_slash_command(prompt))
+        {
+            self.home_draft.accept_submission();
+            return;
+        }
+
+        if provider == "codex" && !self.chatgpt_connected() {
             self.open_account();
             return;
         }
 
-        let prompt = self.home_draft.trim().to_string();
-
-        if prompt.is_empty() {
+        let Some(prompt) = prompt else {
             self.home_error = Some("Type what you want the agent to do.".to_string());
             return;
-        }
+        };
 
         if !self.hello.serves("interactive.start") {
             self.home_error = Some("this gateway does not serve interactive.start".to_string());
@@ -2985,7 +3084,7 @@ impl App {
 
         let request = StartRequest {
             plane: Plane::Interactive,
-            provider: "codex".to_string(),
+            provider: provider.clone(),
             workspace: self.default_workspace(),
             approval_mode: self.config.defaults.approval_mode(),
             objective: String::new(),
@@ -3001,8 +3100,11 @@ impl App {
 
         self.home_pending = true;
         self.home_error = None;
-        self.first_message = Some(prompt);
-        self.config.defaults.provider = Some("codex".to_string());
+        self.first_message = Some(PendingFirstMessage {
+            input: prompt,
+            turn_id: new_turn_id(),
+        });
+        self.config.defaults.provider = Some(provider);
         self.mark_welcomed();
         self.save_pending = true;
 
@@ -3079,16 +3181,34 @@ impl App {
         self.sessions.open = None;
         self.sessions.composer = None;
         self.sessions.focus = Pane::Detail;
-        self.home_draft.clear();
+        self.home_draft.clear_text();
         self.home_error = None;
         self.poll();
+    }
+
+    fn paste(&mut self, text: &str) {
+        if self.overlay.is_some() {
+            return;
+        }
+
+        if self.tab == Tab::Sessions {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.paste(text, &self.completion_catalog);
+                return;
+            }
+
+            if self.sessions.open.is_none() && self.home_ready() && !self.home_pending {
+                self.home_draft.paste(text, &self.completion_catalog);
+                self.home_error = None;
+            }
+        }
     }
 
     // ----- session verbs -------------------------------------------------------------
 
     /// Opens the composer, refusing where the plane has no such verb rather than sending
     /// a call that would come back `-32601`.
-    fn compose(&mut self, verb: ComposerVerb) {
+    fn compose(&mut self, requested_verb: ComposerVerb) {
         if self.tab != Tab::Sessions {
             return;
         }
@@ -3112,6 +3232,20 @@ impl App {
             return;
         }
 
+        // Harness deliberately separates an immediate message from the durable follow-up
+        // queue. Sending another immediate message to a running session is `:busy`, so `i`
+        // means "queue the next request" unless the latest session snapshot is idle.
+        let verb = if requested_verb == ComposerVerb::Message
+            && self
+                .sessions
+                .open_info()
+                .is_some_and(|session| session.status.as_str() != "idle")
+        {
+            ComposerVerb::FollowUp
+        } else {
+            requested_verb
+        };
+
         let method = plane.method(verb.method());
 
         if !self.hello.serves(&method) {
@@ -3125,7 +3259,8 @@ impl App {
         self.sessions.focus = Pane::Detail;
         self.sessions.composer = Some(Composer {
             verb,
-            buffer: String::new(),
+            editor: Editor::default(),
+            next_turn_id: None,
         });
     }
 
@@ -3149,25 +3284,40 @@ impl App {
     }
 
     fn composer_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-
-        match key.code {
-            KeyCode::Esc => self.sessions.composer = None,
-            KeyCode::Enter => self.submit_composer(),
-            KeyCode::PageUp | KeyCode::Up => self.move_by(-1),
-            KeyCode::PageDown | KeyCode::Down => self.move_by(1),
-            KeyCode::Backspace => {
-                if let Some(composer) = self.sessions.composer.as_mut() {
-                    composer.buffer.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(composer) = self.sessions.composer.as_mut() {
-                    composer.buffer.push(c);
-                }
-            }
-            _ => {}
+        if self.first_message_in_flight() {
+            return;
         }
+
+        let action = self
+            .sessions
+            .composer
+            .as_mut()
+            .map(|composer| composer.editor.handle_key(key, &self.completion_catalog))
+            .unwrap_or(EditorAction::None);
+
+        match action {
+            EditorAction::Submit => self.submit_composer(),
+            EditorAction::Cancel => self.sessions.composer = None,
+            EditorAction::Scroll(delta) => self.move_by(delta * 10),
+            EditorAction::None => {}
+        }
+    }
+
+    fn first_message_in_flight(&self) -> bool {
+        let Some((plane, id)) = self.sessions.open.as_ref() else {
+            return false;
+        };
+
+        self.in_flight.iter().any(|tag| {
+            matches!(
+                tag,
+                Tag::FirstMessage {
+                    plane: pending_plane,
+                    id: pending_id,
+                    ..
+                } if pending_plane == plane && pending_id == id
+            )
+        })
     }
 
     fn submit_composer(&mut self) {
@@ -3175,14 +3325,30 @@ impl App {
             return;
         };
 
-        let input = composer.buffer.trim().to_string();
+        let Some(input) = composer.editor.submission() else {
+            return;
+        };
         let verb = composer.verb;
 
-        if input.is_empty() {
+        if self.activate_slash_command(&input) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.accept_submission();
+            }
             return;
         }
 
-        composer.buffer.clear();
+        let Some(composer) = self.sessions.composer.as_mut() else {
+            return;
+        };
+        let turn_id = composer.next_turn_id.take().unwrap_or_else(new_turn_id);
+        composer.editor.accept_submission();
+
+        // Keep the composer open as a queue after the first immediate turn. `follow_up`
+        // is valid both while the provider is busy and once it becomes idle, where Harness
+        // starts it immediately, so a fast second Enter can never race into `:busy`.
+        if composer.verb == ComposerVerb::Message {
+            composer.verb = ComposerVerb::FollowUp;
+        }
 
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
@@ -3190,10 +3356,11 @@ impl App {
 
         let (label, method) = match verb {
             ComposerVerb::Message => ("send_message", plane.method("send_message")),
+            ComposerVerb::FollowUp => ("follow_up", plane.method("follow_up")),
             ComposerVerb::Steer => ("steer", plane.method("steer")),
         };
 
-        if verb == ComposerVerb::Message {
+        if matches!(verb, ComposerVerb::Message | ComposerVerb::FollowUp) {
             self.sessions.mark_reply_pending(plane, &id);
         }
 
@@ -3202,10 +3369,40 @@ impl App {
                 label,
                 plane,
                 id: id.clone(),
+                turn_id: Some(turn_id.clone()),
             },
             method,
-            json!({ "id": id, "input": input }),
+            json!({ "id": id, "input": input, "turn_id": turn_id }),
         ));
+    }
+
+    fn activate_slash_command(&mut self, input: &str) -> bool {
+        let command = match input.trim() {
+            "/new" => Some(Command::NewSession),
+            "/switch" => Some(Command::SwitchSession),
+            "/details" => Some(Command::SessionDetails),
+            "/connect" => Some(Command::ConnectChatGpt),
+            "/runtime" => Some(Command::Runtime),
+            "/agents" => Some(Command::Agents),
+            "/teams" => Some(Command::Teams),
+            "/plans" => Some(Command::Plans),
+            "/upgrades" => Some(Command::Upgrades),
+            "/logs" => Some(Command::Logs),
+            "/settings" => Some(Command::Settings),
+            "/help" => {
+                self.overlay = Some(Overlay::Help);
+                return true;
+            }
+            "/quit" => {
+                self.open_quit();
+                return true;
+            }
+            "/clear" => return true,
+            _ => return false,
+        };
+
+        self.activate_command(command.expect("matched slash command"));
+        true
     }
 
     /// Ctrl-C: the active turn, never this process.
@@ -3264,6 +3461,7 @@ impl App {
                 label,
                 plane,
                 id: id.clone(),
+                turn_id: None,
             },
             method,
             json!({ "id": id }),
@@ -3666,7 +3864,10 @@ impl App {
             quick.pending = true;
         }
 
-        self.first_message = (!prompt.is_empty()).then_some(prompt);
+        self.first_message = (!prompt.is_empty()).then(|| PendingFirstMessage {
+            input: prompt,
+            turn_id: new_turn_id(),
+        });
         self.config.defaults.provider = Some(request.provider.clone());
         self.mark_welcomed();
         self.save_pending = true;
@@ -3739,7 +3940,6 @@ impl App {
             provider: 0,
             workspace: self.default_workspace(),
             approval: approval_index(self.config.defaults.approval_mode()),
-            quick_start: self.config.onboarding.quick_start,
             wanted_provider: self.config.defaults.provider.clone(),
             edited: false,
         })));
@@ -3818,8 +4018,6 @@ impl App {
 
         self.config.defaults.approval_mode =
             approval_at(settings.approval).map(|mode| mode.as_str().to_string());
-
-        self.config.onboarding.quick_start = settings.quick_start;
 
         self.save_pending = true;
     }
@@ -3918,7 +4116,7 @@ impl App {
         self.overlay = None;
         self.home_pending = false;
         self.home_error = None;
-        self.home_draft.clear();
+        self.home_draft.accept_submission();
 
         // The lists are polled, and waiting up to three seconds for the row to appear
         // under a session the operator is already looking at reads as a bug.
@@ -3930,7 +4128,8 @@ impl App {
         if plane == Plane::Interactive {
             self.sessions.composer = Some(Composer {
                 verb: ComposerVerb::Message,
-                buffer: String::new(),
+                editor: Editor::default(),
+                next_turn_id: None,
             });
         }
 
@@ -3938,8 +4137,16 @@ impl App {
         // until this answer arrived there was no session to send it to — the same order
         // `ouro new -m` uses, and for the same reason: `*.start` waits for provider
         // readiness before it answers, so the session is ready to take this.
-        if let Some(input) = self.first_message.take() {
+        if let Some(first_message) = self.first_message.take() {
             let method = plane.method("send_message");
+
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.clear_text();
+                composer
+                    .editor
+                    .paste(&first_message.input, &self.completion_catalog);
+                composer.next_turn_id = Some(first_message.turn_id.clone());
+            }
 
             if self.hello.serves(&method) {
                 self.sessions.mark_reply_pending(plane, &started.id);
@@ -3947,9 +4154,15 @@ impl App {
                     Tag::FirstMessage {
                         plane,
                         id: started.id.clone(),
+                        turn_id: first_message.turn_id.clone(),
+                        input: first_message.input.clone(),
                     },
                     method,
-                    json!({ "id": started.id, "input": input }),
+                    json!({
+                        "id": started.id,
+                        "input": first_message.input,
+                        "turn_id": first_message.turn_id
+                    }),
                 ));
             } else {
                 // The session exists and the message does not. Saying which is the only
@@ -3962,6 +4175,13 @@ impl App {
                     NoticeKind::Warn,
                 );
 
+                self.restore_first_message(
+                    plane,
+                    &started.id,
+                    first_message.input,
+                    first_message.turn_id,
+                );
+
                 return;
             }
         }
@@ -3970,6 +4190,48 @@ impl App {
             format!("started {} on the {plane} plane", started.id),
             NoticeKind::Info,
         );
+    }
+
+    fn accept_first_message(&mut self, plane: Plane, id: &str, turn_id: &str, input: &str) {
+        let Some((open_plane, open_id)) = self.sessions.open.as_ref() else {
+            return;
+        };
+        if *open_plane != plane || open_id != id {
+            return;
+        }
+
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            if composer.next_turn_id.as_deref() == Some(turn_id) {
+                if composer.editor.text().trim() == input.trim() {
+                    composer.editor.accept_submission();
+                }
+                composer.next_turn_id = None;
+                composer.verb = ComposerVerb::FollowUp;
+            }
+        }
+    }
+
+    fn restore_first_message(&mut self, plane: Plane, id: &str, input: String, turn_id: String) {
+        if self.sessions.open.as_ref() != Some(&(plane, id.to_string())) {
+            self.open_session(plane, id.to_string());
+        }
+
+        if plane != Plane::Interactive {
+            return;
+        }
+
+        let composer = self.sessions.composer.get_or_insert_with(|| Composer {
+            verb: ComposerVerb::Message,
+            editor: Editor::default(),
+            next_turn_id: None,
+        });
+
+        if composer.editor.is_empty() || composer.next_turn_id.as_deref() == Some(&turn_id) {
+            composer.editor.clear_text();
+            composer.editor.paste(&input, &self.completion_catalog);
+            composer.next_turn_id = Some(turn_id);
+            composer.verb = ComposerVerb::Message;
+        }
     }
 
     fn start_failed(&mut self, error: ClientError) {
@@ -4022,6 +4284,7 @@ impl App {
                             label: "close",
                             plane,
                             id: id.clone(),
+                            turn_id: None,
                         },
                         "interactive.close",
                         json!({ "id": id }),
@@ -4034,6 +4297,7 @@ impl App {
                             label: "kill",
                             plane,
                             id: id.clone(),
+                            turn_id: None,
                         },
                         "interactive.kill",
                         json!({ "id": id }),
@@ -4049,6 +4313,7 @@ impl App {
                             label: "cancel",
                             plane,
                             id: id.clone(),
+                            turn_id: None,
                         },
                         "coding.cancel",
                         json!({ "id": id }),
@@ -4327,11 +4592,26 @@ impl App {
 
                 self.overlay = None;
                 if let Some((plane, id)) = session {
+                    let verb = self
+                        .sessions
+                        .merged()
+                        .get(selected)
+                        .filter(|session| session.plane == plane && session.id == id)
+                        .map(|session| {
+                            if session.status.as_str() == "idle" {
+                                ComposerVerb::Message
+                            } else {
+                                ComposerVerb::FollowUp
+                            }
+                        })
+                        .unwrap_or(ComposerVerb::Message);
+
                     self.open_session(plane, id);
                     if plane == Plane::Interactive {
                         self.sessions.composer = Some(Composer {
-                            verb: ComposerVerb::Message,
-                            buffer: String::new(),
+                            verb,
+                            editor: Editor::default(),
+                            next_turn_id: None,
                         });
                     }
                 }
@@ -4385,21 +4665,25 @@ impl App {
 
         let (decision, scope) = APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)];
 
+        let marked = self
+            .sessions
+            .watches
+            .get_mut(&(plane, id.clone()))
+            .is_some_and(|watch| watch.mark_approval_response(&request_id));
+
+        if !marked {
+            return;
+        }
+
         self.issue(Call::new(
-            Tag::Action {
-                label: "respond_approval",
+            Tag::Approval {
                 plane,
                 id: id.clone(),
+                request_id: request_id.clone(),
             },
             plane.method("respond_approval"),
             model::respond_approval_params(&id, &request_id, decision, scope),
         ));
-
-        // Cleared locally as well: the plane will emit `approval_resolved`, and until it
-        // does the modal must not reopen on the next event.
-        if let Some(watch) = self.sessions.watches.get_mut(&(plane, id)) {
-            watch.resolve_approval(&request_id);
-        }
     }
 
     fn submit_prompt(&mut self) {
@@ -4428,6 +4712,30 @@ impl App {
 
         self.poll_upgrade_section();
     }
+}
+
+/// A caller-owned turn id is the retry and concurrency boundary at the gateway. Prefer
+/// OS randomness; the timestamp/process/sequence fallback keeps the composer usable on a
+/// platform whose entropy source is temporarily unavailable without reusing an id inside
+/// this process.
+fn new_turn_id() -> String {
+    let mut bytes = [0_u8; 16];
+
+    if rand::rngs::OsRng.try_fill_bytes(&mut bytes).is_ok() {
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        return format!("ouro-{encoded}");
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let sequence = TURN_ID_FALLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+
+    format!("ouro-{}-{timestamp:x}-{sequence:x}", std::process::id())
 }
 
 fn project_agent(value: &Value) -> Option<Row> {

@@ -32,6 +32,7 @@ defmodule Ouroboros.Interactive.State do
                 event_limit: 10_000,
                 events: [],
                 turns: %{},
+                prompt_trace: nil,
                 options: %{},
                 error: nil
               ]
@@ -87,6 +88,7 @@ defmodule Ouroboros.Interactive.State do
           event_limit: pos_integer(),
           events: [Event.t()],
           turns: %{optional(String.t()) => turn()},
+          prompt_trace: map() | nil,
           options: map(),
           error: term()
         }
@@ -122,6 +124,7 @@ defmodule Ouroboros.Interactive.State do
            created_at: now,
            updated_at: now,
            event_limit: base.event_limit,
+           prompt_trace: Map.get(base, :prompt_trace),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -142,16 +145,23 @@ defmodule Ouroboros.Interactive.State do
 
   @spec request(t()) :: map()
   def request(%__MODULE__{} = state) do
+    prompt_trace = Map.get(state, :prompt_trace)
+
+    metadata =
+      %{
+        ouroboros_session_id: state.id,
+        ouroboros_node: Atom.to_string(state.node)
+      }
+      |> maybe_put_prompt_trace(prompt_trace, :ouroboros_prompt)
+
     state.options
+    |> Map.delete(:agent_profile)
     |> rename(:runtime_timeout_ms, :turn_runtime_timeout_ms)
     |> rename(:idle_timeout_ms, :turn_idle_timeout_ms)
     |> Map.drop([:attachments, :max_turns])
     |> Map.merge(%{
       cwd: state.workspace,
-      metadata: %{
-        ouroboros_session_id: state.id,
-        ouroboros_node: Atom.to_string(state.node)
-      }
+      metadata: metadata
     })
     |> reject_nil_values()
   end
@@ -177,15 +187,19 @@ defmodule Ouroboros.Interactive.State do
 
   @spec public(t()) :: t()
   def public(%__MODULE__{} = state) do
-    options = %{
-      approval_mode: Map.get(state.options, :approval_mode),
-      sandbox_mode: Map.get(state.options, :sandbox_mode),
-      model: Map.get(state.options, :model),
-      reasoning_effort: Map.get(state.options, :reasoning_effort),
-      transport: Map.get(state.options, :transport),
-      has_system_prompt: present?(Map.get(state.options, :system_prompt)),
-      has_provider_options: map_size(Map.get(state.options, :provider_options, %{}) || %{}) > 0
-    }
+    prompt_trace = Map.get(state, :prompt_trace)
+
+    options =
+      %{
+        approval_mode: Map.get(state.options, :approval_mode),
+        sandbox_mode: Map.get(state.options, :sandbox_mode),
+        model: Map.get(state.options, :model),
+        reasoning_effort: Map.get(state.options, :reasoning_effort),
+        transport: Map.get(state.options, :transport),
+        has_system_prompt: present?(Map.get(state.options, :system_prompt)),
+        has_provider_options: map_size(Map.get(state.options, :provider_options, %{}) || %{}) > 0
+      }
+      |> maybe_put_prompt_trace(prompt_trace)
 
     turns = Map.new(state.turns, fn {id, turn} -> {id, public_turn(turn)} end)
     %{state | options: options, turns: turns}
@@ -233,6 +247,12 @@ defmodule Ouroboros.Interactive.State do
       is_integer(state.event_limit) and state.event_limit > 0 and state.event_limit <= 100_000 and
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
+      not Map.has_key?(state.options, :agent_profile) and
+      valid_system_prompt?(Map.get(state.options, :system_prompt)) and
+      valid_prompt_trace?(
+        Map.get(state, :prompt_trace),
+        Map.get(state.options, :system_prompt)
+      ) and
       serializable?(state.options) and serializable?(state.error)
   rescue
     _error -> false
@@ -255,6 +275,7 @@ defmodule Ouroboros.Interactive.State do
           :runtime_timeout_ms,
           :idle_timeout_ms,
           :system_prompt,
+          :agent_profile,
           :allowed_tools,
           :disallowed_tools,
           :add_dirs,
@@ -377,4 +398,41 @@ defmodule Ouroboros.Interactive.State do
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
   defp present?(value), do: value not in [nil, "", [], %{}]
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
+
+  defp valid_system_prompt?(prompt),
+    do: is_nil(prompt) or (is_binary(prompt) and String.valid?(prompt))
+
+  defp maybe_put_prompt_trace(map, nil, _key), do: map
+  defp maybe_put_prompt_trace(map, trace, key), do: Map.put(map, key, trace)
+
+  defp maybe_put_prompt_trace(map, trace),
+    do: maybe_put_prompt_trace(map, trace, :prompt_assembly)
+
+  defp valid_prompt_trace?(nil, _system_prompt), do: true
+
+  defp valid_prompt_trace?(trace, system_prompt) when is_map(trace) do
+    Map.keys(trace) |> Enum.sort() ==
+      [:digest, :profile_digest, :profile_id, :profile_version, :version] and
+      trace.version == Ouroboros.Prompt.Assembler.version() and is_binary(trace.profile_id) and
+      is_integer(trace.profile_version) and trace.profile_version > 0 and
+      valid_digest?(trace.digest) and valid_digest?(trace.profile_digest) and
+      is_binary(system_prompt) and prompt_digest(system_prompt) == trace.digest
+  end
+
+  defp valid_prompt_trace?(_trace, _system_prompt), do: false
+
+  defp prompt_digest(prompt) do
+    :sha256
+    |> :crypto.hash(prompt)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp valid_digest?(digest) when is_binary(digest) do
+    case Base.decode16(digest, case: :lower) do
+      {:ok, decoded} -> byte_size(decoded) == 32
+      :error -> false
+    end
+  end
+
+  defp valid_digest?(_digest), do: false
 end

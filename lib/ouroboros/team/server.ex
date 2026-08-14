@@ -1647,7 +1647,8 @@ defmodule Ouroboros.Team.Server do
   defp request_fingerprint(worker_id, objective, coding_task_id, coding_node, opts) do
     coding_options = coding_options(opts, coding_task_id)
 
-    with {:ok, canonical_workspace} <-
+    with :ok <- portable_prompt_options(coding_options),
+         {:ok, canonical_workspace} <-
            canonical_workspace(Keyword.get(coding_options, :workspace, File.cwd!())),
          coding_options = Keyword.put(coding_options, :workspace, canonical_workspace),
          {:ok, task} <- TaskState.new(coding_task_id, objective, coding_options) do
@@ -1677,6 +1678,19 @@ defmodule Ouroboros.Team.Server do
     end
   rescue
     error -> {:error, {:invalid_delegation_options, Exception.message(error)}}
+  end
+
+  # TaskState validates prompt/profile text before it constructs the durable request. Keep
+  # Team's older authority-boundary error stable by rejecting runtime-only values first;
+  # secret-bearing binaries still flow through normalization and the redaction check below.
+  defp portable_prompt_options(coding_options) do
+    coding_options
+    |> Keyword.take([:system_prompt, :agent_profile])
+    |> portable_request?()
+    |> case do
+      true -> :ok
+      false -> {:error, :non_durable_delegation_options}
+    end
   end
 
   defp canonical_workspace(workspace) when is_binary(workspace) do

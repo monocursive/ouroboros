@@ -24,12 +24,14 @@
 pub mod app;
 pub mod boot;
 pub mod dashboard;
+pub mod editor;
 pub mod explorer;
 pub mod logo;
 pub mod logs;
 pub mod sessions;
 pub mod theme;
 pub mod transcript;
+pub mod transcript_cells;
 pub mod tree;
 pub mod view;
 
@@ -39,7 +41,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -178,7 +180,9 @@ impl Screen {
         enable_raw_mode().context("putting the terminal into raw mode")?;
         io::stdout()
             .execute(EnterAlternateScreen)
-            .context("entering the alternate screen")?;
+            .context("entering the alternate screen")?
+            .execute(EnableBracketedPaste)
+            .context("enabling bracketed paste")?;
 
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
             .context("taking over the terminal")?;
@@ -201,7 +205,9 @@ impl Drop for Screen {
 
 fn restore() {
     let _ = disable_raw_mode();
-    let _ = io::stdout().execute(LeaveAlternateScreen);
+    let _ = io::stdout()
+        .execute(DisableBracketedPaste)
+        .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
 }
 
 /// Reads the terminal on a thread of its own.
@@ -219,6 +225,11 @@ fn input(sender: mpsc::UnboundedSender<Msg>) {
             }
             Ok(Event::Resize(_, _)) => {
                 if sender.send(Msg::Redraw).is_err() {
+                    return;
+                }
+            }
+            Ok(Event::Paste(text)) => {
+                if sender.send(Msg::Paste(text)).is_err() {
                     return;
                 }
             }
@@ -340,6 +351,22 @@ pub async fn run(
         .context("positioning the first harness frame")?;
 
     input(sender.clone());
+
+    // File discovery is local presentation data, not a gateway concern. Keep it off the
+    // draw loop and bounded: a large repository must not delay the first usable frame.
+    if let Some(root) = app
+        .config
+        .defaults
+        .workspace
+        .clone()
+        .or_else(|| app.launch_dir.clone())
+    {
+        let completion_sender = sender.clone();
+        std::thread::spawn(move || {
+            let files = editor::index_workspace(std::path::Path::new(&root));
+            let _ = completion_sender.send(Msg::WorkspaceFiles(files));
+        });
+    }
 
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

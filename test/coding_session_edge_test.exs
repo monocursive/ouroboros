@@ -115,6 +115,19 @@ defmodule Ouroboros.CodingSessionEdgeTest do
 
     assert {:stop, :invalid_coding_task_checkpoint} =
              Store.init(storage: {StorageFixture, response: {:ok, %{"bad" => :checkpoint}}})
+
+    assert {:ok, task} =
+             TaskState.new(unique_id("unrequestable"), "objective",
+               provider: @provider,
+               workspace: File.cwd!()
+             )
+
+    malformed = %{task | options: Map.put(task.options, :agent_profile, %{id: "raw"})}
+
+    assert {:error, :invalid_task_state} = Store.create(malformed)
+
+    assert {:stop, :invalid_coding_task_checkpoint} =
+             Store.init(storage: {StorageFixture, response: {:ok, %{malformed.id => malformed}}})
   end
 
   test "task state rejects unknown, inline environment, MCP, and unsafe provider options" do

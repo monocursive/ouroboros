@@ -273,7 +273,7 @@ reading.
 | method | maps to |
 |---|---|
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
-| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id` |
+| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch |
 | `interactive.steer` `{id, input}` | `steer/3` |
 | `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
@@ -678,11 +678,16 @@ live tail, input box, approval modal), **3 Agents** (list + state tree +
 
 The focused session opens as **Agent chat**. It renders durable `input_accepted` text as
 the user's message, collapses output deltas into the corresponding final agent message,
-and keeps lifecycle, provider stderr, usage, reasoning, tool, and bookkeeping events out
-of the reading path. `Ctrl-E` toggles the complete normalized event ledger without
-discarding anything. Gaps, pruning, lag, terminal state, approvals, and actual failures
-remain visible in chat because hiding them would make an incomplete or failed
-conversation look healthy.
+correlates normalized tool calls/results into compact activity cells, and renders file
+changes and bounded unified-diff excerpts without interpreting them as execution authority.
+Lifecycle, provider stderr, usage, reasoning, and bookkeeping stay out of the reading path;
+`Ctrl-E` toggles the complete normalized event ledger without discarding anything. Gaps,
+pruning, lag, terminal state, approvals, and actual failures remain visible in chat because
+hiding them would make an incomplete or failed conversation look healthy. Approval request
+IDs remain presentation correlation only: a matching resolution replaces “Approval needed”
+with the approved/denied outcome while the raw pair remains in event details. Redraw work is
+bounded: chat projects the newest 128 entries and bounded per-cell excerpts, with an explicit
+omission marker; `Ctrl-E` still exposes every event retained by the local 5,000-event window.
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
@@ -696,6 +701,14 @@ rediscovered:
   tab are the same keystrokes, so there is an explicit composer: `i` (or `Enter` on an
   already-open session) opens it, `Enter` sends, `Esc` closes it. Without the mode, the
   letter `s` in a message would steer the session.
+- **The composer is a real bounded editor.** It is Unicode-safe, accepts multiline input
+  with `Shift+Enter` or the terminal-independent `Ctrl+J`, normalizes bracketed-paste line
+  endings, retains bounded history for the current editor, and completes local slash
+  commands and `@` paths. The file catalog is a bounded, symlink-safe index of the local
+  launch workspace. Selecting `@path` inserts prompt text only; it does not yet create a
+  structured attachment or follow an attached runtime's active workspace. The gateway's
+  closed turn envelope supports attachments so that later picker can be runtime-aware
+  instead of treating a local path as if it necessarily existed remotely.
 - **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
   node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
   `x` closes or kills the open session behind a confirmation; `r` refreshes the visible
@@ -719,28 +732,18 @@ rediscovered:
   the config file's `[defaults] provider` satisfies this by being a choice the
   operator made once, explicitly, and the form it prefills stays editable; and
   `objective` is required on the coding plane and refused on the interactive one.
-- **The quick-start screen is the front door, and it starts sessions.**
-  `Overlay::QuickStart` opens on a true first run (no `welcomed` marker — immediately,
-  there is nothing to return to), and on any later attach that finds zero live
-  sessions across *both* `interactive.list` and `coding.list` — both, because one list
-  cannot say "nothing is happening here" on its own, a refused list settles the
-  question shut rather than guessing, and an unrecognised session status counts as
-  live (the safe direction). Gated by `[onboarding] quick_start` (default on); never
-  over `ouro new`, which already stated what it wants. The screen is a provider picker
-  (missing entries dim, naming the probed executable; `r`/`Ctrl-R` re-probes) above a
-  prompt box focused from the first frame — letters belong to the prompt, arrows and
-  `Ctrl-N`/`Ctrl-P` move the picker from either zone, `Tab` swaps zones. Enter runs
-  the `ouro new -m` sequence through the same `StartRequest`: persist the picked
-  provider as `[defaults] provider` plus the `welcomed` marker, `interactive.start`
-  in the launch directory, send the typed prompt once the session answers, open the
-  transcript. An empty prompt is a complete answer (start, open the composer); a
-  refusal renders on the screen that produced it and the held prompt is cleared so it
-  cannot leak into a later session; Esc reaches the dashboard with nothing started.
-  With nothing installed at all it is the setup surface: the probed executables and
-  hints are the content, and Enter refuses honestly.
+- **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
+  tab instead of an onboarding/provider-picker modal. A ready provider focuses the composer
+  immediately. Codex is gated by the managed ChatGPT account flow; Enter connects while
+  `/` commands remain available without sign-in. An explicitly configured non-Codex provider
+  owns its own authentication and is not blocked by OpenAI account state. Enter then runs the
+  same `StartRequest` path as `ouro new`, waits for the new session ID, then sends the
+  retained first message with a stable logical turn ID. The draft is cleared only after
+  that message is accepted; a refusal restores the exact text and ID for an idempotent
+  retry. Recent sessions and account state load behind this first frame.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
   this client's own `[defaults]` — provider picker over the same probed list the `n`
-  dialog uses, workspace, approval mode, and the quick-start toggle — with an explicit
+  dialog uses, workspace, and approval mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
 - **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`
@@ -754,7 +757,7 @@ rediscovered:
   messages describe the shape of the failure and leave the actionable part in `data`;
   a client that dropped it would show "the runtime refused the call" where
   `["invalid_workspace", "/srv/nope"]` was available. `model::refusal` is the one
-  place a refusal becomes text (the `n` dialog, the quick-start screen, the notice
+  place a refusal becomes text (the `n` dialog, the coding home, the notice
   line, and `ouro new`'s stderr all call it): a payload shaped `[tag, map]` renders as
   `provider: message (details)`, every key the sentence did not use lands verbatim on
   a dim second line, and the single deliberately dropped key is Wire's
@@ -788,16 +791,13 @@ resubscribe logic against a scripted fake server; integration smoke gated by
 subscribe, one turn); config file round-trip, unknown-key tolerance,
 corrupt-file fallback, atomic save, and XDG resolution; the boot phase
 machine (`BootProgress`) and its pinned plain-line equivalents; the
-onboarding suite (the quick-start appearance decision as a pure function and
-its first-run/idle/live/unknown-status/flag-off/refused-list cases, zone key
-rules, Enter's full path including the persisted provider, empty-prompt
-Enter, refusal-in-place with no prompt leakage, settings prefill and the
-quick-start toggle round-tripping to disk, `ouro new` resolution order).
+onboarding suite (the transcript-first account gate, configured non-Codex path,
+Enter's full path including stable first-turn ID and prompt recovery, settings prefill,
+and `ouro new` resolution order).
 Honest gaps: nothing in the suite allocates a pty — `Boot::begin/drive/fail/
 finish` and `Screen::enter` are exercised only by manual pty runs; a real
 successful spawn's phase sequence needs the integration gate; `ouro new`
-suppressing the quick-start screen is enforced in `run_ui` and verified by
-reading, not by a test; `persist`'s unwritable-path branch is untested. The
+`persist`'s unwritable-path branch is untested. The
 refusal-rendering suite pins the humanised `[tag, map]` shape, the
 no-field-lost remainder, and byte-identical compact JSON for six unrecognised
 shapes; `ouro new`'s stderr path shares the function but is not driven
@@ -916,9 +916,9 @@ scopes (today scope is per-listener, set at boot); daemon reconfiguration
 from the settings overlay (editing the *runtime's* environment and offering
 a supervised restart — today settings edit only this client's defaults, and
 the daemon is configured by environment at boot); unknown-key preservation
-through config saves; automated pty-level tests for the boot screen and
-quick-start screen; graying out approval/sandbox choices a provider cannot
-take in the `n` dialog and quick-start picker (`runtime.providers` already
+through config saves; automated pty-level tests for the boot screen and coding home;
+graying out approval/sandbox choices a provider cannot take in the `n` dialog
+(`runtime.providers` already
 Wire-encodes `normalized_options`, `normalized_values`, and
 `session_transports`, so the client has the data); a workspace lease posture
 that follows the provider's actual write capability rather than the stated

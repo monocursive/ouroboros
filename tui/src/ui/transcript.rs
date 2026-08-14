@@ -30,7 +30,7 @@
 //! past it raises the same floor a prune raises — so the divider a reader sees means
 //! exactly one thing ("history before here is gone") whichever side dropped it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -135,6 +135,7 @@ pub struct Watch {
     /// each other, so this is the ordinary case rather than the rare one.
     pub resync_again: bool,
     pub pending_approvals: BTreeMap<u64, ApprovalRequest>,
+    approval_responses_in_flight: BTreeSet<String>,
     /// Cumulative frames known lost, from either side. Shown, because a number that keeps
     /// climbing is the difference between "one hiccup" and "this connection is too slow".
     pub dropped: u64,
@@ -163,6 +164,7 @@ impl Watch {
             resyncing: false,
             resync_again: false,
             pending_approvals: BTreeMap::new(),
+            approval_responses_in_flight: BTreeSet::new(),
             dropped: 0,
             follow: true,
             scroll: 0,
@@ -262,12 +264,35 @@ impl Watch {
     pub fn resolve_approval(&mut self, request_id: &str) {
         self.pending_approvals
             .retain(|_, request| request.request_id != request_id);
+        self.approval_responses_in_flight.remove(request_id);
+    }
+
+    /// Marks one response in flight without pretending the runtime has resolved it.
+    pub fn mark_approval_response(&mut self, request_id: &str) -> bool {
+        let pending = self
+            .pending_approvals
+            .values()
+            .any(|request| request.request_id == request_id);
+
+        pending
+            && self
+                .approval_responses_in_flight
+                .insert(request_id.to_string())
+    }
+
+    /// A refused or disconnected RPC can be tried again with the same runtime request id.
+    pub fn retry_approval_response(&mut self, request_id: &str) {
+        self.approval_responses_in_flight.remove(request_id);
     }
 
     /// The approval a modal opens on: the oldest outstanding one, so two requests are
     /// answered in the order the provider asked.
     pub fn next_approval(&self) -> Option<&ApprovalRequest> {
-        self.pending_approvals.values().next()
+        self.pending_approvals.values().find(|request| {
+            !self
+                .approval_responses_in_flight
+                .contains(&request.request_id)
+        })
     }
 
     /// The transcript in order, with the dividers interleaved where they belong.
@@ -374,6 +399,11 @@ impl Watch {
         self.notes.retain(|sequence, _| *sequence > self.floor);
         self.pending_approvals
             .retain(|sequence, _| *sequence > self.floor);
+        self.approval_responses_in_flight.retain(|request_id| {
+            self.pending_approvals
+                .values()
+                .any(|request| &request.request_id == request_id)
+        });
     }
 
     fn recompute_cursor(&mut self) {
@@ -702,6 +732,12 @@ mod tests {
         watch.absorb(vec![approval(5, "req-b"), approval(4, "req-a")]);
 
         assert_eq!(watch.next_approval().expect("one").request_id, "req-a");
+
+        assert!(watch.mark_approval_response("req-a"));
+        assert_eq!(watch.next_approval().expect("the next").request_id, "req-b");
+
+        watch.retry_approval_response("req-a");
+        assert_eq!(watch.next_approval().expect("retry").request_id, "req-a");
 
         watch.resolve_approval("req-a");
         assert_eq!(watch.next_approval().expect("the next").request_id, "req-b");

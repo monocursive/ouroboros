@@ -3,6 +3,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   alias Jido.Harness.Run
   alias Jido.Harness.RunInfo
+  alias Jido.Harness.RunRequest
   alias Jido.Harness.Session
   alias Jido.Harness.SessionInfo
   alias Ouroboros.Gateway
@@ -102,6 +103,46 @@ defmodule Ouroboros.Gateway.StreamingTest do
       assert event["params"]["event"]["sequence"] > 3
 
       assert :ok = HarnessAdapter.finish(adapter)
+    end
+
+    test "dispatches the typed turn envelope without breaking string turns", %{client: client} do
+      {ref, id} = start_session()
+
+      outside =
+        Path.join(
+          System.tmp_dir!(),
+          "ouro-gateway-outside-#{System.unique_integer([:positive, :monotonic])}.txt"
+        )
+
+      File.write!(outside, "not admitted")
+      on_exit(fn -> File.rm(outside) end)
+
+      refused =
+        call(client, "interactive.send_message", %{
+          "id" => id,
+          "turn_id" => "escaped-attachment",
+          "input" => %{"prompt" => "inspect", "attachments" => [outside]}
+        })
+
+      assert refused["error"]["code"] == -32_006
+      assert refused["error"]["data"] == ["attachment_outside_workspace", outside]
+
+      response =
+        call(client, "interactive.send_message", %{
+          "id" => id,
+          "turn_id" => "typed-turn",
+          "input" => %{"prompt" => "inspect the typed envelope"}
+        })
+
+      assert response["result"]["id"] == "typed-turn"
+
+      assert_receive {:ouroboros_test_adapter_started, _run,
+                      %RunRequest{prompt: "inspect the typed envelope"}, adapter},
+                     @receive_timeout
+
+      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "typed"})
+      assert :ok = HarnessAdapter.finish(adapter)
+      assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, "typed-turn", 2_000)
     end
 
     test "a cursor above the backlog is honored rather than replayed from zero", %{

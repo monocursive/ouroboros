@@ -132,6 +132,42 @@ makes retries idempotent, while the returned reference routes over distribution:
 `steer/3`, `respond_approval/3`, and `interrupt/2` route to native Harness
 capabilities when the selected provider transport supports them.
 
+Agent behavior can be assembled from a strict, versioned profile without moving
+execution authority out of Harness:
+
+```elixir
+profile =
+  Ouroboros.AgentProfile.new!(
+    id: "repository-coder",
+    base_prompt: "Work carefully in the requested repository.",
+    instructions: [
+      %{id: "user-work", text: "Preserve unrelated user changes."}
+    ],
+    skills: [
+      %{id: "verification", version: "1", instructions: "Run the narrowest useful checks."}
+    ],
+    tools: [
+      %{name: "Read", description: "Read files in the admitted workspace."}
+    ]
+  )
+
+{:ok, task} =
+  Ouroboros.CodingSession.start("Review the current change",
+    provider: :codex,
+    workspace: File.cwd!(),
+    agent_profile: profile,
+    allowed_tools: ["Read"]
+  )
+```
+
+Profiles are prompt policy data, not executors. A listed tool grants nothing: its
+description enters the assembled prompt only when the request explicitly allows the
+same tool, and `disallowed_tools` wins. The runtime records content-free profile and
+assembly digests for inspection; the user prompt remains a separate Harness input. At
+admission, the profile is compiled into the durable `system_prompt` and the raw profile is
+not checkpointed, so a rollback sees only the established Harness request shape. With no
+profile, the existing valid `system_prompt` path is preserved byte-for-byte.
+
 Control-plane calls (`info/1`, `replay/2`, `subscribe/2`, `cancel/1`, `steer/3`,
 `respond_approval/3`, `interrupt/2`) are bounded by
 `:ouroboros, :session_call_timeout` so one wedged coordinator cannot freeze every
@@ -214,19 +250,19 @@ runtime end with the same two files in the same place.
 On a tty, `ouro` boots inside the UI: the extract/start/publish sequence renders as
 live progress with the runtime's own output underneath it, and a failed boot shows its
 error where it happened instead of after the screen is torn down. Then it opens on a
-quick-start screen — a model picker over the providers the runtime found installed
-(missing ones dim, naming the executable probed for; `r` re-probes after an install in
-another terminal) above a prompt box that already has focus. Type what you want done
-and press Enter: the chosen provider is stored as your default, a session starts in
-the directory you launched from, your prompt is sent, and the streaming transcript
-opens as a user/agent conversation. Lifecycle, provider, usage, and other normalized
-events stay behind `Ctrl-E` in the complete event-details view. An empty prompt starts
-the session with the composer ready; Esc goes to the dashboard instead; nothing asks a
-question.
-
-The same screen greets any later `ouro` that finds no live sessions — the daily flow
-is type-and-go, not just the first one — and `[onboarding] quick_start = false` in the
-config file turns that off.
+transcript-first coding home. A ready provider focuses the prompt immediately. Codex uses
+the managed ChatGPT sign-in gate, where Enter connects and `/` commands remain available;
+an explicitly configured non-Codex provider is not blocked by an unrelated OpenAI account.
+Type what you want done and press Enter: an interactive session
+starts in the displayed requested workspace, the first message carries a stable logical
+turn ID, and the streaming transcript opens as a user/agent conversation. Lifecycle,
+provider, usage, and other normalized events stay behind `Ctrl-E` in the complete
+event-details view. The composer is Unicode-safe and multiline (`Shift+Enter` or `Ctrl+J`),
+normalizes bracketed paste, keeps bounded in-session history, completes local slash
+commands, and completes `@` mentions from a bounded index of the launch workspace. An
+`@path` is currently prompt text, not a structured attachment; the gateway already
+accepts a closed attachment envelope whose files are canonicalized beneath the leased
+session workspace, ready for a future runtime-aware picker.
 
 `,` opens settings: the runtime's facts as it reports them, and this client's own
 defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand

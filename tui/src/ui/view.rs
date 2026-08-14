@@ -55,11 +55,35 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
     let columns =
         Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(inner);
 
-    let workspace = app
+    let workspace = if app.sessions.open.is_some() {
+        app.sessions
+            .open_info()
+            .and_then(|session| session.workspace.as_deref())
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| format!("workspace {}", super::tree::truncate(path, 32)))
+            .unwrap_or_else(|| "session workspace unknown".to_string())
+    } else if let Some(path) = app
+        .config
+        .defaults
+        .workspace
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        format!("requested {}", super::tree::truncate(path, 32))
+    } else if let Some(path) = app
         .launch_dir
         .as_deref()
-        .map(|path| super::tree::truncate(path, 42))
-        .unwrap_or_else(|| "workspace unset".to_string());
+        .filter(|path| !path.trim().is_empty())
+    {
+        let label = if app.spawned() {
+            "requested"
+        } else {
+            "local cwd suggestion"
+        };
+        format!("{label} {}", super::tree::truncate(path, 32))
+    } else {
+        "requested workspace unset".to_string()
+    };
 
     let context = if app.tab == Tab::Sessions {
         match &app.sessions.open {
@@ -81,7 +105,28 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         columns[0],
     );
 
-    let account = if let Some(state) = &app.account.value {
+    let visible_provider = if app.sessions.open.is_some() {
+        app.sessions
+            .open_info()
+            .and_then(|session| session.provider.as_deref())
+    } else {
+        Some(app.home_provider())
+    };
+
+    let account = if visible_provider.is_some_and(|provider| provider != "codex") {
+        Line::from(vec![
+            Span::styled("Provider ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                visible_provider.expect("checked provider"),
+                Style::default().fg(theme::ACCENT),
+            ),
+        ])
+    } else if visible_provider.is_none() {
+        Line::from(Span::styled(
+            "Provider unknown",
+            Style::default().fg(theme::MUTED),
+        ))
+    } else if let Some(state) = &app.account.value {
         if let Some(identity) = &state.account {
             let plan = state
                 .plan_label()
@@ -914,15 +959,6 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             SettingsField::ApprovalMode => {
                 ("approval", settings.approval_label(), Style::default())
             }
-            SettingsField::QuickStart => (
-                "quick start",
-                if settings.quick_start {
-                    "on — opens when this node has nothing running".to_string()
-                } else {
-                    "off — go straight to the dashboard".to_string()
-                },
-                Style::default(),
-            ),
             SettingsField::Save => (
                 "",
                 "[ save ]".to_string(),
@@ -937,8 +973,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 if focused { "> " } else { "  " },
                 Style::default().fg(theme::ACCENT),
             ),
-            // Twelve, not eleven: `quick start` is eleven characters, and a label column
-            // exactly as wide as its widest label leaves a value touching it.
+            // A fixed label column keeps edited preferences scannable.
             Span::styled(format!("{label:<12}"), theme::label()),
             Span::styled(value, style),
         ];

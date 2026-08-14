@@ -2,6 +2,7 @@ defmodule Ouroboros.Coding.TaskState do
   @moduledoc "The serializable source of truth for one coding-agent run."
 
   alias Ouroboros.Coding.Event
+  alias Ouroboros.{AgentProfile, Prompt.Assembler}
   alias Ouroboros.Provider
 
   @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :origin_digest]
@@ -12,6 +13,7 @@ defmodule Ouroboros.Coding.TaskState do
     :runtime_timeout_ms,
     :idle_timeout_ms,
     :system_prompt,
+    :agent_profile,
     :allowed_tools,
     :disallowed_tools,
     :add_dirs,
@@ -106,6 +108,7 @@ defmodule Ouroboros.Coding.TaskState do
                 events: [],
                 result: nil,
                 error: nil,
+                prompt_trace: nil,
                 options: %{}
               ]
 
@@ -131,6 +134,7 @@ defmodule Ouroboros.Coding.TaskState do
           events: [Event.t()],
           result: map() | nil,
           error: term(),
+          prompt_trace: map() | nil,
           options: map()
         }
 
@@ -143,7 +147,7 @@ defmodule Ouroboros.Coding.TaskState do
   def new(id, objective, opts, plane \\ :coding)
 
   def new(id, objective, opts, plane) when is_list(opts) do
-    if Keyword.keyword?(opts) do
+    if Keyword.keyword?(opts) and unique_keys?(opts) do
       do_new(id, objective, opts, plane)
     else
       {:error, :invalid_options}
@@ -159,6 +163,7 @@ defmodule Ouroboros.Coding.TaskState do
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
     safety = Provider.safety_options(provider, opts, plane)
+    assembly = assemble_prompt_options(Map.new(opts))
 
     cond do
       unknown = unknown_option(opts) ->
@@ -188,6 +193,15 @@ defmodule Ouroboros.Coding.TaskState do
       inline_mcp_config?(opts) ->
         {:error, :inline_mcp_config_not_persisted}
 
+      not valid_system_prompt?(Keyword.get(opts, :system_prompt)) ->
+        {:error, :invalid_system_prompt}
+
+      not valid_agent_profile?(Keyword.get(opts, :agent_profile)) ->
+        {:error, :invalid_agent_profile}
+
+      not match?({:ok, _assembly}, assembly) ->
+        {:error, :invalid_agent_profile_options}
+
       not valid_provider_options?(provider, Keyword.get(opts, :provider_options, %{})) ->
         {:error, {:unsafe_provider_options, provider}}
 
@@ -202,6 +216,7 @@ defmodule Ouroboros.Coding.TaskState do
 
       true ->
         {:ok, safety_options} = safety
+        {:ok, prompt_assembly} = assembly
         workspace = Path.expand(workspace_option)
         now = DateTime.utc_now() |> DateTime.to_iso8601()
 
@@ -218,7 +233,8 @@ defmodule Ouroboros.Coding.TaskState do
            workspace_mode: workspace_mode,
            origin_digest: origin_digest,
            event_limit: Keyword.get(opts, :event_limit, 10_000),
-           options: request_options(opts, safety_options)
+           prompt_trace: Assembler.trace(prompt_assembly),
+           options: request_options(opts, safety_options, prompt_assembly)
          }}
     end
   end
@@ -228,9 +244,25 @@ defmodule Ouroboros.Coding.TaskState do
   def terminal?(%__MODULE__{status: status}),
     do: status in [:completed, :failed, :cancelled, :lost]
 
+  @doc "Returns whether a reconstructed task can safely build a Harness request."
+  @spec requestable?(term()) :: boolean()
+  def requestable?(%__MODULE__{options: options} = state) when is_map(options) do
+    not Map.has_key?(options, :agent_profile) and
+      valid_system_prompt?(Map.get(options, :system_prompt)) and
+      valid_prompt_trace?(Map.get(state, :prompt_trace), Map.get(options, :system_prompt))
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  def requestable?(_state), do: false
+
   @doc false
   @spec public(t()) :: t()
   def public(%__MODULE__{} = state) do
+    prompt_trace = Map.get(state, :prompt_trace)
+
     options =
       state.options
       |> Map.take(@public_request_options)
@@ -238,6 +270,7 @@ defmodule Ouroboros.Coding.TaskState do
       |> Map.put(:attachment_count, list_count(state.options[:attachments]))
       |> Map.put(:additional_directory_count, list_count(state.options[:add_dirs]))
       |> Map.put(:has_provider_options, map_size(state.options[:provider_options] || %{}) > 0)
+      |> maybe_put_prompt_trace(prompt_trace)
 
     state
     |> Map.put(:origin_digest, nil)
@@ -246,14 +279,21 @@ defmodule Ouroboros.Coding.TaskState do
 
   @doc false
   def request(%__MODULE__{} = state) do
-    state.options
-    |> Map.merge(%{
-      prompt: state.objective,
-      cwd: state.workspace,
-      metadata: %{
+    prompt_trace = Map.get(state, :prompt_trace)
+
+    metadata =
+      %{
         ouroboros_task_id: state.id,
         ouroboros_node: Atom.to_string(node())
       }
+      |> maybe_put_prompt_trace(prompt_trace, :ouroboros_prompt)
+
+    state.options
+    |> Map.delete(:agent_profile)
+    |> Map.merge(%{
+      prompt: state.objective,
+      cwd: state.workspace,
+      metadata: metadata
     })
   end
 
@@ -261,15 +301,21 @@ defmodule Ouroboros.Coding.TaskState do
   # values included, so they are dropped here and merged back rather than defaulted a
   # second time. An option it omitted must be absent from the request, not present as
   # `nil`: absent is what leaves the harness request at `:default`.
-  defp request_options(opts, safety_options) do
+  defp request_options(opts, safety_options, assembly) do
     opts
     |> Keyword.take(@request_options)
-    |> Keyword.drop([:approval_mode, :sandbox_mode])
+    |> Keyword.drop([:approval_mode, :sandbox_mode, :agent_profile])
     |> Keyword.merge(safety_options)
     |> Map.new()
+    |> put_system_prompt(assembly.system_prompt)
   end
 
   defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
+
+  defp unique_keys?(opts) do
+    keys = Keyword.keys(opts)
+    Enum.uniq(keys) == keys
+  end
 
   defp default_workspace_mode(:read_only), do: :shared_read
   defp default_workspace_mode(_sandbox_mode), do: :exclusive
@@ -319,6 +365,21 @@ defmodule Ouroboros.Coding.TaskState do
 
   defp valid_provider_options?(_provider, _options), do: false
 
+  defp valid_agent_profile?(nil), do: true
+  defp valid_agent_profile?(%AgentProfile{} = profile), do: AgentProfile.valid?(profile)
+  defp valid_agent_profile?(_profile), do: false
+
+  defp valid_system_prompt?(prompt),
+    do: is_nil(prompt) or (is_binary(prompt) and String.valid?(prompt))
+
+  defp assemble_prompt_options(options) do
+    Assembler.assemble(Map.get(options, :agent_profile),
+      system_prompt: Map.get(options, :system_prompt),
+      allowed_tools: Map.get(options, :allowed_tools),
+      disallowed_tools: Map.get(options, :disallowed_tools)
+    )
+  end
+
   defp normalize_provider_option_key(key, _allowed) when is_atom(key), do: key
 
   defp normalize_provider_option_key(key, allowed) when is_binary(key) do
@@ -330,4 +391,43 @@ defmodule Ouroboros.Coding.TaskState do
   defp present?(value), do: value not in [nil, "", [], %{}]
   defp list_count(value) when is_list(value), do: length(value)
   defp list_count(_value), do: 0
+
+  defp put_system_prompt(options, nil), do: Map.delete(options, :system_prompt)
+
+  defp put_system_prompt(options, system_prompt),
+    do: Map.put(options, :system_prompt, system_prompt)
+
+  defp maybe_put_prompt_trace(map, nil, _key), do: map
+  defp maybe_put_prompt_trace(map, trace, key), do: Map.put(map, key, trace)
+
+  defp maybe_put_prompt_trace(map, trace),
+    do: maybe_put_prompt_trace(map, trace, :prompt_assembly)
+
+  defp valid_prompt_trace?(nil, _system_prompt), do: true
+
+  defp valid_prompt_trace?(trace, system_prompt) when is_map(trace) do
+    Map.keys(trace) |> Enum.sort() ==
+      [:digest, :profile_digest, :profile_id, :profile_version, :version] and
+      trace.version == Assembler.version() and is_binary(trace.profile_id) and
+      is_integer(trace.profile_version) and trace.profile_version > 0 and
+      valid_digest?(trace.digest) and valid_digest?(trace.profile_digest) and
+      is_binary(system_prompt) and prompt_digest(system_prompt) == trace.digest
+  end
+
+  defp valid_prompt_trace?(_trace, _system_prompt), do: false
+
+  defp prompt_digest(prompt) do
+    :sha256
+    |> :crypto.hash(prompt)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp valid_digest?(digest) when is_binary(digest) do
+    case Base.decode16(digest, case: :lower) do
+      {:ok, decoded} -> byte_size(decoded) == 32
+      :error -> false
+    end
+  end
+
+  defp valid_digest?(_digest), do: false
 end

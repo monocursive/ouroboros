@@ -1,12 +1,9 @@
-//! The Ouroboros mark, drawn from the same 16-column pixel master in every surface.
+//! The Ouroboros mark and its compact chat shorthand.
 //!
 //! A terminal cell is roughly twice as tall as it is wide, so two logical pixel rows are
-//! folded into one cell with `▀`, `▄`, and `█`. The loading treatment never changes the
-//! silhouette: a cyan highlight travels clockwise around the muted serpent, which keeps
-//! the logo recognizable in monochrome and avoids depending on wide glyphs or a fixed
-//! terminal background.
-
-use std::f32::consts::TAU;
+//! folded into one cell with `▀`, `▄`, and `█`. Chat uses a single-cell clockwise serpent
+//! beside a conventional three-dot typing cadence, retaining the identity without placing
+//! the full mark between two messages.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -19,7 +16,6 @@ use super::theme;
 pub const HEIGHT: u16 = 7;
 
 const WIDTH: usize = 16;
-const SECTORS: i16 = 16;
 
 /// The selected thin-ring 16x14 master. `#` is one square game-snake pixel.
 const MASTER: [&str; 14] = [
@@ -42,7 +38,6 @@ const MASTER: [&str; 14] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Treatment {
     Static,
-    Loading { tick: u64 },
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, treatment: Treatment) {
@@ -59,6 +54,40 @@ pub fn lines(treatment: Treatment) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// A quiet, one-line form of the mark for the next agent-message position in chat.
+pub fn typing_indicator(tick: u64) -> Line<'static> {
+    let active = ((tick / 2) % 3) as usize;
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            "⟳",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+    ];
+
+    for dot in 0..3 {
+        if dot > 0 {
+            spans.push(Span::raw(" "));
+        }
+
+        spans.push(if dot == active {
+            Span::styled(
+                "•",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("·", Style::default().fg(theme::MUTED))
+        });
+    }
+
+    Line::from(spans)
+}
+
 fn line(top: usize, treatment: Treatment) -> Line<'static> {
     let mut spans = Vec::with_capacity(WIDTH);
 
@@ -72,10 +101,7 @@ fn line(top: usize, treatment: Treatment) -> Line<'static> {
             (false, false) => ' ',
         };
 
-        spans.push(Span::styled(
-            glyph.to_string(),
-            style(treatment, x, top, upper, lower),
-        ));
+        spans.push(Span::styled(glyph.to_string(), style(treatment)));
     }
 
     Line::from(spans).alignment(Alignment::Center)
@@ -89,44 +115,12 @@ fn occupied(y: usize, x: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn style(treatment: Treatment, x: usize, top: usize, upper: bool, lower: bool) -> Style {
+fn style(treatment: Treatment) -> Style {
     match treatment {
         Treatment::Static => Style::default()
             .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD),
-        Treatment::Loading { tick } if upper || lower => {
-            let y = top as f32
-                + match (upper, lower) {
-                    (true, true) => 0.5,
-                    (false, true) => 1.0,
-                    _ => 0.0,
-                };
-            let sector = sector(x as f32, y);
-            let active = (tick % SECTORS as u64) as i16;
-            let distance = (sector - active).abs();
-            let distance = distance.min(SECTORS - distance);
-
-            if distance <= 1 {
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            } else if distance == 2 {
-                Style::default()
-            } else {
-                Style::default().fg(theme::MUTED)
-            }
-        }
-        Treatment::Loading { .. } => Style::default(),
     }
-}
-
-/// Sixteen clockwise sectors, beginning at twelve o'clock.
-fn sector(x: f32, y: f32) -> i16 {
-    let dx = x - 7.5;
-    let dy = y - 6.5;
-    let clockwise_from_top = dx.atan2(-dy).rem_euclid(TAU);
-
-    ((clockwise_from_top / TAU * SECTORS as f32).round() as i16).rem_euclid(SECTORS)
 }
 
 #[cfg(test)]
@@ -157,14 +151,17 @@ mod tests {
     }
 
     #[test]
-    fn loading_changes_only_colour_not_the_logo_silhouette() {
-        assert_eq!(
-            text(Treatment::Loading { tick: 0 }),
-            text(Treatment::Loading { tick: 7 })
-        );
+    fn typing_indicator_is_compact_and_advances() {
+        let text = |tick| {
+            typing_indicator(tick)
+                .spans
+                .into_iter()
+                .map(|span| span.content)
+                .collect::<String>()
+        };
 
-        let at_zero = lines(Treatment::Loading { tick: 0 });
-        let later = lines(Treatment::Loading { tick: 7 });
-        assert_ne!(at_zero, later, "the clockwise highlight must advance");
+        assert_eq!(text(0), "  ⟳  • · ·");
+        assert_eq!(text(2), "  ⟳  · • ·");
+        assert_eq!(text(4), "  ⟳  · · •");
     }
 }

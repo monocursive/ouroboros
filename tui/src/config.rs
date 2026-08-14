@@ -8,18 +8,18 @@
 //! screen that shows one of them says so. What is kept here is the small set of answers a
 //! person would otherwise retype into every `ouro new`: which provider, which workspace,
 //! which approval mode. They are *defaults for a form*, not decisions: every one of them
-//! is prefilled into the quick-start screen and the `n` dialog and stays editable in both,
-//! and `ouro new` still accepts a flag that overrides the file.
+//! is prefilled into the coding home and the `n` dialog and stays editable, and `ouro new`
+//! still accepts a flag that overrides the file.
 //!
 //! This is what keeps the "not a choice this client makes for you" rule intact while
 //! removing the retyping. The client still refuses to *invent* a provider. It will use one
 //! the operator chose, once, explicitly, in a file they can read — which is a different
 //! statement from a node's default silently deciding which vendor runs their code. The
-//! quick-start screen writes `defaults.provider` for exactly that reason: pressing Enter
-//! on a model *is* choosing it, so the next run does not ask again.
+//! the coding home writes `defaults.provider` for exactly that reason: pressing Enter with
+//! a displayed provider is choosing it, so the next run does not ask again.
 //!
-//! `[onboarding]` is the other half: what this operator has already seen, and whether they
-//! want the quick-start screen to keep opening itself.
+//! `[onboarding]` retains the schema-1 welcome marker. Its former quick-start toggle is
+//! accepted for compatibility but ignored by the transcript-first shell.
 //!
 //! ## Reading is total; writing is atomic
 //!
@@ -123,19 +123,17 @@ impl Defaults {
 /// What this operator has already been shown, and what they want shown again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Onboarding {
-    /// Whether the quick-start screen has been reached once.
+    /// Whether the coding home has been reached once.
     ///
     /// A marker rather than a timestamp: the only question it answers is "has this person
     /// seen this client introduce itself", and a date would invite a client to decide the
     /// answer expires.
     #[serde(default)]
     pub welcomed: bool,
-    /// Whether the quick-start screen opens on its own when this node has no live session.
-    ///
-    /// On by default, because `ouro` in a workspace usually means "type and go" and the
-    /// screen is that path rather than a greeting. Off is a real answer: an operator who
-    /// lives on the Sessions tab has already made the choice it exists to ask for.
-    #[serde(default = "on")]
+    /// Legacy schema-1 preference accepted so an older file still loads. The
+    /// transcript-first shell no longer has an onboarding modal, so this is ignored and
+    /// omitted on the next save.
+    #[serde(default = "on", skip_serializing)]
     pub quick_start: bool,
 }
 
@@ -458,7 +456,7 @@ mod tests {
             },
             onboarding: Onboarding {
                 welcomed: true,
-                quick_start: false,
+                quick_start: true,
             },
         };
 
@@ -532,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_is_on_unless_the_file_says_otherwise() {
+    fn the_legacy_quick_start_preference_loads_but_is_retired_on_save() {
         let dir = scratch("quick-start");
         let path = dir.join(CONFIG_FILE);
 
@@ -547,12 +545,12 @@ mod tests {
 
         assert!(!load(path.clone()).config.onboarding.quick_start);
 
-        // And "off" survives a rewrite: a value the operator stated is not one a save may
-        // quietly restore to the default.
         let loaded = load(path.clone());
         loaded.config.save(&path).expect("a rewrite");
 
-        assert!(!load(path).config.onboarding.quick_start);
+        let text = fs::read_to_string(&path).expect("the rewritten config");
+        assert!(!text.contains("quick_start"), "{text}");
+        assert!(load(path).config.onboarding.quick_start);
 
         fs::remove_dir_all(&dir).ok();
     }

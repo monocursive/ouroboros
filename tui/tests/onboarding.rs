@@ -1,8 +1,8 @@
 //! Contract tests for the transcript-first harness shell.
 //!
 //! The previous client opened a provider-picker onboarding modal. The product contract is
-//! now the opposite: `ouro` lands on a coding composer, managed ChatGPT sign-in is the
-//! only gate, and distribution remains one searchable command palette away.
+//! now the opposite: `ouro` lands on a coding composer, managed ChatGPT sign-in gates the
+//! first-class Codex path, and distribution remains one searchable command palette away.
 
 mod support;
 
@@ -10,6 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::json;
 
 use ouro::model::Plane;
+use ouro::proto::{ErrorCode, RpcError};
+use ouro::transport::ClientError;
 use ouro::ui::app::{App, Mode, Msg, Overlay, Tab, Tag};
 
 use support::{app, full_hello, render};
@@ -76,6 +78,7 @@ fn ouro_opens_on_the_coding_harness_without_an_onboarding_modal() {
     assert!(app.overlay.is_none());
     assert!(screen.contains("New coding session"), "{}", screen.text());
     assert!(screen.contains("Connect ChatGPT to start coding"));
+    assert!(screen.contains("Type / for commands"), "{}", screen.text());
     assert!(screen.contains("ctrl+p commands"));
     assert!(!screen.contains("Dashboard│"));
 }
@@ -89,6 +92,61 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("Ready in this workspace"));
     assert!(screen.contains("Ask the agent to build, fix, explain, or review"));
     assert!(screen.contains("/work/ouroboros"));
+}
+
+#[test]
+fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
+    let mut app = harness(false);
+    app.config.defaults.provider = Some("claude".into());
+    app.config.defaults.workspace = Some("/srv/agent-work".into());
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Ready in this workspace"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("PROVIDER claude"), "{}", screen.text());
+    assert!(screen.contains("Provider claude"), "{}", screen.text());
+    assert!(
+        !screen.contains("ChatGPT not connected") && !screen.contains("ChatGPT unavailable"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("requested /srv/agent-work"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("Requested workspace: /srv/agent-work"));
+
+    type_text(&mut app, "review the current diff");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    let start = calls
+        .iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the configured provider starts directly");
+    assert_eq!(start.params["provider"], "claude");
+    assert_eq!(start.params["workspace"], "/srv/agent-work");
+    assert!(calls
+        .iter()
+        .all(|call| call.method != "account.login.start"));
+}
+
+#[test]
+fn slash_commands_are_available_before_codex_sign_in() {
+    let mut app = harness(false);
+
+    type_text(&mut app, "/help");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(matches!(app.overlay, Some(Overlay::Help)));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "account.login.start"));
 }
 
 #[test]
@@ -213,6 +271,10 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
         .find(|call| call.method == "interactive.send_message")
         .expect("the first message");
     assert_eq!(first.params["input"], "fix the flaky reconnect test");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("a stable first-message id")
+        .to_string();
     assert!(calls
         .iter()
         .any(|call| call.method == "interactive.subscribe"));
@@ -221,6 +283,27 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
         Some("session-1")
     );
     assert!(app.sessions.composer.is_some());
+
+    app.apply(Msg::Answer {
+        tag: first.tag.clone(),
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "provider refused the turn".into(),
+            data: None,
+        })),
+    });
+
+    let composer = app.sessions.composer.as_ref().expect("the restored draft");
+    assert_eq!(composer.editor.text(), "fix the flaky reconnect test");
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("an idempotent retry");
+    assert_eq!(retry.params["turn_id"], turn_id);
+    assert_eq!(retry.params["input"], "fix the flaky reconnect test");
 }
 
 #[test]
@@ -336,7 +419,7 @@ fn the_session_composer_remains_open_after_sending() {
         app.sessions
             .composer
             .as_ref()
-            .map(|composer| composer.buffer.as_str()),
+            .map(|composer| composer.editor.text()),
         Some("")
     );
 }

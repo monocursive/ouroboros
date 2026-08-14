@@ -150,6 +150,47 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert call(client, "coding.start", %{})["error"]["code"] == -32602
     end
 
+    test "structured turn input is closed and validated before dispatch", %{client: client} do
+      assert hello(client)["result"]
+
+      unknown =
+        call(client, "interactive.send_message", %{
+          "id" => "session",
+          "input" => %{"prompt" => "inspect", "provider_options" => %{"unsafe" => true}}
+        })
+
+      assert unknown["error"]["code"] == -32602
+      assert unknown["error"]["message"] =~ "provider_options"
+
+      reasoning =
+        call(client, "interactive.follow_up", %{
+          "id" => "session",
+          "input" => %{"prompt" => "continue", "reasoning_effort" => "unbounded"}
+        })
+
+      assert reasoning["error"]["code"] == -32602
+      assert reasoning["error"]["message"] =~ "high, low, medium"
+
+      attachments =
+        call(client, "interactive.send_message", %{
+          "id" => "session",
+          "input" => %{"prompt" => "look", "attachments" => ["ok.png", ""]}
+        })
+
+      assert attachments["error"]["code"] == -32602
+      assert attachments["error"]["message"] =~ "nonempty strings"
+
+      extra_top_level =
+        call(client, "interactive.send_message", %{
+          "id" => "session",
+          "input" => "inspect",
+          "provider_options" => %{}
+        })
+
+      assert extra_top_level["error"]["code"] == -32602
+      assert extra_top_level["error"]["message"] =~ "provider_options"
+    end
+
     test "an option outside the allowlist is refused rather than dropped", %{client: client} do
       assert hello(client)["result"]
 

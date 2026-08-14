@@ -746,11 +746,14 @@ defmodule Ouroboros.Gateway.Methods do
 
   # A turn id supplied by the caller is what makes dispatch idempotent: resending the same
   # `{id, input, turn_id}` after a lost response returns the same turn instead of starting
-  # a second one. Passed straight through, because the plane is what owns that guarantee.
+  # a second one. `input` keeps accepting the original string shape and additionally accepts
+  # the small provider-neutral TurnRequest subset a terminal can honestly construct. Richer
+  # provider knobs remain runtime configuration rather than an escape hatch through JSON.
   defp with_turn(params, dispatch) do
     safe(fn ->
-      with {:ok, id} <- fetch_string(params, "id"),
-           {:ok, input} <- fetch_string(params, "input"),
+      with :ok <- only_keys(params, ["id", "input", "turn_id"]),
+           {:ok, id} <- fetch_string(params, "id"),
+           {:ok, input} <- fetch_turn_input(params),
            {:ok, turn_id} <- fetch_optional_string(params, "turn_id") do
         reply(dispatch.(id, input, if(turn_id, do: [id: turn_id], else: [])))
       else
@@ -944,6 +947,72 @@ defmodule Ouroboros.Gateway.Methods do
     case Map.get(params, key) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _other -> {:invalid, "params.#{key} must be a nonempty string"}
+    end
+  end
+
+  defp fetch_turn_input(params) do
+    case Map.get(params, "input") do
+      input when is_binary(input) and input != "" ->
+        {:ok, input}
+
+      input when is_map(input) ->
+        structured_turn_input(input)
+
+      _other ->
+        {:invalid,
+         "params.input must be a nonempty string or an object containing prompt and optional attachments/reasoning_effort"}
+    end
+  end
+
+  defp structured_turn_input(input) do
+    with :ok <- only_keys(input, ["prompt", "attachments", "reasoning_effort"]),
+         {:ok, prompt} <- fetch_string(input, "prompt"),
+         {:ok, attachments} <- fetch_optional_string_list(input, "attachments", 32),
+         {:ok, reasoning_effort} <-
+           fetch_optional_enum(input, "reasoning_effort", @reasoning_efforts) do
+      turn = %{prompt: prompt}
+      turn = if attachments == [], do: turn, else: Map.put(turn, :attachments, attachments)
+
+      {:ok,
+       if(reasoning_effort,
+         do: Map.put(turn, :reasoning_effort, reasoning_effort),
+         else: turn
+       )}
+    end
+  end
+
+  defp fetch_optional_string_list(params, key, limit) do
+    case Map.get(params, key, []) do
+      values when is_list(values) and length(values) <= limit ->
+        if Enum.all?(values, &(is_binary(&1) and String.trim(&1) != "")),
+          do: {:ok, values},
+          else: {:invalid, "params.input.#{key} must contain only nonempty strings"}
+
+      _other ->
+        {:invalid, "params.input.#{key} must be a list of at most #{limit} nonempty strings"}
+    end
+  end
+
+  defp fetch_optional_enum(params, key, allowed) do
+    case Map.get(params, key) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        case Map.fetch(allowed, value) do
+          {:ok, term} ->
+            {:ok, term}
+
+          :error ->
+            {:invalid,
+             "params.input.#{key} must be one of " <>
+               (allowed |> Map.keys() |> Enum.sort() |> Enum.join(", "))}
+        end
+
+      _other ->
+        {:invalid,
+         "params.input.#{key} must be one of " <>
+           (allowed |> Map.keys() |> Enum.sort() |> Enum.join(", "))}
     end
   end
 

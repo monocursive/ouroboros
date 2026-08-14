@@ -116,15 +116,17 @@ defmodule Ouroboros.Coding.Store do
 
   @impl true
   def handle_call({:create, %TaskState{} = task}, _from, state) do
-    if Map.has_key?(state.tasks, task.id) do
-      {:reply, {:error, :already_exists}, state}
-    else
-      persist_task(task, state)
+    cond do
+      not valid_task?(task) -> {:reply, {:error, :invalid_task_state}, state}
+      Map.has_key?(state.tasks, task.id) -> {:reply, {:error, :already_exists}, state}
+      true -> persist_task(task, state)
     end
   end
 
   def handle_call({:put, %TaskState{} = task}, _from, state) do
-    persist_task(task, state)
+    if valid_task?(task),
+      do: persist_task(task, state),
+      else: {:reply, {:error, :invalid_task_state}, state}
   end
 
   def handle_call({:get, id}, _from, state) do
@@ -244,8 +246,11 @@ defmodule Ouroboros.Coding.Store do
 
   defp valid_tasks?(tasks) do
     Enum.all?(tasks, fn
-      {id, %TaskState{id: id}} when is_binary(id) -> true
+      {id, %TaskState{id: id} = task} when is_binary(id) -> valid_task?(task)
       _other -> false
     end)
   end
+
+  defp valid_task?(%TaskState{id: id} = task),
+    do: is_binary(id) and TaskState.requestable?(task)
 end

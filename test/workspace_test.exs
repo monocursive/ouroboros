@@ -69,6 +69,24 @@ defmodule Ouroboros.WorkspaceTest do
              Workspace.validate_root(escape_with_parent <> "/../sibling", server: manager)
   end
 
+  test "file canonicalization follows the leaf symlink for containment checks", context do
+    %{allowed: allowed, outside: outside} = context
+    inside_file = Path.join(allowed, "inside.txt")
+    outside_file = Path.join(outside, "outside.txt")
+    escape = Path.join(allowed, "file-escape")
+    File.write!(inside_file, "inside")
+    File.write!(outside_file, "outside")
+    File.ln_s!(outside_file, escape)
+
+    assert {:ok, ^inside_file} = WorkspacePath.canonicalize_file(inside_file)
+    assert {:ok, ^outside_file} = WorkspacePath.canonicalize_file(escape)
+    assert WorkspacePath.within?(inside_file, allowed)
+    refute WorkspacePath.within?(outside_file, allowed)
+
+    assert {:error, {:not_a_regular_file, ^allowed}} =
+             WorkspacePath.canonicalize_file(allowed)
+  end
+
   test "shared reads coexist while exclusive leases exclude overlapping roots", context do
     %{manager: manager, allowed: allowed, nested: nested} = context
 

@@ -40,6 +40,8 @@ use serde_json::Value;
 
 use crate::proto::RpcError;
 
+pub mod transcript;
+
 /// Which plane an id belongs to. The two have separate id spaces, so a session is only
 /// addressable as a pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
