@@ -5,6 +5,7 @@ defmodule Ouroboros.InteractiveSessionTest do
   alias Ouroboros.Interactive.{Event, Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.StubSession
 
   @provider :ouroboros_test
 
@@ -400,6 +401,66 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.close(ref)
   end
 
+  test "a checkpointed attachment that cannot exist burns its turn, a missing root does not",
+       %{id: id} do
+    base =
+      Path.join(
+        File.cwd!(),
+        ".ouro-recovery-attachment-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace = Path.join(base, "workspace")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf!(base) end)
+
+    missing_attachment_id = id <> "-missing-attachment"
+    missing_root_id = id <> "-missing-root"
+
+    # The named file is gone for good: this checkpointed input cannot be reproduced, so
+    # the turn is the thing that failed.
+    ambiguous =
+      checkpoint_unsent_turn(missing_attachment_id, workspace, ["never-written.txt"])
+
+    assert_eventually(fn ->
+      case InteractiveSession.info(Ref.new(missing_attachment_id)) do
+        {:ok, %State{turns: %{^ambiguous => %{status: :ambiguous, error: error}}}} -> error
+        _other -> false
+      end
+    end)
+    |> then(fn error ->
+      assert {:invalid_checkpointed_turn_request, {:invalid_attachment, "never-written.txt", _}} =
+               error
+    end)
+
+    # The workspace root itself does not resolve — a mount that is not up yet. The turn
+    # is still exactly reproducible once it is, so the wait is bounded backoff, not a
+    # verdict on the turn.
+    File.write!(Path.join(workspace, "present.txt"), "present")
+    unmounted = Path.join(base, "unmounted")
+    File.mkdir_p!(unmounted)
+    retried = checkpoint_unsent_turn(missing_root_id, unmounted, ["present.txt"])
+    File.rm_rf!(unmounted)
+
+    assert_eventually(fn ->
+      case InteractiveSession.info(Ref.new(missing_root_id)) do
+        {:ok, %State{status: :idle, error: {:attachment_workspace_unavailable, _reason}} = state} ->
+          state
+
+        _other ->
+          false
+      end
+    end)
+
+    assert {:ok, %State{turns: %{^retried => turn}} = state} =
+             InteractiveSession.info(Ref.new(missing_root_id))
+
+    assert turn.status == :dispatching
+    refute State.terminal?(state)
+
+    assert :ok = retire_session(missing_root_id)
+    assert :ok = retire_session(missing_attachment_id)
+  end
+
   test "loss of the Harness process fails closed without redispatching an active turn", %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
@@ -533,6 +594,51 @@ defmodule Ouroboros.InteractiveSessionTest do
              InteractiveSession.await(ref, turn_id, 3_000)
 
     assert :ok = InteractiveSession.close(ref)
+  end
+
+  # A durable session whose one turn was checkpointed as intended but never dispatched:
+  # exactly what recovery finds after a coordinator dies between the two writes.
+  defp checkpoint_unsent_turn(id, workspace, attachments) do
+    harness_session_id = unique_id("stub-session")
+    turn_id = unique_id("unsent-turn")
+
+    start_supervised!(
+      {StubSession, session_id: harness_session_id, provider: @provider, state: :idle},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    assert {:ok, request} =
+             TurnRequest.new(%{prompt: "resume this intent", attachments: attachments})
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 workspace: workspace,
+                 harness_session_id: harness_session_id,
+                 turns: %{turn_id => State.new_turn(turn_id, :message, request)}
+             })
+
+    assert {:ok, %State{}} = InteractiveSession.info(Ref.new(id))
+    turn_id
+  end
+
+  # A stubbed provider session never answers `close`, so these coordinators are retired
+  # directly rather than left retrying for the rest of the suite.
+  defp retire_session(id) do
+    case Task.whereis(id) do
+      pid when is_pid(pid) ->
+        DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
+
+      _absent ->
+        :ok
+    end
+
+    assert {:ok, session} = Store.get(id)
+    assert :ok = Store.put(%{session | status: :cancelled})
+    Store.delete(id)
   end
 
   defp cleanup_sessions do

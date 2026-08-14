@@ -396,11 +396,12 @@ defmodule Ouroboros.Interactive.Task do
   defp refresh_session(runtime) do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
       {:ok, %SessionInfo{} = info} ->
-        runtime
-        |> clear_retry()
-        |> collect_turn_results()
-        |> recover_checkpointed_dispatch(info)
-        |> checkpoint_info(info)
+        runtime = runtime |> clear_retry() |> collect_turn_results()
+
+        case recover_checkpointed_dispatch(runtime, info) do
+          {:ok, runtime} -> checkpoint_info(runtime, info)
+          {:retry, runtime, kind, reason} -> retry(runtime, kind, reason)
+        end
 
       {:error, :not_found} ->
         lose(runtime, :harness_session_not_found)
@@ -802,7 +803,7 @@ defmodule Ouroboros.Interactive.Task do
   defp recover_checkpointed_dispatch(runtime, %SessionInfo{} = info) do
     case unresolved_dispatches(runtime.session) do
       [] ->
-        runtime
+        {:ok, runtime}
 
       [turn_id]
       when info.state == :idle and is_nil(info.active_turn_id) and info.queued_turns == 0 ->
@@ -812,18 +813,29 @@ defmodule Ouroboros.Interactive.Task do
              {:ok, request} <-
                authorize_turn_attachments(request, runtime.session.workspace) do
           case dispatch_persisted_turn(runtime, turn, request) do
-            {:ok, _turn, runtime} -> runtime
-            {:error, _reason, runtime} -> runtime
+            {:ok, _turn, runtime} -> {:ok, runtime}
+            {:error, _reason, runtime} -> {:ok, runtime}
           end
         else
+          # The workspace *root* did not canonicalize. That is infrastructure — a mount
+          # that is not up yet — not a verdict on this turn, and the checkpointed input
+          # is still exactly reproducible once the root is back. Retry on the same
+          # bounded backoff an unreachable session info call uses.
+          {:error, {:invalid_attachment_workspace, reason}} ->
+            {:retry, runtime, :attachment_workspace_unavailable, reason}
+
+          # An attachment-level failure is a verdict: the file named in the checkpointed
+          # input is gone or outside the workspace, so that input cannot be reproduced.
           {:error, reason} ->
-            mark_turn_ambiguous(runtime, turn_id, {:invalid_checkpointed_turn_request, reason})
+            {:ok,
+             mark_turn_ambiguous(runtime, turn_id, {:invalid_checkpointed_turn_request, reason})}
         end
 
       ids ->
-        Enum.reduce(ids, runtime, fn turn_id, runtime ->
-          mark_turn_ambiguous(runtime, turn_id, {:dispatch_could_not_be_correlated, info.state})
-        end)
+        {:ok,
+         Enum.reduce(ids, runtime, fn turn_id, runtime ->
+           mark_turn_ambiguous(runtime, turn_id, {:dispatch_could_not_be_correlated, info.state})
+         end)}
     end
   end
 
