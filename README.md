@@ -79,7 +79,8 @@ Ouroboros.provider_status(:codex)
 Ouroboros.providers()
 ```
 
-Start a safe read-only coding task:
+Start a safe read-only coding task (providers whose adapters cannot enforce this
+posture — amp, opencode, kimi — refuse it by name rather than running without it):
 
 ```elixir
 {:ok, task} =
@@ -140,10 +141,22 @@ dispatched turn never resolves, the turn is settled as `:ambiguous` with
 `:ouroboros, :interactive_unresolved_turn_deadline_ms` — the provider work may have
 happened, and the session is released rather than polled forever.
 
-Writing is opt-in. A provider can only edit the workspace when the caller explicitly
-selects a write-capable provider policy, for example `sandbox_mode: :workspace_write`.
-These normalized flags configure the provider CLI; they are not a substitute for an
-OS/container sandbox when executing untrusted work.
+Writing is opt-in where the provider can be told so. The planes default to
+`approval_mode: :prompt` and `sandbox_mode: :read_only`, but only for providers whose
+adapters declare those options — the harness refuses any normalized option a provider
+has not declared, and four of the nine bundled providers (amp, opencode, kimi, pi)
+cannot take the conservative pair in full. The two planes answer that differently: an
+*interactive* session omits a default the provider cannot take and runs under the
+provider's own behavior (reported as `null` in `interactive.info` options — which may
+be write-capable); a *coding* task refuses at creation rather than silently
+downgrading its documented read-only default, and the refusal names the exact
+override to type (for example `sandbox_mode: :default`). An option the caller states
+explicitly is never rewritten or dropped on either plane: a sandbox the provider
+cannot enforce fails loudly by name. These normalized flags configure the provider
+CLI; they are not a substitute for an OS/container sandbox when executing untrusted
+work, and a session running under a provider's own behavior still takes the same
+shared-read workspace lease the omitted default would have taken — the lease posture
+does not yet follow the provider's actual write capability.
 
 Per-run environment maps are rejected because task requests are checkpointed. Put
 provider credentials in the service environment or a dedicated secret boundary,

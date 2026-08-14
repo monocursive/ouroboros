@@ -547,7 +547,11 @@ rehearsed lane can prove restart persistence or an ERTS change.
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
-- Coding requests default to read-only and prompt approval. Write access is explicit.
+- Coding requests default to read-only and prompt approval where the provider can
+  enforce it; a provider that cannot is refused at creation rather than silently
+  downgraded, and the downgrade has to be typed out (`sandbox_mode: :default`).
+  Write access is explicit. Interactive sessions instead omit an unenforceable
+  default and run under the provider's own behavior.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.
 - Inline environment maps are rejected rather than persisted. Event payloads and

@@ -252,7 +252,7 @@ reading.
 | `agents.list` | `Mesh.list_agents/0` |
 | `agents.state` `{id}` | `Mesh.state/1` |
 | `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0` |
-| `interactive.info` `{id}` | `InteractiveSession.info/1` |
+| `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default |
 | `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
 | `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
 | `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
@@ -741,10 +741,18 @@ rediscovered:
 - **An uninstalled provider is drawn dim and stays selectable.** "Installed" is a probe
   finding an executable; the runtime is the authority on whether a session can start,
   and refusing on a heuristic would be this client overruling it.
-- **A refusal is shown on the form that produced it, with the reason from its `data`.**
-  Most `-32006` messages describe the shape of the failure and leave the actionable
-  part in `data`; a client that dropped it would show "the runtime refused the call"
-  where `["invalid_workspace", "/srv/nope"]` was available.
+- **A refusal is shown on the form that produced it, as a sentence.** Most `-32006`
+  messages describe the shape of the failure and leave the actionable part in `data`;
+  a client that dropped it would show "the runtime refused the call" where
+  `["invalid_workspace", "/srv/nope"]` was available. `model::refusal` is the one
+  place a refusal becomes text (the `n` dialog, the quick-start screen, the notice
+  line, and `ouro new`'s stderr all call it): a payload shaped `[tag, map]` renders as
+  `provider: message (details)`, every key the sentence did not use lands verbatim on
+  a dim second line, and the single deliberately dropped key is Wire's
+  `__exception__` envelope marker — a fact about the encoding, not the failure. Any
+  shape it does not recognise keeps the compact JSON untouched, because a prettifier
+  guessing at unknown payloads is a prettifier asserting things the runtime did not
+  say.
 - **`runtime.providers` is not on the status cadence.** Each entry probes an installed
   executable by shelling out ([methods.ex] `@provider_probe_timeout`), so polling it
   beside `runtime.status` would fork a process per provider every three seconds. It
@@ -780,7 +788,11 @@ Honest gaps: nothing in the suite allocates a pty — `Boot::begin/drive/fail/
 finish` and `Screen::enter` are exercised only by manual pty runs; a real
 successful spawn's phase sequence needs the integration gate; `ouro new`
 suppressing the quick-start screen is enforced in `run_ui` and verified by
-reading, not by a test; `persist`'s unwritable-path branch is untested.
+reading, not by a test; `persist`'s unwritable-path branch is untested. The
+refusal-rendering suite pins the humanised `[tag, map]` shape, the
+no-field-lost remainder, and byte-identical compact JSON for six unrecognised
+shapes; `ouro new`'s stderr path shares the function but is not driven
+end-to-end.
 
 ---
 
@@ -896,4 +908,9 @@ from the settings overlay (editing the *runtime's* environment and offering
 a supervised restart — today settings edit only this client's defaults, and
 the daemon is configured by environment at boot); unknown-key preservation
 through config saves; automated pty-level tests for the boot screen and
-quick-start screen.
+quick-start screen; graying out approval/sandbox choices a provider cannot
+take in the `n` dialog and quick-start picker (`runtime.providers` already
+Wire-encodes `normalized_options`, `normalized_values`, and
+`session_transports`, so the client has the data); a workspace lease posture
+that follows the provider's actual write capability rather than the stated
+`sandbox_mode` alone.
