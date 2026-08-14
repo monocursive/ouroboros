@@ -582,7 +582,8 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp evaluation_id(module) do
     "ouroboros-eval-" <>
       (module |> Atom.to_string() |> String.replace(".", "-")) <>
-      "-" <> Atom.to_string(node()) <>
+      "-" <>
+      Atom.to_string(node()) <>
       "-" <> Integer.to_string(System.unique_integer([:positive]))
   end
 

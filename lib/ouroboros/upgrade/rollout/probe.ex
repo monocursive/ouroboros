@@ -160,7 +160,8 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   defp probe_id(module) do
     "ouroboros-probe-" <>
       (module |> Atom.to_string() |> String.replace(".", "-")) <>
-      "-" <> Atom.to_string(node()) <>
+      "-" <>
+      Atom.to_string(node()) <>
       "-" <> Integer.to_string(System.unique_integer([:positive]))
   end
 
