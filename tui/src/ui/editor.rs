@@ -117,6 +117,26 @@ impl Editor {
         !self.text.is_empty() || !self.history.is_empty()
     }
 
+    /// What has been submitted through this editor, oldest first.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Adopts a history from a previous editor over the same conversation. The composer is
+    /// rebuilt every time it opens, and an Up arrow that forgot everything typed before the
+    /// last Esc is a recall that cannot be relied on.
+    pub fn restore_history(&mut self, history: Vec<String>) {
+        self.history = history;
+
+        if self.history.len() > HISTORY_LIMIT {
+            let excess = self.history.len() - HISTORY_LIMIT;
+            self.history.drain(..excess);
+        }
+
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
     pub fn clear_text(&mut self) {
         self.text.clear();
         self.cursor = 0;

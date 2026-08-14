@@ -842,6 +842,101 @@ fn a_pruned_cursor_restarts_from_the_floor_and_marks_the_transcript() {
     assert_eq!(replay.params["cursor"], 96);
 }
 
+/// The composer is rebuilt on every `i`, so its history died with it: Esc-then-i gave you
+/// an Up arrow that had forgotten everything you had sent.
+#[test]
+fn composer_history_survives_closing_and_reopening_the_composer() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "run the focused test");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    app.apply(key(KeyCode::Esc));
+    assert!(app.sessions.composer.is_none());
+
+    app.apply(key(KeyCode::Char('i')));
+    app.apply(key(KeyCode::Up));
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .map(|composer| composer.editor.text()),
+        Some("run the focused test")
+    );
+}
+
+/// `interactive.steer` is idempotent on the caller's turn id, exactly like the other two
+/// input verbs. This pins the shape the runtime is served.
+#[test]
+fn steering_sends_an_id_an_input_and_a_turn_id() {
+    let mut app = with_open_session();
+
+    app.apply(key(KeyCode::Char('s')));
+    type_text(&mut app, "stop and run the tests first");
+    app.apply(key(KeyCode::Enter));
+
+    let steer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.steer")
+        .expect("a steer call");
+
+    assert_eq!(steer.params["id"], "session-0000000000000000000001");
+    assert_eq!(steer.params["input"], "stop and run the tests first");
+    assert!(
+        steer.params["turn_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{}",
+        steer.params
+    );
+    assert_eq!(
+        steer.params.as_object().expect("an object").len(),
+        3,
+        "{}",
+        steer.params
+    );
+}
+
+/// Bracketed paste was dropped whenever an overlay was open. The workspace box of the `n`
+/// dialog is the field most likely to receive a path off the clipboard, and it looked
+/// broken in a way nothing on screen explained.
+#[test]
+fn a_paste_reaches_the_focused_field_of_an_overlay() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Workspace);
+
+    app.apply(Msg::Paste("/srv/pasted\n".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("/srv/pasted"), "{}", screen.text());
+
+    // The palette takes one too, and re-derives its selection from the query.
+    let mut app = shell(full_hello());
+    app.apply(ctrl('p'));
+    app.apply(Msg::Paste("settings".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("settings"), "{}", screen.text());
+    assert!(screen.contains("Settings"), "{}", screen.text());
+
+    // An overlay with no text field says so rather than swallowing it.
+    let mut app = shell(full_hello());
+    app.apply(key(KeyCode::Char('?')));
+    app.apply(Msg::Paste("anything".into()));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("nothing here is taking text"),
+        "{}",
+        screen.text()
+    );
+}
+
 #[test]
 fn stream_ended_marks_the_session_finished() {
     let mut app = with_open_session();

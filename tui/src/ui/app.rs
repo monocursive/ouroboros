@@ -422,6 +422,11 @@ pub struct SessionsTab {
     /// Requests accepted by this client that have not produced their first lifecycle
     /// event yet. The Watch takes over as soon as input/turn/run state reaches the stream.
     pending_replies: HashSet<(Plane, String)>,
+    /// What has been submitted to each session, so the Up arrow recalls it after the
+    /// composer has been closed and reopened. The composer itself is rebuilt on every `i`,
+    /// and a recall that forgot everything typed before the last Esc is one nobody relies
+    /// on twice.
+    composer_history: HashMap<(Plane, String), Vec<String>>,
 }
 
 impl SessionsTab {
@@ -3144,6 +3149,7 @@ impl App {
 
     fn paste(&mut self, text: &str) {
         if self.overlay.is_some() {
+            self.overlay_paste(text);
             return;
         }
 
@@ -3157,6 +3163,56 @@ impl App {
                 self.home_draft.paste(text, &self.completion_catalog);
                 self.home_error = None;
             }
+        }
+    }
+
+    /// A bracketed paste while an overlay owns the keyboard.
+    ///
+    /// Dropped silently before this, which made the workspace box of the `n` dialog and the
+    /// settings overlay — the two fields most likely to receive a path off the clipboard —
+    /// look broken in a way nothing on screen explained. Every overlay with a text field
+    /// takes it; the rest say so rather than swallowing it.
+    fn overlay_paste(&mut self, text: &str) {
+        // These are one-line fields. A multi-line clipboard becomes one line rather than
+        // being refused, because the alternative is a field that silently holds a newline
+        // it cannot draw.
+        let flattened = text
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if flattened.is_empty() {
+            return;
+        }
+
+        let taken = match self.overlay.as_mut() {
+            // A dialog whose start is in flight takes no edits, for the same reason it
+            // takes no keys: the parameters that produced the request are the ones its
+            // answer is about.
+            Some(Overlay::New(dialog)) if !dialog.pending => {
+                push_into(dialog.text_mut(), &flattened)
+            }
+            Some(Overlay::Settings(settings)) => {
+                let taken = push_into(settings.text_mut(), &flattened);
+                settings.edited |= taken;
+                taken
+            }
+            Some(Overlay::Commands(palette)) => {
+                palette.query.push_str(&flattened);
+                // The selection is derived from the query, exactly as for a typed character.
+                palette.selected = palette.first_match();
+                true
+            }
+            Some(Overlay::Prompt { buffer, .. }) => push_into(Some(buffer), &flattened),
+            _ => false,
+        };
+
+        // Said rather than swallowed: a paste that vanished with nothing on screen to
+        // explain it reads as the terminal being broken.
+        if !taken {
+            self.inform("nothing here is taking text right now", NoticeKind::Info);
         }
     }
 
@@ -3212,12 +3268,37 @@ impl App {
             return;
         }
 
+        let mut editor = Editor::default();
+        editor.restore_history(
+            self.sessions
+                .composer_history
+                .get(&(plane, id))
+                .cloned()
+                .unwrap_or_default(),
+        );
+
         self.sessions.focus = Pane::Detail;
         self.sessions.composer = Some(Composer {
             verb,
-            editor: Editor::default(),
+            editor,
             next_turn_id: None,
         });
+    }
+
+    /// Copies the open composer's history where the next composer over the same session
+    /// will find it. Called wherever a submission is accepted, which is the only thing that
+    /// grows it.
+    fn remember_composer_history(&mut self) {
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            return;
+        };
+        let Some(composer) = self.sessions.composer.as_ref() else {
+            return;
+        };
+
+        self.sessions
+            .composer_history
+            .insert((plane, id), composer.editor.history().to_vec());
     }
 
     fn toggle_session_details(&mut self) {
@@ -3290,6 +3371,7 @@ impl App {
             if let Some(composer) = self.sessions.composer.as_mut() {
                 composer.editor.accept_submission();
             }
+            self.remember_composer_history();
             return;
         }
 
@@ -3305,6 +3387,8 @@ impl App {
         if composer.verb == ComposerVerb::Message {
             composer.verb = ComposerVerb::FollowUp;
         }
+
+        self.remember_composer_history();
 
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
@@ -4345,6 +4429,17 @@ impl App {
         }
 
         self.poll_upgrade_section();
+    }
+}
+
+/// Appends to a field that may not exist, answering whether there was one.
+fn push_into(field: Option<&mut String>, text: &str) -> bool {
+    match field {
+        Some(field) => {
+            field.push_str(text);
+            true
+        }
+        None => false,
     }
 }
 
