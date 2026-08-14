@@ -62,6 +62,49 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     assert {:ok, %{}} = CodexAppServer.logout(server)
   end
 
+  test "no field Codex did not promise reaches a caller, on any method" do
+    executable =
+      fake_app_server("""
+        *'"method":"initialize"'*)
+          echo '{"id":0,"result":{"userAgent":"fake"}}'
+          ;;
+        *'"method":"account/read"'*)
+          echo '{"id":1,"result":{"account":{"type":"chatgpt","email":"a@b.example","planType":"pro","accessToken":"sk-leak-identity"},"requiresOpenaiAuth":true,"accessToken":"sk-leak-read","tokens":{"idToken":"sk-leak-nested"}}}'
+          ;;
+        *'"method":"account/login/start"'*)
+          echo '{"id":2,"result":{"type":"chatgpt","loginId":"login-1","authUrl":"https://chatgpt.com/auth/ouroboros","accessToken":"sk-leak-login"}}'
+          ;;
+        *'"method":"account/login/cancel"'*)
+          echo '{"id":3,"result":{"cancelled":true,"accessToken":"sk-leak-cancel"}}'
+          ;;
+        *'"method":"account/logout"'*)
+          echo '{"id":4,"result":{"accessToken":"sk-leak-logout"}}'
+          ;;
+      """)
+
+    server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+    assert {:ok, read} = CodexAppServer.read(server)
+    assert Enum.sort(Map.keys(read)) == ["account", "login", "requiresOpenaiAuth"]
+    assert Enum.sort(Map.keys(read["account"])) == ["email", "planType", "type"]
+
+    assert {:ok, login} = CodexAppServer.login(:browser, server)
+    assert Enum.sort(Map.keys(login)) == ["authUrl", "login", "loginId", "type"]
+
+    assert {:ok, cancelled} = CodexAppServer.cancel("login-1", server)
+    assert cancelled == %{}
+
+    assert {:ok, logged_out} = CodexAppServer.logout(server)
+    assert logged_out == %{}
+
+    # The allowlist is what makes the moduledoc's promise true, so the assertion is on
+    # every reply at once rather than on the fields each one happened to name.
+    for reply <- [read, login, cancelled, logged_out] do
+      refute inspect(reply) =~ "sk-leak"
+      refute inspect(reply) =~ "accessToken"
+    end
+  end
+
   test "a missing Codex executable is a named availability error" do
     server =
       start_supervised!(

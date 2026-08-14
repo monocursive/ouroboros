@@ -10,15 +10,30 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   The app-server transport is long-lived because a managed ChatGPT login completes by
   notification after the browser or device-code ceremony. Calls are serialized through
-  one initialized JSONL connection and every request has its own timeout. No token ever
-  crosses the Ouroboros gateway; clients receive only account metadata, the managed
-  login URL/code, and completion state.
+  one initialized JSONL connection and every request has its own timeout.
+
+  No token crosses the Ouroboros gateway, and this module enforces that rather than
+  assuming it of Codex: every upstream result is projected through an explicit key
+  allowlist before it is replied to. What reaches a client is the account's type, email,
+  and plan, whether OpenAI auth is still required, the managed login's URL and user code,
+  and the login state tracked here. A field Codex adds to either result — including one
+  carrying credentials — reaches nobody until it is named in that allowlist.
   """
 
   use GenServer
 
   @request_timeout 12_000
   @initialize_id 0
+
+  @idle_login %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}
+
+  # Exactly what a client may learn from this boundary, key by key. Codex owns the shape
+  # of these results and can widen it in any release; the promise that no credential
+  # crosses the gateway is kept here, by naming the fields that are allowed through,
+  # rather than by trusting that nothing else was ever added upstream.
+  @account_keys ["account", "requiresOpenaiAuth"]
+  @identity_keys ["type", "email", "planType"]
+  @login_keys ["type", "loginId", "authUrl", "verificationUrl", "userCode"]
 
   defstruct port: nil,
             executable: nil,
@@ -27,12 +42,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
             pending: %{},
             queued: :queue.new(),
             partial: "",
-            login: %{
-              "status" => "idle",
-              "loginId" => nil,
-              "flow" => nil,
-              "error" => nil
-            }
+            login: @idle_login
 
   @type flow :: :browser | :device_code
   @type server :: GenServer.server()
@@ -379,7 +389,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
       if params["authMode"] do
         %{state.login | "status" => "succeeded", "error" => nil}
       else
-        %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}
+        @idle_login
       end
 
     %{state | login: login}
@@ -388,8 +398,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
   defp frame(_notification, state), do: state
 
   defp complete(%{from: from, kind: :account_read}, result, state) do
-    result = Map.put(result, "login", state.login)
-    GenServer.reply(from, {:ok, result})
+    GenServer.reply(from, {:ok, Map.put(account(result), "login", state.login)})
     state
   end
 
@@ -401,23 +410,42 @@ defmodule Ouroboros.Provider.CodexAppServer do
       "error" => nil
     }
 
-    GenServer.reply(from, {:ok, Map.put(result, "login", login)})
+    GenServer.reply(from, {:ok, Map.put(Map.take(result, @login_keys), "login", login)})
     %{state | login: login}
   end
 
-  defp complete(%{from: from, kind: {:login_cancel, _login_id}}, result, state) do
-    GenServer.reply(from, {:ok, result})
-    %{state | login: %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}}
+  defp complete(%{from: from, kind: {:login_cancel, login_id}}, _result, state) do
+    GenServer.reply(from, {:ok, %{}})
+
+    # A completion for a login that is no longer the pending one says nothing about the
+    # one that is. Only the cancelled login's own flow returns this connection to idle.
+    if state.login["loginId"] == login_id, do: %{state | login: @idle_login}, else: state
   end
 
-  defp complete(%{from: from, kind: :logout}, result, state) do
-    GenServer.reply(from, {:ok, result})
-    %{state | login: %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}}
+  defp complete(%{from: from, kind: :logout}, _result, state) do
+    GenServer.reply(from, {:ok, %{}})
+    %{state | login: @idle_login}
   end
 
-  defp complete(%{from: from}, result, state) do
-    GenServer.reply(from, {:ok, result})
+  # A kind this module does not name cannot have a projection, so it carries no field at
+  # all rather than whatever upstream happened to send.
+  defp complete(%{from: from}, _result, state) do
+    GenServer.reply(from, {:ok, %{}})
     state
+  end
+
+  # The projection that makes "no token ever crosses the gateway" a property of this
+  # module rather than of Codex's current response shape.
+  defp account(result) do
+    projected = Map.take(result, @account_keys)
+
+    case projected do
+      %{"account" => account} when is_map(account) ->
+        %{projected | "account" => Map.take(account, @identity_keys)}
+
+      _absent_or_null ->
+        projected
+    end
   end
 
   defp complete_error(%{from: from, kind: {:login_start, flow}}, error, state) do
