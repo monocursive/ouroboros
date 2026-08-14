@@ -523,8 +523,16 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("interactive.steer", params) do
     safe(fn ->
-      with {:ok, id} <- fetch_string(params, "id"),
-           {:ok, input} <- fetch_string(params, "input") do
+      with :ok <- only_keys(params, ["id", "input", "turn_id"]),
+           {:ok, id} <- fetch_string(params, "id"),
+           {:ok, input} <- fetch_turn_input(params),
+           {:ok, _turn_id} <- fetch_optional_string(params, "turn_id") do
+        # A terminal sends one envelope for all three composer verbs, so this method takes
+        # the same keys and the same structured input as `send_message` and `follow_up`
+        # rather than ignoring whatever it does not recognize. `turn_id` is validated and
+        # goes no further: steering dispatches nothing, it injects into whichever turn is
+        # already running, and `InteractiveSession.steer/3` accepts no turn id — there is
+        # no second dispatch here for an id to make idempotent.
         reply(InteractiveSession.steer(id, input))
       else
         {:invalid, message} -> invalid_params(message)

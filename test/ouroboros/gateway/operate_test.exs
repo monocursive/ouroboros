@@ -191,6 +191,40 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert extra_top_level["error"]["message"] =~ "provider_options"
     end
 
+    test "steer takes the same envelope as the other composer verbs", %{client: client} do
+      assert hello(client)["result"]
+
+      # A terminal sends `{id, input, turn_id}` for every composer verb. Steer used to read
+      # only two of those and ignore anything else it was sent.
+      steered =
+        call(client, "interactive.steer", %{
+          "id" => "no-such-session",
+          "input" => "go left",
+          "turn_id" => "turn-1"
+        })
+
+      assert steered["error"]["code"] == -32007
+
+      unknown =
+        call(client, "interactive.steer", %{
+          "id" => "session",
+          "input" => "go left",
+          "provider_options" => %{"unsafe" => true}
+        })
+
+      assert unknown["error"]["code"] == -32602
+      assert unknown["error"]["message"] =~ "provider_options"
+
+      structured =
+        call(client, "interactive.steer", %{
+          "id" => "session",
+          "input" => %{"prompt" => "go left", "reasoning_effort" => "unbounded"}
+        })
+
+      assert structured["error"]["code"] == -32602
+      assert structured["error"]["message"] =~ "high, low, medium"
+    end
+
     test "an option outside the allowlist is refused rather than dropped", %{client: client} do
       assert hello(client)["result"]
 
