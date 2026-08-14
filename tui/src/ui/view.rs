@@ -73,8 +73,15 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
             NoticeKind::Error => Style::default().fg(theme::BAD),
         };
 
+        // The status line is one row, and a refusal that carried a remainder arrives with
+        // a newline in it. Folded onto one line rather than truncated at it: the dialogs
+        // are where a refusal is read in full, and this row must not silently end at a
+        // break the operator cannot see.
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(notice.text.clone(), style))),
+            Paragraph::new(Line::from(Span::styled(
+                notice.text.replace('\n', " · "),
+                style,
+            ))),
             area,
         );
 
@@ -274,10 +281,7 @@ fn quick_start(frame: &mut Frame, area: Rect, app: &App, quick: &QuickStart) {
 
     if let Some(error) = &quick.error {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(theme::BAD),
-        )));
+        lines.extend(refusal_lines(error));
     }
 
     lines.push(Line::from(""));
@@ -822,10 +826,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
     let mut footer = Vec::new();
 
     if let Some(error) = &dialog.error {
-        footer.push(Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(theme::BAD),
-        )));
+        footer.extend(refusal_lines(error));
     } else if providers.is_empty() {
         footer.push(Line::from(Span::styled(
             if app.providers.pending {
@@ -875,6 +876,29 @@ fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, St
         format!("{} — not installed {position}", entry.provider),
         Style::default().fg(theme::MUTED),
     )
+}
+
+/// A refusal, split where [`crate::model::refusal`] put its line break.
+///
+/// The sentence to act on is the first line and is drawn as the error; whatever the
+/// payload carried that the sentence did not use follows it dimly. Two styles rather than
+/// one, because the second line exists so that nothing is *lost* — not because anybody
+/// needs to read it first.
+fn refusal_lines(error: &str) -> Vec<Line<'static>> {
+    error
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            Line::from(Span::styled(
+                line.to_string(),
+                if index == 0 {
+                    Style::default().fg(theme::BAD)
+                } else {
+                    Style::default().fg(theme::MUTED)
+                },
+            ))
+        })
+        .collect()
 }
 
 /// A labelled fact, in the same shape the Dashboard's panes use so the two read as one UI.

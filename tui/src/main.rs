@@ -280,12 +280,14 @@ async fn new_session(
         .await
         .map_err(|error| match &error {
             // Most of what makes a start refusal actionable is Wire-encoded into `data`;
-            // the message alone is often "the runtime refused the call".
-            ClientError::Rpc(rpc) if rpc.data.as_ref().is_some_and(|data| !data.is_null()) => {
+            // the message alone is often "the runtime refused the call". `model::refusal`
+            // is the one place that becomes text, so this stderr and the two dialogs say
+            // the same sentence.
+            ClientError::Rpc(rpc) => {
                 anyhow!(
-                    "{} was refused: {rpc} — {}",
+                    "{} was refused: {}",
                     request.method(),
-                    ouro::model::compact(rpc.data.as_ref().expect("checked"))
+                    ouro::model::refusal(rpc)
                 )
             }
             other => anyhow!("{} was refused: {other}", request.method()),

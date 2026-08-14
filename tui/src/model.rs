@@ -38,6 +38,8 @@ use serde::de::{Deserializer, Error as _};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::proto::RpcError;
+
 /// Which plane an id belongs to. The two have separate id spaces, so a session is only
 /// addressable as a pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -722,6 +724,154 @@ impl CursorPruned {
             floor: data.get("floor").and_then(Value::as_u64).unwrap_or(0),
         })
     }
+}
+
+/// A gateway refusal, rendered for a person.
+///
+/// This is the one place a refusal becomes text, and every surface that shows one goes
+/// through it: the `n` dialog, the quick-start screen, the notice line, and `ouro new`'s
+/// stderr. What it produces is one or two lines — the sentence to read, and, when the
+/// payload carried keys that sentence did not use, those keys underneath it.
+///
+/// ## Why the `data` needs this at all
+///
+/// Most `-32006` messages describe the *shape* of the failure — "the runtime refused the
+/// call" — and leave the actionable half Wire-encoded in `data`. A `Jido.Harness.Error`
+/// raised inside `interactive.start` arrives as `["session_start_failed", {…}]`, and
+/// rendering that as JSON put a line like
+///
+/// ```text
+/// ["session_start_failed",{"__exception__":true,"category":"validation","cause":null,
+///  "details":{"field":"sandbox_mode"},"message":"provider does not support normalized
+///  session option","provider":"amp","run_id":null}]
+/// ```
+///
+/// in front of an operator whose actual problem was one short sentence.
+pub fn refusal(rpc: &RpcError) -> String {
+    let Some(data) = rpc.data.as_ref().filter(|data| !data.is_null()) else {
+        return rpc.to_string();
+    };
+
+    // An unrecognised payload keeps the compact JSON it always had. Guessing at a shape
+    // this build has never seen is how a prettifier starts asserting things the runtime
+    // did not say.
+    let rendered = humanise(data).unwrap_or_else(|| compact(data));
+
+    format!("{rpc} — {rendered}")
+}
+
+/// `Wire` marks every Elixir exception it encodes. It is a fact about the *encoding* —
+/// true on all of them — rather than about this failure, so it is the one key
+/// [`humanise`] drops without showing it anywhere. Everything else survives.
+const EXCEPTION_MARKER: &str = "__exception__";
+
+/// Past this many fields, `details` stops being a phrase and goes back to being JSON.
+const MAX_DETAIL_FIELDS: usize = 6;
+
+/// One line for a `{tag, exception}` payload, plus whatever that line did not use.
+///
+/// The recognised shape is exactly `[tag, map]` — the Wire encoding of an `{:error,
+/// {:some_tag, %SomeException{}}}` tuple, which is what both planes raise. Nothing else is
+/// touched.
+///
+/// The line reads `provider: message (details)`, and each of the three is skipped when the
+/// payload does not carry it. The **tag is only shown when there is no message**: a human
+/// sentence written by the runtime says everything `session_start_failed` says and more,
+/// and the surrounding text already establishes that a start was refused.
+///
+/// Every remaining key is appended on a second line rather than dropped. A payload this
+/// build renders *less* completely than JSON would be worse than the JSON.
+fn humanise(data: &Value) -> Option<String> {
+    let items = data.as_array()?;
+
+    let [tag, payload] = items.as_slice() else {
+        return None;
+    };
+
+    let tag = tag.as_str()?;
+    let payload = payload.as_object()?;
+
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    let message = text("message");
+    let provider = text("provider");
+
+    // A key is "used" only where it really appeared in the line. A `provider: null` is not
+    // a provider this rendered, so it belongs in the remainder like anything else.
+    let mut used = vec![EXCEPTION_MARKER];
+    let mut line = String::new();
+
+    if let Some(provider) = provider {
+        used.push("provider");
+        line.push_str(provider);
+        line.push_str(": ");
+    }
+
+    match message {
+        Some(message) => {
+            used.push("message");
+            line.push_str(message);
+        }
+        None => line.push_str(tag),
+    }
+
+    if let Some(rendered) = payload.get("details").and_then(flatten) {
+        used.push("details");
+        line.push_str(" (");
+        line.push_str(&rendered);
+        line.push(')');
+    }
+
+    let rest: Vec<String> = payload
+        .iter()
+        .filter(|(key, _value)| !used.contains(&key.as_str()))
+        .map(|(key, value)| format!("{key}={}", compact(value)))
+        .collect();
+
+    if rest.is_empty() {
+        return Some(line);
+    }
+
+    Some(format!("{line}\nalso: {}", rest.join(", ")))
+}
+
+/// A small map of scalars as `key: value, key: value`, or `None` for anything else.
+///
+/// Deliberately shallow and deliberately small. A nested or sprawling `details` goes back
+/// to the compact JSON through the remainder, because a flattener that invented a path
+/// syntax for it would be this client making up a notation the runtime never used — and
+/// because the point of the line is that it fits on one.
+///
+/// Nothing here knows what any particular key *means*. `{"field": "sandbox_mode"}` and a
+/// `details` naming an override to try both come out as themselves, which is what lets a
+/// refusal shape nobody has written yet arrive readable.
+fn flatten(details: &Value) -> Option<String> {
+    let fields = details.as_object()?;
+
+    if fields.is_empty() || fields.len() > MAX_DETAIL_FIELDS {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(fields.len());
+
+    for (key, value) in fields {
+        match value {
+            Value::String(text) => parts.push(format!("{key}: {text}")),
+            Value::Number(number) => parts.push(format!("{key}: {number}")),
+            Value::Bool(flag) => parts.push(format!("{key}: {flag}")),
+            // A null or a nested value is not a phrase. The whole map goes to the
+            // remainder rather than half of it here.
+            _ => return None,
+        }
+    }
+
+    Some(parts.join(", "))
 }
 
 /// Whether a `-32005` admits that the runtime may still be working on the request.
@@ -1469,6 +1619,236 @@ mod tests {
 
         assert_eq!(StartedRef::decode(&serde_json::json!({})), None);
         assert_eq!(StartedRef::decode(&serde_json::json!({ "id": "" })), None);
+    }
+
+    fn upstream(data: Value) -> RpcError {
+        RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "the runtime refused the call".into(),
+            data: Some(data),
+        }
+    }
+
+    /// The payload an operator was actually shown as raw JSON: a `Jido.Harness.Error`
+    /// raised inside `interactive.start`, Wire-encoded.
+    fn session_start_failed() -> Value {
+        serde_json::json!([
+            "session_start_failed",
+            {
+                "__exception__": true,
+                "category": "validation",
+                "cause": null,
+                "details": { "field": "sandbox_mode" },
+                "message": "provider does not support normalized session option",
+                "provider": "amp",
+                "run_id": null
+            }
+        ])
+    }
+
+    #[test]
+    fn a_wire_encoded_exception_reads_as_a_sentence_rather_than_as_json() {
+        let rendered = refusal(&upstream(session_start_failed()));
+        let mut lines = rendered.lines();
+
+        assert_eq!(
+            lines.next(),
+            Some(
+                "upstream_error (-32006): the runtime refused the call — amp: provider does \
+                 not support normalized session option (field: sandbox_mode)"
+            ),
+            "{rendered}"
+        );
+
+        // The tag is gone from the sentence: `session_start_failed` says nothing the
+        // message does not, and the surrounding text already said a start was refused.
+        assert!(
+            !lines.clone().collect::<String>().is_empty(),
+            "the keys the sentence did not use are still on screen: {rendered}"
+        );
+    }
+
+    #[test]
+    fn nothing_the_sentence_did_not_use_is_lost() {
+        let rendered = refusal(&upstream(session_start_failed()));
+        let rest = rendered.lines().nth(1).expect("a remainder line");
+
+        // Everything the line above did not carry, and nothing it did.
+        assert!(rest.starts_with("also: "), "{rest}");
+        assert!(rest.contains("category=validation"), "{rest}");
+        assert!(rest.contains("cause=null"), "{rest}");
+        assert!(rest.contains("run_id=null"), "{rest}");
+
+        assert!(
+            !rest.contains("sandbox_mode") && !rest.contains("amp"),
+            "the remainder is the remainder, not a second copy: {rest}"
+        );
+
+        // `__exception__` is the only key that goes nowhere: `Wire` sets it on every
+        // exception it encodes, so it is a fact about the envelope rather than this
+        // failure.
+        assert!(!rest.contains("__exception__"), "{rest}");
+    }
+
+    #[test]
+    fn a_payload_with_no_message_falls_back_to_its_tag() {
+        let rendered = refusal(&upstream(serde_json::json!([
+            "invalid_workspace",
+            { "__exception__": true, "provider": "codex", "details": { "path": "/srv/nope" } }
+        ])));
+
+        assert_eq!(
+            rendered,
+            "upstream_error (-32006): the runtime refused the call — codex: \
+             invalid_workspace (path: /srv/nope)"
+        );
+    }
+
+    #[test]
+    fn each_half_of_the_sentence_is_optional() {
+        // No provider: the message stands on its own.
+        let rendered = refusal(&upstream(serde_json::json!([
+            "start_failed",
+            { "message": "the workspace does not exist" }
+        ])));
+
+        assert_eq!(
+            rendered,
+            "upstream_error (-32006): the runtime refused the call — the workspace does not \
+             exist"
+        );
+
+        // No details, and a provider that is present but null — which is not a provider,
+        // so it belongs in the remainder rather than in the line.
+        let rendered = refusal(&upstream(serde_json::json!([
+            "start_failed",
+            { "message": "no", "provider": null }
+        ])));
+
+        assert_eq!(
+            rendered,
+            "upstream_error (-32006): the runtime refused the call — no\nalso: provider=null"
+        );
+    }
+
+    /// The coding plane's fail-closed refusals are the same shape with different keys, and
+    /// nothing here knows what any particular key means.
+    #[test]
+    fn a_details_map_nobody_has_written_yet_renders_as_itself() {
+        let rendered = refusal(&upstream(serde_json::json!([
+            "coding_start_refused",
+            {
+                "__exception__": true,
+                "message": "this provider will not accept a stated sandbox mode",
+                "provider": "opencode",
+                "details": {
+                    "field": "sandbox_mode",
+                    "override": "omit it and let the plane decide",
+                    "attempted": "danger-full-access"
+                }
+            }
+        ])));
+
+        assert_eq!(
+            rendered,
+            "upstream_error (-32006): the runtime refused the call — opencode: this provider \
+             will not accept a stated sandbox mode (attempted: danger-full-access, field: \
+             sandbox_mode, override: omit it and let the plane decide)"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_payload_keeps_the_json_it_always_had() {
+        // Not a two-element array.
+        for data in [
+            serde_json::json!({ "reason": "cursor_pruned", "floor": 96 }),
+            serde_json::json!(["one"]),
+            serde_json::json!(["one", "two", "three"]),
+            // The second element is not a map, which is the older `{:error, {tag, term}}`
+            // encoding this client has always shown as JSON.
+            serde_json::json!(["invalid_workspace", "/srv/nope"]),
+            serde_json::json!("a bare string"),
+            serde_json::json!([{ "message": "the tag is not a string" }, {}]),
+        ] {
+            let rendered = refusal(&upstream(data.clone()));
+
+            assert_eq!(
+                rendered,
+                format!(
+                    "upstream_error (-32006): the runtime refused the call — {}",
+                    compact(&data)
+                ),
+                "guessing at an unknown shape is how a prettifier starts asserting things"
+            );
+        }
+    }
+
+    #[test]
+    fn a_details_map_too_big_or_too_deep_goes_to_the_remainder_whole() {
+        // Nested: not a phrase, and not silently half-rendered either.
+        let rendered = refusal(&upstream(serde_json::json!([
+            "start_failed",
+            { "message": "no", "details": { "nested": { "a": 1 } } }
+        ])));
+
+        assert_eq!(
+            rendered,
+            "upstream_error (-32006): the runtime refused the call — no\n\
+             also: details={\"nested\":{\"a\":1}}"
+        );
+
+        // Seven fields is past the point where a parenthesis is easier to read than JSON.
+        let wide = serde_json::json!([
+            "start_failed",
+            { "message": "no", "details": { "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7 } }
+        ]);
+
+        assert!(
+            refusal(&upstream(wide)).contains("also: details={"),
+            "a sprawling details map is JSON, not a sentence"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_no_data_is_just_the_error() {
+        let plain = RpcError {
+            code: ErrorCode::ScopeDenied,
+            message: "this listener runs at scope read".into(),
+            data: None,
+        };
+
+        assert_eq!(
+            refusal(&plain),
+            "scope_denied (-32003): this listener runs at scope read"
+        );
+
+        // An explicit null carries nothing either.
+        let null = RpcError {
+            data: Some(Value::Null),
+            ..plain.clone()
+        };
+
+        assert_eq!(refusal(&null), refusal(&plain));
+    }
+
+    /// The fixture the golden set already carries, through the new renderer.
+    #[test]
+    fn the_golden_refusal_fixtures_still_render() {
+        for name in [
+            "error_scope_denied",
+            "error_not_found",
+            "error_invalid_request",
+            "error_cursor_pruned",
+        ] {
+            let rendered = refusal(&error(name));
+
+            assert!(!rendered.is_empty(), "{name}");
+            assert!(
+                rendered.starts_with(&error(name).code.to_string()),
+                "the code stays in front, because that is what a report is grepped for: \
+                 {name} -> {rendered}"
+            );
+        }
     }
 
     #[test]

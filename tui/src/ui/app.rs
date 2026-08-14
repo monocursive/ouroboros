@@ -1713,7 +1713,7 @@ impl App {
                      working — read the session to see which it was"
                 )
             }
-            ClientError::Rpc(rpc) => format!("{label} on {id}: {}", refusal(rpc)),
+            ClientError::Rpc(rpc) => format!("{label} on {id}: {}", model::refusal(rpc)),
             other => format!("{label} on {id} failed: {other}"),
         };
 
@@ -3335,7 +3335,7 @@ impl App {
 
     fn start_failed(&mut self, error: ClientError) {
         let message = match &error {
-            ClientError::Rpc(rpc) => refusal(rpc),
+            ClientError::Rpc(rpc) => model::refusal(rpc),
             other => other.to_string(),
         };
 
@@ -3599,21 +3599,6 @@ impl App {
         }
 
         self.poll_upgrade_section();
-    }
-}
-
-/// A gateway refusal with the reason it carried.
-///
-/// Most `-32006` messages are a sentence about the *shape* of the failure and the actual
-/// upstream reason is Wire-encoded into `data` — `{:error, {:invalid_workspace, path}}`
-/// becomes `["invalid_workspace", "/path"]` there. Dropping it leaves "the runtime refused
-/// the call", which tells an operator nothing they can act on. The two `data` payloads a
-/// client *branches* on are handled where they are branched on; this is for the rest,
-/// which §2.3 says are meant to be read.
-fn refusal(rpc: &RpcError) -> String {
-    match &rpc.data {
-        Some(data) if !data.is_null() => format!("{rpc} — {}", model::compact(data)),
-        _ => rpc.to_string(),
     }
 }
 
