@@ -3,6 +3,41 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
 
   alias Ouroboros.Provider.CodexAppServer
 
+  # `rest_for_one` makes child order a blast radius. This process owns a port to a program
+  # that can die, and nothing downstream rebuilds from what it knows, so it belongs in the
+  # operator-surface tail beside the gateway rather than above the planes: a crash-looping
+  # `codex` must not restart a single live session, and with the default 3-in-5s restart
+  # intensity it must not be able to take the node down either.
+  test "is supervised in the tail, after cluster formation and every plane" do
+    start_order =
+      Ouroboros.Supervisor
+      |> Supervisor.which_children()
+      # A non-dynamic supervisor keeps its children in reverse start order.
+      |> Enum.reverse()
+      |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
+
+    codex = index!(start_order, {CodexAppServer, CodexAppServer})
+    cluster = index!(start_order, Ouroboros.Cluster)
+
+    assert codex > cluster
+
+    for plane <- [
+          Ouroboros.Release.Runtime,
+          Ouroboros.Coding.Recovery,
+          Ouroboros.Interactive.Recovery,
+          Ouroboros.Team.Recovery,
+          Ouroboros.Orchestration.Scheduler
+        ] do
+      assert codex > index!(start_order, plane),
+             "the account boundary starts before #{inspect(plane)}, so its crash restarts it"
+    end
+
+    # The gateway is its only caller, so the gateway — and nothing else — may start after
+    # it. Anything else appearing here would be a durable owner placed downstream of a
+    # child whose crash it now depends on.
+    assert start_order |> Enum.drop(codex + 1) |> Enum.all?(&(&1 == Ouroboros.Gateway))
+  end
+
   test "initializes once, reads the account, and follows a managed device-code login" do
     executable = fake_app_server()
 
@@ -36,6 +71,13 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
 
     assert {:error, {:unavailable, message}} = CodexAppServer.read(server)
     assert message =~ "Codex is not installed on the runtime host"
+  end
+
+  defp index!(order, id) do
+    case Enum.find_index(order, &(&1 == id)) do
+      nil -> flunk("#{inspect(id)} is not supervised by Ouroboros.Supervisor on this node")
+      index -> index
+    end
   end
 
   defp fake_app_server do

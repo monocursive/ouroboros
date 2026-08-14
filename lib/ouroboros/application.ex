@@ -109,7 +109,6 @@ defmodule Ouroboros.Application do
         Ouroboros.Orchestration.Store,
         Ouroboros.Control.Store,
         Ouroboros.Control.Grants,
-        Ouroboros.Provider.CodexAppServer,
         release_runtime()
       ] ++
         workspace_children() ++
@@ -149,7 +148,14 @@ defmodule Ouroboros.Application do
     # node comes down. It is also the only child here that a stranger can reach, which is
     # one more reason for it to be downstream of everything rather than upstream of
     # anything.
-    children ++ [Ouroboros.Cluster] ++ gateway_children()
+    #
+    # The Codex account boundary is in that same tail category, and immediately before the
+    # gateway because the gateway is its only caller. It owns a port to a program that can
+    # die or refuse to speak the protocol, and none of the planes rebuild anything from
+    # what it knows: a crash there must not restart a single live session. It stays
+    # unconditional because it is lazy — no `codex` process is spawned until a client
+    # actually asks about the account.
+    children ++ [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++ gateway_children()
   end
 
   # Absent configuration means no gateway at all — not a disabled one — so a test run, a
