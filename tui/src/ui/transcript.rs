@@ -141,7 +141,15 @@ pub struct Watch {
     pub dropped: u64,
     /// Whether the view sticks to the newest event.
     pub follow: bool,
+    /// How many rendered rows sit *below* the bottom of the viewport. Zero is the newest
+    /// content; only [`Watch::measured`] and the scroll keys change it.
     pub scroll: usize,
+    /// What the last frame actually laid out. The renderer is the only thing that knows
+    /// how many rows a transcript wraps to, so it reports them back here: the scroll keys
+    /// need a ceiling to clamp against, and a scrolled-back viewport needs to know how
+    /// much the content grew under it.
+    rendered_lines: usize,
+    viewport_height: usize,
     /// Events a replay answered that this build could not decode. Counted rather than
     /// hidden: the alternative is a transcript with unexplained holes.
     pub undecodable: usize,
@@ -168,8 +176,49 @@ impl Watch {
             dropped: 0,
             follow: true,
             scroll: 0,
+            rendered_lines: 0,
+            viewport_height: 0,
             undecodable: 0,
             waiting_for_reply: false,
+        }
+    }
+
+    /// The largest [`scroll`](Self::scroll) that still shows content, as of the last frame.
+    ///
+    /// Zero before anything has been drawn, and zero whenever the whole transcript fits:
+    /// there is nothing above the viewport to scroll back to, and an offset that kept
+    /// climbing past this would be a key that does nothing on the way up and hundreds of
+    /// keys that do nothing on the way back down.
+    pub fn max_scroll(&self) -> usize {
+        self.rendered_lines.saturating_sub(self.viewport_height)
+    }
+
+    /// What the renderer just laid out, and the offset correction that keeps a scrolled-back
+    /// reader looking at the same rows.
+    ///
+    /// `scroll` counts from the bottom, so every appended row — a streamed delta, the three
+    /// rows of the typing indicator, a running tool cell rewritten as a completed one —
+    /// would otherwise slide the whole viewport downwards under someone reading history.
+    /// Moving the offset by the same amount holds the content still. Following the tail is
+    /// the one case that *should* move, and it is excluded.
+    pub fn measured(&mut self, lines: usize, height: usize) {
+        if !self.follow && self.scroll > 0 {
+            self.scroll = if lines >= self.rendered_lines {
+                self.scroll + (lines - self.rendered_lines)
+            } else {
+                self.scroll.saturating_sub(self.rendered_lines - lines)
+            };
+        }
+
+        self.rendered_lines = lines;
+        self.viewport_height = height;
+        self.scroll = self.scroll.min(self.max_scroll());
+
+        // Clamped back onto the newest content: a header that still said "scrolled back"
+        // beside a viewport sitting at the bottom would be describing a state that no
+        // longer exists.
+        if self.scroll == 0 {
+            self.follow = true;
         }
     }
 

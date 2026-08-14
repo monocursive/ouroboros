@@ -172,17 +172,17 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let Some(watch) = app.sessions.watches.get(&(plane, id.clone())) else {
+    let ticks = app.ticks;
+    let show_event_details = app.sessions.show_event_details;
+
+    // Sized before the header is built, because the header states whether the transcript is
+    // scrolled back and that is only settled once this frame's rows have been counted. A
+    // block's inner area does not depend on its title.
+    let inner = pane(Line::from(""), focused).inner(area);
+
+    let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
-
-    let show_event_details = app.sessions.show_event_details;
-    let block = pane(
-        header(watch, &id, plane, app.ticks, show_event_details),
-        focused,
-    );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     let width = inner.width.max(8) as usize;
     let entries = watch.entries();
@@ -193,8 +193,18 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     if !show_event_details && waiting_for_reply {
-        push_typing_indicator(&mut lines, app.ticks);
+        push_typing_indicator(&mut lines, ticks);
     }
+
+    // The renderer is the only thing that knows how many rows this wrapped to, so it is
+    // the only thing that can hold a scrolled-back viewport still while the tail grows.
+    watch.measured(lines.len(), inner.height as usize);
+
+    let block = pane(
+        header(watch, &id, plane, ticks, show_event_details),
+        focused,
+    );
+    frame.render_widget(block, area);
 
     if lines.is_empty() {
         frame.render_widget(
@@ -215,13 +225,10 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let height = inner.height as usize;
     let max_scroll = lines.len().saturating_sub(height);
 
-    let scroll = if watch.follow {
-        0
-    } else {
-        watch.scroll.min(max_scroll)
-    };
+    // `measured` already clamped this against exactly these numbers.
+    let scroll = if watch.follow { 0 } else { watch.scroll };
 
-    let start = max_scroll - scroll;
+    let start = max_scroll.saturating_sub(scroll);
     let end = (start + height).min(lines.len());
 
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);

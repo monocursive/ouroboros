@@ -138,6 +138,43 @@ fn event(sequence: u64, kind: &str, text: &str) -> serde_json::Value {
     })
 }
 
+fn event_with(sequence: u64, kind: &str, payload: serde_json::Value) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "interactive.event",
+        "params": {
+            "id": "session-0000000000000000000001",
+            "event": {
+                "_struct": "Ouroboros.Interactive.Event",
+                "id": format!("evt-{sequence}"),
+                "session_id": "session-0000000000000000000001",
+                "sequence": sequence,
+                "type": kind,
+                "timestamp": "2026-01-01T00:00:00.000000Z",
+                "payload": payload
+            }
+        }
+    })
+}
+
+/// Every visible transcript row that carries one of the numbered messages, with the screen
+/// row it landed on. Two of these being equal is the whole claim of "the viewport did not
+/// move under the reader".
+fn message_rows(screen: &support::Screen) -> Vec<(usize, String)> {
+    screen
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_index, row)| row.contains("message-"))
+        .map(|(index, row)| (index, row.trim_end().to_string()))
+        .collect()
+}
+
+fn open_watch(app: &App) -> &ouro::ui::transcript::Watch {
+    let key = app.sessions.open.clone().expect("an open session");
+    app.sessions.watches.get(&key).expect("a watch")
+}
+
 fn notify(app: &mut App, frame: serde_json::Value) {
     app.apply(Msg::Notification(ouro::proto::Notification {
         method: frame["method"].as_str().expect("a method").to_string(),
@@ -466,6 +503,160 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
     let replying = render(&mut app, 120, 30);
     assert!(replying.contains("I am checking"), "{}", replying.text());
     assert!(!replying.contains("⟳"), "{}", replying.text());
+}
+
+/// A transcript is drawn bottom-anchored, so anything appended moves every row up by as
+/// much. For a reader who has scrolled back into history that is the transcript sliding out
+/// from under them — and the typing indicator alone adds and removes three rows on every
+/// turn.
+#[test]
+fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
+    let mut app = with_open_session();
+
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    // The first frame is what tells the scroll keys how tall this content is.
+    render(&mut app, 120, 24);
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Char('k')));
+    }
+
+    let before = render(&mut app, 120, 24);
+    assert!(before.contains("scrolled back"), "{}", before.text());
+    let anchored = message_rows(&before);
+    assert!(!anchored.is_empty(), "{}", before.text());
+
+    // A queued follow-up appends the three rows of the typing indicator below the viewport.
+    app.apply(key(KeyCode::Char('i')));
+    type_text(&mut app, "please inspect this");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    assert!(app.waiting_for_open_agent_reply());
+    let waiting = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&waiting), anchored, "{}", waiting.text());
+
+    // And removes them again when the agent replies, in a turn the reader is not looking at.
+    notify(&mut app, event(41, "output_text_delta", "on it"));
+    assert!(!app.waiting_for_open_agent_reply());
+
+    let replying = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&replying), anchored, "{}", replying.text());
+}
+
+/// The harder case: a cell already in the transcript is rewritten in place, so the rows do
+/// not merely grow at the end — a running tool becomes a completed one with output under it.
+#[test]
+fn a_scrolled_back_transcript_holds_still_when_a_running_tool_completes() {
+    let mut app = with_open_session();
+
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    notify(
+        &mut app,
+        event_with(
+            41,
+            "tool_call",
+            json!({"call_id": "call-1", "name": "bash", "input": {"command": "mix test"}}),
+        ),
+    );
+
+    render(&mut app, 120, 24);
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Char('k')));
+    }
+
+    let before = render(&mut app, 120, 24);
+    let anchored = message_rows(&before);
+    assert!(!anchored.is_empty(), "{}", before.text());
+
+    notify(
+        &mut app,
+        event_with(
+            42,
+            "tool_result",
+            json!({
+                "call_id": "call-1",
+                "output": {"text": "3 tests, 0 failures\nfinished in 0.4s"},
+                "is_error": false
+            }),
+        ),
+    );
+
+    let after = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&after), anchored, "{}", after.text());
+}
+
+/// Scrolling back was unbounded, so holding PageUp on a transcript with nothing above the
+/// viewport bought hundreds of keypresses that did nothing — and then hundreds more to get
+/// back to the bottom.
+#[test]
+fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
+    let mut app = with_open_session();
+    notify(&mut app, event(1, "output_text_final", "the only message"));
+
+    render(&mut app, 120, 40);
+    for _ in 0..50 {
+        app.apply(key(KeyCode::PageUp));
+    }
+
+    let watch = open_watch(&app);
+    assert_eq!(watch.scroll, 0);
+    assert_eq!(watch.max_scroll(), 0);
+    assert!(
+        watch.follow,
+        "there is nothing above the viewport to scroll back to"
+    );
+
+    let screen = render(&mut app, 120, 40);
+    assert!(!screen.contains("scrolled back"), "{}", screen.text());
+
+    // And on a transcript that does have history, the offset stops at the top rather than
+    // climbing: returning costs the pages that exist, not the keys that were pressed.
+    let mut app = with_open_session();
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    render(&mut app, 120, 24);
+    for _ in 0..200 {
+        app.apply(key(KeyCode::PageUp));
+    }
+
+    let top = open_watch(&app).max_scroll();
+    assert!(top > 0);
+    assert_eq!(open_watch(&app).scroll, top);
+
+    for _ in 0..top.div_ceil(10) {
+        app.apply(key(KeyCode::PageDown));
+    }
+
+    assert!(open_watch(&app).follow, "{}", open_watch(&app).scroll);
 }
 
 #[test]

@@ -2734,11 +2734,22 @@ impl App {
                 }
                 Pane::Detail => {
                     if let Some(watch) = self.sessions.open_watch_mut() {
-                        // Scrolling away from the bottom stops the transcript from
-                        // jumping under a reader every time an event arrives.
+                        // Scrolling away from the bottom stops the transcript from jumping
+                        // under a reader every time an event arrives; `Watch::measured`
+                        // holds the rows still on the frames that follow.
                         if delta < 0 {
-                            watch.follow = false;
-                            watch.scroll = watch.scroll.saturating_add(delta.unsigned_abs());
+                            // Clamped against what the last frame drew. Left unbounded, a
+                            // held PageUp on a short transcript buys hundreds of keypresses
+                            // that do nothing, and then hundreds more to get back.
+                            let wanted = watch
+                                .scroll
+                                .saturating_add(delta.unsigned_abs())
+                                .min(watch.max_scroll());
+
+                            if wanted > 0 {
+                                watch.follow = false;
+                                watch.scroll = wanted;
+                            }
                         } else {
                             watch.scroll = watch.scroll.saturating_sub(delta as usize);
 
