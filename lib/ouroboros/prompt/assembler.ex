@@ -16,8 +16,8 @@ defmodule Ouroboros.Prompt.Assembler do
   """
 
   alias Ouroboros.AgentProfile
+  alias Ouroboros.Prompt.Trace
 
-  @version 1
   @accepted_options [:system_prompt, :allowed_tools, :disallowed_tools]
 
   defmodule Assembly do
@@ -45,7 +45,7 @@ defmodule Ouroboros.Prompt.Assembler do
 
   @doc "Returns the prompt-format version used by this build."
   @spec version() :: pos_integer()
-  def version, do: @version
+  def version, do: Trace.version()
 
   @doc "Assembles one optional profile and optional caller system prompt."
   @spec assemble(AgentProfile.t() | nil, keyword()) ::
@@ -57,7 +57,7 @@ defmodule Ouroboros.Prompt.Assembler do
          {:ok, system_prompt} <- legacy_system_prompt(Keyword.get(opts, :system_prompt)) do
       {:ok,
        %Assembly{
-         version: @version,
+         version: Trace.version(),
          system_prompt: system_prompt,
          digest: digest_text(system_prompt)
        }}
@@ -77,7 +77,7 @@ defmodule Ouroboros.Prompt.Assembler do
 
       {:ok,
        %Assembly{
-         version: @version,
+         version: Trace.version(),
          profile_id: profile.id,
          profile_version: profile.version,
          profile_digest: profile_digest,
@@ -90,18 +90,8 @@ defmodule Ouroboros.Prompt.Assembler do
   def assemble(_profile, _opts), do: {:error, :invalid_agent_profile}
 
   @doc "Returns trace metadata without any prompt or profile content."
-  @spec trace(Assembly.t()) :: map() | nil
-  def trace(%Assembly{profile_id: nil}), do: nil
-
-  def trace(%Assembly{} = assembly) do
-    %{
-      version: assembly.version,
-      digest: assembly.digest,
-      profile_id: assembly.profile_id,
-      profile_version: assembly.profile_version,
-      profile_digest: assembly.profile_digest
-    }
-  end
+  @spec trace(Assembly.t()) :: Trace.t() | nil
+  def trace(%Assembly{} = assembly), do: Trace.build(assembly)
 
   defp render(profile, session_prompt, tools) do
     sections =
@@ -203,10 +193,5 @@ defmodule Ouroboros.Prompt.Assembler do
   end
 
   defp digest_text(nil), do: nil
-
-  defp digest_text(text) do
-    :sha256
-    |> :crypto.hash(text)
-    |> Base.encode16(case: :lower)
-  end
+  defp digest_text(text), do: Trace.digest(text)
 end
