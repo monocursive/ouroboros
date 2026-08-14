@@ -57,9 +57,34 @@ fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
     });
 }
 
+/// An App whose `account.read` has already been answered — as "no ChatGPT subscription, and
+/// this install wants one".
+///
+/// Every real client has that answer within the first frames, and until it arrives the home
+/// composer owns the keyboard rather than letting a keystroke fall through to a global
+/// binding. These tests are about the surfaces past the home, so they start from the
+/// resolved state instead of the in-flight one.
+fn shell(hello: ouro::proto::Hello) -> App {
+    let mut app = app(hello);
+    resolve_account(&mut app);
+    app
+}
+
+fn resolve_account(app: &mut App) {
+    answer(
+        app,
+        Tag::Account,
+        json!({
+            "account": serde_json::Value::Null,
+            "requiresOpenaiAuth": true,
+            "login": { "status": "idle" }
+        }),
+    );
+}
+
 /// An App on the Dashboard holding the golden `runtime.status`.
 fn dashboard() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
 
     answer(
@@ -73,7 +98,7 @@ fn dashboard() -> App {
 
 /// An App on the Sessions tab with one interactive session open and watched.
 fn with_open_session() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     app.apply(key(KeyCode::Char('2')));
 
@@ -273,7 +298,7 @@ fn a_provider_probe_that_failed_is_not_reported_as_a_missing_provider() {
 
 #[test]
 fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
     let screen = render(&mut app, 120, 30);
 
@@ -286,7 +311,7 @@ fn a_status_that_never_arrived_says_so_rather_than_drawing_an_empty_runtime() {
 
 #[test]
 fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.tab = Tab::Dashboard;
 
     app.apply(Msg::Answer {
@@ -310,7 +335,7 @@ fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
 
 #[test]
 fn the_coding_home_carries_the_terminal_logo() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     let screen = render(&mut app, 100, 24);
 
     assert!(screen.contains("▄█▄ ▄▄▄▄"), "{}", screen.text());
@@ -319,7 +344,7 @@ fn the_coding_home_carries_the_terminal_logo() {
 
 #[test]
 fn the_sessions_list_merges_both_planes_and_tags_each_row() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(
@@ -1118,7 +1143,7 @@ fn x_confirms_before_ending_a_session() {
 
 #[test]
 fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
@@ -1168,7 +1193,7 @@ fn focus(app: &mut App, target: NewField) {
 
 /// The Sessions tab with both lists answered and a provider list the modal can draw.
 fn ready_to_start() -> App {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.launch_dir = Some("/home/operator/project".into());
 
     app.apply(key(KeyCode::Char('2')));
@@ -1528,7 +1553,7 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
 
 #[test]
 fn a_read_listener_is_told_why_it_cannot_start_a_session() {
-    let mut app = app(support::hello(&[
+    let mut app = shell(support::hello(&[
         "hello",
         "interactive.start",
         "interactive.list",
@@ -1562,7 +1587,7 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
 }
 
 fn app_without_start() -> App {
-    app(support::hello(&[
+    shell(support::hello(&[
         "hello",
         "interactive.list",
         "coding.list",
@@ -1571,7 +1596,7 @@ fn app_without_start() -> App {
 
 #[test]
 fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     let polled: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
@@ -1600,7 +1625,7 @@ fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
 
 #[test]
 fn the_value_tree_names_every_wire_marker() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('3')));
 
     answer(
@@ -1642,7 +1667,7 @@ fn the_value_tree_names_every_wire_marker() {
 
 #[test]
 fn a_tree_node_opens_and_closes_under_the_cursor() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('4')));
 
     answer(
@@ -1676,7 +1701,7 @@ fn a_tree_node_opens_and_closes_under_the_cursor() {
 
 #[test]
 fn plans_and_control_are_two_lists_on_one_tab() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('5')));
 
     answer(
@@ -1701,7 +1726,7 @@ fn plans_and_control_are_two_lists_on_one_tab() {
 
 #[test]
 fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('6')));
 
     // Down to `effect grants`.
@@ -1738,7 +1763,7 @@ fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
 
 #[test]
 fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them() {
-    let mut app = app(support::hello(&[
+    let mut app = shell(support::hello(&[
         "hello",
         "runtime.status",
         "upgrade.status",
@@ -1766,6 +1791,7 @@ fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them
 #[test]
 fn the_logs_tab_says_where_logs_are_when_this_client_did_not_start_the_runtime() {
     let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    resolve_account(&mut app);
 
     app.apply(key(KeyCode::Char('7')));
     let screen = render(&mut app, 120, 20);
@@ -1792,6 +1818,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
         Some(ring),
     );
 
+    resolve_account(&mut app);
     app.apply(key(KeyCode::Char('7')));
     let screen = render(&mut app, 120, 20);
 
@@ -1805,7 +1832,7 @@ fn every_tab_draws_without_any_data_at_all() {
     // A gateway that has answered nothing must still produce every secondary panel even
     // though the persistent tab bar has moved behind the command palette.
     for digit in '1'..='7' {
-        let mut app = app(full_hello());
+        let mut app = shell(full_hello());
         app.apply(key(KeyCode::Char(digit)));
 
         let screen = render(&mut app, 100, 24);
@@ -1822,7 +1849,7 @@ fn every_tab_draws_without_any_data_at_all() {
 
 #[test]
 fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('q')));
 
     let screen = render(&mut app, 120, 24);
@@ -1842,6 +1869,7 @@ fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
 
     // Attach mode has one honest option.
     let mut attached = App::new(Mode::Attached, "a".into(), full_hello(), None);
+    resolve_account(&mut attached);
     attached.apply(key(KeyCode::Char('q')));
 
     let screen = render(&mut attached, 120, 24);
@@ -1856,12 +1884,12 @@ fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
 }
 
 fn app_without_shutdown() -> App {
-    app(support::hello(&["hello", "runtime.status"]))
+    shell(support::hello(&["hello", "runtime.status"]))
 }
 
 #[test]
 fn the_help_overlay_states_the_honest_limits() {
-    let mut app = app(support::hello(&["hello", "runtime.status"]));
+    let mut app = shell(support::hello(&["hello", "runtime.status"]));
     // A read listener, so the scope warning applies.
     app.hello.scope = "read".into();
 
@@ -1879,7 +1907,7 @@ fn the_help_overlay_states_the_honest_limits() {
 
 #[test]
 fn a_notice_replaces_the_status_line_and_expires() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.inform("something happened", NoticeKind::Warn);
 
     assert!(render(&mut app, 120, 20).contains("something happened"));
@@ -1898,7 +1926,7 @@ fn a_notice_replaces_the_status_line_and_expires() {
 
 #[test]
 fn the_visible_tab_is_the_only_one_polled() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
     app.apply(Msg::Tick);
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
@@ -1940,7 +1968,7 @@ fn a_transcript_is_never_polled() {
 
 #[test]
 fn one_question_is_outstanding_at_a_time() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     app.apply(Msg::Tick);
     let first = app.drain();
@@ -1959,7 +1987,7 @@ fn one_question_is_outstanding_at_a_time() {
 
 #[test]
 fn tabs_wrap_in_both_directions() {
-    let mut app = app(full_hello());
+    let mut app = shell(full_hello());
 
     assert_eq!(app.tab, Tab::Sessions);
 
