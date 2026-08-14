@@ -679,8 +679,14 @@ impl ProviderEntry {
 pub struct AccountState {
     #[serde(default)]
     pub account: Option<AccountIdentity>,
+    /// Whether this Codex install needs an OpenAI sign-in at all. `Some(false)` is an
+    /// API-key install: the credential is already on the runtime host.
+    ///
+    /// `Option` rather than a defaulted `bool`, because "the field was absent" and "the
+    /// runtime said no auth is required" are different claims and only one of them is safe
+    /// to act on.
     #[serde(default)]
-    pub requires_openai_auth: bool,
+    pub requires_openai_auth: Option<bool>,
     #[serde(default)]
     pub login: AccountLoginState,
 }
@@ -714,11 +720,26 @@ impl AccountState {
         serde_json::from_value(value.clone())
     }
 
+    /// Whether a managed ChatGPT subscription is connected. What the account panel reports,
+    /// and what the sign-in flow is trying to achieve.
     pub fn connected(&self) -> bool {
         self.account
             .as_ref()
             .map(|account| account.kind == "chatgpt")
             .unwrap_or(false)
+    }
+
+    /// Whether Codex can run without this client asking anyone to sign in.
+    ///
+    /// An API-key install reports `requiresOpenaiAuth: false` and no ChatGPT identity.
+    /// Reading only [`connected`](Self::connected) left those installs looking at "Connect
+    /// ChatGPT" forever, with Enter pushing a login they do not need and cannot complete.
+    ///
+    /// An absent field is not a statement, so it counts as "sign-in required": offering a
+    /// login to someone who does not need one wastes a keystroke, and hiding the only way
+    /// in from someone who does is a client they cannot use.
+    pub fn usable(&self) -> bool {
+        self.connected() || self.requires_openai_auth == Some(false)
     }
 
     pub fn plan_label(&self) -> Option<String> {

@@ -178,6 +178,91 @@ fn a_resolved_unauthenticated_home_still_gives_printable_keys_to_the_shell() {
     assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
 }
 
+/// An install whose Codex credential is an API key on the runtime host reports no ChatGPT
+/// identity and `requiresOpenaiAuth: false`. Reading only the identity left it looking at
+/// "Connect ChatGPT" forever, with Enter pushing a login it neither needs nor can complete.
+#[test]
+fn an_api_key_codex_install_is_ready_without_a_chatgpt_sign_in() {
+    let mut app = app(full_hello());
+    app.launch_dir = Some("/work/ouroboros".into());
+    app.open_home();
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": serde_json::Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
+    let _ = app.drain();
+
+    assert!(!app.chatgpt_connected(), "there is no subscription to name");
+    assert!(app.codex_usable());
+    assert!(app.home_ready());
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Ready in this workspace"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("Codex ready"), "{}", screen.text());
+    assert!(
+        !screen.contains("ChatGPT not connected"),
+        "{}",
+        screen.text()
+    );
+
+    type_text(&mut app, "rename the module");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    assert!(
+        calls.iter().any(|call| call.method == "interactive.start"),
+        "Enter starts work rather than a login it cannot complete"
+    );
+    assert!(calls
+        .iter()
+        .all(|call| call.method != "account.login.start"));
+}
+
+/// The three states of `requiresOpenaiAuth`, and the conservative reading of the third.
+#[test]
+fn an_absent_requires_openai_auth_is_treated_as_sign_in_required() {
+    let ready = |value: serde_json::Value| {
+        let mut app = app(full_hello());
+        app.open_home();
+        answer(&mut app, Tag::Account, value);
+        let _ = app.drain();
+        app.home_ready()
+    };
+
+    // Connected: ready whatever the flag says.
+    assert!(ready(account(true)));
+
+    // Stated as not required: ready with no identity at all.
+    assert!(ready(json!({
+        "account": serde_json::Value::Null,
+        "requiresOpenaiAuth": false
+    })));
+
+    // Absent: not a statement. Offering a login nobody needed costs one keystroke; hiding
+    // the only way in from someone who did need it costs them the client.
+    assert!(!ready(json!({ "account": serde_json::Value::Null })));
+
+    let mut app = app(full_hello());
+    app.open_home();
+    answer(&mut app, Tag::Account, json!({}));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "account.login.start"));
+}
+
 #[test]
 fn slash_commands_are_available_before_codex_sign_in() {
     let mut app = harness(false);

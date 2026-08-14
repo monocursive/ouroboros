@@ -1294,11 +1294,21 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Whether Codex can be started without asking anyone to sign in: a connected ChatGPT
+    /// subscription, or an install the runtime says needs no OpenAI auth at all.
+    pub fn codex_usable(&self) -> bool {
+        self.account
+            .value
+            .as_ref()
+            .map(AccountState::usable)
+            .unwrap_or(false)
+    }
+
     /// Whether the coding home can start its configured provider now. Codex keeps its
-    /// first-class managed ChatGPT gate; every other explicit provider owns its own auth
+    /// first-class managed sign-in gate; every other explicit provider owns its own auth
     /// and must not be blocked by an unrelated OpenAI account state.
     pub fn home_ready(&self) -> bool {
-        self.home_provider() != "codex" || self.chatgpt_connected()
+        self.home_provider() != "codex" || self.codex_usable()
     }
 
     pub fn home_provider(&self) -> &str {
@@ -2997,7 +3007,9 @@ impl App {
             return;
         }
 
-        if provider == "codex" && !self.chatgpt_connected() {
+        // An API-key install needs no sign-in, and pushing one at it would be offering a
+        // flow that cannot succeed and is not needed.
+        if provider == "codex" && !self.codex_usable() {
             self.open_account();
             return;
         }

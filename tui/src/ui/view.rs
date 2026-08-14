@@ -141,6 +141,16 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("ChatGPT{plan}"), Style::default().fg(theme::GOOD)),
                 Span::styled(identity, Style::default().fg(theme::MUTED)),
             ])
+        } else if state.requires_openai_auth == Some(false) {
+            // An API-key install. There is no subscription to name and nothing to connect,
+            // and "not connected" would read as a problem the operator has to go and fix.
+            Line::from(vec![
+                Span::styled("Codex ready", Style::default().fg(theme::GOOD)),
+                Span::styled(
+                    "  • no ChatGPT sign-in needed",
+                    Style::default().fg(theme::MUTED),
+                ),
+            ])
         } else {
             Line::from(Span::styled(
                 "ChatGPT not connected",
