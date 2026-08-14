@@ -249,6 +249,7 @@ reading.
 |---|---|
 | `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
 | `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task |
+| `account.read` `{}` | `CodexAppServer.read/1` — Codex account identity plus managed-login state. Every account result is projected through an explicit key allowlist inside the provider process (`account.type`/`email`/`planType`, `requiresOpenaiAuth`, and the four-field `login` map), so "no token crosses the gateway" is a property of this module, not of Codex's current response shape. Sign-in URLs and device codes never appear here — they exist only in `account.login.start`'s operate-scoped reply |
 | `agents.list` | `Mesh.list_agents/0` |
 | `agents.state` `{id}` | `Mesh.state/1` |
 | `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0` |
@@ -273,11 +274,21 @@ reading.
 | method | maps to |
 |---|---|
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
-| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch |
-| `interactive.steer` `{id, input}` | `steer/3` |
+| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
+| `interactive.steer` `{id, input, turn_id?}` | `steer/3` through the same closed envelope as the other composer verbs (unknown params refused, structured `input` accepted). `turn_id` is validated but inert: steering injects into the running turn, so there is no second dispatch for an id to deduplicate — steer has no idempotency, and the steer text is not durably recorded by the plane (the transcript marks that a steer happened; replay cannot quote it) |
 | `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
+| `account.login.start` `{flow?}` | `CodexAppServer.login/2` — `flow` is `browser` (default) or `device_code`. The reply is the only surface that carries `authUrl`/`verificationUrl`/`userCode` (allowlisted keys), which is why it is operate-scoped while `account.read` is not |
+| `account.login.cancel` `{login_id}` | `CodexAppServer.cancel/2` — completion/cancel notifications are correlated by `loginId`; a stale completion for a superseded login cannot overwrite the pending one |
+| `account.logout` `{}` | `CodexAppServer.logout/1` — reply is `{}`; the account boundary returns nothing it has not named |
+
+The three turn-carrying methods (`send_message`, `follow_up`, `steer`) refuse unknown
+params (`only_keys`) where they previously ignored them, and `steer` gained the shared
+envelope. `hello.protocol` remains `1`: the new `account.*` methods are feature-detectable
+through `hello.methods`, but the envelope tightening and the structured-`input` capability
+are not — the compatibility bet, stated plainly, is that the only deployed client ships in
+this repository and moves in lockstep.
 | `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | same opts allowlist as `interactive.start`; ceiling 120s |
 | `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
 | `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
@@ -701,8 +712,12 @@ rediscovered:
   tab are the same keystrokes, so there is an explicit composer: `i` (or `Enter` on an
   already-open session) opens it, `Enter` sends, `Esc` closes it. Without the mode, the
   letter `s` in a message would steer the session.
-- **The composer is a real bounded editor.** It is Unicode-safe, accepts multiline input
-  with `Shift+Enter` or the terminal-independent `Ctrl+J`, normalizes bracketed-paste line
+- **The composer is a real bounded editor.** It is Unicode-safe (grapheme-aware motion
+  and deletion, display-width wrapping), accepts multiline input with the
+  terminal-independent `Ctrl+J` — `Shift+Enter` also works, but only where the terminal
+  reports the kitty keyboard protocol, and the footer advertises it only then, because a
+  terminal that cannot distinguish `Shift+Enter` from `Enter` would send the message
+  instead — normalizes bracketed-paste line
   endings, retains bounded history for the current editor, and completes local slash
   commands and `@` paths. The file catalog is a bounded, symlink-safe index of the local
   launch workspace. Selecting `@path` inserts prompt text only; it does not yet create a
@@ -922,4 +937,12 @@ graying out approval/sandbox choices a provider cannot take in the `n` dialog
 Wire-encodes `normalized_options`, `normalized_values`, and
 `session_transports`, so the client has the data); a workspace lease posture
 that follows the provider's actual write capability rather than the stated
-`sandbox_mode` alone.
+`sandbox_mode` alone; durable steer requests (today a steer is injected
+into the running Harness turn and never checkpointed, so the transcript can
+mark that a steer happened but replay cannot quote its text, and steer has
+no idempotency); a keyboard path back to the advanced `n` session dialog
+from the coding home (the composer owns `n` there, so the dialog is
+reachable only with a session open — pinned behavior, chosen by nobody);
+integration scaffolding for `recover_checkpointed_dispatch` (the
+checkpointed-but-unconfirmed dispatch seam has no test driver, so its
+workspace-unavailable retry routing is asserted by inspection, not by test).

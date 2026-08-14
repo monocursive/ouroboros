@@ -257,7 +257,8 @@ Type what you want done and press Enter: an interactive session
 starts in the displayed requested workspace, the first message carries a stable logical
 turn ID, and the streaming transcript opens as a user/agent conversation. Lifecycle,
 provider, usage, and other normalized events stay behind `Ctrl-E` in the complete
-event-details view. The composer is Unicode-safe and multiline (`Shift+Enter` or `Ctrl+J`),
+event-details view. The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` where the
+terminal reports the kitty keyboard protocol, and the footer only advertises it there),
 normalizes bracketed paste, keeps bounded in-session history, completes local slash
 commands, and completes `@` mentions from a bounded index of the launch workspace. An
 `@path` is currently prompt text, not a structured attachment; the gateway already
