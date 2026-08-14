@@ -246,7 +246,10 @@ impl Editor {
             }
             KeyCode::PageUp => EditorAction::Scroll(-1),
             KeyCode::PageDown => EditorAction::Scroll(1),
-            KeyCode::Char(c) if !ctrl => {
+            // ALT is excluded as well as CONTROL: a terminal reports Alt-B and Alt-F as
+            // `Char('b')`/`Char('f')` with the modifier set, and inserting the letter turns
+            // a word-motion chord into typing.
+            KeyCode::Char(c) if !ctrl && !alt => {
                 self.insert(&c.to_string());
                 EditorAction::None
             }

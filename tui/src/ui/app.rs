@@ -4260,6 +4260,23 @@ impl App {
                 }
             }
             KeyCode::Enter if connected => self.overlay = None,
+            // The URL is opened once when it arrives, and a browser that was not running,
+            // or a window that swallowed it, leaves nothing on screen to act on. This is
+            // the affordance the dialog advertises beside the link.
+            KeyCode::Char('o') if !connected => {
+                let url = match self.overlay.as_ref() {
+                    Some(Overlay::Account(dialog)) => dialog.url.clone(),
+                    _ => None,
+                };
+
+                match url {
+                    Some(url) => self.open_url_pending = Some(url),
+                    None => self.inform(
+                        "there is no sign-in page yet; the runtime is still preparing one",
+                        NoticeKind::Info,
+                    ),
+                }
+            }
             KeyCode::Char('l') if connected && self.hello.serves("account.logout") => {
                 self.overlay = None;
                 self.issue(Call::new(Tag::AccountLogout, "account.logout", json!({})));

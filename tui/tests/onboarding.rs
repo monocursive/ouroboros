@@ -370,6 +370,47 @@ fn an_attached_client_uses_the_device_code_flow_for_the_runtime_host() {
     assert!(screen.contains("runtime host"));
 }
 
+/// The code is the one string a person has to carry to another device. It used to be drawn
+/// after the URL, and on an 80-column terminal a long verification URL wrapped far enough to
+/// push it out of a fixed-height popup.
+#[test]
+fn the_device_code_is_readable_on_an_eighty_column_terminal() {
+    let mut app = harness(false);
+    app.mode = Mode::Attached;
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+
+    answer(
+        &mut app,
+        Tag::AccountLogin,
+        json!({
+            "type": "chatgptDeviceCode",
+            "loginId": "device-1",
+            "verificationUrl": "https://auth.openai.com/codex/device?flow=ouroboros&\
+                                request=01JQ8Z2K5V7N3M9P4T6R8W0Y2A&redirect=cli",
+            "userCode": "ABCD-1234"
+        }),
+    );
+
+    let screen = render(&mut app, 80, 24);
+
+    assert!(screen.contains("ABCD-1234"), "{}", screen.text());
+    assert!(screen.contains("press o to open"), "{}", screen.text());
+    // Cut to one row rather than wrapped over three.
+    assert!(
+        screen.contains("https://auth.openai.com"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.row("Open").contains('…'), "{}", screen.text());
+
+    // And `o` asks the driver to open it again, for a browser that never came forward.
+    app.apply(key(KeyCode::Char('o')));
+    assert!(app
+        .take_open_url()
+        .is_some_and(|url| url.starts_with("https://auth.openai.com/codex/device")));
+}
+
 #[test]
 fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_message() {
     let mut app = harness(true);

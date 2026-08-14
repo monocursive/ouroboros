@@ -207,6 +207,25 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::MUTED),
     )];
 
+    // Which runtime this is talking to, and at what scope. Terse, and always present: an
+    // `ouro` attached over a tunnel is driving a node somewhere else, and every path it
+    // names — every workspace, every log file — belongs to that node rather than to this
+    // machine. The scope rides along because it is what decides whether a verb will be
+    // refused at all.
+    spans.push(Span::styled(
+        format!(
+            "  ·  {} {} {}",
+            if app.spawned() { "own" } else { "attached" },
+            if app.hello.scope.trim().is_empty() {
+                "scope?"
+            } else {
+                app.hello.scope.trim()
+            },
+            super::tree::truncate(&app.address, 30)
+        ),
+        Style::default().fg(theme::MUTED),
+    ));
+
     if let Connection::Lost { reason } = &app.connection {
         spans.push(Span::styled(
             format!("  disconnected: {reason}"),
@@ -280,7 +299,9 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
 fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
     let commands = palette.visible();
     let width = if area.width >= 110 {
-        area.width * 40 / 100
+        // Widened first: `u16 * 40` overflows in a debug build at 1639 columns, which is an
+        // ordinary width for a full-screen terminal on a wide display.
+        (u32::from(area.width) * 40 / 100) as u16
     } else {
         area.width.saturating_sub(4)
     };
@@ -380,17 +401,16 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
     frame.render_widget(Paragraph::new(lines), rows[2]);
 }
 
+/// The managed sign-in dialog.
+///
+/// The device code is the one thing the operator has to read off this screen and type
+/// somewhere else, so it is the first thing on it. It used to follow the URL, and on an
+/// 80-column terminal a long verification URL wrapped far enough to push the code out of a
+/// fixed-height popup — the dialog showed everything except the part that was the point.
+/// The URL is cut to one line instead, `o` reopens it in a browser, and the popup is sized
+/// to what it holds.
 fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDialog) {
     let connected = app.chatgpt_connected();
-    let popup = centered(area, 58, if connected { 10 } else { 14 });
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" ChatGPT account ", theme::heading()));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
     let mut lines = Vec::new();
 
     if connected {
@@ -438,12 +458,8 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
         )));
         lines.push(Line::from(""));
 
-        if let Some(url) = &dialog.url {
-            lines.push(Line::from(vec![
-                Span::styled("Open  ", theme::label()),
-                Span::styled(url.clone(), Style::default().fg(theme::ACCENT)),
-            ]));
-        }
+        // First, and unabbreviated: this is the string a person has to carry to another
+        // device, and it is short enough to always fit.
         if let Some(code) = &dialog.code {
             lines.push(Line::from(vec![
                 Span::styled("Code  ", theme::label()),
@@ -454,6 +470,23 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
+            lines.push(Line::from(""));
+        }
+
+        if let Some(url) = &dialog.url {
+            // Cut rather than wrapped. A sign-in URL is not something anyone retypes, and a
+            // popup that grew three rows to show one in full would push the code off it.
+            lines.push(Line::from(vec![
+                Span::styled("Open  ", theme::label()),
+                Span::styled(
+                    super::tree::truncate(url, ACCOUNT_INNER.saturating_sub(6)),
+                    Style::default().fg(theme::ACCENT),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "      press o to open it in a browser",
+                Style::default().fg(theme::MUTED),
+            )));
         }
 
         if dialog.url.is_none() && dialog.pending {
@@ -481,8 +514,27 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
         )));
     }
 
+    // Sized to what it holds, and clamped to the frame: a fixed height clipped the last
+    // rows of this dialog on a short terminal, and those rows are the ones that say what to
+    // press.
+    let height = (wrapped(&lines, inner_width(area, ACCOUNT_WIDTH)) + 2).min(area.height);
+    let popup = centered(area, ACCOUNT_WIDTH, height);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" ChatGPT account ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
+
+/// How wide the account dialog is, as a percentage of the frame.
+const ACCOUNT_WIDTH: u16 = 58;
+
+/// The narrowest that percentage can be: 58% of an 80-column terminal, less the border.
+const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
 fn session_picker(frame: &mut Frame, area: Rect, app: &App, choice: usize) {
     let sessions = app.sessions.merged();

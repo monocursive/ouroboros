@@ -27,11 +27,15 @@ pub fn label() -> Style {
     Style::default().fg(MUTED)
 }
 
+/// The cursor row, as an inversion rather than a colour.
+///
+/// White-on-blue is a colour scheme this client does not own: it is illegible on a light
+/// terminal theme, and it overrides whatever the row's own colour was carrying. `REVERSED`
+/// swaps the terminal's own foreground and background, so a selection reads the same way in
+/// every palette an operator has configured — which is the rule the rest of this module
+/// follows.
 pub fn selected() -> Style {
-    Style::default()
-        .fg(Color::White)
-        .bg(Color::Blue)
-        .add_modifier(Modifier::BOLD)
+    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
 /// A pane that does not have focus still shows its selection, dimmed, because losing the

@@ -43,7 +43,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        7 + completion_height(
+        7 + completion_rows(
             app.sessions
                 .composer
                 .as_ref()
@@ -66,7 +66,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    let composer_height = 7 + completion_height(Some(&app.home_draft));
+    let composer_height = 7 + completion_rows(Some(&app.home_draft));
     let rows =
         Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
     let ready = app.home_ready();
@@ -557,13 +557,9 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let completion_rows = active
-        .and_then(|composer| composer.editor.completion())
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0);
     let rows = Layout::vertical([
         Constraint::Min(2),
-        Constraint::Length(completion_rows),
+        Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
@@ -650,14 +646,9 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         ]));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let completion_rows = app
-        .home_draft
-        .completion()
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0);
     let rows = Layout::vertical([
         Constraint::Min(2),
-        Constraint::Length(completion_rows),
+        Constraint::Length(completion_rows(Some(&app.home_draft))),
         Constraint::Length(1),
     ])
     .split(inner);
@@ -736,11 +727,18 @@ fn key_footer(left: &str, enhanced: bool, verb: &str) -> String {
     format!("{left:<42}{newline} newline · Enter {verb}")
 }
 
-fn completion_height(editor: Option<&Editor>) -> u16 {
+/// How many matches the popup lists before it stops listing and starts counting.
+const COMPLETION_ROWS: usize = 3;
+
+/// The height the completion popup needs: the listed rows, plus one for the line that says
+/// how many are not listed.
+fn completion_rows(editor: Option<&Editor>) -> u16 {
     editor
         .and_then(Editor::completion)
-        .map(|menu| menu.items.len().min(3) as u16)
-        .unwrap_or(0)
+        .map(|menu| {
+            menu.items.len().min(COMPLETION_ROWS) + usize::from(menu.items.len() > COMPLETION_ROWS)
+        })
+        .unwrap_or(0) as u16
 }
 
 fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &str) {
@@ -799,12 +797,22 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
     let Some(menu) = editor.completion() else {
         return;
     };
-    let count = area.height as usize;
+
+    // A `@` on its own matches up to fifty paths and three of them fit. Showing three with
+    // nothing to say the rest exist reads as "these are your matches", so the row that would
+    // have been a fourth match counts them instead.
+    let hidden = menu.items.len().saturating_sub(COMPLETION_ROWS);
+    let count = (area.height as usize).saturating_sub(usize::from(hidden > 0));
+
+    if count == 0 {
+        return;
+    }
+
     let start = menu
         .selected
         .saturating_sub(count.saturating_sub(1))
         .min(menu.items.len().saturating_sub(count));
-    let lines = menu
+    let mut lines = menu
         .items
         .iter()
         .enumerate()
@@ -827,6 +835,16 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
             ))
         })
         .collect::<Vec<_>>();
+
+    if hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(
+                &format!("  +{hidden} more — keep typing to narrow, ↑↓ to move"),
+                area.width as usize,
+            ),
+            Style::default().fg(theme::MUTED),
+        )));
+    }
 
     frame.render_widget(Paragraph::new(lines), area);
 }

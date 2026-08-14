@@ -337,10 +337,30 @@ fn open_pending_url(app: &mut App) {
     #[cfg(target_os = "linux")]
     let result = ProcessCommand::new("xdg-open").arg(&url).spawn();
 
+    // `cmd.exe` re-parses its own command line after Rust has quoted the arguments, and Rust
+    // quotes for the CRT rules `cmd` does not follow. Every real OAuth URL carries `&`, which
+    // `cmd` reads as a command separator: the sign-in page would not open and the tail of the
+    // URL would run as a command. So the line is built by hand — the URL quoted, with the one
+    // character that could end that quoting refused outright.
     #[cfg(target_os = "windows")]
-    let result = ProcessCommand::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn();
+    let result = {
+        use std::os::windows::process::CommandExt;
+
+        if url.contains('"') {
+            app.inform(
+                "the account service returned a sign-in URL containing a quote; it was not \
+                 opened",
+                app::NoticeKind::Error,
+            );
+            return;
+        }
+
+        let mut command = ProcessCommand::new("cmd");
+        command.raw_arg("/C");
+        // The empty pair is `start`'s window title, which it would otherwise take the URL for.
+        command.raw_arg(format!("start \"\" \"{url}\""));
+        command.spawn()
+    };
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
