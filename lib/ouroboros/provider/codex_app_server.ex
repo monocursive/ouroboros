@@ -164,7 +164,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
          "the Codex app-server sent a line over #{div(@max_line_bytes, 1024 * 1024)}MB " <>
            "without ending it"}
 
-      {:noreply, reset(reply_all(%{state | partial: ""}, reason), reason)}
+      {:noreply, reset(%{state | partial: ""}, reason)}
     else
       {:noreply, %{state | partial: partial}}
     end
@@ -190,12 +190,12 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
     reason = {:unavailable, "the Codex app-server exited with status #{status}"}
-    {:noreply, reset(reply_all(state, reason), reason)}
+    {:noreply, reset(state, reason)}
   end
 
   def handle_info({:EXIT, port, exit_reason}, %{port: port} = state) do
     reason = {:unavailable, port_failure(exit_reason)}
-    {:noreply, reset(reply_all(state, reason), reason)}
+    {:noreply, reset(state, reason)}
   end
 
   # A port this connection already gave up on. Every caller it had has been answered and
@@ -218,7 +218,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
       {%{from: nil}, pending} ->
         reason = {:timeout, "initialize"}
-        {:noreply, reset(reply_queued(%{state | pending: pending}, reason), reason)}
+        {:noreply, reset(%{state | pending: pending}, reason)}
 
       {%{from: from, method: method}, pending} ->
         GenServer.reply(from, {:error, {:timeout, method}})
@@ -356,7 +356,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
         case send_frame(state.port, frame) do
           :ok -> flush(state)
-          {:error, reason} -> reset(reply_all(state, reason), reason)
+          {:error, reason} -> reset(state, reason)
         end
     end
   end
@@ -396,11 +396,12 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
     case send_frame(state.port, reply) do
       :ok -> state
-      {:error, reason} -> reset(reply_all(state, reason), reason)
+      {:error, reason} -> reset(state, reason)
     end
   end
 
-  defp frame(%{"method" => "account/login/completed", "params" => params}, state) do
+  defp frame(%{"method" => "account/login/completed", "params" => params}, state)
+       when is_map(params) do
     # A completion names the login it belongs to. Applying one that names a different
     # login — a cancelled attempt whose notification arrived late, say — would report its
     # outcome as the outcome of the sign-in the operator is actually watching.
@@ -422,7 +423,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
     end
   end
 
-  defp frame(%{"method" => "account/updated", "params" => params}, state) do
+  defp frame(%{"method" => "account/updated", "params" => params}, state) when is_map(params) do
     cond do
       # The next `account/read` remains the source of account identity. This notification
       # only makes a completed sign-in visible immediately while that read is in flight,
@@ -452,13 +453,13 @@ defmodule Ouroboros.Provider.CodexAppServer do
           flush(%{state | initialized?: true, pending: rest})
 
         {:error, reason} ->
-          reset(reply_all(%{state | pending: rest}, reason), reason)
+          reset(%{state | pending: rest}, reason)
       end
     else
       message = app_server_error(response)
       Logger.warning("the Codex app-server refused to initialize: #{message}")
       reason = {:upstream, message}
-      reset(reply_queued(%{state | pending: rest}, reason), reason)
+      reset(%{state | pending: rest}, reason)
     end
   end
 
@@ -600,9 +601,14 @@ defmodule Ouroboros.Provider.CodexAppServer do
     %{state | queued: :queue.new()}
   end
 
+  # The one way a live connection ends. The transport is closed before anyone is told it
+  # is gone, so no caller is answered "unavailable" while a port to a running `codex` is
+  # still open. What comes back is a connection that has never been started, which the
+  # next request will start again.
   defp reset(state, reason) do
     Logger.warning("the Codex app-server connection was reset: #{describe(reason)}")
     close_port(state.port)
+    state = reply_all(state, reason)
 
     # A sign-in the operator is watching in a terminal ends here too, and it ends in the
     # words that terminal will print. An internal tuple is not an explanation.

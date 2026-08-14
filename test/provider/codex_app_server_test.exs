@@ -287,7 +287,10 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
 
       assert {:error, {:timeout, "initialize"}} = Task.await(caller, 5_000)
       assert Process.alive?(server)
-      assert server_ports(server) == []
+
+      assert eventually(fn -> server_ports(server) == [] end),
+             "the connection kept a port open after it failed: #{inspect(server_ports(server))}"
+
       assert_no_orphans(executable)
     end
 
@@ -304,7 +307,10 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert {:error, {:upstream, message}} = CodexAppServer.read(server)
       assert message =~ "unsupported client"
       assert Process.alive?(server)
-      assert server_ports(server) == []
+
+      assert eventually(fn -> server_ports(server) == [] end),
+             "the connection kept a port open after it failed: #{inspect(server_ports(server))}"
+
       assert_no_orphans(executable)
     end
 
@@ -324,7 +330,10 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert {:error, {:unavailable, message}} = CodexAppServer.read(server)
       assert message =~ "Codex app-server"
       assert Process.alive?(server)
-      assert server_ports(server) == []
+
+      assert eventually(fn -> server_ports(server) == [] end),
+             "the connection kept a port open after it failed: #{inspect(server_ports(server))}"
+
       assert_no_orphans(executable)
 
       # The connection is resettable, not poisoned: the next call tries again.
@@ -354,7 +363,10 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert {:error, {:unavailable, message}} = Task.await(caller, 5_000)
       assert message =~ "without ending it"
       assert Process.alive?(server)
-      assert server_ports(server) == []
+
+      assert eventually(fn -> server_ports(server) == [] end),
+             "the connection kept a port open after it failed: #{inspect(server_ports(server))}"
+
       assert_no_orphans(executable)
     end
 
@@ -374,7 +386,9 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
 
       # `account.read` is a `:read`-scope gateway method. Before this, each failed read
       # left a live `codex` process nobody could reach or stop.
-      assert server_ports(server) == []
+      assert eventually(fn -> server_ports(server) == [] end),
+             "the connection kept a port open after it failed: #{inspect(server_ports(server))}"
+
       assert_no_orphans(executable)
     end
   end
