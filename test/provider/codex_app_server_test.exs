@@ -1,6 +1,8 @@
 defmodule Ouroboros.Provider.CodexAppServerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   # Every failure path this file drives is one the connection is supposed to log about.
   @moduletag :capture_log
 
@@ -117,6 +119,55 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
 
     assert {:error, {:unavailable, message}} = CodexAppServer.read(server)
     assert message =~ "Codex is not installed on the runtime host"
+  end
+
+  describe "the connection is not silent about its own failures" do
+    test "a refused initialize and the reset it causes are both warnings" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"error":{"code":-32000,"message":"unsupported client"}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:upstream, "unsupported client"}} = CodexAppServer.read(server)
+
+          # A second call is answered only after the first failure has been handled in
+          # full, so the reset's line is inside the capture window rather than racing it.
+          assert {:error, {:upstream, _message}} = CodexAppServer.read(server)
+        end)
+
+      assert log =~ "refused to initialize: unsupported client"
+      assert log =~ "connection was reset"
+    end
+
+    test "a non-protocol diagnostic is kept at debug, excerpted rather than dumped" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo "codex says: $(yes x | head -n 400 | tr -d '\\n')"
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            ;;
+          *'"method":"account/read"'*)
+            echo '{"id":1,"result":{"account":null,"requiresOpenaiAuth":true}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      log =
+        capture_log([level: :debug], fn ->
+          assert {:ok, %{"requiresOpenaiAuth" => true}} = CodexAppServer.read(server)
+        end)
+
+      assert log =~ "non-protocol line"
+      assert log =~ "codex says"
+      assert log =~ "(truncated)"
+    end
   end
 
   describe "a frame is routed by what it is, not by whether it has an id" do

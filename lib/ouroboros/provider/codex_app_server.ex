@@ -26,6 +26,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
 
   @request_timeout 12_000
   @initialize_id 0
+  @excerpt_bytes 200
 
   @idle_login %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}
 
@@ -158,10 +159,16 @@ defmodule Ouroboros.Provider.CodexAppServer do
     state = %{state | partial: ""}
 
     case Jason.decode(line) do
-      {:ok, frame} when is_map(frame) -> {:noreply, frame(frame, state)}
+      {:ok, frame} when is_map(frame) ->
+        {:noreply, frame(frame, state)}
+
       # App-server may write diagnostics to stderr. It shares the port only so a full
-      # stderr pipe can never stall the child; a non-JSON diagnostic is not protocol.
-      _not_protocol -> {:noreply, state}
+      # stderr pipe can never stall the child; a non-JSON diagnostic is not protocol. It
+      # is still the only account this node has of what Codex was complaining about, so
+      # it is kept at debug and truncated rather than discarded outright.
+      _not_protocol ->
+        Logger.debug(fn -> "the Codex app-server wrote a non-protocol line: #{excerpt(line)}" end)
+        {:noreply, state}
     end
   end
 
@@ -174,6 +181,19 @@ defmodule Ouroboros.Provider.CodexAppServer do
     reason = {:unavailable, port_failure(exit_reason)}
     {:noreply, reset(reply_all(state, reason), reason)}
   end
+
+  # A port this connection already gave up on. Every caller it had has been answered and
+  # it has been closed; this is only the OS saying how the child ended, which is worth an
+  # operator's attention exactly once.
+  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
+    Logger.warning(
+      "a Codex app-server exited with status #{status} after its connection was reset"
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_info({:EXIT, port, _exit_reason}, state) when is_port(port), do: {:noreply, state}
 
   def handle_info({:request_timeout, id}, state) do
     case Map.pop(state.pending, id) do
@@ -404,7 +424,9 @@ defmodule Ouroboros.Provider.CodexAppServer do
           reset(reply_all(%{state | pending: rest}, reason), reason)
       end
     else
-      reason = {:upstream, app_server_error(response)}
+      message = app_server_error(response)
+      Logger.warning("the Codex app-server refused to initialize: #{message}")
+      reason = {:upstream, message}
       reset(reply_queued(%{state | pending: rest}, reason), reason)
     end
   end
@@ -542,11 +564,14 @@ defmodule Ouroboros.Provider.CodexAppServer do
   end
 
   defp reset(state, reason) do
+    Logger.warning("the Codex app-server connection was reset: #{describe(reason)}")
     close_port(state.port)
 
+    # A sign-in the operator is watching in a terminal ends here too, and it ends in the
+    # words that terminal will print. An internal tuple is not an explanation.
     login =
       if state.login["status"] == "pending" do
-        %{state.login | "status" => "failed", "error" => inspect(reason)}
+        %{state.login | "status" => "failed", "error" => describe(reason)}
       else
         state.login
       end
@@ -561,4 +586,21 @@ defmodule Ouroboros.Provider.CodexAppServer do
         login: login
     }
   end
+
+  # The one place a reset reason becomes words. Both readers are people: an operator
+  # reading the node's log, and whoever is watching a sign-in fail in a terminal.
+  defp describe({:timeout, "initialize"}), do: "the Codex app-server never finished starting"
+  defp describe({:timeout, operation}), do: "the Codex app-server timed out during #{operation}"
+  defp describe({:unavailable, message}) when is_binary(message), do: message
+
+  defp describe({:upstream, message}) when is_binary(message),
+    do: "the Codex app-server refused the request: #{message}"
+
+  defp describe(reason), do: "the Codex app-server became unavailable: #{inspect(reason)}"
+
+  # Enough of a line to recognize it by, never enough to be a payload dump.
+  defp excerpt(line) when byte_size(line) > @excerpt_bytes,
+    do: inspect(binary_slice(line, 0, @excerpt_bytes)) <> " (truncated)"
+
+  defp excerpt(line), do: inspect(line)
 end
