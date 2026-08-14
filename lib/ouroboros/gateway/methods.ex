@@ -383,7 +383,7 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("account.read", params) do
     with :ok <- only_keys(params, []) do
-      safe(fn -> reply(account_adapter().read()) end)
+      safe(fn -> account_reply(account_adapter().read()) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -392,7 +392,7 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("account.login.start", params) do
     with :ok <- only_keys(params, ["flow"]),
          {:ok, flow} <- account_flow(Map.get(params, "flow", "browser")) do
-      safe(fn -> reply(account_adapter().login(flow)) end)
+      safe(fn -> account_reply(account_adapter().login(flow)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -401,7 +401,7 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("account.login.cancel", params) do
     with :ok <- only_keys(params, ["login_id"]),
          {:ok, login_id} <- fetch_string(params, "login_id") do
-      safe(fn -> reply(account_adapter().cancel(login_id)) end)
+      safe(fn -> account_reply(account_adapter().cancel(login_id)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -409,7 +409,7 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("account.logout", params) do
     with :ok <- only_keys(params, []) do
-      safe(fn -> reply(account_adapter().logout()) end)
+      safe(fn -> account_reply(account_adapter().logout()) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1126,18 +1126,27 @@ defmodule Ouroboros.Gateway.Methods do
      %{"outcome" => "unknown"}}
   end
 
-  defp reply({:error, {:timeout, operation}}),
-    do: {:error, code(:upstream_timeout), "Codex app-server timed out during #{operation}"}
-
   defp reply({:error, {:unavailable, message}}) when is_binary(message), do: unavailable(message)
-
-  defp reply({:error, {:upstream, message}}) when is_binary(message),
-    do: upstream_error({:codex_app_server, message})
 
   defp reply({:error, reason}),
     do: {:error, code(:upstream_error), "the runtime refused the call", Wire.to_json(reason)}
 
   defp reply(value), do: {:ok, value}
+
+  # The account boundary is the one upstream that names Codex in its errors, and those
+  # sentences are only true of it. `{:error, {:timeout, _}}` and `{:error, {:upstream, _}}`
+  # are shapes any plane could answer with for its own reasons; mapping them in the shared
+  # `reply/1` would tell an operator that Codex timed out during something Codex was never
+  # asked to do. So the attribution lives here, with the four methods that actually call it.
+  defp account_reply({:error, {:timeout, operation}}),
+    do: {:error, code(:upstream_timeout), "Codex app-server timed out during #{operation}"}
+
+  defp account_reply({:error, {:upstream, message}}) when is_binary(message),
+    do: upstream_error({:codex_app_server, message})
+
+  # `{:unavailable, message}` already reads as a sentence about whatever was unavailable,
+  # and `reply/1` maps it without attributing it to anyone.
+  defp account_reply(result), do: reply(result)
 
   defp exit_result(reason) do
     case exit_class(reason) do
