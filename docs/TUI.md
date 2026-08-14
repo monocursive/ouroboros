@@ -940,9 +940,10 @@ that follows the provider's actual write capability rather than the stated
 `sandbox_mode` alone; durable steer requests (today a steer is injected
 into the running Harness turn and never checkpointed, so the transcript can
 mark that a steer happened but replay cannot quote its text, and steer has
-no idempotency); a keyboard path back to the advanced `n` session dialog
-from the coding home (the composer owns `n` there, so the dialog is
-reachable only with a session open — pinned behavior, chosen by nobody);
-integration scaffolding for `recover_checkpointed_dispatch` (the
-checkpointed-but-unconfirmed dispatch seam has no test driver, so its
-workspace-unavailable retry routing is asserted by inspection, not by test).
+no idempotency; the workable shape is to store the redacted steer prompt
+keyed by the `request_id` that `Session.steer/3` returns and enrich the
+`input_accepted` event carrying it, with a bound on unconsumed entries —
+enriching from the turn's own request would quote the *original* message as
+if it were the steer); a keyboard path back to the advanced `n` session
+dialog from the coding home (the composer owns `n` there, so the dialog is
+reachable only with a session open — pinned behavior, chosen by nobody).
