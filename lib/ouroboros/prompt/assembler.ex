@@ -7,12 +7,27 @@ defmodule Ouroboros.Prompt.Assembler do
   profile instructions and untrusted task input. This module only assembles
   prompt text and trace metadata; it neither selects nor executes tools.
 
-  Passing no profile is a compatibility path: the caller's existing system
-  prompt is returned byte-for-byte and no profile trace is emitted.
+  The rendered prompt states its own structure: profile text inside an
+  `<ouroboros-agent-profile>` block, the caller's session prompt inside an
+  `<ouroboros-session-instructions>` block. That structure is enforced, not merely
+  documented — text containing either tag is rejected with
+  `{:error, {:reserved_prompt_delimiter, field}}`, on both sides, so neither block can
+  close itself and open the other. Rejection rather than escaping: a prompt this module
+  rewrote would no longer be the prompt its author wrote or its digest describes.
+  Attribute injection is not reachable either; profile and tool ids admit no `<` or `"`.
+
+  A profile that renders no sections is refused as `:empty_rendered_profile`. Providers
+  treat a system prompt as a replacement for their own built-in prompt, so an empty
+  envelope is not a neutral one.
+
+  Passing no profile is a compatibility path: there is no block to forge, and the
+  caller's existing system prompt is returned byte-for-byte, with no profile trace
+  emitted. That path refuses exactly one thing — a binary that is not valid UTF-8.
 
   Tool descriptions fail closed: a profile tool is rendered only when its name
   is present in the request's explicit `allowed_tools`; `disallowed_tools`
-  always removes it. With no allowlist, no tool manifest is advertised.
+  always removes it. With no allowlist, no tool manifest is advertised. Caller-supplied
+  tool names are trimmed, as profile tool names already are.
   """
 
   alias Ouroboros.AgentProfile
@@ -54,7 +69,7 @@ defmodule Ouroboros.Prompt.Assembler do
 
   def assemble(nil, opts) do
     with :ok <- validate_options(opts),
-         {:ok, system_prompt} <- legacy_system_prompt(Keyword.get(opts, :system_prompt)) do
+         {:ok, system_prompt} <- legacy_prompt(Keyword.get(opts, :system_prompt)) do
       {:ok,
        %Assembly{
          version: Trace.version(),
@@ -71,10 +86,9 @@ defmodule Ouroboros.Prompt.Assembler do
          {:ok, allowed_tools} <- tool_names(Keyword.get(opts, :allowed_tools), :allowed_tools),
          {:ok, disallowed_tools} <-
            tool_names(Keyword.get(opts, :disallowed_tools, []), :disallowed_tools),
-         {:ok, session_prompt} <- normalized_session_prompt(Keyword.get(opts, :system_prompt)) do
-      tools = active_tools(profile.tools, allowed_tools, disallowed_tools)
-      system_prompt = render(profile, session_prompt, tools)
-
+         {:ok, session_prompt} <- normalized_session_prompt(Keyword.get(opts, :system_prompt)),
+         tools = active_tools(profile.tools, allowed_tools, disallowed_tools),
+         {:ok, system_prompt} <- render(profile, session_prompt, tools) do
       {:ok,
        %Assembly{
          version: Trace.version(),
@@ -101,8 +115,18 @@ defmodule Ouroboros.Prompt.Assembler do
       |> maybe_collection("Skills", profile.skills, &skill/1)
       |> maybe_collection("Tool manifest", tools, &tool/1)
 
-    profile_body = Enum.join(sections, "\n\n")
+    # Providers treat a system prompt as a replacement for their own, not an addition to
+    # it. A profile that renders to nothing — a tools-only profile with no allowlist to
+    # advertise against — would install an empty envelope in place of the provider's
+    # built-in prompt. Refuse: an empty policy is not a policy.
+    if sections == [] do
+      {:error, :empty_rendered_profile}
+    else
+      {:ok, envelope(profile, Enum.join(sections, "\n\n"), session_prompt)}
+    end
+  end
 
+  defp envelope(profile, profile_body, session_prompt) do
     rendered =
       "<ouroboros-agent-profile id=\"#{profile.id}\" version=\"#{profile.version}\">\n" <>
         profile_body <> "\n</ouroboros-agent-profile>"
@@ -149,9 +173,17 @@ defmodule Ouroboros.Prompt.Assembler do
     end
   end
 
-  defp legacy_system_prompt(nil), do: {:ok, nil}
-  defp legacy_system_prompt(prompt) when is_binary(prompt), do: {:ok, prompt}
-  defp legacy_system_prompt(_prompt), do: {:error, :invalid_system_prompt}
+  # No profile means no boundary to forge: the whole prompt is the caller's, and it is
+  # returned byte for byte — no line-ending rewrite, no NFC, no trim. The one thing this
+  # path refuses is a binary that is not UTF-8, which nothing downstream can render and
+  # which the digest would otherwise pin as prompt identity.
+  defp legacy_prompt(nil), do: {:ok, nil}
+
+  defp legacy_prompt(prompt) when is_binary(prompt) do
+    if String.valid?(prompt), do: {:ok, prompt}, else: {:error, :invalid_system_prompt}
+  end
+
+  defp legacy_prompt(_prompt), do: {:error, :invalid_system_prompt}
 
   defp normalized_session_prompt(nil), do: {:ok, nil}
 
@@ -164,7 +196,11 @@ defmodule Ouroboros.Prompt.Assembler do
         |> String.normalize(:nfc)
         |> String.trim()
 
-      {:ok, if(normalized == "", do: nil, else: normalized)}
+      cond do
+        normalized == "" -> {:ok, nil}
+        AgentProfile.reserved_delimiter?(normalized) -> reserved(:system_prompt)
+        true -> {:ok, normalized}
+      end
     else
       {:error, :invalid_system_prompt}
     end
@@ -172,13 +208,20 @@ defmodule Ouroboros.Prompt.Assembler do
 
   defp normalized_session_prompt(_prompt), do: {:error, :invalid_system_prompt}
 
+  defp reserved(field), do: {:error, {:reserved_prompt_delimiter, field}}
+
   # `nil` means the caller did not establish which tools are active, so the safe
   # manifest is empty. This deliberately differs from an empty disallow list.
   defp tool_names(nil, _field), do: {:ok, MapSet.new()}
 
+  # Profile tool names are trimmed at normalization, so caller entries are trimmed too:
+  # `" Read "` naming `Read` is one name, and a set that disagreed would silently drop
+  # the tool from the manifest — or, on the deny side, silently fail to remove it.
+  # Trimming only: tool names are ASCII-constrained by `@id_regex`, so there is no case
+  # folding or Unicode form to reconcile.
   defp tool_names(names, field) when is_list(names) do
     if Enum.all?(names, &(is_binary(&1) and String.trim(&1) != "")) do
-      {:ok, MapSet.new(names)}
+      {:ok, names |> Enum.map(&String.trim/1) |> MapSet.new()}
     else
       {:error, {:invalid_prompt_assembler_option, field}}
     end

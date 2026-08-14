@@ -199,8 +199,13 @@ defmodule Ouroboros.Coding.TaskState do
       not valid_agent_profile?(Keyword.get(opts, :agent_profile)) ->
         {:error, :invalid_agent_profile}
 
-      not match?({:ok, _assembly}, assembly) ->
-        {:error, :invalid_agent_profile_options}
+      # The assembler's reason is the whole diagnosis: which option, which delimiter,
+      # which empty profile. Collapsing it to one atom sent callers to look at the
+      # profile when the fault was in `allowed_tools` — an option that is accepted
+      # without a profile, which is why the nil-profile path below stays as tolerant of
+      # odd `allowed_tools` values as it has always been.
+      match?({:error, _reason}, assembly) ->
+        {:error, {:invalid_agent_profile_options, elem(assembly, 1)}}
 
       not valid_provider_options?(provider, Keyword.get(opts, :provider_options, %{})) ->
         {:error, {:unsafe_provider_options, provider}}
