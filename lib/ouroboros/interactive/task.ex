@@ -816,6 +816,14 @@ defmodule Ouroboros.Interactive.Task do
             {:error, _reason, runtime} -> runtime
           end
         else
+          # The workspace root failing to canonicalize is the node's problem, not the
+          # turn's: a mount that is not up yet at recovery says nothing about whether
+          # this input can be reproduced. It takes the same bounded retry as a failed
+          # session-info call. Attachment-level failures stay terminal — a file that is
+          # missing or resolves outside the workspace cannot be re-dispatched honestly.
+          {:error, {:invalid_attachment_workspace, reason}} ->
+            retry(runtime, :workspace_unavailable_at_recovery, reason)
+
           {:error, reason} ->
             mark_turn_ambiguous(runtime, turn_id, {:invalid_checkpointed_turn_request, reason})
         end
