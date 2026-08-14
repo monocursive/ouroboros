@@ -20,7 +20,16 @@ defmodule Ouroboros.Test.HarnessAdapter do
           usage?: true,
           native_cancel?: true
         ),
-      normalized_options: [:provider_session_id, :approval_mode, :sandbox_mode],
+      normalized_options: [
+        :provider_session_id,
+        :approval_mode,
+        :sandbox_mode,
+        # Prompt policy is normalized, not provider-specific: a test provider that
+        # rejected it could not exercise an assembled agent profile at all.
+        :system_prompt,
+        :allowed_tools,
+        :disallowed_tools
+      ],
       provider_options: []
     )
   end

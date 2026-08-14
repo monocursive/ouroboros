@@ -4,6 +4,7 @@ defmodule Ouroboros.TeamTest do
   alias Jido.Harness.{Run, RunInfo, RunRequest}
   alias Ouroboros.Coding.Event
   alias Ouroboros.Coding.Task, as: CodingTask
+  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Team
   alias Ouroboros.Team.Server
   alias Ouroboros.Team.Store, as: TeamStore
@@ -386,6 +387,101 @@ defmodule Ouroboros.TeamTest do
 
     assert Team.state(team).delegations == %{}
     refute_receive {:ouroboros_test_adapter_started, _run_id, _request, _adapter}, 100
+  end
+
+  test "a delegated agent profile keeps the prompt identity of the identical local task" do
+    team_id = unique_id("profile-team")
+    worker_id = unique_id("profile-worker")
+    delegation_id = unique_id("profile-delegation")
+    team = start_team(team_id)
+    assert {:ok, _worker} = Team.add_worker(team, worker_id)
+
+    profile = delegation_profile()
+    objective = "profiled objective"
+
+    delegation_options = [
+      id: delegation_id,
+      provider: @provider,
+      workspace: File.cwd!(),
+      system_prompt: "Keep explanations concise.",
+      allowed_tools: ["read_file"],
+      agent_profile: profile
+    ]
+
+    result = Team.delegate(team, worker_id, objective, delegation_options)
+
+    # The profile struct used to reach `portable_request?/1`'s map clause, raise
+    # `Protocol.UndefinedError`, and return an error term with the whole profile in it.
+    refute inspect(result) =~ "careful coding agent"
+    assert {:ok, delegation} = result
+
+    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{} = request, adapter},
+                   1_000
+
+    assert {:ok, local} =
+             TaskState.new(
+               delegation.task_ref.id,
+               objective,
+               Keyword.drop(delegation_options, [:id])
+             )
+
+    assert {:ok, remote} = Ouroboros.CodingSession.info(delegation.task_ref)
+    assert remote.prompt_trace == local.prompt_trace
+    assert remote.prompt_trace.profile_digest == local.prompt_trace.profile_digest
+    assert request.system_prompt == local.options.system_prompt
+    assert request.system_prompt =~ "<ouroboros-agent-profile"
+    assert request.system_prompt =~ "Keep explanations concise."
+    assert request.metadata.ouroboros_prompt == local.prompt_trace
+
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "done"})
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %{status: :completed}} = Team.await(team, delegation_id, 2_000)
+  end
+
+  test "delegation errors carry no profile or prompt text" do
+    team_id = unique_id("profile-error-team")
+    worker_id = unique_id("profile-error-worker")
+    team = start_team(team_id)
+    assert {:ok, _worker} = Team.add_worker(team, worker_id)
+
+    missing_workspace = Path.join(System.tmp_dir!(), unique_id("missing-profile-workspace"))
+
+    for {options, expected} <- [
+          {[workspace: missing_workspace], {:invalid_workspace, missing_workspace}},
+          {[system_prompt: self()], :non_durable_delegation_options},
+          {[system_prompt: "Bearer do-not-checkpoint-this"], :secret_bearing_delegation_options}
+        ] do
+      result =
+        Team.delegate(
+          team,
+          worker_id,
+          "profiled failure",
+          Keyword.merge(
+            [
+              id: unique_id("profile-error-delegation"),
+              provider: @provider,
+              workspace: File.cwd!(),
+              agent_profile: delegation_profile()
+            ],
+            options
+          )
+        )
+
+      assert {:error, ^expected} = result
+      refute inspect(result) =~ "careful coding agent"
+      refute inspect(result) =~ "Read a workspace file"
+    end
+
+    assert Team.state(team).delegations == %{}
+    refute_receive {:ouroboros_test_adapter_started, _run_id, _request, _adapter}, 100
+  end
+
+  defp delegation_profile do
+    Ouroboros.AgentProfile.new!(
+      id: "delegated-profile",
+      base_prompt: "Act as a careful coding agent.",
+      tools: [%{name: "read_file", description: "Read a workspace file."}]
+    )
   end
 
   test "an active team process is replaced and resumes one detached run" do

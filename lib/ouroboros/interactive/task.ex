@@ -3,6 +3,8 @@ defmodule Ouroboros.Interactive.Task do
 
   use GenServer, restart: :transient
 
+  require Logger
+
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Workspace
@@ -48,8 +50,17 @@ defmodule Ouroboros.Interactive.Task do
           {:ok, runtime(session), {:continue, :attach}}
         else
           case admit_workspace(session) do
-            {:ok, runtime} -> {:ok, runtime, {:continue, :attach}}
-            {:error, reason} -> {:stop, reason}
+            # A checkpoint this build cannot turn into a Harness request — a trace from a
+            # newer prompt format, a prompt that is no longer a binary — fails as itself,
+            # before any provider session, and releases what it holds.
+            {:ok, runtime} ->
+              case State.unrequestable_reason(runtime.session) do
+                nil -> {:ok, runtime, {:continue, :attach}}
+                reason -> {:ok, runtime, {:continue, {:unrequestable, reason}}}
+              end
+
+            {:error, reason} ->
+              {:stop, reason}
           end
         end
 
@@ -71,6 +82,15 @@ defmodule Ouroboros.Interactive.Task do
     else
       {:noreply, attach_or_start(runtime)}
     end
+  end
+
+  def handle_continue({:unrequestable, reason}, runtime) do
+    Logger.error(
+      "interactive session #{runtime.session.id} cannot build a request: " <>
+        "#{inspect(reason)}; failing it"
+    )
+
+    {:noreply, fail_start(runtime, {:unrequestable_session_state, reason})}
   end
 
   @impl true
@@ -284,9 +304,17 @@ defmodule Ouroboros.Interactive.Task do
   defp start_harness_session(runtime) do
     session = runtime.session
 
-    case safe_session_call(fn -> Session.start(session.provider, State.request(session)) end) do
-      {:ok, id} -> adopt(runtime, id)
-      {:error, reason} -> fail_start(runtime, reason)
+    case State.unrequestable_reason(session) do
+      nil ->
+        case safe_session_call(fn ->
+               Session.start(session.provider, State.request(session))
+             end) do
+          {:ok, id} -> adopt(runtime, id)
+          {:error, reason} -> fail_start(runtime, reason)
+        end
+
+      reason ->
+        fail_start(runtime, {:unrequestable_session_state, reason})
     end
   end
 
@@ -506,7 +534,7 @@ defmodule Ouroboros.Interactive.Task do
         :provider_session_id,
         info.provider_session_id || runtime.session.provider_session_id
       )
-      |> Map.put(:error, Jido.Harness.Redaction.redact(info.error))
+      |> Map.put(:error, durable(info.error))
       |> State.touch()
 
     case persist(runtime, session, []) do
@@ -607,7 +635,7 @@ defmodule Ouroboros.Interactive.Task do
         ambiguous =
           turn
           |> Map.put(:status, :ambiguous)
-          |> Map.put(:error, Jido.Harness.Redaction.redact(reason))
+          |> Map.put(:error, durable(reason))
           |> State.touch_turn()
 
         session =
@@ -626,7 +654,7 @@ defmodule Ouroboros.Interactive.Task do
         failed =
           turn
           |> Map.put(:status, :failed)
-          |> Map.put(:error, Jido.Harness.Redaction.redact(reason))
+          |> Map.put(:error, durable(reason))
           |> State.touch_turn()
 
         session =
@@ -732,7 +760,7 @@ defmodule Ouroboros.Interactive.Task do
           turn
           |> Map.put(:status, status)
           |> Map.put(:result, turn_result_summary(result))
-          |> Map.put(:error, Jido.Harness.Redaction.redact(result.error))
+          |> Map.put(:error, durable(result.error))
           |> State.touch_turn()
 
         session =
@@ -752,7 +780,10 @@ defmodule Ouroboros.Interactive.Task do
     case Map.fetch(runtime.session.turns, turn_id) do
       {:ok, turn} ->
         turn =
-          turn |> Map.put(:status, :ambiguous) |> Map.put(:error, reason) |> State.touch_turn()
+          turn
+          |> Map.put(:status, :ambiguous)
+          |> Map.put(:error, durable(reason))
+          |> State.touch_turn()
 
         session =
           %{runtime.session | turns: Map.put(runtime.session.turns, turn_id, turn)}
@@ -972,10 +1003,10 @@ defmodule Ouroboros.Interactive.Task do
       provider: result.provider,
       provider_session_id: result.provider_session_id,
       status: result.status,
-      text: Jido.Harness.Redaction.redact(result.text),
+      text: durable(result.text),
       text_truncated?: result.text_truncated?,
-      usage: Jido.Harness.Redaction.redact(result.usage),
-      metadata: Jido.Harness.Redaction.redact(result.metadata)
+      usage: durable(result.usage),
+      metadata: durable(result.metadata)
     }
   end
 
@@ -983,7 +1014,7 @@ defmodule Ouroboros.Interactive.Task do
     session =
       runtime.session
       |> Map.put(:status, :failed)
-      |> Map.put(:error, Jido.Harness.Redaction.redact(reason))
+      |> Map.put(:error, durable(reason))
       |> State.touch()
 
     case persist(runtime, session, []) do
@@ -1000,7 +1031,7 @@ defmodule Ouroboros.Interactive.Task do
       runtime.session
       |> finalize_unresolved_turns({:session_lost, reason})
       |> Map.put(:status, :lost)
-      |> Map.put(:error, reason)
+      |> Map.put(:error, durable(reason))
       |> State.touch()
 
     case persist(runtime, session, []) do
@@ -1021,7 +1052,7 @@ defmodule Ouroboros.Interactive.Task do
   # already checkpointed. Back off, and only checkpoint the error the first time it
   # is seen or when it changes.
   defp retry(runtime, kind, reason) do
-    error = {kind, Jido.Harness.Redaction.redact(reason)}
+    error = {kind, durable(reason)}
     {repeat?, runtime} = note_retry(runtime, error)
     delay = runtime.retry.delay
 
@@ -1050,6 +1081,8 @@ defmodule Ouroboros.Interactive.Task do
   defp clear_retry(runtime), do: %{runtime | retry: no_retry()}
 
   defp finalize_unresolved_turns(session, reason) do
+    reason = durable(reason)
+
     turns =
       Map.new(session.turns, fn {id, turn} ->
         if State.terminal_turn?(turn) do
@@ -1075,9 +1108,50 @@ defmodule Ouroboros.Interactive.Task do
 
         {:ok, %{runtime | session: session}}
 
+      # A refused checkpoint is not a storage outage. Polling cannot make a session the
+      # store will not accept acceptable, and the old shared retry path left exactly that
+      # session running forever: no waiter answered, no workspace released.
+      {:error, :invalid_interactive_session} ->
+        {:error, abandon(runtime, session)}
+
       {:error, _reason} ->
         {:error, runtime}
     end
+  end
+
+  defp abandon(%{session: session} = runtime, _rejected) do
+    if State.terminal?(session), do: runtime, else: do_abandon(runtime, session)
+  end
+
+  # The refused state is not the one that gets recorded: it is the state the store just
+  # rejected. What is recorded is the last accepted state, marked failed, which the store
+  # accepts because a terminal session never builds another request.
+  defp do_abandon(runtime, last_accepted) do
+    reason =
+      {:unstorable_session_state,
+       State.unrequestable_reason(runtime.session) || :rejected_by_store}
+
+    Logger.error(
+      "interactive session #{last_accepted.id} was refused by the store: " <>
+        "#{inspect(reason)}; failing it"
+    )
+
+    session =
+      last_accepted
+      |> finalize_unresolved_turns({:session_failed, reason})
+      |> Map.put(:status, :failed)
+      |> Map.put(:error, reason)
+      |> State.touch()
+
+    # Even a refused terminal record leaves this process ending honestly: the durable
+    # checkpoint stays as the store last accepted it, and nothing here spins.
+    _ = Store.put(session)
+
+    %{runtime | session: session}
+    |> release_workspace()
+    |> reply_ready_waiters()
+    |> reply_all_terminal_turn_waiters()
+    |> schedule_retire()
   end
 
   defp append_event(session, event) do
@@ -1122,6 +1196,12 @@ defmodule Ouroboros.Interactive.Task do
   defp with_harness_session(runtime, fun) do
     safe_session_call(fn -> fun.(runtime.session.harness_session_id) end)
   end
+
+  # Everything that lands in durable session state goes through here. Redaction removes
+  # secrets; it leaves runtime authority alone, and a harness call exit reason carries
+  # the pid it was calling. The store refuses such a checkpoint on every attempt, so a
+  # session that wrote one used to retry that refusal for the rest of its life.
+  defp durable(term), do: term |> Jido.Harness.Redaction.redact() |> State.durable_term()
 
   defp safe_session_call(fun) do
     try do
@@ -1328,6 +1408,12 @@ defmodule Ouroboros.Interactive.Task do
             :ok ->
               {:ok, runtime(leased, lease, capability)}
 
+            # The store refuses a session it cannot run. Keep the lease rather than stop:
+            # this session is about to fail as itself, and that failure is what releases
+            # the workspace and clears the recovery reservation the lease just replaced.
+            {:error, :invalid_interactive_session} ->
+              {:ok, runtime(leased, lease, capability)}
+
             {:error, reason} ->
               _ = safe_workspace_release(lease.id, capability)
               {:error, {:storage_error, reason}}
@@ -1377,7 +1463,7 @@ defmodule Ouroboros.Interactive.Task do
   defp stale_own_lease?(_conflicts, _session_id), do: false
 
   defp checkpoint_admission_failure(session, reason) do
-    redacted = Jido.Harness.Redaction.redact(reason)
+    redacted = durable(reason)
 
     failed =
       session

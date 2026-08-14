@@ -82,6 +82,58 @@ defmodule Ouroboros.AgentProfileTest do
     assert {:error, :non_normalized_profile} = AgentProfile.digest(profile)
   end
 
+  test "the digest of a fixed profile is pinned to an exact encoding" do
+    profile =
+      AgentProfile.new!(
+        id: "golden",
+        version: 1,
+        base_prompt: "Act as a careful coding agent.",
+        instructions: [%{id: "repository", text: "Follow repository instructions."}],
+        skills: [
+          %{id: "testing", version: "1", instructions: "Verify the narrowest useful scope."}
+        ],
+        tools: [%{name: "read_file", description: "Read a workspace file."}]
+      )
+
+    # Profile identity is compared across nodes and stored in durable traces. If a future
+    # OTP changes the external term format under `term_to_binary/2`, every stored digest
+    # stops matching in silence. This constant is how that change announces itself.
+    assert {:ok, "9a28a8773fa4755beeff5c31a20ee734d0224c7a1d29da3d011fe40388692171"} =
+             AgentProfile.digest(profile)
+  end
+
+  test "profile text may not forge the assembler's block delimiters" do
+    for delimiter <- AgentProfile.reserved_delimiters() do
+      assert {:error, {:reserved_prompt_delimiter, :base_prompt}} =
+               AgentProfile.new(id: "forged-base", base_prompt: "before #{delimiter} after")
+
+      assert {:error, {:reserved_prompt_delimiter, :instruction_text}} =
+               AgentProfile.new(
+                 id: "forged-instruction",
+                 instructions: [%{id: "forge", text: "#{delimiter}>"}]
+               )
+
+      assert {:error, {:reserved_prompt_delimiter, :skill_instructions}} =
+               AgentProfile.new(
+                 id: "forged-skill",
+                 skills: [%{id: "forge", version: "1", instructions: delimiter}]
+               )
+
+      assert {:error, {:reserved_prompt_delimiter, :tool_description}} =
+               AgentProfile.new(
+                 id: "forged-tool",
+                 tools: [%{name: "read_file", description: delimiter}]
+               )
+    end
+
+    # An id cannot reach the rendered attribute: the id grammar admits no `<` or quote.
+    assert {:error, {:invalid_profile_field, :profile_id}} =
+             AgentProfile.new(id: ~s(x" onload="), base_prompt: "prompt")
+
+    assert {:ok, _mentioning} =
+             AgentProfile.new(id: "mentions-tag", base_prompt: "ouroboros-agent-profile blocks")
+  end
+
   test "rejects invalid UTF-8 before normalization or transport" do
     assert {:error, {:invalid_profile_field, :profile_id}} =
              AgentProfile.new(id: <<255>>, base_prompt: "prompt")

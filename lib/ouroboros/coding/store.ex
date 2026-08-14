@@ -117,14 +117,14 @@ defmodule Ouroboros.Coding.Store do
   @impl true
   def handle_call({:create, %TaskState{} = task}, _from, state) do
     cond do
-      not valid_task?(task) -> {:reply, {:error, :invalid_task_state}, state}
+      not creatable_task?(task) -> {:reply, {:error, :invalid_task_state}, state}
       Map.has_key?(state.tasks, task.id) -> {:reply, {:error, :already_exists}, state}
       true -> persist_task(task, state)
     end
   end
 
   def handle_call({:put, %TaskState{} = task}, _from, state) do
-    if valid_task?(task),
+    if storable_task?(task),
       do: persist_task(task, state),
       else: {:reply, {:error, :invalid_task_state}, state}
   end
@@ -244,13 +244,25 @@ defmodule Ouroboros.Coding.Store do
     end
   end
 
+  # Load checks the shape of the checkpoint, not the runnability of what is in it.
+  # This process is the head of a `rest_for_one` tree: refusing to start takes the whole
+  # node with it, so a single task written by a newer build — or by a build that allowed
+  # something this one does not — must not be able to decide that no task boots. A task
+  # that cannot build a request is failed by name when it tries; see `Coding.Task`.
   defp valid_tasks?(tasks) do
     Enum.all?(tasks, fn
-      {id, %TaskState{id: id} = task} when is_binary(id) -> valid_task?(task)
+      {id, %TaskState{id: id}} when is_binary(id) -> true
       _other -> false
     end)
   end
 
-  defp valid_task?(%TaskState{id: id} = task),
+  # Writes are gated: a checkpoint this build accepts must be one it can run.
+  defp creatable_task?(%TaskState{id: id} = task),
     do: is_binary(id) and TaskState.requestable?(task)
+
+  # A terminal task is the exception the gate has to make. It never builds another
+  # request, and refusing it would leave a task that stopped being requestable mid-run
+  # unable to record its own ending: no waiter answered, no workspace released.
+  defp storable_task?(%TaskState{} = task),
+    do: creatable_task?(task) or (is_binary(task.id) and TaskState.terminal?(task))
 end

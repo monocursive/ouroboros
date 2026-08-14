@@ -11,12 +11,41 @@ defmodule Ouroboros.AgentProfile do
   Lists preserve caller-declared order because instruction precedence is part of
   the profile. Maps are normalized into a fixed shape, text uses LF line endings,
   and digests use deterministic Erlang encoding so the same normalized profile
-  has the same identity on every node.
+  has the same identity on every node running the same pinned OTP release — the
+  `rel/` discipline — rather than across arbitrary OTP majors.
+
+  Profile text may not contain the assembler's block delimiters
+  (`<ouroboros-agent-profile>`, `<ouroboros-session-instructions>`, open or close).
+  Such text is refused as `{:error, {:reserved_prompt_delimiter, field}}` rather than
+  escaped: a profile that forged those boundaries could present itself as session
+  instructions, or present session text as profile policy, and rewriting an operator's
+  instructions to make them safe would change what they wrote and what the digest names.
   """
 
   @current_version 1
   @id_regex ~r/^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
   @profile_keys [:id, :version, :base_prompt, :instructions, :skills, :tools]
+
+  # The assembler renders profile text inside `<ouroboros-agent-profile>` and session
+  # text inside `<ouroboros-session-instructions>`. Text that contains either tag can
+  # close one block and open another, which is exactly the boundary those blocks exist
+  # to state. Rejected, never escaped: silently rewriting an operator's instructions is
+  # not a trust boundary, and an id cannot reach here — `@id_regex` admits no `<`.
+  @reserved_delimiters [
+    "<ouroboros-agent-profile",
+    "</ouroboros-agent-profile",
+    "<ouroboros-session-instructions",
+    "</ouroboros-session-instructions"
+  ]
+
+  @doc false
+  @spec reserved_delimiters() :: [String.t()]
+  def reserved_delimiters, do: @reserved_delimiters
+
+  @doc "Returns whether text would forge one of the assembler's block boundaries."
+  @spec reserved_delimiter?(binary()) :: boolean()
+  def reserved_delimiter?(text) when is_binary(text),
+    do: Enum.any?(@reserved_delimiters, &String.contains?(text, &1))
 
   @enforce_keys [:id]
   defstruct id: nil,
@@ -273,7 +302,7 @@ defmodule Ouroboros.AgentProfile do
     if String.valid?(value) do
       case value |> normalize_text() |> String.trim() do
         "" -> {:ok, nil}
-        normalized -> {:ok, normalized}
+        normalized -> checked_text(normalized, :base_prompt)
       end
     else
       {:error, {:invalid_profile_field, :base_prompt}}
@@ -286,7 +315,7 @@ defmodule Ouroboros.AgentProfile do
     if String.valid?(value) do
       case value |> normalize_text() |> String.trim() do
         "" -> {:error, {:invalid_profile_field, field}}
-        normalized -> {:ok, normalized}
+        normalized -> checked_text(normalized, field)
       end
     else
       {:error, {:invalid_profile_field, field}}
@@ -294,6 +323,12 @@ defmodule Ouroboros.AgentProfile do
   end
 
   defp normalize_required_text(_value, field), do: {:error, {:invalid_profile_field, field}}
+
+  defp checked_text(normalized, field) do
+    if reserved_delimiter?(normalized),
+      do: {:error, {:reserved_prompt_delimiter, field}},
+      else: {:ok, normalized}
+  end
 
   defp normalize_text(text) do
     text
@@ -310,9 +345,13 @@ defmodule Ouroboros.AgentProfile do
   defp require_content(nil, [], [], []), do: {:error, :empty_profile}
   defp require_content(_base_prompt, _instructions, _skills, _tools), do: :ok
 
+  # The external term format is pinned, not merely deterministic: `:deterministic` alone
+  # fixes map ordering, while `minor_version` fixes the encoding itself. Without it a
+  # future OTP default could re-encode the same profile differently and every stored
+  # digest would silently stop matching. A golden digest test fails loudly if it moves.
   defp fingerprint(term) do
     :sha256
-    |> :crypto.hash(:erlang.term_to_binary(term, [:deterministic]))
+    |> :crypto.hash(:erlang.term_to_binary(term, [:deterministic, minor_version: 2]))
     |> Base.encode16(case: :lower)
   end
 end

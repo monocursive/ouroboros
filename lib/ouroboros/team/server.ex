@@ -58,6 +58,7 @@ defmodule Ouroboros.Team.Server do
   use GenServer
 
   alias Ouroboros.Agent.Coordinator
+  alias Ouroboros.AgentProfile
   alias Ouroboros.Coding.{Event, TaskRef, TaskState}
   alias Ouroboros.Coding.Store, as: CodingStore
   alias Ouroboros.Team.Server.State
@@ -1493,7 +1494,12 @@ defmodule Ouroboros.Team.Server do
       origin_digest: delegation.coding_options.origin_digest
     ]
 
-    Keyword.merge(Map.to_list(delegation.coding_options.options), fixed)
+    options =
+      delegation.coding_options.options
+      |> apply_prompt_inputs(Map.get(delegation.coding_options, :prompt_inputs, %{}))
+      |> Map.to_list()
+
+    Keyword.merge(options, fixed)
   end
 
   defp subscribe_assigned_coding(state, delegation, mode) do
@@ -1656,14 +1662,19 @@ defmodule Ouroboros.Team.Server do
         worker_id: worker_id,
         objective: objective,
         coding_node: coding_node,
-        coding_options: durable_coding_options(task)
+        coding_options: durable_coding_options(task, coding_options)
       }
+
+      plain_request = plain_terms(request)
 
       cond do
         not portable_request?(request) ->
           {:error, :non_durable_delegation_options}
 
-        Jido.Harness.Redaction.redact(request) != request ->
+        # Redaction turns every struct it walks into a plain map, so comparing it against
+        # a request that carries one would always differ. Compare like with like: the
+        # same struct-free projection redaction itself would produce.
+        Jido.Harness.Redaction.redact(plain_request) != plain_request ->
           {:error, :secret_bearing_delegation_options}
 
         true ->
@@ -1677,7 +1688,11 @@ defmodule Ouroboros.Team.Server do
       end
     end
   rescue
-    error -> {:error, {:invalid_delegation_options, Exception.message(error)}}
+    # Everything this function inspects is prompt or profile text. An exception message
+    # is built from the term that raised — `Protocol.UndefinedError` inspects it in full —
+    # so only the exception type is reported. The error term reaches callers, logs, and
+    # durable delegation records; none of them are a place for prompt content.
+    error -> {:error, {:invalid_delegation_options, error.__struct__}}
   end
 
   # TaskState validates prompt/profile text before it constructs the durable request. Keep
@@ -1702,15 +1717,60 @@ defmodule Ouroboros.Team.Server do
 
   defp canonical_workspace(workspace), do: {:error, {:invalid_workspace, workspace}}
 
-  defp durable_coding_options(task) do
-    %{
+  # A delegated task must carry the same prompt identity as the identical local task.
+  # `TaskState` compiles the profile into `options.system_prompt` and drops the profile
+  # itself, so the compiled text alone would arrive at the owner as a *session* prompt and
+  # be wrapped a second time — a different prompt, a different digest, no
+  # `metadata.ouroboros_prompt`. The assembler's inputs travel beside the compiled
+  # options, never inside them: assembly is deterministic, so the owner re-runs it and
+  # reproduces byte-identical options, which is what task identity is verified against.
+  defp durable_coding_options(task, coding_options) do
+    durable = %{
       workspace: task.workspace,
       workspace_mode: task.workspace_mode,
       provider: task.provider,
       event_limit: task.event_limit,
       options: task.options
     }
+
+    case Keyword.get(coding_options, :agent_profile) do
+      %AgentProfile{} = profile ->
+        Map.put(durable, :prompt_inputs, prompt_inputs(profile, coding_options))
+
+      _no_profile ->
+        durable
+    end
   end
+
+  defp prompt_inputs(profile, coding_options) do
+    case Keyword.get(coding_options, :system_prompt) do
+      nil -> %{agent_profile: profile}
+      session_prompt -> %{agent_profile: profile, system_prompt: session_prompt}
+    end
+  end
+
+  defp apply_prompt_inputs(options, %{agent_profile: %AgentProfile{} = profile} = inputs) do
+    options
+    |> Map.put(:agent_profile, profile)
+    |> put_session_prompt(Map.get(inputs, :system_prompt))
+  end
+
+  defp apply_prompt_inputs(options, _inputs), do: options
+
+  # An absent session prompt has to be absent again, not left as the compiled profile
+  # text the owner would then treat as this session's own instructions.
+  defp put_session_prompt(options, nil), do: Map.delete(options, :system_prompt)
+  defp put_session_prompt(options, prompt), do: Map.put(options, :system_prompt, prompt)
+
+  # Mirrors the traversal `Jido.Harness.Redaction` performs: structs become plain maps,
+  # map values and list elements are walked, keys and every other term are left alone.
+  defp plain_terms(term) when is_struct(term), do: term |> Map.from_struct() |> plain_terms()
+
+  defp plain_terms(term) when is_map(term),
+    do: Map.new(term, fn {key, value} -> {key, plain_terms(value)} end)
+
+  defp plain_terms(term) when is_list(term), do: Enum.map(term, &plain_terms/1)
+  defp plain_terms(term), do: term
 
   defp origin_digest(team_id, delegation_id, request_fingerprint) do
     {:ouroboros_team_delegation, team_id, delegation_id, request_fingerprint,
@@ -1722,6 +1782,14 @@ defmodule Ouroboros.Team.Server do
 
   defp portable_request?(term) when is_pid(term) or is_port(term) or is_reference(term), do: false
   defp portable_request?(term) when is_function(term), do: false
+
+  # A struct satisfies `is_map/1` but implements no `Enumerable`, so it has to be
+  # decomposed before the map clause walks it. An agent profile is the struct that
+  # actually travels here; enumerating one raised `Protocol.UndefinedError`, and the
+  # rescue below then carried the inspected profile into the returned error term.
+  defp portable_request?(term) when is_struct(term) do
+    term |> Map.from_struct() |> portable_request?()
+  end
 
   defp portable_request?(term) when is_map(term) do
     Enum.all?(term, fn {key, value} ->

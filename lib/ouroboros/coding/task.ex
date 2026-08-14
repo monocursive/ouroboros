@@ -3,6 +3,8 @@ defmodule Ouroboros.Coding.Task do
 
   use GenServer, restart: :transient
 
+  require Logger
+
   alias Jido.Harness.{Run, RunResult}
   alias Ouroboros.Coding.{Store, TaskState}
   alias Ouroboros.Workspace
@@ -46,8 +48,18 @@ defmodule Ouroboros.Coding.Task do
           {:ok, new_runtime(task), {:continue, :attach}}
         else
           case admit_workspace(task) do
-            {:ok, runtime} -> {:ok, runtime, {:continue, :attach}}
-            {:error, reason} -> {:stop, reason}
+            # A checkpoint this build cannot turn into a Harness request — a trace from a
+            # newer prompt format, a prompt that is no longer a binary — fails as itself,
+            # before any provider run, and releases what it holds. Refusing to boot over
+            # it is what would take the node down.
+            {:ok, runtime} ->
+              case TaskState.unrequestable_reason(runtime.task) do
+                nil -> {:ok, runtime, {:continue, :attach}}
+                reason -> {:ok, runtime, {:continue, {:unrequestable, reason}}}
+              end
+
+            {:error, reason} ->
+              {:stop, reason}
           end
         end
 
@@ -69,6 +81,14 @@ defmodule Ouroboros.Coding.Task do
     else
       {:noreply, attach_or_start(runtime)}
     end
+  end
+
+  def handle_continue({:unrequestable, reason}, runtime) do
+    Logger.error(
+      "coding task #{runtime.task.id} cannot build a request: #{inspect(reason)}; failing it"
+    )
+
+    {:noreply, fail_start(runtime, {:unrequestable_task_state, reason})}
   end
 
   @impl true
@@ -197,6 +217,12 @@ defmodule Ouroboros.Coding.Task do
             :ok ->
               {:ok, new_runtime(leased_task, lease, capability)}
 
+            # The store refuses a task it cannot run. Keep the lease rather than stop:
+            # this task is about to fail as itself, and that failure is what releases the
+            # workspace and clears the recovery reservation the lease just replaced.
+            {:error, :invalid_task_state} ->
+              {:ok, new_runtime(leased_task, lease, capability)}
+
             {:error, reason} ->
               _ = safe_workspace_release(lease.id, capability)
               {:error, {:storage_error, reason}}
@@ -322,9 +348,15 @@ defmodule Ouroboros.Coding.Task do
   defp start_harness_run(runtime) do
     task = runtime.task
 
-    case safe_run_call(fn -> Run.start(task.provider, TaskState.request(task)) end) do
-      {:ok, run_id} -> adopt(runtime, run_id)
-      {:error, reason} -> fail_start(runtime, reason)
+    case TaskState.unrequestable_reason(task) do
+      nil ->
+        case safe_run_call(fn -> Run.start(task.provider, TaskState.request(task)) end) do
+          {:ok, run_id} -> adopt(runtime, run_id)
+          {:error, reason} -> fail_start(runtime, reason)
+        end
+
+      reason ->
+        fail_start(runtime, {:unrequestable_task_state, reason})
     end
   end
 
@@ -522,9 +554,53 @@ defmodule Ouroboros.Coding.Task do
 
         {:ok, %{runtime | task: task}}
 
+      # A refused checkpoint is not a storage outage. Polling cannot make a task the
+      # store will not accept acceptable, and the old shared retry path left exactly
+      # that task running forever: no waiter answered, no workspace released.
+      {:error, :invalid_task_state} ->
+        {:error, abandon(runtime, task)}
+
       {:error, _reason} ->
         {:error, runtime}
     end
+  end
+
+  defp abandon(%{task: %TaskState{status: status}} = runtime, _rejected)
+       when status in [:completed, :failed, :cancelled, :lost],
+       do: runtime
+
+  # The refused state is not the one that gets recorded: it is the state the store just
+  # rejected. What is recorded is the last accepted state, marked failed, which the store
+  # accepts because a terminal task never builds another request.
+  defp abandon(runtime, rejected) do
+    reason =
+      {:unstorable_task_state, TaskState.unrequestable_reason(rejected) || :rejected_by_store}
+
+    Logger.error(
+      "coding task #{runtime.task.id} was refused by the store: #{inspect(reason)}; failing it"
+    )
+
+    {task, event} =
+      append_internal(runtime.task, :task_checkpoint_refused, %{error: inspect(reason)})
+
+    task = %{task | status: :failed, error: reason} |> touch()
+
+    runtime =
+      case Store.put(task) do
+        :ok ->
+          Enum.each(runtime.subscribers, fn {pid, _monitor} ->
+            send(pid, {:ouroboros_coding_event, task.id, event})
+          end)
+
+          %{runtime | task: task}
+
+        # Even the terminal record was refused. The durable checkpoint stays as the store
+        # last accepted it; this process still ends honestly rather than spinning.
+        {:error, _reason} ->
+          %{runtime | task: task}
+      end
+
+    runtime |> release_workspace() |> reply_waiters() |> schedule_retire()
   end
 
   defp replay_events(%TaskState{} = task, cursor, limit)

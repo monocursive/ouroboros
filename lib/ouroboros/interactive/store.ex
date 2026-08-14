@@ -100,8 +100,11 @@ defmodule Ouroboros.Interactive.Store do
     end
   end
 
+  # `storable?/1` is `valid?/1` plus the one exception a terminal session needs: it never
+  # builds another request, so a session that stopped being requestable mid-run can still
+  # record the honest ending it just decided. Creation stays on the strict gate.
   def handle_call({:put, %State{} = session}, _from, state) do
-    if State.valid?(session),
+    if State.storable?(session),
       do: persist(Map.put(state.sessions, session.id, session), state),
       else: {:reply, {:error, :invalid_interactive_session}, state}
   end
@@ -153,9 +156,13 @@ defmodule Ouroboros.Interactive.Store do
     end
   end
 
+  # Load checks the shape of the checkpoint, not the runnability of what is in it: one
+  # session written by a newer build must not be able to stop every session from
+  # loading — this process is the head of a `rest_for_one` tree. A session that cannot
+  # build a request is failed by name when it tries; see `Interactive.Task`.
   defp load_sessions(sessions, adapter, adapter_opts, key) do
     if Enum.all?(sessions, fn {id, session} ->
-         is_binary(id) and match?(%State{id: ^id}, session) and State.valid?(session)
+         is_binary(id) and match?(%State{id: ^id}, session) and State.loadable?(session)
        end) do
       {:ok, %{adapter: adapter, opts: adapter_opts, key: key, sessions: sessions}}
     else
