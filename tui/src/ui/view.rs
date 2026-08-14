@@ -11,12 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::model::{compact, Plane, ProviderEntry};
+use crate::model::{Plane, ProviderEntry};
 
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, Mode, NewField,
-    NewSession, NoticeKind, Overlay, ProviderChoice, QuickStart, QuickZone, Settings,
-    SettingsField, Tab, APPROVAL_CHOICES,
+    NewSession, NoticeKind, Overlay, ProviderChoice, Settings, SettingsField, Tab,
+    APPROVAL_CHOICES,
 };
 use super::theme;
 
@@ -263,7 +263,6 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
-        Overlay::QuickStart(quick) => quick_start(frame, area, app, quick),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
     }
 }
@@ -527,167 +526,8 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, choice: usize) {
     );
 }
 
-/// The quick-start screen: pick a model, say what it should do, press Enter.
-///
-/// The shortest honest path from an open terminal to a running agent, on one surface. Only
-/// two things are *asked*, because only two of them are things nobody else can answer:
-/// which model, and what for. Everything else is **stated**, with where it came from — a
-/// screen that asked for a workspace it could already work out would be adding a decision
-/// rather than removing one.
-///
-/// The two kinds of fact stay apart here as everywhere: the provider rows are the
-/// runtime's own probe, the paths under them are this client's. A first run adds those
-/// paths; a returning operator has seen them and is not shown them again.
-fn quick_start(frame: &mut Frame, area: Rect, app: &App, quick: &QuickStart) {
-    let picker = provider_rows(app, quick);
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "pick a model, say what it should do, and press Enter.",
-            Style::default().fg(theme::MUTED),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("model", theme::label()),
-            Span::styled(
-                if app.providers.pending {
-                    format!("  {} probing", theme::spinner(app.ticks))
-                } else {
-                    String::new()
-                },
-                Style::default().fg(theme::MUTED),
-            ),
-        ]),
-    ];
-
-    lines.extend(picker);
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "what should it do?",
-        theme::label(),
-    )));
-    lines.push(prompt_row(quick));
-    lines.push(Line::from(""));
-
-    // Stated, not asked — and each one says where it came from, because "the directory this
-    // terminal is in" and "the default you stored" are different claims.
-    lines.push(field(
-        "workspace",
-        &match (&app.config.defaults.workspace, &app.launch_dir) {
-            (Some(stored), _) => format!("{stored} — your stored default"),
-            (None, Some(here)) => format!("{here} — this terminal's directory"),
-            (None, None) => "none — the plane decides".to_string(),
-        },
-    ));
-
-    lines.push(field(
-        "approval",
-        &match app.config.defaults.approval_mode() {
-            Some(mode) => format!("{} — your stored default", mode.as_str()),
-            None => "unset — the plane's own default".to_string(),
-        },
-    ));
-
-    // Said before Enter rather than after it. `hello.methods` is the feature gate (§2.3),
-    // so this is knowable from the handshake, and a screen that let someone type a prompt
-    // into a listener that will refuse to start anything would be wasting their sentence.
-    if !app.hello.serves("interactive.start") {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "this gateway does not serve interactive.start, so Enter has nothing to call",
-            Style::default().fg(theme::WARN),
-        )));
-    } else if !app.hello.operates() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "this listener runs at scope `{}`; starting a session mutates the runtime \
-                 and will be refused with -32003",
-                app.hello.scope
-            ),
-            Style::default().fg(theme::WARN),
-        )));
-    }
-
-    if let Some(error) = &quick.error {
-        lines.push(Line::from(""));
-        lines.extend(refusal_lines(error));
-    }
-
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::styled(
-        if quick.pending {
-            format!("starting {} ", theme::spinner(app.ticks))
-        } else {
-            "Tab swaps zones · ↑↓ or ctrl-n/ctrl-p pick a model · r (ctrl-r anywhere) \
-             probes again · Enter starts · Esc to the dashboard"
-                .to_string()
-        },
-        if quick.pending {
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::MUTED)
-        },
-    )));
-
-    lines.push(Line::from(Span::styled(
-        "n opens the full dialog (plane, workspace, approval) · , settings · ? keys",
-        Style::default().fg(theme::MUTED),
-    )));
-
-    if quick.first_run {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "first run — where this client keeps things",
-            theme::label(),
-        )));
-
-        lines.push(field(
-            "state",
-            &match &app.data_dir {
-                Some(dir) => dir.clone(),
-                // Attach mode: this client did not choose where that runtime keeps
-                // anything, and will not print a local path under a remote node.
-                None => "with whoever started this runtime — not this client".to_string(),
-            },
-        ));
-
-        lines.push(field(
-            "config",
-            &match &app.config_path {
-                Some(path) => path.display().to_string(),
-                None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".to_string(),
-            },
-        ));
-    }
-
-    // Sized to what it actually holds, wrapping included. A constant height would either
-    // clip the last line of a long provider list or float a short one in empty space, and
-    // the line most likely to be clipped is the one naming a path — which is exactly the
-    // kind of line a panel must not half-show.
-    let rows = wrapped(&lines, inner_width(area, QUICK_WIDTH));
-    let popup = centered(area, QUICK_WIDTH, (rows + 2).min(area.height));
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" ouroboros ", theme::heading()));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-/// How wide the quick-start panel is, as a percentage of the frame. Named because its
-/// height is computed against the same number and the two must not drift apart.
-const QUICK_WIDTH: u16 = 82;
-
-/// How wide the settings overlay is, for the same reason.
+/// How wide the settings overlay is, as a percentage of the frame. Named because its height
+/// is computed against the same number and the two must not drift apart.
 const SETTINGS_WIDTH: u16 = 80;
 
 /// The drawable width inside a popup of `percent`, which is what a line has to fit in.
@@ -723,156 +563,6 @@ fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
             }
         })
         .sum()
-}
-
-/// The typed prompt, with a caret where typing goes and a hint where it has not started.
-fn prompt_row(quick: &QuickStart) -> Line<'static> {
-    let focused = quick.zone == QuickZone::Prompt && !quick.pending;
-
-    let mut spans = vec![Span::styled(
-        if focused { "> " } else { "  " },
-        Style::default().fg(theme::ACCENT),
-    )];
-
-    if quick.prompt.is_empty() {
-        // An empty prompt is a complete answer, and saying so is what stops the box reading
-        // as a required field.
-        spans.push(Span::styled(
-            "optional — Enter with nothing here just opens a session",
-            Style::default().fg(theme::MUTED),
-        ));
-    } else {
-        spans.push(Span::raw(quick.prompt.clone()));
-    }
-
-    if focused {
-        spans.push(Span::styled(
-            "_",
-            Style::default().add_modifier(Modifier::SLOW_BLINK),
-        ));
-    }
-
-    Line::from(spans)
-}
-
-/// The selectable model list: what `runtime.providers` reported, with the cursor on it.
-///
-/// An entry whose probe found no executable is drawn dim and names the executable that was
-/// looked for — that hint *is* the setup instruction, and it is why this screen stays
-/// useful on a machine with nothing installed. It stays selectable regardless: "installed"
-/// is a probe finding a file, the runtime is the authority on whether a session can start,
-/// and refusing on a heuristic would be this client overruling it.
-fn provider_rows(app: &App, quick: &QuickStart) -> Vec<Line<'static>> {
-    let Some(providers) = &app.providers.value else {
-        // A list that was asked for and refused is not the same fact as one nobody has
-        // asked for yet, and a screen that showed them the same way would be reporting a
-        // gateway that cannot answer as a gateway nobody has spoken to.
-        if let Some(error) = &app.providers.error {
-            return vec![Line::from(Span::styled(
-                format!("  runtime.providers was refused: {error}"),
-                Style::default().fg(theme::WARN),
-            ))];
-        }
-
-        return vec![Line::from(Span::styled(
-            if app.providers.pending {
-                "  asking the runtime which providers it serves"
-            } else {
-                "  not asked yet"
-            },
-            Style::default().fg(theme::MUTED),
-        ))];
-    };
-
-    if providers.is_empty() {
-        return vec![Line::from(Span::styled(
-            "  this runtime serves no coding providers, so there is nothing to start here",
-            Style::default().fg(theme::WARN),
-        ))];
-    }
-
-    let focused = quick.zone == QuickZone::Picker;
-    let anything_ready = providers.iter().any(|entry| entry.ready());
-
-    // Two past the longest name, so the column after it is a column rather than a word
-    // touching the one before it.
-    let width = providers
-        .iter()
-        .map(|entry| entry.provider.len())
-        .max()
-        .unwrap_or(1)
-        + 2;
-
-    let mut lines: Vec<Line> = providers
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            // A marker rather than a reversed row: the row's own colour is carrying the
-            // probe result, and inverting it would make the one fact on the line unreadable
-            // exactly where the cursor is.
-            let mut spans = vec![Span::styled(
-                if index == quick.provider { "> " } else { "  " },
-                Style::default().fg(if focused { theme::ACCENT } else { theme::MUTED }),
-            )];
-
-            spans.extend(provider_cells(entry, width));
-            Line::from(spans)
-        })
-        .collect();
-
-    if !anything_ready {
-        lines.push(Line::from(Span::styled(
-            "  none found an executable. Install one of the CLIs above and press r — the \
-             runtime decides, not this probe, so any of them is still yours to try.",
-            Style::default().fg(theme::WARN),
-        )));
-    }
-
-    lines
-}
-
-/// One provider's cells: the mark, the name, and the one line that says why it is dim.
-fn provider_cells(entry: &ProviderEntry, width: usize) -> Vec<Span<'static>> {
-    match &entry.status {
-        Some(probe) if probe.installed && probe.compatible => vec![
-            Span::styled("✓ ", Style::default().fg(theme::GOOD)),
-            Span::raw(format!("{:<width$}", entry.provider)),
-            Span::styled(
-                probe.version.clone().unwrap_or_default(),
-                Style::default().fg(theme::MUTED),
-            ),
-        ],
-        Some(probe) => vec![
-            Span::styled("· ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                format!("{:<width$}", entry.provider),
-                Style::default().fg(theme::MUTED),
-            ),
-            Span::styled(
-                match &probe.executable {
-                    Some(executable) if !probe.installed => {
-                        format!("no {executable} on the runtime's PATH")
-                    }
-                    // Installed but not compatible is a version the harness will not drive,
-                    // which is a different sentence from a missing file.
-                    Some(executable) => {
-                        format!("{executable} is installed but not a version this harness drives")
-                    }
-                    None => "the runtime named no executable for it".to_string(),
-                },
-                Style::default().fg(theme::MUTED),
-            ),
-        ],
-        // A probe that failed is not the same fact as a provider that is missing.
-        None => vec![
-            Span::styled("? ", Style::default().fg(theme::WARN)),
-            Span::raw(format!("{:<width$}", entry.provider)),
-            Span::styled(
-                format!("probe failed: {}", compact(&entry.error)),
-                Style::default().fg(theme::WARN),
-            ),
-        ],
-    }
 }
 
 /// The `,` overlay. Facts above, preferences below, and the line between them labelled.

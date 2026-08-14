@@ -630,10 +630,9 @@ async fn run_ui(
     }
 
     // `open` is `Some` only for `ouro new`, which stated on its command line exactly what
-    // the quick-start screen exists to ask. Offering it a screen to start a session on
-    // would be offering it the thing it just did.
+    // the home composer exists to ask, and is already looking at what it started.
     if !opened {
-        app.offer_quick_start();
+        app.open_home();
     }
 
     let mut daemon = daemon;

@@ -62,7 +62,7 @@ fn account(connected: bool) -> serde_json::Value {
 fn harness(connected: bool) -> App {
     let mut app = app(full_hello());
     app.launch_dir = Some("/work/ouroboros".into());
-    app.offer_quick_start();
+    app.open_home();
     answer(&mut app, Tag::Account, account(connected));
     let _ = app.drain();
     app
