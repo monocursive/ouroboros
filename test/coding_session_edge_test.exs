@@ -123,11 +123,19 @@ defmodule Ouroboros.CodingSessionEdgeTest do
              )
 
     malformed = %{task | options: Map.put(task.options, :agent_profile, %{id: "raw"})}
+    malformed_id = malformed.id
 
     assert {:error, :invalid_task_state} = Store.create(malformed)
 
-    assert {:stop, :invalid_coding_task_checkpoint} =
-             Store.init(storage: {StorageFixture, response: {:ok, %{malformed.id => malformed}}})
+    # Load is structural on purpose. This process is the head of a `rest_for_one` tree,
+    # so a single task this build cannot run must fail as itself when it tries to run —
+    # never by refusing to start the store and every plane beneath it.
+    assert {:ok, %{tasks: %{^malformed_id => %TaskState{}}}} =
+             Store.init(storage: {StorageFixture, response: {:ok, %{malformed_id => malformed}}})
+
+    # A terminal task is the one write the gate lets past: it never builds another
+    # request, and its honest ending has to be recordable.
+    assert :ok = Store.put(%{malformed | status: :failed, error: :unrequestable})
   end
 
   test "task state rejects unknown, inline environment, MCP, and unsafe provider options" do

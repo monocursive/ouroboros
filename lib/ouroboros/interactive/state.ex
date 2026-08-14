@@ -3,6 +3,7 @@ defmodule Ouroboros.Interactive.State do
 
   alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.Event
+  alias Ouroboros.Prompt.Trace
 
   @session_options [
     :transport,
@@ -152,7 +153,7 @@ defmodule Ouroboros.Interactive.State do
         ouroboros_session_id: state.id,
         ouroboros_node: Atom.to_string(state.node)
       }
-      |> maybe_put_prompt_trace(prompt_trace, :ouroboros_prompt)
+      |> Trace.put(prompt_trace, :ouroboros_prompt)
 
     state.options
     |> Map.delete(:agent_profile)
@@ -199,7 +200,7 @@ defmodule Ouroboros.Interactive.State do
         has_system_prompt: present?(Map.get(state.options, :system_prompt)),
         has_provider_options: map_size(Map.get(state.options, :provider_options, %{}) || %{}) > 0
       }
-      |> maybe_put_prompt_trace(prompt_trace)
+      |> Trace.put(prompt_trace)
 
     turns = Map.new(state.turns, fn {id, turn} -> {id, public_turn(turn)} end)
     %{state | options: options, turns: turns}
@@ -230,7 +231,65 @@ defmodule Ouroboros.Interactive.State do
 
   @doc false
   @spec valid?(term()) :: boolean()
-  def valid?(%__MODULE__{} = state) do
+  def valid?(state), do: loadable?(state) and requestable?(state)
+
+  @doc """
+  Returns why a reconstructed session cannot build a Harness request, or `nil`.
+
+  Separate from `valid?/1` so a session whose durable prompt this build cannot honour
+  fails as itself, at the moment it would be handed to the provider, rather than
+  condemning every session that shares its checkpoint.
+  """
+  @spec unrequestable_reason(term()) :: term() | nil
+  def unrequestable_reason(%__MODULE__{options: options} = state) when is_map(options) do
+    system_prompt = Map.get(options, :system_prompt)
+
+    cond do
+      Map.has_key?(options, :agent_profile) ->
+        :agent_profile_in_durable_options
+
+      not valid_system_prompt?(system_prompt) ->
+        :invalid_system_prompt
+
+      true ->
+        case Trace.validate(Map.get(state, :prompt_trace), system_prompt) do
+          :ok -> nil
+          {:error, reason} -> reason
+        end
+    end
+  rescue
+    error -> {:invalid_session_state, error.__struct__}
+  catch
+    kind, _reason -> {:invalid_session_state, kind}
+  end
+
+  def unrequestable_reason(_state), do: :invalid_session_state
+
+  @doc "Returns whether a reconstructed session can safely build a Harness request."
+  @spec requestable?(term()) :: boolean()
+  def requestable?(state), do: unrequestable_reason(state) == nil
+
+  # A terminal session never builds another request, and refusing to write one would
+  # leave a session that stopped satisfying `requestable?/1` mid-run with no way to
+  # record its own honest ending.
+  @doc "Returns whether a session may be written to durable storage."
+  @spec storable?(term()) :: boolean()
+  def storable?(%__MODULE__{} = state),
+    do: loadable?(state) and (terminal?(state) or requestable?(state))
+
+  def storable?(_state), do: false
+
+  @doc """
+  Returns whether a checkpointed session is sound enough to be loaded.
+
+  This is shape and serializability: identifiers, statuses, event and turn structure,
+  no runtime authority smuggled into durable state. It deliberately says nothing about
+  whether the session's prompt can be reproduced — that question belongs to
+  `requestable?/1`, and answering it at load would let one session veto the boot of
+  every other session in the same checkpoint.
+  """
+  @spec loadable?(term()) :: boolean()
+  def loadable?(%__MODULE__{} = state) do
     state.id |> valid_id?() and
       is_atom(state.node) and not is_nil(state.node) and
       is_atom(state.provider) and not is_nil(state.provider) and
@@ -247,18 +306,12 @@ defmodule Ouroboros.Interactive.State do
       is_integer(state.event_limit) and state.event_limit > 0 and state.event_limit <= 100_000 and
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
-      not Map.has_key?(state.options, :agent_profile) and
-      valid_system_prompt?(Map.get(state.options, :system_prompt)) and
-      valid_prompt_trace?(
-        Map.get(state, :prompt_trace),
-        Map.get(state.options, :system_prompt)
-      ) and
       serializable?(state.options) and serializable?(state.error)
   rescue
     _error -> false
   end
 
-  def valid?(_state), do: false
+  def loadable?(_state), do: false
 
   defp validate_session_options(opts) do
     accepted =
@@ -299,6 +352,32 @@ defmodule Ouroboros.Interactive.State do
     keys = Keyword.keys(opts)
     Enum.uniq(keys) == keys
   end
+
+  @doc """
+  Returns a term safe to checkpoint, with runtime authority rendered as text.
+
+  Redaction removes secrets but keeps pids: a harness call exit reason carries the
+  process it was calling. A session that checkpointed one was refused by the store on
+  every attempt, forever, over an error term that was only ever meant to be read.
+  """
+  @spec durable_term(term()) :: term()
+  def durable_term(term)
+      when is_pid(term) or is_port(term) or is_reference(term) or is_function(term),
+      do: inspect(term)
+
+  def durable_term(%module{} = term) do
+    term |> Map.from_struct() |> Map.new(&durable_pair/1) |> then(&struct(module, &1))
+  end
+
+  def durable_term(term) when is_map(term), do: Map.new(term, &durable_pair/1)
+  def durable_term(term) when is_list(term), do: Enum.map(term, &durable_term/1)
+
+  def durable_term(term) when is_tuple(term),
+    do: term |> Tuple.to_list() |> Enum.map(&durable_term/1) |> List.to_tuple()
+
+  def durable_term(term), do: term
+
+  defp durable_pair({key, value}), do: {durable_term(key), durable_term(value)}
 
   defp validate_serializable_options(opts) do
     if serializable?(Map.new(opts)), do: :ok, else: {:error, :non_serializable_options}
@@ -401,38 +480,4 @@ defmodule Ouroboros.Interactive.State do
 
   defp valid_system_prompt?(prompt),
     do: is_nil(prompt) or (is_binary(prompt) and String.valid?(prompt))
-
-  defp maybe_put_prompt_trace(map, nil, _key), do: map
-  defp maybe_put_prompt_trace(map, trace, key), do: Map.put(map, key, trace)
-
-  defp maybe_put_prompt_trace(map, trace),
-    do: maybe_put_prompt_trace(map, trace, :prompt_assembly)
-
-  defp valid_prompt_trace?(nil, _system_prompt), do: true
-
-  defp valid_prompt_trace?(trace, system_prompt) when is_map(trace) do
-    Map.keys(trace) |> Enum.sort() ==
-      [:digest, :profile_digest, :profile_id, :profile_version, :version] and
-      trace.version == Ouroboros.Prompt.Assembler.version() and is_binary(trace.profile_id) and
-      is_integer(trace.profile_version) and trace.profile_version > 0 and
-      valid_digest?(trace.digest) and valid_digest?(trace.profile_digest) and
-      is_binary(system_prompt) and prompt_digest(system_prompt) == trace.digest
-  end
-
-  defp valid_prompt_trace?(_trace, _system_prompt), do: false
-
-  defp prompt_digest(prompt) do
-    :sha256
-    |> :crypto.hash(prompt)
-    |> Base.encode16(case: :lower)
-  end
-
-  defp valid_digest?(digest) when is_binary(digest) do
-    case Base.decode16(digest, case: :lower) do
-      {:ok, decoded} -> byte_size(decoded) == 32
-      :error -> false
-    end
-  end
-
-  defp valid_digest?(_digest), do: false
 end

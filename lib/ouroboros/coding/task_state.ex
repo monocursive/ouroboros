@@ -2,7 +2,7 @@ defmodule Ouroboros.Coding.TaskState do
   @moduledoc "The serializable source of truth for one coding-agent run."
 
   alias Ouroboros.Coding.Event
-  alias Ouroboros.{AgentProfile, Prompt.Assembler}
+  alias Ouroboros.{AgentProfile, Prompt.Assembler, Prompt.Trace}
   alias Ouroboros.Provider
 
   @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :origin_digest]
@@ -246,17 +246,40 @@ defmodule Ouroboros.Coding.TaskState do
 
   @doc "Returns whether a reconstructed task can safely build a Harness request."
   @spec requestable?(term()) :: boolean()
-  def requestable?(%__MODULE__{options: options} = state) when is_map(options) do
-    not Map.has_key?(options, :agent_profile) and
-      valid_system_prompt?(Map.get(options, :system_prompt)) and
-      valid_prompt_trace?(Map.get(state, :prompt_trace), Map.get(options, :system_prompt))
+  def requestable?(state), do: unrequestable_reason(state) == nil
+
+  @doc """
+  Returns why a reconstructed task cannot build a Harness request, or `nil`.
+
+  A task whose durable prompt cannot be trusted — a profile option a rollback would
+  hand to Harness, a prompt that is no longer a UTF-8 binary, a trace from a prompt
+  format this build does not implement — fails as itself, by name. It is not grounds
+  for refusing to load the checkpoint that contains it.
+  """
+  @spec unrequestable_reason(term()) :: term() | nil
+  def unrequestable_reason(%__MODULE__{options: options} = state) when is_map(options) do
+    system_prompt = Map.get(options, :system_prompt)
+
+    cond do
+      Map.has_key?(options, :agent_profile) ->
+        :agent_profile_in_durable_options
+
+      not valid_system_prompt?(system_prompt) ->
+        :invalid_system_prompt
+
+      true ->
+        case Trace.validate(Map.get(state, :prompt_trace), system_prompt) do
+          :ok -> nil
+          {:error, reason} -> reason
+        end
+    end
   rescue
-    _error -> false
+    error -> {:invalid_task_state, error.__struct__}
   catch
-    _kind, _reason -> false
+    kind, _reason -> {:invalid_task_state, kind}
   end
 
-  def requestable?(_state), do: false
+  def unrequestable_reason(_state), do: :invalid_task_state
 
   @doc false
   @spec public(t()) :: t()
@@ -270,7 +293,7 @@ defmodule Ouroboros.Coding.TaskState do
       |> Map.put(:attachment_count, list_count(state.options[:attachments]))
       |> Map.put(:additional_directory_count, list_count(state.options[:add_dirs]))
       |> Map.put(:has_provider_options, map_size(state.options[:provider_options] || %{}) > 0)
-      |> maybe_put_prompt_trace(prompt_trace)
+      |> Trace.put(prompt_trace)
 
     state
     |> Map.put(:origin_digest, nil)
@@ -286,7 +309,7 @@ defmodule Ouroboros.Coding.TaskState do
         ouroboros_task_id: state.id,
         ouroboros_node: Atom.to_string(node())
       }
-      |> maybe_put_prompt_trace(prompt_trace, :ouroboros_prompt)
+      |> Trace.put(prompt_trace, :ouroboros_prompt)
 
     state.options
     |> Map.delete(:agent_profile)
@@ -396,38 +419,4 @@ defmodule Ouroboros.Coding.TaskState do
 
   defp put_system_prompt(options, system_prompt),
     do: Map.put(options, :system_prompt, system_prompt)
-
-  defp maybe_put_prompt_trace(map, nil, _key), do: map
-  defp maybe_put_prompt_trace(map, trace, key), do: Map.put(map, key, trace)
-
-  defp maybe_put_prompt_trace(map, trace),
-    do: maybe_put_prompt_trace(map, trace, :prompt_assembly)
-
-  defp valid_prompt_trace?(nil, _system_prompt), do: true
-
-  defp valid_prompt_trace?(trace, system_prompt) when is_map(trace) do
-    Map.keys(trace) |> Enum.sort() ==
-      [:digest, :profile_digest, :profile_id, :profile_version, :version] and
-      trace.version == Assembler.version() and is_binary(trace.profile_id) and
-      is_integer(trace.profile_version) and trace.profile_version > 0 and
-      valid_digest?(trace.digest) and valid_digest?(trace.profile_digest) and
-      is_binary(system_prompt) and prompt_digest(system_prompt) == trace.digest
-  end
-
-  defp valid_prompt_trace?(_trace, _system_prompt), do: false
-
-  defp prompt_digest(prompt) do
-    :sha256
-    |> :crypto.hash(prompt)
-    |> Base.encode16(case: :lower)
-  end
-
-  defp valid_digest?(digest) when is_binary(digest) do
-    case Base.decode16(digest, case: :lower) do
-      {:ok, decoded} -> byte_size(decoded) == 32
-      :error -> false
-    end
-  end
-
-  defp valid_digest?(_digest), do: false
 end
