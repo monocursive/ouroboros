@@ -73,6 +73,63 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     assert message =~ "Codex is not installed on the runtime host"
   end
 
+  describe "a failed connection leaves nothing running" do
+    test "an app-server that never answers initialize is timed out and closed" do
+      executable = fake_app_server("")
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+      caller = Task.async(fn -> CodexAppServer.read(server) end)
+
+      assert eventually(fn -> server_ports(server) != [] end),
+             "the request never opened a port"
+
+      # The module's own initialize deadline, delivered rather than waited out.
+      send(server, {:request_timeout, 0})
+
+      assert {:error, {:timeout, "initialize"}} = Task.await(caller, 5_000)
+      assert Process.alive?(server)
+      assert server_ports(server) == []
+      assert_no_orphans(executable)
+    end
+
+    test "an app-server that refuses to initialize is closed" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"error":{"code":-32000,"message":"unsupported client"}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      assert {:error, {:upstream, message}} = CodexAppServer.read(server)
+      assert message =~ "unsupported client"
+      assert Process.alive?(server)
+      assert server_ports(server) == []
+      assert_no_orphans(executable)
+    end
+
+    test "three refused reads leave three fewer processes than they started" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"error":{"code":-32000,"message":"unsupported client"}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      for _attempt <- 1..3 do
+        assert {:error, {:upstream, _message}} = CodexAppServer.read(server)
+      end
+
+      # `account.read` is a `:read`-scope gateway method. Before this, each failed read
+      # left a live `codex` process nobody could reach or stop.
+      assert server_ports(server) == []
+      assert_no_orphans(executable)
+    end
+  end
+
   defp index!(order, id) do
     case Enum.find_index(order, &(&1 == id)) do
       nil -> flunk("#{inspect(id)} is not supervised by Ouroboros.Supervisor on this node")
@@ -80,7 +137,63 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     end
   end
 
-  defp fake_app_server do
+  defp server_ports(server) do
+    Enum.filter(Port.list(), fn port ->
+      match?({:connected, ^server}, Port.info(port, :connected))
+    end)
+  end
+
+  # A fake lives at a path unique to its test, so anything still running under that path
+  # is an app-server whose connection was abandoned rather than closed.
+  defp assert_no_orphans(executable) do
+    assert eventually(fn -> orphans(executable) == [] end),
+           "a Codex app-server outlived its connection: #{inspect(orphans(executable))}"
+  end
+
+  defp orphans(executable) do
+    {listing, _status} = System.cmd("ps", ["-A", "-ww", "-o", "pid=,command="])
+
+    listing
+    |> String.split("\n", trim: true)
+    |> Enum.filter(&String.contains?(&1, executable))
+  end
+
+  defp eventually(condition, attempts \\ 40) do
+    cond do
+      condition.() ->
+        true
+
+      attempts > 0 ->
+        Process.sleep(25)
+        eventually(condition, attempts - 1)
+
+      true ->
+        false
+    end
+  end
+
+  @default_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":0,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"id":1,'*'"method":"account/read"'*)
+      echo '{"id":1,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
+      ;;
+    *'"method":"account/login/start"'*)
+      echo '{"id":2,"result":{"type":"chatgptDeviceCode","loginId":"login-1","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}}'
+      echo '{"method":"account/login/completed","params":{"loginId":"login-1","success":true,"error":null}}'
+      ;;
+    *'"id":3,'*'"method":"account/read"'*)
+      echo '{"id":3,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
+      ;;
+    *'"method":"account/logout"'*)
+      echo '{"id":4,"result":{}}'
+      ;;
+  """
+
+  # Every fake answers on stdout and records what it was sent, so a test can assert on the
+  # client half of the protocol as well as the server half.
+  defp fake_app_server(cases \\ @default_cases) do
     dir =
       Path.join(
         System.tmp_dir!(),
@@ -90,32 +203,16 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     File.mkdir_p!(dir)
     path = Path.join(dir, "codex")
 
-    File.write!(
-      path,
-      """
-      #!/bin/sh
-      while IFS= read -r line; do
-        case "$line" in
-          *'"method":"initialize"'*)
-            echo '{"id":0,"result":{"userAgent":"fake"}}'
-            ;;
-          *'"id":1,'*'"method":"account/read"'*)
-            echo '{"id":1,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
-            ;;
-          *'"method":"account/login/start"'*)
-            echo '{"id":2,"result":{"type":"chatgptDeviceCode","loginId":"login-1","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}}'
-            echo '{"method":"account/login/completed","params":{"loginId":"login-1","success":true,"error":null}}'
-            ;;
-          *'"id":3,'*'"method":"account/read"'*)
-            echo '{"id":3,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
-            ;;
-          *'"method":"account/logout"'*)
-            echo '{"id":4,"result":{}}'
-            ;;
-        esac
-      done
-      """
-    )
+    File.write!(path, """
+    #!/bin/sh
+    log="$0.log"
+    while IFS= read -r line; do
+      printf '%s\\n' "$line" >> "$log"
+      case "$line" in
+    #{cases}
+      esac
+    done
+    """)
 
     File.chmod!(path, 0o755)
     on_exit(fn -> File.rm_rf(dir) end)

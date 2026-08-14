@@ -170,14 +170,21 @@ defmodule Ouroboros.Provider.CodexAppServer do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{port: port}) when is_port(port) do
+  def terminate(_reason, %{port: port}), do: close_port(port)
+
+  # Closing the port is what ends the `codex` process: it holds the child's stdin, and the
+  # app-server exits on EOF. A reset that only forgot the port would leave an OS process
+  # alive with nobody able to reach it, and `account/read` is a `:read`-scope call — a
+  # read-only token could spawn them without bound. Already-closed is not a failure; the
+  # only way to know is to try.
+  defp close_port(port) when is_port(port) do
     Port.close(port)
     :ok
   catch
     :error, :badarg -> :ok
   end
 
-  def terminate(_reason, _state), do: :ok
+  defp close_port(_port), do: :ok
 
   defp ensure_started(%{port: port} = state) when is_port(port), do: {:ok, state}
 
@@ -214,7 +221,7 @@ defmodule Ouroboros.Provider.CodexAppServer do
           {:ok, %{state | pending: pending}}
 
         {:error, reason} ->
-          Port.close(port)
+          close_port(port)
           {:error, reason, %{state | port: nil}}
       end
     else
@@ -448,6 +455,8 @@ defmodule Ouroboros.Provider.CodexAppServer do
   end
 
   defp reset(state, reason) do
+    close_port(state.port)
+
     login =
       if state.login["status"] == "pending" do
         %{state.login | "status" => "failed", "error" => inspect(reason)}
