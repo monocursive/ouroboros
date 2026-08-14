@@ -2,6 +2,7 @@ defmodule Ouroboros.Coding.TaskState do
   @moduledoc "The serializable source of truth for one coding-agent run."
 
   alias Ouroboros.Coding.Event
+  alias Ouroboros.Provider
 
   @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :origin_digest]
   @request_options [
@@ -133,24 +134,31 @@ defmodule Ouroboros.Coding.TaskState do
           options: map()
         }
 
+  # The interactive plane builds its own base from this struct, and the two planes differ
+  # in what they may do with a safety default the provider cannot enforce, so the plane
+  # travels with the call rather than being guessed from the objective.
   @doc false
-  @spec new(String.t(), String.t(), keyword()) :: {:ok, t()} | {:error, term()}
-  def new(id, objective, opts) when is_list(opts) do
+  @spec new(String.t(), String.t(), keyword(), Provider.plane()) ::
+          {:ok, t()} | {:error, term()}
+  def new(id, objective, opts, plane \\ :coding)
+
+  def new(id, objective, opts, plane) when is_list(opts) do
     if Keyword.keyword?(opts) do
-      do_new(id, objective, opts)
+      do_new(id, objective, opts, plane)
     else
       {:error, :invalid_options}
     end
   end
 
-  def new(_id, _objective, _opts), do: {:error, :invalid_options}
+  def new(_id, _objective, _opts, _plane), do: {:error, :invalid_options}
 
-  defp do_new(id, objective, opts) do
+  defp do_new(id, objective, opts, plane) do
     workspace_option = Keyword.get(opts, :workspace, File.cwd!())
     provider = Keyword.get(opts, :provider, :codex)
     sandbox_mode = Keyword.get(opts, :sandbox_mode, :read_only)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
+    safety = Provider.safety_options(provider, opts, plane)
 
     cond do
       unknown = unknown_option(opts) ->
@@ -189,7 +197,11 @@ defmodule Ouroboros.Coding.TaskState do
       not valid_event_limit?(Keyword.get(opts, :event_limit, 10_000)) ->
         {:error, :invalid_event_limit}
 
+      match?({:error, _reason}, safety) ->
+        safety
+
       true ->
+        {:ok, safety_options} = safety
         workspace = Path.expand(workspace_option)
         now = DateTime.utc_now() |> DateTime.to_iso8601()
 
@@ -206,7 +218,7 @@ defmodule Ouroboros.Coding.TaskState do
            workspace_mode: workspace_mode,
            origin_digest: origin_digest,
            event_limit: Keyword.get(opts, :event_limit, 10_000),
-           options: request_options(opts)
+           options: request_options(opts, safety_options)
          }}
     end
   end
@@ -245,11 +257,15 @@ defmodule Ouroboros.Coding.TaskState do
     })
   end
 
-  defp request_options(opts) do
+  # `Ouroboros.Provider` has already decided what the two safety options may be, stated
+  # values included, so they are dropped here and merged back rather than defaulted a
+  # second time. An option it omitted must be absent from the request, not present as
+  # `nil`: absent is what leaves the harness request at `:default`.
+  defp request_options(opts, safety_options) do
     opts
     |> Keyword.take(@request_options)
-    |> Keyword.put(:approval_mode, Keyword.get(opts, :approval_mode, :prompt))
-    |> Keyword.put(:sandbox_mode, Keyword.get(opts, :sandbox_mode, :read_only))
+    |> Keyword.drop([:approval_mode, :sandbox_mode])
+    |> Keyword.merge(safety_options)
     |> Map.new()
   end
 
