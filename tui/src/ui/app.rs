@@ -1305,6 +1305,35 @@ impl App {
         self.config.defaults.provider.as_deref().unwrap_or("codex")
     }
 
+    /// Whether `account.read` has come back at all — with a state, or with a refusal.
+    ///
+    /// Not the same question as [`home_ready`](Self::home_ready): until this is true the
+    /// client does not yet know whether the home is ready, and it must not act as though
+    /// the answer were "no".
+    fn account_resolved(&self) -> bool {
+        self.account.value.is_some() || self.account.error.is_some()
+    }
+
+    /// Whether the visible home composer owns this key, or the global bindings do.
+    ///
+    /// The composer is on screen from the first frame and the caret is in it, so the first
+    /// thing typed has to land in the draft. Gating that on *readiness* meant the account
+    /// round trip decided where a keystroke went: type "quick fix" a moment too early and
+    /// the `q` opened the quit dialog. The gate is resolution instead — once the runtime
+    /// has answered, an unauthenticated home genuinely is a surface whose printable keys
+    /// belong to the shell, and it says so on screen.
+    fn home_owns_key(&self, code: crossterm::event::KeyCode) -> bool {
+        use crossterm::event::KeyCode;
+
+        self.home_ready()
+            || !self.home_draft.text().is_empty()
+            || !self.account_resolved()
+            || matches!(
+                code,
+                KeyCode::Char('/') | KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc
+            )
+    }
+
     pub fn home_workspace(&self) -> String {
         self.default_workspace()
     }
@@ -2533,14 +2562,7 @@ impl App {
             return;
         }
 
-        if self.tab == Tab::Sessions
-            && self.sessions.open.is_none()
-            && (self.home_ready()
-                || !self.home_draft.text().is_empty()
-                || matches!(
-                    key.code,
-                    KeyCode::Char('/') | KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc
-                ))
+        if self.tab == Tab::Sessions && self.sessions.open.is_none() && self.home_owns_key(key.code)
         {
             self.home_key(key);
             return;

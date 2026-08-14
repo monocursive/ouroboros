@@ -135,6 +135,49 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         .all(|call| call.method != "account.login.start"));
 }
 
+/// `account.read` is a round trip, and the composer is on screen with the caret in it from
+/// the first frame. Gating the draft on *readiness* meant typing "quick fix" a moment too
+/// early sent the `q` to the quit dialog.
+#[test]
+fn the_first_keystrokes_land_in_the_draft_while_the_account_answer_is_in_flight() {
+    let mut app = app(full_hello());
+    app.launch_dir = Some("/work/ouroboros".into());
+    app.open_home();
+    let _ = app.drain();
+
+    // Nothing has answered `account.read` yet.
+    assert!(!app.chatgpt_connected());
+
+    type_text(&mut app, "quick fix for the parser");
+
+    assert!(app.overlay.is_none(), "no dialog was asked for");
+    assert_eq!(app.home_draft.text(), "quick fix for the parser");
+
+    // And the draft survives the answer that says the home is not ready.
+    answer(&mut app, Tag::Account, account(false));
+    assert_eq!(app.home_draft.text(), "quick fix for the parser");
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("quick fix for the parser"),
+        "{}",
+        screen.text()
+    );
+}
+
+/// Once the runtime has answered, an unauthenticated home is a surface whose printable keys
+/// belong to the shell, and it says so on screen. That half is deliberate and stays.
+#[test]
+fn a_resolved_unauthenticated_home_still_gives_printable_keys_to_the_shell() {
+    let mut app = harness(false);
+    assert!(app.home_draft.is_empty());
+
+    app.apply(key(KeyCode::Char('q')));
+
+    assert!(app.home_draft.is_empty());
+    assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
+}
+
 #[test]
 fn slash_commands_are_available_before_codex_sign_in() {
     let mut app = harness(false);
