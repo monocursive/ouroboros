@@ -385,27 +385,42 @@ defmodule Ouroboros.Provider.CodexAppServer do
   end
 
   defp frame(%{"method" => "account/login/completed", "params" => params}, state) do
-    login = %{
-      "status" => if(params["success"], do: "succeeded", else: "failed"),
-      "loginId" => params["loginId"],
-      "flow" => state.login["flow"],
-      "error" => params["error"]
-    }
+    # A completion names the login it belongs to. Applying one that names a different
+    # login — a cancelled attempt whose notification arrived late, say — would report its
+    # outcome as the outcome of the sign-in the operator is actually watching.
+    if pending_login?(state, params["loginId"]) do
+      login = %{
+        state.login
+        | "status" => if(params["success"], do: "succeeded", else: "failed"),
+          "error" => params["error"]
+      }
 
-    %{state | login: login}
+      %{state | login: login}
+    else
+      Logger.debug(fn ->
+        "ignored a Codex sign-in completion for #{inspect(params["loginId"])}; " <>
+          "this connection is not waiting on it"
+      end)
+
+      state
+    end
   end
 
   defp frame(%{"method" => "account/updated", "params" => params}, state) do
-    # The next `account/read` remains the source of account identity. This notification
-    # only makes a completed sign-in visible immediately while that read is in flight.
-    login =
-      if params["authMode"] do
-        %{state.login | "status" => "succeeded", "error" => nil}
-      else
-        @idle_login
-      end
+    cond do
+      # The next `account/read` remains the source of account identity. This notification
+      # only makes a completed sign-in visible immediately while that read is in flight,
+      # and only for a sign-in this connection is actually waiting on.
+      params["authMode"] && state.login["status"] == "pending" ->
+        %{state | login: %{state.login | "status" => "succeeded", "error" => nil}}
 
-    %{state | login: login}
+      params["authMode"] ->
+        state
+
+      # The host has no account any more, so no login state here is about anything.
+      true ->
+        %{state | login: @idle_login}
+    end
   end
 
   defp frame(%{"id" => @initialize_id} = response, state) do
@@ -517,6 +532,12 @@ defmodule Ouroboros.Provider.CodexAppServer do
     GenServer.reply(from, {:error, {:upstream, error}})
     state
   end
+
+  defp pending_login?(%{login: %{"status" => "pending", "loginId" => login_id}}, login_id)
+       when is_binary(login_id),
+       do: true
+
+  defp pending_login?(_state, _login_id), do: false
 
   defp app_server_error(%{"error" => %{"message" => message}}) when is_binary(message),
     do: message

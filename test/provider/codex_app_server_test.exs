@@ -121,6 +121,63 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     assert message =~ "Codex is not installed on the runtime host"
   end
 
+  describe "login state belongs to the login it names" do
+    test "a completion and a cancel for another login leave the pending one alone" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            ;;
+          *'"method":"account/login/start"'*)
+            echo '{"id":1,"result":{"type":"chatgptDeviceCode","loginId":"login-1","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}}'
+            echo '{"method":"account/login/completed","params":{"loginId":"login-9","success":false,"error":"a different sign-in failed"}}'
+            ;;
+          *'"method":"account/login/cancel"'*)
+            echo '{"id":2,"result":{}}'
+            ;;
+          *'"method":"account/read"'*)
+            echo '{"id":3,"result":{"account":null,"requiresOpenaiAuth":true}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      assert {:ok, %{"login" => %{"status" => "pending", "loginId" => "login-1"}}} =
+               CodexAppServer.login(:device_code, server)
+
+      # Cancelling some other login is not this login ending.
+      assert {:ok, %{}} = CodexAppServer.cancel("login-9", server)
+
+      assert {:ok, %{"login" => login}} = CodexAppServer.read(server)
+
+      assert login == %{
+               "status" => "pending",
+               "loginId" => "login-1",
+               "flow" => "device_code",
+               "error" => nil
+             }
+    end
+
+    test "an account update with no sign-in pending does not invent a succeeded one" do
+      executable =
+        fake_app_server("""
+          *'"method":"initialize"'*)
+            echo '{"id":0,"result":{"userAgent":"fake"}}'
+            ;;
+          *'"method":"account/read"'*)
+            echo '{"method":"account/updated","params":{"authMode":"chatgpt"}}'
+            echo '{"id":1,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
+            ;;
+        """)
+
+      server = start_supervised!({CodexAppServer, name: nil, executable: executable})
+
+      # An account that was already connected — or connected from another terminal — is
+      # not this connection's sign-in succeeding.
+      assert {:ok, %{"login" => %{"status" => "idle"}}} = CodexAppServer.read(server)
+    end
+  end
+
   describe "the connection is not silent about its own failures" do
     test "a refused initialize and the reset it causes are both warnings" do
       executable =
