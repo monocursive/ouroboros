@@ -497,7 +497,7 @@ async fn stream_ended_stops_the_client_expecting_more() {
         })
         .await;
 
-    // Twenty seconds of ticks against a finished session.
+    // A long run of ticks against a finished session.
     for _ in 0..80 {
         harness.app.apply(Msg::Tick);
     }
@@ -573,7 +573,7 @@ async fn a_notification_this_client_could_not_take_is_repaired_like_a_lag() {
     // The interruption is old enough to have scrolled above the compact chat viewport;
     // the complete ledger must retain it exactly.
     harness.app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('e'),
+        crossterm::event::KeyCode::Char('o'),
         crossterm::event::KeyModifiers::CONTROL,
     )));
     let screen = harness.screen(110, 24);

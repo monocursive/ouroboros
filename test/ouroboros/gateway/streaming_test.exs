@@ -136,9 +136,11 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       assert response["result"]["id"] == "typed-turn"
 
-      assert_receive {:ouroboros_test_adapter_started, _run,
-                      %RunRequest{prompt: "inspect the typed envelope"}, adapter},
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt},
+                      adapter},
                      @receive_timeout
+
+      assert Ouroboros.Test.Prompt.wrapped?(prompt, "inspect the typed envelope")
 
       assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "typed"})
       assert :ok = HarnessAdapter.finish(adapter)
@@ -431,6 +433,50 @@ defmodule Ouroboros.Gateway.StreamingTest do
       # closed socket, and exit rather than leak.
       :erlang.resume_process(writer)
     end
+
+    @tag queue_limit: 4
+    test "unsubscribing while lagged does not emit stream.lagged", %{client: client} do
+      {ref, id} = start_session()
+      assert call(client, "interactive.subscribe", %{"id" => id})["result"]
+
+      writer = writer_pid(client)
+      :erlang.suspend_process(writer)
+
+      adapter = send_message(ref, "overflow")
+
+      for index <- 1..40 do
+        assert :ok =
+                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                   "text" => "chunk #{index} " <> String.duplicate("z", 512)
+                 })
+      end
+
+      assert :ok = HarnessAdapter.finish(adapter)
+      await_ingested(id, 40)
+      await_lagging(client)
+
+      request_id = System.unique_integer([:positive])
+
+      :ok =
+        :gen_tcp.send(client, [
+          JSON.encode_to_iodata!(%{
+            "jsonrpc" => "2.0",
+            "id" => request_id,
+            "method" => "interactive.unsubscribe",
+            "params" => %{"id" => id}
+          }),
+          ?\n
+        ])
+
+      await_unsubscribed(client, id)
+
+      :erlang.resume_process(writer)
+      assert await_response(client, request_id)["result"] == "ok"
+      assert is_list(call(client, "interactive.list")["result"])
+
+      assert call(client, "interactive.subscribe", %{"id" => id})["result"]
+      refute lagged_subscription?(conn_pid(client))
+    end
   end
 
   defp start_session(opts \\ []) do
@@ -509,9 +555,25 @@ defmodule Ouroboros.Gateway.StreamingTest do
   defp await_lagging(_client, 0), do: flunk("the outbound queue never overflowed")
 
   defp await_lagging(client, attempts) do
-    if :sys.get_state(conn_pid(client)).lagging == %{} do
+    if lagged_subscription?(conn_pid(client)) do
+      :ok
+    else
       Process.sleep(10)
       await_lagging(client, attempts - 1)
+    end
+  end
+
+  defp lagged_subscription?(pid) do
+    Enum.any?(:sys.get_state(pid).subscriptions, fn {_key, sub} -> sub.dropped > 0 end)
+  end
+
+  defp await_unsubscribed(client, id, attempts \\ 2_000)
+  defp await_unsubscribed(_client, _id, 0), do: flunk("unsubscribe was never applied")
+
+  defp await_unsubscribed(client, id, attempts) do
+    if Map.has_key?(:sys.get_state(conn_pid(client)).subscriptions, {:interactive, id}) do
+      Process.sleep(10)
+      await_unsubscribed(client, id, attempts - 1)
     else
       :ok
     end

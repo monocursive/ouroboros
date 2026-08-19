@@ -196,8 +196,8 @@ impl Watch {
     /// What the renderer just laid out, and the offset correction that keeps a scrolled-back
     /// reader looking at the same rows.
     ///
-    /// `scroll` counts from the bottom, so every appended row — a streamed delta, the three
-    /// rows of the typing indicator, a running tool cell rewritten as a completed one —
+    /// `scroll` counts from the bottom, so every appended row — a streamed delta, the
+    /// working indicator, a running tool cell rewritten as a completed one —
     /// would otherwise slide the whole viewport downwards under someone reading history.
     /// Moving the offset by the same amount holds the content still. Following the tail is
     /// the one case that *should* move, and it is excluded.

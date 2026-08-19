@@ -1,9 +1,8 @@
 //! The Ouroboros mark and its compact chat shorthand.
 //!
 //! A terminal cell is roughly twice as tall as it is wide, so two logical pixel rows are
-//! folded into one cell with `▀`, `▄`, and `█`. Chat uses a single-cell clockwise serpent
-//! beside a conventional three-dot typing cadence, retaining the identity without placing
-//! the full mark between two messages.
+//! folded into one cell with `▀`, `▄`, and `█`. Chat uses the same one-line braille working
+//! indicator as Pi and OpenCode rather than placing the full mark between two messages.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -38,6 +37,7 @@ const MASTER: [&str; 14] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Treatment {
     Static,
+    Alive { tick: u64 },
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, treatment: Treatment) {
@@ -54,38 +54,9 @@ pub fn lines(treatment: Treatment) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// A quiet, one-line form of the mark for the next agent-message position in chat.
+/// A quiet, one-line working indicator for the next agent-message position in chat.
 pub fn typing_indicator(tick: u64) -> Line<'static> {
-    let active = ((tick / 2) % 3) as usize;
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            "⟳",
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-    ];
-
-    for dot in 0..3 {
-        if dot > 0 {
-            spans.push(Span::raw(" "));
-        }
-
-        spans.push(if dot == active {
-            Span::styled(
-                "•",
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled("·", Style::default().fg(theme::MUTED))
-        });
-    }
-
-    Line::from(spans)
+    theme::working(tick, theme::working_verb(tick))
 }
 
 fn line(top: usize, treatment: Treatment) -> Line<'static> {
@@ -120,6 +91,16 @@ fn style(treatment: Treatment) -> Style {
         Treatment::Static => Style::default()
             .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD),
+        Treatment::Alive { tick } => {
+            // A slow pulse on the home mark so an idle coding surface still feels live.
+            if (tick / 8) % 2 == 0 {
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::ACCENT)
+            }
+        }
     }
 }
 
@@ -160,8 +141,11 @@ mod tests {
                 .collect::<String>()
         };
 
-        assert_eq!(text(0), "  ⟳  • · ·");
-        assert_eq!(text(2), "  ⟳  · • ·");
-        assert_eq!(text(4), "  ⟳  · · •");
+        assert_eq!(text(0), "  ⠋  Working");
+        assert_eq!(text(1), "  ⠙  Working");
+        assert_eq!(
+            text(theme::WORKING_VERB_TICKS),
+            format!("  {}  Thinking", theme::spinner(theme::WORKING_VERB_TICKS))
+        );
     }
 }

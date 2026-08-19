@@ -207,7 +207,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         }
       ],
       orchestration_plans: [],
-      control: %{enabled: false, runs: []},
+      control: %{runs: []},
       upgrade: %{
         node: :ouroboros@golden,
         mode: :ready,
@@ -217,7 +217,8 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         rollback_receipts: [],
         operations: []
       },
-      release: %{mode: :ready, handler_releases: [], ephemeral_capability_count: 0}
+      release: %{mode: :ready, handler_releases: [], ephemeral_capability_count: 0},
+      forge: %{signer: :deny, admit_possible?: false, live_count: 0, live: []}
     })
   end
 

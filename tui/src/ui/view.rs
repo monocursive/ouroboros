@@ -16,7 +16,7 @@ use crate::model::{Plane, ProviderEntry};
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, Mode, NewField,
     NewSession, NoticeKind, Overlay, ProviderChoice, Settings, SettingsField, Tab,
-    APPROVAL_CHOICES,
+    APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::theme;
 
@@ -43,6 +43,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     status_line(frame, rows[2], app);
     overlay(frame, frame.area(), app);
+
+    if app.leader_pending() {
+        leader_hint(frame, frame.area());
+    }
 }
 
 fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -87,7 +91,14 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let context = if app.tab == Tab::Sessions {
         match &app.sessions.open {
-            Some((_plane, id)) => format!("Session: {}", super::tree::truncate(id, 36)),
+            Some((_plane, id)) => {
+                let session = format!("Session: {}", super::tree::truncate(id, 36));
+                if app.waiting_for_open_agent_reply() {
+                    format!("{}  {session}", theme::spinner(app.ticks))
+                } else {
+                    session
+                }
+            }
             None => "New coding session".to_string(),
         }
     } else {
@@ -200,7 +211,7 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![Span::styled(
         if app.tab == Tab::Sessions {
-            "ctrl+p commands  ·  ctrl+q quit  ·  ctrl+c interrupt"
+            "ctrl+p commands  ·  ctrl+x leader  ·  esc interrupt  ·  ctrl+q quit"
         } else {
             "ctrl+p commands  ·  Esc returns to coding  ·  r refresh"
         },
@@ -244,7 +255,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
     match overlay {
         Overlay::Commands(palette) => command_palette(frame, area, palette),
         Overlay::Account(dialog) => account_dialog(frame, area, app, dialog),
-        Overlay::SessionPicker { choice } => session_picker(frame, area, app, *choice),
+        Overlay::SessionPicker { selected } => session_picker(frame, area, app, selected.as_ref()),
         Overlay::Help => help(frame, area, app),
         Overlay::Quit { options, choice } => chooser(
             frame,
@@ -361,6 +372,7 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
 
     let mut lines = Vec::new();
     let mut previous_group = "";
+    let mut selected_line = 0;
     let content_width = rows[2].width as usize;
 
     for (index, command) in commands.iter().enumerate() {
@@ -378,6 +390,9 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
         }
 
         let selected = index == palette.selected;
+        if selected {
+            selected_line = lines.len();
+        }
         let prefix = if selected { "  › " } else { "    " };
         let start = format!("{prefix}{}", command.label());
         let gap = content_width
@@ -398,7 +413,10 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
         });
     }
 
-    frame.render_widget(Paragraph::new(lines), rows[2]);
+    let height = rows[2].height as usize;
+    let start = selected_line.saturating_sub(height.saturating_sub(1));
+    let end = (start + height).min(lines.len());
+    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), rows[2]);
 }
 
 /// The managed sign-in dialog.
@@ -536,7 +554,7 @@ const ACCOUNT_WIDTH: u16 = 58;
 /// The narrowest that percentage can be: 58% of an 80-column terminal, less the border.
 const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
-fn session_picker(frame: &mut Frame, area: Rect, app: &App, choice: usize) {
+fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(Plane, String)>) {
     let sessions = app.sessions.merged();
     let height = (sessions.len() + 5).clamp(7, 20) as u16;
     let popup = centered(area, 62, height);
@@ -562,6 +580,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, choice: usize) {
         return;
     }
 
+    let choice = app.sessions.picker_index(selected);
     let items = sessions
         .iter()
         .map(|session| {
@@ -711,6 +730,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             SettingsField::ApprovalMode => {
                 ("approval", settings.approval_label(), Style::default())
             }
+            SettingsField::SandboxMode => ("files", settings.sandbox_label(), Style::default()),
             SettingsField::Save => (
                 "",
                 "[ save ]".to_string(),
@@ -851,6 +871,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 hint_style(&dialog.request.workspace),
             ),
             NewField::ApprovalMode => ("approval", dialog.approval_label(), Style::default()),
+            NewField::SandboxMode => ("files", dialog.sandbox_label(), Style::default()),
             NewField::Start => (
                 "",
                 if dialog.pending {
@@ -1095,41 +1116,74 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
 }
 
 const KEYS: &[(&str, &str)] = &[
-    ("1-7 / Tab", "switch tab"),
-    ("n", "start a new session (Sessions tab)"),
-    ("j k / arrows", "move; in a transcript, scroll"),
     (
-        "h l / arrows",
-        "move between panes; collapse or expand a tree node",
+        "enter",
+        "send, or queue a follow-up while the agent is busy",
     ),
     (
-        "Enter",
-        "open a session, toggle a tree node, send a composed message",
+        "ctrl+j",
+        "newline (shift+enter where the terminal reports it)",
     ),
-    ("i", "compose a message for the open session"),
-    ("s", "steer the open session"),
-    ("a", "reopen the pending approval"),
+    ("esc", "abort the running turn; empty prompt returns home"),
     (
-        "ctrl+e",
-        "toggle between agent chat and complete event details",
+        "ctrl+c",
+        "clear the prompt; empty + running interrupts; twice quits",
     ),
-    ("x", "close or kill the open session (confirmed)"),
+    ("ctrl+p", "command palette"),
     (
-        "ctrl-c",
-        "interrupt the open session's active turn — never this client",
+        "ctrl+x",
+        "leader: n new · l sessions · e editor · y copy · q quit",
     ),
+    ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
+    ("ctrl+o", "toggle agent chat and complete event details"),
+    ("ctrl+q", "quit dialog"),
+    ("?", "this page, when the prompt is empty"),
     (
-        "Esc",
-        "leave the composer, then the transcript, then the session",
+        "wheel",
+        "scroll the transcript; shift/ctrl+↑↓ and pageup/down too",
     ),
-    ("r", "refresh this tab now"),
+    ("↑ / ↓", "prompt history (or a line in a multiline draft)"),
+    ("ctrl+w/k/u", "kill word, to line end, to line start"),
+    ("alt+b / alt+f", "move by word"),
     (
-        ",",
-        "settings: this client's defaults, and where they are kept",
+        "/ commands",
+        "new, write, switch, preview, admit, capabilities, help, quit",
     ),
-    ("q", "quit dialog"),
-    ("?", "this page"),
+    ("1-7 / Tab", "runtime tabs when the prompt is not focused"),
 ];
+
+fn leader_hint(frame: &mut Frame, area: Rect) {
+    let height = (LEADER_KEYS.len() as u16)
+        .saturating_add(2)
+        .min(area.height);
+    let width = area.width.clamp(24, 56);
+    let popup = Rect::new(
+        area.x.saturating_add(2),
+        area.bottom().saturating_sub(height + 1),
+        width,
+        height,
+    );
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::styled(" ctrl+x ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let lines = LEADER_KEYS
+        .iter()
+        .map(|(key, description)| {
+            Line::from(vec![
+                Span::styled(format!(" {key:<4}"), Style::default().fg(theme::ACCENT)),
+                Span::raw(*description),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered(area, 84, (KEYS.len() + 8) as u16);
@@ -1138,7 +1192,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" keys ", theme::heading()));
+        .title(Span::styled(" hotkeys ", theme::heading()));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);

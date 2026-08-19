@@ -60,9 +60,11 @@ defmodule Ouroboros.TeamOwnershipTest do
                workspace: File.cwd!()
              )
 
-    assert_receive {:ouroboros_test_adapter_started, foreign_run, %RunRequest{prompt: ^objective},
+    assert_receive {:ouroboros_test_adapter_started, foreign_run, %RunRequest{prompt: prompt},
                     foreign_adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, objective)
 
     assert {:error,
             {:delegation_setup_failed, :coding_start,

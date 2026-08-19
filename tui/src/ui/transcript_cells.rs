@@ -1,12 +1,16 @@
 //! Declarative cells for the conversation-first transcript.
 //!
 //! Projection is deliberately one-way: normalized durable events become compact display
-//! cells, but no decision made here is sent back to the runtime. Ctrl-E continues to show
+//! cells, but no decision made here is sent back to the runtime. Ctrl-O continues to show
 //! every raw event when this best-effort presentation cannot recognize a newer payload.
+//!
+//! Chat layout is classical: the user's words sit in a right-hand bubble, the agent's on
+//! the left, and tool/command activity is dimmer and more compact than either speaker.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
+use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -17,8 +21,8 @@ use crate::model::transcript::{Diff, FileChange, PresentationEvent, ToolCall, To
 use super::theme;
 use super::transcript::{Entry, Note};
 
-const TOOL_OUTPUT_LINES: usize = 5;
-const COMMAND_OUTPUT_LINES: usize = 8;
+const TOOL_OUTPUT_LINES: usize = 3;
+const COMMAND_OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = 12;
 const MESSAGE_LINES: usize = 256;
 const STATUS_DETAIL_LINES: usize = 32;
@@ -75,6 +79,7 @@ pub enum Cell {
     Message {
         speaker: Speaker,
         text: String,
+        streaming: bool,
     },
     Tool(ToolCell),
     CommandOutput(String),
@@ -113,28 +118,28 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
     for entry in entries {
         match entry {
             Entry::Floor(_) => {
-                flush_agent(&mut cells, &mut pending);
+                flush_agent(&mut cells, &mut pending, false);
                 cells.push(Cell::Divider {
                     text: "Earlier conversation is no longer available".into(),
                     tone: Tone::Warning,
                 });
             }
             Entry::Gap { from, to } => {
-                flush_agent(&mut cells, &mut pending);
+                flush_agent(&mut cells, &mut pending, false);
                 cells.push(Cell::Divider {
                     text: format!("Restoring {} missing updates", to - from + 1),
                     tone: Tone::Warning,
                 });
             }
             Entry::Note(note) => {
-                flush_agent(&mut cells, &mut pending);
+                flush_agent(&mut cells, &mut pending, false);
                 cells.push(Cell::Divider {
                     text: chat_note(note).into(),
                     tone: Tone::Warning,
                 });
             }
             Entry::Ended(status) => {
-                flush_agent(&mut cells, &mut pending);
+                flush_agent(&mut cells, &mut pending, false);
                 cells.push(Cell::Divider {
                     text: format!("Session ended ({status})"),
                     tone: Tone::Muted,
@@ -142,14 +147,15 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
             }
             Entry::Event(event) => match PresentationEvent::from_event(event) {
                 PresentationEvent::UserMessage(text) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     cells.push(Cell::Message {
                         speaker: Speaker::You,
                         text,
+                        streaming: false,
                     });
                 }
                 PresentationEvent::UserSteer(text) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     cells.push(Cell::ChatNote {
                         text: match text {
                             Some(text) => format!("You steered the agent: {text}"),
@@ -158,7 +164,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     });
                 }
                 PresentationEvent::UnrecordedInput => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     cells.push(Cell::ChatNote {
                         text: "[message not recorded]".to_string(),
                     });
@@ -169,19 +175,19 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     final_text,
                 } => project_agent_text(&mut cells, &mut pending, turn_id, text, final_text),
                 PresentationEvent::ToolCall(call) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     project_tool_call(&mut cells, &mut tools, call);
                 }
                 PresentationEvent::ToolResult(result) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     project_tool_result(&mut cells, &tools, result);
                 }
                 PresentationEvent::CommandOutput(text) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     append_command_output(&mut cells, text);
                 }
                 PresentationEvent::FileUpdate(update) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     let mut emitted_file = false;
                     let inferred_diff_path = if update.changes.len() == 1 {
                         update.changes[0].path.clone()
@@ -209,7 +215,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     }
                 }
                 PresentationEvent::ApprovalRequested { request_id, detail } => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     let index = cells.len();
                     if let Some(request_id) = request_id {
                         approvals.insert(request_id, index);
@@ -225,7 +231,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     decision,
                     detail,
                 } => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     project_approval_resolution(
                         &mut cells,
                         &mut approvals,
@@ -235,7 +241,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     );
                 }
                 PresentationEvent::Failure(detail) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     cells.push(Cell::Status {
                         label: "Agent error".into(),
                         detail,
@@ -243,7 +249,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     });
                 }
                 PresentationEvent::Interrupted(detail) => {
-                    flush_agent(&mut cells, &mut pending);
+                    flush_agent(&mut cells, &mut pending, false);
                     cells.push(Cell::Status {
                         label: "Interrupted".into(),
                         detail,
@@ -255,22 +261,49 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
         }
     }
 
-    flush_agent(&mut cells, &mut pending);
+    flush_agent(&mut cells, &mut pending, true);
     cells
+}
+
+/// The newest agent message in chat projection, for copy-last-message.
+pub fn last_agent_message(entries: Vec<Entry<'_>>) -> Option<String> {
+    project(entries)
+        .into_iter()
+        .rev()
+        .find_map(|cell| match cell {
+            Cell::Message {
+                speaker: Speaker::Agent,
+                text,
+                streaming: _,
+            } if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
 }
 
 /// Projects and renders a transcript. Kept as one pure call for the session pane and tests.
 pub fn render(entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
-    render_cells(&project(entries), width)
+    render_at(entries, width, 0)
+}
+
+pub fn render_at(entries: Vec<Entry<'_>>, width: usize, tick: u64) -> Vec<Line<'static>> {
+    render_cells_at(&project(entries), width, tick)
 }
 
 pub fn render_cells(cells: &[Cell], width: usize) -> Vec<Line<'static>> {
+    render_cells_at(cells, width, 0)
+}
+
+pub fn render_cells_at(cells: &[Cell], width: usize, tick: u64) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     for cell in cells {
         match cell {
-            Cell::Message { speaker, text } => render_message(&mut lines, *speaker, text, width),
-            Cell::Tool(tool) => render_tool(&mut lines, tool, width),
+            Cell::Message {
+                speaker,
+                text,
+                streaming,
+            } => render_message(&mut lines, *speaker, text, width, *streaming, tick),
+            Cell::Tool(tool) => render_tool(&mut lines, tool, width, tick),
             Cell::CommandOutput(text) => render_command_output(&mut lines, text, width),
             Cell::File(file) => render_file(&mut lines, file, width),
             Cell::Diff(diff) => render_diff(&mut lines, diff, width),
@@ -300,7 +333,7 @@ fn project_agent_text(
         .unwrap_or(!final_text);
 
     if !same_turn {
-        flush_agent(cells, pending);
+        flush_agent(cells, pending, false);
     }
 
     if final_text {
@@ -311,6 +344,7 @@ fn project_agent_text(
             cells.push(Cell::Message {
                 speaker: Speaker::Agent,
                 text,
+                streaming: false,
             });
         }
     } else if !text.is_empty() {
@@ -322,7 +356,7 @@ fn project_agent_text(
     }
 }
 
-fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>) {
+fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>, streaming: bool) {
     let Some(draft) = pending.take() else {
         return;
     };
@@ -331,6 +365,7 @@ fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>) {
         cells.push(Cell::Message {
             speaker: Speaker::Agent,
             text: draft.text,
+            streaming,
         });
     }
 }
@@ -476,70 +511,151 @@ fn chat_note(note: &Note) -> &'static str {
     }
 }
 
-fn render_message(lines: &mut Vec<Line<'static>>, speaker: Speaker, text: &str, width: usize) {
+fn render_message(
+    lines: &mut Vec<Line<'static>>,
+    speaker: Speaker,
+    text: &str,
+    width: usize,
+    streaming: bool,
+    tick: u64,
+) {
     separate(lines);
-    let (label, colour) = match speaker {
-        Speaker::You => ("You", theme::ACCENT),
-        Speaker::Agent => ("Agent", theme::GOOD),
-    };
-    lines.push(Line::from(Span::styled(
-        label,
-        Style::default().fg(colour).add_modifier(Modifier::BOLD),
-    )));
-
-    render_indented_text(
-        lines,
-        text,
-        width,
-        MESSAGE_LINES,
-        "full message in event details",
-    );
+    match speaker {
+        Speaker::You => render_user_message(lines, text, width),
+        Speaker::Agent => render_agent_message(lines, text, width, streaming, tick),
+    }
 }
 
-fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize) {
-    separate(lines);
-    let (mark, state, colour) = match tool.state {
-        ToolState::Running => ("●", "running", theme::ACCENT),
-        ToolState::Completed => ("✓", "done", theme::GOOD),
-        ToolState::Failed => ("✗", "failed", theme::BAD),
+/// User turns sit in a right-hand column, like a phone chat. The label hugs the pane
+/// edge; the body is a right-aligned block whose width shrinks to the words, so a short
+/// "ok" sits on the right instead of floating in the middle of the column.
+fn render_user_message(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    let column = user_column(width);
+    let label_style = Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(theme::ACCENT);
+
+    lines.push(flush_right("You", label_style, width));
+
+    let wrapped = wrap_limited(text, column, MESSAGE_LINES.saturating_add(1));
+    let shown = wrapped.len().min(MESSAGE_LINES);
+    let block = wrapped
+        .iter()
+        .take(shown)
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0)
+        .min(column);
+    let gutter = width.saturating_sub(1).saturating_sub(block);
+
+    for line in wrapped.iter().take(shown) {
+        lines.push(guttered(gutter, line.clone(), body_style));
+    }
+
+    if wrapped.len() > shown {
+        lines.push(guttered(
+            gutter,
+            "… full message in event details".into(),
+            theme::quiet(),
+        ));
+    }
+}
+
+fn render_agent_message(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    streaming: bool,
+    tick: u64,
+) {
+    lines.push(Line::from(Span::styled(
+        "Agent",
+        Style::default()
+            .fg(theme::GOOD)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let wrapped = wrap_limited(text, width.max(8), MESSAGE_LINES.saturating_add(1));
+    let shown = wrapped.len().min(MESSAGE_LINES);
+
+    for line in wrapped.iter().take(shown) {
+        lines.push(Line::from(Span::raw(line.clone())));
+    }
+
+    if wrapped.len() > shown {
+        lines.push(Line::from(Span::styled(
+            "… full message in event details",
+            theme::quiet(),
+        )));
+    }
+
+    if streaming {
+        let caret = if tick % 8 < 5 { "▌" } else { " " };
+        if let Some(last) = lines.last_mut() {
+            last.spans
+                .push(Span::styled(caret, Style::default().fg(theme::ACCENT)));
+        }
+    }
+}
+
+fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, tick: u64) {
+    let quiet = tool.state != ToolState::Failed;
+    if !quiet {
+        separate(lines);
+    }
+
+    let (mark, mark_style) = match tool.state {
+        ToolState::Running => (
+            theme::spinner(tick).to_string(),
+            Style::default().fg(theme::ACCENT),
+        ),
+        ToolState::Completed => ("·".to_string(), theme::quiet()),
+        ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::BAD)),
+    };
+    let name_style = match tool.state {
+        ToolState::Failed => Style::default().fg(theme::BAD),
+        _ => theme::quiet(),
     };
     let input = tool_input(&tool.name, &tool.input);
-    let label = if command_tool(&tool.name) {
-        "Run"
-    } else {
-        "Tool"
-    };
     let mut head = vec![
-        Span::styled(format!("{mark} "), Style::default().fg(colour)),
-        Span::styled(
-            format!("{label}  {}", display_tool_name(&tool.name)),
-            Style::default().fg(colour).add_modifier(Modifier::BOLD),
-        ),
+        Span::raw("  "),
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(display_tool_name(&tool.name), name_style),
     ];
 
     if !input.is_empty() {
-        head.push(Span::styled("  ", Style::default()));
+        head.push(Span::raw("  "));
         head.push(Span::styled(
-            super::tree::truncate(&input.replace('\n', " "), width.saturating_sub(18)),
-            Style::default().fg(theme::MUTED),
+            super::tree::truncate(&input.replace('\n', " "), width.saturating_sub(16)),
+            theme::quiet(),
         ));
     }
-    head.push(Span::styled(
-        format!("  {state}"),
-        Style::default().fg(colour),
-    ));
+
+    match tool.state {
+        ToolState::Running => head.push(Span::styled("  running", theme::quiet())),
+        ToolState::Failed => {
+            head.push(Span::styled("  failed", Style::default().fg(theme::BAD)));
+        }
+        ToolState::Completed => {}
+    }
+
     lines.push(Line::from(head));
 
     if let Some(output) = &tool.output {
         let output = value_text(output);
         if !output.trim().is_empty() {
+            let body = match tool.state {
+                ToolState::Failed => Style::default().fg(theme::BAD),
+                _ => theme::quiet(),
+            };
             render_excerpt(
                 lines,
                 &output,
                 width,
                 TOOL_OUTPUT_LINES,
                 "full result in event details",
-                colour,
+                body,
             );
         }
     }
@@ -556,47 +672,47 @@ fn render_command_output(lines: &mut Vec<Line<'static>>, text: &str, width: usiz
         width,
         COMMAND_OUTPUT_LINES,
         "full command output in event details",
-        theme::MUTED,
+        theme::quiet(),
     );
 }
 
 fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
-    separate(lines);
     let (mark, colour) = file_mark(file.kind.as_deref());
     let path = file.path.as_deref().unwrap_or("files changed");
-    let path = super::tree::truncate(path, width.saturating_sub(10).max(8));
+    let path = super::tree::truncate(path, width.saturating_sub(12).max(8));
 
     lines.push(Line::from(vec![
-        Span::styled(format!("{mark} "), Style::default().fg(colour)),
-        Span::styled("File  ", Style::default().fg(theme::MUTED)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{mark} "),
+            Style::default().fg(colour).add_modifier(Modifier::DIM),
+        ),
+        Span::styled("File  ", theme::quiet()),
         Span::styled(
             path,
-            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            Style::default().fg(colour).add_modifier(Modifier::DIM),
         ),
     ]));
 }
 
 fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
-    separate(lines);
     let path = diff.path.as_deref().unwrap_or("changes");
-    let path = super::tree::truncate(path, width.saturating_sub(22).max(8));
+    let path = super::tree::truncate(path, width.saturating_sub(24).max(8));
     let mut heading = vec![
-        Span::styled("Diff  ", Style::default().fg(theme::MUTED)),
-        Span::styled(path, Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled("Diff  ", theme::quiet()),
+        Span::styled(path, theme::quiet()),
         Span::styled(
             format!("  +{}", diff.additions),
-            Style::default().fg(theme::GOOD),
+            Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
         ),
         Span::styled(
             format!(" -{}", diff.deletions),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::BAD).add_modifier(Modifier::DIM),
         ),
     ];
     if diff.truncated {
-        heading.push(Span::styled(
-            "  in excerpt",
-            Style::default().fg(theme::MUTED),
-        ));
+        heading.push(Span::styled("  in excerpt", theme::quiet()));
     }
     lines.push(Line::from(heading));
 
@@ -608,18 +724,20 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
         };
         shown += 1;
         let style = if line.starts_with('+') && !line.starts_with("+++") {
-            Style::default().fg(theme::GOOD)
+            Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM)
         } else if line.starts_with('-') && !line.starts_with("---") {
-            Style::default().fg(theme::BAD)
+            Style::default().fg(theme::BAD).add_modifier(Modifier::DIM)
         } else if line.starts_with("@@") {
-            Style::default().fg(theme::ACCENT)
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::DIM)
         } else {
-            Style::default().fg(theme::MUTED)
+            theme::quiet()
         };
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(theme::MUTED)),
+            Span::styled("    ", theme::quiet()),
             Span::styled(
-                super::tree::truncate(line, width.saturating_sub(4).max(8)),
+                super::tree::truncate(line, width.saturating_sub(6).max(8)),
                 style,
             ),
         ]));
@@ -629,11 +747,8 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
     // collect or count the rest of a large diff merely to draw twelve rows of it.
     if source.next().is_some() {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                "… full diff in event details",
-                Style::default().fg(theme::MUTED),
-            ),
+            Span::styled("    ", theme::quiet()),
+            Span::styled("… full diff in event details", theme::quiet()),
         ]));
     }
 }
@@ -642,10 +757,7 @@ fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
     separate(lines);
 
     for line in wrap_limited(text, width.max(8), MESSAGE_LINES) {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(theme::MUTED),
-        )));
+        lines.push(Line::from(Span::styled(line, theme::quiet())).alignment(Alignment::Center));
     }
 }
 
@@ -707,28 +819,28 @@ fn render_excerpt(
     width: usize,
     limit: usize,
     omitted: &str,
-    colour: Color,
+    style: Style,
 ) {
     // The extra row establishes that something was omitted. Wrapping can then stop without
     // tokenizing or allocating the remainder of a long command/tool value.
     let wrapped = wrap_limited(
         text,
-        width.saturating_sub(4).max(8),
+        width.saturating_sub(6).max(8),
         limit.saturating_add(1),
     );
     let shown = wrapped.len().min(limit);
 
     for line in wrapped.iter().take(shown) {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(colour)),
-            Span::raw(line.clone()),
+            Span::raw("    "),
+            Span::styled(line.clone(), style),
         ]));
     }
 
     if wrapped.len() > shown {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(theme::MUTED)),
-            Span::styled(format!("… {omitted}"), Style::default().fg(theme::MUTED)),
+            Span::raw("    "),
+            Span::styled(format!("… {omitted}"), theme::quiet()),
         ]));
     }
 }
@@ -845,6 +957,28 @@ fn colour(tone: Tone) -> Color {
         Tone::Warning => theme::WARN,
         Tone::Error => theme::BAD,
     }
+}
+
+/// Right-hand column for the user's words. Capped so a wide pane still reads as a
+/// bubble rather than a second full-width transcript.
+fn user_column(width: usize) -> usize {
+    let inner = width.saturating_sub(1);
+    (inner * 7 / 12).clamp(8, 56).min(inner.max(8))
+}
+
+fn flush_right(text: &str, style: Style, width: usize) -> Line<'static> {
+    let pad = width.saturating_sub(text.width().saturating_add(1));
+    Line::from(vec![
+        Span::raw(" ".repeat(pad)),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+fn guttered(gutter: usize, text: String, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(gutter)),
+        Span::styled(text, style),
+    ])
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -1179,6 +1313,7 @@ fn push_wrapped_line(lines: &mut Vec<String>, line: String, max_lines: usize) ->
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Modifier;
     use ratatui::text::Line;
     use serde_json::json;
 
@@ -1199,16 +1334,14 @@ mod tests {
     }
 
     fn plain(lines: &[Line<'_>]) -> String {
-        lines
+        lines.iter().map(plain_line).collect::<Vec<_>>().join("\n")
+    }
+
+    fn plain_line(line: &Line<'_>) -> String {
+        line.spans
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -1232,9 +1365,13 @@ mod tests {
         assert_eq!(tool.state, ToolState::Completed);
 
         let text = plain(&render_cells(&cells, 80));
-        assert!(text.contains("Tool  read"), "{text}");
+        assert!(text.contains("· read"), "{text}");
         assert!(text.contains("README.md"), "{text}");
         assert!(text.contains("project docs"), "{text}");
+        assert!(
+            !text.contains("Tool  "),
+            "tool chrome stays out of the reading path: {text}"
+        );
         assert!(
             !text.contains("c1"),
             "correlation ids belong in details: {text}"
@@ -1258,6 +1395,40 @@ mod tests {
         assert!(text.contains("Diff  lib/worker.ex  +1 -1"), "{text}");
         assert!(text.contains("-old"), "{text}");
         assert!(text.contains("+new"), "{text}");
+    }
+
+    #[test]
+    fn a_running_tool_uses_the_working_spinner() {
+        let call = event(
+            1,
+            "tool_call",
+            json!({"call_id": "c-run", "name": "read", "input": {"path": "Cargo.toml"}}),
+        );
+        let cells = project(vec![Entry::Event(&call)]);
+        let text = plain(&render_cells_at(&cells, 80, 0));
+
+        assert!(text.contains(&theme::spinner(0).to_string()), "{text}");
+        assert!(text.contains("running"), "{text}");
+        assert!(!text.contains('●'), "{text}");
+    }
+
+    #[test]
+    fn a_streaming_agent_message_carries_a_caret() {
+        let delta = event(1, "output_text_delta", json!({"text": "Hello"}));
+        let cells = project(vec![Entry::Event(&delta)]);
+        let Cell::Message {
+            streaming: true, ..
+        } = &cells[0]
+        else {
+            panic!("pending agent text is still streaming")
+        };
+
+        let text = plain(&render_cells_at(&cells, 80, 0));
+        assert!(text.contains("Hello▌"), "{text}");
+
+        let hidden = plain(&render_cells_at(&cells, 80, 6));
+        assert!(hidden.contains("Hello "), "{hidden}");
+        assert!(!hidden.contains("Hello▌"), "{hidden}");
     }
 
     #[test]
@@ -1344,6 +1515,7 @@ mod tests {
         let Cell::Message {
             speaker: Speaker::Agent,
             text: agent_text,
+            streaming: _,
         } = &agent_cells[0]
         else {
             panic!("expected accumulated agent text")
@@ -1444,6 +1616,7 @@ mod tests {
         let message = Cell::Message {
             speaker: Speaker::Agent,
             text: "x".repeat(3 * 1024 * 1024),
+            streaming: false,
         };
         let rendered = render_cells(&[message], 10);
 
@@ -1552,5 +1725,109 @@ mod tests {
         assert!(text.contains("git status"), "{text}");
         assert!(text.contains("approve · once"), "{text}");
         assert!(!text.contains("Approval needed"), "{text}");
+    }
+
+    #[test]
+    fn user_messages_occupy_the_right_column_and_agent_messages_the_left() {
+        let cells = vec![
+            Cell::Message {
+                speaker: Speaker::You,
+                text: "please fix the tests".into(),
+                streaming: false,
+            },
+            Cell::Message {
+                speaker: Speaker::Agent,
+                text: "The tests are fixed.".into(),
+                streaming: false,
+            },
+        ];
+        let lines = render_cells(&cells, 40);
+        let you = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.contains("You"))
+            .expect("a You label");
+        let user_body = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.contains("please fix the tests"))
+            .expect("the user body");
+        let agent = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.trim() == "Agent")
+            .expect("an Agent label");
+        let agent_body = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.contains("The tests are fixed."))
+            .expect("the agent body");
+
+        assert!(you.ends_with("You"), "{you:?}");
+        assert!(you.starts_with(' '), "{you:?}");
+        assert!(user_body.starts_with(' '), "{user_body:?}");
+        assert_eq!(agent, "Agent");
+        assert_eq!(agent_body, "The tests are fixed.");
+
+        let gutter = user_body
+            .chars()
+            .take_while(|character| *character == ' ')
+            .count();
+        assert!(
+            gutter >= 8,
+            "the user bubble should sit on the right: {user_body:?}"
+        );
+    }
+
+    #[test]
+    fn command_activity_is_dimmer_and_more_compact_than_agent_copy() {
+        let cells = vec![
+            Cell::Message {
+                speaker: Speaker::Agent,
+                text: "I'll run the suite.".into(),
+                streaming: false,
+            },
+            Cell::Tool(ToolCell {
+                call_id: Some("c1".into()),
+                name: "exec_command".into(),
+                input: json!({"cmd": "mix test"}),
+                output: Some(Value::String("3 tests, 0 failures".into())),
+                state: ToolState::Completed,
+            }),
+        ];
+        let lines = render_cells(&cells, 80);
+        let text = plain(&lines);
+
+        assert!(text.contains("I'll run the suite."), "{text}");
+        assert!(text.contains("· command"), "{text}");
+        assert!(text.contains("mix test"), "{text}");
+        assert!(text.contains("3 tests, 0 failures"), "{text}");
+        assert!(!text.contains("Run  "), "{text}");
+        assert!(!text.contains("  done"), "{text}");
+        assert!(!text.contains('│'), "{text}");
+
+        let command = lines
+            .iter()
+            .find(|line| plain_line(line).contains("· command"))
+            .expect("a command row");
+        assert!(
+            command
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::DIM)),
+            "{command:?}"
+        );
+
+        let agent_body = lines
+            .iter()
+            .find(|line| plain_line(line).contains("I'll run the suite."))
+            .expect("agent copy");
+        assert!(
+            agent_body
+                .spans
+                .iter()
+                .all(|span| !span.style.add_modifier.contains(Modifier::DIM)),
+            "{agent_body:?}"
+        );
     }
 }

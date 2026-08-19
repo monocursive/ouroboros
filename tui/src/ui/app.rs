@@ -34,7 +34,8 @@ use serde_json::{json, Value};
 use crate::config::{Config, Defaults};
 use crate::model::{
     self, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event,
-    EventType, Plane, ProviderEntry, RuntimeStatus, SessionInfo, StartRequest, StartedRef,
+    EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest,
+    StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -42,19 +43,25 @@ use crate::transport::ClientError;
 
 use super::editor::{CompletionCatalog, Editor, EditorAction};
 use super::transcript::{Note, Watch};
+use super::transcript_cells;
 use super::tree::TreeState;
 
-/// The driver's tick. Everything measured in ticks below is measured in these.
-pub const TICK: Duration = Duration::from_millis(250);
+/// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
+/// cadences below are counted in these frames so wall-clock meaning stays put.
+pub const TICK: Duration = Duration::from_millis(80);
 
-const STATUS_TICKS: u64 = 12; // 3s
-const LIST_TICKS: u64 = 12; // 3s
-const UPGRADE_TICKS: u64 = 20; // 5s
-const DETAIL_TICKS: u64 = 40; // 10s: `Mesh.state/1` is a whole agent's state tree
-const PROVIDER_TICKS: u64 = 240; // 60s: each entry probes an executable
-const ACCOUNT_TICKS: u64 = 120; // 30s; 1s while a managed login is pending
-const ACCOUNT_LOGIN_TICKS: u64 = 4;
-const NOTICE_TICKS: u64 = 20;
+const STATUS_TICKS: u64 = 38; // ~3s
+const LIST_TICKS: u64 = 38; // ~3s
+const UPGRADE_TICKS: u64 = 63; // ~5s
+const DETAIL_TICKS: u64 = 125; // ~10s: `Mesh.state/1` is a whole agent's state tree
+const PROVIDER_TICKS: u64 = 750; // ~60s: each entry probes an executable
+const ACCOUNT_TICKS: u64 = 375; // ~30s; ~1s while a managed login is pending
+const ACCOUNT_LOGIN_TICKS: u64 = 13;
+const NOTICE_TICKS: u64 = 63;
+/// OpenCode waits two seconds after the leader key; this is the same window in ticks.
+const LEADER_TICKS: u64 = 25;
+/// Pi's double Ctrl+C quit: the second press has to arrive inside this window.
+const CTRL_C_QUIT_TICKS: u64 = 13;
 static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
@@ -252,6 +259,10 @@ pub enum Msg {
     NotificationsDropped(u64),
     /// The terminal was resized; nothing to do but redraw.
     Redraw,
+    /// The mouse wheel or a trackpad notch, in transcript rows. Negative is older.
+    Scroll(isize),
+    /// Text the I/O driver read back from `$VISUAL`/`$EDITOR`.
+    ExternalEditor(String),
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -409,11 +420,9 @@ struct PendingFirstMessage {
 pub struct SessionsTab {
     pub interactive: Loadable<Vec<SessionInfo>>,
     pub coding: Loadable<Vec<SessionInfo>>,
-    pub selected: usize,
     pub open: Option<(Plane, String)>,
     pub watches: HashMap<(Plane, String), Watch>,
     pub composer: Option<Composer>,
-    pub focus: Pane,
     /// The complete normalized event ledger is an operator detail, not the default chat.
     /// It remains one key away and is never discarded from the watch.
     pub show_event_details: bool,
@@ -452,8 +461,20 @@ impl SessionsTab {
         rows
     }
 
-    pub fn current(&self) -> Option<&SessionInfo> {
-        self.merged().get(self.selected).copied()
+    pub fn picker_index(&self, selected: Option<&(Plane, String)>) -> usize {
+        selected
+            .and_then(|(plane, id)| {
+                self.merged()
+                    .iter()
+                    .position(|session| session.plane == *plane && session.id == *id)
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn picker_key(&self, index: usize) -> Option<(Plane, String)> {
+        self.merged()
+            .get(index)
+            .map(|session| (session.plane, session.id.clone()))
     }
 
     pub fn open_watch(&self) -> Option<&Watch> {
@@ -591,11 +612,14 @@ impl UpgradeTab {
 pub enum PromptKind {
     HistoryModule,
     GrantsPrincipal,
+    PreviewCapability,
+    AdmitCapability,
 }
 
 /// How many rows an approval-mode cycler has: the four the schema declares, plus the
 /// "say nothing" row that is not one of them.
 pub const APPROVAL_ROWS: usize = ApprovalMode::ALL.len() + 1;
+pub const SANDBOX_ROWS: usize = SandboxMode::ALL.len() + 1;
 
 /// The mode a cycler row means. Index 0 is "leave it to the plane", which is an *absent*
 /// parameter rather than `"default"` — the gateway's `default` is itself a value the
@@ -627,6 +651,30 @@ pub fn approval_label(index: usize) -> String {
     match approval_at(index) {
         None => "unset — the plane's own default".to_string(),
         Some(mode) => format!("{} — {}", mode.as_str(), mode.describe()),
+    }
+}
+
+pub fn sandbox_at(index: usize) -> Option<SandboxMode> {
+    index
+        .checked_sub(1)
+        .and_then(|index| SandboxMode::ALL.get(index).copied())
+}
+
+pub fn sandbox_index(mode: Option<SandboxMode>) -> usize {
+    match mode {
+        None => 0,
+        Some(mode) => SandboxMode::ALL
+            .iter()
+            .position(|candidate| *candidate == mode)
+            .map(|index| index + 1)
+            .unwrap_or(0),
+    }
+}
+
+pub fn sandbox_label(index: usize) -> String {
+    match sandbox_at(index) {
+        None => "unset — can edit when the provider allows it".to_string(),
+        Some(mode) => format!("{} — {}", mode.label(), mode.describe()),
     }
 }
 
@@ -685,6 +733,7 @@ pub enum NewField {
     Provider,
     Workspace,
     ApprovalMode,
+    SandboxMode,
     /// Only reachable on the coding plane, where the objective is required.
     Objective,
     Start,
@@ -710,6 +759,7 @@ pub struct NewSession {
     /// providers refresh that reordered nothing.
     pub provider: usize,
     pub approval: usize,
+    pub sandbox: usize,
     /// True while `*.start` is in flight — it declares a 120s ceiling, so this is a dialog
     /// that legitimately waits.
     pub pending: bool,
@@ -736,6 +786,7 @@ impl NewSession {
             },
             provider: 0,
             approval: approval_index(defaults.approval_mode()),
+            sandbox: sandbox_index(defaults.sandbox_mode()),
             pending: false,
             error: None,
             wanted_provider: defaults.provider.clone(),
@@ -774,7 +825,12 @@ impl NewSession {
             fields.push(NewField::Objective);
         }
 
-        fields.extend([NewField::Workspace, NewField::ApprovalMode, NewField::Start]);
+        fields.extend([
+            NewField::Workspace,
+            NewField::ApprovalMode,
+            NewField::SandboxMode,
+            NewField::Start,
+        ]);
         fields
     }
 
@@ -787,6 +843,14 @@ impl NewSession {
         approval_label(self.approval)
     }
 
+    pub fn sandbox_mode(&self) -> Option<SandboxMode> {
+        sandbox_at(self.sandbox)
+    }
+
+    pub fn sandbox_label(&self) -> String {
+        sandbox_label(self.sandbox)
+    }
+
     /// The request as the fields currently read.
     pub fn resolved(&self, providers: &[ProviderEntry]) -> StartRequest {
         let mut request = self.request.clone();
@@ -797,6 +861,7 @@ impl NewSession {
             .unwrap_or_default();
 
         request.approval_mode = self.approval_mode();
+        request.sandbox_mode = self.sandbox_mode();
         request
     }
 
@@ -837,6 +902,10 @@ impl NewSession {
                 self.approval =
                     (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
             }
+            NewField::SandboxMode => {
+                self.sandbox =
+                    (self.sandbox as isize + delta).rem_euclid(SANDBOX_ROWS as isize) as usize;
+            }
             _ => {}
         }
     }
@@ -857,14 +926,16 @@ pub enum SettingsField {
     Provider,
     Workspace,
     ApprovalMode,
+    SandboxMode,
     Save,
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 4] = [
+    pub const ALL: [SettingsField; 5] = [
         SettingsField::Provider,
         SettingsField::Workspace,
         SettingsField::ApprovalMode,
+        SettingsField::SandboxMode,
         SettingsField::Save,
     ];
 }
@@ -883,6 +954,7 @@ pub struct Settings {
     pub provider: usize,
     pub workspace: String,
     pub approval: usize,
+    pub sandbox: usize,
     /// The stored provider, until the probe list arrives and the cursor can be put on it.
     wanted_provider: Option<String>,
     /// Whether anything has been typed or cycled, so closing can say what it discards.
@@ -917,6 +989,10 @@ impl Settings {
         approval_label(self.approval)
     }
 
+    pub fn sandbox_label(&self) -> String {
+        sandbox_label(self.sandbox)
+    }
+
     fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
             SettingsField::Workspace => Some(&mut self.workspace),
@@ -947,6 +1023,11 @@ impl Settings {
                 self.approval =
                     (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
             }
+            SettingsField::SandboxMode => {
+                self.edited = true;
+                self.sandbox =
+                    (self.sandbox as isize + delta).rem_euclid(SANDBOX_ROWS as isize) as usize;
+            }
             _ => {}
         }
     }
@@ -955,8 +1036,15 @@ impl Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     NewSession,
+    NewSessionOptions,
+    WriteAccess,
     SwitchSession,
     SessionDetails,
+    CopyLast,
+    Interrupt,
+    Steer,
+    ExternalEditor,
+    CloseSession,
     ConnectChatGpt,
     Runtime,
     Agents,
@@ -964,15 +1052,26 @@ pub enum Command {
     Nodes,
     Plans,
     Upgrades,
+    ListCapabilities,
+    PreviewCapability,
+    AdmitCapability,
     Logs,
     Settings,
+    Help,
 }
 
 impl Command {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 23] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
+        Self::CopyLast,
+        Self::Interrupt,
+        Self::Steer,
+        Self::ExternalEditor,
+        Self::CloseSession,
+        Self::NewSessionOptions,
+        Self::WriteAccess,
         Self::ConnectChatGpt,
         Self::Runtime,
         Self::Agents,
@@ -982,14 +1081,26 @@ impl Command {
         Self::Upgrades,
         Self::Logs,
         Self::Settings,
+        Self::Help,
+        Self::ListCapabilities,
+        Self::PreviewCapability,
+        Self::AdmitCapability,
     ];
 
     pub fn group(self) -> &'static str {
         match self {
             Self::NewSession
+            | Self::NewSessionOptions
+            | Self::WriteAccess
             | Self::SwitchSession
             | Self::SessionDetails
-            | Self::ConnectChatGpt => "Coding",
+            | Self::CopyLast
+            | Self::Interrupt
+            | Self::Steer
+            | Self::ExternalEditor
+            | Self::CloseSession
+            | Self::ConnectChatGpt
+            | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
     }
@@ -997,8 +1108,15 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Self::NewSession => "New session",
+            Self::NewSessionOptions => "New session options",
+            Self::WriteAccess => "Start a session that can edit files",
             Self::SwitchSession => "Switch session",
-            Self::SessionDetails => "Toggle session details",
+            Self::SessionDetails => "Toggle event details",
+            Self::CopyLast => "Copy last agent message",
+            Self::Interrupt => "Interrupt the running turn",
+            Self::Steer => "Steer the running turn",
+            Self::ExternalEditor => "Edit prompt in $EDITOR",
+            Self::CloseSession => "End open session",
             Self::ConnectChatGpt => "Connect ChatGPT",
             Self::Runtime => "Runtime & distribution",
             Self::Agents => "Agents",
@@ -1006,25 +1124,40 @@ impl Command {
             Self::Nodes => "Nodes",
             Self::Plans => "Plans & control",
             Self::Upgrades => "Upgrades",
+            Self::ListCapabilities => "List capability proposals",
+            Self::PreviewCapability => "Preview a capability",
+            Self::AdmitCapability => "Admit a capability",
             Self::Logs => "Logs",
             Self::Settings => "Settings",
+            Self::Help => "Keyboard shortcuts",
         }
     }
 
     pub fn shortcut(self) -> &'static str {
         match self {
-            Self::NewSession => "n",
-            Self::SwitchSession => "s",
-            Self::SessionDetails => "ctrl+e",
-            Self::ConnectChatGpt => "c",
-            Self::Runtime => "dist",
-            Self::Agents => "ag",
-            Self::Teams => "tm",
-            Self::Nodes => "nd",
-            Self::Plans => "pl",
-            Self::Upgrades => "up",
-            Self::Logs => "lg",
-            Self::Settings => "st",
+            Self::NewSession => "ctrl+x n",
+            Self::NewSessionOptions => "ctrl+x N",
+            Self::WriteAccess => "/write",
+            Self::SwitchSession => "ctrl+x l",
+            Self::SessionDetails => "ctrl+o",
+            Self::CopyLast => "ctrl+x y",
+            Self::Interrupt => "esc",
+            Self::Steer => "ctrl+x s",
+            Self::ExternalEditor => "ctrl+g",
+            Self::CloseSession => "ctrl+x x",
+            Self::ConnectChatGpt => "/connect",
+            Self::Runtime => "/runtime",
+            Self::Agents => "/agents",
+            Self::Teams => "/teams",
+            Self::Nodes => "/runtime",
+            Self::Plans => "/plans",
+            Self::Upgrades => "/upgrades",
+            Self::ListCapabilities => "/capabilities",
+            Self::PreviewCapability => "/preview",
+            Self::AdmitCapability => "/admit",
+            Self::Logs => "/logs",
+            Self::Settings => "/settings",
+            Self::Help => "?",
         }
     }
 
@@ -1090,7 +1223,7 @@ pub enum Overlay {
     Commands(CommandPalette),
     Account(Box<AccountDialog>),
     SessionPicker {
-        choice: usize,
+        selected: Option<(Plane, String)>,
     },
     Help,
     /// This client's own preferences, beside the facts the runtime reports.
@@ -1121,6 +1254,22 @@ pub enum Overlay {
     },
     New(Box<NewSession>),
 }
+
+/// Chords after `Ctrl+X`. Drawn by the which-key overlay while the leader is pending.
+pub const LEADER_KEYS: &[(&str, &str)] = &[
+    ("n", "new session"),
+    ("N", "session options"),
+    ("l", "switch session"),
+    ("e", "external editor"),
+    ("y", "copy last message"),
+    ("s", "steer"),
+    ("a", "approval"),
+    ("w", "writable session"),
+    ("x", "end session"),
+    ("o", "event details"),
+    ("q", "quit"),
+    ("?", "keyboard help"),
+];
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
 /// them. Exactly `Jido.Harness.ApprovalResponse`'s two enums crossed; nothing else is
@@ -1248,6 +1397,14 @@ pub struct App {
     /// A URL the I/O driver should open in the operator's browser. Kept out of notices so
     /// a managed login URL is never copied into logs by accident.
     open_url_pending: Option<String>,
+    /// Tick at which a pending Ctrl+X leader chord expires.
+    pub leader_until: Option<u64>,
+    /// Tick at which a second Ctrl+C will open the quit dialog.
+    ctrl_c_until: Option<u64>,
+    /// Last agent message the I/O driver should copy to the clipboard.
+    copy_pending: Option<String>,
+    /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
+    external_editor_pending: Option<String>,
 }
 
 impl App {
@@ -1290,11 +1447,27 @@ impl App {
             save_pending: false,
             first_message: None,
             open_url_pending: None,
+            leader_until: None,
+            ctrl_c_until: None,
+            copy_pending: None,
+            external_editor_pending: None,
         }
     }
 
     pub fn take_open_url(&mut self) -> Option<String> {
         self.open_url_pending.take()
+    }
+
+    pub fn take_copy(&mut self) -> Option<String> {
+        self.copy_pending.take()
+    }
+
+    pub fn take_external_editor(&mut self) -> Option<String> {
+        self.external_editor_pending.take()
+    }
+
+    pub fn leader_pending(&self) -> bool {
+        self.leader_until.is_some()
     }
 
     pub fn chatgpt_connected(&self) -> bool {
@@ -1357,6 +1530,41 @@ impl App {
 
     pub fn home_workspace(&self) -> String {
         self.default_workspace()
+    }
+
+    /// What the home composer should say about file access, and whether that is writable.
+    ///
+    /// Unset follows the plane: workspace write where the provider allows it. A stored
+    /// `read_only` is the opt-in for launching a session that cannot edit.
+    pub fn home_sandbox(&self) -> (&'static str, bool) {
+        match self.config.defaults.sandbox_mode() {
+            Some(mode) => (mode.label(), mode.writable()),
+            None => (SandboxMode::WorkspaceWrite.label(), true),
+        }
+    }
+
+    /// The open session's sandbox caption, if a session is open.
+    pub fn open_sandbox(&self) -> Option<(String, bool)> {
+        let value = self.sessions.open_info().and_then(|session| {
+            session
+                .raw
+                .get("options")
+                .and_then(|options| options.get("sandbox_mode"))
+        })?;
+
+        match value {
+            serde_json::Value::Null => Some(("provider default".to_string(), false)),
+            serde_json::Value::String(name) if !name.trim().is_empty() => {
+                let mode = SandboxMode::parse(name);
+                Some((
+                    mode.map(SandboxMode::label)
+                        .unwrap_or(name.as_str())
+                        .to_string(),
+                    mode.is_some_and(SandboxMode::writable),
+                ))
+            }
+            other => Some((crate::model::compact(other), false)),
+        }
     }
 
     /// The config this App wants written, once. Drained by the driver, which owns the
@@ -1433,9 +1641,11 @@ impl App {
             Msg::Tick => {
                 self.ticks += 1;
                 self.expire_notice();
+                self.expire_chords();
                 self.poll();
             }
             Msg::Redraw => {}
+            Msg::Scroll(delta) => self.scroll_view(delta),
             Msg::Notification(notification) => self.notification(notification),
             Msg::Answer { tag, result } => self.answer(tag, result),
             Msg::Reconnected(hello) => {
@@ -1457,6 +1667,7 @@ impl App {
                 );
             }
             Msg::NotificationsDropped(total) => self.client_dropped(total),
+            Msg::ExternalEditor(text) => self.apply_external_editor(text),
         }
     }
 
@@ -1913,6 +2124,9 @@ impl App {
             Tag::Action {
                 label, plane, id, ..
             } => match result {
+                Ok(value) if matches!(label, "preview" | "admit" | "list capabilities") => {
+                    self.capability_answered(label, &id, value)
+                }
                 Ok(_value) => self.inform(format!("{label} accepted for {id}"), NoticeKind::Info),
                 Err(error) => {
                     if matches!(label, "send_message" | "follow_up")
@@ -2467,6 +2681,12 @@ impl App {
     /// where the reconnect hook can find it.
     pub fn open_session(&mut self, plane: Plane, id: String) {
         let key = (plane, id.clone());
+        let switching = self.sessions.open.as_ref() != Some(&key);
+
+        if switching {
+            self.remember_composer_history();
+            self.sessions.composer = None;
+        }
 
         self.sessions
             .watches
@@ -2474,11 +2694,15 @@ impl App {
             .or_insert_with(|| Watch::new(plane, id.clone()));
 
         self.sessions.open = Some(key.clone());
-        self.sessions.focus = Pane::Detail;
-
-        // Opening a session is a request to look at it, and an approval modal raised by
-        // one that opened behind another tab would have nothing legible underneath it.
         self.tab = Tab::Sessions;
+
+        if plane == Plane::Interactive {
+            if self.sessions.composer.is_none() {
+                self.compose(ComposerVerb::Message);
+            }
+        } else {
+            self.sessions.composer = None;
+        }
 
         let cursor = self
             .sessions
@@ -2544,6 +2768,12 @@ impl App {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        if self.leader_until.is_some() {
+            self.leader_key(key);
+            return;
+        }
 
         if ctrl && matches!(key.code, KeyCode::Char('p')) {
             if matches!(self.overlay, Some(Overlay::Commands(_))) {
@@ -2559,22 +2789,51 @@ impl App {
             return;
         }
 
-        // Never the TUI. §3.4 is explicit: ctrl-c interrupts the active turn, and `q` is
-        // the only thing that quits.
-        if ctrl && matches!(key.code, KeyCode::Char('c')) {
-            self.interrupt();
+        if ctrl && matches!(key.code, KeyCode::Char('x')) && self.overlay.is_none() {
+            self.leader_until = Some(self.ticks + LEADER_TICKS);
+            return;
+        }
+
+        if ctrl && matches!(key.code, KeyCode::Char('g')) && self.overlay.is_none() {
+            self.request_external_editor();
             return;
         }
 
         // Event details must remain reachable while the composer owns printable keys.
-        // This is handled before overlays/composers for the same reason as ctrl+p.
-        if ctrl && matches!(key.code, KeyCode::Char('e')) && self.overlay.is_none() {
+        // Ctrl+O is the Pi/OpenCode muscle memory for expanding tool output; Ctrl+E is
+        // readline end-of-line once it reaches the editor.
+        if ctrl && matches!(key.code, KeyCode::Char('o')) && self.overlay.is_none() {
             self.toggle_session_details();
+            return;
+        }
+
+        if ctrl && matches!(key.code, KeyCode::Char('c')) {
+            self.ctrl_c();
+            return;
+        }
+
+        if ctrl
+            && matches!(key.code, KeyCode::Char('d'))
+            && self.overlay.is_none()
+            && self.focused_prompt_empty()
+        {
+            self.open_quit();
             return;
         }
 
         if self.overlay.is_some() {
             self.overlay_key(key);
+            return;
+        }
+
+        // The composer is always focused, so these have to be claimed before Up/Down
+        // become prompt history. The wheel is handled as Msg::Scroll, not as keys.
+        if self.transcript_scroll_key(key) {
+            return;
+        }
+
+        if matches!(key.code, KeyCode::Char('?')) && !shift && self.focused_prompt_empty() {
+            self.overlay = Some(Overlay::Help);
             return;
         }
 
@@ -2590,7 +2849,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char(digit @ '1'..='7') => {
+            KeyCode::Char(digit @ '1'..='7') if !ctrl => {
                 let index = digit as usize - '1' as usize;
                 self.select_tab(Tab::ALL[index]);
             }
@@ -2615,10 +2874,38 @@ impl App {
             KeyCode::Char('a') => self.reopen_approval(),
             KeyCode::Char('n') => self.open_new_session(),
             KeyCode::Char('x') => self.open_close_confirm(),
-            // `,` is free in every other dispatch here, and it is the punctuation a
-            // terminal reader already expects to mean "preferences".
             KeyCode::Char(',') => self.open_settings(),
             _ => {}
+        }
+    }
+
+    fn leader_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        self.leader_until = None;
+
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Char('n') if shift => self.open_new_session(),
+            KeyCode::Char('N') => self.open_new_session(),
+            KeyCode::Char('n') => self.new_home(),
+            KeyCode::Char('l') => self.activate_command(Command::SwitchSession),
+            KeyCode::Char('e') | KeyCode::Char('g') => self.request_external_editor(),
+            KeyCode::Char('y') => self.copy_last_agent(),
+            KeyCode::Char('s') => self.compose(ComposerVerb::Steer),
+            KeyCode::Char('a') => self.reopen_approval(),
+            KeyCode::Char('w') => self.start_writable_session(),
+            KeyCode::Char('x') => self.open_close_confirm(),
+            KeyCode::Char('o') | KeyCode::Char('d') => self.toggle_session_details(),
+            KeyCode::Char('q') => self.open_quit(),
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char(',') => self.open_settings(),
+            _ => self.inform(
+                "ctrl+x n new · w write · l sessions · e editor · y copy · s steer · x end · q quit",
+                NoticeKind::Info,
+            ),
         }
     }
 
@@ -2630,46 +2917,33 @@ impl App {
     fn move_by(&mut self, delta: isize) {
         match self.tab {
             Tab::Dashboard => {}
-            Tab::Sessions => match self.sessions.focus {
-                Pane::List => {
-                    let len = self.sessions.merged().len();
+            Tab::Sessions => {
+                if let Some(watch) = self.sessions.open_watch_mut() {
+                    // Scrolling away from the bottom stops the transcript from jumping
+                    // under a reader every time an event arrives; `Watch::measured`
+                    // holds the rows still on the frames that follow.
+                    if delta < 0 {
+                        // Clamped against what the last frame drew. Left unbounded, a
+                        // held PageUp on a short transcript buys hundreds of keypresses
+                        // that do nothing, and then hundreds more to get back.
+                        let wanted = watch
+                            .scroll
+                            .saturating_add(delta.unsigned_abs())
+                            .min(watch.max_scroll());
 
-                    if len == 0 {
-                        self.sessions.selected = 0;
+                        if wanted > 0 {
+                            watch.follow = false;
+                            watch.scroll = wanted;
+                        }
                     } else {
-                        self.sessions.selected = (self.sessions.selected as isize + delta)
-                            .clamp(0, len as isize - 1)
-                            as usize;
-                    }
-                }
-                Pane::Detail => {
-                    if let Some(watch) = self.sessions.open_watch_mut() {
-                        // Scrolling away from the bottom stops the transcript from jumping
-                        // under a reader every time an event arrives; `Watch::measured`
-                        // holds the rows still on the frames that follow.
-                        if delta < 0 {
-                            // Clamped against what the last frame drew. Left unbounded, a
-                            // held PageUp on a short transcript buys hundreds of keypresses
-                            // that do nothing, and then hundreds more to get back.
-                            let wanted = watch
-                                .scroll
-                                .saturating_add(delta.unsigned_abs())
-                                .min(watch.max_scroll());
+                        watch.scroll = watch.scroll.saturating_sub(delta as usize);
 
-                            if wanted > 0 {
-                                watch.follow = false;
-                                watch.scroll = wanted;
-                            }
-                        } else {
-                            watch.scroll = watch.scroll.saturating_sub(delta as usize);
-
-                            if watch.scroll == 0 {
-                                watch.follow = true;
-                            }
+                        if watch.scroll == 0 {
+                            watch.follow = true;
                         }
                     }
                 }
-            },
+            }
             Tab::Agents => Self::explorer_move(&mut self.agents, delta),
             Tab::Teams => Self::explorer_move(&mut self.teams, delta),
             Tab::Plans => {
@@ -2702,6 +2976,39 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Transcript motion that must win over the always-on composer.
+    ///
+    /// Bare Up/Down stay prompt history, matching Pi and OpenCode. The wheel, PageUp, and
+    /// Shift/Ctrl+Up are how you read the conversation without leaving the draft.
+    fn transcript_scroll_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if self.tab != Tab::Sessions || self.sessions.open.is_none() {
+            return false;
+        }
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::PageUp => self.scroll_view(-10),
+            KeyCode::PageDown => self.scroll_view(10),
+            KeyCode::Up if ctrl || shift => self.scroll_view(-3),
+            KeyCode::Down if ctrl || shift => self.scroll_view(3),
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn scroll_view(&mut self, delta: isize) {
+        if self.overlay.is_some() {
+            return;
+        }
+
+        self.move_by(delta);
     }
 
     fn explorer_move(explorer: &mut Explorer, delta: isize) {
@@ -2738,7 +3045,7 @@ impl App {
 
     fn left(&mut self) {
         match self.tab {
-            Tab::Sessions => self.sessions.focus = Pane::List,
+            Tab::Sessions => {}
             Tab::Agents => Self::explorer_left(&mut self.agents),
             Tab::Teams => Self::explorer_left(&mut self.teams),
             Tab::Plans => {
@@ -2804,11 +3111,8 @@ impl App {
 
     fn right(&mut self) {
         match self.tab {
-            Tab::Sessions => {
-                if self.sessions.open.is_some() {
-                    self.sessions.focus = Pane::Detail;
-                }
-            }
+            Tab::Sessions => {}
+
             Tab::Agents => self.agents.focus = Pane::Detail,
             Tab::Teams => self.teams.focus = Pane::Detail,
             Tab::Plans => {
@@ -2832,15 +3136,11 @@ impl App {
 
     fn activate(&mut self) {
         match self.tab {
-            Tab::Sessions => match self.sessions.focus {
-                Pane::List => {
-                    if let Some(session) = self.sessions.current() {
-                        let (plane, id) = (session.plane, session.id.clone());
-                        self.open_session(plane, id);
-                    }
+            Tab::Sessions => {
+                if self.sessions.open.is_some() {
+                    self.compose(ComposerVerb::Message);
                 }
-                Pane::Detail => self.compose(ComposerVerb::Message),
-            },
+            }
             Tab::Agents => Self::explorer_activate(&mut self.agents),
             Tab::Teams => Self::explorer_activate(&mut self.teams),
             Tab::Plans => {
@@ -2933,11 +3233,6 @@ impl App {
         if self.tab == Tab::Sessions {
             if self.sessions.composer.is_some() {
                 self.sessions.composer = None;
-                return;
-            }
-
-            if self.sessions.focus == Pane::Detail {
-                self.sessions.focus = Pane::List;
                 return;
             }
 
@@ -3048,6 +3343,7 @@ impl App {
             provider: provider.clone(),
             workspace: self.default_workspace(),
             approval_mode: self.config.defaults.approval_mode(),
+            sandbox_mode: self.config.defaults.sandbox_mode(),
             objective: String::new(),
         };
 
@@ -3068,6 +3364,109 @@ impl App {
         self.config.defaults.provider = Some(provider);
         self.mark_welcomed();
         self.save_pending = true;
+
+        self.issue(
+            Call::new(
+                Tag::Start {
+                    plane: Plane::Interactive,
+                },
+                request.method(),
+                params,
+            )
+            .with_timeout(START_TIMEOUT),
+        );
+    }
+
+    /// Starts a new interactive session that can edit the workspace.
+    ///
+    /// Sandbox is a start-time option: a running read-only session cannot be promoted.
+    /// This is the switch the composer chrome offers.
+    fn start_writable_session(&mut self) {
+        if self.open_sandbox().is_some_and(|(_, writable)| writable) {
+            self.inform(
+                "this session can already edit files in the workspace",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        if self.sessions.open.is_none()
+            && self
+                .config
+                .defaults
+                .sandbox_mode()
+                .map_or(true, SandboxMode::writable)
+        {
+            self.inform(
+                "new sessions can already edit files; --sandbox-mode read_only or settings \
+                 starts a read-only one",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        if !self.hello.serves("interactive.start") {
+            self.inform(
+                "this gateway does not serve interactive.start",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        if !self.hello.operates() {
+            self.inform(
+                format!(
+                    "starting a session mutates the runtime, and this listener runs at scope `{}`",
+                    self.hello.scope
+                ),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let provider = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.provider.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.home_provider().to_string());
+
+        if provider.is_empty() {
+            self.inform(
+                "choose a provider before starting a writable session",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let workspace = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.workspace.clone())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| self.default_workspace());
+
+        let request = StartRequest {
+            plane: Plane::Interactive,
+            provider,
+            workspace,
+            approval_mode: self.config.defaults.approval_mode(),
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            objective: String::new(),
+        };
+
+        let params = match request.params() {
+            Ok(params) => params,
+            Err(refusal) => {
+                self.inform(refusal.message(), NoticeKind::Warn);
+                return;
+            }
+        };
+
+        self.inform(
+            "starting a session that can edit files in the workspace",
+            NoticeKind::Info,
+        );
 
         self.issue(
             Call::new(
@@ -3141,7 +3540,6 @@ impl App {
         self.tab = Tab::Sessions;
         self.sessions.open = None;
         self.sessions.composer = None;
-        self.sessions.focus = Pane::Detail;
         self.home_draft.clear_text();
         self.home_error = None;
         self.poll();
@@ -3268,6 +3666,11 @@ impl App {
             return;
         }
 
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.verb = verb;
+            return;
+        }
+
         let mut editor = Editor::default();
         editor.restore_history(
             self.sessions
@@ -3277,7 +3680,6 @@ impl App {
                 .unwrap_or_default(),
         );
 
-        self.sessions.focus = Pane::Detail;
         self.sessions.composer = Some(Composer {
             verb,
             editor,
@@ -3334,7 +3736,7 @@ impl App {
 
         match action {
             EditorAction::Submit => self.submit_composer(),
-            EditorAction::Cancel => self.sessions.composer = None,
+            EditorAction::Cancel => self.escape_from_prompt(),
             EditorAction::Scroll(delta) => self.move_by(delta * 10),
             EditorAction::None => {}
         }
@@ -3417,22 +3819,39 @@ impl App {
     }
 
     fn activate_slash_command(&mut self, input: &str) -> bool {
-        let command = match input.trim() {
+        let trimmed = input.trim();
+
+        if let Some(name) = slash_arg(trimmed, "/preview") {
+            self.preview_capability(name);
+            return true;
+        }
+
+        if let Some(name) = slash_arg(trimmed, "/admit") {
+            self.confirm_admit_capability(name);
+            return true;
+        }
+
+        let command = match trimmed {
             "/new" => Some(Command::NewSession),
-            "/switch" => Some(Command::SwitchSession),
+            "/switch" | "/sessions" => Some(Command::SwitchSession),
             "/details" => Some(Command::SessionDetails),
+            "/copy" => Some(Command::CopyLast),
+            "/interrupt" => Some(Command::Interrupt),
+            "/steer" => Some(Command::Steer),
+            "/editor" => Some(Command::ExternalEditor),
+            "/close" => Some(Command::CloseSession),
+            "/options" => Some(Command::NewSessionOptions),
+            "/write" => Some(Command::WriteAccess),
             "/connect" => Some(Command::ConnectChatGpt),
             "/runtime" => Some(Command::Runtime),
             "/agents" => Some(Command::Agents),
             "/teams" => Some(Command::Teams),
             "/plans" => Some(Command::Plans),
             "/upgrades" => Some(Command::Upgrades),
+            "/capabilities" => Some(Command::ListCapabilities),
             "/logs" => Some(Command::Logs),
             "/settings" => Some(Command::Settings),
-            "/help" => {
-                self.overlay = Some(Overlay::Help);
-                return true;
-            }
+            "/help" | "/hotkeys" => Some(Command::Help),
             "/quit" => {
                 self.open_quit();
                 return true;
@@ -3445,7 +3864,42 @@ impl App {
         true
     }
 
-    /// Ctrl-C: the active turn, never this process.
+    /// Ctrl-C: clear the prompt if it has text; otherwise interrupt a running turn;
+    /// a second press on an idle surface opens the quit dialog. Never a single-press quit.
+    fn ctrl_c(&mut self) {
+        if self.overlay.is_some() {
+            self.interrupt();
+            return;
+        }
+
+        if !self.focused_prompt_empty() {
+            if let Some(editor) = self.focused_editor_mut() {
+                editor.clear_text();
+            }
+            self.ctrl_c_until = None;
+            return;
+        }
+
+        if self.sessions.open.is_some() {
+            self.interrupt_turn();
+            self.ctrl_c_until = None;
+            return;
+        }
+
+        if self.ctrl_c_until.is_some_and(|until| self.ticks < until) {
+            self.ctrl_c_until = None;
+            self.open_quit();
+            return;
+        }
+
+        self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
+        self.inform(
+            "press ctrl+c again to quit · esc aborts a running turn · ctrl+q opens the quit dialog",
+            NoticeKind::Info,
+        );
+    }
+
+    /// Ctrl-C / Esc: the active turn, never this process.
     fn interrupt(&mut self) {
         if self.overlay.is_some() {
             let login_id = match self.overlay.as_ref() {
@@ -3465,9 +3919,13 @@ impl App {
             return;
         }
 
+        self.interrupt_turn();
+    }
+
+    fn interrupt_turn(&mut self) {
         let Some((plane, id)) = self.sessions.open.clone() else {
             self.inform(
-                "ctrl-c interrupts a running turn; `q` opens the quit dialog",
+                "esc or ctrl+c interrupts a running turn; ctrl+q opens the quit dialog",
                 NoticeKind::Info,
             );
             return;
@@ -3479,7 +3937,7 @@ impl App {
             // destructive enough to go through the confirmation instead.
             Plane::Coding => {
                 self.inform(
-                    format!("{id} is a coding task; `x` cancels it"),
+                    format!("{id} is a coding task; ctrl+x x cancels it"),
                     NoticeKind::Info,
                 );
                 return;
@@ -3537,9 +3995,11 @@ impl App {
     /// the gateway serves the verb — `hello.methods` is the feature gate (§2.3), and a
     /// read listener advertises the operate verbs it will refuse, so scope is checked too.
     fn open_new_session(&mut self) {
-        if self.tab != Tab::Sessions || self.overlay.is_some() {
+        if self.overlay.is_some() {
             return;
         }
+
+        self.select_tab(Tab::Sessions);
 
         if !self.hello.serves("interactive.start") {
             self.inform(
@@ -3633,6 +4093,151 @@ impl App {
         self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
     }
 
+    fn capability_workspace(&self) -> Option<String> {
+        self.sessions
+            .open_info()
+            .and_then(|session| session.workspace.clone())
+            .filter(|workspace| !workspace.is_empty())
+            .or_else(|| {
+                let workspace = self.default_workspace();
+                (!workspace.is_empty()).then_some(workspace)
+            })
+    }
+
+    fn capability_target(&self) -> (Plane, String) {
+        self.sessions
+            .open
+            .clone()
+            .unwrap_or((Plane::Interactive, "capabilities".into()))
+    }
+
+    fn list_capabilities(&mut self) {
+        let Some(workspace) = self.capability_workspace() else {
+            self.inform(
+                "open a session or set a default workspace before listing capabilities",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let (plane, id) = self.capability_target();
+        self.issue(Call::new(
+            Tag::Action {
+                label: "list capabilities",
+                plane,
+                id,
+                turn_id: None,
+            },
+            "capabilities.list",
+            json!({ "workspace": workspace }),
+        ));
+    }
+
+    fn preview_capability(&mut self, name: &str) {
+        if name.trim().is_empty() {
+            self.list_capabilities();
+            return;
+        }
+
+        let Some(workspace) = self.capability_workspace() else {
+            self.inform(
+                "open a session or set a default workspace before previewing a capability",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let Some(path) = capability_proposal_path(name) else {
+            self.inform(
+                "a capability path must stay inside the workspace",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let (plane, _) = self.capability_target();
+        self.issue(
+            Call::new(
+                Tag::Action {
+                    label: "preview",
+                    plane,
+                    id: path.clone(),
+                    turn_id: None,
+                },
+                "capabilities.preview",
+                json!({ "workspace": workspace, "path": path }),
+            )
+            .with_timeout(START_TIMEOUT),
+        );
+    }
+
+    fn confirm_admit_capability(&mut self, name: &str) {
+        if name.trim().is_empty() {
+            self.inform("name a proposal: /admit Echo", NoticeKind::Warn);
+            return;
+        }
+
+        let Some(workspace) = self.capability_workspace() else {
+            self.inform(
+                "open a session or set a default workspace before admitting a capability",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let Some(path) = capability_proposal_path(name) else {
+            self.inform(
+                "a capability path must stay inside the workspace",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let (plane, session_id) = self.capability_target();
+        let mut params = json!({ "workspace": workspace, "path": path });
+        if session_id != "capabilities" {
+            params["session_id"] = json!(session_id);
+        }
+
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("admit {path}?"),
+            detail: "this forges, signs, and rolls out the proposal; the selected model cannot \
+                     undo it"
+                .to_string(),
+            options: vec![
+                (
+                    "admit (forge, sign, roll out)".to_string(),
+                    Some(
+                        Call::new(
+                            Tag::Action {
+                                label: "admit",
+                                plane,
+                                id: path,
+                                turn_id: None,
+                            },
+                            "capabilities.admit",
+                            params,
+                        )
+                        .with_timeout(START_TIMEOUT),
+                    ),
+                ),
+                ("cancel".to_string(), None),
+            ],
+            choice: 1,
+        });
+    }
+
+    fn capability_answered(&mut self, label: &str, id: &str, value: Value) {
+        let text = match label {
+            "list capabilities" => format_capability_list(&value),
+            "preview" => format_capability_preview(id, &value),
+            "admit" => format_capability_admit(id, &value),
+            _ => format!("{label} accepted for {id}"),
+        };
+
+        self.inform(text, NoticeKind::Info);
+    }
+
     /// `,`: this client's preferences, from any tab.
     ///
     /// No scope check and no `hello.methods` gate, unlike `n`: writing a file this process
@@ -3651,6 +4256,7 @@ impl App {
             provider: 0,
             workspace: self.default_workspace(),
             approval: approval_index(self.config.defaults.approval_mode()),
+            sandbox: sandbox_index(self.config.defaults.sandbox_mode()),
             wanted_provider: self.config.defaults.provider.clone(),
             edited: false,
         })));
@@ -3729,6 +4335,9 @@ impl App {
 
         self.config.defaults.approval_mode =
             approval_at(settings.approval).map(|mode| mode.as_str().to_string());
+
+        self.config.defaults.sandbox_mode =
+            sandbox_at(settings.sandbox).map(|mode| mode.as_str().to_string());
 
         self.save_pending = true;
     }
@@ -3835,14 +4444,6 @@ impl App {
         self.sessions.coding.invalidate();
 
         self.open_session(plane, started.id.clone());
-
-        if plane == Plane::Interactive {
-            self.sessions.composer = Some(Composer {
-                verb: ComposerVerb::Message,
-                editor: Editor::default(),
-                next_turn_id: None,
-            });
-        }
 
         // The quick-start screen's prompt. Sent here rather than beside the start, because
         // until this answer arrived there was no session to send it to — the same order
@@ -4219,8 +4820,21 @@ impl App {
     fn activate_command(&mut self, command: Command) {
         match command {
             Command::NewSession => self.new_home(),
+            Command::NewSessionOptions => {
+                self.overlay = None;
+                self.open_new_session();
+            }
+            Command::WriteAccess => {
+                self.overlay = None;
+                self.start_writable_session();
+            }
             Command::SwitchSession => {
-                self.overlay = Some(Overlay::SessionPicker { choice: 0 });
+                let selected = self
+                    .sessions
+                    .open
+                    .clone()
+                    .or_else(|| self.sessions.picker_key(0));
+                self.overlay = Some(Overlay::SessionPicker { selected });
                 self.sessions.interactive.invalidate();
                 self.sessions.coding.invalidate();
                 self.poll();
@@ -4228,6 +4842,26 @@ impl App {
             Command::SessionDetails => {
                 self.overlay = None;
                 self.toggle_session_details();
+            }
+            Command::CopyLast => {
+                self.overlay = None;
+                self.copy_last_agent();
+            }
+            Command::Interrupt => {
+                self.overlay = None;
+                self.interrupt_turn();
+            }
+            Command::Steer => {
+                self.overlay = None;
+                self.compose(ComposerVerb::Steer);
+            }
+            Command::ExternalEditor => {
+                self.overlay = None;
+                self.request_external_editor();
+            }
+            Command::CloseSession => {
+                self.overlay = None;
+                self.open_close_confirm();
             }
             Command::ConnectChatGpt => {
                 self.overlay = None;
@@ -4253,6 +4887,24 @@ impl App {
                 self.overlay = None;
                 self.select_tab(Tab::Upgrade);
             }
+            Command::ListCapabilities => {
+                self.overlay = None;
+                self.list_capabilities();
+            }
+            Command::PreviewCapability => {
+                self.overlay = Some(Overlay::Prompt {
+                    kind: PromptKind::PreviewCapability,
+                    label: "proposal name (empty lists them)".into(),
+                    buffer: String::new(),
+                });
+            }
+            Command::AdmitCapability => {
+                self.overlay = Some(Overlay::Prompt {
+                    kind: PromptKind::AdmitCapability,
+                    label: "proposal name to admit".into(),
+                    buffer: String::new(),
+                });
+            }
             Command::Logs => {
                 self.overlay = None;
                 self.select_tab(Tab::Logs);
@@ -4260,6 +4912,9 @@ impl App {
             Command::Settings => {
                 self.overlay = None;
                 self.open_settings();
+            }
+            Command::Help => {
+                self.overlay = Some(Overlay::Help);
             }
         }
     }
@@ -4272,49 +4927,34 @@ impl App {
             return;
         }
 
-        let len = self.sessions.merged().len();
-
-        let Some(Overlay::SessionPicker { choice }) = self.overlay.as_mut() else {
+        let Some(Overlay::SessionPicker { selected }) = self.overlay.as_ref() else {
             return;
         };
 
+        let selected = selected.clone();
+        let index = self.sessions.picker_index(selected.as_ref());
+        let last = self.sessions.merged().len().saturating_sub(1);
+
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
-                *choice = (*choice + 1).min(len.saturating_sub(1))
+                if let Some(key) = self.sessions.picker_key((index + 1).min(last)) {
+                    self.overlay = Some(Overlay::SessionPicker {
+                        selected: Some(key),
+                    });
+                }
             }
-            KeyCode::Up | KeyCode::Char('k') => *choice = choice.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(key) = self.sessions.picker_key(index.saturating_sub(1)) {
+                    self.overlay = Some(Overlay::SessionPicker {
+                        selected: Some(key),
+                    });
+                }
+            }
             KeyCode::Enter => {
-                let selected = *choice;
-                let session = self
-                    .sessions
-                    .merged()
-                    .get(selected)
-                    .map(|session| (session.plane, session.id.clone()));
-
+                let session = selected.or_else(|| self.sessions.picker_key(index));
                 self.overlay = None;
                 if let Some((plane, id)) = session {
-                    let verb = self
-                        .sessions
-                        .merged()
-                        .get(selected)
-                        .filter(|session| session.plane == plane && session.id == id)
-                        .map(|session| {
-                            if session.status.as_str() == "idle" {
-                                ComposerVerb::Message
-                            } else {
-                                ComposerVerb::FollowUp
-                            }
-                        })
-                        .unwrap_or(ComposerVerb::Message);
-
                     self.open_session(plane, id);
-                    if plane == Plane::Interactive {
-                        self.sessions.composer = Some(Composer {
-                            verb,
-                            editor: Editor::default(),
-                            next_turn_id: None,
-                        });
-                    }
                 }
             }
             _ => {}
@@ -4411,11 +5051,18 @@ impl App {
 
         let value = buffer.trim().to_string();
 
-        if value.is_empty() {
-            return;
-        }
-
         match kind {
+            PromptKind::PreviewCapability => {
+                self.preview_capability(&value);
+                return;
+            }
+            PromptKind::AdmitCapability => {
+                self.confirm_admit_capability(&value);
+                return;
+            }
+            PromptKind::HistoryModule | PromptKind::GrantsPrincipal if value.is_empty() => {
+                return;
+            }
             PromptKind::HistoryModule => {
                 self.upgrade.history_module = Some(value);
                 self.upgrade.history = Loadable::default();
@@ -4429,6 +5076,140 @@ impl App {
         }
 
         self.poll_upgrade_section();
+    }
+
+    fn expire_chords(&mut self) {
+        if self.leader_until.is_some_and(|until| self.ticks >= until) {
+            self.leader_until = None;
+        }
+
+        if self.ctrl_c_until.is_some_and(|until| self.ticks >= until) {
+            self.ctrl_c_until = None;
+        }
+    }
+
+    fn focused_prompt_empty(&self) -> bool {
+        match self.focused_editor() {
+            Some(editor) => editor.is_empty(),
+            None => true,
+        }
+    }
+
+    fn focused_editor(&self) -> Option<&Editor> {
+        if self.overlay.is_some() {
+            return None;
+        }
+
+        if self.tab != Tab::Sessions {
+            return None;
+        }
+
+        if let Some(composer) = self.sessions.composer.as_ref() {
+            return Some(&composer.editor);
+        }
+
+        if self.sessions.open.is_none() {
+            return Some(&self.home_draft);
+        }
+
+        None
+    }
+
+    fn focused_editor_mut(&mut self) -> Option<&mut Editor> {
+        if self.overlay.is_some() {
+            return None;
+        }
+
+        if self.tab != Tab::Sessions {
+            return None;
+        }
+
+        if self.sessions.composer.is_some() {
+            return self
+                .sessions
+                .composer
+                .as_mut()
+                .map(|composer| &mut composer.editor);
+        }
+
+        if self.sessions.open.is_none() {
+            return Some(&mut self.home_draft);
+        }
+
+        None
+    }
+
+    fn session_busy(&self) -> bool {
+        if self.waiting_for_open_agent_reply() {
+            return true;
+        }
+
+        self.sessions.open_info().is_some_and(|session| {
+            matches!(
+                session.status.as_str(),
+                "running" | "starting" | "awaiting_approval"
+            )
+        })
+    }
+
+    fn escape_from_prompt(&mut self) {
+        if self.session_busy() {
+            self.interrupt_turn();
+            return;
+        }
+
+        if self.focused_prompt_empty() {
+            self.leave_session();
+        }
+    }
+
+    fn leave_session(&mut self) {
+        self.remember_composer_history();
+        self.sessions.composer = None;
+        self.sessions.open = None;
+    }
+
+    fn copy_last_agent(&mut self) {
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform("open a session before copying a message", NoticeKind::Info);
+            return;
+        };
+
+        match transcript_cells::last_agent_message(watch.entries()) {
+            Some(text) => {
+                self.copy_pending = Some(text);
+                self.inform("copied the last agent message", NoticeKind::Info);
+            }
+            None => self.inform("no agent message to copy yet", NoticeKind::Info),
+        }
+    }
+
+    fn request_external_editor(&mut self) {
+        let text = self
+            .focused_editor()
+            .map(|editor| editor.text().to_string())
+            .unwrap_or_default();
+        self.external_editor_pending = Some(text);
+    }
+
+    fn apply_external_editor(&mut self, text: String) {
+        if self.tab != Tab::Sessions {
+            self.select_tab(Tab::Sessions);
+        }
+
+        if self.sessions.open.is_some() {
+            self.compose(ComposerVerb::Message);
+        }
+
+        let catalog = self.completion_catalog.clone();
+        if let Some(editor) = self.focused_editor_mut() {
+            editor.clear_text();
+            editor.paste(&text, &catalog);
+            return;
+        }
+
+        self.home_draft.clear_text();
+        self.home_draft.paste(&text, &catalog);
     }
 }
 
@@ -4533,4 +5314,124 @@ fn project_run(value: &Value) -> Option<Row> {
         id,
         raw: value.clone(),
     })
+}
+
+fn slash_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    if input == command {
+        Some("")
+    } else {
+        input
+            .strip_prefix(command)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .map(str::trim)
+    }
+}
+
+fn capability_proposal_path(name: &str) -> Option<String> {
+    let trimmed = name.trim().trim_start_matches('/').replace('\\', "/");
+
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed
+        .split('/')
+        .any(|part| part.is_empty() || part == "..")
+    {
+        return None;
+    }
+
+    if trimmed.contains('/') {
+        Some(trimmed)
+    } else {
+        Some(format!(".ouroboros/capabilities/{trimmed}"))
+    }
+}
+
+fn format_capability_list(value: &Value) -> String {
+    let Some(items) = value.as_array() else {
+        return "listed capability proposals".into();
+    };
+
+    if items.is_empty() {
+        return "no capability proposals under .ouroboros/capabilities".into();
+    }
+
+    let names: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            item.get("path")
+                .and_then(Value::as_str)
+                .map(|path| path.rsplit('/').next().unwrap_or(path).to_string())
+                .or_else(|| {
+                    item.get("module")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+        })
+        .collect();
+
+    format!(
+        "{} proposal{}: {}",
+        names.len(),
+        if names.len() == 1 { "" } else { "s" },
+        names.join(", ")
+    )
+}
+
+fn format_capability_preview(id: &str, value: &Value) -> String {
+    let module = value.get("module").and_then(Value::as_str).unwrap_or(id);
+    let loaded = value
+        .get("loaded?")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let report = value.get("test_report");
+    let total = report
+        .and_then(|report| report.get("total"))
+        .and_then(Value::as_u64);
+    let failures = report
+        .and_then(|report| report.get("failures"))
+        .and_then(Value::as_u64);
+    let tests = match (total, failures) {
+        (Some(total), Some(failures)) => {
+            format!("tests {}/{total}", total.saturating_sub(failures))
+        }
+        _ => "tests unknown".into(),
+    };
+    let load = if loaded {
+        "loaded on this node"
+    } else {
+        "not loaded"
+    };
+
+    format!("preview {module}: {tests}, {load}")
+}
+
+fn format_capability_admit(id: &str, value: &Value) -> String {
+    let module = value.get("module").and_then(Value::as_str).unwrap_or(id);
+    let epoch = value
+        .get("epoch")
+        .map(model::compact)
+        .unwrap_or_else(|| "-".into());
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let started = match value.get("started") {
+        None | Some(Value::Null) => None,
+        Some(started) => {
+            if let Some(error) = started.get("error") {
+                Some(format!("start failed: {}", model::compact(error)))
+            } else if let Some(agent) = started.get("id").and_then(Value::as_str) {
+                Some(format!("started {agent}"))
+            } else {
+                Some(model::compact(started))
+            }
+        }
+    };
+
+    match started {
+        Some(started) => format!("admitted {module} epoch={epoch} {state}; {started}"),
+        None => format!("admitted {module} epoch={epoch} {state}"),
+    }
 }

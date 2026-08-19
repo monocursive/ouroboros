@@ -9,8 +9,9 @@ defmodule Ouroboros.Prompt.Assembler do
 
   The rendered prompt states its own structure: profile text inside an
   `<ouroboros-agent-profile>` block, the caller's session prompt inside an
-  `<ouroboros-session-instructions>` block. That structure is enforced, not merely
-  documented — text containing either tag is rejected with
+  `<ouroboros-session-instructions>` block, and an optional runtime identity
+  inside an `<ouroboros-runtime>` block. That structure is enforced, not merely
+  documented — text containing any of those tags is rejected with
   `{:error, {:reserved_prompt_delimiter, field}}`, on both sides, so neither block can
   close itself and open the other. Rejection rather than escaping: a prompt this module
   rewrote would no longer be the prompt its author wrote or its digest describes.
@@ -32,8 +33,9 @@ defmodule Ouroboros.Prompt.Assembler do
 
   alias Ouroboros.AgentProfile
   alias Ouroboros.Prompt.Trace
+  alias Ouroboros.Runtime.Exposure
 
-  @accepted_options [:system_prompt, :allowed_tools, :disallowed_tools]
+  @accepted_options [:system_prompt, :allowed_tools, :disallowed_tools, :runtime]
 
   defmodule Assembly do
     @moduledoc "A rendered prompt plus content-free deterministic trace metadata."
@@ -88,7 +90,8 @@ defmodule Ouroboros.Prompt.Assembler do
            tool_names(Keyword.get(opts, :disallowed_tools, []), :disallowed_tools),
          {:ok, session_prompt} <- normalized_session_prompt(Keyword.get(opts, :system_prompt)),
          tools = active_tools(profile.tools, allowed_tools, disallowed_tools),
-         {:ok, system_prompt} <- render(profile, session_prompt, tools) do
+         {:ok, runtime} <- runtime_block(Keyword.get(opts, :runtime)),
+         {:ok, system_prompt} <- render(profile, session_prompt, tools, runtime) do
       {:ok,
        %Assembly{
          version: Trace.version(),
@@ -107,7 +110,7 @@ defmodule Ouroboros.Prompt.Assembler do
   @spec trace(Assembly.t()) :: Trace.t() | nil
   def trace(%Assembly{} = assembly), do: Trace.build(assembly)
 
-  defp render(profile, session_prompt, tools) do
+  defp render(profile, session_prompt, tools, runtime) do
     sections =
       []
       |> maybe_section("Base behavior", profile.base_prompt)
@@ -122,19 +125,26 @@ defmodule Ouroboros.Prompt.Assembler do
     if sections == [] do
       {:error, :empty_rendered_profile}
     else
-      {:ok, envelope(profile, Enum.join(sections, "\n\n"), session_prompt)}
+      {:ok, envelope(profile, Enum.join(sections, "\n\n"), session_prompt, runtime)}
     end
   end
 
-  defp envelope(profile, profile_body, session_prompt) do
+  defp envelope(profile, profile_body, session_prompt, runtime) do
     rendered =
       "<ouroboros-agent-profile id=\"#{profile.id}\" version=\"#{profile.version}\">\n" <>
         profile_body <> "\n</ouroboros-agent-profile>"
 
-    if session_prompt do
-      rendered <>
-        "\n\n<ouroboros-session-instructions>\n" <>
-        session_prompt <> "\n</ouroboros-session-instructions>"
+    rendered =
+      if session_prompt do
+        rendered <>
+          "\n\n<ouroboros-session-instructions>\n" <>
+          session_prompt <> "\n</ouroboros-session-instructions>"
+      else
+        rendered
+      end
+
+    if runtime do
+      rendered <> "\n\n" <> runtime
     else
       rendered
     end
@@ -209,6 +219,12 @@ defmodule Ouroboros.Prompt.Assembler do
   defp normalized_session_prompt(_prompt), do: {:error, :invalid_system_prompt}
 
   defp reserved(field), do: {:error, {:reserved_prompt_delimiter, field}}
+
+  defp runtime_block(nil), do: {:ok, nil}
+  defp runtime_block(false), do: {:ok, nil}
+  defp runtime_block(true), do: {:ok, Exposure.envelope(:static)}
+  defp runtime_block(snapshot) when is_map(snapshot), do: {:ok, Exposure.envelope(snapshot)}
+  defp runtime_block(_other), do: {:error, {:invalid_prompt_assembler_option, :runtime}}
 
   # `nil` means the caller did not establish which tools are active, so the safe
   # manifest is empty. This deliberately differs from an empty disallow list.

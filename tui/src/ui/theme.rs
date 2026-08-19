@@ -27,6 +27,12 @@ pub fn label() -> Style {
     Style::default().fg(MUTED)
 }
 
+/// Secondary transcript matter: tool calls, command output, footnotes. Dimmer than
+/// either speaker's words, so the conversation stays the thing the eye lands on.
+pub fn quiet() -> Style {
+    Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+}
+
 /// The cursor row, as an inversion rather than a colour.
 ///
 /// White-on-blue is a colour scheme this client does not own: it is illegible on a light
@@ -66,8 +72,34 @@ pub fn session_status(status: &SessionStatus) -> Style {
     }
 }
 
-/// Four frames rather than a braille spinner: a stale panel with a refresh in flight has
-/// to be legible in a terminal that does not do wide glyphs.
+/// Pi / OpenCode braille frames. Each glyph is one terminal cell.
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Verbs beside the working spinner, rotated so a quiet model still reads as alive.
+const WORKING_VERBS: [&str; 3] = ["Working", "Thinking", "Planning"];
+
+/// Ticks between verb changes. ~3s at an 80ms frame, matching OpenCode's spinner copy.
+pub const WORKING_VERB_TICKS: u64 = 38;
+
 pub fn spinner(tick: u64) -> char {
-    ['|', '/', '-', '\\'][(tick % 4) as usize]
+    SPINNER_FRAMES[(tick as usize) % SPINNER_FRAMES.len()]
+}
+
+pub fn working_verb(tick: u64) -> &'static str {
+    WORKING_VERBS[((tick / WORKING_VERB_TICKS) as usize) % WORKING_VERBS.len()]
+}
+
+/// One-line working indicator: `⠋  Working`.
+pub fn working(tick: u64, message: impl Into<String>) -> ratatui::text::Line<'static> {
+    use ratatui::text::{Line, Span};
+
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            spinner(tick).to_string(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(message.into(), Style::default().fg(MUTED)),
+    ])
 }

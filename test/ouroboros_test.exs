@@ -45,6 +45,11 @@ defmodule OuroborosTest do
     assert status.availability.control == :disabled
     assert is_list(status.coding_tasks)
     assert is_list(status.control.runs)
+    refute Map.has_key?(status.control, :enabled)
+    assert status.forge.signer in [:deny, :local, :remote, :other, :unknown]
+    assert is_boolean(status.forge.admit_possible?)
+    assert is_integer(status.forge.live_count)
+    assert is_list(status.forge.live)
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"

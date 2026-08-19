@@ -738,13 +738,16 @@ rediscovered:
   Sessions tab opens a form carrying plane, provider, workspace and approval mode;
   `ouro new` is the same request from a shell. Both build their parameters through one
   `model::StartRequest`, which emits a strict subset of `Gateway.Methods`
-  `@start_options` — `provider`, `workspace`, `approval_mode`, and `objective` on the
-  coding plane — omits anything unanswered (an empty workspace box is *no* workspace,
-  not `""`, which `option_value(_, :string, _)` would refuse), and never sends `id`.
-  Two places the client is stricter than the gateway, both stated in the refusal: a
-  start with no provider from any source is refused here, because letting the node's
-  default decide would be a terminal choosing which vendor runs the operator's code —
-  the config file's `[defaults] provider` satisfies this by being a choice the
+  `@start_options` — `provider`, `workspace`, `approval_mode`, `sandbox_mode`, and
+  `objective` on the coding plane — omits anything unanswered (an empty workspace box is
+  *no* workspace, not `""`, which `option_value(_, :string, _)` would refuse), and never
+  sends `id`. The plane defaults to workspace write where the provider can take it;
+  `--sandbox-mode read_only` and the settings/files row launch a session that cannot
+  edit. `/write` (ctrl+x w) starts a new session with `workspace_write` when the open
+  one cannot edit. Two places the client is stricter than the gateway, both stated in
+  the refusal: a start with no provider from any source is refused here, because letting
+  the node's default decide would be a terminal choosing which vendor runs the operator's
+  code — the config file's `[defaults] provider` satisfies this by being a choice the
   operator made once, explicitly, and the form it prefills stays editable; and
   `objective` is required on the coding plane and refused on the interactive one.
 - **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
@@ -758,7 +761,7 @@ rediscovered:
   retry. Recent sessions and account state load behind this first frame.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
   this client's own `[defaults]` — provider picker over the same probed list the `n`
-  dialog uses, workspace, and approval mode — with an explicit
+  dialog uses, workspace, approval mode, and sandbox mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
 - **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`

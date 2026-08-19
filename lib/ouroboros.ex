@@ -66,7 +66,12 @@ defmodule Ouroboros do
         end,
       control: control_status(),
       upgrade: safe_value(&Ouroboros.Upgrade.NodeExecutor.status/0, %{mode: :unavailable}),
-      release: safe_value(&Ouroboros.Release.Runtime.status/0, %{mode: :unavailable})
+      release: safe_value(&Ouroboros.Release.Runtime.status/0, %{mode: :unavailable}),
+      forge:
+        safe_value(
+          &Ouroboros.Runtime.Exposure.forge_status/0,
+          %{signer: :unknown, admit_possible?: false, live_count: 0, live: []}
+        )
     }
   end
 
@@ -98,7 +103,7 @@ defmodule Ouroboros do
           []
       end
 
-    %{enabled: Process.whereis(Ouroboros.Control.Server) != nil, runs: runs}
+    %{runs: runs}
   end
 
   defp normalize_list(value) when is_list(value), do: value

@@ -556,12 +556,13 @@ pub struct RuntimeStatus {
     pub upgrade: Value,
     #[serde(default)]
     pub release: Value,
+    /// Signer posture and live capability count. Absent on older gateways.
+    #[serde(default)]
+    pub forge: Value,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ControlStatus {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default)]
     pub runs: Vec<Value>,
 }
@@ -611,6 +612,31 @@ impl RuntimeStatus {
         }
 
         parts.join("  ")
+    }
+
+    /// Signer posture and how many capabilities are live, from whatever `status.forge` sent.
+    pub fn forge_summary(&self) -> String {
+        if self.forge.is_null() {
+            return "-".into();
+        }
+
+        let signer = self
+            .forge
+            .get("signer")
+            .map(compact)
+            .unwrap_or_else(|| "-".into());
+        let live = self
+            .forge
+            .get("live_count")
+            .map(compact)
+            .unwrap_or_else(|| "-".into());
+        let admit = match self.forge.get("admit_possible?").and_then(Value::as_bool) {
+            Some(true) => "admit=yes",
+            Some(false) => "admit=no",
+            None => "admit=?",
+        };
+
+        format!("signer={signer} live={live} {admit}")
     }
 }
 
@@ -1051,6 +1077,64 @@ impl ApprovalMode {
     }
 }
 
+/// The four values `interactive.start` and `coding.start` accept for `sandbox_mode`.
+///
+/// Transcribed from `Gateway.Methods` `@sandbox_modes`. Sending anything else is `-32602`
+/// naming the parameter. The TUI default is to omit this field so the plane can apply
+/// workspace write where the provider allows it, and omit it where the provider cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxMode {
+    Default,
+    ReadOnly,
+    WorkspaceWrite,
+    Unrestricted,
+}
+
+impl SandboxMode {
+    pub const ALL: [SandboxMode; 4] = [
+        SandboxMode::Default,
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::Unrestricted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
+
+    /// Short caption for the composer chrome, in the terms an operator is deciding in.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "provider default",
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "can edit",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Default => "whatever the provider does on its own",
+            Self::ReadOnly => "cannot create or edit files",
+            Self::WorkspaceWrite => "can edit files in the workspace",
+            Self::Unrestricted => "no filesystem sandbox",
+        }
+    }
+
+    pub fn writable(self) -> bool {
+        matches!(self, Self::WorkspaceWrite | Self::Unrestricted)
+    }
+}
+
 /// Why a start was refused before it was sent.
 ///
 /// Local refusals are typed rather than free text because two of them are this client
@@ -1067,6 +1151,7 @@ pub enum StartError {
     /// `objective` is not in the interactive allowlist, so sending it would be `-32602`.
     ObjectiveOnInteractive,
     UnknownApprovalMode(String),
+    UnknownSandboxMode(String),
 }
 
 impl StartError {
@@ -1089,6 +1174,14 @@ impl StartError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::UnknownSandboxMode(name) => format!(
+                "sandbox_mode must be one of {}; the gateway refuses {name:?} by name",
+                SandboxMode::ALL
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -1097,11 +1190,13 @@ impl StartError {
 ///
 /// The gateway's allowlist for both start verbs is `id`, `provider`, `workspace`, `model`,
 /// `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`,
-/// `reasoning_effort` (`Gateway.Methods` `@start_options`), and an option outside it is
-/// `-32602` naming it rather than being ignored. This type emits a strict subset of that —
-/// the ones a terminal can honestly ask a person for — and **omits** every field it has no
-/// answer for rather than sending a placeholder: the gateway requires a *nonempty* string
-/// for `workspace`, so an empty box means "no workspace", not `""`.
+/// `reasoning_effort`, `runtime_exposure` (`Gateway.Methods` `@start_options`), and an
+/// option outside it is `-32602` naming it rather than being ignored. This type emits a
+/// strict subset of that — the ones a terminal can honestly ask a person for — and
+/// **omits** every field it has no answer for rather than sending a placeholder: the
+/// gateway requires a *nonempty* string for `workspace`, so an empty box means "no
+/// workspace", not `""`. Runtime exposure is default-on upstream, so this dialog does
+/// not send `runtime_exposure`.
 ///
 /// `id` is deliberately not sent. The plane generates one, and a client-chosen id buys
 /// idempotency this dialog has no way to use.
@@ -1111,6 +1206,7 @@ pub struct StartRequest {
     pub provider: String,
     pub workspace: String,
     pub approval_mode: Option<ApprovalMode>,
+    pub sandbox_mode: Option<SandboxMode>,
     /// Required on the coding plane, refused on the interactive one.
     pub objective: String,
 }
@@ -1122,6 +1218,7 @@ impl StartRequest {
             provider: String::new(),
             workspace: String::new(),
             approval_mode: None,
+            sandbox_mode: None,
             objective: String::new(),
         }
     }
@@ -1163,6 +1260,13 @@ impl StartRequest {
         if let Some(mode) = self.approval_mode {
             params.insert(
                 "approval_mode".into(),
+                Value::String(mode.as_str().to_string()),
+            );
+        }
+
+        if let Some(mode) = self.sandbox_mode {
+            params.insert(
+                "sandbox_mode".into(),
                 Value::String(mode.as_str().to_string()),
             );
         }
@@ -1283,6 +1387,9 @@ mod tests {
         assert!(hello.operates());
         assert!(hello.serves("interactive.respond_approval"));
         assert!(hello.serves("runtime.shutdown"));
+        assert!(hello.serves("capabilities.preview"));
+        assert!(hello.serves("capabilities.admit"));
+        assert!(hello.serves("capabilities.list"));
         assert!(!hello.serves("mesh.send_message"));
     }
 
@@ -1310,8 +1417,9 @@ mod tests {
 
         assert_eq!(status.mode("upgrade"), Some("ready"));
         assert_eq!(status.mode("release"), Some("ready"));
-        assert!(!status.control.enabled);
+        assert!(status.control.runs.is_empty());
         assert_eq!(status.cluster_summary(), "strategy=none  distributed=false");
+        assert_eq!(status.forge_summary(), "signer=deny live=0 admit=no");
     }
 
     #[test]
@@ -1613,6 +1721,16 @@ mod tests {
             "an option outside @start_options is -32602 naming it, so none is invented: \
              {fields:?}"
         );
+
+        request.sandbox_mode = Some(SandboxMode::ReadOnly);
+        let fields = request
+            .params()
+            .expect("still valid")
+            .as_object()
+            .expect("an object")
+            .clone();
+        assert_eq!(fields["sandbox_mode"], "read_only");
+        assert_eq!(fields.len(), 4);
     }
 
     #[test]
@@ -1627,6 +1745,7 @@ mod tests {
         // parameter error rather than "no workspace".
         assert!(!fields.contains_key("workspace"));
         assert!(!fields.contains_key("approval_mode"));
+        assert!(!fields.contains_key("sandbox_mode"));
         assert!(!fields.contains_key("objective"));
         assert!(!fields.contains_key("id"), "the plane generates the id");
         assert_eq!(fields.len(), 1);
@@ -1690,6 +1809,25 @@ mod tests {
         assert!(StartError::UnknownApprovalMode("yolo".into())
             .message()
             .contains("auto_approve"));
+    }
+
+    #[test]
+    fn the_sandbox_modes_are_the_ones_the_schema_declares() {
+        assert_eq!(
+            SandboxMode::ALL.map(SandboxMode::as_str),
+            ["default", "read_only", "workspace_write", "unrestricted"]
+        );
+
+        for mode in SandboxMode::ALL {
+            assert_eq!(SandboxMode::parse(mode.as_str()), Some(mode));
+            assert!(!mode.describe().is_empty());
+            assert!(!mode.label().is_empty());
+        }
+
+        assert_eq!(SandboxMode::parse("yolo"), None);
+        assert!(StartError::UnknownSandboxMode("yolo".into())
+            .message()
+            .contains("workspace_write"));
     }
 
     #[test]

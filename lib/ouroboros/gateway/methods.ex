@@ -85,6 +85,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
   alias Ouroboros.Provider.CodexAppServer
+  alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
   alias Ouroboros.Upgrade.NodeExecutor
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
@@ -110,6 +111,10 @@ defmodule Ouroboros.Gateway.Methods do
   # minutes on a first run. The gateway still refuses to hold a request open forever, so
   # this is the one ceiling measured in provider time rather than in control-plane time.
   @start_timeout 120_000
+
+  # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
+  # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
+  @forge_timeout 120_000
 
   # `Team.add_worker/3` and `delegate/4` bound themselves at 60s; `cancel/2` and `close/1`
   # call at `:infinity`. Both land here as 60s, and for the two `:infinity` verbs the
@@ -191,6 +196,9 @@ defmodule Ouroboros.Gateway.Methods do
     "control.submit" => %{scope: :operate, timeout: @default_timeout},
     "control.cancel" => %{scope: :operate, timeout: @default_timeout},
     "agents.stop" => %{scope: :operate, timeout: @default_timeout},
+    "capabilities.list" => %{scope: :operate, timeout: @default_timeout},
+    "capabilities.preview" => %{scope: :operate, timeout: @forge_timeout},
+    "capabilities.admit" => %{scope: :operate, timeout: @forge_timeout},
     # Answered by the connection: it holds the listener configuration this verb needs a
     # second permission from, and it owns the socket the acknowledgement has to reach
     # before the node stops.
@@ -234,7 +242,8 @@ defmodule Ouroboros.Gateway.Methods do
     "event_limit" => :event_limit,
     "approval_mode" => {:enum, @approval_modes},
     "sandbox_mode" => {:enum, @sandbox_modes},
-    "reasoning_effort" => {:enum, @reasoning_efforts}
+    "reasoning_effort" => {:enum, @reasoning_efforts},
+    "runtime_exposure" => :boolean
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -657,6 +666,43 @@ defmodule Ouroboros.Gateway.Methods do
     with_id(params, fn id -> safe(fn -> reply(Mesh.stop_agent(id)) end) end)
   end
 
+  def invoke("capabilities.list", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["workspace"]),
+           {:ok, workspace} <- fetch_string(params, "workspace") do
+        reply(Capabilities.list(workspace))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  def invoke("capabilities.preview", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["workspace", "path"]),
+           {:ok, workspace} <- fetch_string(params, "workspace"),
+           {:ok, path} <- fetch_string(params, "path") do
+        reply(Capabilities.preview(workspace, path))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  def invoke("capabilities.admit", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["workspace", "path", "session_id"]),
+           {:ok, workspace} <- fetch_string(params, "workspace"),
+           {:ok, path} <- fetch_string(params, "path"),
+           {:ok, session_id} <- fetch_optional_string(params, "session_id") do
+        opts = if session_id, do: [author: "session:" <> session_id], else: []
+        reply(Capabilities.admit(workspace, path, opts))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   # Reached only if `table/0` and the clauses above ever drift apart. Answering rather
   # than raising keeps that drift a client-visible error instead of a killed task.
   # `runtime.shutdown` and the four subscription verbs reach the connection instead of
@@ -796,6 +842,7 @@ defmodule Ouroboros.Gateway.Methods do
     "approval_mode" => :approval_mode,
     "sandbox_mode" => :sandbox_mode,
     "reasoning_effort" => :reasoning_effort,
+    "runtime_exposure" => :runtime_exposure,
     "role" => :role,
     "node" => :node,
     "coding_node" => :coding_node,
@@ -829,6 +876,11 @@ defmodule Ouroboros.Gateway.Methods do
       {:invalid, message} -> {:invalid, message}
     end
   end
+
+  defp option_value(_key, :boolean, value) when is_boolean(value), do: {:ok, value}
+
+  defp option_value(key, :boolean, _value),
+    do: {:invalid, "params.#{key} must be a boolean"}
 
   defp option_value(key, :string, value) do
     if is_binary(value) and String.trim(value) != "",

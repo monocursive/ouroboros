@@ -190,15 +190,21 @@ if config_env() == :prod do
 
   orchestration_forge_options =
     cond do
-      is_nil(forge_workspace) -> []
-      forge_nodes == [] -> [workspace: forge_workspace]
-      true -> [workspace: forge_workspace, nodes: forge_nodes]
-    end
+      is_nil(forge_workspace) ->
+        []
 
-  orchestration_forge_options =
-    case System.get_env("OUROBOROS_FORGE_SIGNER_ID") do
-      nil -> orchestration_forge_options
-      signer_id -> Keyword.put(orchestration_forge_options, :signer_id, signer_id)
+      true ->
+        options =
+          if forge_nodes == [] do
+            [workspace: forge_workspace]
+          else
+            [workspace: forge_workspace, nodes: forge_nodes]
+          end
+
+        case env_value.("OUROBOROS_FORGE_SIGNER_ID") do
+          nil -> options
+          signer_id -> Keyword.put(options, :signer_id, signer_id)
+        end
     end
 
   # Letting a planner express a forge step is an explicit operator decision, and
@@ -355,6 +361,27 @@ gateway_data_dir = gateway_value.("OUROBOROS_DATA_DIR")
 if gateway_data_dir do
   config :ouroboros, :data_dir, gateway_data_dir
 end
+
+# A scratch-workspace turn is a first-class path, not a provider escape hatch. Codex's
+# non-interactive CLI refuses a directory with no Git metadata unless the host states
+# that it already admitted the workspace, and dependency-based work needs network access
+# inside the still-bounded workspace-write sandbox. Network is on for the local coding
+# product and can be narrowed explicitly at boot; malformed policy never degrades to a
+# guess.
+codex_network_access =
+  case gateway_value.("OUROBOROS_CODEX_NETWORK_ACCESS") do
+    nil -> true
+    value when value in ["1", "true"] -> true
+    value when value in ["0", "false"] -> false
+    other -> raise "OUROBOROS_CODEX_NETWORK_ACCESS must be 1, 0, true, or false, got: #{other}"
+  end
+
+config :ouroboros, :provider_execution_defaults, %{
+  codex: %{
+    skip_git_repo_check: true,
+    network_access_enabled: codex_network_access
+  }
+}
 
 if System.get_env("OUROBOROS_GATEWAY") == "1" do
   gateway_port =

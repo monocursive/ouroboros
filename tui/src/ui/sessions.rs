@@ -2,7 +2,7 @@
 //!
 //! The transcript is assembled from `replay` plus the live subscription and nothing else —
 //! it is never polled. The default view projects those events into messages and compact
-//! tool/file/diff cells; `Ctrl-E` reveals the normalized ledger. Stream interruptions remain
+//! tool/file/diff cells; `Ctrl-O` reveals the normalized ledger. Stream interruptions remain
 //! visible in both views: a reader who cannot see a hole reads a partial transcript as a
 //! complete one.
 
@@ -15,16 +15,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Event, EventType, Plane, SessionInfo};
 
-use super::app::{App, Pane};
+use super::app::App;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
 use super::transcript::{Entry, Watch};
 use super::transcript_cells;
-use super::view::{pane, panel_title};
 
 // Projection is rebuilt on every draw, so bound the default conversation surface to a
-// useful recent suffix. The complete retained ledger remains available through Ctrl-E.
+// useful recent suffix. The complete retained ledger remains available through Ctrl-O.
 const CHAT_ENTRY_WINDOW: usize = 128;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -43,11 +42,12 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        7 + completion_rows(
+        composer_block_height(
             app.sessions
                 .composer
                 .as_ref()
                 .map(|composer| &composer.editor),
+            area.width,
         )
     } else {
         0
@@ -66,7 +66,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    let composer_height = 7 + completion_rows(Some(&app.home_draft));
+    let composer_height = composer_block_height(Some(&app.home_draft), area.width);
     let rows =
         Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
     let ready = app.home_ready();
@@ -126,7 +126,7 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
         .flex(ratatui::layout::Flex::Center)
         .split(rows[0]);
 
-        logo::draw(frame, vertical[0], Treatment::Static);
+        logo::draw(frame, vertical[0], Treatment::Alive { tick: app.ticks });
         frame.render_widget(
             Paragraph::new(message).alignment(ratatui::layout::Alignment::Center),
             vertical[2],
@@ -145,12 +145,13 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.sessions.focus == Pane::Detail;
     let waiting_for_reply = app.waiting_for_open_agent_reply();
+    let session_status = app
+        .sessions
+        .open_info()
+        .map(|session| session.status.as_str().to_string());
 
     let Some((plane, id)) = app.sessions.open.clone() else {
-        let block = pane(panel_title("transcript", false, None, app.ticks), focused);
-
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -164,7 +165,6 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                     Style::default().fg(theme::MUTED),
                 )),
             ])
-            .block(block)
             .wrap(Wrap { trim: false }),
             area,
         );
@@ -174,37 +174,61 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let ticks = app.ticks;
     let show_event_details = app.sessions.show_event_details;
-
-    // Sized before the header is built, because the header states whether the transcript is
-    // scrolled back and that is only settled once this frame's rows have been counted. A
-    // block's inner area does not depend on its title.
-    let inner = pane(Line::from(""), focused).inner(area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    let inner = rows[1];
 
     let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
 
     let width = inner.width.max(8) as usize;
+    let resyncing = watch.resyncing;
     let entries = watch.entries();
     let mut lines = if show_event_details {
         event_lines(entries, width)
     } else {
-        chat_lines(entries, width)
+        chat_lines(entries, width, ticks)
     };
 
-    if !show_event_details && waiting_for_reply {
-        push_typing_indicator(&mut lines, ticks);
+    if !show_event_details {
+        let empty = lines.is_empty();
+        if waiting_for_reply {
+            push_working_indicator(&mut lines, ticks, theme::working_verb(ticks));
+        } else if resyncing {
+            push_working_indicator(
+                &mut lines,
+                ticks,
+                if empty {
+                    "Loading conversation"
+                } else {
+                    "Restoring history"
+                },
+            );
+        } else if empty
+            && session_status
+                .as_deref()
+                .is_some_and(|status| matches!(status, "running" | "starting"))
+        {
+            push_working_indicator(
+                &mut lines,
+                ticks,
+                if session_status.as_deref() == Some("starting") {
+                    "Starting"
+                } else {
+                    theme::working_verb(ticks)
+                },
+            );
+        }
     }
 
     // The renderer is the only thing that knows how many rows this wrapped to, so it is
     // the only thing that can hold a scrolled-back viewport still while the tail grows.
     watch.measured(lines.len(), inner.height as usize);
 
-    let block = pane(
-        header(watch, &id, plane, ticks, show_event_details),
-        focused,
+    frame.render_widget(
+        Paragraph::new(header(watch, &id, plane, ticks, show_event_details)),
+        rows[0],
     );
-    frame.render_widget(block, area);
 
     if lines.is_empty() {
         frame.render_widget(
@@ -244,7 +268,7 @@ fn header(
     if !show_event_details {
         let mut spans = vec![
             Span::styled(" Agent chat ", theme::heading()),
-            Span::styled("ctrl+e details ", Style::default().fg(theme::MUTED)),
+            Span::styled("ctrl+o details ", Style::default().fg(theme::MUTED)),
         ];
 
         push_stream_state(&mut spans, watch, tick, false);
@@ -253,7 +277,7 @@ fn header(
 
     let mut spans = vec![
         Span::styled(" Event details ", theme::heading()),
-        Span::styled("ctrl+e chat  ", Style::default().fg(theme::MUTED)),
+        Span::styled("ctrl+o chat  ", Style::default().fg(theme::MUTED)),
         Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
         Span::raw(format!("{id} ")),
         Span::styled(
@@ -352,14 +376,14 @@ fn push_event_entry(lines: &mut Vec<Line<'static>>, entry: Entry<'_>, width: usi
     }
 }
 
-fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
+fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize, tick: u64) -> Vec<Line<'static>> {
     let omitted = entries.len().saturating_sub(CHAT_ENTRY_WINDOW);
     let visible = if omitted == 0 {
         entries
     } else {
         entries.split_off(omitted)
     };
-    let mut lines = transcript_cells::render(visible, width);
+    let mut lines = transcript_cells::render_at(visible, width, tick);
 
     if omitted == 0 {
         return lines;
@@ -368,7 +392,7 @@ fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
     let mut bounded = vec![
         divider(
             &format!(
-                "{omitted} earlier chat entries omitted here — Ctrl-E shows all retained events"
+                "{omitted} earlier chat entries omitted here — Ctrl-O shows all retained events"
             ),
             width,
             theme::WARN,
@@ -379,15 +403,9 @@ fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
     bounded
 }
 
-fn push_typing_indicator(lines: &mut Vec<Line<'static>>, tick: u64) {
+fn push_working_indicator(lines: &mut Vec<Line<'static>>, tick: u64, message: &str) {
     separate(lines);
-    lines.push(Line::from(Span::styled(
-        "Agent",
-        Style::default()
-            .fg(theme::GOOD)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(logo::typing_indicator(tick));
+    lines.push(theme::working(tick, message.to_string()));
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -532,7 +550,14 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         .and_then(|session| session.provider.as_deref())
         .unwrap_or("agent");
     let approval = session_policy(session, "approval_mode");
-    let sandbox = session_policy(session, "sandbox_mode");
+    let (sandbox, sandbox_writable) = app
+        .open_sandbox()
+        .unwrap_or_else(|| ("unknown".to_string(), false));
+    let sandbox_style = if sandbox_writable {
+        Style::default().fg(theme::GOOD)
+    } else {
+        Style::default().fg(theme::WARN)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -542,16 +567,12 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
             theme::MUTED
         }))
         .title(Line::from(vec![
-            Span::styled(" MODE ", theme::label()),
-            Span::styled("Build", Style::default().fg(theme::ACCENT)),
-            Span::raw("   "),
             Span::styled(" PROVIDER ", theme::label()),
             Span::raw(provider.to_string()),
-            Span::raw("   "),
-            Span::styled(" APPROVAL ", theme::label()),
+            Span::styled("  ·  APPROVAL ", theme::label()),
             Span::styled(approval, Style::default().fg(theme::WARN)),
-            Span::styled(" SANDBOX ", theme::label()),
-            Span::styled(sandbox, Style::default().fg(theme::WARN)),
+            Span::styled("  ·  FILES ", theme::label()),
+            Span::styled(sandbox, sandbox_style),
             Span::styled(format!("   {verb}"), Style::default().fg(theme::MUTED)),
         ]));
     let inner = block.inner(area);
@@ -575,7 +596,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "Press i to write a follow-up",
+                "This coding task takes no further input. ctrl+x x cancels it.",
                 Style::default().fg(theme::MUTED),
             ))),
             rows[0],
@@ -593,7 +614,11 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         key_footer(
-            "@ paths · / commands · ↑ history",
+            if sandbox_writable {
+                "esc abort · shift+↑ scroll · / commands"
+            } else {
+                "esc abort · /write to edit · / commands"
+            },
             app.keyboard_enhanced,
             "sends",
         )
@@ -629,20 +654,22 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         .approval_mode()
         .map(|mode| mode.as_str())
         .unwrap_or("ask");
+    let (sandbox, sandbox_writable) = app.home_sandbox();
+    let sandbox_style = if sandbox_writable {
+        Style::default().fg(theme::GOOD)
+    } else {
+        Style::default().fg(theme::WARN)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if ready { theme::ACCENT } else { theme::MUTED }))
         .title(Line::from(vec![
-            Span::styled(" MODE ", theme::label()),
-            Span::styled("Build", Style::default().fg(theme::ACCENT)),
-            Span::raw("   "),
             Span::styled(" PROVIDER ", theme::label()),
             Span::raw(app.home_provider().to_string()),
-            Span::raw("   "),
-            Span::styled(" REQUESTED APPROVAL ", theme::label()),
+            Span::styled("  ·  REQUESTED APPROVAL ", theme::label()),
             Span::styled(permission.to_string(), Style::default().fg(theme::WARN)),
-            Span::styled(" SANDBOX ", theme::label()),
-            Span::styled("runtime default", Style::default().fg(theme::MUTED)),
+            Span::styled("  ·  FILES ", theme::label()),
+            Span::styled(sandbox.to_string(), sandbox_style),
         ]));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -655,10 +682,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
 
     if app.home_pending {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{} starting the agent…", theme::spinner(app.ticks)),
-                Style::default().fg(theme::ACCENT),
-            ))),
+            Paragraph::new(theme::working(app.ticks, "Starting the agent…")),
             rows[0],
         );
     } else if ready || !app.home_draft.text().is_empty() {
@@ -729,6 +753,54 @@ fn key_footer(left: &str, enhanced: bool, verb: &str) -> String {
 
 /// How many matches the popup lists before it stops listing and starts counting.
 const COMPLETION_ROWS: usize = 3;
+const COMPOSER_EDITOR_MIN: u16 = 2;
+const COMPOSER_EDITOR_MAX: u16 = 6;
+const COMPOSER_CHROME: u16 = 3;
+
+fn composer_block_height(editor: Option<&Editor>, width: u16) -> u16 {
+    COMPOSER_CHROME + editor_rows(editor, width) + completion_rows(editor)
+}
+
+fn editor_rows(editor: Option<&Editor>, width: u16) -> u16 {
+    let Some(editor) = editor else {
+        return COMPOSER_EDITOR_MIN;
+    };
+    if editor.is_empty() {
+        return COMPOSER_EDITOR_MIN;
+    }
+    let content_width = width.saturating_sub(4).max(1) as usize;
+    visual_line_count(editor.text(), content_width)
+        .clamp(COMPOSER_EDITOR_MIN as usize, COMPOSER_EDITOR_MAX as usize) as u16
+}
+
+fn visual_line_count(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut row = 0usize;
+    let mut column = 0usize;
+
+    for character in text.chars() {
+        if character == '\n' {
+            row += 1;
+            column = 0;
+            continue;
+        }
+
+        let cell_width = if character == '\t' {
+            4 - (column % 4)
+        } else {
+            character.width().unwrap_or(0)
+        };
+
+        if column > 0 && column + cell_width > width {
+            row += 1;
+            column = 0;
+        }
+
+        column += cell_width;
+    }
+
+    row + 1
+}
 
 /// The height the completion popup needs: the listed rows, plus one for the line that says
 /// how many are not listed.
@@ -915,7 +987,7 @@ mod tests {
             .map(|_| Entry::Ended("closed"))
             .collect();
 
-        let lines = chat_lines(entries, 160);
+        let lines = chat_lines(entries, 160, 0);
 
         assert!(
             lines[0]
@@ -924,6 +996,13 @@ mod tests {
             "{}",
             lines[0]
         );
-        assert!(lines[0].to_string().contains("Ctrl-E"), "{}", lines[0]);
+        assert!(lines[0].to_string().contains("Ctrl-O"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn visual_line_count_grows_with_newlines() {
+        assert_eq!(visual_line_count("one line", 40), 1);
+        assert_eq!(visual_line_count("one\ntwo\nthree", 40), 3);
+        assert_eq!(visual_line_count("abcdefghij", 4), 3);
     }
 }

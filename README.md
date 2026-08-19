@@ -177,27 +177,51 @@ dispatched turn never resolves, the turn is settled as `:ambiguous` with
 `:ouroboros, :interactive_unresolved_turn_deadline_ms` — the provider work may have
 happened, and the session is released rather than polled forever.
 
-Writing is opt-in where the provider can be told so. The planes default to
-`approval_mode: :prompt` and `sandbox_mode: :read_only`, but only for providers whose
+Writing is the default where the provider can be told so. The planes default to
+`approval_mode: :prompt` and `sandbox_mode: :workspace_write`, but only for providers whose
 adapters declare those options — the harness refuses any normalized option a provider
 has not declared, and four of the nine bundled providers (amp, opencode, kimi, pi)
-cannot take the conservative pair in full. The two planes answer that differently: an
+cannot take the pair in full. The two planes answer that differently: an
 *interactive* session omits a default the provider cannot take and runs under the
-provider's own behavior (reported as `null` in `interactive.info` options — which may
-be write-capable); a *coding* task refuses at creation rather than silently
-downgrading its documented read-only default, and the refusal names the exact
-override to type (for example `sandbox_mode: :default`). An option the caller states
+provider's own behavior (reported as `null` in `interactive.info` options); a *coding*
+task refuses at creation rather than silently dropping its documented workspace-write
+default, and the refusal names the exact override to type (for example
+`sandbox_mode: :default`). Pass `sandbox_mode: :read_only` for a session that cannot
+edit files. An option the caller states
 explicitly is never rewritten or dropped on either plane: a sandbox the provider
 cannot enforce fails loudly by name. These normalized flags configure the provider
 CLI; they are not a substitute for an OS/container sandbox when executing untrusted
 work, and a session running under a provider's own behavior still takes the same
-shared-read workspace lease the omitted default would have taken — the lease posture
+workspace lease the omitted default would have taken — the lease posture
 does not yet follow the provider's actual write capability.
 
 Per-run environment maps are rejected because task requests are checkpointed. Put
 provider credentials in the service environment or a dedicated secret boundary,
 never in task options. Persisted normalized event payloads are redacted before they
 enter the Ouroboros store.
+
+The bundled Codex policy is usable in a genuinely empty workspace: it passes
+`skip_git_repo_check` and enables network access inside Codex's workspace-write sandbox,
+so a first turn can create a repository and fetch ordinary dependencies. These are
+durable, non-secret execution options and appear as the derived `provider_execution`
+summary in public session state. A library caller can explicitly set either boolean to
+`false`; explicit options win. Set `OUROBOROS_CODEX_NETWORK_ACCESS=0` to make the node's
+default network-off. Network access does not widen the filesystem sandbox or turn the
+gateway token into a sandbox.
+
+When the runtime has a data directory, Codex also inherits a managed Cargo home under
+`<data-dir>/provider-cache/codex/cargo`, and that one directory is added to its writable
+roots. Rust dependency downloads therefore neither fail against the read-only global
+Cargo cache nor leave a project-local `.cargo-home`; public session state reports whether
+the managed cache was established. An operator-supplied Codex `CARGO_HOME` remains
+authoritative.
+
+Codex currently uses Harness's managed `exec --json` transport, which cannot carry an
+approval question back into Ouroboros. Public `provider_execution` therefore reports
+`interactive_approvals: false`: workspace-safe actions run under the selected sandbox,
+while an action that still needs provider escalation is denied rather than presenting a
+button that cannot answer it. `approval_mode: :prompt` configures Codex's policy, but it
+must not be read as proof that this transport can complete an interactive approval.
 
 To enforce workspace admission, configure existing roots before application start:
 
@@ -737,6 +761,33 @@ The rollout is recorded in `Ouroboros.Upgrade.Rollout.Registry` as `:deploying`,
 `:live`, `:rolled_back`, or `:quarantined`. The last two are never confused: only a
 deployment whose every node *proved* it compensated is recorded as rolled back, and any
 ambiguity — a lost reply, a node that never answered — is recorded as quarantined.
+
+### The selected model can see the runtime
+
+A coding or interactive session keeps the provider's own prompt. At admission Ouroboros
+captures a compact `<ouroboros-runtime>` envelope — identity, the authoring contract, and
+the current signer posture, loaded capabilities, and mesh agents. Every dispatch and
+recovery reuses those exact bytes, so one logical turn cannot silently observe a different
+runtime. Durable user text is not rewritten, so the transcript still shows what the
+operator typed.
+
+When explicitly asked for an Ouroboros runtime capability, the selected model authors a
+proposal; it cannot sign, deploy, or grant. Ordinary coding objectives stay ordinary
+coding work. A capability proposal uses:
+
+```
+.ouroboros/capabilities/<Name>/
+  manifest.json    # module, description; optional eval; optional start {id, role}
+  source.ex        # one `use Jido.Agent` module under Ouroboros.Capability.*
+  test.exs         # at least one passing test
+```
+
+The operator lists, previews, and admits from `ouro` (`/capabilities`, `/preview`,
+`/admit`). Preview compiles and tests in the existing isolated build peer and loads
+nothing on this node. Admit runs the forge and health-gated rollout, then optionally
+`Mesh.start_agent/2` when the manifest asks. Default nodes use `Forge.Signer.Deny`, so
+authoring and preview work and this node cannot admit — that is intentional. Opt out
+with `runtime_exposure: false` on session start.
 
 ### Evaluation gates
 

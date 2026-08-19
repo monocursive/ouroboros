@@ -227,13 +227,12 @@ defmodule Ouroboros.Gateway.Conn do
       in_flight: %{},
       pending: :queue.new(),
       pending_len: 0,
-      # `{plane, session_id} => coordinator monitor`.
+      # `{plane, session_id} => %{ref, dropped, last_sequence}`. `dropped == 0` means
+      # the stream is not lagging. Lag lives on this record so forget/unsubscribe cannot
+      # leave drop counters behind for a session this connection no longer watches.
       subscriptions: %{},
       # The reverse index, so a `:DOWN` finds its session without scanning.
       coordinators: %{},
-      # `{plane, session_id} => %{dropped: n, last_sequence: seq}` for sessions whose
-      # events are being discarded right now.
-      lagging: %{},
       # Armed before ownership transfer so that a socket that never arrives — the handoff
       # raced a dying client — still reaps this process.
       hello_timer: Process.send_after(self(), :hello_timeout, @hello_timeout)
@@ -685,7 +684,8 @@ defmodule Ouroboros.Gateway.Conn do
 
         %{
           state
-          | subscriptions: Map.put(state.subscriptions, key, ref),
+          | subscriptions:
+              Map.put(state.subscriptions, key, %{ref: ref, dropped: 0, last_sequence: 0}),
             coordinators: Map.put(state.coordinators, ref, key)
         }
 
@@ -766,7 +766,7 @@ defmodule Ouroboros.Gateway.Conn do
       {nil, _subscriptions} ->
         state
 
-      {ref, subscriptions} ->
+      {%{ref: ref}, subscriptions} ->
         Process.demonitor(ref, [:flush])
 
         %{
@@ -806,47 +806,55 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp lag(state, key, sequence) do
-    lagging =
-      Map.update(
-        state.lagging,
-        key,
-        %{dropped: 1, last_sequence: sequence},
-        fn lag ->
-          %{dropped: lag.dropped + 1, last_sequence: max(lag.last_sequence, sequence)}
-        end
-      )
+    case Map.get(state.subscriptions, key) do
+      nil ->
+        state
 
-    %{state | lagging: lagging}
+      sub ->
+        updated = %{
+          sub
+          | dropped: sub.dropped + 1,
+            last_sequence: max(sub.last_sequence, sequence)
+        }
+
+        %{state | subscriptions: Map.put(state.subscriptions, key, updated)}
+    end
   end
 
   # One notification per lagged session, once the queue is genuinely drained rather than
   # merely under the limit — otherwise the notification itself arrives in the middle of the
   # congestion it is reporting and is dropped or repeated.
   defp flush_lagged(state) do
-    if state.lagging != %{} and state.outbound < low_water(state) do
-      Enum.reduce(Map.keys(state.lagging), state, &flush_lag(&2, &1))
+    if state.outbound < low_water(state) do
+      state.subscriptions
+      |> Enum.filter(fn {_key, sub} -> sub.dropped > 0 end)
+      |> Enum.reduce(state, fn {key, _sub}, acc -> flush_lag(acc, key) end)
     else
       state
     end
   end
 
   defp flush_lag(state, key) do
-    case Map.pop(state.lagging, key) do
-      {nil, _lagging} ->
-        state
-
-      {lag, lagging} ->
+    case Map.get(state.subscriptions, key) do
+      %{dropped: dropped, last_sequence: last_sequence} = sub when dropped > 0 ->
         {plane, session_id} = key
 
-        %{state | lagging: lagging}
+        %{
+          state
+          | subscriptions:
+              Map.put(state.subscriptions, key, %{sub | dropped: 0, last_sequence: 0})
+        }
         |> enqueue(
           notification_frame("stream.lagged", %{
             "id" => session_id,
             "plane" => Atom.to_string(plane),
-            "dropped" => lag.dropped,
-            "last_sequence" => lag.last_sequence
+            "dropped" => dropped,
+            "last_sequence" => last_sequence
           })
         )
+
+      _other ->
+        state
     end
   end
 

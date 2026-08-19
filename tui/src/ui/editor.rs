@@ -15,21 +15,36 @@ use unicode_width::UnicodeWidthStr;
 const HISTORY_LIMIT: usize = 100;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-const COMMANDS: [(&str, &str); 14] = [
+const COMMANDS: [(&str, &str); 26] = [
     ("/new", "start a new coding session"),
+    ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
+    ("/sessions", "switch sessions"),
     ("/details", "toggle normalized event details"),
+    ("/copy", "copy the last agent message"),
+    ("/interrupt", "abort the running turn"),
+    ("/steer", "steer the running turn"),
+    ("/editor", "edit this prompt in $EDITOR"),
     ("/connect", "connect or inspect ChatGPT"),
     ("/runtime", "open runtime and distribution"),
     ("/agents", "open agents"),
     ("/teams", "open teams"),
     ("/plans", "open plans and control"),
     ("/upgrades", "open upgrades"),
+    ("/capabilities", "list workspace capability proposals"),
+    ("/preview", "preview a capability proposal"),
+    ("/admit", "admit a capability proposal"),
     ("/logs", "open runtime logs"),
     ("/settings", "open settings"),
     ("/help", "show keyboard help"),
+    ("/hotkeys", "show keyboard help"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
+    ("/close", "end the open session"),
+    (
+        "/options",
+        "new session with provider and workspace options",
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +105,7 @@ pub struct Editor {
     history_index: Option<usize>,
     history_draft: Option<(String, usize)>,
     completion: Option<CompletionMenu>,
+    yank: Option<String>,
 }
 
 impl Editor {
@@ -204,12 +220,56 @@ impl Editor {
                 self.select_completion(-1);
                 EditorAction::None
             }
+            KeyCode::Backspace if ctrl || alt => {
+                self.delete_word_backward();
+                EditorAction::None
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.delete_word_backward();
+                EditorAction::None
+            }
+            KeyCode::Char('h') if ctrl => {
+                self.backspace();
+                EditorAction::None
+            }
             KeyCode::Backspace => {
                 self.backspace();
                 EditorAction::None
             }
+            KeyCode::Delete if ctrl || alt => {
+                self.delete_word_forward();
+                EditorAction::None
+            }
+            KeyCode::Char('d') if alt => {
+                self.delete_word_forward();
+                EditorAction::None
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.delete();
+                EditorAction::None
+            }
             KeyCode::Delete => {
                 self.delete();
+                EditorAction::None
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.delete_to_line_start();
+                EditorAction::None
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.delete_to_line_end();
+                EditorAction::None
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.yank_insert();
+                EditorAction::None
+            }
+            KeyCode::Left if ctrl || alt => {
+                self.move_word_left();
+                EditorAction::None
+            }
+            KeyCode::Char('b') if alt => {
+                self.move_word_left();
                 EditorAction::None
             }
             KeyCode::Left => {
@@ -218,6 +278,14 @@ impl Editor {
             }
             KeyCode::Char('b') if ctrl => {
                 self.move_left();
+                EditorAction::None
+            }
+            KeyCode::Right if ctrl || alt => {
+                self.move_word_right();
+                EditorAction::None
+            }
+            KeyCode::Char('f') if alt => {
+                self.move_word_right();
                 EditorAction::None
             }
             KeyCode::Right => {
@@ -249,6 +317,14 @@ impl Editor {
                 EditorAction::None
             }
             KeyCode::Down if self.completion.is_some() => {
+                self.select_completion(1);
+                EditorAction::None
+            }
+            KeyCode::Char('p') if ctrl && self.completion.is_some() => {
+                self.select_completion(-1);
+                EditorAction::None
+            }
+            KeyCode::Char('n') if ctrl && self.completion.is_some() => {
                 self.select_completion(1);
                 EditorAction::None
             }
@@ -318,6 +394,60 @@ impl Editor {
         self.preferred_column = None;
     }
 
+    fn delete_word_backward(&mut self) {
+        let start = word_left(&self.text, self.cursor);
+        self.kill_range(start, self.cursor);
+    }
+
+    fn delete_word_forward(&mut self) {
+        let end = word_right(&self.text, self.cursor);
+        self.kill_range(self.cursor, end);
+    }
+
+    fn delete_to_line_start(&mut self) {
+        let start = line_start(&self.text, self.cursor);
+        self.kill_range(start, self.cursor);
+    }
+
+    fn delete_to_line_end(&mut self) {
+        let end = line_end(&self.text, self.cursor);
+        if end == self.cursor && end < self.text.len() && self.text[end..].starts_with('\n') {
+            self.kill_range(self.cursor, end + 1);
+        } else {
+            self.kill_range(self.cursor, end);
+        }
+    }
+
+    fn kill_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+
+        self.detach_history();
+        let killed = self.text[start..end].to_string();
+        self.text.drain(start..end);
+        self.cursor = start;
+        self.preferred_column = None;
+        self.yank = Some(killed);
+    }
+
+    fn yank_insert(&mut self) {
+        let Some(text) = self.yank.clone() else {
+            return;
+        };
+        self.insert(&text);
+    }
+
+    fn move_word_left(&mut self) {
+        self.cursor = word_left(&self.text, self.cursor);
+        self.preferred_column = None;
+    }
+
+    fn move_word_right(&mut self) {
+        self.cursor = word_right(&self.text, self.cursor);
+        self.preferred_column = None;
+    }
+
     fn move_left(&mut self) {
         if let Some(previous) = previous_boundary(&self.text, self.cursor) {
             self.cursor = previous;
@@ -333,14 +463,12 @@ impl Editor {
     }
 
     fn move_line_start(&mut self) {
-        self.cursor = self.text[..self.cursor].rfind('\n').map_or(0, |at| at + 1);
+        self.cursor = line_start(&self.text, self.cursor);
         self.preferred_column = None;
     }
 
     fn move_line_end(&mut self) {
-        self.cursor = self.text[self.cursor..]
-            .find('\n')
-            .map_or(self.text.len(), |at| self.cursor + at);
+        self.cursor = line_end(&self.text, self.cursor);
         self.preferred_column = None;
     }
 
@@ -540,6 +668,86 @@ fn matching_files(query: &str, files: &[String]) -> Vec<CompletionItem> {
 /// `e` + U+0301 and a ZWJ emoji sequence are each one thing on screen and several `char`s
 /// in memory. Stepping by `char` put the cursor inside them, so one Left moved nowhere
 /// visible and one Backspace left a stray combining mark attached to whatever preceded it.
+fn line_start(text: &str, cursor: usize) -> usize {
+    text[..cursor].rfind('\n').map_or(0, |at| at + 1)
+}
+
+fn line_end(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |at| cursor + at)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClusterClass {
+    Space,
+    Word,
+    Other,
+}
+
+fn cluster_class(cluster: &str) -> ClusterClass {
+    if cluster.chars().all(char::is_whitespace) {
+        ClusterClass::Space
+    } else if cluster
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        ClusterClass::Word
+    } else {
+        ClusterClass::Other
+    }
+}
+
+fn word_left(text: &str, mut cursor: usize) -> usize {
+    while let Some(previous) = previous_boundary(text, cursor) {
+        if cluster_class(&text[previous..cursor]) != ClusterClass::Space {
+            break;
+        }
+        cursor = previous;
+    }
+
+    let Some(previous) = previous_boundary(text, cursor) else {
+        return 0;
+    };
+    let class = cluster_class(&text[previous..cursor]);
+    cursor = previous;
+
+    while let Some(previous) = previous_boundary(text, cursor) {
+        if cluster_class(&text[previous..cursor]) != class {
+            break;
+        }
+        cursor = previous;
+    }
+
+    cursor
+}
+
+fn word_right(text: &str, mut cursor: usize) -> usize {
+    let Some(next) = next_boundary(text, cursor) else {
+        return text.len();
+    };
+    let mut class = cluster_class(&text[cursor..next]);
+    if class == ClusterClass::Space {
+        cursor = next;
+        while let Some(next) = next_boundary(text, cursor) {
+            class = cluster_class(&text[cursor..next]);
+            if class != ClusterClass::Space {
+                break;
+            }
+            cursor = next;
+        }
+    }
+
+    while let Some(next) = next_boundary(text, cursor) {
+        if cluster_class(&text[cursor..next]) != class {
+            break;
+        }
+        cursor = next;
+    }
+
+    cursor
+}
+
 fn previous_boundary(text: &str, cursor: usize) -> Option<usize> {
     text[..cursor]
         .grapheme_indices(true)
@@ -800,15 +1008,49 @@ mod tests {
     }
 
     #[test]
-    fn alt_chords_are_not_typed_into_the_draft() {
+    fn readline_word_and_line_kills_match_the_agent_editors() {
         let catalog = CompletionCatalog::default();
         let mut editor = Editor::default();
 
-        editor.paste("word", &catalog);
+        editor.paste("hello world", &catalog);
         editor.handle_key(modified(KeyCode::Char('b'), KeyModifiers::ALT), &catalog);
+        assert_eq!(&editor.text()[..editor.cursor()], "hello ");
         editor.handle_key(modified(KeyCode::Char('f'), KeyModifiers::ALT), &catalog);
+        assert_eq!(editor.cursor(), editor.text().len());
 
-        assert_eq!(editor.text(), "word");
+        editor.handle_key(
+            modified(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        assert_eq!(editor.text(), "hello ");
+
+        editor.handle_key(
+            modified(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        assert_eq!(editor.text(), "hello world");
+
+        editor.handle_key(
+            modified(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        editor.handle_key(
+            modified(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        assert_eq!(editor.text(), "");
+        editor.handle_key(
+            modified(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        assert_eq!(editor.text(), "hello world");
+
+        editor.paste("\nnext", &catalog);
+        editor.handle_key(
+            modified(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &catalog,
+        );
+        assert_eq!(editor.text(), "hello world\n");
     }
 
     #[test]

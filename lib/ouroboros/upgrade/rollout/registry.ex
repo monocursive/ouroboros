@@ -9,11 +9,14 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   that dies mid-rollout leaves evidence that a rollout was in flight instead of leaving a
   capability nobody remembers deploying.
 
-  Four states, and the difference between the last two is the whole point:
+  Five states, and the difference between rollback and quarantine is the whole point:
 
     * `:deploying` - checkpointed, outcome not yet known. A `:deploying` entry found at
       startup means a rollout was interrupted and its nodes must be inspected.
-    * `:live` - committed and health-checked on every target.
+    * `:live` - committed and health-checked on every target, and still the version this
+      plane believes is running there.
+    * `:superseded` - was live, then a later compare-replace of the same module on
+      overlapping nodes reached `:live`. Finished history, not current inventory.
     * `:rolled_back` - every target proved it compensated. Only proof earns this state.
     * `:quarantined` - the outcome is ambiguous somewhere. A node that never answered
       may be running the code; saying "rolled back" here would be a claim nobody made.
@@ -48,13 +51,14 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @store_key {:ouroboros, :capability_rollouts, 1}
   @checkpoint_version 2
   @upgradable_versions [1]
-  @states [:deploying, :live, :rolled_back, :quarantined]
+  @states [:deploying, :live, :superseded, :rolled_back, :quarantined]
   @default_limit 200
   @max_eval_report_bytes 32_768
 
   @transitions %{
     deploying: [:live, :rolled_back, :quarantined],
-    live: [:rolled_back, :quarantined],
+    live: [:rolled_back, :quarantined, :superseded],
+    superseded: [:quarantined],
     rolled_back: [:quarantined],
     quarantined: []
   }
@@ -67,7 +71,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     defstruct @enforce_keys ++
                 [source_sha256: nil, test_report: %{}, detail: nil, eval_report: nil]
 
-    @type state :: :deploying | :live | :rolled_back | :quarantined
+    @type state :: :deploying | :live | :superseded | :rolled_back | :quarantined
     @type t :: %__MODULE__{
             artifact_id: String.t(),
             module: module(),
@@ -266,7 +270,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # The effect this registry describes happens after its checkpoint, so a failed write is
   # reported without touching in-memory state: the caller must not proceed.
   defp persist(entry, state) do
-    rollouts = state.rollouts |> Map.put(entry.artifact_id, entry) |> prune(state.limit)
+    rollouts = state.rollouts |> put_entry(entry) |> prune(state.limit)
 
     case adapter_call(state.adapter, :put_checkpoint, [
            @store_key,
@@ -279,16 +283,47 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
-  # Growth is bounded by dropping the oldest *settled* rollbacks only. A `:deploying`,
+  # Marking a module live displaces any overlapping live record of the same module in
+  # the same persist. Two `:live` rows for one module would make `live/1` over-report
+  # and let a later forge of the old digest claim the work was already done.
+  defp put_entry(rollouts, %Entry{state: :live} = live) do
+    rollouts
+    |> Map.put(live.artifact_id, live)
+    |> Map.new(fn
+      {id, _entry} when id == live.artifact_id ->
+        {id, live}
+
+      {id, %Entry{} = entry} ->
+        if entry.state == :live and entry.module == live.module and
+             Enum.any?(entry.nodes, &(&1 in live.nodes)) do
+          {id,
+           %{
+             entry
+             | state: :superseded,
+               detail: %{replaced_by: live.artifact_id},
+               updated_at: live.updated_at
+           }}
+        else
+          {id, entry}
+        end
+
+      other ->
+        other
+    end)
+  end
+
+  defp put_entry(rollouts, entry), do: Map.put(rollouts, entry.artifact_id, entry)
+
+  # Growth is bounded by dropping the oldest settled history only. A `:deploying`,
   # `:live`, or `:quarantined` entry is unfinished business and is never discarded to make
-  # room for history.
+  # room for history. `:superseded` is finished inventory, same as a proven rollback.
   defp prune(rollouts, limit) when map_size(rollouts) <= limit, do: rollouts
 
   defp prune(rollouts, limit) do
     droppable =
       rollouts
       |> Map.values()
-      |> Enum.filter(&(&1.state == :rolled_back))
+      |> Enum.filter(&(&1.state in [:rolled_back, :superseded]))
       |> Enum.sort_by(& &1.updated_at)
 
     Enum.reduce_while(droppable, rollouts, fn entry, acc ->

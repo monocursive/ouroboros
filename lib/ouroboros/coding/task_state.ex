@@ -4,6 +4,7 @@ defmodule Ouroboros.Coding.TaskState do
   alias Ouroboros.Coding.Event
   alias Ouroboros.{AgentProfile, Prompt.Assembler, Prompt.Trace}
   alias Ouroboros.Provider
+  alias Ouroboros.Runtime.Exposure
 
   @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :origin_digest]
   @request_options [
@@ -21,7 +22,8 @@ defmodule Ouroboros.Coding.TaskState do
     :reasoning_effort,
     :provider_options,
     :approval_mode,
-    :sandbox_mode
+    :sandbox_mode,
+    :runtime_exposure
   ]
   @rejected_inline_options [:env, :env_mode, :mcp_config]
   @accepted_options @envelope_options ++ @request_options ++ @rejected_inline_options
@@ -81,7 +83,8 @@ defmodule Ouroboros.Coding.TaskState do
     :idle_timeout_ms,
     :allowed_tools,
     :disallowed_tools,
-    :reasoning_effort
+    :reasoning_effort,
+    :runtime_exposure
   ]
 
   @enforce_keys [
@@ -109,6 +112,7 @@ defmodule Ouroboros.Coding.TaskState do
                 result: nil,
                 error: nil,
                 prompt_trace: nil,
+                runtime_snapshot: nil,
                 options: %{}
               ]
 
@@ -135,6 +139,7 @@ defmodule Ouroboros.Coding.TaskState do
           result: map() | nil,
           error: term(),
           prompt_trace: map() | nil,
+          runtime_snapshot: map() | nil,
           options: map()
         }
 
@@ -159,7 +164,7 @@ defmodule Ouroboros.Coding.TaskState do
   defp do_new(id, objective, opts, plane) do
     workspace_option = Keyword.get(opts, :workspace, File.cwd!())
     provider = Keyword.get(opts, :provider, :codex)
-    sandbox_mode = Keyword.get(opts, :sandbox_mode, :read_only)
+    sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
     safety = Provider.safety_options(provider, opts, plane)
@@ -207,6 +212,12 @@ defmodule Ouroboros.Coding.TaskState do
       match?({:error, _reason}, assembly) ->
         {:error, {:invalid_agent_profile_options, elem(assembly, 1)}}
 
+      not valid_runtime_exposure?(Keyword.get(opts, :runtime_exposure, true)) ->
+        {:error, :invalid_runtime_exposure}
+
+      runtime_exposure?(opts) and AgentProfile.reserved_delimiter?(objective) ->
+        {:error, {:reserved_prompt_delimiter, :objective}}
+
       not valid_provider_options?(provider, Keyword.get(opts, :provider_options, %{})) ->
         {:error, {:unsafe_provider_options, provider}}
 
@@ -224,6 +235,7 @@ defmodule Ouroboros.Coding.TaskState do
         {:ok, prompt_assembly} = assembly
         workspace = Path.expand(workspace_option)
         now = DateTime.utc_now() |> DateTime.to_iso8601()
+        options = request_options(provider, opts, safety_options, prompt_assembly)
 
         {:ok,
          %__MODULE__{
@@ -239,7 +251,8 @@ defmodule Ouroboros.Coding.TaskState do
            origin_digest: origin_digest,
            event_limit: Keyword.get(opts, :event_limit, 10_000),
            prompt_trace: Assembler.trace(prompt_assembly),
-           options: request_options(opts, safety_options, prompt_assembly)
+           runtime_snapshot: capture_runtime(options),
+           options: options
          }}
     end
   end
@@ -272,6 +285,9 @@ defmodule Ouroboros.Coding.TaskState do
       not valid_system_prompt?(system_prompt) ->
         :invalid_system_prompt
 
+      not valid_runtime_snapshot?(state) ->
+        :invalid_runtime_snapshot
+
       true ->
         case Trace.validate(Map.get(state, :prompt_trace), system_prompt) do
           :ok -> nil
@@ -294,14 +310,43 @@ defmodule Ouroboros.Coding.TaskState do
     options =
       state.options
       |> Map.take(@public_request_options)
-      |> Map.put(:has_system_prompt, present?(state.options[:system_prompt]))
-      |> Map.put(:attachment_count, list_count(state.options[:attachments]))
-      |> Map.put(:additional_directory_count, list_count(state.options[:add_dirs]))
-      |> Map.put(:has_provider_options, map_size(state.options[:provider_options] || %{}) > 0)
+      |> Map.put(
+        :has_system_prompt,
+        projected(state.options, :has_system_prompt, present?(state.options[:system_prompt]))
+      )
+      |> Map.put(
+        :attachment_count,
+        projected(state.options, :attachment_count, list_count(state.options[:attachments]))
+      )
+      |> Map.put(
+        :additional_directory_count,
+        projected(
+          state.options,
+          :additional_directory_count,
+          list_count(state.options[:add_dirs])
+        )
+      )
+      |> Map.put(
+        :has_provider_options,
+        projected(
+          state.options,
+          :has_provider_options,
+          map_size(state.options[:provider_options] || %{}) > 0
+        )
+      )
+      |> Map.put(
+        :provider_execution,
+        projected(
+          state.options,
+          :provider_execution,
+          Provider.public_execution_policy(state.provider, state.options[:provider_options])
+        )
+      )
       |> Trace.put(prompt_trace)
 
     state
     |> Map.put(:origin_digest, nil)
+    |> Map.put(:runtime_snapshot, nil)
     |> Map.put(:options, options)
   end
 
@@ -318,24 +363,35 @@ defmodule Ouroboros.Coding.TaskState do
 
     state.options
     |> Map.delete(:agent_profile)
+    |> Map.delete(:runtime_exposure)
     |> Map.merge(%{
-      prompt: state.objective,
+      prompt: expose_prompt(state, state.objective),
       cwd: state.workspace,
       metadata: metadata
     })
+    |> Provider.apply_execution_directories(state.provider)
   end
 
   # `Ouroboros.Provider` has already decided what the two safety options may be, stated
   # values included, so they are dropped here and merged back rather than defaulted a
   # second time. An option it omitted must be absent from the request, not present as
   # `nil`: absent is what leaves the harness request at `:default`.
-  defp request_options(opts, safety_options, assembly) do
+  defp request_options(provider, opts, safety_options, assembly) do
     opts
     |> Keyword.take(@request_options)
     |> Keyword.drop([:approval_mode, :sandbox_mode, :agent_profile])
     |> Keyword.merge(safety_options)
     |> Map.new()
+    |> put_provider_execution_defaults(provider)
     |> put_system_prompt(assembly.system_prompt)
+    |> put_runtime_exposure(Keyword.get(opts, :runtime_exposure, true))
+  end
+
+  defp put_provider_execution_defaults(options, provider) do
+    case Provider.execution_options(provider, Map.get(options, :provider_options)) do
+      nil -> Map.delete(options, :provider_options)
+      provider_options -> Map.put(options, :provider_options, provider_options)
+    end
   end
 
   defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
@@ -404,9 +460,44 @@ defmodule Ouroboros.Coding.TaskState do
     Assembler.assemble(Map.get(options, :agent_profile),
       system_prompt: Map.get(options, :system_prompt),
       allowed_tools: Map.get(options, :allowed_tools),
-      disallowed_tools: Map.get(options, :disallowed_tools)
+      disallowed_tools: Map.get(options, :disallowed_tools),
+      runtime: profile_runtime(options)
     )
   end
+
+  defp profile_runtime(options) do
+    Map.get(options, :runtime_exposure, true) == true and
+      match?(%AgentProfile{}, options[:agent_profile])
+  end
+
+  defp runtime_exposure?(opts), do: Keyword.get(opts, :runtime_exposure, true) == true
+
+  defp valid_runtime_exposure?(value), do: is_boolean(value)
+
+  defp expose_prompt(state, text) do
+    if Map.get(state.options, :runtime_exposure, true) do
+      {:ok, wrapped} = Exposure.wrap_prompt_capture(text, Map.get(state, :runtime_snapshot))
+      wrapped
+    else
+      text
+    end
+  end
+
+  defp capture_runtime(%{runtime_exposure: true} = options) do
+    Exposure.capture(sandbox_mode: Map.get(options, :sandbox_mode))
+  end
+
+  defp capture_runtime(_options), do: nil
+
+  defp valid_runtime_snapshot?(%__MODULE__{options: options} = state) do
+    case Map.get(options, :runtime_exposure, true) do
+      true -> Exposure.valid_capture?(Map.get(state, :runtime_snapshot))
+      false -> is_nil(Map.get(state, :runtime_snapshot))
+    end
+  end
+
+  defp put_runtime_exposure(options, true), do: Map.put(options, :runtime_exposure, true)
+  defp put_runtime_exposure(options, false), do: Map.put(options, :runtime_exposure, false)
 
   defp normalize_provider_option_key(key, _allowed) when is_atom(key), do: key
 
@@ -419,6 +510,10 @@ defmodule Ouroboros.Coding.TaskState do
   defp present?(value), do: value not in [nil, "", [], %{}]
   defp list_count(value) when is_list(value), do: length(value)
   defp list_count(_value), do: 0
+
+  defp projected(options, key, fallback) do
+    if Map.has_key?(options, key), do: Map.get(options, key), else: fallback
+  end
 
   defp put_system_prompt(options, nil), do: Map.delete(options, :system_prompt)
 

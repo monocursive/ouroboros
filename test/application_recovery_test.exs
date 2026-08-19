@@ -276,6 +276,13 @@ defmodule Ouroboros.ApplicationRecoveryTest do
   } do
     good_id = unique_id("loadable-task")
     bad_id = unique_id("version-skew-task")
+    bad_workspace = Path.join(Path.dirname(workspace), "version-skew-workspace")
+    File.mkdir_p!(bad_workspace)
+
+    # The test is about request-format isolation, not two exclusive writers claiming
+    # the same root. Keep both states admissible under the workspace-write default so
+    # the intentionally unrequestable neighbour reaches its own failure boundary.
+    Application.put_env(:ouroboros, :workspace_allowed_roots, [workspace, bad_workspace])
 
     profile =
       Ouroboros.AgentProfile.new!(id: "skewed-profile", base_prompt: "Act as a coding agent.")
@@ -289,7 +296,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert {:ok, bad} =
              TaskState.new(bad_id, "written by a newer prompt format",
                provider: @provider,
-               workspace: workspace,
+               workspace: bad_workspace,
                agent_profile: profile
              )
 

@@ -59,8 +59,13 @@
     ],
     "connected_nodes": [],
     "control": {
-      "enabled": false,
       "runs": []
+    },
+    "forge": {
+      "admit_possible?": false,
+      "live": [],
+      "live_count": 0,
+      "signer": "deny"
     },
     "interactive_sessions": [
       {

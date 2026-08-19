@@ -1,0 +1,31 @@
+{
+  "module": "Ouroboros.Capability.RuntimeSteward",
+  "description": "An inspectable mesh role for receiving evidence, tracking assignments, and recording bounded Ouroboros improvement work without effect authority.",
+  "eval": {
+    "probes": [
+      {
+        "input": {
+          "kind": "improvement_observation",
+          "summary": "Preserve operator authority"
+        },
+        "expect": [
+          "contains",
+          "Preserve operator authority"
+        ]
+      },
+      {
+        "input": {
+          "kind": "improvement_observation",
+          "summary": "Keep changes measurable"
+        },
+        "expect": [
+          "contains",
+          "Keep changes measurable"
+        ]
+      }
+    ],
+    "budget_ms": 5000,
+    "max_latency_ms": 2000,
+    "required": "all"
+  }
+}

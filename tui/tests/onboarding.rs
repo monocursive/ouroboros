@@ -92,6 +92,7 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("Ready in this workspace"));
     assert!(screen.contains("Ask the agent to build, fix, explain, or review"));
     assert!(screen.contains("/work/ouroboros"));
+    assert!(screen.contains("FILES can edit"), "{}", screen.text());
 }
 
 #[test]
@@ -574,7 +575,6 @@ fn the_session_composer_remains_open_after_sending() {
     let mut app = harness(true);
     app.open_session(Plane::Interactive, "session-1".into());
     let _ = app.drain();
-    app.apply(key(KeyCode::Char('i')));
     type_text(&mut app, "run the focused test");
     app.apply(key(KeyCode::Enter));
 

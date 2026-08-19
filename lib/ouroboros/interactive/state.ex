@@ -34,6 +34,7 @@ defmodule Ouroboros.Interactive.State do
                 events: [],
                 turns: %{},
                 prompt_trace: nil,
+                runtime_snapshot: nil,
                 options: %{},
                 error: nil
               ]
@@ -90,6 +91,7 @@ defmodule Ouroboros.Interactive.State do
           events: [Event.t()],
           turns: %{optional(String.t()) => turn()},
           prompt_trace: map() | nil,
+          runtime_snapshot: map() | nil,
           options: map(),
           error: term()
         }
@@ -126,6 +128,7 @@ defmodule Ouroboros.Interactive.State do
            updated_at: now,
            event_limit: base.event_limit,
            prompt_trace: Map.get(base, :prompt_trace),
+           runtime_snapshot: Map.get(base, :runtime_snapshot),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -157,6 +160,7 @@ defmodule Ouroboros.Interactive.State do
 
     state.options
     |> Map.delete(:agent_profile)
+    |> Map.delete(:runtime_exposure)
     |> rename(:runtime_timeout_ms, :turn_runtime_timeout_ms)
     |> rename(:idle_timeout_ms, :turn_idle_timeout_ms)
     |> Map.drop([:attachments, :max_turns])
@@ -165,6 +169,7 @@ defmodule Ouroboros.Interactive.State do
       metadata: metadata
     })
     |> reject_nil_values()
+    |> Ouroboros.Provider.apply_execution_directories(state.provider)
   end
 
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
@@ -197,23 +202,50 @@ defmodule Ouroboros.Interactive.State do
         model: Map.get(state.options, :model),
         reasoning_effort: Map.get(state.options, :reasoning_effort),
         transport: Map.get(state.options, :transport),
-        has_system_prompt: present?(Map.get(state.options, :system_prompt)),
-        has_provider_options: map_size(Map.get(state.options, :provider_options, %{}) || %{}) > 0
+        has_system_prompt:
+          projected(
+            state.options,
+            :has_system_prompt,
+            present?(Map.get(state.options, :system_prompt))
+          ),
+        has_provider_options:
+          projected(
+            state.options,
+            :has_provider_options,
+            map_size(Map.get(state.options, :provider_options, %{}) || %{}) > 0
+          ),
+        provider_execution:
+          projected(
+            state.options,
+            :provider_execution,
+            Ouroboros.Provider.public_execution_policy(
+              state.provider,
+              Map.get(state.options, :provider_options)
+            )
+          )
       }
       |> Trace.put(prompt_trace)
 
     turns = Map.new(state.turns, fn {id, turn} -> {id, public_turn(turn)} end)
-    %{state | options: options, turns: turns}
+
+    state
+    |> Map.put(:runtime_snapshot, nil)
+    |> Map.put(:options, options)
+    |> Map.put(:turns, turns)
   end
 
   @spec public_turn(turn()) :: map()
   def public_turn(turn) do
-    request = Map.get(turn, :request, %{})
+    case Map.fetch(turn, :request) do
+      {:ok, request} ->
+        turn
+        |> Map.drop([:fingerprint, :request])
+        |> Map.put(:prompt, Map.get(request, :prompt))
+        |> Jido.Harness.Redaction.redact()
 
-    turn
-    |> Map.drop([:fingerprint, :request])
-    |> Map.put(:prompt, Map.get(request, :prompt))
-    |> Jido.Harness.Redaction.redact()
+      :error ->
+        Jido.Harness.Redaction.redact(turn)
+    end
   end
 
   @spec fingerprint(:message | :follow_up, map()) :: String.t()
@@ -250,6 +282,9 @@ defmodule Ouroboros.Interactive.State do
 
       not valid_system_prompt?(system_prompt) ->
         :invalid_system_prompt
+
+      not valid_runtime_snapshot?(state) ->
+        :invalid_runtime_snapshot
 
       true ->
         case Trace.validate(Map.get(state, :prompt_trace), system_prompt) do
@@ -306,7 +341,8 @@ defmodule Ouroboros.Interactive.State do
       is_integer(state.event_limit) and state.event_limit > 0 and state.event_limit <= 100_000 and
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
-      serializable?(state.options) and serializable?(state.error)
+      serializable?(state.options) and serializable?(Map.get(state, :runtime_snapshot)) and
+      serializable?(state.error)
   rescue
     _error -> false
   end
@@ -337,6 +373,7 @@ defmodule Ouroboros.Interactive.State do
           :provider_options,
           :approval_mode,
           :sandbox_mode,
+          :runtime_exposure,
           :env,
           :env_mode,
           :mcp_config
@@ -476,8 +513,20 @@ defmodule Ouroboros.Interactive.State do
 
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
   defp present?(value), do: value not in [nil, "", [], %{}]
+
+  defp projected(options, key, fallback) do
+    if Map.has_key?(options, key), do: Map.get(options, key), else: fallback
+  end
+
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
 
   defp valid_system_prompt?(prompt),
     do: is_nil(prompt) or (is_binary(prompt) and String.valid?(prompt))
+
+  defp valid_runtime_snapshot?(%__MODULE__{options: options} = state) do
+    case Map.get(options, :runtime_exposure, true) do
+      true -> Ouroboros.Runtime.Exposure.valid_capture?(Map.get(state, :runtime_snapshot))
+      false -> is_nil(Map.get(state, :runtime_snapshot))
+    end
+  end
 end

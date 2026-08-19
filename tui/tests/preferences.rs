@@ -69,6 +69,11 @@ fn type_text(app: &mut App, text: &str) {
     }
 }
 
+fn apply_leader(app: &mut App, c: char) {
+    app.apply(ctrl('x'));
+    app.apply(key(KeyCode::Char(c)));
+}
+
 fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
     app.apply(Msg::Answer {
         tag,
@@ -245,6 +250,7 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
     );
 
     app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
 
     assert!(app.overlay.is_none(), "saving closes the overlay");
@@ -316,6 +322,7 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
 
     ouro::ui::persist(&mut app);
@@ -351,6 +358,7 @@ fn settings_open_on_whatever_the_file_already_said() {
         provider: Some("gemini".into()),
         workspace: Some("/srv/stored".into()),
         approval_mode: Some("auto_edit".into()),
+        ..Defaults::default()
     });
 
     app.apply(key(KeyCode::Char(',')));
@@ -393,7 +401,7 @@ fn a_stored_provider_this_runtime_does_not_serve_is_shown_rather_than_dropped() 
 
     // Still savable as itself: the runtime is the authority on whether a start works, and
     // this client does not overrule a file the operator wrote.
-    for _ in 0..3 {
+    for _ in 0..4 {
         app.apply(key(KeyCode::Down));
     }
     app.apply(key(KeyCode::Enter));
@@ -475,9 +483,8 @@ fn focus(app: &mut App, target: NewField) {
     panic!("the form never reached {target:?}");
 }
 
-/// The Sessions tab with a session open, which is where `n` — the advanced start — is
-/// reachable by key: on the coding home itself every printable character belongs to the
-/// composer.
+/// The Sessions tab with a session open. The always-on composer owns printable keys, so
+/// the advanced start is `ctrl+x N` rather than a bare `n`.
 fn ready_for_n(defaults: Defaults) -> App {
     let mut app = with_providers(defaults);
 
@@ -496,9 +503,10 @@ fn the_start_dialog_opens_on_the_defaults_the_file_states() {
         provider: Some("gemini".into()),
         workspace: Some("/srv/stored".into()),
         approval_mode: Some("auto_edit".into()),
+        ..Defaults::default()
     });
 
-    app.apply(key(KeyCode::Char('n')));
+    apply_leader(&mut app, 'N');
 
     let screen = render(&mut app, 130, 34);
 
@@ -545,7 +553,7 @@ fn the_start_dialog_opens_on_the_defaults_the_file_states() {
 #[test]
 fn with_no_file_the_dialog_is_exactly_what_it_was() {
     let mut app = ready_for_n(Defaults::default());
-    app.apply(key(KeyCode::Char('n')));
+    apply_leader(&mut app, 'N');
 
     let screen = render(&mut app, 130, 34);
 
@@ -579,7 +587,7 @@ fn a_provider_list_that_arrives_after_a_dialog_still_places_the_cursor() {
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
     answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-open".into());
-    app.apply(key(KeyCode::Char('n')));
+    apply_leader(&mut app, 'N');
 
     let asked = app.drain();
     assert!(
@@ -600,7 +608,7 @@ fn a_late_provider_list_does_not_move_a_cursor_the_operator_already_moved() {
         ..Defaults::default()
     });
 
-    app.apply(key(KeyCode::Char('n')));
+    apply_leader(&mut app, 'N');
     let _ = app.drain();
 
     focus(&mut app, NewField::Provider);
@@ -624,7 +632,7 @@ fn a_default_provider_this_runtime_does_not_serve_is_said_rather_than_guessed_at
         ..Defaults::default()
     });
 
-    app.apply(key(KeyCode::Char('n')));
+    apply_leader(&mut app, 'N');
 
     let notice = app
         .notice

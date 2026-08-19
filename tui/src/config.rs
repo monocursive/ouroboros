@@ -7,7 +7,7 @@
 //! the provider probes — those come from the daemon and from [`crate::runtime`], and a
 //! screen that shows one of them says so. What is kept here is the small set of answers a
 //! person would otherwise retype into every `ouro new`: which provider, which workspace,
-//! which approval mode. They are *defaults for a form*, not decisions: every one of them
+//! which approval mode, which sandbox. They are *defaults for a form*, not decisions: every one of them
 //! is prefilled into the coding home and the `n` dialog and stays editable, and `ouro new`
 //! still accepts a flag that overrides the file.
 //!
@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::ApprovalMode;
+use crate::model::{ApprovalMode, SandboxMode};
 use crate::runtime::xdg_root;
 
 /// The directory this client keeps its preferences in, under the XDG config root.
@@ -106,6 +106,10 @@ pub struct Defaults {
     /// problem naming it, because sending it would be a `-32602` naming the parameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
+    /// One of [`SandboxMode::ALL`]. Anything else is dropped by [`normalise`] with a
+    /// problem naming it, because sending it would be a `-32602` naming the parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
 }
 
 impl Defaults {
@@ -114,10 +118,17 @@ impl Defaults {
         self.approval_mode.as_deref().and_then(ApprovalMode::parse)
     }
 
+    pub fn sandbox_mode(&self) -> Option<SandboxMode> {
+        self.sandbox_mode.as_deref().and_then(SandboxMode::parse)
+    }
+
     /// Whether anything at all has been stated. A settings screen shows a different
     /// sentence for "nothing is set" than for "these are your answers".
     pub fn is_empty(&self) -> bool {
-        self.provider.is_none() && self.workspace.is_none() && self.approval_mode.is_none()
+        self.provider.is_none()
+            && self.workspace.is_none()
+            && self.approval_mode.is_none()
+            && self.sandbox_mode.is_none()
     }
 }
 
@@ -240,6 +251,7 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.defaults.provider);
     blank_to_none(&mut config.defaults.workspace);
     blank_to_none(&mut config.defaults.approval_mode);
+    blank_to_none(&mut config.defaults.sandbox_mode);
 
     if let Some(mode) = config.defaults.approval_mode.clone() {
         if ApprovalMode::parse(&mode).is_none() {
@@ -255,6 +267,23 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
             ));
 
             config.defaults.approval_mode = None;
+        }
+    }
+
+    if let Some(mode) = config.defaults.sandbox_mode.clone() {
+        if SandboxMode::parse(&mode).is_none() {
+            problems.push(format!(
+                "{}: defaults.sandbox_mode is {mode:?}, which is not one of {}; treating it \
+                 as unset",
+                path.display(),
+                SandboxMode::ALL
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            config.defaults.sandbox_mode = None;
         }
     }
 }
@@ -343,6 +372,7 @@ pub struct StartFlags {
     pub provider: Option<String>,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
+    pub sandbox_mode: Option<String>,
 }
 
 /// The parameters a start will be built from, and where each of them came from.
@@ -351,6 +381,7 @@ pub struct ResolvedStart {
     pub provider: String,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
+    pub sandbox_mode: Option<String>,
 }
 
 /// The one thing no default can supply.
@@ -375,11 +406,12 @@ impl Missing {
     }
 }
 
-/// Flag, then the config file, then a refusal. The same order for all three parameters.
+/// Flag, then the config file, then a refusal. The same order for all four parameters.
 ///
-/// Only the provider can fail: a workspace and an approval mode that nobody stated are
-/// legitimately absent — the plane decides — while a provider that nobody stated would be
-/// the node's default deciding which vendor runs the operator's code.
+/// Only the provider can fail: a workspace, an approval mode, and a sandbox mode that
+/// nobody stated are legitimately absent — the plane decides — while a provider that
+/// nobody stated would be the node's default deciding which vendor runs the operator's
+/// code.
 pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> Result<ResolvedStart, Missing> {
     let provider = first(&flags.provider, &defaults.provider).ok_or(Missing::Provider)?;
 
@@ -387,6 +419,7 @@ pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> Result<Resolved
         provider,
         workspace: first(&flags.workspace, &defaults.workspace),
         approval_mode: first(&flags.approval_mode, &defaults.approval_mode),
+        sandbox_mode: first(&flags.sandbox_mode, &defaults.sandbox_mode),
     })
 }
 
@@ -434,6 +467,7 @@ mod tests {
                 provider: Some("claude".into()),
                 workspace: Some("/home/me/project".into()),
                 approval_mode: Some("auto_edit".into()),
+                sandbox_mode: Some("read_only".into()),
             },
             onboarding: Onboarding { welcomed: true },
         };
@@ -448,6 +482,10 @@ mod tests {
         assert_eq!(
             loaded.config.defaults.approval_mode(),
             Some(ApprovalMode::AutoEdit)
+        );
+        assert_eq!(
+            loaded.config.defaults.sandbox_mode(),
+            Some(SandboxMode::ReadOnly)
         );
 
         // The file says what wrote it and what a save does to hand edits.
@@ -590,13 +628,39 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_mode_outside_the_schema_is_dropped_and_reported() {
+        let dir = scratch("bad-sandbox");
+        let path = dir.join(CONFIG_FILE);
+
+        fs::write(
+            &path,
+            "[defaults]\nprovider = \"codex\"\nsandbox_mode = \"yolo\"\n",
+        )
+        .expect("a config with a typo");
+
+        let loaded = load(path);
+
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert_eq!(loaded.config.defaults.sandbox_mode, None);
+        assert_eq!(loaded.config.defaults.sandbox_mode(), None);
+        assert_eq!(loaded.problems.len(), 1);
+        assert!(
+            loaded.problems[0].contains("yolo") && loaded.problems[0].contains("workspace_write"),
+            "the problem names the value and what would have been accepted: {}",
+            loaded.problems[0]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_blank_value_is_the_same_statement_as_an_absent_one() {
         let dir = scratch("blank");
         let path = dir.join(CONFIG_FILE);
 
         fs::write(
             &path,
-            "[defaults]\nprovider = \"\"\nworkspace = \"   \"\napproval_mode = \"\"\n",
+            "[defaults]\nprovider = \"\"\nworkspace = \"   \"\napproval_mode = \"\"\nsandbox_mode = \"\"\n",
         )
         .expect("a blank config");
 
@@ -716,6 +780,7 @@ mod tests {
             provider: Some("claude".into()),
             workspace: Some("/home/me/project".into()),
             approval_mode: Some("auto_edit".into()),
+            sandbox_mode: Some("read_only".into()),
         };
 
         // Nothing stated: every answer comes from the file.
@@ -724,11 +789,13 @@ mod tests {
         assert_eq!(resolved.provider, "claude");
         assert_eq!(resolved.workspace.as_deref(), Some("/home/me/project"));
         assert_eq!(resolved.approval_mode.as_deref(), Some("auto_edit"));
+        assert_eq!(resolved.sandbox_mode.as_deref(), Some("read_only"));
 
         // Stated: the flag wins, field by field.
         let flags = StartFlags {
             provider: Some("codex".into()),
             approval_mode: Some("prompt".into()),
+            sandbox_mode: Some("workspace_write".into()),
             ..StartFlags::default()
         };
 
@@ -741,6 +808,7 @@ mod tests {
             "a flag that was not passed does not clear the default"
         );
         assert_eq!(resolved.approval_mode.as_deref(), Some("prompt"));
+        assert_eq!(resolved.sandbox_mode.as_deref(), Some("workspace_write"));
     }
 
     #[test]
@@ -776,5 +844,6 @@ mod tests {
         assert_eq!(resolved.provider, "codex");
         assert_eq!(resolved.workspace, None);
         assert_eq!(resolved.approval_mode, None);
+        assert_eq!(resolved.sandbox_mode, None);
     }
 }

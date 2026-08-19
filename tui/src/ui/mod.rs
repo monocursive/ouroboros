@@ -35,7 +35,9 @@ pub mod transcript_cells;
 pub mod tree;
 pub mod view;
 
-use std::io::{self, IsTerminal, Stdout};
+use std::env;
+use std::fs;
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -43,8 +45,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyEventKind, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, Clear, ClearType,
@@ -202,7 +205,9 @@ impl Screen {
             .execute(EnterAlternateScreen)
             .context("entering the alternate screen")?
             .execute(EnableBracketedPaste)
-            .context("enabling bracketed paste")?;
+            .context("enabling bracketed paste")?
+            .execute(EnableMouseCapture)
+            .context("enabling mouse capture")?;
 
         // Asked rather than assumed, and only claimed where the terminal answered yes: the
         // composer advertises `Shift+Enter` for a newline, and in a terminal without this
@@ -231,6 +236,33 @@ impl Screen {
     pub fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
         &mut self.terminal
     }
+
+    fn suspend(&mut self) {
+        restore();
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        enable_raw_mode().context("restoring raw mode after $EDITOR")?;
+        io::stdout()
+            .execute(EnterAlternateScreen)
+            .context("re-entering the alternate screen")?
+            .execute(EnableBracketedPaste)
+            .context("re-enabling bracketed paste")?
+            .execute(EnableMouseCapture)
+            .context("re-enabling mouse capture")?;
+
+        if matches!(supports_keyboard_enhancement(), Ok(true))
+            && io::stdout()
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                ))
+                .is_ok()
+        {
+            ENHANCED_KEYBOARD.store(true, Ordering::SeqCst);
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for Screen {
@@ -250,8 +282,91 @@ fn restore() {
 
     let _ = disable_raw_mode();
     let _ = io::stdout()
-        .execute(DisableBracketedPaste)
+        .execute(DisableMouseCapture)
+        .and_then(|stdout| stdout.execute(DisableBracketedPaste))
         .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
+}
+
+fn copy_pending(app: &mut App) {
+    let Some(text) = app.take_copy() else {
+        return;
+    };
+
+    let encoded = base64_encode(text.as_bytes());
+    let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
+    let _ = io::stdout().flush();
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = ProcessCommand::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+fn edit_externally(screen: &mut Screen, draft: &str) -> Result<String> {
+    screen.suspend();
+
+    let result = (|| {
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+        let path = env::temp_dir().join(format!("ouro-prompt-{}.md", std::process::id()));
+        fs::write(&path, draft).with_context(|| format!("writing {}", path.display()))?;
+
+        let status = ProcessCommand::new("sh")
+            .arg("-c")
+            .arg(format!("{editor} \"$1\""))
+            .arg("ouro-editor")
+            .arg(&path)
+            .status()
+            .with_context(|| format!("running {editor}"))?;
+
+        if !status.success() {
+            anyhow::bail!("{editor} exited with {status}");
+        }
+
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let _ = fs::remove_file(&path);
+        Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+    })();
+
+    screen.resume()?;
+    result
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let b0 = bytes[index];
+        let b1 = bytes.get(index + 1).copied().unwrap_or(0);
+        let b2 = bytes.get(index + 2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if index + 1 < bytes.len() {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if index + 2 < bytes.len() {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        index += 3;
+    }
+
+    out
 }
 
 /// Reads the terminal on a thread of its own.
@@ -274,6 +389,16 @@ fn input(sender: mpsc::UnboundedSender<Msg>) {
             }
             Ok(Event::Paste(text)) => {
                 if sender.send(Msg::Paste(text)).is_err() {
+                    return;
+                }
+            }
+            Ok(Event::Mouse(mouse)) => {
+                let delta = match mouse.kind {
+                    MouseEventKind::ScrollUp => -3,
+                    MouseEventKind::ScrollDown => 3,
+                    _ => continue,
+                };
+                if sender.send(Msg::Scroll(delta)).is_err() {
                     return;
                 }
             }
@@ -452,6 +577,17 @@ pub async fn run(
         // settings overlay closing.
         persist(&mut app);
         open_pending_url(&mut app);
+        copy_pending(&mut app);
+
+        if let Some(draft) = app.take_external_editor() {
+            match edit_externally(&mut screen, &draft) {
+                Ok(text) => app.apply(Msg::ExternalEditor(text)),
+                Err(error) => app.inform(
+                    format!("external editor failed: {error:#}"),
+                    app::NoticeKind::Error,
+                ),
+            }
+        }
 
         screen
             .terminal

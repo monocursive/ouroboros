@@ -3,6 +3,8 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
 
   @data_dir "OUROBOROS_DATA_DIR"
   @signers "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
+  @forge_workspace "OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE"
+  @forge_signer "OUROBOROS_FORGE_SIGNER_ID"
 
   setup do
     previous = System.get_env()
@@ -19,6 +21,8 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
       File.rm_rf(data_dir)
       restore_env(@data_dir, previous)
       restore_env(@signers, previous)
+      restore_env(@forge_workspace, previous)
+      restore_env(@forge_signer, previous)
     end)
 
     {:ok, data_dir: data_dir}
@@ -58,9 +62,35 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
     end
   end
 
+  test "a signer id alone does not enable the forge executor" do
+    System.delete_env(@forge_workspace)
+    System.put_env(@forge_signer, "release-key")
+
+    assert forge_options() == []
+  end
+
+  test "a named workspace enables forge options and can carry a signer" do
+    workspace = Path.join(System.tmp_dir!(), "ouroboros-forge-workspace")
+    System.put_env(@forge_workspace, workspace)
+    System.delete_env(@forge_signer)
+
+    assert forge_options() == [workspace: workspace]
+
+    System.put_env(@forge_signer, "release-key")
+    assert Map.new(forge_options()) == %{workspace: workspace, signer_id: "release-key"}
+
+    System.put_env(@forge_signer, "   ")
+    assert forge_options() == [workspace: workspace]
+  end
+
   defp trust_policy do
     config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
     get_in(config, [:ouroboros, :upgrade_trust_policy])
+  end
+
+  defp forge_options do
+    config = Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
+    get_in(config, [:ouroboros, :orchestration_forge_options])
   end
 
   defp restore_env(name, previous) do

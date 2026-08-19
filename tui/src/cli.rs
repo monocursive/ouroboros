@@ -65,6 +65,12 @@ pub enum Command {
         #[arg(long, value_name = "MODE")]
         approval_mode: Option<String>,
 
+        /// One of: default, read_only, workspace_write, unrestricted. Omitted, the config
+        /// file's `defaults.sandbox_mode`, and with neither the plane starts a session that
+        /// can edit the workspace where the provider allows it.
+        #[arg(long, value_name = "MODE")]
+        sandbox_mode: Option<String>,
+
         /// A first message, sent once the session is ready.
         #[arg(long, short = 'm', value_name = "TEXT")]
         message: Option<String>,
@@ -133,6 +139,7 @@ mod tests {
         let Some(Command::New {
             workspace,
             approval_mode,
+            sandbox_mode,
             message,
             print,
             ..
@@ -142,6 +149,8 @@ mod tests {
             "/srv/work",
             "--approval-mode",
             "auto_edit",
+            "--sandbox-mode",
+            "read_only",
             "-m",
             "hello",
             "--print",
@@ -153,6 +162,7 @@ mod tests {
 
         assert_eq!(workspace, Some(PathBuf::from("/srv/work")));
         assert_eq!(approval_mode.as_deref(), Some("auto_edit"));
+        assert_eq!(sandbox_mode.as_deref(), Some("read_only"));
         assert_eq!(message.as_deref(), Some("hello"));
         assert!(print);
     }

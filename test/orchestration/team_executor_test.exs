@@ -97,16 +97,20 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert {:ok, _running} = Scheduler.submit(context.scheduler, plan)
 
-    assert_receive {:ouroboros_test_adapter_started, first_run,
-                    %RunRequest{prompt: "inspect the repository"}, first_adapter},
+    assert_receive {:ouroboros_test_adapter_started, first_run, %RunRequest{prompt: first_prompt},
+                    first_adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(first_prompt, "inspect the repository")
 
     assert :ok = HarnessAdapter.emit(first_adapter, :output_text_final, %{"text" => "inspected"})
     assert :ok = HarnessAdapter.finish(first_adapter)
 
     assert_receive {:ouroboros_test_adapter_started, second_run,
-                    %RunRequest{prompt: "explain the result"}, second_adapter},
+                    %RunRequest{prompt: second_prompt}, second_adapter},
                    2_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(second_prompt, "explain the result")
 
     assert first_run != second_run
     assert :ok = HarnessAdapter.emit(second_adapter, :output_text_final, %{"text" => "explained"})
@@ -145,9 +149,11 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert {:ok, _} = Scheduler.submit(context.scheduler, plan)
 
-    assert_receive {:ouroboros_test_adapter_started, run_id, %RunRequest{prompt: "keep running"},
+    assert_receive {:ouroboros_test_adapter_started, run_id, %RunRequest{prompt: prompt},
                     _adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, "keep running")
 
     assert {:ok, %{status: :cancelled}} = Scheduler.cancel(context.scheduler, plan.id, :user_stop)
     assert_receive {:ouroboros_test_adapter_cancelled, ^run_id}, 2_000
@@ -172,9 +178,11 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert {:ok, _} = Scheduler.submit(context.scheduler, plan)
 
-    assert_receive {:ouroboros_test_adapter_started, run_id,
-                    %RunRequest{prompt: "cancel after the coordinator restarts"}, _adapter},
+    assert_receive {:ouroboros_test_adapter_started, run_id, %RunRequest{prompt: prompt},
+                    _adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, "cancel after the coordinator restarts")
 
     {:ok, running} = Scheduler.get(context.scheduler, plan.id)
     token = running.steps["long"].execution_token
@@ -222,10 +230,14 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert {:ok, _} = Scheduler.submit(context.scheduler, plan)
 
-    assert_receive {:ouroboros_test_adapter_started, run_id,
-                    %RunRequest{prompt: "remain active while cancellation is unconfirmed"},
+    assert_receive {:ouroboros_test_adapter_started, run_id, %RunRequest{prompt: prompt},
                     adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(
+             prompt,
+             "remain active while cancellation is unconfirmed"
+           )
 
     with_suspended_team_recovery(fn ->
       _old_team = stop_team(context.team_id)
@@ -269,9 +281,11 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert {:ok, _running} = Scheduler.submit(context.scheduler, plan)
 
-    assert_receive {:ouroboros_test_adapter_started, _run_id,
-                    %RunRequest{prompt: "survive the coordinator restart"}, adapter},
+    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: prompt},
+                    adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, "survive the coordinator restart")
 
     {:ok, running} = Scheduler.get(context.scheduler, plan.id)
     token = running.steps["survive"].execution_token

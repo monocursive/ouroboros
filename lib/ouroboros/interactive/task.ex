@@ -7,6 +7,7 @@ defmodule Ouroboros.Interactive.Task do
 
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
+  alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Path, as: WorkspacePath
@@ -566,6 +567,7 @@ defmodule Ouroboros.Interactive.Task do
          {:ok, request} <- authorize_turn_attachments(request, runtime.session.workspace),
          :ok <- ensure_serializable(request),
          :ok <- ensure_secret_free_options(request),
+         :ok <- ensure_exposable_turn(runtime.session, request),
          turn = State.new_turn(id, mode, request) do
       case Map.fetch(runtime.session.turns, id) do
         {:ok, existing} ->
@@ -604,73 +606,96 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp dispatch_persisted_turn(runtime, turn, request) do
-    call =
-      case turn.mode do
-        :message -> fn id -> Session.send_message(id, request) end
-        :follow_up -> fn id -> Session.follow_up(id, request) end
+    with {:ok, harness_request} <- expose_turn_request(runtime.session, request) do
+      call =
+        case turn.mode do
+          :message -> fn id -> Session.send_message(id, harness_request) end
+          :follow_up -> fn id -> Session.follow_up(id, harness_request) end
+        end
+
+      case with_harness_session(runtime, call) do
+        {:ok, harness_turn_id} ->
+          updated =
+            turn
+            |> Map.put(:harness_turn_id, harness_turn_id)
+            |> Map.put(:status, if(turn.mode == :follow_up, do: :queued, else: :running))
+            |> State.touch_turn()
+
+          session =
+            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, updated)}
+            |> State.touch()
+
+          case persist(runtime, session, []) do
+            {:ok, runtime} ->
+              {:ok, updated, schedule_poll(runtime, 0)}
+
+            {:error, runtime} ->
+              {:error, {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id},
+               schedule_poll(runtime, 0)}
+          end
+
+        {:error, reason}
+        when is_tuple(reason) and elem(reason, 0) in [:harness_call_exception, :harness_call_exit] ->
+          ambiguous =
+            turn
+            |> Map.put(:status, :ambiguous)
+            |> Map.put(:error, durable(reason))
+            |> State.touch_turn()
+
+          session =
+            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, ambiguous)}
+            |> State.touch()
+
+          case persist(runtime, session, []) do
+            {:ok, runtime} ->
+              {:error, {:turn_dispatch_ambiguous, turn.id}, reply_turn_waiters(runtime, turn.id)}
+
+            {:error, runtime} ->
+              {:error, {:turn_dispatch_ambiguous, turn.id, :checkpoint_failed}, runtime}
+          end
+
+        {:error, reason} ->
+          failed =
+            turn
+            |> Map.put(:status, :failed)
+            |> Map.put(:error, durable(reason))
+            |> State.touch_turn()
+
+          session =
+            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, failed)}
+            |> State.touch()
+
+          case persist(runtime, session, []) do
+            {:ok, runtime} ->
+              {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
+
+            {:error, runtime} ->
+              {:error, {:turn_dispatch_failed, reason, :checkpoint_failed}, runtime}
+          end
       end
-
-    case with_harness_session(runtime, call) do
-      {:ok, harness_turn_id} ->
-        updated =
-          turn
-          |> Map.put(:harness_turn_id, harness_turn_id)
-          |> Map.put(:status, if(turn.mode == :follow_up, do: :queued, else: :running))
-          |> State.touch_turn()
-
-        session =
-          %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, updated)}
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} ->
-            {:ok, updated, schedule_poll(runtime, 0)}
-
-          {:error, runtime} ->
-            {:error, {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id},
-             schedule_poll(runtime, 0)}
-        end
-
-      {:error, reason}
-      when is_tuple(reason) and elem(reason, 0) in [:harness_call_exception, :harness_call_exit] ->
-        ambiguous =
-          turn
-          |> Map.put(:status, :ambiguous)
-          |> Map.put(:error, durable(reason))
-          |> State.touch_turn()
-
-        session =
-          %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, ambiguous)}
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} ->
-            {:error, {:turn_dispatch_ambiguous, turn.id}, reply_turn_waiters(runtime, turn.id)}
-
-          {:error, runtime} ->
-            {:error, {:turn_dispatch_ambiguous, turn.id, :checkpoint_failed}, runtime}
-        end
-
-      {:error, reason} ->
-        failed =
-          turn
-          |> Map.put(:status, :failed)
-          |> Map.put(:error, durable(reason))
-          |> State.touch_turn()
-
-        session =
-          %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, failed)}
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} ->
-            {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
-
-          {:error, runtime} ->
-            {:error, {:turn_dispatch_failed, reason, :checkpoint_failed}, runtime}
-        end
+    else
+      {:error, reason} -> {:error, {:turn_dispatch_failed, reason}, runtime}
     end
   end
+
+  defp expose_turn_request(session, request) do
+    if Map.get(session.options, :runtime_exposure, true) do
+      Exposure.wrap_turn_request_capture(request, Map.get(session, :runtime_snapshot))
+    else
+      {:ok, request}
+    end
+  end
+
+  defp ensure_exposable_turn(session, %{prompt: prompt}) when is_binary(prompt) do
+    if Map.get(session.options, :runtime_exposure, true) and
+         Ouroboros.AgentProfile.reserved_delimiter?(prompt) do
+      {:error, {:reserved_prompt_delimiter, :prompt}}
+    else
+      :ok
+    end
+  end
+
+  defp ensure_exposable_turn(_session, _request), do: :ok
 
   defp build_turn_request(input, opts) do
     allowed = [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]

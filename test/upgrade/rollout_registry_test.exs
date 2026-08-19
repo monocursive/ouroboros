@@ -43,7 +43,7 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     assert quarantined.state == :quarantined
 
     # Quarantine has no automatic exit here, exactly as it has none in the node executor.
-    for state <- [:live, :rolled_back, :deploying] do
+    for state <- [:live, :rolled_back, :deploying, :superseded] do
       assert {:error, {:invalid_transition, :quarantined, ^state}} =
                Registry.mark(entry.artifact_id, state, [], registry)
     end
@@ -51,6 +51,25 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     assert [%{artifact_id: id}] = Registry.history(@module, registry)
     assert id == entry.artifact_id
     assert Registry.history(Ouroboros.Capability.Unrelated, registry) == []
+  end
+
+  test "marking a module live supersedes the overlapping champion" do
+    registry = start_registry!()
+    {:ok, champion} = Registry.deploying(attrs(), registry)
+    {:ok, live_champion} = Registry.mark(champion.artifact_id, :live, [], registry)
+    {:ok, challenger} = Registry.deploying(attrs(), registry)
+
+    assert {:ok, live_challenger} = Registry.mark(challenger.artifact_id, :live, [], registry)
+    assert live_challenger.state == :live
+    assert Registry.live(registry) == [live_challenger]
+
+    assert {:ok, superseded} = Registry.get(champion.artifact_id, registry)
+    assert superseded.state == :superseded
+    assert superseded.detail == %{replaced_by: live_challenger.artifact_id}
+    assert live_champion.state == :live
+
+    assert {:error, {:invalid_transition, :superseded, :live}} =
+             Registry.mark(champion.artifact_id, :live, [], registry)
   end
 
   test "rejects malformed records rather than storing a rollout nobody can interpret" do

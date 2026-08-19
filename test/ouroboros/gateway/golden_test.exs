@@ -78,6 +78,10 @@ defmodule Ouroboros.Gateway.GoldenTest do
 
     assert status["availability"]["control"] == "disabled"
     assert status["availability"]["mesh"] == "available"
+    assert status["forge"]["signer"] == "deny"
+    assert status["forge"]["admit_possible?"] == false
+    assert status["forge"]["live_count"] == 0
+    assert status["forge"]["live"] == []
   end
 
   defp fixture(name), do: name |> Golden.path() |> File.read!() |> JSON.decode!()

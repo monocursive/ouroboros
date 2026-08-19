@@ -99,11 +99,17 @@ defmodule Ouroboros.CodingWorkspaceTest do
   end
 
   test "workspace mode defaults from sandbox policy and rejects unknown modes", %{nested: nested} do
+    assert {:ok, %TaskState{workspace_mode: :exclusive}} =
+             TaskState.new(unique_id("write-default"), "write", workspace: nested)
+
     assert {:ok, %TaskState{workspace_mode: :shared_read}} =
-             TaskState.new(unique_id("read-default"), "read", workspace: nested)
+             TaskState.new(unique_id("read-default"), "read",
+               workspace: nested,
+               sandbox_mode: :read_only
+             )
 
     assert {:ok, %TaskState{workspace_mode: :exclusive}} =
-             TaskState.new(unique_id("write-default"), "write",
+             TaskState.new(unique_id("write-stated"), "write",
                workspace: nested,
                sandbox_mode: :workspace_write
              )
@@ -144,7 +150,7 @@ defmodule Ouroboros.CodingWorkspaceTest do
 
   test "canonical lease metadata is public and completion releases it", %{nested: nested} do
     id = unique_id("complete")
-    {task_ref, _run_id, adapter} = start_controlled(id, nested)
+    {task_ref, _run_id, adapter} = start_controlled(id, nested, sandbox_mode: :read_only)
 
     assert {:ok,
             %TaskState{

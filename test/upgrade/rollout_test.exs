@@ -349,6 +349,11 @@ defmodule Ouroboros.Upgrade.RolloutTest do
 
       assert :erpc.call(target, @echo, :module_info, [:md5]) == hd(champion.modules).md5
     end
+
+    assert {:ok, champion_entry} = Registry.get(champion.id)
+    assert champion_entry.state == :live
+    assert Enum.any?(Registry.live(), &(&1.artifact_id == champion.id))
+    refute Enum.any?(Registry.live(), &(&1.artifact_id == challenger.id))
   end
 
   test "a challenger that holds its own replaces the champion", context do
@@ -377,14 +382,17 @@ defmodule Ouroboros.Upgrade.RolloutTest do
     assert entry.state == :live
     assert is_map(entry.eval_report.champion)
 
-    # The running code is the challenger's, and it is the challenger the registry calls
-    # live while the champion's own record is untouched.
+    # The running code is the challenger's. The champion record is finished history, not
+    # a second live inventory row that a later forge of the old digest could reattach.
     for target <- nodes do
       assert :erpc.call(target, @echo, :module_info, [:md5]) == hd(challenger.modules).md5
     end
 
     assert {:ok, champion_entry} = Registry.get(champion.id)
-    assert champion_entry.state == :live
+    assert champion_entry.state == :superseded
+    assert champion_entry.detail == %{replaced_by: challenger.id}
+    assert Enum.any?(Registry.live(), &(&1.artifact_id == challenger.id))
+    refute Enum.any?(Registry.live(), &(&1.artifact_id == champion.id))
   end
 
   test "the forge cannot forge itself out of the protected set", %{nodes: nodes} do

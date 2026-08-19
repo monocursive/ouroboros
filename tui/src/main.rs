@@ -31,7 +31,7 @@ use serde_json::json;
 
 use ouro::cli::{Cli, Command};
 use ouro::config::{self, Loaded, StartFlags};
-use ouro::model::{ApprovalMode, Plane, StartError, StartRequest, StartedRef};
+use ouro::model::{ApprovalMode, Plane, SandboxMode, StartError, StartRequest, StartedRef};
 use ouro::proto::Hello;
 use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
 use ouro::transport::{
@@ -73,6 +73,7 @@ async fn run(cli: Cli) -> Result<()> {
             provider,
             workspace,
             approval_mode,
+            sandbox_mode,
             message,
             print,
         }) => {
@@ -84,6 +85,7 @@ async fn run(cli: Cli) -> Result<()> {
                     provider,
                     workspace: workspace.map(absolute).transpose()?,
                     approval_mode,
+                    sandbox_mode,
                 },
                 message,
                 print,
@@ -208,6 +210,12 @@ async fn new_session(
                     "{}",
                     StartError::UnknownApprovalMode(name.clone()).message()
                 )
+            })?),
+        },
+        sandbox_mode: match &resolved.sandbox_mode {
+            None => None,
+            Some(name) => Some(SandboxMode::parse(name).ok_or_else(|| {
+                anyhow!("{}", StartError::UnknownSandboxMode(name.clone()).message())
             })?),
         },
         objective: String::new(),

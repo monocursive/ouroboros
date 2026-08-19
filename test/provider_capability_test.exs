@@ -20,14 +20,14 @@ defmodule Ouroboros.ProviderCapabilityTest do
   # transport declares both, and refuses only the `:prompt` approval value.
   @interactive_defaults %{
     amp: {:absent, :absent},
-    claude: {:prompt, :read_only},
-    codex: {:prompt, :read_only},
-    gemini: {:prompt, :read_only},
-    grok: {:prompt, :read_only},
+    claude: {:prompt, :workspace_write},
+    codex: {:prompt, :workspace_write},
+    gemini: {:prompt, :workspace_write},
+    grok: {:prompt, :workspace_write},
     kimi: {:absent, :absent},
     opencode: {:absent, :absent},
-    pi: {:absent, :read_only},
-    zai: {:prompt, :read_only}
+    pi: {:absent, :absent},
+    zai: {:prompt, :workspace_write}
   }
 
   # provider => the fields the coding plane refuses at creation under its own defaults.
@@ -39,7 +39,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
     grok: [],
     kimi: [:approval_mode, :sandbox_mode],
     opencode: [:sandbox_mode],
-    pi: [:approval_mode],
+    pi: [:approval_mode, :sandbox_mode],
     zai: []
   }
 
@@ -69,23 +69,45 @@ defmodule Ouroboros.ProviderCapabilityTest do
       request = interactive_request(provider: :no_such_provider)
 
       assert request.approval_mode == :prompt
-      assert request.sandbox_mode == :read_only
+      assert request.sandbox_mode == :workspace_write
     end
 
     test "an unresolvable transport is left to the harness with the defaults intact" do
       request = interactive_request(provider: :amp, transport: :no_such_transport)
 
       assert request.approval_mode == :prompt
-      assert request.sandbox_mode == :read_only
+      assert request.sandbox_mode == :workspace_write
+    end
+
+    test "codex can start in an empty non-Git workspace and fetch dependencies" do
+      request = interactive_request(provider: :codex)
+
+      assert request.provider_options == %{
+               skip_git_repo_check: true,
+               network_access_enabled: true
+             }
+    end
+
+    test "explicit codex restrictions win over the node defaults" do
+      request =
+        interactive_request(
+          provider: :codex,
+          provider_options: %{network_access_enabled: false, skip_git_repo_check: false}
+        )
+
+      assert request.provider_options == %{
+               skip_git_repo_check: false,
+               network_access_enabled: false
+             }
     end
   end
 
   describe "coding plane defaults" do
     for {provider, refused} <- @coding_refusals, refused == [] do
-      test "#{provider} keeps the read-only default" do
+      test "#{provider} keeps the workspace-write default" do
         assert {:ok, task} = coding_task(provider: unquote(provider))
         assert task.options.approval_mode == :prompt
-        assert task.options.sandbox_mode == :read_only
+        assert task.options.sandbox_mode == :workspace_write
       end
     end
 
@@ -132,7 +154,9 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
 
     test "pi accepts the approval value its spec allows" do
-      assert {:ok, task} = coding_task(provider: :pi, approval_mode: :auto_approve)
+      assert {:ok, task} =
+               coding_task(provider: :pi, approval_mode: :auto_approve, sandbox_mode: :read_only)
+
       assert task.options.approval_mode == :auto_approve
       assert task.options.sandbox_mode == :read_only
     end
@@ -140,7 +164,22 @@ defmodule Ouroboros.ProviderCapabilityTest do
     test "an unresolvable provider is left to the harness with the defaults intact" do
       assert {:ok, task} = coding_task(provider: :no_such_provider)
       assert task.options.approval_mode == :prompt
-      assert task.options.sandbox_mode == :read_only
+      assert task.options.sandbox_mode == :workspace_write
+    end
+
+    test "codex execution policy is durable and publicly inspectable" do
+      assert {:ok, task} = coding_task(provider: :codex)
+
+      assert task.options.provider_options == %{
+               skip_git_repo_check: true,
+               network_access_enabled: true
+             }
+
+      public = TaskState.public(task)
+      assert public.options.provider_execution.network_access_enabled
+      refute public.options.provider_execution.git_repository_required
+      refute Map.has_key?(public.options, :provider_options)
+      assert TaskState.public(public) == public
     end
   end
 

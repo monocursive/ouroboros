@@ -237,6 +237,7 @@ defmodule Ouroboros.Gateway.OperateTest do
       # Naming the accepted set is what turns a refusal into something a client author can
       # act on without reading this build's source.
       assert response["error"]["message"] =~ "sandbox_mode"
+      assert response["error"]["message"] =~ "runtime_exposure"
     end
 
     test "an unknown provider is a parameter error, not a new atom", %{client: client} do

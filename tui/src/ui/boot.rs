@@ -48,7 +48,7 @@ use super::Screen;
 
 /// How often the boot screen redraws while it waits. Fast enough that the spinner reads as
 /// motion, slow enough that a 60-second wait is not a busy loop.
-const FRAME: Duration = Duration::from_millis(120);
+const FRAME: Duration = Duration::from_millis(80);
 
 /// How long a failed boot holds the screen before restoring the terminal on its own.
 ///
@@ -502,7 +502,7 @@ fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
     for step in progress.steps() {
         let (marker, style) = match step.state {
             StepState::Doing => (
-                theme::spinner(ticks / 2).to_string(),
+                theme::spinner(ticks).to_string(),
                 Style::default().fg(theme::ACCENT),
             ),
             StepState::Done => ("✓".to_string(), Style::default().fg(theme::GOOD)),

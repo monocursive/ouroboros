@@ -2,13 +2,13 @@ defmodule Ouroboros.Provider do
   @moduledoc """
   What a provider will actually accept for the two options the planes default.
 
-  Both planes want to start under a conservative posture: approvals prompted and the
-  workspace read-only. Four of the nine bundled providers cannot be told that. Amp
-  declares neither option, OpenCode declares no `sandbox_mode`, Kimi declares both but
-  accepts only `:default` for each, and Pi refuses `:prompt` approvals. `Jido.Harness`
-  refuses any normalized option a provider has not declared, so injecting the
-  conservative pair unconditionally did not make those four providers safe — it made
-  them unstartable.
+  Both planes want to start under a usable posture: approvals prompted and the workspace
+  writable. Four of the nine bundled providers cannot be told that. Amp declares neither
+  option, OpenCode declares no `sandbox_mode`, Kimi declares both but accepts only
+  `:default` for each, and Pi refuses `:prompt` approvals. `Jido.Harness` refuses any
+  normalized option a provider has not declared, so injecting the pair unconditionally
+  did not make those four providers safe — it made them unstartable. A read-only session
+  is still available: pass `sandbox_mode: :read_only`.
 
   The lookup answers per plane because the harness validates the two surfaces against
   different lists. A run is checked against the adapter's own `normalized_options`
@@ -23,9 +23,9 @@ defmodule Ouroboros.Provider do
     * The interactive plane omits a default the provider cannot take, which leaves the
       harness request at `:default` — the provider's own behavior, which is what "the
       caller said nothing" has always meant.
-    * The coding plane refuses at creation, because its read-only default is a promise
-      the README makes to whoever starts a task, and quietly dropping it would break
-      that promise in the one direction that matters.
+    * The coding plane refuses at creation, because its workspace-write default is a
+      promise the README makes to whoever starts a task, and quietly dropping it would
+      break that promise in the one direction that matters.
 
   Neither plane rewrites or drops an option the caller stated. A sandbox the provider
   cannot enforce has to fail loudly rather than quietly become no sandbox at all, so a
@@ -34,27 +34,202 @@ defmodule Ouroboros.Provider do
 
   alias Jido.Harness.Registry
 
+  require Logger
+
   @typedoc """
   Which harness surface the options are bound for. An interactive session also carries
   the transport the caller selected, or `nil` when it takes the adapter's default.
   """
   @type plane :: :coding | {:interactive, atom() | nil}
 
-  # The conservative posture, in the order a refusal reports it.
-  @plane_defaults [approval_mode: :prompt, sandbox_mode: :read_only]
+  # The default posture, in the order a refusal reports it. Read-only is opt-in.
+  @plane_defaults [approval_mode: :prompt, sandbox_mode: :workspace_write]
+
+  # Codex's non-interactive transport otherwise refuses an empty directory before the
+  # model sees the first turn, and its workspace-write sandbox cannot fetch a dependency
+  # unless network access is stated. These are execution facts of the node, not knobs a
+  # terminal should have to smuggle through `provider_options`. Explicit caller values
+  # still win below, including `false`.
+  @execution_defaults %{
+    codex: %{skip_git_repo_check: true, network_access_enabled: true}
+  }
 
   # `Jido.Harness` reads each of these as "the caller said nothing" and never checks it
   # against a provider's allowlist. `:default` is therefore always legal to send, which
   # is what makes it the override a refusal can honestly recommend.
   @unset_values [nil, [], %{}, :default]
 
+  @doc "Merges this node's safe provider execution defaults under caller options."
+  @spec execution_options(atom(), map() | nil) :: map() | nil
+  def execution_options(provider, options) when options in [nil, %{}] do
+    defaults = provider |> provider_defaults(%{}) |> normalize_default_keys(provider)
+    if defaults == %{} and is_nil(options), do: nil, else: defaults
+  end
+
+  def execution_options(provider, options) when is_map(options) do
+    defaults = provider |> provider_defaults(%{}) |> normalize_default_keys(provider)
+    Map.merge(defaults, normalize_default_keys(options, provider))
+  end
+
+  def execution_options(_provider, options), do: options
+
+  @doc "Returns the non-secret execution policy safe to show in public session state."
+  @spec public_execution_policy(atom(), map() | nil) :: map()
+  def public_execution_policy(:codex, options) when is_map(options) do
+    %{
+      network_access_enabled: execution_value(options, :network_access_enabled) == true,
+      git_repository_required: execution_value(options, :skip_git_repo_check) != true,
+      managed_cargo_cache: is_binary(Application.get_env(:ouroboros, :managed_cargo_cache)),
+      interactive_approvals: false,
+      escalation_behavior: :deny_when_provider_cannot_prompt
+    }
+  end
+
+  def public_execution_policy(_provider, _options), do: %{}
+
+  @doc false
+  @spec apply_execution_directories(map(), atom()) :: map()
+  def apply_execution_directories(request, :codex) when is_map(request) do
+    case Application.get_env(:ouroboros, :codex_cargo_home) do
+      cargo_home when is_binary(cargo_home) and cargo_home != "" ->
+        add_dirs =
+          case Map.get(request, :add_dirs, []) do
+            dirs when is_list(dirs) -> Enum.uniq([cargo_home | dirs])
+            _invalid -> [cargo_home]
+          end
+
+        Map.put(request, :add_dirs, add_dirs)
+
+      _unset ->
+        request
+    end
+  end
+
+  def apply_execution_directories(request, _provider), do: request
+
+  @doc false
+  @spec configure_runtime_cache() :: :ok
+  def configure_runtime_cache do
+    case Application.get_env(:ouroboros, :data_dir) do
+      data_dir when is_binary(data_dir) ->
+        cargo_home = Path.join([data_dir, "provider-cache", "codex", "cargo"])
+
+        case File.mkdir_p(cargo_home) do
+          :ok ->
+            case configure_codex_cache(cargo_home) do
+              ^cargo_home ->
+                Application.put_env(:ouroboros, :managed_cargo_cache, cargo_home)
+                Application.put_env(:ouroboros, :codex_cargo_home, cargo_home)
+
+              operator_home ->
+                Application.delete_env(:ouroboros, :managed_cargo_cache)
+                Application.put_env(:ouroboros, :codex_cargo_home, operator_home)
+            end
+
+          {:error, reason} ->
+            Application.delete_env(:ouroboros, :managed_cargo_cache)
+            Application.delete_env(:ouroboros, :codex_cargo_home)
+
+            Logger.warning(
+              "Codex Cargo cache #{cargo_home} is unavailable: #{:file.format_error(reason)}; " <>
+                "Rust turns may need a workspace-local CARGO_HOME"
+            )
+        end
+
+      _unset ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp configure_codex_cache(cargo_home) do
+    providers =
+      case Application.get_env(:jido_harness, :provider_config, %{}) do
+        value when is_map(value) or is_list(value) -> Map.new(value)
+        _invalid -> %{}
+      end
+
+    codex =
+      case Map.get(providers, :codex, %{}) do
+        value when is_map(value) or is_list(value) -> Map.new(value)
+        _invalid -> %{}
+      end
+
+    env = codex |> config_map(:env) |> Map.put_new("CARGO_HOME", cargo_home)
+
+    effective_cargo_home =
+      case Map.get(env, "CARGO_HOME") do
+        path when is_binary(path) and path != "" -> path
+        _invalid -> cargo_home
+      end
+
+    env = Map.put(env, "CARGO_HOME", effective_cargo_home)
+
+    codex =
+      codex
+      |> Map.delete("env")
+      |> Map.put(:env, env)
+      |> put_cache_default(:request_defaults, effective_cargo_home)
+      |> put_cache_default(:session_defaults, effective_cargo_home)
+
+    Application.put_env(:jido_harness, :provider_config, Map.put(providers, :codex, codex))
+    effective_cargo_home
+  end
+
+  defp put_cache_default(config, field, cargo_home) do
+    defaults = config_map(config, field)
+
+    add_dirs =
+      case Map.get(defaults, :add_dirs, Map.get(defaults, "add_dirs", [])) do
+        dirs when is_list(dirs) -> Enum.uniq([cargo_home | dirs])
+        _invalid -> [cargo_home]
+      end
+
+    defaults = defaults |> Map.delete("add_dirs") |> Map.put(:add_dirs, add_dirs)
+    config |> Map.delete(Atom.to_string(field)) |> Map.put(field, defaults)
+  end
+
+  defp config_map(config, field) do
+    case Map.get(config, field, Map.get(config, Atom.to_string(field), %{})) do
+      value when is_map(value) or is_list(value) -> Map.new(value)
+      _invalid -> %{}
+    end
+  end
+
+  defp normalize_default_keys(options, :codex) do
+    Map.new(options, fn
+      {"skip_git_repo_check", value} -> {:skip_git_repo_check, value}
+      {"network_access_enabled", value} -> {:network_access_enabled, value}
+      pair -> pair
+    end)
+  end
+
+  defp normalize_default_keys(options, _provider), do: options
+
+  defp execution_value(options, key),
+    do: Map.get(options, key, Map.get(options, Atom.to_string(key)))
+
+  defp provider_defaults(provider, fallback) do
+    case Application.get_env(:ouroboros, :provider_execution_defaults, @execution_defaults) do
+      configured when is_map(configured) ->
+        case Map.get(configured, provider, fallback) do
+          defaults when is_map(defaults) -> defaults
+          _invalid -> fallback
+        end
+
+      _invalid ->
+        Map.get(@execution_defaults, provider, fallback)
+    end
+  end
+
   @doc """
   Returns the `approval_mode` and `sandbox_mode` a request for `provider` may carry.
 
   Options the caller stated in `opts` are returned unchanged. Options the caller left
-  unset take the plane's conservative default when the provider can accept it. On the
-  interactive plane an unacceptable default is omitted from the result; on the coding
-  plane it is refused, and so is a stated value the provider cannot enforce.
+  unset take the plane's default when the provider can accept it. On the interactive
+  plane an unacceptable default is omitted from the result; on the coding plane it is
+  refused, and so is a stated value the provider cannot enforce.
 
   When the provider's spec cannot be resolved — an unregistered atom, or a session
   transport no adapter declares — the defaults are returned as they always were, so the

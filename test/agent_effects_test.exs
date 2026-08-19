@@ -199,9 +199,11 @@ defmodule Ouroboros.AgentEffectsTest do
 
     # The effect returned immediately, so this process is free to drive the provider run
     # the delegation started while the bounded runner waits for it.
-    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: ^objective},
+    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: prompt},
                     adapter},
                    5_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, objective)
 
     assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "reviewed"})
     assert :ok = HarnessAdapter.finish(adapter)

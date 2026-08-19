@@ -225,8 +225,7 @@ defmodule Ouroboros.TeamTest do
                workspace: File.cwd!()
              )
 
-    refute_receive {:ouroboros_test_adapter_started, _run_id,
-                    %RunRequest{prompt: "second objective"}, _adapter},
+    refute_receive {:ouroboros_test_adapter_started, _run_id, _request, _adapter},
                    100
 
     assert :ok = HarnessAdapter.emit(first_adapter, :output_text_final, %{"text" => "done"})
@@ -286,9 +285,11 @@ defmodule Ouroboros.TeamTest do
                workspace: File.cwd!()
              )
 
-    assert_receive {:ouroboros_test_adapter_started, run_a,
-                    %RunRequest{prompt: "objective owned by team A"}, _adapter_a},
+    assert_receive {:ouroboros_test_adapter_started, run_a, %RunRequest{prompt: prompt_a},
+                    _adapter_a},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt_a, "objective owned by team A")
 
     assert {:ok, delegation_b} =
              Team.delegate(team_b, worker_b_id, "different objective owned by team B",
@@ -297,9 +298,11 @@ defmodule Ouroboros.TeamTest do
                workspace: File.cwd!()
              )
 
-    assert_receive {:ouroboros_test_adapter_started, run_b,
-                    %RunRequest{prompt: "different objective owned by team B"}, adapter_b},
+    assert_receive {:ouroboros_test_adapter_started, run_b, %RunRequest{prompt: prompt_b},
+                    adapter_b},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt_b, "different objective owned by team B")
 
     assert delegation_a.id == delegation_id
     assert delegation_b.id == delegation_id
@@ -340,8 +343,10 @@ defmodule Ouroboros.TeamTest do
              )
 
     assert_receive {:ouroboros_test_adapter_started, foreign_run,
-                    %RunRequest{prompt: "foreign objective"}, foreign_adapter},
+                    %RunRequest{prompt: foreign_prompt}, foreign_adapter},
                    1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(foreign_prompt, "foreign objective")
 
     assert {:error,
             {:delegation_setup_failed, :coding_start,
@@ -896,7 +901,7 @@ defmodule Ouroboros.TeamTest do
                     adapter},
                    1_000
 
-    assert request.prompt == objective
+    assert Ouroboros.Test.Prompt.wrapped?(request.prompt, objective)
 
     # This may land in the atomic subscription backlog or on the live path. The
     # cursor contract makes the distinction irrelevant and prevents loss/duplication.

@@ -185,9 +185,10 @@ defmodule Ouroboros.CodingSessionTest do
                     %RunRequest{metadata: %{ouroboros_task_id: ^id}} = request, adapter},
                    1_000
 
-    assert request.prompt == objective
+    assert request.prompt != objective
+    assert Ouroboros.Test.Prompt.wrapped?(request.prompt, objective)
     assert request.approval_mode == :prompt
-    assert request.sandbox_mode == :read_only
+    assert request.sandbox_mode == :workspace_write
 
     assert_eventually(fn ->
       match?(

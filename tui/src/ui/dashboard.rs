@@ -26,7 +26,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(11), Constraint::Min(3)])
+        .constraints([Constraint::Length(12), Constraint::Min(3)])
         .split(columns[0]);
 
     node(frame, left[0], app);
@@ -68,14 +68,15 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
                 "control",
                 &format!(
                     "{} ({} runs)",
-                    if status.control.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
+                    status
+                        .availability
+                        .get("control")
+                        .map(|availability| availability.as_str())
+                        .unwrap_or("unknown"),
                     status.control.runs.len()
                 ),
             ));
+            lines.push(field("forge", &status.forge_summary()));
         }
         None => {
             lines.push(field("node", &blank(&app.hello.node)));

@@ -15,7 +15,8 @@ defmodule Ouroboros.AgentProfile do
   `rel/` discipline — rather than across arbitrary OTP majors.
 
   Profile text may not contain the assembler's block delimiters
-  (`<ouroboros-agent-profile>`, `<ouroboros-session-instructions>`, open or close).
+  (`<ouroboros-agent-profile>`, `<ouroboros-session-instructions>`,
+  `<ouroboros-runtime>`, open or close).
   Such text is refused as `{:error, {:reserved_prompt_delimiter, field}}` rather than
   escaped: a profile that forged those boundaries could present itself as session
   instructions, or present session text as profile policy, and rewriting an operator's
@@ -35,7 +36,9 @@ defmodule Ouroboros.AgentProfile do
     "<ouroboros-agent-profile",
     "</ouroboros-agent-profile",
     "<ouroboros-session-instructions",
-    "</ouroboros-session-instructions"
+    "</ouroboros-session-instructions",
+    "<ouroboros-runtime",
+    "</ouroboros-runtime"
   ]
 
   @doc false

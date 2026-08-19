@@ -73,6 +73,13 @@ defmodule Ouroboros.Application do
     # An unrecognized role raises here rather than booting the privileged tree.
     role = Ouroboros.Cluster.boot_role!()
 
+    if role == :core do
+      # Provider processes inherit a runtime-owned Cargo cache that is writable through
+      # Codex's workspace sandbox. Dependency work stays out of both the repository and
+      # the user's global toolchain cache.
+      :ok = Ouroboros.Provider.configure_runtime_cache()
+    end
+
     Supervisor.start_link(children(role), strategy: :rest_for_one, name: Ouroboros.Supervisor)
   end
 

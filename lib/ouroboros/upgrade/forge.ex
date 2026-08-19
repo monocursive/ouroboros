@@ -16,6 +16,10 @@ defmodule Ouroboros.Upgrade.Forge do
   the same introduction rules the loading node will re-check, and only then is a number
   allocated and a signature requested. Nothing after the build peer runs agent code.
 
+  `preview/2` stops after the build peer. It never constructs a `Beam.introduce/3`
+  transition, never allocates an epoch, and never asks a signer. A preview that
+  compiled is not a prepared load.
+
   The forge produces an artifact; it does not deploy one and cannot authorize one. The
   signature comes from whatever `config :ouroboros, :forge_signer` names, which is
   `Signer.Deny` unless an operator changed it, and the artifact is verified again on
@@ -71,6 +75,33 @@ defmodule Ouroboros.Upgrade.Forge do
   end
 
   def forge(source, _opts), do: {:error, {:source_rejected, {:invalid_source, source}}}
+
+  @doc """
+  Validates and compiles one capability in the build peer, then discards the binary.
+
+  Returns module, source digest, and the peer's test report. The production node does
+  not introduce, epoch, or sign anything. `:code.which/1` for the declared module stays
+  `:non_existing` on this VM.
+  """
+  @spec preview(Source.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def preview(source, opts \\ [])
+
+  def preview(%Source{} = source, opts) when is_list(opts) do
+    with {:ok, source} <- validate(source),
+         {:ok, eval} <- eval_spec(opts),
+         {:ok, build} <- build(source, opts) do
+      {:ok,
+       %{
+         module: source.module,
+         source_sha256: source.sha256,
+         test_report: Map.get(build, :test_report, %{}),
+         peer_runtime: Map.get(build, :peer_runtime, %{}),
+         eval: eval
+       }}
+    end
+  end
+
+  def preview(source, _opts), do: {:error, {:source_rejected, {:invalid_source, source}}}
 
   defp validate(source) do
     case Source.validate(source) do

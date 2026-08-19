@@ -73,24 +73,23 @@ pub fn render_status(status: &Value) -> String {
     }
 
     let control = status.get("control");
-    let enabled = control
-        .and_then(|control| control.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let posture = status
+        .get("availability")
+        .and_then(Value::as_object)
+        .and_then(|availability| availability.get("control"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let runs = control
         .and_then(|control| control.get("runs"))
         .and_then(Value::as_array)
         .map(|runs| runs.len())
         .unwrap_or(0);
 
-    let _ = writeln!(
-        page,
-        "  control      {} ({runs} runs)",
-        if enabled { "enabled" } else { "disabled" }
-    );
+    let _ = writeln!(page, "  control      {posture} ({runs} runs)");
 
     let _ = writeln!(page, "  upgrade      {}", mode(status, "upgrade"));
     let _ = writeln!(page, "  release      {}", mode(status, "release"));
+    let _ = writeln!(page, "  forge        {}", forge(status));
 
     page
 }
@@ -123,6 +122,32 @@ fn mode(status: &Value, key: &str) -> String {
         .and_then(|value| value.get("mode"))
         .map(render_value)
         .unwrap_or_else(|| "-".into())
+}
+
+fn forge(status: &Value) -> String {
+    let Some(forge) = status.get("forge") else {
+        return "-".into();
+    };
+
+    if forge.is_null() {
+        return "-".into();
+    }
+
+    let signer = forge
+        .get("signer")
+        .map(render_value)
+        .unwrap_or_else(|| "-".into());
+    let live = forge
+        .get("live_count")
+        .map(render_value)
+        .unwrap_or_else(|| "-".into());
+    let admit = match forge.get("admit_possible?").and_then(Value::as_bool) {
+        Some(true) => "admit=yes",
+        Some(false) => "admit=no",
+        None => "admit=?",
+    };
+
+    format!("signer={signer} live={live} {admit}")
 }
 
 /// `Ouroboros.Cluster.status/0` reports formation and distribution separately, and a
@@ -218,7 +243,8 @@ mod tests {
         let status = json!({
             "agents": [{ "id": "a" }, { "id": "b" }],
             "interactive_sessions": [],
-            "control": { "enabled": true, "runs": [{ "id": "r" }] }
+            "availability": { "control": "available" },
+            "control": { "runs": [{ "id": "r" }] }
         });
 
         let page = render_status(&status);
@@ -229,7 +255,25 @@ mod tests {
             page.contains("coding       -"),
             "an absent list is not a zero"
         );
-        assert!(page.contains("enabled (1 runs)"));
+        assert!(page.contains("available (1 runs)"));
+    }
+
+    #[test]
+    fn forge_posture_is_rendered_from_whatever_the_runtime_sent() {
+        let status = json!({
+            "forge": {
+                "signer": "deny",
+                "admit_possible?": false,
+                "live_count": 0,
+                "live": []
+            }
+        });
+
+        assert!(
+            render_status(&status).contains("signer=deny live=0 admit=no"),
+            "{}",
+            render_status(&status)
+        );
     }
 
     #[test]

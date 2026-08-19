@@ -14,6 +14,7 @@ use serde_json::json;
 use ouro::model::Plane;
 use ouro::transport::ClientError;
 use ouro::ui::app::{App, Call, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag};
+use ouro::ui::theme;
 
 use support::{app, fixture, full_hello, render};
 
@@ -42,6 +43,11 @@ fn modified(code: KeyCode, modifiers: KeyModifiers) -> Msg {
         kind: KeyEventKind::Press,
         state: crossterm::event::KeyEventState::NONE,
     })
+}
+
+fn apply_leader(app: &mut App, c: char) {
+    app.apply(ctrl('x'));
+    app.apply(key(KeyCode::Char(c)));
 }
 
 fn type_text(app: &mut App, text: &str) {
@@ -240,6 +246,8 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     }
 
     assert!(screen.contains("none — this runtime is not connected to other nodes"));
+    assert!(screen.contains("signer=deny"), "{}", screen.text());
+    assert!(screen.contains("admit=no"), "{}", screen.text());
 }
 
 #[test]
@@ -361,7 +369,7 @@ fn the_sessions_list_merges_both_planes_and_tags_each_row() {
                  "updated_at": "2026-01-01T00:00:01.000000Z" }]),
     );
 
-    app.overlay = Some(Overlay::SessionPicker { choice: 0 });
+    app.overlay = Some(Overlay::SessionPicker { selected: None });
     let screen = render(&mut app, 120, 20);
 
     assert!(screen.row("session-1").contains("int"), "{}", screen.text());
@@ -372,6 +380,89 @@ fn the_sessions_list_merges_both_planes_and_tags_each_row() {
     let sessions = screen.rows.iter().position(|r| r.contains("session-1"));
     let tasks = screen.rows.iter().position(|r| r.contains("task-2"));
     assert!(sessions < tasks);
+}
+
+#[test]
+fn escape_from_an_idle_empty_prompt_returns_home() {
+    let mut app = with_open_session();
+    assert!(app.sessions.open.is_some());
+    assert!(app.sessions.composer.is_some());
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": "session-0000000000000000000001",
+            "status": "idle",
+            "updated_at": "2026-01-01T00:00:00.000000Z"
+        }]),
+    );
+
+    app.apply(key(KeyCode::Esc));
+
+    assert!(app.sessions.open.is_none());
+    assert!(app.sessions.composer.is_none());
+    assert_eq!(app.tab, Tab::Sessions);
+}
+
+#[test]
+fn a_list_poll_does_not_retarget_the_session_picker() {
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([
+            {
+                "id": "older",
+                "status": "idle",
+                "updated_at": "2026-01-01T00:00:01.000000Z"
+            },
+            {
+                "id": "newer",
+                "status": "idle",
+                "updated_at": "2026-01-01T00:00:02.000000Z"
+            }
+        ]),
+    );
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+
+    app.overlay = Some(Overlay::SessionPicker {
+        selected: Some((Plane::Interactive, "older".into())),
+    });
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([
+            {
+                "id": "older",
+                "status": "idle",
+                "updated_at": "2026-01-01T00:00:01.000000Z"
+            },
+            {
+                "id": "newer",
+                "status": "idle",
+                "updated_at": "2026-01-01T00:00:03.000000Z"
+            }
+        ]),
+    );
+
+    match &app.overlay {
+        Some(Overlay::SessionPicker { selected }) => {
+            assert_eq!(
+                selected.as_ref().map(|(_plane, id)| id.as_str()),
+                Some("older")
+            );
+        }
+        other => panic!("expected a session picker, got {other:?}"),
+    }
+
+    app.apply(key(KeyCode::Enter));
+    assert_eq!(
+        app.sessions.open.as_ref().map(|(_plane, id)| id.as_str()),
+        Some("older")
+    );
 }
 
 #[test]
@@ -418,7 +509,7 @@ fn the_transcript_renders_the_golden_interactive_event() {
     );
 
     // The complete event ledger remains one key away.
-    app.apply(ctrl('e'));
+    app.apply(ctrl('o'));
     let details = render(&mut app, 120, 24);
     assert!(details.contains("Event details"), "{}", details.text());
     assert!(details.contains("output_text_final"), "{}", details.text());
@@ -475,9 +566,8 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
     }
 
     // The details shortcut works even while the message composer owns printable keys.
-    app.apply(key(KeyCode::Char('i')));
     assert!(app.sessions.composer.is_some());
-    app.apply(ctrl('e'));
+    app.apply(ctrl('o'));
     let details = render(&mut app, 120, 26);
     assert!(details.contains("session_started"), "{}", details.text());
     assert!(details.contains("provider_event"), "{}", details.text());
@@ -488,7 +578,6 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
 fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrives() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     type_text(&mut app, "please inspect this");
     app.apply(key(KeyCode::Enter));
 
@@ -500,7 +589,11 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
 
     let waiting = render(&mut app, 120, 30);
     assert!(waiting.contains("Agent"), "{}", waiting.text());
-    assert!(waiting.contains("⟳  • · ·"), "{}", waiting.text());
+    assert!(
+        waiting.contains(&format!("  {}  Working", theme::spinner(0))),
+        "{}",
+        waiting.text()
+    );
     assert!(!waiting.contains("▄█▄ ▄▄▄▄"), "{}", waiting.text());
     assert!(
         !waiting.contains("waiting for agent reply"),
@@ -510,7 +603,11 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
 
     app.ticks = 2;
     let advanced = render(&mut app, 120, 30);
-    assert!(advanced.contains("⟳  · • ·"), "{}", advanced.text());
+    assert!(
+        advanced.contains(&format!("  {}  Working", theme::spinner(2))),
+        "{}",
+        advanced.text()
+    );
 
     answer(&mut app, send.tag, json!({ "status": "running" }));
     notify(&mut app, event(1, "input_accepted", "please inspect this"));
@@ -521,19 +618,35 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
         "{}",
         accepted.text()
     );
-    assert!(accepted.contains("⟳  · • ·"), "{}", accepted.text());
+    assert!(
+        accepted.contains(&format!("  {}  Working", theme::spinner(2))),
+        "{}",
+        accepted.text()
+    );
 
     notify(&mut app, event(2, "output_text_delta", "I am checking"));
 
     let replying = render(&mut app, 120, 30);
     assert!(replying.contains("I am checking"), "{}", replying.text());
-    assert!(!replying.contains("⟳"), "{}", replying.text());
+    assert!(!replying.contains("Working"), "{}", replying.text());
+}
+
+#[test]
+fn an_empty_running_session_shows_a_working_indicator() {
+    let mut app = with_open_session();
+    let screen = render(&mut app, 120, 24);
+
+    assert!(
+        screen.contains(&format!("  {}  Working", theme::spinner(0))),
+        "{}",
+        screen.text()
+    );
+    assert!(!screen.contains("No messages yet."), "{}", screen.text());
 }
 
 /// A transcript is drawn bottom-anchored, so anything appended moves every row up by as
 /// much. For a reader who has scrolled back into history that is the transcript sliding out
-/// from under them — and the typing indicator alone adds and removes three rows on every
-/// turn.
+/// from under them — and the working indicator alone adds and removes a row on every turn.
 #[test]
 fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
     let mut app = with_open_session();
@@ -552,7 +665,7 @@ fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
     // The first frame is what tells the scroll keys how tall this content is.
     render(&mut app, 120, 24);
     for _ in 0..3 {
-        app.apply(key(KeyCode::Char('k')));
+        app.apply(key(KeyCode::PageUp));
     }
 
     let before = render(&mut app, 120, 24);
@@ -560,8 +673,7 @@ fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
     let anchored = message_rows(&before);
     assert!(!anchored.is_empty(), "{}", before.text());
 
-    // A queued follow-up appends the three rows of the typing indicator below the viewport.
-    app.apply(key(KeyCode::Char('i')));
+    // A queued follow-up appends the working indicator below the viewport.
     type_text(&mut app, "please inspect this");
     app.apply(key(KeyCode::Enter));
     let _ = app.drain();
@@ -606,7 +718,7 @@ fn a_scrolled_back_transcript_holds_still_when_a_running_tool_completes() {
 
     render(&mut app, 120, 24);
     for _ in 0..3 {
-        app.apply(key(KeyCode::Char('k')));
+        app.apply(key(KeyCode::PageUp));
     }
 
     let before = render(&mut app, 120, 24);
@@ -628,6 +740,66 @@ fn a_scrolled_back_transcript_holds_still_when_a_running_tool_completes() {
 
     let after = render(&mut app, 120, 24);
     assert_eq!(message_rows(&after), anchored, "{}", after.text());
+}
+
+/// The composer is always focused, so a wheel notch or Shift+Up used to walk prompt
+/// history instead of the conversation. Those bindings have to reach the transcript
+/// without touching the draft.
+#[test]
+fn the_wheel_and_shift_up_scroll_the_transcript_not_prompt_history() {
+    let mut app = with_open_session();
+
+    for sequence in 1..=40 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:02}"),
+            ),
+        );
+    }
+
+    type_text(&mut app, "unfinished draft");
+    render(&mut app, 120, 24);
+
+    app.apply(modified(KeyCode::Up, KeyModifiers::SHIFT));
+    let shifted = render(&mut app, 120, 24);
+    assert!(shifted.contains("scrolled back"), "{}", shifted.text());
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "unfinished draft"
+    );
+
+    app.apply(Msg::Scroll(-12));
+    let wheeled = render(&mut app, 120, 24);
+    assert!(wheeled.contains("scrolled back"), "{}", wheeled.text());
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "unfinished draft"
+    );
+
+    app.apply(key(KeyCode::Up));
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("composer")
+            .editor
+            .text(),
+        "unfinished draft",
+        "bare up still belongs to the prompt until there is history to recall"
+    );
 }
 
 /// Scrolling back was unbounded, so holding PageUp on a transcript with nothing above the
@@ -691,7 +863,6 @@ fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
 #[test]
 fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     let mut app = with_open_session();
-    app.apply(key(KeyCode::Char('i')));
 
     app.keyboard_enhanced = false;
     let plain = render(&mut app, 120, 30);
@@ -788,7 +959,7 @@ fn a_lag_divider_renders_with_the_hole_it_left() {
 
     // The technical resync cursor stays out of chat and remains visible in details.
     assert!(!screen.contains("cursor 2"), "{}", screen.text());
-    app.apply(ctrl('e'));
+    app.apply(ctrl('o'));
     let details = render(&mut app, 120, 24);
     assert!(details.contains("cursor 2"), "{}", details.text());
 
@@ -842,21 +1013,24 @@ fn a_pruned_cursor_restarts_from_the_floor_and_marks_the_transcript() {
     assert_eq!(replay.params["cursor"], 96);
 }
 
-/// The composer is rebuilt on every `i`, so its history died with it: Esc-then-i gave you
-/// an Up arrow that had forgotten everything you had sent.
+/// History is kept on the always-on composer, and survives switching away and back.
 #[test]
-fn composer_history_survives_closing_and_reopening_the_composer() {
+fn composer_history_survives_leaving_and_reopening_the_session() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     type_text(&mut app, "run the focused test");
     app.apply(key(KeyCode::Enter));
     let _ = app.drain();
 
-    app.apply(key(KeyCode::Esc));
+    apply_leader(&mut app, 'n');
+    assert!(app.sessions.open.is_none());
     assert!(app.sessions.composer.is_none());
 
-    app.apply(key(KeyCode::Char('i')));
+    app.open_session(
+        Plane::Interactive,
+        "session-0000000000000000000001".to_string(),
+    );
+    let _ = app.drain();
     app.apply(key(KeyCode::Up));
 
     assert_eq!(
@@ -874,7 +1048,7 @@ fn composer_history_survives_closing_and_reopening_the_composer() {
 fn steering_sends_an_id_an_input_and_a_turn_id() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('s')));
+    apply_leader(&mut app, 's');
     type_text(&mut app, "stop and run the tests first");
     app.apply(key(KeyCode::Enter));
 
@@ -1067,7 +1241,6 @@ fn the_approval_modal_renders_and_produces_the_right_respond_approval_params() {
 fn the_composer_queues_while_running_and_ctrl_c_interrupts_rather_than_quitting() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     type_text(&mut app, "look at the tests");
     app.apply(key(KeyCode::Enter));
 
@@ -1096,7 +1269,6 @@ fn the_composer_queues_while_running_and_ctrl_c_interrupts_rather_than_quitting(
 fn the_composer_edits_and_sends_a_multiline_bracketed_paste() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     app.apply(Msg::Paste("first\r\nthird".into()));
     app.apply(key(KeyCode::Up));
     app.apply(modified(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -1126,15 +1298,19 @@ fn the_composer_edits_and_sends_a_multiline_bracketed_paste() {
 fn the_open_composer_names_the_actual_provider_and_queues_every_later_request() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     let screen = render(&mut app, 180, 30);
     assert!(screen.contains("claude_code"), "{}", screen.text());
     assert!(!screen.contains("PROVIDER Codex"), "{}", screen.text());
     assert!(screen.contains("workspace /tmp/w"), "{}", screen.text());
     assert!(screen.contains("APPROVAL auto_edit"), "{}", screen.text());
     assert!(
-        screen.contains("SANDBOX provider default"),
+        screen.contains("FILES provider default"),
         "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("/write to edit"),
+        "a session that did not pin write access offers the switch: {}",
         screen.text()
     );
 
@@ -1188,7 +1364,6 @@ fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
 fn composer_history_restores_the_unsent_draft() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('i')));
     type_text(&mut app, "previous request");
     app.apply(key(KeyCode::Enter));
     let _ = app.drain();
@@ -1224,7 +1399,6 @@ fn slash_commands_and_workspace_mentions_complete_in_the_composer() {
         "src/ui/app.rs".into(),
         "src/ui/view.rs".into(),
     ]));
-    app.apply(key(KeyCode::Char('i')));
 
     type_text(&mut app, "/sett");
     let commands = render(&mut app, 120, 30);
@@ -1263,10 +1437,105 @@ fn slash_commands_and_workspace_mentions_complete_in_the_composer() {
 }
 
 #[test]
+fn preview_without_a_name_lists_workspace_proposals() {
+    let mut app = with_open_session();
+    let _ = app.drain();
+
+    type_text(&mut app, "/preview");
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "capabilities.list")
+        .expect("a list");
+    assert_eq!(call.params["workspace"], "/tmp/w");
+}
+
+#[test]
+fn preview_names_a_contained_proposal_and_uses_the_forge_budget() {
+    let mut app = with_open_session();
+    let _ = app.drain();
+
+    type_text(&mut app, "/preview Echo");
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "capabilities.preview")
+        .expect("a preview");
+    assert_eq!(call.params["workspace"], "/tmp/w");
+    assert_eq!(call.params["path"], ".ouroboros/capabilities/Echo");
+    assert_eq!(call.timeout, Some(ouro::ui::app::START_TIMEOUT));
+}
+
+#[test]
+fn admit_confirms_before_forging_and_records_the_open_session() {
+    let mut app = with_open_session();
+    let _ = app.drain();
+
+    type_text(&mut app, "/admit Echo");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Confirm { .. })),
+        "admit is operator-gated"
+    );
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "capabilities.admit"),
+        "confirming is what admits, not the slash itself"
+    );
+
+    app.apply(key(KeyCode::Up));
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "capabilities.admit")
+        .expect("an admit");
+    assert_eq!(call.params["workspace"], "/tmp/w");
+    assert_eq!(call.params["path"], ".ouroboros/capabilities/Echo");
+    assert_eq!(call.params["session_id"], "session-0000000000000000000001");
+    assert_eq!(call.timeout, Some(ouro::ui::app::START_TIMEOUT));
+}
+
+#[test]
+fn a_preview_answer_is_said_as_a_notice_not_as_user_text() {
+    let mut app = with_open_session();
+    let _ = app.drain();
+
+    type_text(&mut app, "/preview Echo");
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "capabilities.preview")
+        .expect("a preview");
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Ok(json!({
+            "module": "Ouroboros.Capability.Echo",
+            "loaded?": false,
+            "test_report": { "total": 1, "failures": 0 }
+        })),
+    });
+
+    let notice = app.notice.as_ref().expect("a preview notice");
+    assert!(notice.text.contains("Ouroboros.Capability.Echo"));
+    assert!(notice.text.contains("not loaded"));
+    assert_eq!(notice.kind, NoticeKind::Info);
+}
+
+#[test]
 fn x_confirms_before_ending_a_session() {
     let mut app = with_open_session();
 
-    app.apply(key(KeyCode::Char('x')));
+    apply_leader(&mut app, 'x');
 
     let screen = render(&mut app, 120, 24);
     assert!(screen.contains("end session-"), "{}", screen.text());
@@ -1478,6 +1747,53 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
 
     // The 120s gateway ceiling, not the transport's 20s default.
     assert_eq!(call.timeout, Some(ouro::ui::app::START_TIMEOUT));
+}
+
+#[test]
+fn the_form_can_pin_workspace_write_or_read_only() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+
+    focus(&mut app, NewField::SandboxMode);
+    app.apply(key(KeyCode::Right));
+    app.apply(key(KeyCode::Right));
+    app.apply(key(KeyCode::Right));
+
+    let screen = render(&mut app, 140, 30);
+    assert!(
+        screen.contains("can edit — can edit files in the workspace"),
+        "{}",
+        screen.text()
+    );
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a start");
+
+    assert_eq!(call.params["sandbox_mode"], "workspace_write");
+}
+
+#[test]
+fn write_starts_a_session_that_can_edit_when_this_one_cannot() {
+    let mut app = with_open_session();
+
+    type_text(&mut app, "/write");
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a writable start");
+
+    assert_eq!(call.params["sandbox_mode"], "workspace_write");
+    assert_eq!(call.params["provider"], "claude_code");
+    assert_eq!(call.params["workspace"], "/tmp/w");
 }
 
 #[test]
@@ -2038,7 +2354,7 @@ fn the_help_overlay_states_the_honest_limits() {
     app.apply(key(KeyCode::Char('?')));
     let screen = render(&mut app, 130, 30);
 
-    assert!(screen.contains("ctrl-c"), "{}", screen.text());
+    assert!(screen.contains("ctrl+c"), "{}", screen.text());
     assert!(screen.contains("single-node view"));
     assert!(screen.contains("not a sandbox"));
     assert!(screen.contains("scope `read`"));
@@ -2048,13 +2364,112 @@ fn the_help_overlay_states_the_honest_limits() {
 }
 
 #[test]
+fn an_open_session_keeps_the_composer_focused_like_an_agent_tui() {
+    let mut app = with_open_session();
+
+    assert!(app.sessions.composer.is_some());
+    type_text(&mut app, "fix the flaky test");
+    assert_eq!(
+        app.sessions.composer.as_ref().unwrap().editor.text(),
+        "fix the flaky test"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("ctrl+x leader"), "{}", screen.text());
+    assert!(screen.contains("esc abort"), "{}", screen.text());
+    assert!(!screen.contains("Press i to write"), "{}", screen.text());
+}
+
+#[test]
+fn ctrl_x_opens_a_leader_overlay_and_n_starts_a_new_session() {
+    let mut app = with_open_session();
+    app.apply(ctrl('x'));
+
+    let screen = render(&mut app, 120, 30);
+    assert!(screen.contains("ctrl+x"), "{}", screen.text());
+    assert!(screen.contains("new session"), "{}", screen.text());
+    assert!(screen.contains("copy last message"), "{}", screen.text());
+
+    app.apply(key(KeyCode::Char('n')));
+    assert!(app.sessions.open.is_none());
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn ctrl_x_y_copies_the_last_agent_message() {
+    let mut app = with_open_session();
+    notify(
+        &mut app,
+        event(1, "output_text_final", "the tests are green"),
+    );
+
+    apply_leader(&mut app, 'y');
+    assert_eq!(app.take_copy().as_deref(), Some("the tests are green"));
+}
+
+#[test]
+fn escape_interrupts_a_running_turn_without_closing_the_composer() {
+    let mut app = with_open_session();
+    assert!(app.sessions.composer.is_some());
+
+    app.apply(key(KeyCode::Esc));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.interrupt")
+        .expect("esc interrupts the running turn");
+    assert_eq!(call.params["id"], "session-0000000000000000000001");
+    assert!(app.sessions.composer.is_some());
+    assert!(app.sessions.open.is_some());
+}
+
+#[test]
+fn ctrl_c_clears_the_prompt_before_it_interrupts() {
+    let mut app = with_open_session();
+    type_text(&mut app, "half written");
+
+    app.apply(ctrl('c'));
+    assert_eq!(app.sessions.composer.as_ref().unwrap().editor.text(), "");
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.interrupt"),
+        "clearing a draft must not abort the turn"
+    );
+
+    app.apply(ctrl('c'));
+    assert!(app
+        .drain()
+        .into_iter()
+        .any(|call| call.method == "interactive.interrupt"));
+    assert!(app.quit.is_none());
+}
+
+#[test]
+fn readline_kills_reach_the_open_composer() {
+    let mut app = with_open_session();
+    type_text(&mut app, "hello world");
+    app.apply(ctrl('w'));
+    assert_eq!(
+        app.sessions.composer.as_ref().unwrap().editor.text(),
+        "hello "
+    );
+    app.apply(ctrl('y'));
+    assert_eq!(
+        app.sessions.composer.as_ref().unwrap().editor.text(),
+        "hello world"
+    );
+}
+
+#[test]
 fn a_notice_replaces_the_status_line_and_expires() {
     let mut app = shell(full_hello());
     app.inform("something happened", NoticeKind::Warn);
 
     assert!(render(&mut app, 120, 20).contains("something happened"));
 
-    for _ in 0..40 {
+    for _ in 0..80 {
         app.apply(Msg::Tick);
     }
 
@@ -2090,7 +2505,7 @@ fn a_transcript_is_never_polled() {
     notify(&mut app, event(1, "output_text_final", "hello"));
     let _ = app.drain();
 
-    // Twenty seconds of ticks on the Sessions tab.
+    // A long run of ticks on the Sessions tab.
     for _ in 0..80 {
         app.apply(Msg::Tick);
     }
