@@ -1,8 +1,9 @@
-# HONESTY NOTE, and it is not a formality: this repository has no git remote as of the
-# commit that adds this file, so nothing here has ever executed. It is written to be
-# correct — every command in it is one that passes locally on the same toolchain versions
-# — but "passes locally" and "passes on a runner" are different claims and only the first
-# has been made. Treat the first run as a debugging session, not a regression.
+# HONESTY NOTE, and it is not a formality: the configured repository remote is not a
+# public GitHub Actions channel, so nothing here has executed on a hosted runner. It is
+# written to be correct — every command in it is one that passes locally on the same
+# toolchain versions — but "passes locally" and "passes on a runner" are different claims
+# and only the first has been made. Treat the first run as a debugging session, not a
+# regression.
 
 name: CI
 
@@ -113,3 +114,23 @@ jobs:
         run: |
           mix ouroboros.gateway.golden
           git diff --exit-code test/support/gateway_golden
+
+  # One representative packaged Linux build is required because unit suites cannot prove
+  # three released BEAM nodes negotiate TLS, learn late peers, and recover their mesh.
+  fleet-e2e:
+    name: Packaged three-node fleet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - run: rustup toolchain install stable --profile minimal
+
+      - run: mix deps.get
+
+      - run: make fleet-e2e

@@ -1,22 +1,140 @@
 # Ouroboros Fleet
 
-A design and evolution spec: a fleet of Ouroboros runtimes — a Mac, a Linux laptop,
-a VPS — joined over a Tailscale tailnet, discovering each other without a
-hand-maintained host list, and routing work between machines by **tags**: free-form,
-node-advertised capability labels (`gpu`, `docker`, `provider:claude`,
-`workspace:ouroboros`, `arch:aarch64-apple-darwin`) layered beside the existing
-closed role enum.
+An implemented secure core plus the evolution design for a fleet of Ouroboros runtimes
+— a Mac, a Linux laptop, a VPS — joined as one BEAM cluster.
 
-This document was produced by a four-way adversarial code survey (cluster/distribution,
+## Current shipped core (2026-08-20)
+
+The beginner path no longer requires the environment/OpenSSL runbook described later in
+this document:
+
+```sh
+# First machine
+ouro fleet create
+ouro fleet invite --machine laptop --host laptop.example-tailnet.ts.net --out laptop.ouro
+
+# Invited machine, after privately copying the mode-0600 file
+ouro fleet join laptop.ouro
+ouro daemon
+
+# On both machines, for crash/login recovery. Review and run the activation command it prints.
+ouro fleet service install
+
+# Either machine
+ouro fleet status
+ouro fleet doctor
+ouro new --machine laptop --provider codex --workspace /absolute/path/on/laptop/project
+
+# If an expected invitation is abandoned, publish the signed membership change
+ouro fleet invite cancel --machine laptop --out fleet.ouro-roster
+# On every existing member, inspect service ownership before stopping anything
+ouro fleet service status
+# Deactivate an installed recovery unit with the exact command above; otherwise: ouro stop
+ouro fleet sync import fleet.ouro-roster
+# Reactivate that unit with its printed command; otherwise: ouro daemon
+ouro fleet doctor
+
+# Only for a permanently lost machine that owned sessions, after inspecting/exporting
+# any recoverable owner-local state. Run locally on every gateway that may have seen it.
+ouro fleet sessions forget --machine laptop --accept-state-loss
+```
+
+`fleet status` is fleet-wide. `fleet doctor` merges live fleet facts with host-local
+certificate, interface, port, log, and recovery-service checks, so run doctor locally on
+each machine during setup.
+
+Each machine's `OUROBOROS_DATA_DIR` leaf must be a real same-user directory at mode
+`0700`. The packaged launcher creates a missing leaf privately, but refuses symlinks,
+foreign ownership, non-directories, and broader existing modes without changing them.
+If an imported path is refused, inspect its ownership and contents before applying
+`chmod 700` (only when it is truly yours), or select a fresh absolute path; do this
+before installing or retrying the generated fleet service.
+
+Cancel/import changes membership bookkeeping; it does not revoke credentials and does not
+erase positive session-owner evidence. An offline former owner therefore continues to
+make session lists fail closed after restart. If the machine is permanently lost, first
+inspect or export any recoverable owner-local state, then run `ouro fleet sessions forget
+--machine NAME --accept-state-loss` locally on every gateway/data directory that may have
+observed it. The authenticated operate call requires the matching signed-roster tombstone,
+refuses while that node is connected, and syncs both evidence planes before success. It is
+an irreversible local discoverability boundary only: it neither deletes files on the lost
+machine nor revokes its credential.
+
+Implemented now:
+
+- a private per-machine profile, generated fleet CA, per-node TLS certificate/key, 0600
+  cookie file, dynamic `vm.args`, stable identity/ports, owner-attested invitations and
+  membership rosters, and create/invite/join/sync/leave validation in the packaged
+  `ouro` binary;
+- no real fleet cookie in argv or the environment; a disposable boot cookie is replaced
+  from the validated private file before supervised formation starts;
+- private-interface TLS distribution with a fleet-specific EPMD port, supervised static
+  reconnect, a last-known expected/connected/offline machine directory, compatibility
+  and transport diagnostics, plus `fleet.status` and `fleet.doctor` gateway methods;
+- one local gateway routing remote starts, session lists, calls, replay, subscriptions,
+  and follow-ups over BEAM distribution using owner-qualified references;
+- durable positive session-owner evidence that survives gateway/runtime recovery, plus an
+  explicit tombstoned-offline state-loss command instead of implicit deletion on cancel;
+- Settings → Machines guidance, a connected-machine New Session picker, and retained
+  cursor recovery when a remote owner temporarily disappears;
+- remote Team worker reconciliation after the worker's machine restarts;
+- generated launchd/systemd-user recovery units, with activation kept explicit;
+- separate private service logs: OTP live-rotates `runtime.log` after 2 MiB with three
+  archives while restart-rotated `daemon.log` retains bootstrap/VM/crash diagnostics,
+  with no shared rotated inode between their writers; and
+- downloadable per-platform release assets plus checksums in the tag workflow (the
+  workflow remains honestly unproven until the first tag runs).
+
+The checked-in packaged exercise builds a three-node TLS mesh with reverse/cold boot,
+late join, hub loss/rejoin, automatic service-run crash restart, and final cleanup. CI
+runs that exercise on Linux before a release artifact may publish. This remains an
+isolated same-host proof, not a claim that a release has already been installed on three
+physical networks.
+
+For a real network, run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`
+before `fleet create`. Create prints the exact fleet-specific EPMD port and TLS
+distribution range to allow only between the private fleet addresses. The full
+copy/paste setup, signed roster flow, recovery-service steps, and honest limits live in
+the README's **Running a cluster** section.
+
+Fleet placement has one explicit, manually maintained protocol fence:
+`fleet_protocol_revision: 1`. A machine is compatible only when that revision, the
+Ouroboros version, and the OTP release match. CPU architecture and Elixir version remain
+inventory rather than placement fences. Bump the integer whenever fleet posture, remote
+session routing, or distributed ownership semantics become unsafe across revisions; do
+not replace it with a build-path or source hash.
+
+Still intentionally deferred: automatic Tailscale LocalAPI discovery, free-form tags,
+logical workspace maps, heterogeneous forge orchestration, replicated journals, live
+provider migration, quorum/fencing, and multi-cluster federation. One Erlang cluster is
+one trust domain. A network partition can produce independent views; no section below
+should be read as a claim of partition-safe consensus.
+
+## Historical design record (pre-implementation snapshot)
+
+Everything below this heading is the original adversarial evolution survey that led to
+the implemented core above. It is retained as design history, **not** as current setup or
+feature documentation. In particular, its “does not exist” statements and file:line
+citations describe the pre-fleet tree and are now intentionally stale. Use the current
+core section above or the README for operation; use the remainder only to understand
+decisions and deferred ideas such as tags, Tailscale discovery, logical workspaces, and
+HA.
+
+The longer-term design targets discovery without a hand-maintained host list and routing
+by **tags**: free-form, node-advertised capability labels (`gpu`, `docker`,
+`provider:claude`, `workspace:ouroboros`, `arch:aarch64-apple-darwin`) layered beside the
+existing closed role enum.
+
+This historical record was produced by a four-way adversarial code survey (cluster/distribution,
 gateway/TUI, mesh/team/orchestration/workspace, upgrade/forge/rollout) on branch
-`review-fixes`; every file:line citation below was independently re-verified against
-the working tree. Sections: what exists (§1), decisions (§2), defects to fix first
+`review-fixes`. Its citations were verified against that earlier snapshot, not the
+current working tree. Sections: what existed (§1), decisions (§2), defects identified
 (§3), the design (§4–§12), security posture and honest limits (§13), implementation
 slices (§14), deferred (§15).
 
 ---
 
-## 1. Current state, surveyed
+## 1. Historical baseline at survey time
 
 What the fleet vision can already stand on:
 
@@ -44,7 +162,7 @@ What the fleet vision can already stand on:
   failures and an inner timeout below the method ceiling: `signing.decisions`
   (`lib/ouroboros/gateway/methods.ex:756-792`).
 
-What does not exist (verified absences, zero hits repo-wide):
+What did not exist in that pre-implementation snapshot (not current claims):
 
 - No Tailscale/tailnet/MagicDNS awareness of any kind.
 - No tag, label, or capability-advertisement concept; `nodes_by_role/1` is the only
@@ -62,7 +180,7 @@ What does not exist (verified absences, zero hits repo-wide):
 - No workspace advertisement or logical naming; no grant replication; no per-arch
   builder selection; no reconciliation between the N per-node rollout registries.
 
-And the environment for a sleeping-laptop fleet is hostile today: epoch allocation
+At that survey point, the environment for a sleeping-laptop fleet was hostile: epoch allocation
 refuses fleet-wide if any *named* target is unreachable (`upgrade/epoch.ex:94-96`),
 recovery adopts only node-local work (`coding/recovery.ex:89`,
 `interactive/recovery.ex:64`), `Cluster.Monitor` logs nodeup/nodedown and does

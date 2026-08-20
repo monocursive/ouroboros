@@ -1,7 +1,10 @@
-# HONESTY NOTE: this repository has no git remote as of the commit that adds this file.
-# No tag has ever been pushed, this workflow has never executed, and no artifact it
-# describes has ever been produced by a runner. The four-target matrix reflects a real
-# constraint rather than an aspiration — see below — but the YAML itself is unproven.
+# HONESTY NOTE: the configured repository remote is not a public GitHub release channel.
+# No tag has executed this workflow and no artifact it describes has been produced by a
+# hosted runner. The four-target matrix reflects a real constraint rather than an
+# aspiration — see below — but the YAML itself is unproven. Linux outputs inherit the
+# Ubuntu 24.04 GNU ABI, and macOS outputs remain unsigned/unnotarized until release
+# credentials and the corresponding verified steps are added; README installation
+# guidance states both boundaries.
 
 name: Release
 
@@ -26,9 +29,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             triple: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-15-intel
             triple: x86_64-apple-darwin
           - runner: ubuntu-24.04
             triple: x86_64-unknown-linux-gnu
@@ -43,9 +46,24 @@ jobs:
           elixir-version: "1.20"
           otp-version: "29"
 
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
       - run: mix deps.get
+
+      - name: Verify the tag names this application version
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="v$(mix run --no-start -e 'IO.write(Mix.Project.config()[:version])')"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match Mix application version $expected" >&2
+            exit 1
+          fi
+
+      # A tag is also seen by the ordinary CI workflow, but release publication must not
+      # race ahead of a failing CI job in another workflow. Gate every native artifact
+      # with the same cross-language suite before it can enter the publish fan-in.
+      - run: make test
 
       # `make dist` is the same target a laptop runs, on purpose: a release built by a
       # command CI alone knows is a release nobody can reproduce when it breaks. It emits
@@ -53,8 +71,25 @@ jobs:
       # because the runner is the target.
       - run: make dist
 
+      # The ordinary CI workflow also requires this on Linux, but a tag workflow must
+      # carry its own publication gate rather than race a separate workflow. One native
+      # Linux artifact is representative: the script boots the just-built packaged
+      # binary three times and verifies mutual TLS, late formation, hub loss, crash
+      # recovery, and exact lab-only cleanup before any matrix artifact can publish.
+      - name: Gate publication on the packaged secure-fleet E2E
+        if: ${{ matrix.triple == 'x86_64-unknown-linux-gnu' }}
+        run: OURO_E2E_BIN="$PWD/tui/target/release/ouro" bash scripts/fleet-e2e.sh
+
       - name: Check the artifact is named for this target
-        run: test -f "dist/ouro-$(ls _build/prod/ouroboros-*.tar.gz | head -1 | sed -e 's|.*/ouroboros-||' -e 's|\.tar\.gz$||')-${{ matrix.triple }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find _build/prod -maxdepth 1 -type f -name 'ouroboros-*.tar.gz' -print -quit)
+          test -n "$archive"
+          filename=${archive##*/}
+          version=${filename#ouroboros-}
+          version=${version%.tar.gz}
+          test -f "dist/ouro-${version}-${{ matrix.triple }}"
 
       # The client is asked what it carries. A binary that cannot report its own embedded
       # release version has not proven it has one, and finding that out here is cheaper
@@ -66,3 +101,57 @@ jobs:
           name: ouro-${{ matrix.triple }}
           path: dist/ouro-*
           if-no-files-found: error
+
+  # A workflow artifact is useful to CI and awkward for a person setting up another
+  # machine. Once every native build succeeds, publish the four self-contained binaries
+  # beside one checksum file on the tag's GitHub Release. `gh release create` is used
+  # instead of a marketplace action so the publication boundary is visible here and uses
+  # only GitHub's short-lived workflow token.
+  publish:
+    name: publish downloadable binaries
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ouro-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the native matrix is complete and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          for triple in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu
+          do
+            compgen -G "dist/ouro-*-${triple}" >/dev/null || {
+              echo "missing Ouroboros binary for ${triple}" >&2
+              exit 1
+            }
+          done
+          (cd dist && sha256sum ouro-* > SHA256SUMS)
+
+      - name: Publish one immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; refusing to replace binaries or checksums under an existing version" >&2
+            echo "publish a new application version and tag instead" >&2
+            exit 1
+          fi
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "Ouroboros ${TAG}"

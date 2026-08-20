@@ -1,6 +1,9 @@
-# Ouroboros TUI & Distribution — Design Spec
+# Ouroboros TUI & Distribution
 
-Status: proposed (2026-08-13). Companion to [ARCHITECTURE.md](ARCHITECTURE.md).
+Status: implemented operator/runtime contract (updated 2026-08-20). Companion to
+[ARCHITECTURE.md](ARCHITECTURE.md). Future ideas are labelled explicitly; fleet setup for
+normal operators lives in [FLEET.md](FLEET.md) and the README rather than in environment
+variables below.
 
 ## 0. Summary
 
@@ -77,11 +80,11 @@ stalls only itself.
   ([interactive/event.ex:37](../lib/ouroboros/interactive/event.ex)); the
   gateway adds no new raw surface. Status/state maps may still carry workspace
   paths and objectives — same trust domain as the operator.
-- v1 is a **single-node view**: the gateway reports the node it runs on plus
-  whatever `Ouroboros.status/0` says about the cluster.
-  `InteractiveSession.list/0` is deliberately local
-  ([interactive_session.ex:68](../lib/ouroboros/interactive_session.ex)).
-  Cross-node fan-out is future work.
+- One authenticated gateway is the operator entrance to its **connected BEAM
+  fleet**. Session lists fan out with bounded calls, session references retain
+  their owner node, and calls/subscriptions route to that owner over distribution.
+  This does not federate unrelated clusters and does not make the gateway's
+  cleartext TCP listener safe to expose; the listener remains loopback-only.
 
 ---
 
@@ -143,10 +146,21 @@ Two placement facts the implementation must respect:
   gateway section below persists the variable in the environments the prod
   block never runs in. `OUROBOROS_GATEWAY=1` still requires it (raise naming
   the variable otherwise); the spawner always sets it.
+- **The durable leaf is private before anything beneath it is touched.** Rust and
+  BEAM both require a real same-UID directory at exactly 0700, creating a missing leaf
+  atomically at that mode. An existing symlink, foreign owner, non-directory, or broad
+  mode fails closed without chmod/replacement and names the safe operator choices:
+  inspect it and repair it only if it is truly yours, or choose a fresh absolute
+  `OUROBOROS_DATA_DIR`. Every managed child gets umask 077, including Ring output, so
+  Jido stores and later log generations cannot inherit a normal caller's 022 posture.
+  At the last Harness boundary, Harness-managed provider subprocesses restore workspace
+  umask 022, yielding conventional 0644 files and 0755 directories whether the runtime
+  uses Ring or service output.
 
-After binding, the gateway writes `Path.join(data_dir, "gateway.json")` —
-atomic tmp+rename, followed by an explicit `File.chmod!(path, 0o600)`:
-`{"port": .., "protocol": 1, "node": "..", "pid": <os_pid>, "scope": "..",
+After binding, the gateway writes `Path.join(data_dir, "gateway.json")` through an
+exclusive random temporary inode made 0600 before its bytes, synced, inode-checked, and
+atomically renamed:
+`{"port": .., "protocol": 1, "node": "..", "pid": <os_pid>, "birth": "..", "scope": "..",
 "token_file": ".."}`.
 This is how spawn-mode `ouro` (and no-arg `ouro attach`) discovers the port;
 it also removes the bind-race of pre-choosing ephemeral ports.
@@ -160,6 +174,21 @@ arguments — reads the credential's location instead of guessing a convention. 
 *value* is never in this file: `gateway.json` says where to look, and the 0600 file it
 points at is the thing that has to be readable. A deployment using the environment token
 is, by that same rule, not discoverable — which is one more reason the file is preferred.
+
+`gateway.json` is only discovery. The core runtime separately hard-link-claims a private
+`runtime.owner` before durable children start and releases it last on orderly shutdown.
+Dead-owner replacement is serialized by the advisory lock on the persistent, versioned
+`runtime.owner.recovery` inode. A trusted native helper holds it across the complete
+claim, and its Port closing on a claimant or VM crash releases the kernel lock so a
+supervised retry can recover unattended. A legacy or malformed gate still fails closed
+for one explicit operator inspection because it may belong to an older active runtime.
+
+The Rust client's shorter-lived `spawn.lock` also publishes a fully written private PID
+and process-birth inode by atomic hard link. Dead claims are replaced only by the holder
+of the advisory lock on the persistent, versioned `spawn.lock.recovery` inode; every
+loser re-reads or refuses and never unlinks. Process death releases that kernel lock, so
+ordinary crash recovery needs no manual gate removal. Legacy or malformed gates retain
+the conservative one-time inspection contract.
 
 ### 2.3 Protocol
 
@@ -273,9 +302,10 @@ reading.
 
 | method | maps to |
 |---|---|
-| `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`). Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, and it runs in its own task so it never blocks the connection |
+| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's signed-roster tombstones, refuses a connected node, and syncs the checkpoint before success. Ordinary invite cancellation/import never invokes it; this removes local discoverability evidence, not remote files or credentials. |
+| `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, plus fleet `machine`/`node`). The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
-| `interactive.steer` `{id, input, turn_id?}` | `steer/3` through the same closed envelope as the other composer verbs (unknown params refused, structured `input` accepted). `turn_id` is validated but inert: steering injects into the running turn, so there is no second dispatch for an id to deduplicate — steer has no idempotency, and the steer text is not durably recorded by the plane (the transcript marks that a steer happened; replay cannot quote it) |
+| `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Steering injects into the running turn and is not durably keyed by the plane: it has no idempotency, and the steer text is not durably recorded (the transcript marks that a steer happened; replay cannot quote it). A connection loss after submission is therefore unreconcilable; the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. |
 | `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
@@ -284,12 +314,12 @@ reading.
 | `account.logout` `{}` | `CodexAppServer.logout/1` — reply is `{}`; the account boundary returns nothing it has not named |
 
 The three turn-carrying methods (`send_message`, `follow_up`, `steer`) refuse unknown
-params (`only_keys`) where they previously ignored them, and `steer` gained the shared
-envelope. `hello.protocol` remains `1`: the new `account.*` methods are feature-detectable
+params (`only_keys`) where they previously ignored them. `hello.protocol` remains `1`:
+the new `account.*` methods are feature-detectable
 through `hello.methods`, but the envelope tightening and the structured-`input` capability
 are not — the compatibility bet, stated plainly, is that the only deployed client ships in
 this repository and moves in lockstep.
-| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | same opts allowlist as `interactive.start`; ceiling 120s |
+| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | same start identity, fleet routing, remote-workspace rule, immutable-intent reconciliation, and outcome-unknown 120s ceiling as `interactive.start` |
 | `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
 | `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
 | `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
@@ -454,31 +484,47 @@ control-plane namespaces are treated.
 ### 2.9 Logging
 
 Whenever the gateway is on — `OUROBOROS_GATEWAY=1` or the defaulted
-single-machine posture — route the default logger to stderr so the spawner
-owns the log stream. stdout is not clean in the defaulted posture, it is
-deliberate: the listener prints a plain notice there (mode, data dir, bound
-address, how a client attaches), because a person who ran
-`bin/ouroboros start` in a terminal is reading stdout. Elixir ≥ 1.15 idiom
-(not the legacy `:console` backend):
+single-machine posture — the foreground client routes the default logger to stderr so
+its bounded in-memory ring owns the visible log stream. stdout is not clean in the
+defaulted posture, deliberately: the listener retains a plain notice branch for a future
+standalone package (mode, data dir, bound address, how a client attaches). A bare
+`bin/ouroboros start` is not currently supported because it cannot supply the trusted
+native lifecycle helper. Elixir >= 1.15 idiom (not the legacy `:console` backend):
 
 ```elixir
 config :logger, :default_handler, config: [type: :standard_error]
 ```
+
+A packaged detached daemon or recovery service uses two files instead. The inherited
+stdout/stderr descriptors write `daemon.log`, retaining pre-Logger bootstrap, VM, and
+crash diagnostics; Rust rotates that file before a managed start at 2 MiB and keeps
+three private backups. The launcher separately precreates and validates `runtime.log`
+plus its archive names, then gives that path only to
+[OTP 29 `:logger_std_h`](https://www.erlang.org/docs/29/apps/kernel/logger_std_h.html) with
+`file_check: 0`, `max_no_bytes: 2_097_152`, and `max_no_files: 3`. Logger alone writes
+and live-rotates it as `runtime.log.0` (newest) through `.2`; the inherited descriptors
+never share that inode. A child umask of 077 keeps the new active file private after
+each rotation. OTP rotates after a complete event, so an individual generation may
+exceed 2 MiB by at most one formatted event.
 
 ### 2.10 Distribution-off mode (env.sh.eex)
 
 [rel/env.sh.eex](../rel/env.sh.eex) picks between two postures:
 
 - `OUROBOROS_DIST=none` → `RELEASE_DISTRIBUTION=none`, node/cookie not
-  required, **no epmd, no dist listener, no cookie on the host at all**. This
+  required, **no epmd and no dist listener**. The release launcher uses a fresh
+  disposable boot cookie rather than the artifact fallback, but it is not a
+  reachable cluster credential in this posture. This
   is also the **default**: a release with no `OUROBOROS_NODE`, no
   `OUROBOROS_CLUSTER_STRATEGY`, and no `OUROBOROS_DIST` boots this posture
   rather than refusing — the refusal existed to block the fallback to the
-  baked shared cookie, and a posture with no cookie at all blocks it harder.
+  baked shared cookie, and a posture with no listener blocks it harder.
 - Anything that asks for distribution — `OUROBOROS_NODE` set, `OUROBOROS_DIST`
   set to other than `none`, or a cluster strategy named — takes the strict
-  path: long name and cookie required before the VM starts, refusals
-  signposting the standalone posture.
+  path: a long name plus `OUROBOROS_COOKIE_FILE` (recommended) or legacy
+  `OUROBOROS_COOKIE`, with refusals signposting the standalone posture. A fleet
+  passes only the private cookie file path and replaces the disposable boot
+  cookie before libcluster starts.
 - The combination `OUROBOROS_DIST=none` + `OUROBOROS_CLUSTER_STRATEGY` ≠
   `none` is refused at preflight (they contradict; both variables named in the
   error). A strategy *alone* is not that contradiction — it asks for
@@ -553,7 +599,7 @@ and clustering keeps the existing posture.
 
 Rust ≥ 1.75, 2021 edition. Deps: `ratatui`, `crossterm`, `tokio` (rt +net +
 process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
-`dirs`, `rand`, `zeroize`, `sha2`. Unix-only in v1 (the release itself is
+`dirs`, `rand`, `rcgen`, `zeroize`, `sha2`. Unix-only in v1 (the release itself is
 `include_executables_for: [:unix]`).
 
 ### 3.1 CLI
@@ -562,23 +608,56 @@ process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
 ouro                  spawn (or adopt via gateway.json) + attach UI
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
-ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE] [--message TEXT] [--print]
+ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
+         [--message TEXT] [--machine NAME] [--print]
                       start an interactive session, then attach focused on it;
                       provider/workspace/approval resolve flag first, then the
                       config file's [defaults]; only a provider neither names
                       is refused, naming both places
 ouro stop             graceful stop of the locally spawned daemon
+ouro fleet create     create private CA/cookie/profile for the first machine
+ouro fleet invite --machine NAME --host HOST --out FILE
+                      create one private 0600 owner-attested invitation
+ouro fleet invite cancel --machine NAME --out ROSTER
+                      stop expecting an abandoned invite and sign the new roster
+ouro fleet join FILE  import that machine's invitation
+ouro fleet sync export --out ROSTER
+ouro fleet sync import ROSTER
+                      distribute/import a newer signed membership roster
+ouro fleet sessions forget --machine NAME --accept-state-loss
+                      after signed removal + restart, irreversibly retire this
+                      gateway/data-dir's offline session-owner evidence
+ouro fleet status     expected/connected/offline machines and TLS posture
+ouro fleet doctor     actionable profile/network/runtime/service checks
+ouro fleet service install|status|remove
+                      generate and inspect launchd/systemd user recovery
+ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
 ouro version          client version, embedded release version+sha, protocol
-ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed)
+ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
+                      defaults to an isolated ouroboros-dev data directory
 ```
 
 Spawn-mode environment assembly: `OUROBOROS_GATEWAY=1`, `_SCOPE=operate`,
 `_ALLOW_SHUTDOWN=1`, `_PORT=0`, token: 32 random bytes hex → file 0600 in the
-data dir (zeroized in memory after write), `OUROBOROS_DATA_DIR=$XDG_DATA_HOME/
-ouroboros`, `OUROBOROS_DIST=none` — **unless** the caller's environment already
-carries `OUROBOROS_CLUSTER_STRATEGY`/`OUROBOROS_NODE`, in which case cluster
-vars pass through untouched and dist stays on. Existing server workflows are
-unchanged by construction.
+data dir (zeroized in memory after write), `OUROBOROS_DATA_DIR` set to the caller's
+explicit absolute value or the mode-specific derived `$XDG_DATA_HOME/ouroboros`
+(`ouroboros-dev` with `--dev`) default,
+`OUROBOROS_PROCESS_ID_HELPER` set to the product `ouro` binary (never a cargo test
+harness) so Mix can run `process-birth` and `hold-runtime-recovery-lock`,
+`OUROBOROS_DIST=none` for a standalone machine. A private `fleet/profile.json`
+is authoritative when present: spawn supplies its stable node/machine name,
+static seed set, one-second reconnect interval, local gateway port, private
+cookie-file path, and generated runtime `vm.args` with TLS and distribution
+ports. The real cookie is never copied into argv or the environment. Without a
+profile, existing operator-managed cluster variables still pass through and
+distribution stays on.
+
+A nonblank explicit `OUROBOROS_DATA_DIR` is used exactly in both modes. Before a
+`--dev` spawn, attach, stop, or adoption flow uses one, the boot screen (or plain command output)
+warns that the normal `ouroboros-dev` isolation is disabled and a release runtime in
+that same directory may be adopted. The override is neither rewritten nor refused;
+operators who want isolation with an explicit root should name a dedicated dev
+directory.
 
 Client-side preferences live in `$XDG_CONFIG_HOME/ouroboros/config.toml`
 (else `~/.config/ouroboros/config.toml`): `[defaults]`
@@ -601,6 +680,13 @@ environment, and nothing in this file reaches the spawn env.
   just deletes its tmp). GC keeps the newest 2 versions.
 - Spawn `bin/ouroboros start`; stdout/stderr piped. stderr → bounded ring
   buffer (Logs tab). Child exit → prominent status change + last stderr page.
+- Serialize the complete read/recheck/spawn window with a fully written 0600
+  `spawn.lock` atomically hard-linked into place. Stale publication removal happens
+  only after re-reading under that lock; stale-lock replacement has its own crash-releasing
+  `spawn.lock.recovery` advisory gate, so concurrent starters and stoppers cannot erase a newer
+  runtime's publication or claim. `ouro stop` holds the same lock continuously from its
+  live-publication read through owner/token/hello validation and authenticated shutdown request,
+  and observed PID exit; no starter can replace the publication while stop acts on it.
 - Readiness: poll for `gateway.json` (with a deadline), then TCP hello. On a
   tty this sequence is visible: the client enters the alternate screen first
   and renders the phases (prepare → spawn → publish → connect) as a boot
@@ -724,6 +810,11 @@ rediscovered:
   structured attachment or follow an attached runtime's active workspace. The gateway's
   closed turn envelope supports attachments so that later picker can be runtime-aware
   instead of treating a local path as if it necessarily existed remotely.
+- **Same-session mutations cross the gateway in Enter order.** JSON-RPC handlers run in
+  independent tasks, so the composer sends only one message/follow-up/steer request at a
+  time. If Enter is pressed while the preceding acknowledgement is outstanding, the new
+  draft remains visibly editable and unsent. After the earlier request is accepted—or
+  reconciled under its stable turn ID—the operator presses Enter again to send the draft.
 - **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
   node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
   `x` closes or kills the open session behind a confirmation; `r` refreshes the visible
@@ -757,13 +848,22 @@ rediscovered:
   owns its own authentication and is not blocked by OpenAI account state. Enter then runs the
   same `StartRequest` path as `ouro new`, waits for the new session ID, then sends the
   retained first message with a stable logical turn ID. The draft is cleared only after
-  that message is accepted; a refusal restores the exact text and ID for an idempotent
-  retry. Recent sessions and account state load behind this first frame.
+  that message is accepted. An outcome-unknown answer restores the exact text and same ID
+  for reconciliation; a definite or terminal refusal restores the text with a fresh ID
+  (`:busy` switches to the durable follow-up queue). Pending reconciliation IDs are kept
+  per session across composer closure and session switches. Recent sessions and account
+  state load behind this first frame.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
   this client's own `[defaults]` — provider picker over the same probed list the `n`
   dialog uses, workspace, approval mode, and sandbox mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
+- **Machines keeps membership removal and state retirement separate.** Its guidance says
+  cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
+  removed owner's state, importing the signed roster, and restarting does it show the
+  exact local `ouro fleet sessions forget --machine NAME --accept-state-loss` command.
+  Operators must repeat it for every gateway/data directory that may have observed the
+  owner; it is irreversible local evidence removal, not credential revocation.
 - **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`
   would land in the alternate buffer and be overdrawn; the id is on the boot screen,
   the notice line, and the Sessions tab. `--print` and any non-tty stdout print it
@@ -806,15 +906,19 @@ files from `mix ouroboros.gateway.golden` — CI fails if either side drifts);
 extractor against a tiny fixture tarball (sha mismatch refuses); reconnect
 resubscribe logic against a scripted fake server; integration smoke gated by
 `OUROBOROS_TUI_INTEGRATION=1` (spawns a real dev daemon: hello, status,
-subscribe, one turn); config file round-trip, unknown-key tolerance,
+live UI data, and a typed subscription refusal without starting a provider turn);
+config file round-trip, unknown-key tolerance,
 corrupt-file fallback, atomic save, and XDG resolution; the boot phase
 machine (`BootProgress`) and its pinned plain-line equivalents; the
 onboarding suite (the transcript-first account gate, configured non-Codex path,
 Enter's full path including stable first-turn ID and prompt recovery, settings prefill,
 and `ouro new` resolution order).
-Honest gaps: nothing in the suite allocates a pty — `Boot::begin/drive/fail/
+Honest gaps: the automated suite neither allocates a pty nor starts a real provider —
+every bundled development provider invokes a real CLI and may bill an account.
+`Boot::begin/drive/fail/
 finish` and `Screen::enter` are exercised only by manual pty runs; a real
-successful spawn's phase sequence needs the integration gate; `ouro new`
+successful spawn's phase sequence needs the integration gate, while provider-backed file
+editing, commands, and rendered progress need an explicit manual end-to-end run; `ouro new`
 `persist`'s unwritable-path branch is untested. The
 refusal-rendering suite pins the humanised `[tag, map]` shape, the
 no-field-lost remainder, and byte-identical compact JSON for six unrecognised
@@ -863,21 +967,22 @@ unpacked — otherwise the release a daemon is running out of ages out from unde
 it after two upgrades.
 
 - **CI matrix** builds per target — the release must be built on the exact OS/arch
-  because ERTS is not cross-compiled: `macos-14` (aarch64-apple-darwin),
-  `macos-13` (x86_64-apple-darwin), `ubuntu-24.04` (x86_64-unknown-linux-gnu),
+  because ERTS is not cross-compiled: `macos-15` (aarch64-apple-darwin),
+  `macos-15-intel` (x86_64-apple-darwin), `ubuntu-24.04` (x86_64-unknown-linux-gnu),
   `ubuntu-24.04-arm` (aarch64-unknown-linux-gnu). Artifact:
   `dist/ouro-<version>-<triple>`, e.g. `ouro-0.1.0-aarch64-apple-darwin`, produced
   by `make dist` so CI and a laptop cannot drift. This is the same ERTS/arch
   identity constraint the forge verifier already enforces for artifacts
   ([mix.exs](../mix.exs) release comment).
-  **Status: written, never executed.** `.github/workflows/{ci,release}.yml` exist
-  as of Slice 4, and this repository still has no git remote — no push, pull
-  request, or tag has ever reached a runner. Every command in them passes locally
-  on the same toolchain versions; that is a different claim and both files say so
-  at the top. `.gitignore` covers `*.tar.gz`, `/tui/target/`, and `/dist/`.
-- Servers keep deploying the plain release tarball from the same commit; the
-  embedded copy inside `ouro` is a convenience for laptops/edge, not a new
-  deployment path.
+  The release workflow downloads the complete matrix, verifies every target,
+  writes `SHA256SUMS`, and creates or updates the tag's GitHub Release. **Status:
+  written, never executed.** The configured repository remote is not a public GitHub
+  release channel, and no tag has reached this workflow. Local builds are evidence about
+  the commands, not evidence that downloadable assets already exist. `.gitignore`
+  covers `*.tar.gz`, `/tui/target/`, and `/dist/`.
+- The supported deployment artifact is `ouro`, including generated fleet services. A
+  plain release tarball or raw-release container remains unsupported until it ships the
+  trusted native process-incarnation and recovery-lock helper too.
 - Version skew: `hello.protocol` is the only compatibility contract. Mismatch
   → the TUI prints both versions and the one-line fix. The runtime's own
   modules may change hourly under the upgrade lanes — the protocol integer is
@@ -885,7 +990,7 @@ it after two upgrades.
 - README: a "Terminal UI" section (spawn vs attach, how a client finds a runtime,
   SSH-tunnel recipe, env passthrough, keys deferred to the in-app `?`) and an
   **Honest limits** block (token ≠ sandbox; loopback boundary and what
-  `ALLOW_REMOTE` does *not* add; single-node view; logs-with-spawner;
+  `ALLOW_REMOTE` does *not* add; one-gateway fleet routing; logs-with-spawner;
   env-token deployments not discoverable by a bare `ouro attach`). Both stale
   lines are gone: the intro no longer lists a terminal UI among what this does
   not provide, and "There is no polished terminal UX yet" under Current limits is
@@ -911,7 +1016,8 @@ it after two upgrades.
 4. **Full surface + packaging.** Tabs 3–7, embed + extract + GC, `ouro stop`/
    `daemon`/`attach`, Makefile, CI matrix, README. Gate: single downloaded
    binary on a clean machine reaches the Dashboard in one command; `ouro
-   attach` over an SSH tunnel against a server release.
+   attach` over an SSH tunnel against a server runtime launched by `ouro` or its generated
+   service.
    *Packaging landed against a real release rather than a fixture:* `mix release`
    → tarball → `cargo build --features embed` → the binary run on a scratch
    `XDG_DATA_HOME`/`XDG_CACHE_HOME`, extracting, spawning `bin/ouroboros start`,
@@ -927,13 +1033,14 @@ independently mergeable and leaves main releasable.
 
 ## 6. Deferred (recorded so they're chosen, not forgotten)
 
-Cross-node session listing/fan-out; `agents.start` behind a spec allowlist;
-a read-only web dashboard reusing the same gateway; multi-cluster attach
+`agents.start` behind a spec allowlist; a read-only web dashboard reusing the
+same gateway; multi-cluster attach
 profiles in `ouro`; Windows; log streaming to attach-mode clients; per-token
 scopes (today scope is per-listener, set at boot); daemon reconfiguration
-from the settings overlay (editing the *runtime's* environment and offering
-a supervised restart — today settings edit only this client's defaults, and
-the daemon is configured by environment at boot); unknown-key preservation
+from arbitrary settings fields (a private fleet profile is the one implemented
+runtime configuration path; Machines deliberately guides secret-bearing create,
+invite, and join commands instead of executing them on an accidental keypress);
+unknown-key preservation
 through config saves; automated pty-level tests for the boot screen and coding home;
 graying out approval/sandbox choices a provider cannot take in the `n` dialog
 (`runtime.providers` already

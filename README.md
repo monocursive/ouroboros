@@ -58,11 +58,12 @@ make ouro
 ./tui/target/release/ouro
 ```
 
-The raw release is self-sufficient too: `bin/ouroboros start` with nothing set boots a
-single-machine daemon — distribution off, data under `~/.local/share/ouroboros`, a
-loopback gateway with a token it generates itself — and prints how to attach. Joining a
-cluster is a deliberate, explicit configuration; see
-[Running a cluster](#running-a-cluster).
+Use the `ouro` executable as the lifecycle entrypoint. Its embedded release relies on the
+same native executable for exact process-incarnation checks and crash-releasing recovery
+locks. A bare extracted `bin/ouroboros start` does not carry that helper and deliberately
+fails before opening durable state; raw release and Docker launch packaging are not yet a
+supported deployment path. Joining a cluster is deliberate configuration through
+`ouro fleet`; see [Running a cluster](#running-a-cluster).
 
 For the library from a checkout, the project currently targets Elixir 1.20 and OTP 29.
 
@@ -187,13 +188,15 @@ provider's own behavior (reported as `null` in `interactive.info` options); a *c
 task refuses at creation rather than silently dropping its documented workspace-write
 default, and the refusal names the exact override to type (for example
 `sandbox_mode: :default`). Pass `sandbox_mode: :read_only` for a session that cannot
-edit files. An option the caller states
-explicitly is never rewritten or dropped on either plane: a sandbox the provider
-cannot enforce fails loudly by name. These normalized flags configure the provider
-CLI; they are not a substitute for an OS/container sandbox when executing untrusted
-work, and a session running under a provider's own behavior still takes the same
-workspace lease the omitted default would have taken — the lease posture
-does not yet follow the provider's actual write capability.
+edit files. An option the caller states explicitly is never rewritten or dropped on
+either plane: a sandbox the provider cannot enforce fails loudly by name. The one
+deliberate exception is Codex `provider_options.cli_path` on a runtime with managed
+caches: executable selection is a node boundary, so every initial, recovered, and turn
+request is pinned to the runtime-owned launcher. These normalized flags configure the
+provider CLI; they are not a substitute for an OS/container sandbox when executing
+untrusted work, and a session running under a provider's own behavior still takes the
+same workspace lease the omitted default would have taken — the lease posture does not
+yet follow the provider's actual write capability.
 
 Per-run environment maps are rejected because task requests are checkpointed. Put
 provider credentials in the service environment or a dedicated secret boundary,
@@ -209,12 +212,32 @@ summary in public session state. A library caller can explicitly set either bool
 default network-off. Network access does not widen the filesystem sandbox or turn the
 gateway token into a sandbox.
 
-When the runtime has a data directory, Codex also inherits a managed Cargo home under
-`<data-dir>/provider-cache/codex/cargo`, and that one directory is added to its writable
-roots. Rust dependency downloads therefore neither fail against the read-only global
-Cargo cache nor leave a project-local `.cargo-home`; public session state reports whether
-the managed cache was established. An operator-supplied Codex `CARGO_HOME` remains
-authoritative.
+When the runtime has a data directory, Codex also inherits managed language-tool homes
+under `<data-dir>/provider-cache/codex`. Ouroboros provisions and authorizes Cargo, Mix,
+Mix archives, Hex, and Rebar cache/config directories independently. Rust and Elixir
+dependency downloads therefore neither fail against read-only global caches nor require
+project-local tool homes; public session state reports which managed caches were actually
+established. An operator-supplied absolute value for any corresponding environment
+variable remains authoritative and is authorized explicitly. The managed Codex launcher
+pins only these non-secret cache paths through Codex's shell-environment policy. Provider
+commands keep the caller's inherited PATH and normal login-shell startup, while startup
+hooks cannot replace the effective cache homes. Runtime ownership is claimed before the
+launcher or provider configuration is touched; a losing runtime cannot rewrite the live
+owner's artifacts, and an owner restart rebuilds the provider boundary before Jido or any
+session consumer restarts.
+
+At startup, and again in the eventual request working directory before each provider
+invocation, Ouroboros runs the resolved upstream's local `codex sandbox` command with a
+five-second bound to verify the *effective* shell policy. The second check covers
+workspace-local Codex configuration without authenticating, starting a model turn, or
+using the network. Codex applies `set` before `include_only`, so an existing allowlist
+must retain its entries and append `CARGO_HOME`, `MIX_HOME`, `MIX_ARCHIVES`, `HEX_HOME`,
+`REBAR_CACHE_DIR`, and `REBAR_GLOBAL_CONFIG_DIR`. Ouroboros does not replace or widen
+that operator-authored allowlist. If the startup probe is unavailable, times out, filters
+a cache, or executable resolution would make the launcher call itself, Ouroboros
+installs a clear Codex-only refusal launcher; the core and every other provider still
+start. A workspace-only mismatch exits 78 before Codex receives the provider argv. Fix
+the named Codex policy or node-level executable and retry or restart as instructed.
 
 Codex currently uses Harness's managed `exec --json` transport, which cannot carry an
 approval question back into Ouroboros. Public `provider_execution` therefore reports
@@ -265,9 +288,8 @@ make dist    # the same, copied to dist/ouro-<version>-<target triple>
 There is no `--token` flag anywhere, deliberately: a secret on a command line is
 readable by every process on the host for as long as the command runs. A spawning client
 writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells the
-gateway the path. A release started bare does the same thing for itself — it generates
-`gateway.token` in its data directory if none exists — so both ways of starting a
-runtime end with the same two files in the same place.
+gateway the path. The internally extracted release reads that launcher-owned file; a
+bare release is not a second supported token-generation or lifecycle path.
 
 ### First run and configuration
 
@@ -301,19 +323,60 @@ that neither names is refused, and the refusal says where both live.
 
 The runtime binds an ephemeral port and publishes it to `gateway.json` in its data
 directory — `OUROBOROS_DATA_DIR`, or when that is unset, the same derived default the
-client uses (`$XDG_DATA_HOME/ouroboros`, else `~/.local/share/ouroboros`), so a
-bare-started release and a spawned one publish in the same place — alongside its pid,
-protocol version, and scope. Nothing
+client uses (`$XDG_DATA_HOME/ouroboros`, else `~/.local/share/ouroboros`) — alongside its
+PID, exact OS process-birth identity, protocol version, and scope. Nothing
 pre-chooses a port, so two daemons cannot race for a number one of them picked in
 advance. That file is removed on graceful shutdown and left behind by a kill, which is
-why it carries a pid: a publication whose pid is dead is stale and is replaced, and a
-publication whose pid is *alive* is never overwritten — a daemon this client cannot talk
-to is something to report, not something to resolve by starting a second one on top of
-it.
+why it carries a process incarnation: a publication whose PID is absent or whose PID was
+reused with a different birth identity is stale and is replaced. An exact live
+incarnation is never overwritten — a daemon this client cannot talk to is something to
+report, not something to resolve by starting a second one on top of it. Upgrade-era
+PID-only publications remain conservative: a live PID blocks, but never authorizes a
+signal.
 
-A `--dev` daemon gets its own data directory (`ouroboros-dev`), because a development
-runtime and a real one that shared `gateway.json` would each be discoverable as the
-other.
+That data-directory leaf is itself a security boundary. Before any lifecycle lock,
+storage probe, publication, token, or journal write, Ouroboros requires a real
+same-user directory at exactly mode `0700`; a missing leaf is created that way. A
+pre-existing symlink, foreign-owned directory, non-directory, or broader mode is
+refused without being replaced or silently chmodded. Inspect an existing directory's
+ownership and contents first, then use `chmod 700 <path>` only when it is truly yours,
+or point `OUROBOROS_DATA_DIR` at a fresh absolute path. Every runtime spawned by `ouro`
+also starts with umask `077`, including foreground/TUI Ring mode, so later Jido stores,
+checkpoints, and rotated logs remain private inside that boundary. Harness-managed
+provider subprocesses cross one boundary that restores the conventional workspace umask
+`022`, so provider-created files and directories default to `0644` and `0755` in both
+foreground and service modes.
+
+`gateway.json` is discovery, not ownership: it can be missing or replaced while a live
+runtime still owns the journals. A separate private `runtime.owner` marker is claimed
+atomically before any durable core child starts and retained for the VM lifetime. A
+second runtime fails closed while that exact PID-and-birth incarnation is alive; a dead
+or reused incarnation is recovered once. A live legacy PID-only owner also blocks until
+it can be upgraded or stopped through its existing supervisor. This prevents two daemons
+from writing the same checkpoint even when publication state is stale.
+
+Stale-owner recovery uses a private, persistent `runtime.owner.recovery` inode whose
+advisory lock is held by a native helper for the complete atomic claim. A claimant or VM
+crash closes that helper's port and releases the kernel lock, so a generated service can
+retry unattended. The inode itself normally remains; its versioned contents let new
+clients distinguish this safe coordination primitive from an old or malformed gate.
+
+Client spawn serialization follows the same fail-closed rule. `spawn.lock` appears only
+after a complete 0600 PID-and-process-birth claim has been written and atomically
+hard-linked into place;
+dead-lock replacement is serialized by `spawn.lock.recovery`, so two stale readers can
+never unlink one another's replacement. This is also a persistent, versioned inode with
+a kernel-held advisory lock: process death releases the claim automatically. Legacy or
+malformed recovery files continue to fail closed once, with explicit inspection and
+repair guidance, because they might belong to an older active client.
+
+When `OUROBOROS_DATA_DIR` is unset or blank, a `--dev` daemon gets the separate
+`ouroboros-dev` directory, because a development runtime and a release that shared
+`gateway.json` would each be discoverable as the other. A nonblank explicit
+`OUROBOROS_DATA_DIR` remains an exact operator override in both modes; `ouro --dev`
+prints a warning before it can start, adopt, attach to, or stop a runtime there, since an
+override shared with the release mode intentionally disables that default isolation. Use
+a dedicated explicit directory when development isolation is intended.
 
 ### Attaching to a server over SSH
 
@@ -339,10 +402,15 @@ the tunnel first on purpose.
 
 `ouro` sets the gateway posture (`OUROBOROS_GATEWAY=1`, scope `operate`, port `0`, the
 token file path, `OUROBOROS_DATA_DIR`) and otherwise hands the child the environment it
-was called with. On a laptop it also sets `OUROBOROS_DIST=none`: no epmd, no
-distribution listener, no cookie on the host at all. That posture is also what the
-release defaults to when told nothing; `ouro` states it explicitly anyway, because a
-stated contract survives a change of default.
+was called with. Mix/`--dev` and packaged starts also set `OUROBOROS_PROCESS_ID_HELPER`
+to the product `ouro` binary so the runtime can read process-birth identity and hold the
+owner-recovery lock; cargo test harnesses are never that helper. On a standalone laptop
+it also sets `OUROBOROS_DIST=none`: no epmd or
+distribution listener. The release launcher uses a fresh disposable boot cookie rather
+than the artifact's shared fallback, but with distribution disabled it is not a reachable
+cluster credential. That posture is also what the release defaults to when told nothing;
+`ouro` states it explicitly anyway, because a stated contract survives a change of
+default.
 
 That default steps aside for a real deployment. If the calling environment already
 carries `OUROBOROS_CLUSTER_STRATEGY` or `OUROBOROS_NODE`, the cluster variables pass
@@ -366,19 +434,22 @@ stale.
 - **Loopback is the security boundary.** The protocol has no transport encryption.
   `OUROBOROS_GATEWAY_ALLOW_REMOTE=1` does not add any — it only stops the runtime from
   refusing to bind a non-loopback address. Use the tunnel.
-- **The view is single-node.** The client speaks to exactly one gateway and renders that
-  node's state. Connected peers appear as names; their sessions, agents, and plans do
-  not. Cross-node listing is deferred, not hidden.
-- **In attach mode there are no logs.** A spawning client pipes the runtime's output
-  into a bounded ring it can show you. A client that attached to a process it did not
-  start has no access to that process's stdout — the logs live wherever the spawner put
-  them (`journalctl`, `daemon.log`, a container log driver).
-- **`ouro attach` with no arguments only finds runtimes that published locally.** That
-  includes a bare `bin/ouroboros start`, which publishes to the derived data directory
-  this client also reads. A deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the
-  service environment, or one whose data directory this user cannot read, is reachable
-  only by naming `--addr` and `--token-file` explicitly. There is no discovery beyond
-  the file.
+- **One gateway controls one connected fleet.** The client still authenticates to one
+  loopback gateway, but that gateway lists sessions across connected core nodes and routes
+  owner-qualified session calls/subscriptions over BEAM distribution. Offline owners stay
+  visible in Machines and return an explicit unavailable state; their live streams resume
+  from the retained cursor after reconnection. Unrelated Erlang clusters are not
+  federated.
+- **In attach mode there is no log streaming.** A foreground spawning client pipes the
+  runtime's output into a bounded ring it can show you. A packaged detached daemon or
+  recovery service writes application logs to `runtime.log`, live-rotated by OTP at
+  2 MiB with three archives (`.0` newest through `.2`), and keeps bootstrap/VM/crash
+  output separately in restart-rotated `daemon.log`. Other deployments still use the
+  sink their operator selected (`journalctl`, a container log driver, and so on).
+- **`ouro attach` with no arguments only finds runtimes that published locally.** A
+  deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
+  one whose data directory this user cannot read, is reachable only by naming `--addr`
+  and `--token-file` explicitly. There is no discovery beyond the file.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.
@@ -1155,11 +1226,291 @@ single-owner atomic file checkpoints.
 
 ## Running a cluster
 
-Until now every node in this README connected because something outside it said so.
-`Ouroboros.Cluster` owns the other half: which tree a node boots, and how it finds the
-others.
+The normal multi-machine path is an Ouroboros **fleet**: the same `ouro` executable on
+each trusted machine, one private invitation per machine, and no Erlang configuration to
+write. Ouroboros generates the membership secret, a private CA, one TLS certificate per
+machine, a firewall-friendly distribution range, stable machine identity, and the BEAM
+formation arguments. The gateway remains local; one attached `ouro` uses BEAM routing to
+start and follow sessions anywhere in the connected fleet.
 
-### Node roles
+### Install the same binary
+
+Tagged builds publish one self-contained asset for each supported macOS/Linux architecture
+plus `SHA256SUMS` on the repository's Releases page. Download both files, verify the
+matching checksum, then put the asset somewhere on `PATH` on every machine:
+
+```sh
+ASSET=ouro-VERSION-aarch64-apple-darwin   # choose the one for this OS/CPU
+
+# Linux
+grep "  ${ASSET}$" SHA256SUMS | sha256sum -c -
+
+# macOS
+grep "  ${ASSET}$" SHA256SUMS | shasum -a 256 -c -
+
+mkdir -p ~/.local/bin
+install -m 0755 "$ASSET" ~/.local/bin/ouro
+~/.local/bin/ouro version
+
+# Keep this for future shells (zsh); use the equivalent file for another shell.
+grep -q 'HOME/.local/bin' ~/.zshrc 2>/dev/null || \
+  printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> ~/.zshrc
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Use assets from the same tag across the fleet. CPU architecture may differ, but remote
+placement requires the same Ouroboros version, OTP release, and fleet protocol revision;
+`ouro fleet doctor` names a mismatch and the runtime refuses to place paid/write-capable
+work there until the machine is upgraded.
+
+The current Linux artifacts are native Ubuntu 24.04 GNU builds, not static binaries;
+use Ubuntu 24.04 or a distribution with a compatible glibc, or run `make ouro` on an
+older target. The current macOS workflow has no Developer ID/notarization credentials,
+so its artifacts are checksum-verifiable but unsigned. After verifying the official
+checksum, Gatekeeper may require `xattr -d com.apple.quarantine ./ouro-*` before the
+first run. The release workflow says this plainly until signing is actually configured.
+
+Until the first tagged workflow has run, build the binary on each target platform with
+`make ouro` and copy `tui/target/release/ouro`; the release workflow is intentionally
+marked unproven in source rather than implying an artifact already exists.
+
+The machines need private, mutually reachable names or addresses. Tailscale is the
+easiest first setup; private DNS or private IPv4 addresses work too. On every machine:
+
+```sh
+tailscale status           # this machine and the peers it can currently see
+tailscale ip -4            # a private address suitable for --host
+tailscale ping PEER        # run for each other machine before creating the fleet
+```
+
+Use either that Tailscale IPv4 address or a MagicDNS name that resolves to exactly one
+private IPv4 address. Ouroboros refuses public, IPv6, `.local`, ambiguous multi-address,
+and unresolvable fleet identities instead of creating a profile that only looks usable.
+
+`ouro fleet create` prints the exact TCP ports to permit between fleet devices: one
+fleet-specific EPMD port plus the TLS distribution range. Do **not** blindly open the
+host-global EPMD port 4369, and do not expose either port set to the public internet. If
+you use Tailscale grants, scope those printed ports from your fleet users/devices to the
+same fleet users/devices; the current grants syntax accepts entries such as
+`"ip": ["tcp:PORT", "tcp:MIN-MAX"]`. See the
+[Tailscale CLI reference](https://tailscale.com/docs/reference/tailscale-cli) and
+[grant examples](https://tailscale.com/docs/reference/examples/grants). The generated
+fleet pins both listeners to the advertised private IPv4 interface and uses mutually
+verified TLS in addition to the private network.
+
+### Create, invite, join
+
+On the first machine:
+
+```sh
+# If this data directory is already running standalone, stop it before changing posture.
+ouro stop                 # harmless to omit when nothing is running
+ouro fleet create
+ouro fleet doctor
+ouro daemon
+```
+
+Fleet creation/join/leave serialize with runtime startup and refuse to rewrite the
+posture of a live VM. The refusal tells you to stop it and retry; Ouroboros never leaves a
+saved fleet profile beside a still-running standalone runtime.
+
+Ouroboros uses a reachable hostname only when it can verify one. If it cannot, it asks for
+the single missing fact instead of guessing:
+
+```sh
+ouro fleet create --machine studio --host studio.example-tailnet.ts.net
+```
+
+Still on that first machine, make one invitation for the second machine:
+
+```sh
+ouro fleet invite \
+  --machine laptop \
+  --host laptop.example-tailnet.ts.net \
+  --out laptop.ouro
+```
+
+Copy `laptop.ouro` through a private channel. It is mode 0600 and contains that machine's
+certificate/key plus the fleet membership credential; never paste it into chat or logs.
+On the laptop:
+
+```sh
+chmod 600 laptop.ouro
+ouro fleet join laptop.ouro
+rm laptop.ouro
+ouro fleet doctor
+ouro daemon
+```
+
+Delete the creator's copied invitation after the join too. Repeat `fleet invite` once for
+each additional machine. Start order does not matter: each daemon keeps retrying absent
+members and the connected BEAM nodes form a mesh.
+
+Every invitation is owner-attested: editing its creation time, ports, roster, certificate,
+key, or cookie makes join refuse it before installing anything. The seven-day age check
+prevents accidentally using stale setup instructions; it is **not** credential expiry,
+because an offline invitation necessarily contains a longer-lived node credential.
+
+If an invitation file was lost before join, reissue the same machine identity with
+`ouro fleet invite --replace ...`; replacing never makes the previously copied credential
+invalid. If an invitation was abandoned or mistyped, the owner may stay running while it
+removes the saved expectation and creates a signed roster update:
+
+```sh
+ouro fleet invite cancel \
+  --machine NAME \
+  --out fleet-without-NAME.ouro-roster
+```
+
+Copy that mode-0600 roster privately to **every existing fleet machine**, then on each
+recipient first inspect who owns restart recovery:
+
+```sh
+chmod 600 fleet-without-NAME.ouro-roster
+ouro fleet service status
+```
+
+If a recovery service is installed, run the exact **deactivation** command printed by
+that status command. Otherwise run `ouro stop`. Then install the roster while the runtime
+is stopped:
+
+```sh
+ouro fleet sync import fleet-without-NAME.ouro-roster
+```
+
+If the machine had a recovery service, run its printed **activation** command again;
+otherwise run `ouro daemon`. Finish with `ouro fleet doctor`, then delete the copied
+roster. This ordering avoids fighting an always-restarting service or accidentally
+starting a second runtime.
+
+Cancel is safe while the owner is serving work, but its currently running formation
+still has the old boot-time seed list. Restart the owner with the same service-aware
+deactivate/reactivate sequence when convenient; the signed profile is already updated
+and will take effect on that next boot.
+
+The owner can recreate the current update later with
+`ouro fleet sync export --out fleet.ouro-roster`. Imports reject another fleet, unsigned
+edits, rollback revisions, and removal of the receiving machine itself. Cancellation and
+roster sync are bookkeeping, not credential revocation. Treat a leaked invitation or
+member credential as compromise of the fleet trust domain and rebuild/rotate the fleet
+rather than pretending that removing a hostname revokes it.
+
+Cancellation also does **not** silently discard session-owner evidence. If `NAME` ran
+interactive or coding sessions and is offline, every gateway that previously observed
+those sessions keeps its last-known rows and reports the fleet list incomplete. First
+bring that machine back if possible and inspect or export the owner-local session state
+you need. After the signed roster above has been imported and the runtime restarted, a
+permanently lost machine can be retired explicitly on **every gateway/data directory that
+may have observed it**:
+
+```sh
+ouro fleet sessions forget --machine NAME --accept-state-loss
+```
+
+Run that command locally against each member's authenticated, `operate`-scope gateway. It
+requires the exact machine name, a matching signed-roster tombstone, the literal
+`--accept-state-loss` acknowledgement, and an offline target; it durably updates both
+session planes before reporting success. This is irreversible removal of that gateway's
+local discoverability evidence, not deletion of the lost machine's files and not
+credential revocation. A canceled credential that reconnects is still trusted by this
+fleet until you rebuild or rotate it.
+
+Inspect the fleet-wide directory from any running member:
+
+```sh
+ouro fleet status
+ouro fleet doctor
+ouro new --machine laptop --provider codex --workspace /path/on/laptop/project
+```
+
+`fleet doctor` combines those live fleet checks with certificate, interface, port, log,
+and recovery-service checks that are local to the machine where it runs. Run it locally
+on every machine during setup and after changing membership; one member cannot prove
+another host's service manager or private files.
+
+The selected provider runs on the selected machine. Install/sign in to that provider on
+each machine where it may run work; credentials are deliberately not copied in an
+invitation. If a destination is connected but its provider is unavailable, session start
+returns that machine's concrete installation or authentication error instead of silently
+falling back to the gateway machine. Workspace paths are likewise resolved on the
+destination; automatic logical workspace mapping between different machines is not yet
+implemented.
+
+The same path is discoverable inside `ouro`: open Settings with `,`, choose
+**Machines**, and follow the vocabulary-first create/join/status/membership guides. The
+New Session form lists only connected, runtime-compatible machines that can run agents;
+friendly names are used in the request while the technical `name@host` identity remains
+visible for diagnosis.
+
+### Start after login and recover after crashes
+
+For an unattended fleet member, generate a user-level launchd service on macOS or
+systemd user service on Linux:
+
+```sh
+ouro fleet service install
+ouro fleet service status
+```
+
+`install` writes a private unit and prints the exact `launchctl` or `systemctl --user`
+activation command; it does not start a persistent service behind your back. Once that
+one printed command is run, the OS starts Ouroboros at login and restarts it after a VM
+crash or reboot. For planned maintenance, use the printed deactivation command before
+`ouro stop`; otherwise the service is doing its job when it starts the runtime again.
+
+`ouro fleet service status` also names two private logs. `runtime.log` is owned and
+live-rotated by OTP at 2 MiB with three archives; `daemon.log` retains bootstrap, VM, and
+crash output and is rotated before managed starts. Keeping those writers separate avoids
+rotation races while bounding ordinary long-running application logs.
+
+`ouro fleet service status` and `ouro fleet doctor` print both managed log paths and
+their distinct limits. `runtime.log` is the live application sink: OTP rotates it after
+2 MiB and retains three archives (`runtime.log.0` newest through `.2`) even during one
+uninterrupted run. `daemon.log` keeps inherited stdout/stderr so early bootstrap and VM
+crash diagnostics are not lost; it is checked and rotated before a managed start after
+2 MiB, with three private backups. Only OTP writes or renames `runtime.log`, so the two
+sinks never race one rotated file.
+
+Recovery has explicit boundaries:
+
+- late boot and temporary network loss heal automatically through supervised libcluster
+  retries; BEAM distribution, monitors, and the scoped `:pg` directory resynchronize;
+- a restarted remote worker machine is reconciled by its durable team owner after the
+  node rejoins, without restarting the whole team;
+- coordinator/process crashes recover from the owner machine's durable checkpoints;
+- a full machine/BEAM restart restores the runtime and fleet membership, but a live
+  provider subprocess is **not migrated to another machine**. Its owner-local checkpoint
+  remains inspectable and recovery is only as strong as the provider's resumable session;
+- changing a machine's fleet identity strands state owned by the old BEAM node name, so
+  leave the generated identity stable;
+- formation is not quorum or fencing. A network partition may create two temporarily
+  independent views; Ouroboros does not claim partition-safe placement or replicated
+  session storage.
+
+Repository contributors can rerun the same packaged three-node acceptance proof used by
+Linux CI without touching their normal data directory:
+
+```sh
+make fleet-e2e
+```
+
+It creates a private temporary lab, boots in reverse order, removes/rejoins the hub,
+crashes a service-owned leaf, verifies exactly one automatic replacement and a healed
+TLS mesh, then stops only the recorded lab PIDs and removes the lab.
+
+`ouro fleet leave` removes only a stopped machine's recognized fleet credentials. It
+does not evict or rewrite the other machines. Deactivate and remove that machine's
+recovery service first, then run it only when intentionally making the machine
+standalone. The creator is the sole invitation authority and cannot leave while other
+members remain; before depending on a fleet, keep an encrypted, offline backup of the
+creator's entire private `fleet/` directory while its runtime and service are stopped.
+Do not copy only `ca-key.pem`: the profile, cookie, CA, and node identity are one unit.
+
+The remaining environment-variable configuration below is the advanced path for custom
+roles, custom discovery, containers, and operator-managed PKI. New installations should
+use `ouro fleet`.
+
+### Advanced: node roles
 
 A node boots exactly one role, from `OUROBOROS_NODE_ROLE` (default `core`):
 
@@ -1245,23 +1596,11 @@ authenticated:
            {versions, ['tlsv1.3']}]}].
 ```
 
-`vm.args` is a static file the emulator reads with `-args_file`: it has no shell and no
-runtime interpolation. So the distribution flags are read from the **build**
-environment and baked into the artifact:
-
-```sh
-export OUROBOROS_DIST_TLS=1
-export OUROBOROS_DIST_TLS_OPTFILE=/etc/ouroboros/dist_tls.conf
-export OUROBOROS_DIST_PORT_MIN=9100   # optional: pin the listener for a firewall
-export OUROBOROS_DIST_PORT_MAX=9105
-MIX_ENV=prod mix release
-```
-
-`OUROBOROS_DIST_TLS=1` without an optfile fails the build rather than producing a
-release that cannot start distribution. The same flags are rendered into
-`remote.vm.args` so `bin/ouroboros remote`, `rpc`, and `stop` can still reach the node;
-the port pinning deliberately is not, because a remote shell must not bind the port the
-running node already holds.
+`ouro fleet` writes this file and a matching private `vm.args` per machine, then selects
+them with `RELEASE_VM_ARGS` at launch. That is why the same stock `ouro` binary can use
+different certificates, names, and port ranges without a rebuild. Building or launching
+a plain Mix release is not a supported substitute: raw releases currently have no
+trusted native process-incarnation/recovery helper.
 
 At boot, `config/runtime.exs` reads the transport the VM is actually running. A node
 that forms a cluster over cleartext distribution refuses to start unless
@@ -1269,57 +1608,12 @@ that forms a cluster over cleartext distribution refuses to start unless
 
 ### Three nodes
 
-One image, three roles:
-
-```yaml
-# docker-compose.yml — built with OUROBOROS_DIST_TLS=1
-x-node: &node
-  image: ouroboros:0.1.0
-  command: ["/app/bin/ouroboros", "start"]
-  volumes: ["./tls:/etc/ouroboros/tls:ro", "./dist_tls.conf:/etc/ouroboros/dist_tls.conf:ro"]
-
-x-env: &env
-  OUROBOROS_COOKIE: ${OUROBOROS_COOKIE:?set a cookie}
-  OUROBOROS_DATA_DIR: /var/lib/ouroboros
-  OUROBOROS_CLUSTER_STRATEGY: epmd
-  OUROBOROS_CLUSTER_HOSTS: core-1@core-1,core-2@core-2,builder-1@builder-1
-
-services:
-  core-1:
-    <<: *node
-    hostname: core-1
-    environment:
-      <<: *env
-      OUROBOROS_NODE: core-1@core-1
-      OUROBOROS_NODE_ROLE: core
-      OUROBOROS_FORGE_BUILDER_NODE: builder-1@builder-1
-
-  core-2:
-    <<: *node
-    hostname: core-2
-    environment:
-      <<: *env
-      OUROBOROS_NODE: core-2@core-2
-      OUROBOROS_NODE_ROLE: core
-      OUROBOROS_FORGE_BUILDER_NODE: builder-1@builder-1
-
-  builder-1:
-    <<: *node
-    hostname: builder-1
-    environment:
-      <<: *env
-      OUROBOROS_NODE: builder-1@builder-1
-      OUROBOROS_NODE_ROLE: builder
-```
-
-On the distributed path — anything set among `OUROBOROS_NODE`, `OUROBOROS_DIST`, or a
-cluster strategy — `bin/ouroboros` refuses a blank `OUROBOROS_NODE` or
-`OUROBOROS_COOKIE` before the VM starts, and refuses a short name, because
-`RELEASE_DISTRIBUTION=name` needs `name@host`. Without that refusal the release would
-fall back to the release name and to the random cookie baked into `releases/COOKIE` at
-build time — a cluster secret nobody chose and nobody can rotate. Told nothing at all,
-the release boots the standalone single-machine posture instead: distribution off, no
-cookie in existence anywhere.
+Create, invite, and join all three through the `ouro fleet` walkthrough above, then
+install the generated service on each host. Fleet startup puts only a fresh disposable
+boot cookie on the VM command line, validates the 0600 cookie file, and installs the real
+credential before libcluster starts; the real fleet cookie is never placed in argv or
+the environment. A raw-release Docker Compose topology is intentionally not documented
+as runnable until the container packaging includes the trusted native lifecycle helper.
 
 Once up, `Ouroboros.status()` reports the local role, the roles it can see, the
 formation strategy, and the distribution posture (`security.cookie` is `:set` or
@@ -1331,8 +1625,10 @@ Ouroboros.Cluster.nodes_by_role(:core) #=> [:"core-1@core-1", :"core-2@core-2"]
 Ouroboros.status().cluster.security    #=> %{distributed: true, proto_dist: :inet_tls, tls: true, cookie: :set}
 ```
 
-Topology churn is logged as it happens, with the arriving node's role, because
-`Node.list/0` can show what is connected now but never what left.
+Topology churn is logged and retained in a secret-free last-known directory. `fleet
+status` therefore shows configured or previously observed machines as connected/offline,
+their last transition, compatibility, TLS posture, and the supervised retry interval
+instead of making a departed machine disappear.
 
 ### Honest limits
 
@@ -1359,8 +1655,10 @@ Topology churn is logged as it happens, with the arriving node's role, because
   partition policy, and no opinion about a node that comes back with stale state.
   `:global.trans/2` narrows duplicate-start races in a *healthy connected* cluster and
   is not partition-safe consensus.
-- **The distribution flags are baked at build time.** Changing TLS or the port range
-  means building a new release, or pointing `RELEASE_VM_ARGS` at a file you maintain.
+- **Manual releases still own their manual PKI.** `ouro fleet` generates runtime TLS and
+  port arguments dynamically. If you bypass it and use the environment path above, you
+  own certificate renewal, cookie rotation, and the `RELEASE_VM_ARGS` file or build-time
+  flags yourself.
 - **EPMD is still in the path** for the `epmd` and `dns` strategies: its port (4369)
   has to be reachable even when the distribution listener is pinned elsewhere.
 
@@ -1428,16 +1726,17 @@ Topology churn is logged as it happens, with the arriving node's role, because
 - Release metadata construction, archive inspection, authorization, and journaling are
   implemented; full tar assembly and a real `HandlerAdapter.OTP` reboot rehearsal are
   deployment gates.
-- The terminal client is new, and it is a client: `ouro` renders one node through the
-  gateway, at the scope that node's listener was booted with, over a cleartext loopback
-  socket. Its token authenticates a connection and sandboxes nothing; there is no
-  cross-node view, no log stream to an attached client, and no discovery beyond
-  `gateway.json`. `Ouroboros.status/0` remains the inspectable API snapshot underneath
-  it, and still reports per-plane availability separately from empty result lists.
-- CI exists as two GitHub Actions workflows and has never run: this repository has no
-  git remote, so no push, pull request, or tag has ever reached a runner. The four-target
-  release matrix is a statement about ERTS — a release is only valid on the OS and
-  architecture that built it — not a record of four builds that happened.
+- The terminal remains a client of one loopback gateway, at the scope that listener was
+  booted with. In fleet mode that gateway can list, start, route, replay, and follow work
+  owned by connected BEAM nodes; it is not a separately exposed remote control port on
+  every machine. Its token authenticates a connection and sandboxes nothing. Session
+  journals remain owner-local, attached clients do not receive a general runtime log
+  stream, and a full owner-host loss does not migrate a live provider subprocess.
+- CI exists as two GitHub Actions workflows and has not been proven on a hosted runner.
+  The configured repository remote is not a public GitHub release channel, and no tag or
+  downloadable release exists yet. The four-target release matrix is a statement about
+  ERTS — a release is only valid on the OS and architecture that built it — not a record
+  of four hosted builds that happened.
 
 The next architecture steps and stop conditions are tracked in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

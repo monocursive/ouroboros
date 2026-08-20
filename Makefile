@@ -12,7 +12,7 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev test golden release-tarball ouro dist
+.PHONY: help dev test golden release-tarball ouro fleet-e2e dist
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -20,6 +20,7 @@ help:
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
+	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
 	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
 
 dev:
@@ -59,6 +60,12 @@ ouro: release-tarball
 	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
 	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
 	@ls -l tui/target/release/ouro
+
+# Deliberately not part of `make test`: this builds a packaged release and repeatedly
+# boots three real BEAM nodes. The script isolates HOME, data, ports, names, and cleanup.
+fleet-e2e: ouro
+	@echo "==> fleet-e2e: packaged three-node TLS formation and recovery"
+	OURO_E2E_BIN="$$PWD/tui/target/release/ouro" bash scripts/fleet-e2e.sh
 
 dist: ouro
 	@echo "==> dist: naming the binary for the platform it can actually run"
