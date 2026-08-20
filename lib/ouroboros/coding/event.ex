@@ -25,13 +25,15 @@ defmodule Ouroboros.Coding.Event do
 
   @spec from_harness(String.t(), pos_integer(), Jido.Harness.Event.t()) :: t()
   def from_harness(task_id, sequence, %Jido.Harness.Event{} = event) do
+    {type, payload} = Ouroboros.HarnessEventProjection.durable_fields(event)
+
     %__MODULE__{
       id: Jido.Signal.ID.generate!(),
       task_id: task_id,
       sequence: sequence,
-      type: event.type,
+      type: type,
       timestamp: event.timestamp,
-      payload: Jido.Harness.Redaction.redact(event.payload),
+      payload: Jido.Harness.Redaction.redact(payload),
       provider: event.provider,
       provider_session_id: event.provider_session_id,
       harness_sequence: event.sequence

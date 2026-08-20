@@ -1,8 +1,8 @@
 <%
   # `vm.args` is a static file the emulator reads with -args_file: it has no shell and
-  # no runtime interpolation. So the distribution posture is read from the BUILD
-  # environment here and baked into the artifact. Changing it means building again, or
-  # pointing RELEASE_VM_ARGS at a file of your own.
+  # no runtime interpolation. Operator-built releases may still bake a distribution
+  # posture here. The stock `ouro fleet` path instead writes a private per-machine file
+  # and points RELEASE_VM_ARGS at it at launch, so one packaged binary works everywhere.
   #
   # Ouroboros.Cluster reads the result back out of :init at boot, and config/runtime.exs
   # refuses to start a clustering node that ended up on cleartext distribution.
@@ -60,6 +60,8 @@
 ## Build with OUROBOROS_DIST_TLS=1 and OUROBOROS_DIST_TLS_OPTFILE to change that.
 <% end %><%= if port_min do %>
 ## Pin the distribution listener to a fixed range so a firewall can describe it.
-## EPMD's own port (4369) still has to be reachable separately.
+## EPMD must be reachable separately. Advanced/manual releases default to 4369 unless
+## ERL_EPMD_PORT says otherwise; `ouro fleet` replaces this file and prints its own
+## fleet-specific EPMD port, so do not assume or open 4369 for a generated fleet.
 -kernel inet_dist_listen_min <%= port_min %> inet_dist_listen_max <%= port_max %>
 <% end %>

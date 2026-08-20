@@ -45,8 +45,10 @@ defmodule Ouroboros.Gateway.Listener do
 
   require Logger
 
+  alias Ouroboros.DataDir
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Conn
+  alias Ouroboros.RuntimeOwner
 
   @publication_name "gateway.json"
   @protocol 1
@@ -68,16 +70,16 @@ defmodule Ouroboros.Gateway.Listener do
 
   @impl true
   def init(opts) do
-    Process.flag(:trap_exit, true)
-
     config = Keyword.fetch!(opts, :config)
     conn_supervisor = Keyword.fetch!(opts, :conn_supervisor)
     task_supervisor = Keyword.fetch!(opts, :task_supervisor)
+    DataDir.ensure_private!(config.data_dir)
+    Process.flag(:trap_exit, true)
 
     case :gen_tcp.listen(config.port, listen_options(config)) do
       {:ok, listen_socket} ->
         {:ok, port} = :inet.port(listen_socket)
-        path = publish!(config, port)
+        {path, publication_stat} = publish!(config, port)
 
         state = %{
           config: config,
@@ -86,6 +88,7 @@ defmodule Ouroboros.Gateway.Listener do
           listen_socket: listen_socket,
           port: port,
           publication: path,
+          publication_stat: publication_stat,
           acceptor: nil
         }
 
@@ -117,7 +120,7 @@ defmodule Ouroboros.Gateway.Listener do
 
   @impl true
   def terminate(_reason, state) do
-    _ = File.rm(state.publication)
+    _ = remove_publication_if_owner(state.publication, state.publication_stat)
     _ = :gen_tcp.close(state.listen_socket)
     :ok
   end
@@ -160,8 +163,9 @@ defmodule Ouroboros.Gateway.Listener do
   # directory, and the client's name are facts the operator has not already got in front
   # of them. This goes to stdout rather than the log, because a person who ran
   # `bin/ouroboros start` in a terminal is reading stdout; the same branch of
-  # `config/runtime.exs` moves the default log handler to stderr so that this stream stays
-  # the daemon's own, whether a person or a client is holding it.
+  # `config/runtime.exs` keeps the default log handler off stdout (stderr for a foreground
+  # client, the separate live-rotated runtime log for a managed daemon) so this stream
+  # stays the daemon's own, whether a person or a client is holding it.
   defp notice(config, port, path) do
     distribution =
       if Node.alive?(), do: "distribution on as #{node()}", else: "distribution off"
@@ -177,18 +181,30 @@ defmodule Ouroboros.Gateway.Listener do
   end
 
   defp publish!(config, port) do
-    File.mkdir_p!(config.data_dir)
+    DataDir.ensure_private!(config.data_dir)
 
     path = publication_path(config.data_dir)
-    tmp = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+
+    tmp =
+      path <>
+        ".tmp-#{os_pid()}-#{System.unique_integer([:positive, :monotonic])}-#{Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)}"
+
+    owner =
+      case Process.whereis(RuntimeOwner) do
+        nil -> %{pid: os_pid(), birth: nil}
+        _pid -> RuntimeOwner.claim()
+      end
 
     published = %{
       "port" => port,
       "protocol" => @protocol,
       "node" => Atom.to_string(node()),
-      "pid" => os_pid(),
+      "pid" => owner.pid,
       "scope" => Atom.to_string(config.scope)
     }
+
+    published =
+      if is_binary(owner.birth), do: Map.put(published, "birth", owner.birth), else: published
 
     # The path to the credential, never the credential. A client that did not spawn this
     # daemon otherwise has to guess where the token file lives by convention, and a
@@ -203,18 +219,52 @@ defmodule Ouroboros.Gateway.Listener do
 
     contents = JSON.encode_to_iodata!(published)
 
-    try do
-      File.write!(tmp, contents)
-      File.chmod!(tmp, 0o600)
-      File.rename!(tmp, path)
-    rescue
-      error ->
-        _ = File.rm(tmp)
-        reraise error, __STACKTRACE__
-    end
+    publication_stat =
+      try do
+        # The exclusive empty inode makes a preplanted symlink a refusal. Its mode is private
+        # before any discovery bytes are written, and the descriptor is synced before rename.
+        File.write!(tmp, "", [:exclusive, :sync])
+        File.chmod!(tmp, 0o600)
+        before = File.lstat!(tmp, time: :posix)
 
-    File.chmod!(path, 0o600)
-    path
+        File.open!(tmp, [:write, :binary], fn io ->
+          IO.binwrite(io, contents)
+          :ok = :file.sync(io)
+        end)
+
+        after_write = File.lstat!(tmp, time: :posix)
+
+        unless same_file?(before, after_write) do
+          raise "gateway publication temporary inode changed while it was written"
+        end
+
+        File.rename!(tmp, path)
+        published = File.lstat!(path, time: :posix)
+
+        unless same_file?(after_write, published) do
+          raise "gateway publication inode changed while it was published"
+        end
+
+        published
+      rescue
+        error ->
+          _ = File.rm(tmp)
+          reraise error, __STACKTRACE__
+      end
+
+    {path, publication_stat}
+  end
+
+  defp remove_publication_if_owner(path, expected) do
+    case File.lstat(path, time: :posix) do
+      {:ok, current} -> if same_file?(current, expected), do: File.rm(path), else: :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp same_file?(left, right) do
+    left.uid == right.uid and left.major_device == right.major_device and
+      left.inode == right.inode
   end
 
   defp os_pid do

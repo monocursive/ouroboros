@@ -74,12 +74,15 @@ defmodule Ouroboros.Gateway.Methods do
   """
 
   alias Ouroboros.Coding.Task, as: CodingTask
+  alias Ouroboros.Coding.TaskRef
   alias Ouroboros.Coding.TaskState
   alias Ouroboros.CodingSession
+  alias Ouroboros.Cluster
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State, as: InteractiveState
+  alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Task, as: InteractiveTask
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Mesh
@@ -97,6 +100,7 @@ defmodule Ouroboros.Gateway.Methods do
   # bounded well inside the method ceiling: a provider that never answers costs the
   # client a null status for that provider, not a timed-out method.
   @provider_probe_timeout 5_000
+  @fleet_query_timeout 5_000
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -149,6 +153,8 @@ defmodule Ouroboros.Gateway.Methods do
     "hello" => %{scope: :read, timeout: @hello_deadline},
     "runtime.status" => %{scope: :read, timeout: @default_timeout},
     "runtime.providers" => %{scope: :read, timeout: @default_timeout},
+    "fleet.status" => %{scope: :read, timeout: @default_timeout},
+    "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
     "account.read" => %{scope: :read, timeout: @default_timeout},
     "agents.list" => %{scope: :read, timeout: @default_timeout},
     "agents.state" => %{scope: :read, timeout: @default_timeout},
@@ -173,18 +179,36 @@ defmodule Ouroboros.Gateway.Methods do
     "upgrade.history" => %{scope: :read, timeout: @default_timeout},
     "signing.decisions" => %{scope: :read, timeout: @default_timeout},
     "grants.list" => %{scope: :read, timeout: @default_timeout},
-    "interactive.start" => %{scope: :operate, timeout: @start_timeout},
+    # This is intentionally not coupled to invitation cancellation. It is the explicit
+    # state-loss boundary that lets an operator retire durable session-owner evidence
+    # only after a signed roster tombstone is present and the machine is offline.
+    "fleet.forget_session_owner" => %{scope: :operate, timeout: @default_timeout},
+    # Session ids are caller-owned and both planes reconcile the same immutable intent.
+    # A ceiling can fire after durable creation, so never imply that minting a second id
+    # is safe merely because the gateway stopped waiting.
+    "interactive.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "account.login.start" => %{scope: :operate, timeout: @default_timeout},
     "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
     "account.logout" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.send_message" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.follow_up" => %{scope: :operate, timeout: @default_timeout},
+    # Both calls checkpoint intent before dispatch. A gateway ceiling can therefore fire
+    # after the provider accepted the turn, so the client must reconcile the session
+    # rather than present the timeout as a refusal or blindly mint another turn id.
+    "interactive.send_message" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      outcome: :unknown
+    },
+    "interactive.follow_up" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      outcome: :unknown
+    },
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
     "interactive.close" => %{scope: :operate, timeout: @default_timeout},
     "interactive.kill" => %{scope: :operate, timeout: @default_timeout},
-    "coding.start" => %{scope: :operate, timeout: @start_timeout},
+    "coding.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "coding.cancel" => %{scope: :operate, timeout: @default_timeout},
     "teams.add_worker" => %{scope: :operate, timeout: @team_timeout},
     "teams.delegate" => %{scope: :operate, timeout: @team_timeout},
@@ -243,7 +267,9 @@ defmodule Ouroboros.Gateway.Methods do
     "approval_mode" => {:enum, @approval_modes},
     "sandbox_mode" => {:enum, @sandbox_modes},
     "reasoning_effort" => {:enum, @reasoning_efforts},
-    "runtime_exposure" => :boolean
+    "runtime_exposure" => :boolean,
+    "machine" => :node,
+    "node" => :node
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -310,18 +336,22 @@ defmodule Ouroboros.Gateway.Methods do
   Separate from `invoke/2` because the connection makes this call itself; the validation
   still belongs beside every other parameter rule rather than in the socket handler.
   """
-  @spec subscription_params(map()) ::
-          {:ok, String.t(), non_neg_integer()} | {:invalid, String.t()}
-  def subscription_params(params) do
-    with {:ok, id} <- fetch_string(params, "id"),
+  @spec subscription_params(plane(), map()) ::
+          {:ok, InteractiveRef.t() | TaskRef.t(), non_neg_integer()} | {:invalid, String.t()}
+  def subscription_params(plane, params) do
+    with :ok <- only_keys(params, ["id", "cursor", "node"]),
+         {:ok, session} <- session_target(plane, params),
          {:ok, cursor} <- fetch_cursor(params) do
-      {:ok, id, cursor}
+      {:ok, session, cursor}
     end
   end
 
   @doc "Validates the one parameter an unsubscribe call carries."
-  @spec session_param(map()) :: {:ok, String.t()} | {:invalid, String.t()}
-  def session_param(params), do: fetch_string(params, "id")
+  @spec session_param(plane(), map()) ::
+          {:ok, InteractiveRef.t() | TaskRef.t()} | {:invalid, String.t()}
+  def session_param(plane, params) do
+    with :ok <- only_keys(params, ["id", "node"]), do: session_target(plane, params)
+  end
 
   @doc """
   Subscribes the **calling process** to a session and returns the backlog after `cursor`.
@@ -331,19 +361,21 @@ defmodule Ouroboros.Gateway.Methods do
   it to a task, and accepts that the call is bounded by the plane's own control-plane
   timeout rather than by a gateway ceiling it could enforce on a task it owns.
   """
-  @spec subscribe(plane(), String.t(), non_neg_integer()) :: result()
-  def subscribe(:interactive, id, cursor) do
-    safe(fn -> reply(InteractiveSession.subscribe(id, cursor: cursor)) end)
+  @spec subscribe(plane(), InteractiveRef.t() | TaskRef.t(), non_neg_integer()) :: result()
+  def subscribe(:interactive, session, cursor) do
+    safe(fn -> reply(InteractiveSession.subscribe(session, cursor: cursor)) end)
   end
 
-  def subscribe(:coding, id, cursor) do
-    safe(fn -> reply(CodingSession.subscribe(id, cursor: cursor)) end)
+  def subscribe(:coding, session, cursor) do
+    safe(fn -> reply(CodingSession.subscribe(session, cursor: cursor)) end)
   end
 
   @doc "Stops event delivery to the calling process. Same `self()` rule as `subscribe/3`."
-  @spec unsubscribe(plane(), String.t()) :: result()
-  def unsubscribe(:interactive, id), do: safe(fn -> reply(InteractiveSession.unsubscribe(id)) end)
-  def unsubscribe(:coding, id), do: safe(fn -> reply(CodingSession.unsubscribe(id)) end)
+  @spec unsubscribe(plane(), InteractiveRef.t() | TaskRef.t()) :: result()
+  def unsubscribe(:interactive, session),
+    do: safe(fn -> reply(InteractiveSession.unsubscribe(session)) end)
+
+  def unsubscribe(:coding, session), do: safe(fn -> reply(CodingSession.unsubscribe(session)) end)
 
   @doc """
   The session's durable status and whether it is terminal.
@@ -353,16 +385,16 @@ defmodule Ouroboros.Gateway.Methods do
   ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex)). Without this check a
   client would sit forever waiting for live events from a session that had already ended.
   """
-  @spec session(plane(), String.t()) :: {:ok, atom(), boolean()} | :error
-  def session(:interactive, id) do
-    case safe(fn -> InteractiveSession.info(id) end) do
+  @spec session(plane(), InteractiveRef.t() | TaskRef.t()) :: {:ok, atom(), boolean()} | :error
+  def session(:interactive, session) do
+    case safe(fn -> InteractiveSession.info(session) end) do
       {:ok, %InteractiveState{} = state} -> {:ok, state.status, InteractiveState.terminal?(state)}
       _other -> :error
     end
   end
 
-  def session(:coding, id) do
-    case safe(fn -> CodingSession.info(id) end) do
+  def session(:coding, session) do
+    case safe(fn -> CodingSession.info(session) end) do
       {:ok, %TaskState{} = task} -> {:ok, task.status, TaskState.terminal?(task)}
       _other -> :error
     end
@@ -376,9 +408,12 @@ defmodule Ouroboros.Gateway.Methods do
   further events arrive. The connection monitors what this returns so it can say so
   instead of leaving a client waiting on a stream that ended.
   """
-  @spec coordinator(plane(), String.t()) :: pid() | nil
-  def coordinator(:interactive, id), do: InteractiveTask.whereis(id)
-  def coordinator(:coding, id), do: CodingTask.whereis(id)
+  @spec coordinator(plane(), InteractiveRef.t() | TaskRef.t()) :: pid() | nil
+  def coordinator(:interactive, %InteractiveRef{id: id, node: owner}),
+    do: coordinator_on(owner, InteractiveTask, id)
+
+  def coordinator(:coding, %TaskRef{id: id, node: owner}),
+    do: coordinator_on(owner, CodingTask, id)
 
   @doc """
   Runs one method's handler. Called inside a supervised task, never in the connection.
@@ -389,6 +424,30 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
 
   def invoke("runtime.providers", _params), do: safe(fn -> {:ok, providers()} end)
+
+  def invoke("fleet.status", _params), do: safe(fn -> {:ok, Cluster.fleet_status()} end)
+
+  def invoke("fleet.doctor", _params), do: safe(fn -> {:ok, Cluster.fleet_doctor()} end)
+
+  def invoke("fleet.forget_session_owner", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["machine", "accept_state_loss"]),
+           {:ok, machine} <- fetch_string(params, "machine"),
+           true <- Map.get(params, "accept_state_loss") == true do
+        machine
+        |> Cluster.forget_session_owner()
+        |> forget_session_owner_reply()
+      else
+        false ->
+          invalid_params(
+            "params.accept_state_loss must be true; forgetting an owner can hide its offline interactive and coding sessions"
+          )
+
+        {:invalid, message} ->
+          invalid_params(message)
+      end
+    end)
+  end
 
   def invoke("account.read", params) do
     with :ok <- only_keys(params, []) do
@@ -430,24 +489,31 @@ defmodule Ouroboros.Gateway.Methods do
     with_id(params, fn id -> safe(fn -> reply(Mesh.state(id)) end) end)
   end
 
-  def invoke("interactive.list", _params), do: safe(fn -> reply(InteractiveSession.list()) end)
+  def invoke("interactive.list", _params),
+    do: safe(fn -> fleet_sessions(InteractiveSession) end)
 
   def invoke("interactive.info", params) do
-    with_id(params, fn id -> safe(fn -> reply(InteractiveSession.info(id)) end) end)
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.info(session)) end)
+    end)
   end
 
   def invoke("interactive.replay", params) do
-    with_replay(params, fn id, opts -> InteractiveSession.replay(id, opts) end)
+    with_replay(params, :interactive, fn session, opts ->
+      InteractiveSession.replay(session, opts)
+    end)
   end
 
-  def invoke("coding.list", _params), do: safe(fn -> reply(CodingSession.list()) end)
+  def invoke("coding.list", _params), do: safe(fn -> fleet_sessions(CodingSession) end)
 
   def invoke("coding.info", params) do
-    with_id(params, fn id -> safe(fn -> reply(CodingSession.info(id)) end) end)
+    with_session(params, :coding, ["id", "node"], fn session ->
+      safe(fn -> reply(CodingSession.info(session)) end)
+    end)
   end
 
   def invoke("coding.replay", params) do
-    with_replay(params, fn id, opts -> CodingSession.replay(id, opts) end)
+    with_replay(params, :coding, fn session, opts -> CodingSession.replay(session, opts) end)
   end
 
   def invoke("teams.list", _params), do: safe(fn -> {:ok, teams()} end)
@@ -516,33 +582,33 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("interactive.start", params) do
     safe(fn ->
       case options(params, @start_options) do
-        {:ok, opts} -> reply(InteractiveSession.start(opts))
-        {:invalid, message} -> invalid_params(message)
+        {:ok, opts} ->
+          {owner, opts} = Keyword.pop(opts, :node, node())
+          start_interactive_on(owner, opts)
+
+        {:invalid, message} ->
+          invalid_params(message)
       end
     end)
   end
 
   def invoke("interactive.send_message", params) do
-    with_turn(params, &InteractiveSession.send_message/3)
+    with_turn(params, :interactive, &InteractiveSession.send_message/3)
   end
 
   def invoke("interactive.follow_up", params) do
-    with_turn(params, &InteractiveSession.follow_up/3)
+    with_turn(params, :interactive, &InteractiveSession.follow_up/3)
   end
 
   def invoke("interactive.steer", params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "input", "turn_id"]),
-           {:ok, id} <- fetch_string(params, "id"),
-           {:ok, input} <- fetch_turn_input(params),
-           {:ok, _turn_id} <- fetch_optional_string(params, "turn_id") do
-        # A terminal sends one envelope for all three composer verbs, so this method takes
-        # the same keys and the same structured input as `send_message` and `follow_up`
-        # rather than ignoring whatever it does not recognize. `turn_id` is validated and
-        # goes no further: steering dispatches nothing, it injects into whichever turn is
-        # already running, and `InteractiveSession.steer/3` accepts no turn id — there is
-        # no second dispatch here for an id to make idempotent.
-        reply(InteractiveSession.steer(id, input))
+      with :ok <- only_keys(params, ["id", "input", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, input} <- fetch_turn_input(params) do
+        # Steering injects into the active provider turn and the interactive plane has no
+        # durable steer-request ledger. Accepting a caller id here would falsely advertise
+        # that a lost acknowledgement can be reconciled or safely replayed.
+        reply(InteractiveSession.steer(session, input))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -551,10 +617,11 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("interactive.respond_approval", params) do
     safe(fn ->
-      with {:ok, id} <- fetch_string(params, "id"),
+      with :ok <- only_keys(params, ["id", "request_id", "response", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
            {:ok, request_id} <- fetch_string(params, "request_id"),
            {:ok, response} <- approval_response(params) do
-        reply(InteractiveSession.respond_approval(id, request_id, response))
+        reply(InteractiveSession.respond_approval(session, request_id, response))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -563,11 +630,12 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("interactive.interrupt", params) do
     safe(fn ->
-      with {:ok, id} <- fetch_string(params, "id"),
+      with :ok <- only_keys(params, ["id", "turn_id", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
            {:ok, turn_id} <- fetch_optional_string(params, "turn_id") do
         # `:active` is what the plane calls "whichever turn is running now", and it is
         # the only thing a terminal's Ctrl-C can mean.
-        reply(InteractiveSession.interrupt(id, turn_id || :active))
+        reply(InteractiveSession.interrupt(session, turn_id || :active))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -575,18 +643,23 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   def invoke("interactive.close", params) do
-    with_id(params, fn id -> safe(fn -> reply(InteractiveSession.close(id)) end) end)
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.close(session)) end)
+    end)
   end
 
   def invoke("interactive.kill", params) do
-    with_id(params, fn id -> safe(fn -> reply(InteractiveSession.kill(id)) end) end)
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.kill(session)) end)
+    end)
   end
 
   def invoke("coding.start", params) do
     safe(fn ->
       with {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, opts} <- options(params, @start_options, ["objective"]) do
-        reply(CodingSession.start(objective, opts))
+        {owner, opts} = Keyword.pop(opts, :node, node())
+        start_coding_on(owner, objective, opts)
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -594,7 +667,9 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   def invoke("coding.cancel", params) do
-    with_id(params, fn id -> safe(fn -> reply(CodingSession.cancel(id)) end) end)
+    with_session(params, :coding, ["id", "node"], fn session ->
+      safe(fn -> reply(CodingSession.cancel(session)) end)
+    end)
   end
 
   def invoke("teams.add_worker", params) do
@@ -711,6 +786,108 @@ defmodule Ouroboros.Gateway.Methods do
     {:error, code(:method_not_found), "this build does not serve #{method}"}
   end
 
+  defp start_interactive_on(owner, opts) do
+    case destination_workspace(owner, opts) do
+      :ok ->
+        case Cluster.ensure_placeable(owner) do
+          :ok ->
+            case fence_possible_owner(:interactive, owner) do
+              :ok ->
+                owner
+                |> InteractiveSession.start_for_gateway_on(opts)
+                |> remember_started_owner(:interactive, owner)
+                |> start_reply()
+
+              {:error, _reason} ->
+                unavailable_not_dispatched(
+                  "machine #{owner} start was not dispatched because durable fleet owner evidence could not be checkpointed; repair the Ouroboros data directory and retry"
+                )
+            end
+
+          {:error, reason} ->
+            unavailable_not_dispatched(
+              "machine #{owner} cannot run this interactive session: #{placement_reason(reason)}"
+            )
+        end
+
+      {:error, reason} ->
+        invalid_params(destination_workspace_message(owner, reason))
+    end
+  end
+
+  defp start_coding_on(owner, objective, opts) do
+    case destination_workspace(owner, opts) do
+      :ok ->
+        case Cluster.ensure_placeable(owner) do
+          :ok ->
+            case fence_possible_owner(:coding, owner) do
+              :ok ->
+                owner
+                |> CodingSession.start_for_gateway_on(objective, opts)
+                |> remember_started_owner(:coding, owner)
+                |> start_reply()
+
+              {:error, _reason} ->
+                unavailable_not_dispatched(
+                  "machine #{owner} start was not dispatched because durable fleet owner evidence could not be checkpointed; repair the Ouroboros data directory and retry"
+                )
+            end
+
+          {:error, reason} ->
+            unavailable_not_dispatched(
+              "machine #{owner} cannot run this coding task: #{placement_reason(reason)}"
+            )
+        end
+
+      {:error, reason} ->
+        invalid_params(destination_workspace_message(owner, reason))
+    end
+  end
+
+  # A relative path belongs to the process that expands it. On a selected remote owner
+  # that process is a packaged release whose cwd is an implementation detail, not the
+  # developer's project. Require the client to name the destination path explicitly;
+  # the remote plane remains responsible for checking that the directory exists.
+  defp destination_workspace(owner, _opts) when owner == node(), do: :ok
+
+  defp destination_workspace(owner, opts) do
+    case Keyword.fetch(opts, :workspace) do
+      {:ok, workspace} when is_binary(workspace) ->
+        if Path.type(workspace) == :absolute,
+          do: :ok,
+          else: {:error, {:remote_workspace_not_absolute, owner}}
+
+      :error ->
+        {:error, {:remote_workspace_missing, owner}}
+
+      {:ok, _invalid} ->
+        {:error, {:remote_workspace_missing, owner}}
+    end
+  end
+
+  defp destination_workspace_message(owner, {:remote_workspace_missing, owner}) do
+    "params.workspace is required when params.machine or params.node selects remote " <>
+      "machine #{owner}; provide a nonempty absolute path that exists on that machine"
+  end
+
+  defp destination_workspace_message(owner, {:remote_workspace_not_absolute, owner}) do
+    "params.workspace must be an absolute path on remote machine #{owner}; relative paths " <>
+      "would resolve inside the packaged release rather than the destination project"
+  end
+
+  defp placement_reason(:node_not_connected), do: "it is not connected"
+  defp placement_reason(:runtime_not_running), do: "its Ouroboros runtime is not running"
+
+  defp placement_reason({:runtime_incompatible, _actual, _expected}),
+    do:
+      "its Ouroboros version, OTP release, or fleet protocol revision differs from this gateway; " <>
+        "install the same Ouroboros build before placing sessions there"
+
+  defp placement_reason({:role, actual, :core}),
+    do: "its role is #{actual}; agent sessions require a machine that runs agents"
+
+  defp placement_reason(reason), do: inspect(reason, limit: 10, printable_limit: 200)
+
   defp providers do
     specs = Ouroboros.providers()
 
@@ -729,6 +906,148 @@ defmodule Ouroboros.Gateway.Methods do
       {{:exit, _reason}, spec} ->
         %{provider: spec.provider, spec: spec, status: nil, error: :probe_timeout}
     end)
+  end
+
+  # Session checkpoints are owner-local, so a client attached to one gateway has to ask
+  # every connected compatible core. A successful array is authoritative in existing
+  # clients; it must therefore include every queryable core and fail when an owner proven
+  # by an earlier complete list or successful start is no longer queryable. That positive
+  # observation matters for transitive peers which were never invitation seeds and for
+  # peers whose last-known runtime later became incompatible. Returning [] for either
+  # kind of disconnected owner made its sessions disappear even though this gateway had
+  # already proved that it owned checkpoints.
+  # Fail the read instead: the TUI retains its last-known rows and retries, which is both
+  # backward-compatible and honest. A seed with no positive evidence does not freeze an
+  # otherwise useful list during an ordinary outage. Sessions created exclusively through
+  # another gateway remain owner-local until journals themselves are replicated.
+  defp fleet_sessions(module) when module in [InteractiveSession, CodingSession] do
+    query_fleet_sessions(module, session_plane(module))
+  end
+
+  defp query_fleet_sessions(module, plane) do
+    fleet = Cluster.fleet_status()
+    targets = fleet_session_targets(fleet)
+
+    case unavailable_session_owner(plane, targets) do
+      {:unavailable, target} ->
+        incomplete_session_list(target)
+
+      {:error, reason} ->
+        incomplete_session_evidence(reason)
+
+      :none ->
+        results =
+          targets
+          |> Task.async_stream(
+            &fleet_session_query(&1, module),
+            max_concurrency: max(length(targets), 1),
+            ordered: true,
+            timeout: @fleet_query_timeout,
+            on_timeout: :kill_task
+          )
+
+        targets
+        |> Enum.zip(results)
+        |> Enum.reduce_while({:ok, []}, fn
+          {target, {:ok, {:ok, sessions}}}, {:ok, observations} ->
+            {:cont, {:ok, [{target, sessions} | observations]}}
+
+          {target, _unavailable_or_foreign}, _observations ->
+            {:halt, incomplete_session_list(target)}
+        end)
+        |> case do
+          {:ok, observations} ->
+            # This synchronous update happens before the successful list escapes. Every
+            # queried target participates, so an empty connected owner clears its old
+            # evidence while an unavailable required owner can never be cleared by accident.
+            case Cluster.record_session_snapshot(plane, observations) do
+              :ok ->
+                sessions = Enum.flat_map(observations, &elem(&1, 1))
+
+                {:ok,
+                 Enum.sort_by(sessions, fn session ->
+                   {session |> Map.get(:node, node()) |> Atom.to_string(),
+                    Map.get(session, :id, "")}
+                 end)}
+
+              {:error, reason} ->
+                incomplete_session_evidence(reason)
+            end
+
+          error ->
+            error
+        end
+    end
+  end
+
+  defp session_plane(InteractiveSession), do: :interactive
+  defp session_plane(CodingSession), do: :coding
+
+  # Builders and signers deliberately run no session stores. Asking every distributed
+  # node made a healthy mixed-role fleet look incomplete, so only connected, compatible
+  # cores participate. Positive evidence still wins: a previously listed owner that is
+  # now offline, incompatible, or no longer a core is required and fails closed below.
+  defp fleet_session_targets(fleet) do
+    fleet.machines
+    |> Enum.filter(fn machine ->
+      machine.state in [:local, :connected] and machine.role == :core and
+        machine.runtime_running? == true and machine.compatibility in [:local, :compatible]
+    end)
+    |> Enum.map(& &1.node)
+    |> Enum.uniq()
+  end
+
+  defp unavailable_session_owner(plane, targets) do
+    queried = targets |> Enum.map(&Atom.to_string/1) |> MapSet.new()
+
+    case Cluster.session_owners(plane) do
+      {:ok, owners} ->
+        unavailable =
+          owners
+          |> Enum.sort()
+          |> Enum.find(&(not MapSet.member?(queried, &1)))
+
+        if is_binary(unavailable), do: {:unavailable, unavailable}, else: :none
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp incomplete_session_evidence(_reason) do
+    {:error, code(:unavailable),
+     "session list is incomplete because durable fleet owner evidence is unavailable; keeping the previous fleet view is safer than hiding its sessions",
+     %{
+       "reason" => "owner_query_incomplete",
+       "node" => "unknown",
+       "evidence" => "unavailable"
+     }}
+  end
+
+  defp incomplete_session_list(target) do
+    owner = if(is_atom(target), do: Atom.to_string(target), else: target)
+
+    {:error, code(:unavailable),
+     "session list is incomplete because owner #{owner} did not answer; keeping the previous fleet view is safer than hiding its sessions",
+     %{"reason" => "owner_query_incomplete", "node" => owner}}
+  end
+
+  # `Task.async_stream/3` bounds slow owners. Convert exceptions/exits inside each task
+  # into ordinary data as well, so a dead remote Store cannot link-exit the gateway
+  # caller while we are trying to report the partial read honestly.
+  defp fleet_session_query(target, module) do
+    sessions =
+      if target == node() do
+        apply(module, :list, [])
+      else
+        :erpc.call(target, module, :list, [], @fleet_query_timeout)
+      end
+
+    if is_list(sessions), do: {:ok, sessions}, else: {:error, :invalid_reply}
+  rescue
+    error -> {:error, {:exception, error}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp probe_provider(spec) do
@@ -803,13 +1122,13 @@ defmodule Ouroboros.Gateway.Methods do
   # a second one. `input` keeps accepting the original string shape and additionally accepts
   # the small provider-neutral TurnRequest subset a terminal can honestly construct. Richer
   # provider knobs remain runtime configuration rather than an escape hatch through JSON.
-  defp with_turn(params, dispatch) do
+  defp with_turn(params, plane, dispatch) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "input", "turn_id"]),
-           {:ok, id} <- fetch_string(params, "id"),
+      with :ok <- only_keys(params, ["id", "input", "turn_id", "node"]),
+           {:ok, session} <- session_target(plane, params),
            {:ok, input} <- fetch_turn_input(params),
            {:ok, turn_id} <- fetch_optional_string(params, "turn_id") do
-        reply(dispatch.(id, input, if(turn_id, do: [id: turn_id], else: [])))
+        reply(dispatch.(session, input, if(turn_id, do: [id: turn_id], else: [])))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -844,6 +1163,7 @@ defmodule Ouroboros.Gateway.Methods do
     "reasoning_effort" => :reasoning_effort,
     "runtime_exposure" => :runtime_exposure,
     "role" => :role,
+    "machine" => :node,
     "node" => :node,
     "coding_node" => :coding_node,
     "max_revisions" => :max_revisions
@@ -872,8 +1192,17 @@ defmodule Ouroboros.Gateway.Methods do
       end
     end)
     |> case do
-      {:ok, opts} -> {:ok, Enum.reverse(opts)}
-      {:invalid, message} -> {:invalid, message}
+      {:ok, opts} ->
+        opts = Enum.reverse(opts)
+
+        if Keyword.keys(opts) == Enum.uniq(Keyword.keys(opts)) do
+          {:ok, opts}
+        else
+          {:invalid, "params.machine and params.node are aliases; provide only one"}
+        end
+
+      {:invalid, message} ->
+        {:invalid, message}
     end
   end
 
@@ -940,17 +1269,19 @@ defmodule Ouroboros.Gateway.Methods do
   # is not connected to could not be placed on anyway, so refusing here is the same answer
   # the placement check would give, arrived at without minting an atom.
   defp option_value(key, :node, value) do
-    case Enum.find([node() | Node.list()], &(is_binary(value) and Atom.to_string(&1) == value)) do
-      nil ->
+    case Cluster.resolve_machine(value) do
+      {:error, _reason} ->
         {:invalid,
-         "params.#{key} must name this node or one connected to it: " <>
-           ([node() | Node.list()]
-            |> Enum.map(&Atom.to_string/1)
+         "params.#{key} must name a connected machine or BEAM node: " <>
+           (Cluster.fleet_status().machines
+            |> Enum.filter(&(&1.state in [:local, :connected]))
+            |> Enum.flat_map(&[&1.machine, Atom.to_string(&1.node)])
+            |> Enum.uniq()
             |> Enum.sort()
             |> Enum.join(", "))}
 
-      name ->
-        {:ok, name}
+      {:ok, target} ->
+        {:ok, target}
     end
   end
 
@@ -993,14 +1324,73 @@ defmodule Ouroboros.Gateway.Methods do
       ~s({"decision": "approve"|"deny", "scope": "once"|"session", "reason": "..."})
   end
 
-  defp with_replay(params, replay) do
-    with {:ok, id} <- fetch_string(params, "id"),
+  defp with_replay(params, plane, replay) do
+    with :ok <- only_keys(params, ["id", "cursor", "limit", "node"]),
+         {:ok, session} <- session_target(plane, params),
          {:ok, cursor} <- fetch_cursor(params),
          {:ok, limit} <- fetch_limit(params) do
-      safe(fn -> reply(replay.(id, cursor: cursor, limit: limit)) end)
+      safe(fn -> reply(replay.(session, cursor: cursor, limit: limit)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
+  end
+
+  defp with_session(params, plane, allowed, fun) do
+    with :ok <- only_keys(params, allowed),
+         {:ok, session} <- session_target(plane, params) do
+      fun.(session)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  defp session_target(plane, params) do
+    with {:ok, id} <- fetch_string(params, "id"),
+         {:ok, owner} <- optional_owner(params) do
+      owner = owner || node()
+
+      case plane do
+        :interactive -> {:ok, InteractiveRef.new(id, owner)}
+        :coding -> {:ok, TaskRef.new(id, owner)}
+      end
+    end
+  end
+
+  defp optional_owner(params) do
+    case Map.fetch(params, "node") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        case Cluster.resolve_known_machine(value) do
+          {:ok, owner} ->
+            {:ok, owner}
+
+          {:error, _reason} ->
+            {:invalid,
+             "params.node must name a known BEAM node: " <>
+               (Cluster.fleet_status().machines
+                |> Enum.flat_map(&[&1.machine, Atom.to_string(&1.node)])
+                |> Enum.uniq()
+                |> Enum.sort()
+                |> Enum.join(", "))}
+        end
+
+      {:ok, _value} ->
+        {:invalid, "params.node must name a known BEAM node"}
+    end
+  end
+
+  defp coordinator_on(owner, module, id) when owner == node(), do: module.whereis(id)
+
+  defp coordinator_on(owner, module, id) do
+    if owner in Node.list() do
+      :erpc.call(owner, module, :whereis, [id], @default_timeout)
+    else
+      nil
+    end
+  catch
+    _kind, _reason -> nil
   end
 
   defp fetch_string(params, key) do
@@ -1188,10 +1578,152 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp reply({:error, {:unavailable, message}}) when is_binary(message), do: unavailable(message)
 
-  defp reply({:error, reason}),
+  defp reply({:error, {:owner_unavailable, owner}}) when is_atom(owner) do
+    {:error, code(:unavailable), "session owner #{owner} is offline; Ouroboros is reconnecting",
+     %{"reason" => "owner_unavailable", "node" => owner, "outcome" => "unknown"}}
+  end
+
+  defp reply({:error, {:owner_unavailable, owner, detail}}) when is_atom(owner) do
+    {:error, code(:unavailable),
+     "session owner #{owner} did not answer; Ouroboros is reconnecting",
+     %{
+       "reason" => "owner_unavailable",
+       "node" => owner,
+       "detail" => Wire.to_json(detail),
+       "outcome" => "unknown"
+     }}
+  end
+
+  defp reply({:error, reason}), do: turn_error_reply(reason)
+  defp reply(value), do: {:ok, value}
+
+  # Start has a durable boundary the generic `reply/1` cannot infer. Once the exact
+  # caller-owned request is checkpointed, readiness failure is still a successful
+  # creation outcome: clients must open that stable failed session, not mint another or
+  # remain trapped reconciling it. Conflicts are the inverse — this request definitely
+  # created nothing, because the id already belongs to different immutable intent.
+  # Owner-evidence failure cannot rewrite a created session into `not_dispatched`; the
+  # monitor marks its evidence unreliable so subsequent lists fail closed instead.
+  defp fence_possible_owner(_plane, owner) when owner == node(), do: :ok
+
+  defp fence_possible_owner(plane, owner) do
+    Cluster.record_session_snapshot(plane, [{owner, [%{possible_start: true}]}])
+  end
+
+  defp remember_started_owner({:ok, %{node: owner}} = result, plane, owner) do
+    _ = Cluster.record_session_snapshot(plane, [{owner, [%{created: true}]}])
+    result
+  end
+
+  defp remember_started_owner({:created, %{node: owner}, _reason} = result, plane, owner) do
+    _ = Cluster.record_session_snapshot(plane, [{owner, [%{created: true}]}])
+    result
+  end
+
+  defp remember_started_owner(result, _plane, _owner), do: result
+
+  defp start_reply({:created, %{id: id, node: owner}, reason}) do
+    {:ok,
+     %{
+       "id" => id,
+       "node" => owner,
+       "outcome" => "created",
+       "ready" => false,
+       "error" => Wire.to_json(reason)
+     }}
+  end
+
+  defp start_reply({:error, {:session_id_conflict, id} = reason}) do
+    {:error, code(:upstream_error),
+     "session id #{inspect(id)} already belongs to different immutable start options",
+     %{
+       "reason" => "session_id_conflict",
+       "id" => id,
+       "outcome" => "not_dispatched",
+       "error" => Wire.to_json(reason)
+     }}
+  end
+
+  defp start_reply({:error, {:task_id_conflict, id} = reason}) do
+    {:error, code(:upstream_error),
+     "coding task id #{inspect(id)} already belongs to a different immutable request",
+     %{
+       "reason" => "task_id_conflict",
+       "id" => id,
+       "outcome" => "not_dispatched",
+       "error" => Wire.to_json(reason)
+     }}
+  end
+
+  defp start_reply(result), do: reply(result)
+
+  @doc false
+  # These are not refusals. Harness may already have returned a turn id, its call may
+  # have exited before a trustworthy acknowledgement, or a synchronous refusal may have
+  # failed to replace the durable `:dispatching` intent that recovery can still send.
+  # In every case the caller-owned id is the reconciliation boundary and retrying under
+  # a new id could duplicate live work.
+  def turn_error_reply(
+        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id} = reason
+      )
+      when is_binary(turn_id) do
+    unknown_turn_dispatch(turn_id, reason)
+  end
+
+  def turn_error_reply(
+        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
+         {:harness_refused, _refusal}} = reason
+      )
+      when is_binary(turn_id) do
+    unknown_turn_dispatch(turn_id, reason)
+  end
+
+  def turn_error_reply(
+        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
+         {:request_exposure_failed, _failure}} = reason
+      )
+      when is_binary(turn_id) do
+    unknown_turn_dispatch(turn_id, reason)
+  end
+
+  def turn_error_reply({:turn_dispatch_ambiguous, turn_id} = reason)
+      when is_binary(turn_id) do
+    unknown_turn_dispatch(turn_id, reason)
+  end
+
+  def turn_error_reply({:turn_dispatch_ambiguous, turn_id, :checkpoint_failed} = reason)
+      when is_binary(turn_id) do
+    unknown_turn_dispatch(turn_id, reason)
+  end
+
+  # Harness accepts `follow_up` while a session is running and queues it, but refuses a
+  # second immediate `send_message` as `:busy`. Name that distinction so an interactive
+  # client can preserve the draft and switch to the queueing verb instead of showing an
+  # opaque upstream failure. Harness answered synchronously, so this input did not cross
+  # the dispatch boundary and a retry under a fresh logical id is safe.
+  def turn_error_reply({:turn_dispatch_failed, :busy} = reason) do
+    {:error, code(:upstream_error),
+     "the session is already running a turn; queue this input with interactive.follow_up",
+     %{
+       "reason" => "busy",
+       "outcome" => "not_dispatched",
+       "retry_with" => "interactive.follow_up",
+       "error" => Wire.to_json(reason)
+     }}
+  end
+
+  def turn_error_reply(reason),
     do: {:error, code(:upstream_error), "the runtime refused the call", Wire.to_json(reason)}
 
-  defp reply(value), do: {:ok, value}
+  defp unknown_turn_dispatch(turn_id, reason) do
+    {:error, code(:upstream_timeout),
+     "the runtime could not confirm the turn dispatch; the turn may already be running",
+     %{
+       "outcome" => "unknown",
+       "turn_id" => turn_id,
+       "error" => Wire.to_json(reason)
+     }}
+  end
 
   # The account boundary is the one upstream that names Codex in its errors, and those
   # sentences are only true of it. `{:error, {:timeout, _}}` and `{:error, {:upstream, _}}`
@@ -1207,6 +1739,59 @@ defmodule Ouroboros.Gateway.Methods do
   # `{:unavailable, message}` already reads as a sentence about whatever was unavailable,
   # and `reply/1` maps it without attributing it to anyone.
   defp account_reply(result), do: reply(result)
+
+  defp forget_session_owner_reply({:ok, result}), do: {:ok, result}
+
+  defp forget_session_owner_reply({:error, {:invalid_session_owner_machine, machine}}) do
+    invalid_params(
+      "params.machine must be the exact fleet machine name, got: #{inspect(machine)}"
+    )
+  end
+
+  defp forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
+    not_found(
+      "fleet profile has no signed roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
+    )
+  end
+
+  defp forget_session_owner_reply({:error, {:session_owner_connected, machine, owner}}) do
+    {:error, code(:unavailable),
+     "machine #{machine} is connected as #{owner}; inspect or copy its sessions instead of forgetting live state",
+     %{
+       "reason" => "session_owner_connected",
+       "machine" => machine,
+       "node" => owner
+     }}
+  end
+
+  defp forget_session_owner_reply({:error, :fleet_profile_unavailable}) do
+    unavailable(
+      "no active fleet profile is available; this command only retires a member already tombstoned by a signed fleet roster"
+    )
+  end
+
+  defp forget_session_owner_reply({:error, {:fleet_profile_unavailable, reason}}) do
+    {:error, code(:unavailable),
+     "the local fleet profile could not be validated; repair or re-import it before forgetting session state",
+     %{"reason" => "fleet_profile_unavailable", "error" => Wire.to_json(reason)}}
+  end
+
+  defp forget_session_owner_reply({:error, {:session_owner_evidence_unavailable, reason}}) do
+    {:error, code(:unavailable),
+     "durable session-owner evidence is unavailable; repair it before accepting state loss",
+     %{"reason" => "session_owner_evidence_unavailable", "error" => Wire.to_json(reason)}}
+  end
+
+  defp forget_session_owner_reply({:error, {:session_owner_forget_checkpoint_failed, reason}}) do
+    {:error, code(:upstream_error),
+     "session-owner evidence could not be checkpointed, so no state was forgotten",
+     %{
+       "reason" => "session_owner_forget_checkpoint_failed",
+       "error" => Wire.to_json(reason)
+     }}
+  end
+
+  defp forget_session_owner_reply({:error, reason}), do: upstream_error(reason)
 
   defp exit_result(reason) do
     case exit_class(reason) do
@@ -1238,6 +1823,10 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp unavailable(message), do: {:error, code(:unavailable), message}
+
+  defp unavailable_not_dispatched(message),
+    do: {:error, code(:unavailable), message, %{"outcome" => "not_dispatched"}}
+
   defp not_found(message), do: {:error, code(:not_found), message}
   defp invalid_params(message), do: {:error, code(:invalid_params), message}
 end

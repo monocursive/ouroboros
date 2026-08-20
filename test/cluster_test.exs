@@ -9,6 +9,7 @@ defmodule Ouroboros.ClusterTest do
   alias Cluster.Strategy.Gossip
 
   alias Ouroboros.Cluster
+  alias Ouroboros.Gateway.Methods
   alias Ouroboros.Mesh
   alias Ouroboros.Team
   alias Ouroboros.Team.Server
@@ -55,6 +56,24 @@ defmodule Ouroboros.ClusterTest do
 
       assert_raise ArgumentError, ~r/node_role/, fn -> Cluster.boot_role!() end
     end
+
+    test "fleet compatibility has an explicit manual protocol revision" do
+      runtime = Cluster.local_fleet_posture().runtime
+
+      assert runtime.fleet_protocol_revision == 1
+
+      assert Cluster.runtime_compatible?(
+               runtime,
+               %{runtime | system_architecture: "different-test-architecture"}
+             )
+
+      refute Cluster.runtime_compatible?(
+               runtime,
+               %{runtime | fleet_protocol_revision: runtime.fleet_protocol_revision + 1}
+             )
+
+      refute Cluster.runtime_compatible?(runtime, Map.delete(runtime, :fleet_protocol_revision))
+    end
   end
 
   describe "roles across real nodes" do
@@ -95,6 +114,133 @@ defmodule Ouroboros.ClusterTest do
       assert Cluster.ensure_role(bare, :core) == {:error, :runtime_not_running}
       assert Cluster.ensure_role(bare, :any) == {:error, :runtime_not_running}
       refute bare in Cluster.nodes_by_role(:core)
+    end
+
+    @tag timeout: 180_000
+    test "fleet directory retains an offline peer with last-known runtime facts" do
+      peer = start_app_peer!()
+
+      assert_eventually(
+        fn ->
+          Enum.any?(Cluster.fleet_status().machines, fn machine ->
+            machine.node == peer and machine.state == :connected and machine.role == :core and
+              machine.runtime_running? == true
+          end)
+        end,
+        300
+      )
+
+      before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
+      assert before.compatibility == :compatible
+      assert before.last_up_at
+      assert before.runtime.fleet_protocol_revision == 1
+      assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
+
+      assert %{status: :warning, guidance: roster_guidance} =
+               Enum.find(
+                 Cluster.fleet_doctor().checks,
+                 &(&1.id == {:machine_connectivity, peer})
+               )
+
+      assert roster_guidance =~ "latest signed roster"
+      assert roster_guidance =~ "rotate the fleet"
+
+      # CPU architecture is inventory, not a compatibility fence: Erlang distribution
+      # and the agent protocol are cross-architecture. Simulate the common arm64 Mac +
+      # x86_64 Linux fleet and ensure doctor does not turn it into a false outage.
+      :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+        put_in(
+          state,
+          [:machines, peer, :runtime, :system_architecture],
+          "different-test-architecture"
+        )
+      end)
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(peer)
+        },
+        fn ->
+          mixed_arch = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
+          assert mixed_arch.runtime.system_architecture == "different-test-architecture"
+          assert mixed_arch.compatibility == :compatible
+
+          assert %{status: :ok} =
+                   Enum.find(Cluster.fleet_doctor().checks, fn check ->
+                     check.id == {:machine_compatibility, peer}
+                   end)
+
+          protocol_revision = mixed_arch.runtime.fleet_protocol_revision
+
+          :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+            put_in(
+              state,
+              [:machines, peer, :runtime, :fleet_protocol_revision],
+              protocol_revision + 1
+            )
+          end)
+
+          protocol_skew = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
+          assert protocol_skew.compatibility == :incompatible
+
+          assert %{status: :error, guidance: guidance} =
+                   Enum.find(Cluster.fleet_doctor().checks, fn check ->
+                     check.id == {:machine_compatibility, peer}
+                   end)
+
+          assert guidance =~ "same Ouroboros build"
+
+          :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+            put_in(
+              state,
+              [:machines, peer, :runtime, :fleet_protocol_revision],
+              protocol_revision
+            )
+          end)
+        end
+      )
+
+      joined_fleet = Cluster.fleet_status()
+      assert joined_fleet.summary.expected == length(joined_fleet.machines)
+      assert joined_fleet.summary.expected >= joined_fleet.summary.connected
+
+      # Stop the peer through BEAM rather than by touching an OS pid. The monitor has no
+      # process left to query afterward, so retaining these facts proves this is a
+      # last-known directory rather than a decorated Node.list/0.
+      true = :rpc.cast(peer, System, :stop, [])
+
+      assert_eventually(
+        fn ->
+          case Enum.find(Cluster.fleet_status().machines, &(&1.node == peer)) do
+            %{state: :offline, last_down_at: value, down_reason: reason}
+            when is_binary(value) and is_binary(reason) ->
+              true
+
+            _other ->
+              false
+          end
+        end,
+        300
+      )
+
+      offline = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
+      assert offline.role == :core
+
+      assert Map.drop(offline.runtime, [:system_architecture]) ==
+               Map.drop(before.runtime, [:system_architecture])
+
+      assert offline.runtime.system_architecture == "different-test-architecture"
+      assert offline.last_seen_at >= before.last_seen_at
+      assert Cluster.status().fleet.summary.offline >= 0
+      assert Cluster.resolve_machine(Atom.to_string(peer)) == {:error, :unknown_machine}
+      assert Cluster.resolve_known_machine(Atom.to_string(peer)) == {:ok, peer}
+
+      doctor = Cluster.fleet_doctor()
+      refute inspect(doctor) =~ Atom.to_string(:erlang.get_cookie())
+
+      assert %{status: :warning, node: ^peer} =
+               Enum.find(doctor.checks, &(&1.id == {:machine_connectivity, peer}))
     end
   end
 
@@ -220,6 +366,57 @@ defmodule Ouroboros.ClusterTest do
         end
       )
     end
+
+    test "static topology exposes an expected offline machine with recovery guidance" do
+      absent = :"expected-core@127.0.0.1"
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(absent),
+          "OUROBOROS_CLUSTER_RECONNECT_MS" => "250"
+        },
+        fn ->
+          fleet = Cluster.fleet_status()
+          machine = Enum.find(fleet.machines, &(&1.node == absent))
+
+          assert machine.expected? == true
+          assert machine.state == :offline
+          assert fleet.formation.reconnect_ms == 250
+          assert fleet.summary.offline >= 1
+
+          doctor = Cluster.fleet_doctor()
+
+          assert Enum.any?(doctor.checks, fn check ->
+                   check.id == {:machine_connectivity, absent} and check.status == :error and
+                     check.message =~ "will keep retrying" and check.guidance =~ "EPMD"
+                 end)
+        end
+      )
+    end
+
+    test "doctor never calls an explicitly overridden cleartext fleet healthy" do
+      ensure_distributed!()
+      absent = :"cleartext-core@127.0.0.1"
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(absent)
+        },
+        fn ->
+          doctor = Cluster.fleet_doctor()
+
+          refute doctor.healthy?
+
+          assert %{status: :error, message: message, guidance: guidance} =
+                   Enum.find(doctor.checks, &(&1.id == :distribution_encryption))
+
+          assert message =~ "cleartext"
+          assert guidance =~ "generated fleet TLS profile"
+        end
+      )
+    end
   end
 
   describe "placement" do
@@ -269,6 +466,830 @@ defmodule Ouroboros.ClusterTest do
       local_id = unique_id("local-worker")
       assert {:ok, %{id: ^local_id, node: local_node}} = Team.add_worker(team, local_id)
       assert local_node == node()
+    end
+
+    @tag timeout: 180_000
+    test "an incompatible core is refused by placement and both gateway start planes" do
+      core = start_app_peer!()
+      incompatible_version = "999.0.0-placement-test"
+      replace_peer_version!(core, incompatible_version)
+
+      # The directory and live placement probe deliberately use the same contract. Force
+      # an immediate refresh because this test changes an application spec without taking
+      # the distributed node down, which produces no natural nodeup event.
+      send(Ouroboros.Cluster.Monitor, {:refresh_connected, [core]})
+
+      assert_eventually(
+        fn ->
+          case Enum.find(Cluster.fleet_status().machines, &(&1.node == core)) do
+            %{
+              compatibility: :incompatible,
+              runtime: %{ouroboros_version: ^incompatible_version}
+            } ->
+              true
+
+            _other ->
+              false
+          end
+        end,
+        300
+      )
+
+      expected =
+        Cluster.local_fleet_posture().runtime
+        |> Map.take([:fleet_protocol_revision, :ouroboros_version, :otp_release])
+
+      assert {:error,
+              {:runtime_incompatible, %{ouroboros_version: ^incompatible_version} = actual,
+               ^expected}} =
+               Cluster.ensure_placeable(core)
+
+      assert actual.otp_release == expected.otp_release
+      assert actual.fleet_protocol_revision == expected.fleet_protocol_revision
+
+      assert %{status: :error, node: ^core} =
+               Enum.find(
+                 Cluster.fleet_doctor().checks,
+                 &(&1.id == {:machine_compatibility, core})
+               )
+
+      interactive_id = unique_id("incompatible-interactive")
+      coding_id = unique_id("incompatible-coding")
+
+      starts = [
+        {"interactive.start",
+         %{
+           "id" => interactive_id,
+           "node" => Atom.to_string(core)
+         }},
+        {"coding.start",
+         %{
+           "id" => coding_id,
+           "objective" => "must not start on a mismatched runtime",
+           "machine" => Atom.to_string(core)
+         }}
+      ]
+
+      # Workspace validation precedes placement: this peer is deliberately incompatible,
+      # yet missing and relative destination paths are parameter refusals rather than a
+      # version refusal or an accidental expansion from the packaged release's cwd.
+      for {method, params} <- starts do
+        assert {:error, -32_602, missing} = Methods.invoke(method, params)
+        assert missing =~ "params.workspace is required"
+        assert missing =~ "nonempty absolute path"
+        assert missing =~ "on that machine"
+
+        assert {:error, -32_602, relative} =
+                 Methods.invoke(method, Map.put(params, "workspace", "."))
+
+        assert relative =~ "params.workspace must be an absolute path"
+        assert relative =~ "packaged release"
+
+        assert {:error, -32_602, empty} =
+                 Methods.invoke(method, Map.put(params, "workspace", ""))
+
+        assert empty =~ "params.workspace must be a nonempty string"
+      end
+
+      for {method, params} <-
+            Enum.map(starts, fn {method, params} ->
+              {method, Map.put(params, "workspace", File.cwd!())}
+            end) do
+        assert {:error, -32_004, message, %{"outcome" => "not_dispatched"}} =
+                 Methods.invoke(method, params)
+
+        assert message =~ "Ouroboros version, OTP release, or fleet protocol revision differs"
+        assert message =~ "install the same Ouroboros build"
+      end
+
+      assert :not_found ==
+               :erpc.call(core, Ouroboros.Interactive.Store, :get, [interactive_id])
+
+      assert :not_found == :erpc.call(core, Ouroboros.Coding.Store, :get, [coding_id])
+    end
+
+    @tag timeout: 180_000
+    test "connected core query failures are incomplete without freezing an idle offline seed" do
+      core = start_app_peer!()
+
+      previous_strategy = System.get_env("OUROBOROS_CLUSTER_STRATEGY")
+      previous_hosts = System.get_env("OUROBOROS_CLUSTER_HOSTS")
+      System.put_env("OUROBOROS_CLUSTER_STRATEGY", "epmd")
+      System.put_env("OUROBOROS_CLUSTER_HOSTS", Atom.to_string(core))
+
+      on_exit(fn ->
+        if previous_strategy,
+          do: System.put_env("OUROBOROS_CLUSTER_STRATEGY", previous_strategy),
+          else: System.delete_env("OUROBOROS_CLUSTER_STRATEGY")
+
+        if previous_hosts,
+          do: System.put_env("OUROBOROS_CLUSTER_HOSTS", previous_hosts),
+          else: System.delete_env("OUROBOROS_CLUSTER_HOSTS")
+      end)
+
+      assert_eventually(
+        fn ->
+          match?(
+            %{expected?: true, state: :connected, role: :core},
+            Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+          )
+        end,
+        300
+      )
+
+      assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
+      assert is_list(interactive)
+      assert {:ok, coding} = Methods.invoke("coding.list", %{})
+      assert is_list(coding)
+
+      # Keep distribution alive but remove the owner-local stores. This is the exact
+      # posture in which silently mapping the remote error to [] used to erase its rows
+      # while fleet.status continued to call the node connected.
+      assert :ok = :erpc.call(core, Application, :stop, [:ouroboros])
+      assert core in Node.list()
+
+      for method <- ["interactive.list", "coding.list"] do
+        assert {:error, -32_004, message,
+                %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                 Methods.invoke(method, %{})
+
+        assert owner == Atom.to_string(core)
+        assert message =~ "session list is incomplete"
+        assert message =~ "keeping the previous fleet view"
+      end
+
+      # Both complete lists above proved this core empty, so its later outage must not
+      # freeze an otherwise useful refresh merely because it is a saved invitation seed.
+      # Positive start/list evidence, not stale topology alone, is the retention fence.
+      true = :rpc.cast(core, System, :stop, [])
+
+      assert_eventually(fn -> core not in Node.list() end, 300)
+
+      assert_eventually(
+        fn ->
+          match?(
+            %{state: :offline, role: :core, runtime_running?: true},
+            Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+          )
+        end,
+        300
+      )
+
+      for method <- ["interactive.list", "coding.list"] do
+        assert {:ok, sessions} = Methods.invoke(method, %{})
+        assert is_list(sessions)
+      end
+    end
+
+    test "a complete empty reply clears only that connected owner's positive evidence" do
+      assert :ok =
+               Cluster.record_session_snapshot(:interactive, [
+                 {node(), [%{id: "observed-session"}]}
+               ])
+
+      assert {:ok, observed} = Cluster.session_owners(:interactive)
+      assert MapSet.member?(observed, Atom.to_string(node()))
+
+      assert :ok = Cluster.record_session_snapshot(:interactive, [{node(), []}])
+      assert {:ok, cleared} = Cluster.session_owners(:interactive)
+      refute MapSet.member?(cleared, Atom.to_string(node()))
+    end
+
+    test "session-owner evidence accepts fleets beyond the former 256-machine ceiling" do
+      reset_session_owner_evidence!()
+      on_exit(fn -> reset_session_owner_evidence!() end)
+
+      owners =
+        Enum.map(1..257, fn index ->
+          String.to_atom("evidence-owner-#{index}@127.0.0.1")
+        end)
+
+      observations = Enum.map(owners, &{&1, [%{id: "session-on-#{&1}"}]})
+
+      assert :ok = Cluster.record_session_snapshot(:interactive, observations)
+      assert {:ok, recorded} = Cluster.session_owners(:interactive)
+      assert MapSet.size(recorded) == 257
+      assert Enum.all?(owners, &MapSet.member?(recorded, Atom.to_string(&1)))
+
+      assert :ok =
+               Cluster.record_session_snapshot(
+                 :interactive,
+                 Enum.map(owners, &{&1, []})
+               )
+    end
+
+    test "a new fleet ignores durable owner evidence from a previous fleet identity" do
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      previous_fleet_id = System.get_env("OUROBOROS_FLEET_ID")
+      current_fleet_id = "111122223333444455556666"
+
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      System.put_env("OUROBOROS_FLEET_ID", current_fleet_id)
+
+      write_test_fleet_profile!(fleet_dir, current_fleet_id)
+
+      on_exit(fn ->
+        if previous_data_dir,
+          do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+          else: Application.delete_env(:ouroboros, :data_dir)
+
+        if previous_fleet_id,
+          do: System.put_env("OUROBOROS_FLEET_ID", previous_fleet_id),
+          else: System.delete_env("OUROBOROS_FLEET_ID")
+      end)
+
+      assert :ok =
+               Ouroboros.Storage.DurableFile.put_checkpoint(
+                 {:ouroboros, :cluster_session_owners, 1},
+                 %{
+                   version: 1,
+                   fleet_id: "aaaabbbbccccddddeeeeffff",
+                   interactive: ["former-core@127.0.0.1"],
+                   coding: []
+                 },
+                 path: Path.join(fleet_dir, "cluster-directory")
+               )
+
+      previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+      Process.exit(previous_monitor, :kill)
+
+      assert_eventually(
+        fn ->
+          case Process.whereis(Ouroboros.Cluster.Monitor) do
+            monitor when is_pid(monitor) -> monitor != previous_monitor
+            _absent -> false
+          end
+        end,
+        300
+      )
+
+      assert {:ok, owners} = Cluster.session_owners(:interactive)
+      refute MapSet.member?(owners, "former-core@127.0.0.1")
+    end
+
+    test "a malformed fleet tombstone makes owner evidence unavailable instead of clearing it" do
+      fleet_id = "2468ace02468ace02468ace0"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+      owner = :"ouro-lost@127.0.0.2"
+      removed = test_fleet_member("lost", "127.0.0.2")
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+
+      with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+
+        on_exit(fn ->
+          if previous_data_dir,
+            do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+            else: Application.delete_env(:ouroboros, :data_dir)
+        end)
+
+        write_test_fleet_profile!(fleet_dir, fleet_id)
+        reset_session_owner_evidence!()
+
+        assert :ok =
+                 Cluster.record_session_snapshot(:interactive, [
+                   {owner, [%{id: "retained-owner"}]}
+                 ])
+
+        malformed = Map.put(removed, "node", "ouro-someone-else@127.0.0.2")
+
+        write_test_fleet_profile!(fleet_dir, fleet_id,
+          tombstones: [malformed],
+          roster_revision: 2
+        )
+
+        restart_cluster_monitor!()
+
+        assert {:error, {:fleet_profile_unreadable, :invalid_fleet_profile_roster}} =
+                 Cluster.session_owners(:interactive)
+
+        assert {:error, -32_004, _message,
+                %{
+                  "reason" => "owner_query_incomplete",
+                  "node" => "unknown",
+                  "evidence" => "unavailable"
+                }} = Methods.invoke("interactive.list", %{})
+
+        # Repairing the profile recovers the unchanged durable evidence; malformed input
+        # never became an implicit state-loss acknowledgement.
+        write_test_fleet_profile!(fleet_dir, fleet_id, roster_revision: 2)
+        restart_cluster_monitor!()
+
+        assert {:ok, recovered} = Cluster.session_owners(:interactive)
+        assert MapSet.member?(recovered, Atom.to_string(owner))
+        assert :ok = Cluster.record_session_snapshot(:interactive, [{owner, []}])
+      end)
+    end
+
+    @tag timeout: 180_000
+    test "a roster tombstone preserves evidence until an explicit offline state-loss acknowledgement" do
+      fleet_id = "9876543210abcdef98765432"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      machine = "retire#{System.unique_integer([:positive])}"
+      ensure_distributed!()
+
+      {:ok, peer, target} =
+        :peer.start(%{
+          name: String.to_atom("ouro-#{machine}"),
+          args: code_path_args(),
+          wait_boot: 30_000
+        })
+
+      on_exit(fn -> stop_peer(peer) end)
+      [_name, host] = target |> Atom.to_string() |> String.split("@", parts: 2)
+      removed_member = test_fleet_member(machine, host)
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+
+      with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+
+        on_exit(fn ->
+          if previous_data_dir,
+            do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+            else: Application.delete_env(:ouroboros, :data_dir)
+        end)
+
+        write_test_fleet_profile!(fleet_dir, fleet_id)
+        reset_session_owner_evidence!()
+
+        assert {:error, -32_007, missing_message} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => true
+                 })
+
+        assert missing_message =~ "no signed roster tombstone"
+
+        write_test_fleet_profile!(fleet_dir, fleet_id,
+          tombstones: [removed_member],
+          roster_revision: 2
+        )
+
+        assert :ok =
+                 Cluster.record_session_snapshot(:interactive, [
+                   {target, [%{id: "offline-interactive"}]}
+                 ])
+
+        assert :ok =
+                 Cluster.record_session_snapshot(:coding, [
+                   {target, [%{id: "offline-coding"}]}
+                 ])
+
+        assert {:error, -32_602, confirmation_message} =
+                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
+
+        assert confirmation_message =~ "accept_state_loss must be true"
+
+        assert {:error, -32_004, connected_message,
+                %{
+                  "reason" => "session_owner_connected",
+                  "machine" => ^machine,
+                  "node" => connected_node
+                }} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => true
+                 })
+
+        assert connected_node == Atom.to_string(target)
+        assert connected_message =~ "inspect or copy its sessions"
+
+        stop_peer(peer)
+        assert_eventually(fn -> target not in Node.list() end, 300)
+        restart_cluster_monitor!()
+
+        # Cancellation and signed roster import are not session-state retirement. The
+        # tombstone alone survives a Monitor/BEAM recovery and keeps both planes honest.
+        for plane <- [:interactive, :coding] do
+          assert {:ok, owners} = Cluster.session_owners(plane)
+          assert MapSet.member?(owners, Atom.to_string(target))
+        end
+
+        for method <- ["interactive.list", "coding.list"] do
+          assert {:error, -32_004, _message,
+                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                   Methods.invoke(method, %{})
+
+          assert owner == Atom.to_string(target)
+        end
+
+        assert {:ok,
+                %{
+                  machine: ^machine,
+                  node: forgotten_node,
+                  roster_revision: 2,
+                  removed: true
+                }} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => true
+                 })
+
+        assert forgotten_node == Atom.to_string(target)
+
+        for plane <- [:interactive, :coding] do
+          assert {:ok, owners} = Cluster.session_owners(plane)
+          refute MapSet.member?(owners, Atom.to_string(target))
+        end
+
+        # Repeating an already-confirmed retirement is safe for automation and still
+        # forces a synced checkpoint before success.
+        assert {:ok, %{removed: false, roster_revision: 2}} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => true
+                 })
+
+        restart_cluster_monitor!()
+
+        assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
+        assert is_list(interactive)
+        assert {:ok, coding} = Methods.invoke("coding.list", %{})
+        assert is_list(coding)
+      end)
+    end
+
+    @tag timeout: 180_000
+    test "session lists query cores without treating connected builders or signers as missing stores" do
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "none",
+          "OUROBOROS_CLUSTER_HOSTS" => nil
+        },
+        fn ->
+          core = start_app_peer!()
+          builder = start_app_peer!(node_role: :builder)
+          signer = start_signer_peer!()
+          on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
+
+          assert_eventually(
+            fn ->
+              machines = Cluster.fleet_status().machines
+
+              match?(%{role: :core}, Enum.find(machines, &(&1.node == core))) and
+                match?(%{role: :builder}, Enum.find(machines, &(&1.node == builder))) and
+                match?(%{role: :signer}, Enum.find(machines, &(&1.node == signer)))
+            end,
+            300
+          )
+
+          assert :erpc.call(builder, Process, :whereis, [Ouroboros.Interactive.Store]) == nil
+          assert :erpc.call(signer, Process, :whereis, [Ouroboros.Interactive.Store]) == nil
+
+          id = unique_id("mixed-role-core-session")
+          create_remote_interactive_session!(core, id)
+
+          assert {:ok, sessions} = Methods.invoke("interactive.list", %{})
+          assert Enum.any?(sessions, &(&1.id == id and &1.node == core))
+        end
+      )
+    end
+
+    @tag timeout: 180_000
+    test "a successful remote start records its owner before the first fleet list" do
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "none",
+          "OUROBOROS_CLUSTER_HOSTS" => nil
+        },
+        fn ->
+          core = start_app_peer!()
+          on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
+
+          previous_providers = Application.get_env(:jido_harness, :providers)
+          previous_config = Application.get_env(:jido_harness, :provider_config)
+
+          providers =
+            previous_providers
+            |> then(&Map.new(&1 || %{}))
+            |> Map.put(:ouroboros_test, Ouroboros.Test.HarnessAdapter)
+
+          config =
+            previous_config
+            |> then(&Map.new(&1 || %{}))
+            |> Map.put(:ouroboros_test, %{test_pid: self()})
+
+          Application.put_env(:jido_harness, :providers, providers)
+          Application.put_env(:jido_harness, :provider_config, config)
+
+          # No turn is sent, so this creates a durable ready session without leaving a
+          # provider stream running — exactly the start-before-first-list boundary.
+          :ok = :erpc.call(core, Application, :put_env, [:jido_harness, :providers, providers])
+
+          :ok =
+            :erpc.call(core, Application, :put_env, [
+              :jido_harness,
+              :provider_config,
+              Map.put(config, :ouroboros_test, %{})
+            ])
+
+          on_exit(fn ->
+            if previous_providers,
+              do: Application.put_env(:jido_harness, :providers, previous_providers),
+              else: Application.delete_env(:jido_harness, :providers)
+
+            if previous_config,
+              do: Application.put_env(:jido_harness, :provider_config, previous_config),
+              else: Application.delete_env(:jido_harness, :provider_config)
+          end)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{state: :connected, role: :core, compatibility: :compatible},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          id = unique_id("remote-created-before-list")
+
+          assert {:ok, %Ouroboros.Interactive.Ref{id: ^id, node: ^core}} =
+                   Methods.invoke("interactive.start", %{
+                     "id" => id,
+                     "provider" => "ouroboros_test",
+                     "workspace" => File.cwd!(),
+                     "node" => Atom.to_string(core)
+                   })
+
+          assert {:ok, owners} = Cluster.session_owners(:interactive)
+          assert MapSet.member?(owners, Atom.to_string(core))
+
+          true = :rpc.cast(core, System, :stop, [])
+          assert_eventually(fn -> core not in Node.list() end, 300)
+
+          assert {:error, -32_004, _message,
+                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                   Methods.invoke("interactive.list", %{})
+
+          assert owner == Atom.to_string(core)
+        end
+      )
+    end
+
+    @tag timeout: 180_000
+    test "a pre-dispatch owner fence survives a lost remote reply and monitor restart" do
+      fleet_id = "abcdefabcdefabcdefabcdef"
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "none",
+          "OUROBOROS_CLUSTER_HOSTS" => nil,
+          "OUROBOROS_FLEET_ID" => fleet_id
+        },
+        fn ->
+          data_dir = tmp_dir!()
+          fleet_dir = Path.join(data_dir, "fleet")
+          File.mkdir_p!(fleet_dir)
+
+          write_test_fleet_profile!(fleet_dir, fleet_id)
+
+          previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+          Application.put_env(:ouroboros, :data_dir, data_dir)
+
+          on_exit(fn ->
+            if previous_data_dir,
+              do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+              else: Application.delete_env(:ouroboros, :data_dir)
+          end)
+
+          core = start_app_peer!()
+          on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{state: :connected, role: :core, compatibility: :compatible},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          # Hold the remote store before its create reply. The gateway request is now
+          # outcome-unknown if distribution is lost, so the possible-owner fence must
+          # already be durable before this call can reach the remote node.
+          assert :ok =
+                   :erpc.call(core, :sys, :suspend, [Ouroboros.Interactive.Store])
+
+          id = unique_id("lost-remote-start-reply")
+
+          start =
+            Task.async(fn ->
+              Methods.invoke("interactive.start", %{
+                "id" => id,
+                "provider" => "codex",
+                "workspace" => File.cwd!(),
+                "node" => Atom.to_string(core)
+              })
+            end)
+
+          assert_eventually(
+            fn ->
+              case Cluster.session_owners(:interactive) do
+                {:ok, owners} -> MapSet.member?(owners, Atom.to_string(core))
+                _unavailable -> false
+              end
+            end,
+            300
+          )
+
+          true = :rpc.cast(core, System, :stop, [])
+          assert_eventually(fn -> core not in Node.list() end, 300)
+          lost_reply = Task.await(start, 10_000)
+          assert is_tuple(lost_reply) and elem(lost_reply, 0) == :error
+
+          previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+          Process.exit(previous_monitor, :kill)
+
+          assert_eventually(
+            fn ->
+              case Process.whereis(Ouroboros.Cluster.Monitor) do
+                monitor when is_pid(monitor) -> monitor != previous_monitor
+                _absent -> false
+              end
+            end,
+            300
+          )
+
+          assert {:ok, recovered} = Cluster.session_owners(:interactive)
+          assert MapSet.member?(recovered, Atom.to_string(core))
+
+          assert {:error, -32_004, _message,
+                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                   Methods.invoke("interactive.list", %{})
+
+          assert owner == Atom.to_string(core)
+        end
+      )
+    end
+
+    @tag timeout: 180_000
+    test "a listed non-expected session owner cannot disappear behind a local-only list" do
+      fleet_id = "00112233445566778899aabb"
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "none",
+          "OUROBOROS_CLUSTER_HOSTS" => nil,
+          "OUROBOROS_FLEET_ID" => fleet_id
+        },
+        fn ->
+          data_dir = tmp_dir!()
+          fleet_dir = Path.join(data_dir, "fleet")
+          File.mkdir_p!(fleet_dir)
+
+          write_test_fleet_profile!(fleet_dir, fleet_id)
+
+          previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+          Application.put_env(:ouroboros, :data_dir, data_dir)
+
+          on_exit(fn ->
+            if previous_data_dir,
+              do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+              else: Application.delete_env(:ouroboros, :data_dir)
+          end)
+
+          core = start_app_peer!()
+          on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{expected?: false, state: :connected, role: :core},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          id = unique_id("learned-owner-session")
+          create_remote_interactive_session!(core, id)
+
+          assert {:ok, sessions} = Methods.invoke("interactive.list", %{})
+          assert Enum.any?(sessions, &(&1.id == id and &1.node == core))
+          assert {:ok, interactive_owners} = Cluster.session_owners(:interactive)
+          assert MapSet.member?(interactive_owners, Atom.to_string(core))
+          assert {:ok, coding_owners} = Cluster.session_owners(:coding)
+          refute MapSet.member?(coding_owners, Atom.to_string(core))
+
+          # The monitor is deliberately at the tail of the supervision tree and can
+          # restart independently. Its positive owner evidence must come back from the
+          # synced checkpoint before another successful list can erase remote rows.
+          previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+          Process.exit(previous_monitor, :kill)
+
+          assert_eventually(
+            fn ->
+              case Process.whereis(Ouroboros.Cluster.Monitor) do
+                monitor when is_pid(monitor) -> monitor != previous_monitor
+                _absent -> false
+              end
+            end,
+            300
+          )
+
+          assert {:ok, recovered_owners} = Cluster.session_owners(:interactive)
+          assert MapSet.member?(recovered_owners, Atom.to_string(core))
+
+          true = :rpc.cast(core, System, :stop, [])
+          assert_eventually(fn -> core not in Node.list() end, 300)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{expected?: false, state: :offline},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          assert {:error, -32_004, _message,
+                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                   Methods.invoke("interactive.list", %{})
+
+          assert owner == Atom.to_string(core)
+        end
+      )
+    end
+
+    @tag timeout: 180_000
+    test "positive session evidence survives version skew and protects the next list" do
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "none",
+          "OUROBOROS_CLUSTER_HOSTS" => nil
+        },
+        fn ->
+          core = start_app_peer!()
+          on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{expected?: false, state: :connected, compatibility: :compatible},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          id = unique_id("skewed-owner-session")
+          create_remote_interactive_session!(core, id)
+
+          assert {:ok, sessions} = Methods.invoke("interactive.list", %{})
+          assert Enum.any?(sessions, &(&1.id == id and &1.node == core))
+          assert {:ok, owners} = Cluster.session_owners(:interactive)
+          assert MapSet.member?(owners, Atom.to_string(core))
+
+          revision =
+            Cluster.fleet_status().machines
+            |> Enum.find(&(&1.node == core))
+            |> get_in([:runtime, :fleet_protocol_revision])
+
+          :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+            put_in(
+              state,
+              [:machines, core, :runtime, :fleet_protocol_revision],
+              revision + 1
+            )
+          end)
+
+          assert Enum.find(Cluster.fleet_status().machines, &(&1.node == core)).compatibility ==
+                   :incompatible
+
+          true = :rpc.cast(core, System, :stop, [])
+          assert_eventually(fn -> core not in Node.list() end, 300)
+
+          assert_eventually(
+            fn ->
+              match?(
+                %{expected?: false, state: :offline, compatibility: :incompatible},
+                Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+              )
+            end,
+            300
+          )
+
+          assert {:error, -32_004, _message,
+                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                   Methods.invoke("interactive.list", %{})
+
+          assert owner == Atom.to_string(core)
+        end
+      )
     end
   end
 
@@ -506,7 +1527,8 @@ defmodule Ouroboros.ClusterTest do
                  "OUROBOROS_COOKIE" => ""
                })
 
-      assert output =~ "OUROBOROS_COOKIE must be set"
+      assert output =~ "OUROBOROS_COOKIE_FILE"
+      assert output =~ "legacy OUROBOROS_COOKIE"
 
       assert {output, 0} =
                run_script(script, %{
@@ -535,12 +1557,13 @@ defmodule Ouroboros.ClusterTest do
 
       File.write!(script, render_template("rel/env.sh.eex", %{}) <> probe)
 
-      # No name, no strategy, no OUROBOROS_DIST: the single-machine daemon. No node name
-      # and no cookie are exported, because there is no distribution for either to reach.
+      # No name, no strategy, no OUROBOROS_DIST: the single-machine daemon. It has no node
+      # name or distribution listener. The release launcher still gets a fresh disposable
+      # boot cookie so it never falls back to the artifact's shared releases/COOKIE.
       assert {output, 0} = run_script(script, %{})
       assert output =~ "DIST=none"
       assert output =~ "NODE=\n"
-      assert output =~ "COOKIE=\n"
+      assert output =~ ~r/COOKIE=ouro_boot_[a-f0-9]{64}\n/
 
       # A cluster strategy is a request for distribution, so it takes the strict path and
       # is refused for the name it was not given rather than defaulted into a node that
@@ -568,7 +1591,8 @@ defmodule Ouroboros.ClusterTest do
 
       # Naming the node is enough to take the strict path with OUROBOROS_DIST unset.
       assert {output, 1} = run_script(script, %{"OUROBOROS_NODE" => "core-1@10.0.0.11"})
-      assert output =~ "OUROBOROS_COOKIE must be set"
+      assert output =~ "OUROBOROS_COOKIE_FILE"
+      assert output =~ "legacy OUROBOROS_COOKIE"
     end
   end
 
@@ -588,12 +1612,14 @@ defmodule Ouroboros.ClusterTest do
         "OUROBOROS_CLUSTER_STRATEGY",
         "OUROBOROS_CLUSTER_HOSTS",
         "OUROBOROS_ALLOW_INSECURE_DIST",
+        "OUROBOROS_COOKIE_FILE",
         "OUROBOROS_FORGE_BUILDER_NODE",
         "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
       ]
 
       Enum.each(managed, &System.delete_env/1)
       System.put_env("OUROBOROS_DATA_DIR", data_dir)
+      Ouroboros.DataDir.ensure_private!(data_dir)
 
       on_exit(fn ->
         File.rm_rf(data_dir)
@@ -638,6 +1664,28 @@ defmodule Ouroboros.ClusterTest do
       System.put_env("OUROBOROS_CLUSTER_STRATEGY", "kubernetes")
       assert_raise RuntimeError, ~r/OUROBOROS_CLUSTER_STRATEGY/, fn -> prod_config() end
     end
+
+    test "a fleet cookie file is private and replaces the release's decoy before boot" do
+      ensure_distributed!()
+      previous_cookie = :erlang.get_cookie()
+      on_exit(fn -> Node.set_cookie(previous_cookie) end)
+
+      cookie_file = Path.join(System.fetch_env!("OUROBOROS_DATA_DIR"), "fleet-cookie")
+      cookie = String.duplicate("a", 64)
+      File.mkdir_p!(Path.dirname(cookie_file))
+      File.write!(cookie_file, cookie, [:binary, :sync])
+      File.chmod!(cookie_file, 0o600)
+      System.put_env("OUROBOROS_COOKIE_FILE", cookie_file)
+
+      assert prod_config()[:ouroboros][:node_role] == :core
+      assert :erlang.get_cookie() == String.to_existing_atom(cookie)
+
+      File.chmod!(cookie_file, 0o644)
+
+      assert_raise RuntimeError, ~r/OUROBOROS_COOKIE_FILE must have mode 0600/, fn ->
+        prod_config()
+      end
+    end
   end
 
   defp prod_config, do: Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
@@ -656,6 +1704,7 @@ defmodule Ouroboros.ClusterTest do
         %{
           "OUROBOROS_NODE" => nil,
           "OUROBOROS_COOKIE" => nil,
+          "OUROBOROS_COOKIE_FILE" => nil,
           "OUROBOROS_DIST" => nil,
           "OUROBOROS_CLUSTER_STRATEGY" => nil,
           "RELEASE_COMMAND" => "start"
@@ -684,6 +1733,61 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
+  defp write_test_fleet_profile!(fleet_dir, fleet_id, opts \\ []) do
+    local = Keyword.get(opts, :local, test_fleet_member("owner", "127.0.0.1"))
+    members = Keyword.get(opts, :members, [local])
+    tombstones = Keyword.get(opts, :tombstones, [])
+
+    profile = %{
+      "schema" => 1,
+      "fleet_id" => fleet_id,
+      "name" => "Cluster test fleet",
+      "machine" => local["machine"],
+      "host" => local["host"],
+      "node" => local["node"],
+      "role" => "core",
+      "members" => members,
+      "roster_revision" => Keyword.get(opts, :roster_revision, 1),
+      "tombstones" => tombstones,
+      "gateway_port" => 41_789,
+      "epmd_port" => 44_369,
+      "dist_port_min" => 45_100,
+      "dist_port_max" => 45_199
+    }
+
+    path = Path.join(fleet_dir, "profile.json")
+    File.write!(path, Jason.encode!(profile), [:binary, :sync])
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp test_fleet_member(machine, host) do
+    %{"machine" => machine, "host" => host, "node" => "ouro-#{machine}@#{host}"}
+  end
+
+  defp restart_cluster_monitor! do
+    previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+    Process.exit(previous_monitor, :kill)
+
+    assert_eventually(
+      fn ->
+        case Process.whereis(Ouroboros.Cluster.Monitor) do
+          monitor when is_pid(monitor) -> monitor != previous_monitor
+          _absent -> false
+        end
+      end,
+      300
+    )
+  end
+
+  defp reset_session_owner_evidence! do
+    :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+      state
+      |> Map.put(:session_owners, %{interactive: MapSet.new(), coding: MapSet.new()})
+      |> Map.put(:session_owner_evidence, :reliable)
+    end)
+  end
+
   defp start_app_peer!(env \\ []) do
     peer_node = start_bare_peer!()
 
@@ -693,6 +1797,88 @@ defmodule Ouroboros.ClusterTest do
 
     {:ok, _applications} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
     peer_node
+  end
+
+  defp create_remote_interactive_session!(peer_node, id) do
+    assert {:ok, session} =
+             :erpc.call(peer_node, Ouroboros.Interactive.State, :new, [
+               id,
+               [provider: :codex, workspace: File.cwd!()]
+             ])
+
+    assert :ok =
+             :erpc.call(peer_node, Ouroboros.Interactive.Store, :create, [session])
+  end
+
+  defp start_signer_peer! do
+    peer_node = start_bare_peer!()
+    key_dir = tmp_dir!()
+    key_path = Path.join(key_dir, "signer.seed")
+    File.write!(key_path, :crypto.strong_rand_bytes(32), [:binary, :sync])
+    File.chmod!(key_path, 0o600)
+
+    put_peer_env!(peer_node, :node_role, :signer)
+    put_peer_env!(peer_node, :signer_id, "cluster-test-signer")
+
+    put_peer_env!(
+      peer_node,
+      :signing_journal_storage,
+      {Jido.Storage.ETS, table: peer_table(peer_node)}
+    )
+
+    :ok =
+      :erpc.call(peer_node, System, :put_env, [
+        %{"OUROBOROS_SIGNER_KEY_PATH" => key_path}
+      ])
+
+    {:ok, _applications} =
+      :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
+
+    peer_node
+  end
+
+  defp clear_session_owner_evidence(plane, target) do
+    case Process.whereis(Ouroboros.Cluster.Monitor) do
+      monitor when is_pid(monitor) ->
+        :sys.replace_state(monitor, fn state ->
+          owners =
+            state
+            |> Map.get(:session_owners, %{})
+            |> Map.update(plane, MapSet.new(), &MapSet.delete(&1, Atom.to_string(target)))
+
+          Map.put(state, :session_owners, owners)
+        end)
+
+      _absent ->
+        :ok
+    end
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp replace_peer_version!(peer_node, version) do
+    spec = :erpc.call(peer_node, Application, :spec, [:ouroboros])
+    :ok = :erpc.call(peer_node, Application, :stop, [:ouroboros])
+    :ok = :erpc.call(peer_node, Application, :unload, [:ouroboros])
+
+    changed = Keyword.put(spec, :vsn, String.to_charlist(version))
+
+    :ok =
+      :erpc.call(peer_node, :application, :load, [{:application, :ouroboros, changed}])
+
+    # Unloading an application drops runtime overrides that are not part of its .app
+    # spec. Restore the peer-local test store before the least-privilege tree boots.
+    put_peer_env!(
+      peer_node,
+      :coding_storage,
+      {Jido.Storage.ETS, table: peer_table(peer_node)}
+    )
+
+    {:ok, _applications} =
+      :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
+
+    assert :erpc.call(peer_node, Application, :spec, [:ouroboros, :vsn]) ==
+             String.to_charlist(version)
   end
 
   defp start_bare_peer! do

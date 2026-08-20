@@ -8,6 +8,15 @@ defmodule Ouroboros.Gateway.OperateTest do
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Coding.Store, as: CodingStore
+  alias Ouroboros.Coding.Task, as: CodingTask
+  alias Ouroboros.InteractiveSession
+  alias Ouroboros.Interactive.Ref, as: InteractiveRef
+  alias Ouroboros.Interactive.Store, as: InteractiveStore
+  alias Ouroboros.Interactive.Task, as: InteractiveTask
+  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Workspace
+  alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
   @token String.duplicate("o", 40)
   @receive_timeout 2_000
@@ -150,6 +159,56 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert call(client, "coding.start", %{})["error"]["code"] == -32602
     end
 
+    test "a post-dispatch checkpoint failure is outcome-unknown, not a refusal" do
+      turn_id = "caller-owned-turn"
+      reason = {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id}
+
+      assert {:error, -32_005, message, data} = Methods.turn_error_reply(reason)
+      assert message =~ "may already be running"
+      assert data["outcome"] == "unknown"
+      assert data["turn_id"] == turn_id
+
+      assert data["error"] == [
+               "turn_dispatch_checkpoint_failed",
+               "dispatch_may_have_started",
+               turn_id
+             ]
+
+      # A Harness call exit and a refused call whose failure checkpoint was lost have the
+      # same retry hazard. Every shape retains the caller's id for reconciliation.
+      for ambiguous <- [
+            {:turn_dispatch_ambiguous, turn_id},
+            {:turn_dispatch_ambiguous, turn_id, :checkpoint_failed},
+            {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
+             {:harness_refused, :busy}},
+            {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
+             {:request_exposure_failed, :invalid_runtime_capture}}
+          ] do
+        assert {:error, -32_005, _message, %{"outcome" => "unknown", "turn_id" => ^turn_id}} =
+                 Methods.turn_error_reply(ambiguous)
+      end
+
+      # A validation failure happened before dispatch and remains a definite refusal.
+      assert {:error, -32_006, "the runtime refused the call", "invalid_turn"} =
+               Methods.turn_error_reply(:invalid_turn)
+
+      assert {:error, -32_006, busy_message,
+              %{
+                "reason" => "busy",
+                "outcome" => "not_dispatched",
+                "retry_with" => "interactive.follow_up",
+                "error" => ["turn_dispatch_failed", "busy"]
+              }} = Methods.turn_error_reply({:turn_dispatch_failed, :busy})
+
+      assert busy_message =~ "already running a turn"
+      assert busy_message =~ "interactive.follow_up"
+
+      assert Methods.table()["interactive.send_message"].outcome == :unknown
+      assert Methods.table()["interactive.follow_up"].outcome == :unknown
+      assert Methods.table()["interactive.start"].outcome == :unknown
+      assert Methods.table()["coding.start"].outcome == :unknown
+    end
+
     test "structured turn input is closed and validated before dispatch", %{client: client} do
       assert hello(client)["result"]
 
@@ -191,16 +250,28 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert extra_top_level["error"]["message"] =~ "provider_options"
     end
 
-    test "steer takes the same envelope as the other composer verbs", %{client: client} do
+    test "steer refuses a false idempotency key and accepts only its actual envelope", %{
+      client: client
+    } do
       assert hello(client)["result"]
 
-      # A terminal sends `{id, input, turn_id}` for every composer verb. Steer used to read
-      # only two of those and ignore anything else it was sent.
-      steered =
+      # Unlike dispatched turns, a steer is not durably keyed by the interactive plane.
+      # Silently accepting this field would tell a client that replay is safe when it can
+      # inject the same text twice.
+      false_idempotency =
         call(client, "interactive.steer", %{
           "id" => "no-such-session",
           "input" => "go left",
           "turn_id" => "turn-1"
+        })
+
+      assert false_idempotency["error"]["code"] == -32602
+      assert false_idempotency["error"]["message"] =~ "turn_id"
+
+      steered =
+        call(client, "interactive.steer", %{
+          "id" => "no-such-session",
+          "input" => "go left"
         })
 
       assert steered["error"]["code"] == -32007
@@ -264,6 +335,132 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       assert response["error"]["code"] == -32602
       assert response["error"]["message"] =~ "workspace_write"
+    end
+
+    test "durable failed starts return their stable reference and mismatches are definite", %{
+      client: client
+    } do
+      assert hello(client)["result"]
+
+      previous_providers = Application.get_env(:jido_harness, :providers)
+      previous_config = Application.get_env(:jido_harness, :provider_config)
+      suffix = System.unique_integer([:positive, :monotonic])
+      workspace = Path.join(File.cwd!(), ".ouro-gateway-created-start-#{suffix}")
+      File.mkdir_p!(workspace)
+
+      Application.put_env(
+        :jido_harness,
+        :providers,
+        Map.put(Map.new(previous_providers || %{}), :ouroboros_test, HarnessAdapter)
+      )
+
+      Application.put_env(
+        :jido_harness,
+        :provider_config,
+        previous_config
+        |> then(&Map.new(&1 || %{}))
+        |> Map.put(:ouroboros_test, %{test_pid: self()})
+      )
+
+      unless is_pid(Process.whereis(WorkspaceManager)) do
+        start_supervised!(
+          {Workspace,
+           allowed_roots: [File.cwd!()],
+           name: WorkspaceManager,
+           id: {:gateway_created_start_workspace, suffix}}
+        )
+      end
+
+      holder_id = "gateway-workspace-holder-#{suffix}"
+      interactive_id = "gateway-failed-interactive-#{suffix}"
+      coding_id = "gateway-failed-coding-#{suffix}"
+
+      on_exit(fn ->
+        for {task, supervisor, id} <- [
+              {InteractiveTask, Ouroboros.Interactive.TaskSupervisor, holder_id},
+              {InteractiveTask, Ouroboros.Interactive.TaskSupervisor, interactive_id},
+              {CodingTask, Ouroboros.Coding.TaskSupervisor, coding_id}
+            ],
+            pid = task.whereis(id),
+            is_pid(pid) do
+          _ = DynamicSupervisor.terminate_child(supervisor, pid)
+        end
+
+        _ = InteractiveStore.delete(holder_id)
+        _ = InteractiveStore.delete(interactive_id)
+        _ = CodingStore.delete(coding_id)
+
+        if is_nil(previous_providers),
+          do: Application.delete_env(:jido_harness, :providers),
+          else: Application.put_env(:jido_harness, :providers, previous_providers)
+
+        if is_nil(previous_config),
+          do: Application.delete_env(:jido_harness, :provider_config),
+          else: Application.put_env(:jido_harness, :provider_config, previous_config)
+
+        File.rm_rf(workspace)
+      end)
+
+      assert call(client, "interactive.start", %{
+               "id" => holder_id,
+               "provider" => "ouroboros_test",
+               "workspace" => workspace
+             })["result"]["id"] == holder_id
+
+      interactive_params = %{
+        "id" => interactive_id,
+        "provider" => "ouroboros_test",
+        "workspace" => workspace
+      }
+
+      interactive = call(client, "interactive.start", interactive_params)["result"]
+      assert interactive["id"] == interactive_id
+      assert interactive["outcome"] == "created"
+      assert interactive["ready"] == false
+      assert interactive["error"]
+
+      # The exact replay reads the terminal checkpoint and returns promptly with the same
+      # reference; it does not wait through another gateway ceiling.
+      retry = call(client, "interactive.start", interactive_params)["result"]
+      assert retry["id"] == interactive_id
+      assert retry["outcome"] == "created"
+
+      interactive_conflict =
+        call(
+          client,
+          "interactive.start",
+          Map.put(interactive_params, "sandbox_mode", "read_only")
+        )["error"]
+
+      assert interactive_conflict["data"]["reason"] == "session_id_conflict"
+      assert interactive_conflict["data"]["outcome"] == "not_dispatched"
+
+      coding_params = %{
+        "id" => coding_id,
+        "objective" => "cannot acquire the held workspace",
+        "provider" => "ouroboros_test",
+        "workspace" => workspace
+      }
+
+      coding = call(client, "coding.start", coding_params)["result"]
+      assert coding["id"] == coding_id
+      assert coding["outcome"] == "created"
+      assert coding["ready"] == false
+      assert coding["error"]
+
+      coding_retry = call(client, "coding.start", coding_params)["result"]
+      assert coding_retry["id"] == coding_id
+      assert coding_retry["outcome"] == "created"
+
+      coding_conflict =
+        call(client, "coding.start", Map.put(coding_params, "objective", "different request"))[
+          "error"
+        ]
+
+      assert coding_conflict["data"]["reason"] == "task_id_conflict"
+      assert coding_conflict["data"]["outcome"] == "not_dispatched"
+
+      assert :ok = InteractiveSession.close(InteractiveRef.new(holder_id))
     end
 
     test "an approval response outside the allowlist is refused", %{client: client} do

@@ -178,9 +178,7 @@ defmodule Ouroboros.TeamReliabilityTest do
     assert :ok = Team.close(team)
   end
 
-  test "an unavailable coding owner keeps the delegation starting until its bound expires" do
-    Application.put_env(:ouroboros, :delegation_start_retry_ms, 400)
-
+  test "an unavailable coding owner is rejected before durable delegation intent" do
     team_id = unique_id("unavailable-team")
     worker_id = unique_id("unavailable-worker")
     delegation_id = unique_id("unavailable-delegation")
@@ -189,12 +187,7 @@ defmodule Ouroboros.TeamReliabilityTest do
     team = start_team(team_id)
     assert {:ok, _worker} = Team.add_worker(team, worker_id)
 
-    assert {:ok,
-            %{
-              status: :starting,
-              delivery: :pending,
-              delivery_error: {:coding_start_unconfirmed, {:owner_unavailable, ^coding_node}}
-            }} =
+    assert {:error, {:invalid_coding_node, ^coding_node, :node_not_connected}} =
              Team.delegate(team, worker_id, "start against an unreachable owner",
                id: delegation_id,
                provider: @provider,
@@ -202,22 +195,9 @@ defmodule Ouroboros.TeamReliabilityTest do
                coding_node: coding_node
              )
 
-    assert {:ok, starting} = TeamStore.get(team_id)
-    assert starting.delegations[delegation_id].status == :starting
-
-    assert_eventually(fn ->
-      match?(
-        %{status: :failed, delivery: :delivered},
-        Team.state(team).delegations[delegation_id]
-      )
-    end)
-
-    assert {:delegation_setup_failed, :coding_start_unconfirmed,
-            {:owner_unavailable, ^coding_node},
-            {:compensation_unavailable,
-             {:coding_task_owner_verification_failed, _coding_task_id, _reason}}} =
-             Team.state(team).delegations[delegation_id].error
-
+    assert {:ok, snapshot} = TeamStore.get(team_id)
+    refute Map.has_key?(snapshot.delegations, delegation_id)
+    refute Map.has_key?(Team.state(team).delegations, delegation_id)
     refute_receive {:ouroboros_test_adapter_started, _run_id, _request, _adapter}, 100
     assert :ok = Team.close(team)
   end

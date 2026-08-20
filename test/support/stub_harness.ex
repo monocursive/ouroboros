@@ -103,6 +103,7 @@ defmodule Ouroboros.Test.StubSession do
        provider: Keyword.get(opts, :provider, :ouroboros_test),
        state: Keyword.get(opts, :state, :idle),
        replay: Keyword.get(opts, :replay, {:ok, []}),
+       send_message: Keyword.get(opts, :send_message, :ok),
        delay_ms: Keyword.get(opts, :delay_ms, 0),
        replay_calls: 0
      }}
@@ -123,6 +124,32 @@ defmodule Ouroboros.Test.StubSession do
   # timeout for as long as the caller keeps asking.
   def handle_call({:turn_result, _turn_id}, _from, state),
     do: {:reply, {:pending, info(state)}, state}
+
+  # Fault injection for the boundary where the caller sees a GenServer exit before
+  # this stand-in performed any turn dispatch. The observer message proves the first
+  # call reached this boundary and a same-id replay did not call it a second time.
+  def handle_call(
+        {:send_message, _request},
+        _from,
+        %{send_message: {:exit_before_dispatch, observer}} = state
+      )
+      when is_pid(observer) do
+    send(observer, {:stub_session_exited_before_dispatch, state.session_id})
+    {:stop, :normal, state}
+  end
+
+  def handle_call(
+        {:send_message, request},
+        _from,
+        %{send_message: {:observe, observer, reply}} = state
+      )
+      when is_pid(observer) do
+    send(observer, {:stub_session_send_message, state.session_id, request})
+    {:reply, reply, state}
+  end
+
+  def handle_call({:send_message, _request}, _from, %{send_message: reply} = state),
+    do: {:reply, reply, state}
 
   def handle_call(:stub_replay_calls, _from, state), do: {:reply, state.replay_calls, state}
 

@@ -14,7 +14,7 @@ if config_env() == :prod do
       System.get_env("HOME")
     )
 
-  File.mkdir_p!(data_dir)
+  Ouroboros.DataDir.ensure_private!(data_dir)
 
   probe =
     Path.join(
@@ -43,6 +43,57 @@ if config_env() == :prod do
       nil -> nil
       value -> if String.trim(value) == "", do: nil, else: String.trim(value)
     end
+  end
+
+  # Fleet profiles keep the real distribution cookie in a private file rather than in
+  # the release command line or environment. The release launcher uses a fresh decoy for
+  # `RELEASE_COOKIE`; replace it here before libcluster starts, after verifying the file
+  # is exactly the private, non-symlink credential the profile installer promised. No
+  # error or configured value below includes the credential itself.
+  cookie_file = env_value.("OUROBOROS_COOKIE_FILE")
+
+  case cookie_file do
+    nil ->
+      :ok
+
+    cookie_file ->
+      unless Path.type(cookie_file) == :absolute do
+        raise "OUROBOROS_COOKIE_FILE must be an absolute path"
+      end
+
+      cookie_stat =
+        case File.lstat(cookie_file, time: :posix) do
+          {:ok, %File.Stat{type: :regular} = stat} ->
+            stat
+
+          {:ok, %File.Stat{type: type}} ->
+            raise "OUROBOROS_COOKIE_FILE must be a regular, non-symlink file, got: #{type}"
+
+          {:error, reason} ->
+            raise "OUROBOROS_COOKIE_FILE cannot be inspected: #{:file.format_error(reason)}"
+        end
+
+      unless Bitwise.band(cookie_stat.mode, 0o777) == 0o600 do
+        raise "OUROBOROS_COOKIE_FILE must have mode 0600"
+      end
+
+      data_stat = File.stat!(data_dir, time: :posix)
+
+      unless cookie_stat.uid == data_stat.uid do
+        raise "OUROBOROS_COOKIE_FILE must be owned by the same user as OUROBOROS_DATA_DIR"
+      end
+
+      cookie = File.read!(cookie_file)
+
+      unless byte_size(cookie) == 64 and String.match?(cookie, ~r/^[a-f0-9]{64}$/) do
+        raise "OUROBOROS_COOKIE_FILE must contain exactly 64 lowercase hexadecimal characters"
+      end
+
+      unless Node.alive?() do
+        raise "OUROBOROS_COOKIE_FILE was set, but this runtime was started without BEAM distribution"
+      end
+
+      true = Node.set_cookie(String.to_atom(cookie))
   end
 
   node_role =
@@ -76,13 +127,21 @@ if config_env() == :prod do
   # the override has to be typed out on the host that wants it.
   if cluster_strategy != "none" and not dist_tls? and
        env_value.("OUROBOROS_ALLOW_INSECURE_DIST") != "1" do
+    tls_guidance =
+      if cookie_file do
+        "This boot uses an ouro fleet profile, but its generated TLS VM arguments were not applied. " <>
+          "Run `ouro fleet doctor`, then start the packaged `ouro` again; do not enable the insecure override."
+      else
+        "For an advanced operator-managed release, configure distribution TLS as described in " <>
+          "Running a cluster in the README, or set OUROBOROS_ALLOW_INSECURE_DIST=1 only to " <>
+          "accept cleartext distribution on a trusted network."
+      end
+
     raise """
     OUROBOROS_CLUSTER_STRATEGY=#{cluster_strategy} forms a cluster, but this release is \
     not running TLS distribution (-proto_dist is #{if dist_tls?, do: "tls", else: "cleartext"}).
 
-    Configure distribution TLS (see "Running a cluster" in the README: OUROBOROS_DIST_TLS=1 \
-    and OUROBOROS_DIST_TLS_OPTFILE at release build time), or set \
-    OUROBOROS_ALLOW_INSECURE_DIST=1 to accept a cleartext cluster on a trusted network.
+    #{tls_guidance}
     """
   end
 
@@ -299,12 +358,12 @@ if config_env() == :prod do
   # only source it has in the environments this block never runs in.
   config :ouroboros, :data_dir, data_dir
 
-  # A release told nothing at all is a single-machine daemon, and a single-machine daemon
-  # with no operator surface is a process nobody can talk to: `bin/ouroboros start` would
-  # boot, serve nobody, and offer nothing to attach to. This branch is the whole of that
-  # convenience and it is deliberately narrow — it runs only when no gateway, no node name
-  # and no cluster strategy were named, which is exactly the posture `rel/env.sh.eex`
-  # starts without distribution, without epmd, and without a cookie on the host.
+  # An embedded release told nothing at all is configured as a single-machine daemon so
+  # the native `ouro` launcher can give it an operator surface. This branch is deliberately
+  # narrow — it runs only when no gateway, node name, or cluster strategy was named. A
+  # bare `bin/ouroboros start` still fails before durable children because it cannot supply
+  # the trusted native process-incarnation/recovery helper; this is configuration fallback,
+  # not a supported raw-release lifecycle entrypoint.
   #
   # Nothing here reads an `OUROBOROS_GATEWAY_*` variable. Setting `OUROBOROS_GATEWAY` at
   # all makes this branch unreachable, and that other path is where every one of those
@@ -329,8 +388,8 @@ if config_env() == :prod do
       token_generate: true
 
     # A client that spawns this node as a child process owns its stdout, and the notice
-    # the listener prints on a defaulted boot goes there. Routing the default handler to
-    # stderr keeps that stream a log stream and this one clean.
+    # the listener prints on a defaulted boot goes there. stderr is the foreground
+    # default; the managed-file block below replaces it for a detached/service spawn.
     config :logger, :default_handler, config: [type: :standard_error]
   end
 end
@@ -340,12 +399,13 @@ end
 # `mix run --no-halt`, and a section that only existed in a release would make the
 # development loop a different protocol than the shipped one.
 #
-# This stands on `System` alone. A config provider runs before this application's modules
-# are guaranteed loadable, so a check that must be able to refuse the boot cannot call
-# `Ouroboros.Gateway.Config` — which re-validates all of this at init, on purpose, for the
-# operator who configures application environment directly. The production block makes one
-# exception, `Ouroboros.DataDir`, and that module depends on nothing but `Path` and
-# `String` precisely so it can be the exception.
+# Apart from `Ouroboros.DataDir`, this stands on `System` alone. A config provider runs
+# before this application's modules are guaranteed loadable, so a check that must be able
+# to refuse the boot cannot call `Ouroboros.Gateway.Config` — which re-validates all of
+# this at init, on purpose, for the operator who configures application environment
+# directly. `Ouroboros.DataDir` depends only on config-provider-safe standard modules and
+# trusted absolute operating-system helpers, so both durable stores and gateway discovery
+# can share one path and permission contract this early.
 gateway_value = fn name ->
   case System.get_env(name) do
     nil -> nil
@@ -356,9 +416,11 @@ end
 # In production the block above has already persisted the data directory, including the
 # default it derives when the variable is unset. This is the same write for every other
 # environment, where the variable is the only source there is.
-gateway_data_dir = gateway_value.("OUROBOROS_DATA_DIR")
+gateway_data_dir =
+  Ouroboros.DataDir.configured!(System.get_env("OUROBOROS_DATA_DIR"))
 
 if gateway_data_dir do
+  Ouroboros.DataDir.ensure_private!(gateway_data_dir)
   config :ouroboros, :data_dir, gateway_data_dir
 end
 
@@ -483,8 +545,101 @@ if System.get_env("OUROBOROS_GATEWAY") == "1" do
     max_frame: gateway_max_frame,
     queue_limit: gateway_queue_limit
 
-  # A client that spawns this node as a child process owns its stdout. Routing the
-  # default handler to stderr keeps that stream a log stream and this one clean, rather
-  # than interleaving `Logger` output with anything the daemon is asked to print.
+  # A client that spawns this node as a child process owns its stdout. stderr is the
+  # foreground default; the managed-file block below replaces it for a detached/service
+  # spawn so neither posture interleaves Logger output with daemon notices.
   config :logger, :default_handler, config: [type: :standard_error]
+end
+
+# A packaged detached daemon has two deliberately separate sinks. Its inherited
+# stdout/stderr stays on `daemon.log`, where VM bootstrap and crash diagnostics remain
+# visible even before Elixir Logger starts. The launcher sets this internal path only
+# after securely creating and validating it; from that point onward `:logger_std_h` is
+# the sole writer and sole rotator of `runtime.log`.
+runtime_log_file = gateway_value.("OUROBOROS_RUNTIME_LOG_FILE")
+
+if runtime_log_file do
+  unless gateway_data_dir do
+    raise "OUROBOROS_RUNTIME_LOG_FILE requires OUROBOROS_DATA_DIR"
+  end
+
+  expected_runtime_log = Path.join(gateway_data_dir, "runtime.log")
+
+  unless Path.type(runtime_log_file) == :absolute and runtime_log_file == expected_runtime_log do
+    raise "OUROBOROS_RUNTIME_LOG_FILE must be exactly #{expected_runtime_log}"
+  end
+
+  runtime_log_max_bytes =
+    case Integer.parse(gateway_value.("OUROBOROS_RUNTIME_LOG_MAX_BYTES") || "2097152") do
+      {value, ""} when value > 0 -> value
+      _other -> raise "OUROBOROS_RUNTIME_LOG_MAX_BYTES must be a positive integer"
+    end
+
+  runtime_log_max_files =
+    case Integer.parse(gateway_value.("OUROBOROS_RUNTIME_LOG_MAX_FILES") || "3") do
+      {value, ""} when value > 0 -> value
+      _other -> raise "OUROBOROS_RUNTIME_LOG_MAX_FILES must be a positive integer"
+    end
+
+  data_stat = File.stat!(gateway_data_dir, time: :posix)
+
+  inspect_private_log = fn path ->
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular} = stat} ->
+        unless stat.uid == data_stat.uid and Bitwise.band(stat.mode, 0o777) == 0o600 do
+          raise "#{path} must be a mode-0600 regular runtime log owned by OUROBOROS_DATA_DIR's user"
+        end
+
+        :present
+
+      {:ok, %File.Stat{type: type}} ->
+        raise "#{path} must be a regular, non-symlink runtime log, got: #{type}"
+
+      {:error, :enoent} ->
+        :absent
+
+      {:error, reason} ->
+        raise "#{path} cannot be inspected: #{:file.format_error(reason)}"
+    end
+  end
+
+  unless inspect_private_log.(runtime_log_file) == :present do
+    raise "OUROBOROS_RUNTIME_LOG_FILE must already exist as a private file created by the packaged launcher"
+  end
+
+  # Validate every archive the handler may rename, plus the contiguous overflow it
+  # removes at startup. A symlink or foreign/broad file is refused before Logger can
+  # mutate any name in the retained set.
+  Enum.each(0..(runtime_log_max_files - 1), fn index ->
+    inspect_private_log.(runtime_log_file <> ".#{index}")
+
+    compressed = runtime_log_file <> ".#{index}.gz"
+
+    if inspect_private_log.(compressed) == :present do
+      raise "unexpected compressed runtime log archive #{compressed}; managed rotation is uncompressed and will not rewrite it"
+    end
+  end)
+
+  inspect_overflow = fn inspect_overflow, index ->
+    plain = inspect_private_log.(runtime_log_file <> ".#{index}")
+    compressed = inspect_private_log.(runtime_log_file <> ".#{index}.gz")
+
+    case {plain, compressed} do
+      {:absent, :absent} -> :ok
+      _present -> inspect_overflow.(inspect_overflow, index + 1)
+    end
+  end
+
+  inspect_overflow.(inspect_overflow, runtime_log_max_files)
+
+  config :logger, :default_handler,
+    config: [
+      type: :file,
+      file: String.to_charlist(runtime_log_file),
+      file_check: 0,
+      filesync_repeat_interval: 5_000,
+      max_no_bytes: runtime_log_max_bytes,
+      max_no_files: runtime_log_max_files,
+      compress_on_rotate: false
+    ]
 end

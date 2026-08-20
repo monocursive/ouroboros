@@ -116,3 +116,10 @@ config :ouroboros,
       do: Ouroboros.Test.CodexAccountAdapter,
       else: Ouroboros.Provider.CodexAppServer
     )
+
+# Keep every upstream Codex execution and validation behavior, but normalize the one
+# command-start event the pinned Harness currently leaves provider-specific before its
+# journal deliberately discards raw provider records.
+config :jido_harness,
+  providers: %{codex: Ouroboros.Provider.CodexAdapter},
+  process_driver: Ouroboros.Provider.ProcessDriver

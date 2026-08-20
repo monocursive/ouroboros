@@ -5,6 +5,8 @@ defmodule Ouroboros.CodingSessionTest do
   alias Ouroboros.Coding.{Event, Task, TaskRef, TaskState}
   alias Ouroboros.CodingSession
   alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Workspace
+  alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
   @provider :ouroboros_test
 
@@ -171,6 +173,101 @@ defmodule Ouroboros.CodingSessionTest do
     assert Enum.count(events, &(&1.type == :run_cancelled)) == 1
     assert Enum.count(events, &Event.terminal?/1) == 1
     assert List.last(events).type == :run_cancelled
+  end
+
+  test "a matching caller-supplied task ID idempotently adopts the existing run", %{id: id} do
+    objective = "reconcile a coding start whose response was lost"
+
+    opts = [
+      id: id,
+      provider: @provider,
+      workspace: File.cwd!()
+    ]
+
+    assert {:ok, %TaskRef{id: ^id} = first_ref} = CodingSession.start(objective, opts)
+
+    assert_receive {:ouroboros_test_adapter_started, run_id,
+                    %RunRequest{metadata: %{ouroboros_task_id: ^id}}, adapter},
+                   1_000
+
+    # This is the retry a gateway client makes after losing the first response. Mutable
+    # state has already advanced to a Harness run, but the normalized start request is
+    # unchanged and therefore returns the same durable owner reference.
+    assert {:ok, ^first_ref} = CodingSession.start(objective, opts)
+
+    refute_receive {:ouroboros_test_adapter_started, _duplicate_run, _request, _adapter}, 100
+
+    assert {:ok, %TaskState{harness_run_id: ^run_id, status: :running}} =
+             CodingSession.info(first_ref)
+
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %TaskState{status: :completed}} = CodingSession.await(first_ref, 2_000)
+  end
+
+  test "a caller-supplied task ID rejects conflicting immutable intent", %{id: id} do
+    opts = [id: id, provider: @provider, workspace: File.cwd!()]
+
+    assert {:ok, %TaskRef{id: ^id} = task_ref} =
+             CodingSession.start("the original objective", opts)
+
+    assert_receive {:ouroboros_test_adapter_started, _run_id,
+                    %RunRequest{metadata: %{ouroboros_task_id: ^id}}, adapter},
+                   1_000
+
+    assert {:error, {:task_id_conflict, ^id}} =
+             CodingSession.start("a different objective", opts)
+
+    assert {:error, {:task_id_conflict, ^id}} =
+             CodingSession.start("the original objective", Keyword.put(opts, :model, "other"))
+
+    assert {:ok, %TaskState{objective: "the original objective", status: :running}} =
+             CodingSession.info(task_ref)
+
+    refute_receive {:ouroboros_test_adapter_started, _duplicate_run, _request, _adapter}, 100
+
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %TaskState{status: :completed}} = CodingSession.await(task_ref, 2_000)
+  end
+
+  test "gateway start exposes a durable workspace failure and rejects a same-id mismatch", %{
+    id: holder_id
+  } do
+    unless is_pid(Process.whereis(WorkspaceManager)) do
+      start_supervised!(
+        {Workspace,
+         allowed_roots: [File.cwd!()],
+         name: WorkspaceManager,
+         id: {:durable_failed_start_workspace, holder_id}}
+      )
+    end
+
+    {holder, _run_id, adapter} =
+      start_controlled_session(holder_id, "hold the exclusive workspace lease")
+
+    id = unique_id("durable-failed-coding-start")
+    opts = [id: id, provider: @provider, workspace: File.cwd!()]
+
+    assert {:created, %TaskRef{id: ^id} = ref,
+            {:workspace_admission_failed, {:workspace_conflict, conflicts}}} =
+             CodingSession.start_for_gateway("cannot acquire the workspace", opts)
+
+    assert Enum.any?(conflicts, &(&1.task_id == holder_id))
+    assert {:ok, %TaskState{status: :failed, harness_run_id: nil}} = CodingSession.info(ref)
+
+    # A retry reads the terminal checkpoint directly. It does not restart a coordinator,
+    # redispatch work, or wait for readiness that this failed task can never reach.
+    assert {:created, ^ref, {:workspace_admission_failed, {:workspace_conflict, _}}} =
+             CodingSession.start_for_gateway("cannot acquire the workspace", opts)
+
+    assert {:error, {:task_id_conflict, ^id}} =
+             CodingSession.start_for_gateway("different immutable objective", opts)
+
+    refute_receive {:ouroboros_test_adapter_started, _duplicate_run,
+                    %RunRequest{metadata: %{ouroboros_task_id: ^id}}, _duplicate_adapter},
+                   100
+
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %TaskState{status: :completed}} = CodingSession.await(holder, 2_000)
   end
 
   defp start_controlled_session(id, objective) do

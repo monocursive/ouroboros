@@ -91,6 +91,8 @@ defmodule Ouroboros.Gateway.Config do
   # generated token clears @min_token_bytes with room to spare.
   @generated_token_bytes 32
 
+  alias Ouroboros.DataDir
+
   # Below this a `hello` frame itself would be chopped, and every connection would fail
   # with an oversized-frame error that names the wrong cause.
   @min_max_frame 1_024
@@ -299,7 +301,7 @@ defmodule Ouroboros.Gateway.Config do
   # them. An existing file is never replaced — it is read instead — because the token in
   # it may already be the one a running client holds.
   defp generate_token_file!(path) do
-    File.mkdir_p!(Path.dirname(path))
+    DataDir.ensure_private!(Path.dirname(path))
 
     tmp = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
     token = @generated_token_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)

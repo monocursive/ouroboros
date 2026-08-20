@@ -23,6 +23,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
   @receive_timeout 15_000
 
   setup context do
+    File.chmod!(context.tmp_dir, 0o700)
     cleanup_sessions()
     cleanup_runs()
     cleanup_stores()
@@ -169,6 +170,62 @@ defmodule Ouroboros.Gateway.StreamingTest do
       # A round trip after the emission: if a notification were coming it would be ahead
       # of this response in the socket, because one connection has one writer.
       assert call(client, "interactive.list")["result"]
+    end
+
+    test "same explicit id on another owner is refused without dropping the watched stream", %{
+      client: client
+    } do
+      {_ref, id} = start_session()
+      assert is_list(call(client, "interactive.subscribe", %{"id" => id})["result"])
+
+      # The event envelope identifies a stream by plane + id, so two owners with the same
+      # caller-supplied id cannot be multiplexed honestly on one connection. Add a
+      # last-known offline owner to the directory and prove Conn refuses that collision
+      # before calling its plane. This exercises the protocol rule without inventing a
+      # second provider run merely to obtain the node identity.
+      monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+      original_monitor_state = :sys.get_state(monitor)
+      other_owner = :"ouroboros-collision-owner@test"
+
+      :sys.replace_state(monitor, fn state ->
+        local = Map.fetch!(state.machines, node())
+
+        other = %{
+          local
+          | node: other_owner,
+            machine: "collision-owner",
+            state: :offline,
+            expected?: false,
+            last_down_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+            down_reason: "test_offline"
+        }
+
+        %{state | machines: Map.put(state.machines, other_owner, other)}
+      end)
+
+      on_exit(fn ->
+        if Process.alive?(monitor),
+          do: :sys.replace_state(monitor, fn _ -> original_monitor_state end)
+      end)
+
+      collision =
+        call(client, "interactive.subscribe", %{
+          "id" => id,
+          "node" => Atom.to_string(other_owner)
+        })
+
+      assert collision["error"]["code"] == -32_004
+      assert collision["error"]["message"] =~ "another machine"
+
+      # Naming the colliding owner on unsubscribe is a no-op, not permission to tear down
+      # the local stream that actually owns this plane + id slot.
+      assert call(client, "interactive.unsubscribe", %{
+               "id" => id,
+               "node" => Atom.to_string(other_owner)
+             })["result"] == "ok"
+
+      assert Map.has_key?(:sys.get_state(conn_pid(client)).subscriptions, {:interactive, id})
+      assert call(client, "interactive.unsubscribe", %{"id" => id})["result"] == "ok"
     end
 
     test "unsubscribing from a session this connection never watched starts nothing", %{

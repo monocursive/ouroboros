@@ -169,7 +169,8 @@ defmodule Ouroboros.Interactive.State do
       metadata: metadata
     })
     |> reject_nil_values()
-    |> Ouroboros.Provider.apply_execution_directories(state.provider)
+    |> Ouroboros.Provider.apply_runtime_provider_policy(state.provider)
+    |> Ouroboros.Provider.apply_execution_directories(state.provider, :session)
   end
 
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()

@@ -17,20 +17,53 @@ defmodule Ouroboros.CodingSession do
   # is given that timeout plus a margin so the local waiter, not the transport, decides.
   @default_call_timeout 30_000
   @remote_margin_ms 5_000
+  @immutable_request_fields [
+    :id,
+    :node,
+    :objective,
+    :provider,
+    :workspace_mode,
+    :origin_digest,
+    :event_limit,
+    :options
+  ]
 
   @doc "Starts a detached coding task on the local node."
   @spec start(String.t(), keyword()) :: {:ok, TaskRef.t()} | {:error, term()}
   def start(objective, opts \\ []) when is_binary(objective) and is_list(opts) do
+    case start_for_gateway(objective, opts) do
+      {:created, %TaskRef{}, reason} -> {:error, reason}
+      result -> result
+    end
+  end
+
+  @doc false
+  @spec start_for_gateway(String.t(), keyword()) ::
+          {:ok, TaskRef.t()} | {:created, TaskRef.t(), term()} | {:error, term()}
+  def start_for_gateway(objective, opts \\ []) when is_binary(objective) and is_list(opts) do
     id = Keyword.get_lazy(opts, :id, &Jido.Signal.ID.generate!/0)
 
-    with {:ok, task} <- TaskState.new(id, objective, opts),
-         :ok <- Store.create(task) do
-      case ensure_coordinator(id) do
-        {:ok, _pid} ->
-          {:ok, TaskRef.new(id)}
+    with {:ok, requested} <- TaskState.new(id, objective, opts),
+         {:ok, task} <- create_or_match(requested) do
+      ref = TaskRef.new(id)
 
-        {:error, reason} ->
-          fail_unstarted_task(task, reason)
+      case task.status do
+        status when status in [:failed, :lost] ->
+          {:created, ref, task.error || {:task_start_failed, status}}
+
+        status when status in [:completed, :cancelled] ->
+          {:ok, ref}
+
+        _active ->
+          case ensure_coordinator(id) do
+            {:ok, _pid} ->
+              {:ok, ref}
+
+            {:error, reason} ->
+              case fail_unstarted_task(task, reason) do
+                {:error, failure} -> {:created, ref, failure}
+              end
+          end
       end
     end
   end
@@ -39,6 +72,13 @@ defmodule Ouroboros.CodingSession do
   @spec start_on(node(), String.t(), keyword()) :: {:ok, TaskRef.t()} | {:error, term()}
   def start_on(owner, objective, opts \\ []) when is_atom(owner) do
     route(owner, __MODULE__, :start, [objective, opts])
+  end
+
+  @doc false
+  @spec start_for_gateway_on(node(), String.t(), keyword()) ::
+          {:ok, TaskRef.t()} | {:created, TaskRef.t(), term()} | {:error, term()}
+  def start_for_gateway_on(owner, objective, opts \\ []) when is_atom(owner) do
+    route(owner, __MODULE__, :start_for_gateway, [objective, opts])
   end
 
   @doc "Returns a durable task snapshot."
@@ -140,6 +180,37 @@ defmodule Ouroboros.CodingSession do
     end
   end
 
+  # A caller-generated ID is the start idempotency key. `Store.create/1` is serialized,
+  # so concurrent starts elect exactly one durable request; every loser may adopt it only
+  # when the normalized immutable intent is identical. Mutable run state — status,
+  # cursor, events, Harness IDs, timestamps, results, and workspace lease — never enters
+  # the comparison.
+  defp create_or_match(requested) do
+    case Store.create(requested) do
+      :ok ->
+        {:ok, requested}
+
+      {:error, :already_exists} ->
+        case Store.get(requested.id) do
+          {:ok, existing} ->
+            if same_request?(existing, requested),
+              do: {:ok, existing},
+              else: {:error, {:task_id_conflict, requested.id}}
+
+          other ->
+            {:error, {:existing_task_unavailable, other}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp same_request?(left, right) do
+    Map.take(left, @immutable_request_fields) == Map.take(right, @immutable_request_fields) and
+      canonical_workspace(left.workspace) == canonical_workspace(right.workspace)
+  end
+
   defp ensure_coordinator(id) do
     case Task.whereis(id) do
       pid when is_pid(pid) ->
@@ -193,6 +264,13 @@ defmodule Ouroboros.CodingSession do
   defp transport_timeout(:infinity), do: :infinity
   defp transport_timeout(timeout) when is_integer(timeout), do: timeout + @remote_margin_ms
   defp transport_timeout(_timeout), do: call_timeout()
+
+  defp canonical_workspace(workspace) do
+    case Ouroboros.Workspace.Path.canonicalize(workspace) do
+      {:ok, canonical} -> canonical
+      {:error, _reason} -> workspace
+    end
+  end
 
   defp fail_unstarted_task(task, reason) do
     case Store.get(task.id) do

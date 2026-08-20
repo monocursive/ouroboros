@@ -17,6 +17,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
   @moduletag :capture_log
 
   setup %{tmp_dir: tmp_dir} do
+    File.chmod!(tmp_dir, 0o700)
     config = Config.new!(token: @token, data_dir: tmp_dir, port: 0)
 
     start_supervised!({Gateway, config: config})

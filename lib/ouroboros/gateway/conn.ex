@@ -636,21 +636,36 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp subscribe(state, plane, rpc_id, params) do
-    case Methods.subscription_params(params) do
-      {:ok, session_id, cursor} ->
+    case Methods.subscription_params(plane, params) do
+      {:ok, session, cursor} ->
+        session_id = session.id
         key = {plane, session_id}
+        watched = Map.get(state.subscriptions, key)
 
-        if map_size(state.subscriptions) >= @max_subscriptions and
-             not Map.has_key?(state.subscriptions, key) do
-          respond_error(
-            state,
-            rpc_id,
-            :unavailable,
-            "this connection already watches #{@max_subscriptions} sessions; unsubscribe " <>
-              "from one before subscribing to another"
-          )
-        else
-          open_subscription(state, key, rpc_id, cursor)
+        cond do
+          map_size(state.subscriptions) >= @max_subscriptions and is_nil(watched) ->
+            respond_error(
+              state,
+              rpc_id,
+              :unavailable,
+              "this connection already watches #{@max_subscriptions} sessions; unsubscribe " <>
+                "from one before subscribing to another"
+            )
+
+          match?(%{session: existing} when existing != session, watched) ->
+            # Event envelopes predate remote refs and identify a stream by plane + id,
+            # without its owner node. Refuse the rare cross-owner duplicate explicitly
+            # instead of merging two streams or silently abandoning the first subscription.
+            respond_error(
+              state,
+              rpc_id,
+              :unavailable,
+              "this connection already watches #{plane} session #{inspect(session_id)} " <>
+                "on another machine; unsubscribe from it before watching this owner"
+            )
+
+          true ->
+            open_subscription(state, key, rpc_id, cursor, session)
         end
 
       {:invalid, message} ->
@@ -658,16 +673,16 @@ defmodule Ouroboros.Gateway.Conn do
     end
   end
 
-  defp open_subscription(state, {plane, session_id} = key, rpc_id, cursor) do
-    case Methods.subscribe(plane, session_id, cursor) do
+  defp open_subscription(state, {plane, _session_id} = key, rpc_id, cursor, session) do
+    case Methods.subscribe(plane, session, cursor) do
       {:ok, backlog} ->
         # Registration completed inside the plane before this returned, so any event it
         # has already sent is sitting in this process's mailbox behind the frame being
         # answered here — the backlog and the live stream cannot interleave or gap.
         state = state |> forget_subscription(key) |> respond(rpc_id, {:ok, backlog})
 
-        case Methods.session(plane, session_id) do
-          {:ok, _status, false} -> watch(state, key)
+        case Methods.session(plane, session) do
+          {:ok, _status, false} -> watch(state, key, session)
           {:ok, status, true} -> stream_ended(state, key, Atom.to_string(status))
           :error -> stream_ended(state, key, "unknown")
         end
@@ -677,15 +692,20 @@ defmodule Ouroboros.Gateway.Conn do
     end
   end
 
-  defp watch(state, {plane, session_id} = key) do
-    case Methods.coordinator(plane, session_id) do
+  defp watch(state, {plane, _session_id} = key, session) do
+    case Methods.coordinator(plane, session) do
       pid when is_pid(pid) ->
         ref = Process.monitor(pid)
 
         %{
           state
           | subscriptions:
-              Map.put(state.subscriptions, key, %{ref: ref, dropped: 0, last_sequence: 0}),
+              Map.put(state.subscriptions, key, %{
+                ref: ref,
+                session: session,
+                dropped: 0,
+                last_sequence: 0
+              }),
             coordinators: Map.put(state.coordinators, ref, key)
         }
 
@@ -697,18 +717,21 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp unsubscribe(state, plane, rpc_id, params) do
-    case Methods.session_param(params) do
-      {:ok, session_id} ->
+    case Methods.session_param(plane, params) do
+      {:ok, session} ->
+        session_id = session.id
         key = {plane, session_id}
 
-        if Map.has_key?(state.subscriptions, key) do
-          _ = Methods.unsubscribe(plane, session_id)
-          state |> forget_subscription(key) |> respond(rpc_id, {:ok, :ok})
-        else
-          # Answered without calling the plane on purpose: `unsubscribe` would *start* a
-          # coordinator for a session this connection never watched, and a verb that
-          # spawns the thing it was asked to stop listening to is not a read verb.
-          respond(state, rpc_id, {:ok, :ok})
+        case Map.get(state.subscriptions, key) do
+          %{session: ^session} ->
+            _ = Methods.unsubscribe(plane, session)
+            state |> forget_subscription(key) |> respond(rpc_id, {:ok, :ok})
+
+          _different_owner_or_absent ->
+            # Answered without calling the plane on purpose: `unsubscribe` would *start* a
+            # coordinator for a session this connection never watched, and a verb that
+            # spawns the thing it was asked to stop listening to is not a read verb.
+            respond(state, rpc_id, {:ok, :ok})
         end
 
       {:invalid, message} ->
@@ -780,9 +803,9 @@ defmodule Ouroboros.Gateway.Conn do
   defp release_subscriptions(state) do
     deadline = System.monotonic_time(:millisecond) + @unsubscribe_budget_ms
 
-    Enum.each(state.subscriptions, fn {{plane, session_id}, _ref} ->
+    Enum.each(state.subscriptions, fn {{plane, _session_id}, subscription} ->
       if System.monotonic_time(:millisecond) < deadline do
-        _ = Methods.unsubscribe(plane, session_id)
+        _ = Methods.unsubscribe(plane, subscription.session)
       end
     end)
   end

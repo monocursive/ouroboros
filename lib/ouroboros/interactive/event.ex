@@ -28,13 +28,15 @@ defmodule Ouroboros.Interactive.Event do
   @doc false
   @spec from_harness(String.t(), Jido.Harness.Event.t()) :: t()
   def from_harness(session_id, %Jido.Harness.Event{} = event) do
+    {type, payload} = Ouroboros.HarnessEventProjection.durable_fields(event)
+
     %__MODULE__{
       id: event_id(session_id, event.sequence),
       session_id: session_id,
       sequence: event.sequence,
-      type: event.type,
+      type: type,
       timestamp: event.timestamp,
-      payload: Jido.Harness.Redaction.redact(event.payload || %{}),
+      payload: Jido.Harness.Redaction.redact(payload),
       harness_session_id: event.session_id,
       provider: event.provider,
       provider_session_id: event.provider_session_id,

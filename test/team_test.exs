@@ -5,6 +5,7 @@ defmodule Ouroboros.TeamTest do
   alias Ouroboros.Coding.Event
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskState
+  alias Ouroboros.Gateway.Methods
   alias Ouroboros.Team
   alias Ouroboros.Team.Server
   alias Ouroboros.Team.Store, as: TeamStore
@@ -47,6 +48,19 @@ defmodule Ouroboros.TeamTest do
       assert {:error, {:team_supervisor_unavailable, Ouroboros.Team.Supervisor}} =
                Team.start(id: unique_id("unmanaged-team"))
     end
+  end
+
+  test "generated team IDs are node-qualified while explicit durable IDs are unchanged" do
+    generated = Server.child_spec([])
+    assert {Server, :start_link, [generated_opts]} = generated.start
+    generated_id = Keyword.fetch!(generated_opts, :id)
+
+    assert String.starts_with?(generated_id, Atom.to_string(node()) <> ":team:")
+    assert generated.id == {Server, generated_id}
+
+    explicit = Server.child_spec(id: "durable-team-id")
+    assert {Server, :start_link, [[id: "durable-team-id"]]} = explicit.start
+    assert explicit.id == {Server, "durable-team-id"}
   end
 
   test "team IDs are registered atomically and cannot share a coordinator" do
@@ -1019,7 +1033,14 @@ defmodule Ouroboros.TeamTest do
              :peer.start(%{name: peer_name, args: args, wait_boot: 15_000})
 
     journal_dir = unique_journal_dir()
-    on_exit(fn -> :peer.stop(peer) end)
+    remote_cwd = Path.join(journal_dir, "remote-cwd")
+    File.mkdir_p!(remote_cwd)
+    :ok = :erpc.call(peer_node, File, :cd!, [remote_cwd])
+
+    assert {:ok, remote_workspace} =
+             :erpc.call(peer_node, Ouroboros.Workspace.Path, :canonicalize, ["."])
+
+    on_exit(fn -> safe_stop_peer(peer) end)
     on_exit(fn -> File.rm_rf(journal_dir) end)
 
     storage = {Jido.Storage.ETS, table: peer_name}
@@ -1047,6 +1068,64 @@ defmodule Ouroboros.TeamTest do
 
     assert {:ok, _applications} =
              :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
+
+    # One gateway stays attached to the local node while the owner lives remotely. The
+    # friendly placement field selects it, and every later call routes with the node in
+    # the returned ref instead of accidentally looking in the gateway node's local store.
+    gateway_objective = "gateway routed remote task"
+
+    assert {:ok, %Ouroboros.Coding.TaskRef{node: ^peer_node} = gateway_ref} =
+             Methods.invoke("coding.start", %{
+               "objective" => gateway_objective,
+               "machine" => Atom.to_string(peer_node),
+               "provider" => Atom.to_string(@provider),
+               "workspace" => remote_workspace
+             })
+
+    assert_receive {:ouroboros_test_adapter_started, _gateway_run_id,
+                    %RunRequest{metadata: %{ouroboros_task_id: gateway_task_id}},
+                    gateway_adapter},
+                   2_000
+
+    assert gateway_task_id == gateway_ref.id
+    assert node(gateway_adapter) == peer_node
+
+    assert {:ok,
+            %TaskState{
+              id: ^gateway_task_id,
+              node: ^peer_node,
+              status: :running,
+              workspace: ^remote_workspace
+            }} =
+             Methods.invoke("coding.info", %{
+               "id" => gateway_task_id,
+               "node" => Atom.to_string(peer_node)
+             })
+
+    assert {:ok, fleet_tasks} = Methods.invoke("coding.list", %{})
+
+    assert Enum.any?(fleet_tasks, fn task ->
+             task.id == gateway_task_id and task.node == peer_node
+           end)
+
+    assert {:ok, _backlog} = Methods.subscribe(:coding, gateway_ref, 0)
+    assert node(Methods.coordinator(:coding, gateway_ref)) == peer_node
+    assert :ok = HarnessAdapter.emit(gateway_adapter, :output_text_final, %{"text" => "routed"})
+    assert :ok = HarnessAdapter.finish(gateway_adapter)
+
+    assert_receive {:ouroboros_coding_event, ^gateway_task_id, %Event{}}, 2_000
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, %TaskState{status: :completed}},
+        Methods.invoke("coding.info", %{
+          "id" => gateway_task_id,
+          "node" => Atom.to_string(peer_node)
+        })
+      )
+    end)
+
+    assert {:ok, :ok} = Methods.unsubscribe(:coding, gateway_ref)
 
     team_id = unique_id("distributed-team")
     worker_id = unique_id("distributed-worker")
@@ -1088,8 +1167,11 @@ defmodule Ouroboros.TeamTest do
              Team.delegate(team, worker_id, objective,
                id: delegation_id,
                provider: @provider,
-               workspace: File.cwd!()
+               workspace: "."
              )
+
+    assert {:ok, %TaskState{workspace: ^remote_workspace}} =
+             :erpc.call(peer_node, Ouroboros.Coding.Store, :get, [coding_task_id])
 
     assert_receive {:ouroboros_test_adapter_started, run_id,
                     %RunRequest{metadata: %{ouroboros_task_id: ^coding_task_id}}, adapter},
@@ -1114,6 +1196,201 @@ defmodule Ouroboros.TeamTest do
 
     assert :ok = Team.close(team)
     assert_eventually(fn -> Ouroboros.Mesh.whereis(worker_id) == nil end)
+
+    # A durable ref does not stop being valid merely because its owner is temporarily
+    # offline. Resolve the last-known node without minting an atom, then let the session
+    # plane return the honest reconnectable error instead of mislabelling it bad input.
+    :ok = :peer.stop(peer)
+    assert_eventually(fn -> peer_node not in Node.list() end, 500)
+
+    assert_eventually(fn ->
+      Enum.any?(Ouroboros.Cluster.fleet_status().machines, fn machine ->
+        machine.node == peer_node and machine.state == :offline
+      end)
+    end)
+
+    assert {:error, unavailable_code, _message,
+            %{
+              "reason" => "owner_unavailable",
+              "node" => ^peer_node,
+              "outcome" => "unknown"
+            }} =
+             Methods.invoke("coding.info", %{
+               "id" => gateway_task_id,
+               "node" => Atom.to_string(peer_node)
+             })
+
+    assert unavailable_code == Methods.code(:unavailable)
+
+    assert {:ok, %Ouroboros.Coding.TaskRef{node: ^peer_node} = offline_ref, 0} =
+             Methods.subscription_params(:coding, %{
+               "id" => gateway_task_id,
+               "node" => Atom.to_string(peer_node)
+             })
+
+    assert {:error, ^unavailable_code, _message,
+            %{
+              "reason" => "owner_unavailable",
+              "node" => ^peer_node,
+              "outcome" => "unknown"
+            }} =
+             Methods.subscribe(:coding, offline_ref, 0)
+  end
+
+  @tag timeout: 180_000
+  test "a remote worker is recreated when its machine rejoins under the same BEAM name" do
+    ensure_distributed!()
+
+    peer_name = String.to_atom("ouroboros_recovery_peer_#{System.unique_integer([:positive])}")
+    args = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
+    peer_opts = %{name: peer_name, args: args, wait_boot: 15_000}
+
+    assert {:ok, first_peer, peer_node} = :peer.start(peer_opts)
+    on_exit(fn -> safe_stop_peer(first_peer) end)
+
+    start_peer_runtime!(peer_node, peer_name)
+
+    team_id = unique_id("machine-recovery-team")
+    worker_id = unique_id("machine-recovery-worker")
+
+    assert {:ok, team} = Team.start(id: team_id, cleanup_agents: true)
+
+    on_exit(fn ->
+      case Team.whereis(team_id) do
+        pid when is_pid(pid) -> Team.close(pid)
+        nil -> :ok
+      end
+    end)
+
+    assert {:ok, %{pid: first_worker, node: ^peer_node}} =
+             Team.add_worker(team, worker_id, node: peer_node, role: "remote reviewer")
+
+    assert first_worker in Ouroboros.Mesh.members(worker_id)
+    assert Team.state(team).workers[worker_id].available? == true
+
+    :ok = :peer.stop(first_peer)
+
+    assert_eventually(fn -> peer_node not in Node.list() end, 500)
+    assert_eventually(fn -> Ouroboros.Mesh.members(worker_id) == [] end, 500)
+    assert Team.state(team).workers[worker_id].available? == false
+
+    # Same stable node identity, fresh VM and fresh process table. Cluster.Monitor's
+    # nodeup broadcast is the only recovery trigger; the team process itself stays live.
+    assert {:ok, replacement_peer, ^peer_node} = :peer.start(peer_opts)
+    on_exit(fn -> safe_stop_peer(replacement_peer) end)
+    start_peer_runtime!(peer_node, peer_name)
+
+    assert_eventually(
+      fn ->
+        case Ouroboros.Mesh.members(worker_id) do
+          [replacement] -> node(replacement) == peer_node and replacement != first_worker
+          _other -> false
+        end
+      end,
+      1_000
+    )
+
+    assert Team.state(team).workers[worker_id].available? == true
+    assert {:ok, worker_state} = Ouroboros.Mesh.state(worker_id)
+    assert worker_state.agent.state.parent_id == team_id <> ":coordinator"
+
+    assert :ok = Team.close(team)
+    assert_eventually(fn -> Ouroboros.Mesh.whereis(worker_id) == nil end)
+  end
+
+  @tag timeout: 240_000
+  test "one rejoining owner is reconciled independently of another offline worker" do
+    ensure_distributed!()
+
+    suffix = System.unique_integer([:positive])
+    first_name = String.to_atom("ouroboros_partial_recovery_a_#{suffix}")
+    second_name = String.to_atom("ouroboros_partial_recovery_b_#{suffix}")
+    args = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
+    first_opts = %{name: first_name, args: args, wait_boot: 15_000}
+    second_opts = %{name: second_name, args: args, wait_boot: 15_000}
+
+    assert {:ok, first_peer, first_node} = :peer.start(first_opts)
+    assert {:ok, second_peer, second_node} = :peer.start(second_opts)
+    on_exit(fn -> safe_stop_peer(first_peer) end)
+    on_exit(fn -> safe_stop_peer(second_peer) end)
+
+    remote_journal_dir = unique_journal_dir()
+    File.mkdir_p!(remote_journal_dir)
+    on_exit(fn -> File.rm_rf(remote_journal_dir) end)
+    configure_peer_harness!(second_node, self(), remote_journal_dir)
+
+    start_peer_runtime!(first_node, first_name)
+    start_peer_runtime!(second_node, second_name)
+
+    team_id = unique_id("partial-machine-recovery-team")
+    first_worker_id = unique_id("partial-machine-recovery-worker-a")
+    second_worker_id = unique_id("partial-machine-recovery-worker-b")
+    delegation_id = unique_id("partial-machine-recovery-delegation")
+
+    assert {:ok, team} = Team.start(id: team_id, cleanup_agents: true)
+
+    on_exit(fn ->
+      case Team.whereis(team_id) do
+        pid when is_pid(pid) -> Team.close(pid)
+        nil -> :ok
+      end
+    end)
+
+    assert {:ok, %{pid: first_worker, node: ^first_node}} =
+             Team.add_worker(team, first_worker_id, node: first_node)
+
+    assert {:ok, %{pid: second_worker, node: ^second_node}} =
+             Team.add_worker(team, second_worker_id, node: second_node)
+
+    assert {:ok, %{status: :running}} =
+             Team.delegate(team, second_worker_id, "finish before both owners disconnect",
+               id: delegation_id,
+               provider: @provider,
+               workspace: "."
+             )
+
+    assert_receive {:ouroboros_test_adapter_started, _run_id, _request, adapter}, 2_000
+    assert node(adapter) == second_node
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "finished"})
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %{delivery: :delivered}} = Team.await(team, delegation_id, 3_000)
+
+    :ok = :peer.stop(first_peer)
+    :ok = :peer.stop(second_peer)
+
+    assert_eventually(
+      fn -> first_node not in Node.list() and second_node not in Node.list() end,
+      500
+    )
+
+    assert_eventually(fn -> Ouroboros.Mesh.members(first_worker_id) == [] end, 500)
+    assert_eventually(fn -> Ouroboros.Mesh.members(second_worker_id) == [] end, 500)
+
+    # Only the first owner rejoins. Its restored PID must be committed even though the
+    # second worker has a durable completed delegation and remains unreachable.
+    assert {:ok, replacement_peer, ^first_node} = :peer.start(first_opts)
+    on_exit(fn -> safe_stop_peer(replacement_peer) end)
+    start_peer_runtime!(first_node, first_name)
+
+    assert_eventually(
+      fn ->
+        case Ouroboros.Mesh.members(first_worker_id) do
+          [replacement] -> node(replacement) == first_node and replacement != first_worker
+          _other -> false
+        end
+      end,
+      1_000
+    )
+
+    [replacement] = Ouroboros.Mesh.members(first_worker_id)
+    runtime_state = :sys.get_state(team)
+    assert runtime_state.workers[first_worker_id].pid == replacement
+    assert runtime_state.workers[second_worker_id].pid == second_worker
+
+    # Cleanup must use the refreshed first-owner PID rather than orphaning the agent that
+    # reconciliation already created as a side effect.
+    assert :ok = Team.close(team)
+    assert_eventually(fn -> Ouroboros.Mesh.whereis(first_worker_id) == nil end)
   end
 
   defp cleanup_test_runs do
@@ -1166,6 +1443,45 @@ defmodule Ouroboros.TeamTest do
       name = String.to_atom("ouroboros_team_root_#{System.unique_integer([:positive])}")
       assert {:ok, _pid} = :net_kernel.start([name, :shortnames])
     end
+  end
+
+  defp start_peer_runtime!(peer_node, table) do
+    :ok =
+      :erpc.call(peer_node, Application, :put_env, [
+        :ouroboros,
+        :coding_storage,
+        {Jido.Storage.ETS, table: table}
+      ])
+
+    assert {:ok, _applications} =
+             :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
+  end
+
+  defp configure_peer_harness!(peer_node, test_pid, journal_dir) do
+    :ok =
+      :erpc.call(peer_node, Application, :put_env, [
+        :jido_harness,
+        :providers,
+        %{@provider => HarnessAdapter}
+      ])
+
+    :ok =
+      :erpc.call(peer_node, Application, :put_env, [
+        :jido_harness,
+        :provider_config,
+        %{
+          @provider => %{
+            test_pid: test_pid,
+            retention: %{journal_dir: journal_dir}
+          }
+        }
+      ])
+  end
+
+  defp safe_stop_peer(peer) do
+    :peer.stop(peer)
+  catch
+    _kind, _reason -> :ok
   end
 
   defp assert_eventually(fun, attempts \\ 200)

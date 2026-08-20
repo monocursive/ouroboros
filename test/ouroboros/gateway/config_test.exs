@@ -5,6 +5,11 @@ defmodule Ouroboros.Gateway.ConfigTest do
 
   @token String.duplicate("t", 32)
 
+  setup context do
+    if tmp_dir = Map.get(context, :tmp_dir), do: File.chmod!(tmp_dir, 0o700)
+    :ok
+  end
+
   defp valid(overrides \\ []) do
     Keyword.merge([token: @token, data_dir: "/tmp/ouroboros-gateway-test"], overrides)
   end

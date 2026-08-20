@@ -209,7 +209,7 @@ defmodule Ouroboros.CodingWorkspaceTest do
     assert_eventually(fn -> Workspace.list() == [] end)
   end
 
-  defp start_controlled(id, workspace, extra_opts \\ []) do
+  defp start_controlled(id, workspace, extra_opts) do
     opts =
       [id: id, provider: @provider, workspace: workspace]
       |> Keyword.merge(extra_opts)

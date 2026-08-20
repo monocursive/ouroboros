@@ -15,6 +15,29 @@ defmodule Ouroboros.InteractiveSessionTest do
     def put_checkpoint(_key, _value, _opts), do: :ok
   end
 
+  defmodule RefuseFailedTurnStorage do
+    @moduledoc false
+
+    def get_checkpoint(_key, opts) do
+      controller = Keyword.fetch!(opts, :controller)
+      {:ok, Agent.get(controller, & &1.checkpoint)}
+    end
+
+    def put_checkpoint(_key, checkpoint, opts) do
+      controller = Keyword.fetch!(opts, :controller)
+      session_id = Keyword.fetch!(opts, :session_id)
+      turn_id = Keyword.fetch!(opts, :turn_id)
+
+      if get_in(checkpoint, [session_id, Access.key(:turns), turn_id, Access.key(:status)]) ==
+           :failed do
+        {:error, :disk_full}
+      else
+        Agent.update(controller, &%{&1 | checkpoint: checkpoint})
+        :ok
+      end
+    end
+  end
+
   setup do
     cleanup_sessions()
 
@@ -216,6 +239,27 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.close(ref)
   end
 
+  test "gateway start exposes a durable failed session and keeps same-id conflicts definite", %{
+    id: id
+  } do
+    opts = [id: id, provider: :ouroboros_missing_test_provider, workspace: File.cwd!()]
+
+    assert {:created, %Ref{id: ^id} = ref, {:session_start_failed, _reason}} =
+             InteractiveSession.start_for_gateway(opts)
+
+    assert {:ok, %State{status: :failed, error: failure}} = InteractiveSession.info(ref)
+    refute is_nil(failure)
+
+    # A lost gateway answer is reconciled against the exact immutable checkpoint. It
+    # returns the same created reference rather than claiming the failed provider start
+    # was an unknown mutation forever.
+    assert {:created, ^ref, {:session_start_failed, _reason}} =
+             InteractiveSession.start_for_gateway(opts)
+
+    assert {:error, {:session_id_conflict, ^id}} =
+             InteractiveSession.start_for_gateway(Keyword.put(opts, :sandbox_mode, :read_only))
+  end
+
   test "a turn that forges the runtime envelope is refused before dispatch", %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
@@ -290,6 +334,113 @@ defmodule Ouroboros.InteractiveSessionTest do
     refute prompt =~ "\nsigner: local\n"
     assert :ok = HarnessAdapter.finish(adapter)
     assert :ok = InteractiveSession.close(ref)
+  end
+
+  test "an exposure failure is checkpointed terminal before it is reported definite", %{id: id} do
+    harness_session_id = unique_id("invalid-exposure-session")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_session_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:observe, self(), {:ok, unique_id("unexpected-harness-turn")}}},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 harness_session_id: harness_session_id
+             })
+
+    ref = Ref.new(id)
+    turn_id = unique_id("invalid-exposure-turn")
+    # TurnRequest accepts arbitrary binaries, while the runtime envelope deliberately
+    # refuses text that is not valid UTF-8. This reaches the post-intent exposure seam
+    # without manufacturing an invalid stored session.
+    input = <<255>>
+
+    assert {:error, {:turn_dispatch_failed, :invalid_prompt}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    refute_receive {:stub_session_send_message, ^harness_session_id, _request}, 100
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :failed}}}} = Store.get(id)
+
+    # The same logical id is now an idempotent read of a terminal rejection, never a
+    # recovered dispatch masquerading behind a definite error.
+    assert {:ok, %{id: ^turn_id, status: :failed}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    assert :ok = retire_session(id)
+  end
+
+  test "a lost exposure-failure checkpoint remains outcome-unknown under the same id", %{id: id} do
+    harness_session_id = unique_id("lost-exposure-checkpoint-session")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_session_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:observe, self(), {:ok, unique_id("unexpected-harness-turn")}}},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 harness_session_id: harness_session_id
+             })
+
+    ref = Ref.new(id)
+    assert {:ok, %State{status: :idle}} = InteractiveSession.info(ref)
+
+    turn_id = unique_id("lost-exposure-checkpoint-turn")
+
+    controller =
+      start_supervised!(
+        {Agent, fn -> %{checkpoint: nil} end},
+        id: {:exposure_checkpoint_controller, id}
+      )
+
+    original_store = :sys.get_state(Store)
+
+    :sys.replace_state(Store, fn state ->
+      %{
+        state
+        | adapter: RefuseFailedTurnStorage,
+          opts: [controller: controller, session_id: id, turn_id: turn_id]
+      }
+    end)
+
+    on_exit(fn -> restore_store_after_fault(original_store, id) end)
+
+    assert {:error,
+            {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, ^turn_id,
+             {:request_exposure_failed, :invalid_prompt}}} =
+             InteractiveSession.send_message(ref, <<255>>, id: turn_id)
+
+    refute_receive {:stub_session_send_message, ^harness_session_id, _request}, 100
+
+    if coordinator = Task.whereis(id) do
+      assert :ok =
+               DynamicSupervisor.terminate_child(
+                 Ouroboros.Interactive.TaskSupervisor,
+                 coordinator
+               )
+    end
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :dispatching}}}} = Store.get(id)
+
+    restore_store_after_fault(original_store, id)
   end
 
   test "turn attachments are canonical files contained by the leased workspace", %{id: id} do
@@ -443,7 +594,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.kill(kill_ref)
   end
 
-  test "a checkpointed but unsent intent is recovered once and stable-id retry does not duplicate",
+  test "a checkpointed intent stays unknown until recovery dispatches it exactly once",
        %{
          id: id
        } do
@@ -472,7 +623,9 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     ref = Ref.new(id)
 
-    assert {:ok, %{id: ^turn_id, status: :dispatching}} =
+    # Merely finding the intent is not proof of dispatch. The coordinator's recovery
+    # loop owns the send; a same-id caller stays outcome-unknown until that happens.
+    assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
              InteractiveSession.send_message(ref, "resume intent", id: turn_id)
 
     assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt}, adapter},
@@ -480,12 +633,220 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "resume intent")
 
-    assert {:ok, same} = InteractiveSession.send_message(ref, "resume intent", id: turn_id)
-    assert same.id == turn_id
+    # Once Harness has accepted it, the same fingerprint is an idempotent read and
+    # must not start a second provider run.
+    assert {:ok, %{id: ^turn_id, status: :running}} =
+             InteractiveSession.send_message(ref, "resume intent", id: turn_id)
+
     refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
     assert :ok = HarnessAdapter.finish(adapter)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, turn_id, 2_000)
     assert :ok = InteractiveSession.close(ref)
+  end
+
+  test "stable-id replay never accepts a turn whose dispatch is still ambiguous", %{id: id} do
+    harness_session_id = unique_id("exit-before-dispatch")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_session_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:exit_before_dispatch, self()}},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 harness_session_id: harness_session_id
+             })
+
+    ref = Ref.new(id)
+    turn_id = unique_id("ambiguous-turn")
+    input = "do not silently lose this prompt"
+
+    # The stub exits before performing any dispatch. The first call therefore records
+    # an honestly ambiguous turn even though this test knows no provider work started.
+    assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    assert_receive {:stub_session_exited_before_dispatch, ^harness_session_id}, 1_000
+
+    # Reconciliation under the same logical id must remain outcome-unknown. Returning
+    # the existing turn as `{:ok, ...}` would make FirstMessage clear the restored draft
+    # while neither this call nor the first one dispatched anything.
+    assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    refute_receive {:stub_session_exited_before_dispatch, ^harness_session_id}, 100
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :ambiguous}}}} =
+             InteractiveSession.info(ref)
+
+    assert :ok = retire_session(id)
+  end
+
+  test "a refused dispatch whose failure checkpoint is lost remains outcome-unknown", %{id: id} do
+    harness_session_id = unique_id("refusing-session")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_session_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:error, :busy}},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 harness_session_id: harness_session_id
+             })
+
+    ref = Ref.new(id)
+    assert {:ok, %State{status: :idle}} = InteractiveSession.info(ref)
+
+    turn_id = unique_id("refused-checkpoint-turn")
+
+    controller =
+      start_supervised!(
+        {Agent, fn -> %{checkpoint: nil} end},
+        id: {:turn_checkpoint_controller, id}
+      )
+
+    original_store = :sys.get_state(Store)
+
+    :sys.replace_state(Store, fn state ->
+      %{
+        state
+        | adapter: RefuseFailedTurnStorage,
+          opts: [controller: controller, session_id: id, turn_id: turn_id]
+      }
+    end)
+
+    on_exit(fn -> restore_store_after_fault(original_store, id) end)
+
+    # The first write durably records `:dispatching`. Harness then refuses the call, and
+    # the injected disk failure prevents the `:failed` transition from replacing that
+    # intent. Recovery may therefore send it later; the caller must keep this exact id.
+    assert {:error,
+            {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, ^turn_id,
+             {:harness_refused, :busy}}} =
+             InteractiveSession.send_message(ref, "retain this logical turn", id: turn_id)
+
+    if coordinator = Task.whereis(id) do
+      assert :ok =
+               DynamicSupervisor.terminate_child(
+                 Ouroboros.Interactive.TaskSupervisor,
+                 coordinator
+               )
+    end
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :dispatching}}}} = Store.get(id)
+
+    restore_store_after_fault(original_store, id)
+  end
+
+  test "recovery pins a legacy checkpointed Codex turn to the current runtime launcher", %{
+    id: id
+  } do
+    previous_launcher = Application.get_env(:ouroboros, :managed_codex_launcher)
+    root = Path.join(System.tmp_dir!(), unique_id("recovered-codex-turn"))
+    workspace = Path.join(root, "workspace")
+    launcher = Path.join(root, "runtime-owned-codex")
+    legacy_launcher = Path.join(root, "pre-upgrade-codex")
+    File.mkdir_p!(workspace)
+    File.write!(Path.join(workspace, "context.txt"), "checkpoint context")
+
+    Application.put_env(:ouroboros, :managed_codex_launcher, launcher)
+
+    on_exit(fn ->
+      if is_nil(previous_launcher) do
+        Application.delete_env(:ouroboros, :managed_codex_launcher)
+      else
+        Application.put_env(:ouroboros, :managed_codex_launcher, previous_launcher)
+      end
+
+      File.rm_rf!(root)
+    end)
+
+    harness_session_id = unique_id("legacy-codex-session")
+    harness_turn_id = unique_id("recovered-harness-turn")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_session_id,
+       provider: :codex,
+       state: :idle,
+       send_message: {:observe, self(), {:ok, harness_turn_id}}},
+      id: {:stub_session, harness_session_id}
+    )
+
+    assert {:ok, session} =
+             State.new(id,
+               provider: :codex,
+               workspace: workspace,
+               runtime_exposure: false
+             )
+
+    # This is deliberately a pre-policy checkpoint: it retains the executable selected
+    # by an older runtime. Recovery must rebuild the TurnRequest, pin today's node-owned
+    # launcher, then authorize its attachment before anything crosses into Harness.
+    legacy_request =
+      TurnRequest.new!(%{
+        prompt: "resume the legacy intent",
+        attachments: ["context.txt"],
+        provider_options: %{cli_path: legacy_launcher}
+      })
+
+    turn_id = unique_id("legacy-checkpointed-turn")
+
+    assert :ok =
+             Store.create(%{
+               session
+               | status: :idle,
+                 harness_session_id: harness_session_id,
+                 turns: %{turn_id => State.new_turn(turn_id, :message, legacy_request)}
+             })
+
+    assert {:ok, %State{}} = InteractiveSession.info(Ref.new(id))
+
+    assert_receive {:stub_session_send_message, ^harness_session_id, %TurnRequest{} = recovered},
+                   1_000
+
+    assert recovered.provider_options.cli_path == launcher
+    refute recovered.provider_options.cli_path == legacy_launcher
+    assert [authorized_attachment] = recovered.attachments
+    assert Path.basename(authorized_attachment) == "context.txt"
+    assert File.read!(authorized_attachment) == "checkpoint context"
+
+    assert {:ok, %State{turns: %{^turn_id => migrated}}} = Store.get(id)
+    assert migrated.request.provider_options.cli_path == launcher
+    refute migrated.request.provider_options.cli_path == legacy_launcher
+
+    # Reconciliation rebuilds the same request under today's runtime policy. The migrated
+    # durable fingerprint must match it, returning the known running turn without either a
+    # conflict (which invites a fresh-id duplicate) or a second Harness dispatch.
+    assert {:ok, %{id: ^turn_id, status: :running}} =
+             InteractiveSession.send_message(
+               Ref.new(id),
+               "resume the legacy intent",
+               id: turn_id,
+               attachments: ["context.txt"],
+               provider_options: %{cli_path: legacy_launcher}
+             )
+
+    refute_receive {:stub_session_send_message, ^harness_session_id, %TurnRequest{}}, 100
+
+    assert :ok = retire_session(id)
   end
 
   test "a checkpointed attachment that cannot exist burns its turn, a missing root does not",
@@ -728,6 +1089,29 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:ok, session} = Store.get(id)
     assert :ok = Store.put(%{session | status: :cancelled})
     Store.delete(id)
+  end
+
+  defp restore_store_after_fault(original_store, id) do
+    if coordinator = Task.whereis(id) do
+      _ = DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, coordinator)
+    end
+
+    if Process.whereis(Store) do
+      :sys.replace_state(Store, fn state ->
+        Map.merge(state, Map.take(original_store, [:adapter, :opts, :key]))
+      end)
+
+      case Store.get(id) do
+        {:ok, session} ->
+          _ = Store.put(%{session | status: :cancelled})
+          _ = Store.delete(id)
+
+        _absent ->
+          :ok
+      end
+    end
+
+    :ok
   end
 
   defp cleanup_sessions do

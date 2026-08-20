@@ -73,13 +73,6 @@ defmodule Ouroboros.Application do
     # An unrecognized role raises here rather than booting the privileged tree.
     role = Ouroboros.Cluster.boot_role!()
 
-    if role == :core do
-      # Provider processes inherit a runtime-owned Cargo cache that is writable through
-      # Codex's workspace sandbox. Dependency work stays out of both the repository and
-      # the user's global toolchain cache.
-      :ok = Ouroboros.Provider.configure_runtime_cache()
-    end
-
     Supervisor.start_link(children(role), strategy: :rest_for_one, name: Ouroboros.Supervisor)
   end
 
@@ -93,31 +86,36 @@ defmodule Ouroboros.Application do
   # A `:signer` node is the same posture plus the one process its role names. The service
   # owns a key, a policy, and a durable decision journal; it refuses to boot without all
   # three, so a signer host that is misconfigured fails here rather than at the first
-  # request. It leads the chain for the reason cluster formation trails it everywhere
-  # else: formation connects this node to a cluster that can then ask it for signatures,
-  # and there is no reason to be askable before the key is loaded.
-  defp children(:signer), do: [Ouroboros.Upgrade.Signing.Service, Ouroboros.Cluster]
+  # request. After the role-neutral durable-directory owner, it leads the role-specific
+  # chain for the reason cluster formation trails it everywhere else: formation connects
+  # this node to a cluster that can then ask it for signatures, and there is no reason to
+  # be askable before the key is loaded.
+  defp children(:signer) do
+    runtime_boundary_children([]) ++
+      [Ouroboros.Upgrade.Signing.Service, Ouroboros.Cluster]
+  end
 
   defp children(:core) do
     children =
-      [
-        Ouroboros.Jido,
-        %{
-          id: Ouroboros.Mesh.Scope,
-          start: {:pg, :start_link, [Ouroboros.Mesh.Scope]},
-          type: :worker
-        },
-        Ouroboros.Mesh.Directory,
-        Ouroboros.Upgrade.NodeExecutor,
-        Ouroboros.Upgrade.Rollout.Registry,
-        Ouroboros.Coding.Store,
-        Ouroboros.Interactive.Store,
-        Ouroboros.Team.Store,
-        Ouroboros.Orchestration.Store,
-        Ouroboros.Control.Store,
-        Ouroboros.Control.Grants,
-        release_runtime()
-      ] ++
+      runtime_boundary_children([Ouroboros.Provider.RuntimeCache]) ++
+        [
+          Ouroboros.Jido,
+          %{
+            id: Ouroboros.Mesh.Scope,
+            start: {:pg, :start_link, [Ouroboros.Mesh.Scope]},
+            type: :worker
+          },
+          Ouroboros.Mesh.Directory,
+          Ouroboros.Upgrade.NodeExecutor,
+          Ouroboros.Upgrade.Rollout.Registry,
+          Ouroboros.Coding.Store,
+          Ouroboros.Interactive.Store,
+          Ouroboros.Team.Store,
+          Ouroboros.Orchestration.Store,
+          Ouroboros.Control.Store,
+          Ouroboros.Control.Grants,
+          release_runtime()
+        ] ++
         workspace_children() ++
         [
           {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Coding.Registry},
@@ -163,6 +161,23 @@ defmodule Ouroboros.Application do
     # unconditional because it is lazy — no `codex` process is spawned until a client
     # actually asks about the account.
     children ++ [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++ gateway_children()
+  end
+
+  # A discovery publication is not runtime ownership. When this node has a durable data
+  # directory, claim it before the first store, registry, session, signing journal, or
+  # provider process can touch anything beneath it. Role-specific children run only after
+  # the claim succeeds, and a restarted owner takes them and every consumer beneath it
+  # through the `rest_for_one` recovery path. Test and library-only starts that configure
+  # no data directory retain their in-memory posture. Core adds provider cache setup at
+  # this boundary; signer owns only its key, policy, and durable decision journal.
+  defp runtime_boundary_children(after_owner) do
+    case Application.get_env(:ouroboros, :data_dir) do
+      data_dir when is_binary(data_dir) and data_dir != "" ->
+        [{Ouroboros.RuntimeOwner, data_dir: data_dir} | after_owner]
+
+      _unset ->
+        []
+    end
   end
 
   # Absent configuration means no gateway at all — not a disabled one — so a test run, a

@@ -7,6 +7,7 @@ defmodule Ouroboros.Interactive.Task do
 
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
+  alias Ouroboros.Provider
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
@@ -563,7 +564,7 @@ defmodule Ouroboros.Interactive.Task do
        when mode in [:message, :follow_up] and is_binary(id) and is_list(opts) do
     with :ok <- validate_turn_id(id),
          true <- Keyword.keyword?(opts) || {:error, :invalid_turn_options},
-         {:ok, request} <- build_turn_request(input, opts),
+         {:ok, request} <- build_turn_request(runtime.session.provider, input, opts),
          {:ok, request} <- authorize_turn_attachments(request, runtime.session.workspace),
          :ok <- ensure_serializable(request),
          :ok <- ensure_secret_free_options(request),
@@ -571,10 +572,22 @@ defmodule Ouroboros.Interactive.Task do
          turn = State.new_turn(id, mode, request) do
       case Map.fetch(runtime.session.turns, id) do
         {:ok, existing} ->
-          if existing.fingerprint == turn.fingerprint do
-            {:ok, existing, runtime}
-          else
-            {:error, {:turn_id_conflict, id}, runtime}
+          cond do
+            existing.fingerprint != turn.fingerprint ->
+              {:error, {:turn_id_conflict, id}, runtime}
+
+            # These are not acknowledgements. `:dispatching` is the last durable state
+            # both before a recovered send and after Harness accepted a turn whose
+            # correlation checkpoint failed; `:ambiguous` means the Harness call exited
+            # without a trustworthy answer. Replaying either as `{:ok, existing}` makes
+            # a stable-id client clear its input even though nothing proved the turn was
+            # accepted. Keep the outcome unknown and let polling/transcript evidence
+            # reconcile it without ever dispatching a duplicate here.
+            existing.status in [:dispatching, :ambiguous] ->
+              {:error, {:turn_dispatch_ambiguous, id}, runtime}
+
+            true ->
+              {:ok, existing, runtime}
           end
 
         :error ->
@@ -670,11 +683,40 @@ defmodule Ouroboros.Interactive.Task do
               {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
 
             {:error, runtime} ->
-              {:error, {:turn_dispatch_failed, reason, :checkpoint_failed}, runtime}
+              # Harness refused this call synchronously, but the failed checkpoint leaves
+              # the durable turn at `:dispatching`. Recovery still owns that intent and
+              # may send it once the Harness session becomes idle, so the caller cannot
+              # safely mint a replacement id. Preserve both the reconciliation id and the
+              # original refusal as a diagnostic while classifying the outcome unknown.
+              {:error,
+               {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
+                {:harness_refused, reason}}, schedule_poll(runtime, 0)}
           end
       end
     else
-      {:error, reason} -> {:error, {:turn_dispatch_failed, reason}, runtime}
+      {:error, reason} ->
+        failed =
+          turn
+          |> Map.put(:status, :failed)
+          |> Map.put(:error, durable(reason))
+          |> State.touch_turn()
+
+        session =
+          %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, failed)}
+          |> State.touch()
+
+        case persist(runtime, session, []) do
+          {:ok, runtime} ->
+            {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
+
+          {:error, runtime} ->
+            # Exposure failed before Harness was called, but the only durable record is
+            # still `:dispatching`. Recovery owns that intent and can send it after the
+            # capture is repaired, so a fresh caller id could duplicate the recovered turn.
+            {:error,
+             {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
+              {:request_exposure_failed, reason}}, schedule_poll(runtime, 0)}
+        end
     end
   end
 
@@ -697,7 +739,7 @@ defmodule Ouroboros.Interactive.Task do
 
   defp ensure_exposable_turn(_session, _request), do: :ok
 
-  defp build_turn_request(input, opts) do
+  defp build_turn_request(provider, input, opts) do
     allowed = [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
 
     case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
@@ -717,7 +759,9 @@ defmodule Ouroboros.Interactive.Task do
               other
           end
 
-        TurnRequest.new(attrs)
+        with {:ok, request} <- TurnRequest.new(attrs) do
+          {:ok, Provider.apply_runtime_provider_policy(request, provider)}
+        end
 
       key ->
         {:error, {:unknown_turn_option, key}}
@@ -835,11 +879,22 @@ defmodule Ouroboros.Interactive.Task do
         turn = Map.fetch!(runtime.session.turns, turn_id)
 
         with {:ok, request} <- TurnRequest.new(turn.request),
+             request =
+               Provider.apply_runtime_provider_policy(request, runtime.session.provider),
              {:ok, request} <-
                authorize_turn_attachments(request, runtime.session.workspace) do
-          case dispatch_persisted_turn(runtime, turn, request) do
-            {:ok, _turn, runtime} -> {:ok, runtime}
-            {:error, _reason, runtime} -> {:ok, runtime}
+          case checkpoint_recovered_turn_request(runtime, turn, request) do
+            {:ok, turn, runtime} ->
+              case dispatch_persisted_turn(runtime, turn, request) do
+                {:ok, _turn, runtime} -> {:ok, runtime}
+                {:error, _reason, runtime} -> {:ok, runtime}
+              end
+
+            {:error, runtime} ->
+              # Never dispatch under a policy the durable same-id fingerprint does not
+              # describe. Once storage is writable, the exact same recovery path retries
+              # the migration before it can cross into Harness.
+              {:retry, runtime, :checkpointed_turn_policy_migration_failed, :storage_error}
           end
         else
           # The workspace *root* did not canonicalize. That is infrastructure — a mount
@@ -861,6 +916,29 @@ defmodule Ouroboros.Interactive.Task do
          Enum.reduce(ids, runtime, fn turn_id, runtime ->
            mark_turn_ambiguous(runtime, turn_id, {:dispatch_could_not_be_correlated, info.state})
          end)}
+    end
+  end
+
+  defp checkpoint_recovered_turn_request(runtime, turn, request) do
+    normalized = State.new_turn(turn.id, turn.mode, request)
+
+    if turn.request == normalized.request and turn.fingerprint == normalized.fingerprint do
+      {:ok, turn, runtime}
+    else
+      updated =
+        turn
+        |> Map.put(:request, normalized.request)
+        |> Map.put(:fingerprint, normalized.fingerprint)
+        |> State.touch_turn()
+
+      session =
+        %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, updated)}
+        |> State.touch()
+
+      case persist(runtime, session, []) do
+        {:ok, runtime} -> {:ok, updated, runtime}
+        {:error, runtime} -> {:error, runtime}
+      end
     end
   end
 

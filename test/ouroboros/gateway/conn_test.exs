@@ -272,6 +272,30 @@ defmodule Ouroboros.Gateway.ConnTest do
     assert Enum.all?([first, second], &Map.has_key?(&1, "result"))
   end
 
+  test "fleet status and doctor are readable, actionable, and never expose the cookie", %{
+    client: client
+  } do
+    assert hello(client)["result"]
+
+    send_frame(client, %{"jsonrpc" => "2.0", "id" => "fleet", "method" => "fleet.status"})
+    status = recv_frame(client)["result"]
+
+    assert status["local_node"] == Atom.to_string(node())
+    assert is_list(status["machines"])
+    assert status["summary"]["connected"] >= 1
+    assert status["security"]["cookie"] in ["set", "unset"]
+
+    encoded_status = JSON.encode!(status)
+    refute encoded_status =~ Atom.to_string(:erlang.get_cookie())
+
+    send_frame(client, %{"jsonrpc" => "2.0", "id" => "doctor", "method" => "fleet.doctor"})
+    doctor = recv_frame(client)["result"]
+
+    assert is_boolean(doctor["healthy?"])
+    assert Enum.all?(doctor["checks"], &is_binary(&1["message"]))
+    refute JSON.encode!(doctor) =~ Atom.to_string(:erlang.get_cookie())
+  end
+
   test "the listener's scope is what the connection reports and enforces", %{config: config} do
     assert config.scope == :read
     assert Methods.permits?(:read, %{scope: :read, timeout: 1_000})

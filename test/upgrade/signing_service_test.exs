@@ -494,6 +494,41 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     end
 
     @tag timeout: 180_000
+    test "claims its durable journal directory before a second signer can open it" do
+      data_dir = tmp_dir!()
+      File.chmod!(data_dir, 0o700)
+      key_path = write_key!(seed())
+      storage = {DurableFile, path: Path.join(data_dir, "signing-journal")}
+      first = start_bare_peer!()
+      second = start_bare_peer!()
+
+      for peer <- [first, second] do
+        assert {:ok, _applications} =
+                 :erpc.call(peer, Application, :ensure_all_started, [:mix])
+
+        :ok = :erpc.call(peer, Mix, :env, [:test])
+        put_peer_env!(peer, :node_role, :signer)
+        put_peer_env!(peer, :signer_id, @signer_id)
+        put_peer_env!(peer, :data_dir, data_dir)
+        put_peer_env!(peer, :signing_journal_storage, storage)
+        put_signer_key!(peer, key_path)
+      end
+
+      assert {:ok, _applications} =
+               :erpc.call(first, Application, :ensure_all_started, [:ouroboros])
+
+      assert is_pid(:erpc.call(first, Process, :whereis, [Ouroboros.RuntimeOwner]))
+      assert is_pid(:erpc.call(first, Process, :whereis, [Service]))
+      assert File.exists?(Ouroboros.RuntimeOwner.marker_path(data_dir))
+
+      assert {:error, reason} =
+               :erpc.call(second, Application, :ensure_all_started, [:ouroboros])
+
+      assert inspect(reason) =~ "Ouroboros.RuntimeOwner"
+      assert :erpc.call(second, Process, :whereis, [Service]) == nil
+    end
+
+    @tag timeout: 180_000
     test "with a missing or malformed key refuses to complete its boot" do
       for contents <- ["not a seed", :binary.copy(<<3>>, 31)] do
         peer = start_bare_peer!()

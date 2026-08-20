@@ -26,17 +26,49 @@ defmodule Ouroboros.InteractiveSession do
   def start(opts \\ [])
 
   def start(opts) when is_list(opts) do
+    case start_for_gateway(opts) do
+      {:created, %Ref{}, reason} -> {:error, reason}
+      result -> result
+    end
+  end
+
+  def start(_opts), do: {:error, :invalid_options}
+
+  @doc false
+  @spec start_for_gateway(keyword()) ::
+          {:ok, Ref.t()} | {:created, Ref.t(), term()} | {:error, term()}
+  def start_for_gateway(opts) when is_list(opts) do
     if valid_options?(opts) do
       id = Keyword.get_lazy(opts, :id, &Jido.Signal.ID.generate!/0)
 
       with {:ok, session} <- State.new(id, opts),
-           :ok <- create_or_match(session),
-           {:ok, pid} <- ensure_coordinator(id) do
-        # Readiness waits for provider start-up, whose latency is legitimately
-        # unbounded, so it keeps the long wait rather than the control-plane bound.
-        case safe_call(pid, :ready, :infinity) do
-          {:ok, _state} -> {:ok, Ref.new(id)}
-          {:error, reason} -> {:error, reason}
+           {:ok, persisted} <- create_or_match(session) do
+        ref = Ref.new(id)
+
+        case persisted.status do
+          status when status in [:failed, :lost] ->
+            {:created, ref, {:session_start_failed, persisted.error}}
+
+          status when status in [:closed, :cancelled] ->
+            {:ok, ref}
+
+          _active ->
+            case ensure_coordinator(id) do
+              {:ok, pid} ->
+                # Readiness waits for provider start-up, whose latency is legitimately
+                # unbounded, so it keeps the long wait rather than the control-plane
+                # bound. The request already exists durably at this point. Preserve that
+                # fact when provider/workspace readiness fails so the gateway can open
+                # the failed session instead of making a same-id client reconcile
+                # forever.
+                case safe_call(pid, :ready, :infinity) do
+                  {:ok, _state} -> {:ok, ref}
+                  {:error, reason} -> {:created, ref, reason}
+                end
+
+              {:error, reason} ->
+                {:created, ref, reason}
+            end
         end
       else
         {:error, reason} -> {:error, reason}
@@ -46,7 +78,7 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
-  def start(_opts), do: {:error, :invalid_options}
+  def start_for_gateway(_opts), do: {:error, :invalid_options}
 
   @doc "Starts an interactive session on a selected connected node."
   @spec start_on(node(), keyword()) :: {:ok, Ref.t()} | {:error, term()}
@@ -60,6 +92,21 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   def start_on(_owner, _opts), do: {:error, :invalid_owner}
+
+  @doc false
+  @spec start_for_gateway_on(node(), keyword()) ::
+          {:ok, Ref.t()} | {:created, Ref.t(), term()} | {:error, term()}
+  def start_for_gateway_on(owner, opts \\ [])
+
+  def start_for_gateway_on(owner, opts) when is_atom(owner) and not is_nil(owner) do
+    case route(owner, __MODULE__, :start_for_gateway, [opts]) do
+      {:ok, %Ref{} = ref} -> {:ok, %{ref | node: owner}}
+      {:created, %Ref{} = ref, reason} -> {:created, %{ref | node: owner}, reason}
+      other -> other
+    end
+  end
+
+  def start_for_gateway_on(_owner, _opts), do: {:error, :invalid_owner}
 
   @doc "Returns a durable public session snapshot."
   def info(session), do: call(session, :info)
@@ -180,13 +227,13 @@ defmodule Ouroboros.InteractiveSession do
   defp create_or_match(session) do
     case Store.create(session) do
       :ok ->
-        :ok
+        {:ok, session}
 
       {:error, :already_exists} ->
         case Store.get(session.id) do
           {:ok, existing} ->
             if same_request?(existing, session),
-              do: :ok,
+              do: {:ok, existing},
               else: {:error, {:session_id_conflict, session.id}}
 
           other ->

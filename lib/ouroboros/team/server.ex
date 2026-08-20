@@ -57,6 +57,8 @@ defmodule Ouroboros.Team.Server do
 
   use GenServer
 
+  require Logger
+
   alias Ouroboros.Agent.Coordinator
   alias Ouroboros.AgentProfile
   alias Ouroboros.Coding.{Event, TaskRef, TaskState}
@@ -73,13 +75,18 @@ defmodule Ouroboros.Team.Server do
   @backoff_cap_ms 5_000
   @default_start_retry_ms 300_000
   @mesh_visibility_timeout_ms 2_000
+  @worker_reconcile_ms 250
   @terminal_statuses [:completed, :failed, :cancelled, :lost]
   @server_options [:id, :coordinator_id, :cleanup_agents, :store]
   @worker_options [:role, :node]
   @registry Ouroboros.Team.Registry
 
   def child_spec(opts) do
-    team_id = Keyword.get(opts, :id, "team-#{System.unique_integer([:positive])}")
+    # Team IDs become coordinator IDs in the cluster-wide Mesh namespace. A VM-local
+    # integer alone can collide with the same default allocated on another machine, so
+    # generated IDs carry the stable BEAM owner. Explicit durable IDs remain byte-for-byte
+    # unchanged for restart and snapshot recovery.
+    team_id = Keyword.get_lazy(opts, :id, &default_team_id/0)
 
     %{
       id: Keyword.get(opts, :supervisor_id, {__MODULE__, team_id}),
@@ -100,6 +107,15 @@ defmodule Ouroboros.Team.Server do
   end
 
   def start_link(_opts), do: {:error, :invalid_team_options}
+
+  @doc false
+  def build_delegated_task_state(id, objective, opts) when is_list(opts) do
+    workspace = Keyword.get(opts, :workspace, File.cwd!())
+
+    with {:ok, canonical_workspace} <- canonical_workspace(workspace) do
+      TaskState.new(id, objective, Keyword.put(opts, :workspace, canonical_workspace))
+    end
+  end
 
   @impl true
   def init(opts) do
@@ -268,6 +284,43 @@ defmodule Ouroboros.Team.Server do
 
   def handle_info({:retry_start, delegation_id}, state) do
     transition_info(resume_delegation_start(state, delegation_id), state)
+  end
+
+  # Cluster.Monitor retains topology churn and broadcasts it to every live local team.
+  # Durable membership is not revoked by a disconnect: on rejoin, recreate or adopt the
+  # exact logical workers assigned to that owner. Repeated nodeup events and monitor
+  # restarts are safe because Mesh identity and the stored owner fence every adoption.
+  def handle_info({:ouroboros_cluster, :nodeup, owner}, state) when is_atom(owner) do
+    Process.send_after(self(), {:reconcile_workers, owner}, @worker_reconcile_ms)
+    {:noreply, state}
+  end
+
+  def handle_info({:ouroboros_cluster, :nodedown, _owner}, state), do: {:noreply, state}
+
+  def handle_info({:reconcile_workers, owner}, state) when is_atom(owner) do
+    case reconcile_workers_on(state, owner) do
+      {:ok, state} ->
+        {:noreply, reset_backoff(state, {:worker_reconcile, owner})}
+
+      {:retry, reason, state} ->
+        {delay, state} = next_backoff(state, {:worker_reconcile, owner}, @worker_reconcile_ms)
+        Process.send_after(self(), {:reconcile_workers, owner}, delay)
+
+        Logger.debug(
+          "team #{state.id} is waiting to restore workers on #{owner}: " <>
+            inspect(reason, limit: 10, printable_limit: 200)
+        )
+
+        {:noreply, state}
+
+      {:error, reason, state} ->
+        Logger.error(
+          "team #{state.id} could not reconcile workers on #{owner}: " <>
+            inspect(reason, limit: 10, printable_limit: 200)
+        )
+
+        {:noreply, state}
+    end
   end
 
   def handle_info(
@@ -844,6 +897,78 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
+  defp reconcile_workers_on(state, owner) do
+    assigned =
+      state.workers
+      |> Map.values()
+      |> Enum.filter(&(&1.node == owner))
+
+    if assigned == [] do
+      {:ok, state}
+    else
+      worker_ids = assigned |> Enum.map(& &1.id) |> MapSet.new()
+
+      case Ouroboros.Cluster.ensure_placeable(owner) do
+        :ok ->
+          case restore_assigned_workers(assigned, state) do
+            {:ok, restored} ->
+              restored
+              |> restore_worker_delegations(worker_ids)
+              |> worker_reconcile_result(restored)
+
+            {:error, reason, restored} ->
+              worker_reconcile_result({:error, reason}, restored)
+          end
+
+        {:error, reason} ->
+          worker_reconcile_result({:error, reason}, state)
+      end
+    end
+  end
+
+  defp worker_reconcile_result(:ok, state), do: {:ok, state}
+
+  defp worker_reconcile_result({:error, reason}, state) do
+    if transient_worker_reconcile_error?(reason),
+      do: {:retry, reason, state},
+      else: {:error, reason, state}
+  end
+
+  defp restore_assigned_workers(workers, state) do
+    Enum.reduce_while(workers, {:ok, state}, fn runtime_worker, {:ok, acc} ->
+      durable_worker = %Worker{
+        id: runtime_worker.id,
+        node: runtime_worker.node,
+        role: runtime_worker.role,
+        hierarchy: runtime_worker.hierarchy
+      }
+
+      case restore_worker(durable_worker, acc) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, reason, acc}}
+      end
+    end)
+  end
+
+  defp transient_worker_reconcile_error?(:node_not_connected), do: true
+  defp transient_worker_reconcile_error?(:runtime_not_running), do: true
+  defp transient_worker_reconcile_error?({:probe_failed, _reason}), do: true
+  defp transient_worker_reconcile_error?({:mesh_visibility_timeout, _id, _owner}), do: true
+
+  defp transient_worker_reconcile_error?({:worker_restore_failed, _id, reason}),
+    do: transient_worker_reconcile_error?(reason)
+
+  defp transient_worker_reconcile_error?({:placement_refused, _owner, reason}),
+    do: transient_worker_reconcile_error?(reason)
+
+  defp transient_worker_reconcile_error?({:remote_start_failed, _owner, _reason}), do: true
+
+  defp transient_worker_reconcile_error?({:agent_state_call_failed, _owner, _kind, _reason}),
+    do: true
+
+  defp transient_worker_reconcile_error?({:agent_not_found, _id}), do: true
+  defp transient_worker_reconcile_error?(_reason), do: false
+
   defp restore_delegation_projections(state) do
     with :ok <- restore_coordinator_delegations(state),
          :ok <- restore_worker_delegations(state) do
@@ -872,9 +997,14 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
-  defp restore_worker_delegations(state) do
+  defp restore_worker_delegations(state), do: restore_worker_delegations(state, :all)
+
+  defp restore_worker_delegations(state, worker_ids) do
     state.delegations
     |> Enum.group_by(fn {_id, delegation} -> delegation.worker_id end)
+    |> Enum.filter(fn {worker_id, _delegations} ->
+      worker_ids == :all or MapSet.member?(worker_ids, worker_id)
+    end)
     |> Enum.reduce_while(:ok, fn {worker_id, delegations}, :ok ->
       case current_worker_delegation(delegations) do
         nil ->
@@ -1435,53 +1565,22 @@ defmodule Ouroboros.Team.Server do
       {:error, {:owner_unavailable, _owner, _erpc_reason} = reason} ->
         {:error, reason}
 
-      {:error, reason} ->
+      {:error, _reason} ->
         # A coordinator may have been created between the lookup and this
-        # branch. The stable ID makes one retry safe before treating it as a
-        # setup failure.
-        case start_coding_task(delegation) do
-          {:error, :already_exists} ->
-            case Ouroboros.CodingSession.info(delegation.task_ref) do
-              {:ok, %TaskState{}} ->
-                with :ok <- verify_coding_task_owner(delegation) do
-                  {:ok, delegation.task_ref}
-                end
-
-              {:error, _retry_reason} ->
-                {:error, reason}
-            end
-
-          other ->
-            other
-        end
+        # branch. The stable ID makes start idempotent: a matching live task
+        # returns `{:ok, ref}` rather than `:already_exists`.
+        start_coding_task(delegation)
     end
   end
 
   defp start_coding_task(delegation) do
     options = coding_options_from_snapshot(delegation)
 
-    case Ouroboros.CodingSession.start_on(
-           delegation.task_ref.node,
-           delegation.objective,
-           options
-         ) do
-      {:ok, %TaskRef{} = task_ref} ->
-        {:ok, task_ref}
-
-      {:error, :already_exists} ->
-        case Ouroboros.CodingSession.info(delegation.task_ref) do
-          {:ok, %TaskState{}} ->
-            with :ok <- verify_coding_task_owner(delegation) do
-              {:ok, delegation.task_ref}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Ouroboros.CodingSession.start_on(
+      delegation.task_ref.node,
+      delegation.objective,
+      options
+    )
   end
 
   defp coding_options_from_snapshot(delegation) do
@@ -1654,10 +1753,7 @@ defmodule Ouroboros.Team.Server do
     coding_options = coding_options(opts, coding_task_id)
 
     with :ok <- portable_prompt_options(coding_options),
-         {:ok, canonical_workspace} <-
-           canonical_workspace(Keyword.get(coding_options, :workspace, File.cwd!())),
-         coding_options = Keyword.put(coding_options, :workspace, canonical_workspace),
-         {:ok, task} <- TaskState.new(coding_task_id, objective, coding_options) do
+         {:ok, task} <- task_state_on(coding_node, coding_task_id, objective, coding_options) do
       request = %{
         worker_id: worker_id,
         objective: objective,
@@ -1706,6 +1802,22 @@ defmodule Ouroboros.Team.Server do
       true -> :ok
       false -> {:error, :non_durable_delegation_options}
     end
+  end
+
+  # Relative paths belong to the execution machine, not the coordinator. Constructing
+  # TaskState there makes its cwd, symlink resolution, provider defaults, and prompt
+  # assembly the same ones the eventual coding task will use.
+  defp task_state_on(owner, id, objective, opts) when owner == node(),
+    do: build_delegated_task_state(id, objective, opts)
+
+  defp task_state_on(owner, id, objective, opts) do
+    :erpc.call(owner, __MODULE__, :build_delegated_task_state, [id, objective, opts], 30_000)
+  catch
+    :error, {:erpc, reason} when reason in [:noconnection, :timeout] ->
+      {:error, {:owner_unavailable, owner, reason}}
+
+    kind, reason ->
+      {:error, {:remote_task_normalization_failed, owner, kind, durable_error(reason)}}
   end
 
   defp canonical_workspace(workspace) when is_binary(workspace) do
@@ -1842,7 +1954,13 @@ defmodule Ouroboros.Team.Server do
     if String.trim(objective) == "", do: {:error, :invalid_objective}, else: :ok
   end
 
-  defp validate_coding_node(coding_node) when is_atom(coding_node), do: :ok
+  defp validate_coding_node(coding_node) when is_atom(coding_node) do
+    case Ouroboros.Cluster.ensure_placeable(coding_node) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_coding_node, coding_node, reason}}
+    end
+  end
+
   defp validate_coding_node(_coding_node), do: {:error, :invalid_coding_node}
 
   defp validate_options(opts) do
@@ -2020,6 +2138,10 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
+  defp default_team_id do
+    "#{node()}:team:#{System.unique_integer([:positive, :monotonic])}"
+  end
+
   defp put_delegation(state, delegation) do
     %{state | delegations: Map.put(state.delegations, delegation.id, delegation)}
   end
@@ -2074,7 +2196,15 @@ defmodule Ouroboros.Team.Server do
       id: state.id,
       node: node(),
       coordinator_id: state.coordinator_id,
-      workers: Map.new(state.workers, fn {id, worker} -> {id, Map.delete(worker, :pid)} end),
+      workers:
+        Map.new(state.workers, fn {id, worker} ->
+          visible? =
+            Enum.any?(Ouroboros.Mesh.members(id), fn pid ->
+              node(pid) == worker.node
+            end)
+
+          {id, worker |> Map.delete(:pid) |> Map.put(:available?, visible?)}
+        end),
       delegations:
         Map.new(state.delegations, fn {id, value} -> {id, public_delegation(value)} end),
       waiter_count: Enum.sum(Enum.map(state.waiters, fn {_id, waiters} -> map_size(waiters) end)),

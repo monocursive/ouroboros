@@ -369,7 +369,8 @@ defmodule Ouroboros.Coding.TaskState do
       cwd: state.workspace,
       metadata: metadata
     })
-    |> Provider.apply_execution_directories(state.provider)
+    |> Provider.apply_runtime_provider_policy(state.provider)
+    |> Provider.apply_execution_directories(state.provider, :request)
   end
 
   # `Ouroboros.Provider` has already decided what the two safety options may be, stated
