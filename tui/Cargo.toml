@@ -29,6 +29,8 @@ dirs = "6"
 libc = "0.2"
 ratatui = "0.30"
 rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+rcgen = { version = "0.13.2", features = ["x509-parser", "zeroize"] }
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The client's own config file, and nothing else. Default features only: `preserve_order`
@@ -51,6 +53,7 @@ tokio = { version = "1", features = [
   "macros",
 ] }
 zeroize = "1"
+x509-parser = { version = "0.16", features = ["verify"] }
 
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }

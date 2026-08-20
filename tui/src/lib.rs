@@ -9,6 +9,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod fleet;
 pub mod model;
 pub mod proto;
 pub mod runtime;

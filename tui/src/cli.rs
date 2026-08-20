@@ -27,8 +27,8 @@ use clap::{Parser, Subcommand};
 )]
 pub struct Cli {
     /// Start `mix run --no-halt` from an ouroboros checkout instead of an embedded
-    /// release, in a data directory of its own so a development daemon and a real one
-    /// never discover each other.
+    /// release. Its default data directory is isolated as `ouroboros-dev`; an explicit
+    /// OUROBOROS_DATA_DIR is used exactly and warns because it can name a release runtime.
     #[arg(long, global = true)]
     pub dev: bool,
 
@@ -55,8 +55,9 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
 
-        /// The directory the session works in, resolved by the *runtime*. Omitted, the
-        /// config file's `defaults.workspace`, and with neither the plane decides.
+        /// The directory the session works in. Local relative paths resolve where this
+        /// command is typed. With --machine, this must already be an absolute destination
+        /// path on that machine. Omitted, the config file's `defaults.workspace` is used.
         #[arg(long, value_name = "PATH")]
         workspace: Option<PathBuf>,
 
@@ -74,6 +75,11 @@ pub enum Command {
         /// A first message, sent once the session is ready.
         #[arg(long, short = 'm', value_name = "TEXT")]
         message: Option<String>,
+
+        /// Run the agent on this fleet machine. Use its friendly name from
+        /// `ouro fleet status`; omitted means the runtime chooses locally.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
 
         /// Print the session id and exit instead of opening the terminal UI.
         #[arg(long)]
@@ -103,8 +109,203 @@ pub enum Command {
     /// Stop the runtime this client started.
     Stop,
 
+    /// Create, join, and diagnose a secure group of Ouroboros machines.
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
+
+    /// Run the packaged runtime in the foreground for a generated user service.
+    #[command(hide = true)]
+    ServiceRun,
+
+    /// Print the exact kernel incarnation of one process for the BEAM ownership protocol.
+    #[command(hide = true)]
+    ProcessBirth {
+        #[arg(long, hide = true)]
+        pid: i32,
+    },
+
+    /// Hold the BEAM runtime-owner recovery gate until stdin closes.
+    #[command(hide = true)]
+    HoldRuntimeRecoveryLock {
+        #[arg(long, hide = true)]
+        path: PathBuf,
+    },
+
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetCommand {
+    /// Create a new secure fleet on this first machine.
+    Create {
+        /// A friendly label shown in Settings. Defaults to "MACHINE's fleet".
+        #[arg(long, value_name = "FLEET")]
+        name: Option<String>,
+
+        /// A short label people will recognize, such as studio-mini.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// An IP address or DNS name every fleet machine can reach. A Tailscale
+        /// MagicDNS name is usually the easiest choice.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// Pin the local-only operator gateway. Normally Ouroboros chooses a stable
+        /// per-machine port; this override is useful for several test nodes on one host.
+        #[arg(long, value_name = "PORT")]
+        gateway_port: Option<u16>,
+
+        /// Pin this machine's TLS distribution listener to one port. Normally a small
+        /// firewall-friendly range is used.
+        #[arg(long, value_name = "PORT")]
+        dist_port: Option<u16>,
+    },
+
+    /// Make a private, one-machine invitation on the fleet's creator.
+    Invite {
+        /// Manage an invitation already recorded by the owner. With no action, creates
+        /// an invitation using the flags below.
+        #[command(subcommand)]
+        command: Option<InviteCommand>,
+
+        /// The new machine's friendly, unique label.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// The new machine's reachable IP address or DNS name.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// Where to write the mode-0600 invitation. Existing files are never replaced.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// Override the invited machine's stable local gateway port.
+        #[arg(long, value_name = "PORT")]
+        gateway_port: Option<u16>,
+
+        /// Pin the invited machine's TLS distribution listener to one port.
+        #[arg(long, value_name = "PORT")]
+        dist_port: Option<u16>,
+
+        /// Reissue credentials for the same machine and host after its local data was
+        /// lost. This does not revoke a copied/compromised old credential.
+        #[arg(long)]
+        replace: bool,
+    },
+
+    /// Join using the private invitation copied from the fleet creator.
+    Join {
+        /// The mode-0600 invitation file. Its contents are never printed.
+        #[arg(value_name = "INVITE")]
+        invitation: PathBuf,
+
+        /// Override this machine's stable local gateway port.
+        #[arg(long, value_name = "PORT")]
+        gateway_port: Option<u16>,
+
+        /// Pin this machine's TLS distribution listener to one port.
+        #[arg(long, value_name = "PORT")]
+        dist_port: Option<u16>,
+    },
+
+    /// Show this machine's non-secret fleet identity and next action.
+    Status,
+
+    /// Check local security plus live fleet connectivity and compatibility when running.
+    Doctor,
+
+    /// Export or import a CA-attested membership roster after invitations change.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+
+    /// Manage durable knowledge about sessions owned by removed fleet machines.
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+
+    /// Remove this machine's fleet credentials after its runtime is stopped.
+    Leave {
+        /// Explicitly clear a partial setup whose profile.json is missing. Also requires
+        /// --machine so Ouroboros can prove the matching recovery unit is inactive.
+        #[arg(long, requires = "machine")]
+        discard_incomplete: bool,
+
+        /// The former machine name, required with --discard-incomplete to locate its
+        /// launchd/systemd unit safely.
+        #[arg(long, value_name = "NAME", requires = "discard_incomplete")]
+        machine: Option<String>,
+    },
+
+    /// Install or inspect restart-on-failure integration for this fleet machine.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InviteCommand {
+    /// Stop expecting an invitation that was abandoned or mistyped. This changes only
+    /// saved membership and does not revoke a copied credential.
+    Cancel {
+        /// The recorded machine name to stop expecting.
+        #[arg(long, value_name = "NAME")]
+        machine: String,
+
+        /// Write the signed roster that existing fleet machines must import.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncCommand {
+    /// Export the owner's current signed membership roster for existing machines.
+    Export {
+        /// A fresh mode-0600 output path; existing files are never overwritten.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Import a newer signed roster while this machine's runtime is stopped.
+    Import {
+        /// The mode-0600 roster file received privately from the fleet owner.
+        #[arg(value_name = "ROSTER")]
+        roster: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommand {
+    /// Irreversibly forget this machine's saved routing evidence for a tombstoned,
+    /// offline owner. Run this separately on every remaining fleet machine.
+    Forget {
+        /// The tombstoned machine whose offline session-owner evidence will be lost.
+        #[arg(long, value_name = "NAME")]
+        machine: String,
+
+        /// Confirm that sessions known only through this local evidence may become
+        /// undiscoverable while their former owner is offline.
+        #[arg(long, required = true)]
+        accept_state_loss: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCommand {
+    /// Write a launchd (macOS) or systemd user unit and show the exact activation command.
+    Install,
+    /// Show the generated unit, activation guidance, and local runtime state.
+    Status,
+    /// Remove an inactive generated unit. Running services are refused.
+    Remove,
 }
 
 #[cfg(test)]
@@ -141,6 +342,7 @@ mod tests {
             approval_mode,
             sandbox_mode,
             message,
+            machine,
             print,
             ..
         }) = parse(&[
@@ -153,6 +355,8 @@ mod tests {
             "read_only",
             "-m",
             "hello",
+            "--machine",
+            "builder-one",
             "--print",
         ])
         .command
@@ -164,6 +368,7 @@ mod tests {
         assert_eq!(approval_mode.as_deref(), Some("auto_edit"));
         assert_eq!(sandbox_mode.as_deref(), Some("read_only"));
         assert_eq!(message.as_deref(), Some("hello"));
+        assert_eq!(machine.as_deref(), Some("builder-one"));
         assert!(print);
     }
 
@@ -175,11 +380,195 @@ mod tests {
             vec!["attach", "--token", "secret"],
             vec!["new", "--token", "secret"],
             vec!["daemon", "--token", "secret"],
+            vec!["fleet", "join", "invite", "--token", "secret"],
+            vec!["fleet", "service", "install", "--token", "secret"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied())).is_err(),
                 "a secret on a command line is readable by every process on the host: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn fleet_commands_keep_networking_details_optional() {
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Create {
+                    name,
+                    machine,
+                    host,
+                    gateway_port,
+                    dist_port,
+                },
+        }) = parse(&[
+            "fleet",
+            "create",
+            "--machine",
+            "studio-mini",
+            "--host",
+            "studio.tailnet.ts.net",
+        ])
+        .command
+        else {
+            panic!("fleet create must parse");
+        };
+        assert_eq!(machine.as_deref(), Some("studio-mini"));
+        assert_eq!(host.as_deref(), Some("studio.tailnet.ts.net"));
+        assert_eq!(name, None);
+        assert_eq!(gateway_port, None);
+        assert_eq!(dist_port, None);
+
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Join {
+                    invitation,
+                    gateway_port,
+                    dist_port,
+                },
+        }) = parse(&[
+            "fleet",
+            "join",
+            "worker.ouro",
+            "--gateway-port",
+            "48101",
+            "--dist-port",
+            "44101",
+        ])
+        .command
+        else {
+            panic!("fleet join must parse");
+        };
+        assert_eq!(invitation, PathBuf::from("worker.ouro"));
+        assert_eq!(gateway_port, Some(48_101));
+        assert_eq!(dist_port, Some(44_101));
+
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Invite {
+                    replace,
+                    machine,
+                    host,
+                    ..
+                },
+        }) = parse(&[
+            "fleet",
+            "invite",
+            "--machine",
+            "worker",
+            "--host",
+            "worker.tailnet.ts.net",
+            "--out",
+            "worker.ouro",
+            "--replace",
+        ])
+        .command
+        else {
+            panic!("fleet invite --replace must parse");
+        };
+        assert!(replace);
+        assert_eq!(machine.as_deref(), Some("worker"));
+        assert_eq!(host.as_deref(), Some("worker.tailnet.ts.net"));
+        assert!(matches!(
+            parse(&[
+                "fleet",
+                "invite",
+                "cancel",
+                "--machine",
+                "worker",
+                "--out",
+                "roster.ouro-roster"
+            ])
+            .command,
+            Some(Command::Fleet {
+                command: FleetCommand::Invite {
+                    command: Some(InviteCommand::Cancel { machine, out }),
+                    ..
+                }
+            }) if machine == "worker" && out == std::path::Path::new("roster.ouro-roster")
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "invite", "cancel", "--machine", "worker"])
+                .is_err()
+        );
+        assert!(matches!(
+            parse(&[
+                "fleet",
+                "sync",
+                "import",
+                "roster.ouro-roster"
+            ])
+            .command,
+            Some(Command::Fleet {
+                command: FleetCommand::Sync {
+                    command: SyncCommand::Import { roster }
+                }
+            }) if roster == std::path::Path::new("roster.ouro-roster")
+        ));
+        assert!(matches!(
+            parse(&[
+                "fleet",
+                "sessions",
+                "forget",
+                "--machine",
+                "retired-vps",
+                "--accept-state-loss"
+            ])
+            .command,
+            Some(Command::Fleet {
+                command: FleetCommand::Sessions {
+                    command: SessionsCommand::Forget {
+                        machine,
+                        accept_state_loss: true
+                    }
+                }
+            }) if machine == "retired-vps"
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "ouro",
+                "fleet",
+                "sessions",
+                "forget",
+                "--machine",
+                "retired-vps"
+            ])
+            .is_err(),
+            "irreversible local evidence loss must require an explicit acknowledgement"
+        );
+
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Leave {
+                    discard_incomplete,
+                    machine,
+                },
+        }) = parse(&[
+            "fleet",
+            "leave",
+            "--discard-incomplete",
+            "--machine",
+            "worker",
+        ])
+        .command
+        else {
+            panic!("explicit incomplete cleanup must parse");
+        };
+        assert!(discard_incomplete);
+        assert_eq!(machine.as_deref(), Some("worker"));
+        assert!(Cli::try_parse_from(["ouro", "fleet", "leave", "--machine", "worker"]).is_err());
+
+        assert!(matches!(
+            parse(&["fleet", "service", "install"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Service {
+                    command: ServiceCommand::Install
+                }
+            })
+        ));
+        assert!(matches!(
+            parse(&["service-run"]).command,
+            Some(Command::ServiceRun)
+        ));
     }
 }

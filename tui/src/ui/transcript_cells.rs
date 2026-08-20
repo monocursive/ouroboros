@@ -371,10 +371,18 @@ fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>, strea
 }
 
 fn project_tool_call(cells: &mut Vec<Cell>, tools: &mut BTreeMap<String, usize>, call: ToolCall) {
-    let index = cells.len();
-
     if let Some(call_id) = &call.call_id {
-        tools.insert(call_id.clone(), index);
+        if let Some(index) = tools.get(call_id).copied() {
+            if let Some(Cell::Tool(tool)) = cells.get_mut(index) {
+                // Some providers repeat the normalized call when publishing its result.
+                // Refresh the descriptive fields but retain the row's lifecycle and output.
+                tool.name = call.name;
+                tool.input = call.input;
+                return;
+            }
+        }
+
+        tools.insert(call_id.clone(), cells.len());
     }
 
     cells.push(Cell::Tool(ToolCell {
@@ -1376,6 +1384,64 @@ mod tests {
             !text.contains("c1"),
             "correlation ids belong in details: {text}"
         );
+    }
+
+    #[test]
+    fn repeated_tool_call_with_the_same_id_updates_one_running_row() {
+        let started = event(
+            1,
+            "tool_call",
+            json!({"call_id": "command-1", "name": "exec_command", "input": {"cmd": "mix test"}}),
+        );
+        let completed_call = event(
+            2,
+            "tool_call",
+            json!({
+                "call_id": "command-1",
+                "name": "exec_command",
+                "input": {"cmd": "mix test", "cwd": "/tmp/project"}
+            }),
+        );
+        let result = event(
+            3,
+            "tool_result",
+            json!({
+                "call_id": "command-1",
+                "name": "exec_command",
+                "output": "12 tests, 0 failures",
+                "is_error": false
+            }),
+        );
+
+        let running = project(vec![Entry::Event(&started), Entry::Event(&completed_call)]);
+        assert_eq!(running.len(), 1);
+        let Cell::Tool(tool) = &running[0] else {
+            panic!("expected one running command cell")
+        };
+        assert_eq!(tool.state, ToolState::Running);
+        assert_eq!(
+            tool.input,
+            json!({"cmd": "mix test", "cwd": "/tmp/project"})
+        );
+
+        let completed = project(vec![
+            Entry::Event(&started),
+            Entry::Event(&completed_call),
+            Entry::Event(&result),
+        ]);
+        assert_eq!(completed.len(), 1);
+        let Cell::Tool(tool) = &completed[0] else {
+            panic!("expected one completed command cell")
+        };
+        assert_eq!(tool.state, ToolState::Completed);
+        assert_eq!(
+            tool.output,
+            Some(Value::String("12 tests, 0 failures".into()))
+        );
+
+        let text = plain(&render_cells(&completed, 100));
+        assert_eq!(text.matches("mix test").count(), 1, "{text}");
+        assert_eq!(text.matches("12 tests, 0 failures").count(), 1, "{text}");
     }
 
     #[test]

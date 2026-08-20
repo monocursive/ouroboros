@@ -426,13 +426,18 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
 
     assert_eq!(start.params["provider"], "codex");
     assert_eq!(start.params["workspace"], "/work/ouroboros");
+    let start_id = start.params["id"]
+        .as_str()
+        .expect("a stable start id")
+        .to_string();
 
     answer(
         &mut app,
         Tag::Start {
             plane: Plane::Interactive,
+            id: start_id.clone(),
         },
-        json!({ "_struct": "Ouroboros.Interactive.Ref", "id": "session-1" }),
+        json!({ "_struct": "Ouroboros.Interactive.Ref", "id": start_id }),
     );
 
     let calls = app.drain();
@@ -450,7 +455,7 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
         .any(|call| call.method == "interactive.subscribe"));
     assert_eq!(
         app.sessions.open.as_ref().map(|(_plane, id)| id.as_str()),
-        Some("session-1")
+        Some(start.params["id"].as_str().expect("the start id"))
     );
     assert!(app.sessions.composer.is_some());
 
@@ -471,9 +476,374 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
         .drain()
         .into_iter()
         .find(|call| call.method == "interactive.send_message")
-        .expect("an idempotent retry");
-    assert_eq!(retry.params["turn_id"], turn_id);
+        .expect("a fresh retry after the definite refusal");
+    assert_ne!(retry.params["turn_id"], turn_id);
     assert_eq!(retry.params["input"], "fix the flaky reconnect test");
+}
+
+#[test]
+fn a_lost_home_start_reply_reconciles_the_same_session_before_sending_the_prompt() {
+    let mut app = harness(true);
+    let prompt = "build the websocket engine";
+    type_text(&mut app, prompt);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a session start");
+    let params = first.params.clone();
+    let id = params["id"].as_str().expect("a stable id").to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Timeout),
+    });
+
+    let screen = render(&mut app, 130, 34);
+    assert!(screen.contains(&id), "{}", screen.text());
+    assert!(screen.contains("may already exist"), "{}", screen.text());
+
+    // Until the old identity is reconciled, a casual edit cannot turn it into a second
+    // provider start or lose the original prompt.
+    app.apply(key(KeyCode::Char('x')));
+    assert_eq!(app.home_draft.text(), prompt);
+    app.apply(key(KeyCode::Enter));
+
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the same start is reconciled");
+    assert_eq!(retry.params, params);
+
+    answer(
+        &mut app,
+        retry.tag,
+        json!({ "_struct": "Ouroboros.Interactive.Ref", "id": id }),
+    );
+    let message = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the original prompt is sent after reconciliation");
+    assert_eq!(message.params["input"], prompt);
+}
+
+#[test]
+fn cli_handoff_reissues_an_indeterminate_first_message_with_the_same_turn_id() {
+    let mut app = harness(true);
+    let session_id = "session-from-cli";
+    let turn_id = "ouro-first:session-from-cli";
+    let input = "build the websocket engine";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.retry_first_message(session_id.into(), input.into(), turn_id.into());
+
+    let calls = app.drain();
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "interactive.subscribe"));
+
+    let first = calls
+        .iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the idempotent handoff retry");
+
+    assert_eq!(first.params["id"], session_id);
+    assert_eq!(first.params["input"], input);
+    assert_eq!(first.params["turn_id"], turn_id);
+
+    // If reconciliation itself loses its acknowledgement, FirstMessage restores both
+    // the prompt and the original id. Enter is another idempotent retry, never a second
+    // logical turn.
+    app.apply(Msg::Answer {
+        tag: first.tag.clone(),
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamTimeout,
+            message: "the runtime could not confirm the turn dispatch".into(),
+            data: Some(json!({ "outcome": "unknown", "turn_id": turn_id })),
+        })),
+    });
+
+    let composer = app.sessions.composer.as_ref().expect("the restored prompt");
+    assert_eq!(composer.editor.text(), input);
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the user retry");
+
+    assert_eq!(retry.params["id"], session_id);
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+
+    // Repeated uncertainty is still not acceptance. Preserve the exact draft/id for
+    // another deliberate reconciliation instead of silently clearing the composer.
+    app.apply(Msg::Answer {
+        tag: retry.tag.clone(),
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamTimeout,
+            message: "dispatch reconciliation is still pending".into(),
+            data: Some(json!({ "outcome": "unknown", "turn_id": turn_id })),
+        })),
+    });
+
+    let composer = app.sessions.composer.as_ref().expect("the retained prompt");
+    assert_eq!(composer.editor.text(), input);
+
+    app.apply(key(KeyCode::Enter));
+    let next_retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("another same-id reconciliation");
+
+    assert_eq!(next_retry.params["id"], session_id);
+    assert_eq!(next_retry.params["input"], input);
+    assert_eq!(next_retry.params["turn_id"], turn_id);
+
+    // A dropped connection can happen after the gateway received the mutation. It is
+    // just as indeterminate as the typed reply above and must not mint a replacement.
+    app.apply(Msg::Answer {
+        tag: next_retry.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    let composer = app
+        .sessions
+        .composer
+        .as_ref()
+        .expect("the transport-lost prompt");
+    assert_eq!(composer.editor.text(), input);
+
+    app.apply(key(KeyCode::Enter));
+    let transport_retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the same-id transport reconciliation");
+
+    assert_eq!(transport_retry.params["input"], input);
+    assert_eq!(transport_retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn an_unknown_first_message_survives_composer_reopen_and_clears_after_acceptance() {
+    let mut app = harness(true);
+    let session_id = "first-message-reopen";
+    let turn_id = "ouro-first:first-message-reopen";
+    let input = "build the websocket engine";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.retry_first_message(session_id.into(), input.into(), turn_id.into());
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the initial reconciliation");
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    app.apply(ctrl('x'));
+    app.apply(key(KeyCode::Char('n')));
+    assert!(app.sessions.open.is_none());
+    app.open_session(Plane::Interactive, session_id.into());
+    let _ = app.drain();
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the rehydrated first message")
+            .editor
+            .text(),
+        input
+    );
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("1 outcome-unknown turn"),
+        "{}",
+        screen.text()
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the same-id FirstMessage retry");
+    assert_eq!(retry.params["turn_id"], turn_id);
+    assert_eq!(retry.params["input"], input);
+
+    answer(
+        &mut app,
+        retry.tag,
+        json!({ "id": turn_id, "status": "running" }),
+    );
+    assert!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the accepted composer")
+            .editor
+            .is_empty(),
+        "the synthetic rehydrated draft must clear once its same-id turn is accepted"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain().into_iter().all(|call| {
+            call.method != "interactive.send_message" && call.method != "interactive.follow_up"
+        }),
+        "an empty accepted reconciliation must not submit a fresh duplicate"
+    );
+}
+
+#[test]
+fn an_unknown_first_message_answer_does_not_steal_focus_and_survives_the_switch() {
+    let mut app = harness(true);
+    let session_id = "first-message-switch";
+    let turn_id = "ouro-first:first-message-switch";
+    let input = "keep the original first-message identity";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.retry_first_message(session_id.into(), input.into(), turn_id.into());
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the first-message request");
+
+    app.open_session(Plane::Interactive, "session-user-opened".into());
+    let _ = app.drain();
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+    assert_eq!(
+        app.sessions.open.as_ref().map(|(_plane, id)| id.as_str()),
+        Some("session-user-opened"),
+        "a late answer must not pull the operator back to its session"
+    );
+
+    app.open_session(Plane::Interactive, session_id.into());
+    let _ = app.drain();
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the deferred FirstMessage reconciliation");
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_successful_rpc_read_of_a_failed_first_message_keeps_a_fresh_retry_draft() {
+    let mut app = harness(true);
+    let session_id = "session-with-failed-first-turn";
+    let turn_id = "ouro-first:session-with-failed-first-turn";
+    let input = "build the websocket engine";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.retry_first_message(session_id.into(), input.into(), turn_id.into());
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the same-id first-message read");
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Ok(json!({
+            "id": turn_id,
+            "status": "failed",
+            "error": "provider_refused"
+        })),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the failed first-message draft")
+            .editor
+            .text(),
+        input
+    );
+    let notice = &app.notice.as_ref().expect("the failed-turn notice").text;
+    assert!(notice.contains("is failed"), "{notice}");
+    assert!(notice.contains("provider_refused"), "{notice}");
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the fresh first-message retry");
+
+    assert_eq!(retry.params["input"], input);
+    assert_ne!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_busy_first_message_restores_the_prompt_as_a_fresh_queued_follow_up() {
+    let mut app = harness(true);
+    let session_id = "session-with-active-turn";
+    let turn_id = "first-message-that-became-busy";
+    let input = "queue this exact request";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.retry_first_message(session_id.into(), input.into(), turn_id.into());
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the first-message attempt");
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "the session is already running a turn; queue this input with \
+                      interactive.follow_up"
+                .into(),
+            data: Some(json!({
+                "reason": "busy",
+                "outcome": "not_dispatched",
+                "retry_with": "interactive.follow_up",
+                "error": ["turn_dispatch_failed", "busy"]
+            })),
+        })),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the restored prompt")
+            .editor
+            .text(),
+        input
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the safe queued retry");
+
+    assert_eq!(retry.params["input"], input);
+    assert_ne!(retry.params["turn_id"], turn_id);
 }
 
 #[test]
@@ -485,7 +855,13 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     assert!(screen.contains("Coding"), "{}", screen.text());
     assert!(screen.contains("Runtime & distribution"));
     assert!(screen.contains("Agents"));
-    assert!(screen.contains("Settings"));
+
+    type_text(&mut app, "settings");
+    let screen = render(&mut app, 120, 34);
+    assert!(screen.contains("Settings"), "{}", screen.text());
+
+    app.apply(key(KeyCode::Esc));
+    app.apply(ctrl('p'));
 
     type_text(&mut app, "dist");
     let screen = render(&mut app, 120, 34);
@@ -590,5 +966,30 @@ fn the_session_composer_remains_open_after_sending() {
             .as_ref()
             .map(|composer| composer.editor.text()),
         Some("")
+    );
+}
+
+#[test]
+fn a_successful_cli_first_message_makes_the_next_input_a_queued_follow_up() {
+    let mut app = harness(true);
+    let session_id = "session-from-cli";
+
+    app.open_session(Plane::Interactive, session_id.into());
+    app.continue_after_first_message(session_id);
+    let _ = app.drain();
+
+    type_text(&mut app, "keep going with the implementation");
+    app.apply(key(KeyCode::Enter));
+
+    let follow_up = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the post-handoff input queues behind the active first turn");
+
+    assert_eq!(follow_up.params["id"], session_id);
+    assert_eq!(
+        follow_up.params["input"],
+        "keep going with the implementation"
     );
 }

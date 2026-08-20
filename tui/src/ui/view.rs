@@ -14,9 +14,9 @@ use ratatui::Frame;
 use crate::model::{Plane, ProviderEntry};
 
 use super::app::{
-    provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, Mode, NewField,
-    NewSession, NoticeKind, Overlay, ProviderChoice, Settings, SettingsField, Tab,
-    APPROVAL_CHOICES, LEADER_KEYS,
+    provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, MachineAction,
+    MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice,
+    Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::theme;
 
@@ -304,6 +304,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
+        Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
     }
 }
 
@@ -584,17 +585,33 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     let items = sessions
         .iter()
         .map(|session| {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", session.plane.tag()),
                     Style::default().fg(theme::MUTED),
                 ),
                 Span::raw(super::tree::truncate(&session.id, 42)),
-                Span::styled(
+            ];
+            if let Some(owners) = app.sessions.owner_conflict(session.plane, &session.id) {
+                spans.push(Span::styled(
+                    format!(
+                        "  ID conflict · {}",
+                        super::tree::truncate(&owners.join(" + "), 46)
+                    ),
+                    Style::default().fg(theme::BAD),
+                ));
+            } else if session.last_known {
+                spans.push(Span::styled(
+                    format!("  last-known · owner offline · {}", session.status.as_str()),
+                    Style::default().fg(theme::WARN),
+                ));
+            } else {
+                spans.push(Span::styled(
                     format!("  {}", session.status.as_str()),
                     theme::session_status(&session.status),
-                ),
-            ]))
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     let mut state = ListState::default().with_selected(Some(choice));
@@ -610,6 +627,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
 /// How wide the settings overlay is, as a percentage of the frame. Named because its height
 /// is computed against the same number and the two must not drift apart.
 const SETTINGS_WIDTH: u16 = 80;
+const MACHINES_WIDTH: u16 = 104;
 
 /// The drawable width inside a popup of `percent`, which is what a line has to fit in.
 fn inner_width(area: Rect, percent: u16) -> usize {
@@ -673,7 +691,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "defaults this client remembers — they prefill the start screens, nothing more",
+            "machines opens a guided setup; the other rows are this client's session defaults",
             theme::label(),
         )),
     ];
@@ -713,11 +731,43 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
     );
 
     let mut rows = Vec::new();
+    let machine_summary = app.machine_summary();
 
     for row in SettingsField::ALL {
         let focused = row == settings.field;
 
         let (label, value, style) = match row {
+            SettingsField::Machines => {
+                let expected = machine_summary
+                    .expected
+                    .map(|expected| expected.to_string())
+                    .unwrap_or_else(|| "?".into());
+                let value = if machine_summary.mode == "Standalone" {
+                    "standalone · open to create or join a fleet".to_string()
+                } else {
+                    let security = match machine_summary.security {
+                        MachineSecurity::Secure => "secure",
+                        MachineSecurity::Insecure => "TLS not active",
+                        MachineSecurity::Mismatch => "configuration mismatch",
+                        MachineSecurity::Unknown => "security unknown",
+                        MachineSecurity::Standalone => "standalone",
+                    };
+                    format!(
+                        "{}/{} connected · {}",
+                        machine_summary.connected, expected, security
+                    )
+                };
+                let style = match machine_summary.security {
+                    MachineSecurity::Secure | MachineSecurity::Standalone => {
+                        Style::default().fg(theme::GOOD)
+                    }
+                    MachineSecurity::Insecure | MachineSecurity::Mismatch => {
+                        Style::default().fg(theme::BAD)
+                    }
+                    MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+                };
+                ("machines", value, style)
+            }
             SettingsField::Provider => {
                 let (value, style) = settings_provider_cell(&choices, settings.provider, app);
                 ("provider", value, style)
@@ -765,8 +815,8 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "Tab/arrows move · left/right change · Enter on [ save ] writes the file · Esc \
-                 closes without saving",
+                "Tab/arrows move · Enter opens Machines or advances · Enter on [ save ] writes \
+                 the file · Esc closes",
                 Style::default().fg(theme::MUTED),
             )),
             Line::from(Span::styled(
@@ -781,6 +831,210 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         .wrap(Wrap { trim: false }),
         chunks[2],
     );
+}
+
+/// Settings → Machines: a vocabulary-first fleet setup and recovery surface. It never
+/// executes a fleet command. Copying the selected command is the only mutation, and the
+/// exact command remains an ordinary terminal action so an invite can never be created or
+/// imported by an accidental keypress.
+fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
+    let summary = app.machine_summary();
+    let popup = centered(area, MACHINES_WIDTH, 32.min(area.height));
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" machines ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::vertical([
+        Constraint::Length(9),
+        Constraint::Length(MachineAction::ALL.len() as u16 + 1),
+        Constraint::Min(6),
+        Constraint::Length(4),
+    ])
+    .split(inner);
+
+    let expected = summary
+        .expected
+        .map(|expected| expected.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let offline = summary
+        .offline
+        .map(|offline| offline.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let fleet = summary
+        .fleet
+        .as_deref()
+        .map(|fleet| super::tree::truncate(fleet, 44))
+        .unwrap_or_else(|| {
+            if summary.mode == "Standalone" {
+                "not created yet".into()
+            } else {
+                "name unavailable from this connection".into()
+            }
+        });
+    let local = match &summary.host {
+        Some(host) => format!("{} at {host}", summary.machine),
+        None => summary.machine.clone(),
+    };
+    let offline_names = if summary.offline_names.is_empty() {
+        None
+    } else {
+        Some(format!("Offline: {}", summary.offline_names.join(", ")))
+    };
+
+    let security_style = match summary.security {
+        MachineSecurity::Standalone | MachineSecurity::Secure => Style::default().fg(theme::GOOD),
+        MachineSecurity::Insecure | MachineSecurity::Mismatch => Style::default().fg(theme::BAD),
+        MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+    };
+
+    let mut facts = vec![
+        Line::from(Span::styled(
+            "Run agents on this machine alone, or connect trusted machines as one fleet.",
+            theme::label(),
+        )),
+        field("mode", &summary.mode),
+        field("fleet", &fleet),
+        field("local", &local),
+        Line::from(vec![
+            Span::styled("machines    ", theme::label()),
+            Span::raw(format!(
+                "Known {expected} · Connected {} · Offline {offline}",
+                summary.connected
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("security    ", theme::label()),
+            Span::styled(summary.security.label(), security_style),
+        ]),
+        Line::from(vec![
+            Span::styled("recovery    ", theme::label()),
+            Span::raw(summary.recovery),
+        ]),
+    ];
+    if let Some(offline_names) = offline_names {
+        facts.push(Line::from(Span::styled(
+            offline_names,
+            Style::default().fg(theme::WARN),
+        )));
+    }
+    frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), rows[0]);
+
+    let mut actions = vec![Line::from(Span::styled(
+        "Choose a next step — the guide shows commands but never runs them",
+        theme::label(),
+    ))];
+    for (index, action) in MachineAction::ALL.iter().copied().enumerate() {
+        let focused = machines.selected == index;
+        actions.push(Line::from(vec![
+            Span::styled(
+                if focused { "> " } else { "  " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(format!("{:<28}", action.label()), Style::default()),
+            Span::styled(action.command(), Style::default().fg(theme::ACCENT)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(actions), rows[1]);
+
+    let selected = machines.guide.unwrap_or_else(|| machines.selected());
+    let mut detail = vec![Line::from(vec![
+        Span::styled(
+            if machines.guide.is_some() {
+                format!("{}  ", selected.label())
+            } else {
+                format!("Preview: {}  ", selected.label())
+            },
+            theme::heading(),
+        ),
+        Span::styled(selected.command(), Style::default().fg(theme::ACCENT)),
+    ])];
+    detail.extend(machine_guidance(selected, machines.guide.is_some()));
+    frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), rows[2]);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Network recovery: a running Ouroboros process retries fleet membership automatically.",
+                Style::default().fg(theme::WARN),
+            )),
+            Line::from(Span::styled(
+                "Process/reboot: activate the service for crash/login recovery; Linux pre-login boot needs optional linger.",
+                Style::default().fg(theme::WARN),
+            )),
+            Line::from(Span::styled(
+                "Boundary: live provider work does not migrate after a full host loss.",
+                Style::default().fg(theme::WARN),
+            )),
+            Line::from(Span::styled(
+                "↑↓ choose · Enter open guide · y copy command · r refresh · Esc back/close",
+                Style::default().fg(theme::MUTED),
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        rows[3],
+    );
+}
+
+fn machine_guidance(action: MachineAction, expanded: bool) -> Vec<Line<'static>> {
+    if !expanded {
+        return vec![Line::from(Span::styled(
+            "Press Enter for plain-language steps, or y to copy this command. No Erlang settings are needed.",
+            Style::default().fg(theme::MUTED),
+        ))];
+    }
+
+    let lines: &[&str] = match action {
+        MachineAction::Create => &[
+            "If this TUI is attached to a standalone runtime, quit or detach first: run `ouro stop`, then `ouro fleet create`, then `ouro daemon`.",
+            "On separate machines, first run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`; use the private IPv4 or one-record MagicDNS name when `--host` is requested.",
+            "Fleet creation refuses to change a live runtime. On a stopped first machine, Ouroboros safely detects its name and reachable hostname.",
+            "If detection cannot prove the hostname is reachable, it asks for `--host HOST`; `--machine NAME` is an optional friendly-name override.",
+            "The output prints the exact private TCP ports to allow between fleet devices. Keys and cookies stay in mode-0600 files, never process arguments.",
+            "Then choose Add another machine to make one invite per machine.",
+        ],
+        MachineAction::Join => &[
+            "Install the same Ouroboros release on the invited machine and copy its .ouro invite there using a private channel.",
+            "Set the copied invite to mode 0600, then run the join command. It imports identity; you do not type cookies, certificates, or node names.",
+            "Start `ouro daemon`, then use `ouro fleet status` on either machine.",
+        ],
+        MachineAction::Invite => &[
+            "Run this on the fleet's original owner machine (the one holding invitation authority). NAME is a friendly label; HOST is how the other machines reach the new one.",
+            "The invite is private membership material. Send it only to that machine and do not paste its contents into chat or logs.",
+            "Create a separate invite for every machine. A lost file can be reissued for the exact same identity with `--replace`.",
+            "For an abandoned or mistyped invite, run `ouro fleet invite cancel --machine NAME --out fleet.ouro-roster`. It is safe live; restart the owner when convenient so its boot-time seeds refresh.",
+            "Cancel fixes the expected list but does not revoke a copied credential. A leak requires whole-fleet credential rotation, so keep every invite private even before it is used.",
+        ],
+        MachineAction::Service => &[
+            "Run this after create or join on every packaged macOS or Linux machine that should recover without you.",
+            "Install only writes a private user service; it deliberately does not start anything behind your back.",
+            "Review and run the exact activation command it prints, then check `ouro fleet service status`; do not also run a separate daemon.",
+            "Once activated, the OS service restores Ouroboros after a crash and at login; Linux pre-login boot is an optional advanced setup printed by the command.",
+        ],
+        MachineAction::Status => &[
+            "Shows which machines are known, connected, or offline and whether encrypted distribution is active.",
+            "An offline known machine stays visible. Its running daemon retries membership; the recovery service handles process crashes and reboots.",
+            "Start work with `ouro new --machine NAME --provider PROVIDER --workspace /absolute/path/on/NAME/project`; that path is on the destination. The New Session form enforces the same rule.",
+        ],
+        MachineAction::Doctor => &[
+            "Checks names, reachability, versions, encrypted distribution, and the daemon's restart setup.",
+            "Each failed check includes a concrete fix. The command never prints cookies, private keys, or invite contents.",
+        ],
+        MachineAction::Sync => &[
+            "Owner: `ouro fleet sync export --out fleet.ouro-roster`. On each recipient, first run `ouro fleet service status`.",
+            "Use its exact deactivation command when installed; otherwise run `ouro stop`.",
+            "Then run `ouro fleet sync import fleet.ouro-roster`. Copy this mode-0600 file privately; sync does not revoke credentials.",
+            "After import, reactivate that unit with its printed command or run `ouro daemon`, then `ouro fleet doctor`. Doctor's host/service checks are local.",
+        ],
+    };
+
+    lines
+        .iter()
+        .map(|line| Line::from((*line).to_string()))
+        .collect()
 }
 
 fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -> (String, Style) {
@@ -821,6 +1075,7 @@ fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -
 /// The new-session form: every choice on screen at once, none of them made for you.
 fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
     let providers = app.providers.value.as_deref().unwrap_or_default();
+    let machines = app.machine_choices();
     let rows = dialog.fields();
     let height = (rows.len() + 8).min(area.height as usize) as u16;
     let popup = centered(area, 76, height);
@@ -859,7 +1114,35 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 },
                 Style::default(),
             ),
-            NewField::Provider => provider_cell(providers, dialog.provider),
+            NewField::Machine => {
+                let selected = dialog.request.machine.trim();
+                if selected.is_empty() {
+                    (
+                        "machine",
+                        machines
+                            .first()
+                            .map(|machine| machine.label())
+                            .unwrap_or_else(|| "This machine".into()),
+                        Style::default(),
+                    )
+                } else if let Some(machine) = machines
+                    .iter()
+                    .find(|machine| machine.wire_name() == Some(selected))
+                {
+                    ("machine", machine.label(), Style::default())
+                } else {
+                    (
+                        "machine",
+                        format!("{selected} — no longer connected; start will be refused"),
+                        Style::default().fg(theme::WARN),
+                    )
+                }
+            }
+            NewField::Provider => provider_cell(
+                providers,
+                dialog.provider,
+                !dialog.request.machine.trim().is_empty(),
+            ),
             NewField::Objective => (
                 "objective",
                 text_or_hint(&dialog.request.objective, "required"),
@@ -867,7 +1150,14 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
             ),
             NewField::Workspace => (
                 "workspace",
-                text_or_hint(&dialog.request.workspace, "none — the plane decides"),
+                text_or_hint(
+                    &dialog.request.workspace,
+                    if dialog.request.machine.trim().is_empty() {
+                        "none — the plane decides"
+                    } else {
+                        "required — absolute path on destination"
+                    },
+                ),
                 hint_style(&dialog.request.workspace),
             ),
             NewField::ApprovalMode => ("approval", dialog.approval_label(), Style::default()),
@@ -910,7 +1200,13 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Tab/arrows move · left/right change · Enter on [ start ] · Esc cancels",
+            if dialog.pending {
+                "Waiting for this exact start · the form stays open until its answer"
+            } else if dialog.reconciling {
+                "Tab/arrows move · Enter on [ start ] reconciles the same id · edits stay locked"
+            } else {
+                "Tab/arrows move · left/right change · Enter on [ start ] · Esc cancels"
+            },
             Style::default().fg(theme::MUTED),
         ))),
         chunks[1],
@@ -929,10 +1225,11 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
             },
             Style::default().fg(theme::WARN),
         )));
-    } else if !providers
-        .get(dialog.provider)
-        .map(|entry| entry.ready())
-        .unwrap_or(true)
+    } else if dialog.request.machine.trim().is_empty()
+        && !providers
+            .get(dialog.provider)
+            .map(|entry| entry.ready())
+            .unwrap_or(true)
     {
         // Selectable anyway: "installed" means a probe found an executable, and the
         // runtime is the authority on whether a session can start.
@@ -942,10 +1239,25 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
         )));
     }
 
+    if !dialog.request.machine.trim().is_empty() {
+        footer.push(Line::from(Span::styled(
+            "Connected checks reachability, not provider readiness. Install and sign in to the provider on that destination; fleet invites never copy credentials.",
+            Style::default().fg(theme::WARN),
+        )));
+        footer.push(Line::from(Span::styled(
+            "Workspace paths are resolved on that destination machine, not on this terminal.",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
     frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), chunks[2]);
 }
 
-fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, String, Style) {
+fn provider_cell(
+    providers: &[ProviderEntry],
+    index: usize,
+    remote: bool,
+) -> (&'static str, String, Style) {
     let Some(entry) = providers.get(index) else {
         return (
             "provider",
@@ -955,6 +1267,17 @@ fn provider_cell(providers: &[ProviderEntry], index: usize) -> (&'static str, St
     };
 
     let position = format!("({}/{})", index + 1, providers.len());
+
+    if remote {
+        return (
+            "provider",
+            format!(
+                "{} — readiness unknown on destination {position}",
+                entry.provider
+            ),
+            Style::default().fg(theme::WARN),
+        );
+    }
 
     if entry.ready() {
         return (
@@ -1214,7 +1537,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
     // into something that reads as a different claim.
     lines.push(Line::from(Span::styled(
         format!(
-            "a single-node view of {}",
+            "one gateway view of the fleet through {}",
             if app.hello.node.is_empty() {
                 "this runtime"
             } else {

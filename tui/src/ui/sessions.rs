@@ -603,7 +603,13 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
 
-    let footer = if active
+    let pending_reconciliations = app.open_pending_reconciliation_count();
+    let footer = if pending_reconciliations > 0 {
+        format!(
+            "{pending_reconciliations} outcome-unknown turn{} · Enter reconciles first · draft kept",
+            if pending_reconciliations == 1 { "" } else { "s" }
+        )
+    } else if active
         .and_then(|composer| composer.editor.completion())
         .is_some()
     {

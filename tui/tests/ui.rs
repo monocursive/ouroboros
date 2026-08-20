@@ -11,12 +11,49 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::style::Color;
 use serde_json::json;
 
+use ouro::fleet::{Member, Profile};
 use ouro::model::Plane;
+use ouro::proto::{ErrorCode, RpcError};
 use ouro::transport::ClientError;
-use ouro::ui::app::{App, Call, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag};
+use ouro::ui::app::{App, Call, ComposerVerb, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag};
 use ouro::ui::theme;
 
 use support::{app, fixture, full_hello, render};
+
+fn fleet_profile() -> Profile {
+    Profile {
+        schema: 1,
+        fleet_id: "fleet-test-0123456789".into(),
+        name: "Studio fleet".into(),
+        machine: "studio".into(),
+        host: "studio.test".into(),
+        node: "ouro@studio.test".into(),
+        role: "core".into(),
+        members: vec![
+            Member {
+                machine: "studio".into(),
+                host: "studio.test".into(),
+                node: "ouro@studio.test".into(),
+            },
+            Member {
+                machine: "mini".into(),
+                host: "mini.test".into(),
+                node: "ouro@mini.test".into(),
+            },
+            Member {
+                machine: "workstation".into(),
+                host: "workstation.test".into(),
+                node: "ouro@workstation.test".into(),
+            },
+        ],
+        roster_revision: 1,
+        tombstones: Vec::new(),
+        gateway_port: 47_123,
+        epmd_port: 14_123,
+        dist_port_min: 43_700,
+        dist_port_max: 43_729,
+    }
+}
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent {
@@ -250,6 +287,349 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     assert!(screen.contains("admit=no"), "{}", screen.text());
 }
 
+fn open_machines(app: &mut App) {
+    app.apply(ctrl('p'));
+    type_text(app, "machines");
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Some(Overlay::Machines(_))));
+}
+
+#[test]
+fn settings_makes_standalone_machine_setup_discoverable() {
+    let mut app = dashboard();
+    app.apply(key(KeyCode::Char(',')));
+
+    let settings = render(&mut app, 120, 34);
+    assert!(settings.contains("machines"), "{}", settings.text());
+    assert!(
+        settings.contains("standalone · open to create or join a fleet"),
+        "{}",
+        settings.text()
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let machines = render(&mut app, 120, 34);
+    assert!(machines.contains("Standalone"), "{}", machines.text());
+    assert!(machines.contains("Known 1 · Connected 1 · Offline 0"));
+    assert!(machines.contains("ouro fleet create"));
+    assert!(machines.contains("ouro fleet join INVITE.ouro"));
+    assert!(machines.contains("ouro fleet service install"));
+    assert!(machines.contains("ouro fleet status"));
+    assert!(machines.contains("ouro fleet doctor"));
+    assert!(machines.contains("ouro fleet sync export"));
+    assert!(machines.contains("never runs them"));
+}
+
+#[test]
+fn a_healthy_three_machine_fleet_is_plain_and_secure() {
+    let mut app = shell(full_hello());
+    app.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test", "ouro@workstation.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true, "cookie": "set", "proto_dist": "inet_tls" },
+                "fleet": {
+                    "summary": { "expected": 3, "connected": 3, "offline": 0 },
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local" },
+                        { "machine": "mini", "node": "ouro@mini.test", "role": "core", "state": "connected" },
+                        { "machine": "workstation", "node": "ouro@workstation.test", "role": "core", "state": "connected" }
+                    ]
+                }
+            }
+        }),
+    );
+    open_machines(&mut app);
+
+    let screen = render(&mut app, 120, 34);
+    assert!(screen.contains("Studio fleet"), "{}", screen.text());
+    assert!(screen.contains("studio at studio.test"));
+    assert!(screen.contains("Known 3 · Connected 3 · Offline 0"));
+    assert!(screen.contains("encrypted and authenticated (TLS)"));
+    assert!(screen.contains("All known machines are connected"));
+    assert!(screen.contains("live provider work does not migrate"));
+    assert!(screen.contains("after a full host"), "{}", screen.text());
+    assert!(screen.contains("loss."));
+}
+
+#[test]
+fn an_early_joiner_counts_later_machines_learned_from_beam() {
+    let mut app = shell(full_hello());
+    let mut early_profile = fleet_profile();
+    early_profile.members.truncate(2);
+    app.fleet_profile = Some(early_profile);
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test", "ouro@workstation.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": {
+                    "summary": { "expected": 3, "connected": 3, "offline": 0 },
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local" },
+                        { "machine": "mini", "node": "ouro@mini.test", "role": "core", "state": "connected" },
+                        { "machine": "workstation", "node": "ouro@workstation.test", "role": "core", "state": "connected" }
+                    ]
+                }
+            }
+        }),
+    );
+    open_machines(&mut app);
+
+    let screen = render(&mut app, 120, 34);
+    assert!(screen.contains("Known 3 · Connected 3 · Offline 0"));
+    assert!(!screen.contains("Known 2 · Connected 3"));
+}
+
+#[test]
+fn newly_invited_profile_members_count_offline_before_the_live_runtime_learns_them() {
+    let mut app = shell(full_hello());
+    app.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": {
+                    "summary": { "expected": 1, "connected": 1, "offline": 0 },
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local" }
+                    ]
+                }
+            }
+        }),
+    );
+    open_machines(&mut app);
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Known 3 · Connected 1 · Offline 2"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("Offline: mini, workstation"),
+        "{}",
+        screen.text()
+    );
+}
+
+#[test]
+fn an_offline_machine_is_named_retried_and_then_recovers() {
+    let mut app = shell(full_hello());
+    app.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": { "summary": { "expected": 3, "connected": 2, "offline": 1 } }
+            }
+        }),
+    );
+    open_machines(&mut app);
+
+    let partial = render(&mut app, 120, 34);
+    assert!(partial.contains("Known 3 · Connected 2 · Offline 1"));
+    assert!(
+        partial.contains("Offline: workstation"),
+        "{}",
+        partial.text()
+    );
+    assert!(partial.contains("running daemons keep retrying membership"));
+
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test", "ouro@workstation.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": { "summary": { "expected": 3, "connected": 3, "offline": 0 } }
+            }
+        }),
+    );
+    let recovered = render(&mut app, 120, 34);
+    assert!(recovered.contains("Known 3 · Connected 3 · Offline 0"));
+    assert!(recovered.contains("retry membership after network interruptions"));
+    assert!(!recovered.contains("Offline: workstation"));
+}
+
+#[test]
+fn machines_calls_out_insecure_and_mismatched_runtime_states() {
+    let mut insecure = shell(full_hello());
+    answer(
+        &mut insecure,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": false },
+                "fleet": { "summary": { "expected": 2, "connected": 2, "offline": 0 } }
+            }
+        }),
+    );
+    open_machines(&mut insecure);
+    let insecure_screen = render(&mut insecure, 120, 34);
+    assert!(insecure_screen.contains("insecure: machine traffic is not using TLS"));
+
+    let mut mismatch = shell(full_hello());
+    mismatch.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut mismatch,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": false,
+                "formation": { "strategy": "none" },
+                "security": { "tls": false }
+            }
+        }),
+    );
+    open_machines(&mut mismatch);
+    let mismatch_screen = render(&mut mismatch, 120, 34);
+    assert!(mismatch_screen.contains("configuration mismatch"));
+    assert!(mismatch_screen.contains("Known 3 · Connected 1 · Offline 2"));
+}
+
+#[test]
+fn machines_create_and_join_open_guidance_without_running_any_command() {
+    let mut app = dashboard();
+    open_machines(&mut app);
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+
+    app.apply(key(KeyCode::Enter));
+    let create = render(&mut app, 120, 34);
+    assert!(
+        create.contains("attached to a standalone runtime"),
+        "{}",
+        create.text()
+    );
+    assert!(create.contains("ouro fleet create"));
+    assert!(create.contains("ouro stop"));
+    assert!(create.contains("ouro daemon"));
+    assert!(create.contains("refuses to change a live runtime"));
+
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+    let join = render(&mut app, 120, 34);
+    assert!(
+        join.contains("Install the same Ouroboros release"),
+        "{}",
+        join.text()
+    );
+    assert!(join.contains("mode 0600"));
+    assert!(join.contains("you do not type cookies"));
+    assert!(join.contains("certificates"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+    let service = render(&mut app, 120, 34);
+    assert!(service.contains("Keep this machine running"));
+    assert!(service.contains("ouro fleet service install"));
+    assert!(service.contains("deliberately does not start anything"));
+    assert!(service.contains("exact activation command"));
+    assert!(service.contains("ouro fleet service status"));
+    assert!(service.contains("do not also run"));
+    assert!(service.contains("after a crash and at login"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+}
+
+#[test]
+fn machines_copies_the_selected_command_but_never_executes_it() {
+    let mut app = dashboard();
+    open_machines(&mut app);
+
+    let overview = render(&mut app, 120, 34);
+    assert!(overview.contains("y copy command"), "{}", overview.text());
+
+    app.apply(key(KeyCode::Char('y')));
+    assert_eq!(app.take_copy().as_deref(), Some("ouro fleet create"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+
+    // Copy follows the focused row even after opening its longer guide. Placeholders are
+    // copied verbatim for the operator to review and replace in their terminal.
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Char('y')));
+    assert_eq!(
+        app.take_copy().as_deref(),
+        Some("ouro fleet invite --machine NAME --host HOST --out INVITE.ouro")
+    );
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+}
+
+#[test]
+fn machines_explains_signed_membership_updates_and_non_revocation() {
+    let mut app = dashboard();
+    open_machines(&mut app);
+
+    for _ in 0..6 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+
+    let sync = render(&mut app, 120, 34);
+    assert!(sync.contains("Update saved membership"), "{}", sync.text());
+    assert!(sync.contains("ouro fleet sync export"));
+    assert!(sync.contains("ouro fleet sync import"));
+    assert!(sync.contains("mode-0600"));
+    assert!(sync.contains("does not revoke"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+}
+
 #[test]
 fn availability_is_three_colours_and_disabled_is_not_one_of_the_alarming_ones() {
     let mut app = dashboard();
@@ -380,6 +760,125 @@ fn the_sessions_list_merges_both_planes_and_tags_each_row() {
     let sessions = screen.rows.iter().position(|r| r.contains("session-1"));
     let tasks = screen.rows.iter().position(|r| r.contains("task-2"));
     assert!(sessions < tasks);
+}
+
+#[test]
+fn an_incomplete_fleet_list_keeps_last_known_session_rows() {
+    let mut app = shell(full_hello());
+    app.apply(key(KeyCode::Char('2')));
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "remote-session",
+            "node": "ouro@remote.test",
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:02.000000Z"
+        }]),
+    );
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+
+    app.apply(Msg::Answer {
+        tag: Tag::Sessions(Plane::Interactive),
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::Unavailable,
+            message: "session list is incomplete because owner ouro@remote.test did not answer"
+                .into(),
+            data: Some(json!({
+                "reason": "owner_query_incomplete",
+                "node": "ouro@remote.test"
+            })),
+        })),
+    });
+    assert!(app
+        .sessions
+        .interactive
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("session list is incomplete")));
+
+    app.overlay = Some(Overlay::SessionPicker { selected: None });
+    let screen = render(&mut app, 120, 20);
+    assert!(screen.contains("remote-session"), "{}", screen.text());
+}
+
+#[test]
+fn a_successful_local_only_list_retains_a_learned_offline_owners_last_known_row() {
+    let mut app = shell(full_hello());
+    app.apply(key(KeyCode::Char('2')));
+    let remote_node = "ouro@late-member.test";
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "late-member-session",
+            "node": remote_node,
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:02.000000Z"
+        }]),
+    );
+
+    // No local fleet profile names this node: it was learned transitively through the
+    // runtime directory before going offline.
+    assert!(app.fleet_profile.is_none());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": "ouroboros@golden", "machine": "local", "state": "local" },
+                        { "node": remote_node, "machine": "late-member", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
+
+    // An older gateway may still return success after querying only the local owner. The
+    // prior remote row remains because runtime.status explicitly proves that owner is
+    // offline; absence from this array is not evidence that its durable session vanished.
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "local-session",
+            "node": "ouroboros@golden",
+            "status": "idle",
+            "updated_at": "2026-01-01T00:00:03.000000Z"
+        }]),
+    );
+
+    let rows = app
+        .sessions
+        .interactive
+        .value
+        .as_ref()
+        .expect("the merged list");
+    assert!(rows.iter().any(|row| {
+        row.id == "late-member-session"
+            && row.node.as_deref() == Some(remote_node)
+            && row.last_known
+    }));
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "local-session" && !row.last_known));
+
+    app.overlay = Some(Overlay::SessionPicker { selected: None });
+    let screen = render(&mut app, 130, 20);
+    assert!(
+        screen
+            .row("late-member-session")
+            .contains("last-known · owner offline"),
+        "{}",
+        screen.text()
+    );
 }
 
 #[test]
@@ -629,6 +1128,642 @@ fn queueing_a_follow_up_shows_an_inline_typing_indicator_until_agent_text_arrive
     let replying = render(&mut app, 120, 30);
     assert!(replying.contains("I am checking"), "{}", replying.text());
     assert!(!replying.contains("Working"), "{}", replying.text());
+}
+
+#[test]
+fn an_unknown_follow_up_restores_and_retries_the_exact_draft_and_turn_id() {
+    let mut app = with_open_session();
+    let input = "queue this after the current work";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first queued request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("a logical turn id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamTimeout,
+            message: "the runtime could not confirm the turn dispatch".into(),
+            data: Some(json!({ "outcome": "unknown", "turn_id": turn_id })),
+        })),
+    });
+
+    let composer = app.sessions.composer.as_ref().expect("the restored draft");
+    assert_eq!(composer.editor.text(), input);
+    assert_eq!(composer.verb, ComposerVerb::FollowUp);
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the same-id reconciliation");
+
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn an_unknown_follow_up_keeps_a_newer_draft_while_reconciling_the_old_id_first() {
+    let mut app = with_open_session();
+    let first_input = "queue the first exact request";
+    let newer_draft = "and then inspect the renderer";
+
+    type_text(&mut app, first_input);
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first queued request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("the first logical id")
+        .to_string();
+
+    type_text(&mut app, newer_draft);
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the newer draft remains active")
+            .editor
+            .text(),
+        newer_draft
+    );
+    let notice = &app
+        .notice
+        .as_ref()
+        .expect("the explicit reconciliation notice")
+        .text;
+    assert!(notice.contains(&turn_id), "{notice}");
+    assert!(
+        notice.contains("without overwriting the session draft"),
+        "{notice}"
+    );
+    assert!(notice.contains("Enter reconciles it"), "{notice}");
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("1 outcome-unknown turn"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("Enter reconciles first"),
+        "{}",
+        screen.text()
+    );
+
+    // Enter reconciles A under the only safe id and does not consume or submit B.
+    app.apply(key(KeyCode::Enter));
+    let reconciliation = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the explicit same-id reconciliation");
+    assert_eq!(reconciliation.params["input"], first_input);
+    assert_eq!(reconciliation.params["turn_id"], turn_id);
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the newer draft still remains")
+            .editor
+            .text(),
+        newer_draft
+    );
+
+    answer(
+        &mut app,
+        reconciliation.tag,
+        json!({ "id": turn_id, "status": "running" }),
+    );
+    app.apply(key(KeyCode::Enter));
+    let newer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the newer draft submits after reconciliation");
+    assert_eq!(newer.params["input"], newer_draft);
+    assert_ne!(newer.params["turn_id"], turn_id);
+}
+
+#[test]
+fn an_identical_newer_draft_is_not_cleared_by_an_older_reconciliation() {
+    let mut app = with_open_session();
+    let repeated_input = "run the focused lifecycle test";
+
+    type_text(&mut app, repeated_input);
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first submission");
+    let first_id = first.params["turn_id"]
+        .as_str()
+        .expect("the first logical id")
+        .to_string();
+
+    // B is intentional new editor input even though its bytes equal A. Text equality is
+    // not ownership: only the generation synthesized by retry restoration may be cleared.
+    type_text(&mut app, repeated_input);
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the independently typed B draft")
+            .editor
+            .text(),
+        repeated_input
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let reconciliation = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the same-id reconciliation for A");
+    assert_eq!(reconciliation.params["turn_id"], first_id);
+
+    answer(
+        &mut app,
+        reconciliation.tag,
+        json!({ "id": first_id, "status": "running" }),
+    );
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("B survives A's accepted reconciliation")
+            .editor
+            .text(),
+        repeated_input
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let second = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("B remains independently submittable");
+    assert_eq!(second.params["input"], repeated_input);
+    assert_ne!(second.params["turn_id"], first_id);
+}
+
+#[test]
+fn same_session_follow_ups_are_issued_in_submission_order() {
+    let mut app = with_open_session();
+
+    type_text(&mut app, "first queued instruction");
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first queued instruction");
+    let first_id = first.params["turn_id"]
+        .as_str()
+        .expect("the first turn id")
+        .to_string();
+
+    type_text(&mut app, "second queued instruction");
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "the gateway must not receive B while A is unclassified"
+    );
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("B remains visibly editable")
+            .editor
+            .text(),
+        "second queued instruction"
+    );
+
+    answer(
+        &mut app,
+        first.tag,
+        json!({ "id": first_id, "status": "running" }),
+    );
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "classification never submits a visible draft without another Enter"
+    );
+    app.apply(key(KeyCode::Enter));
+    let second = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("B is issued after A is accepted and the operator confirms it");
+    assert_eq!(second.params["input"], "second queued instruction");
+    assert_ne!(second.params["turn_id"], first_id);
+}
+
+#[test]
+fn an_unknown_first_submission_reconciles_before_a_visible_second_draft() {
+    let mut app = with_open_session();
+
+    type_text(&mut app, "first uncertain instruction");
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first instruction");
+    let first_id = first.params["turn_id"]
+        .as_str()
+        .expect("the first turn id")
+        .to_string();
+
+    type_text(&mut app, "second locally queued instruction");
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "B stays local while A is still in flight"
+    );
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+    app.apply(key(KeyCode::Enter));
+    let first_retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("A reconciles before B can cross the gateway");
+    assert_eq!(first_retry.params["input"], "first uncertain instruction");
+    assert_eq!(first_retry.params["turn_id"], first_id);
+
+    answer(
+        &mut app,
+        first_retry.tag,
+        json!({ "id": first_id, "status": "running" }),
+    );
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "reconciliation leaves B visible rather than auto-submitting it"
+    );
+    app.apply(key(KeyCode::Enter));
+    let second = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("B is sent only after A reconciles and Enter is pressed again");
+    assert_eq!(second.params["input"], "second locally queued instruction");
+    assert_ne!(second.params["turn_id"], first_id);
+}
+
+#[test]
+fn an_unknown_reply_after_switching_sessions_is_reconciled_when_the_session_reopens() {
+    let mut app = with_open_session();
+    let session_id = "session-0000000000000000000001";
+    let input = "preserve this turn across the session switch";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("the stable turn id")
+        .to_string();
+
+    app.open_session(Plane::Interactive, "another-session".into());
+    let _ = app.drain();
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    app.open_session(Plane::Interactive, session_id.into());
+    let _ = app.drain();
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the reopened composer")
+            .editor
+            .text(),
+        input
+    );
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("1 outcome-unknown turn"),
+        "{}",
+        screen.text()
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the deferred reconciliation");
+    assert_eq!(retry.params["id"], session_id);
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_pending_reconciliation_survives_closing_and_reopening_the_composer() {
+    let mut app = with_open_session();
+    let session_id = "session-0000000000000000000001";
+    let input = "keep this exact unresolved request";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("the stable turn id")
+        .to_string();
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    apply_leader(&mut app, 'n');
+    assert!(app.sessions.open.is_none());
+    assert!(app.sessions.composer.is_none());
+
+    app.open_session(Plane::Interactive, session_id.into());
+    let _ = app.drain();
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the rehydrated composer")
+            .editor
+            .text(),
+        input
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the same-id retry after reopening");
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_transport_loss_after_follow_up_restores_the_same_draft_and_turn_id() {
+    let mut app = with_open_session();
+    let input = "do not duplicate this queued request";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the queued request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("a logical turn id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the restored transport-lost draft")
+            .editor
+            .text(),
+        input
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the same-id transport reconciliation");
+
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_successful_rpc_read_of_a_failed_follow_up_restores_a_fresh_retry() {
+    let mut app = with_open_session();
+    let input = "retry this only as a new logical turn";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the queued request");
+    let failed_id = first.params["turn_id"]
+        .as_str()
+        .expect("the failed logical id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Ok(json!({
+            "id": failed_id,
+            "status": "failed",
+            "error": "provider_refused"
+        })),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the failed turn draft")
+            .editor
+            .text(),
+        input
+    );
+    let notice = &app.notice.as_ref().expect("the failed turn notice").text;
+    assert!(notice.contains("is failed"), "{notice}");
+    assert!(notice.contains("provider_refused"), "{notice}");
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("a deliberate fresh retry");
+
+    assert_eq!(retry.params["input"], input);
+    assert_ne!(retry.params["turn_id"], failed_id);
+}
+
+#[test]
+fn a_legacy_unknown_follow_up_reply_still_preserves_the_same_turn_id() {
+    let mut app = with_open_session();
+    let input = "reconcile this legacy gateway reply";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the queued request");
+    let turn_id = first.params["turn_id"]
+        .as_str()
+        .expect("a logical turn id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "the runtime refused the call".into(),
+            data: Some(json!(["turn_dispatch_ambiguous", turn_id])),
+        })),
+    });
+
+    app.apply(key(KeyCode::Enter));
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the legacy same-id reconciliation");
+
+    assert_eq!(retry.params["input"], input);
+    assert_eq!(retry.params["turn_id"], turn_id);
+}
+
+#[test]
+fn a_busy_immediate_message_restores_the_draft_as_a_fresh_queued_follow_up() {
+    let mut app = shell(full_hello());
+    let session_id = "session-with-an-active-turn";
+    let input = "implement now with the context you have";
+
+    // With no list snapshot yet, this reproduces the old `ouro new -m` handoff: the
+    // composer believes it owns the immediate-message slot while Harness is already busy.
+    app.open_session(Plane::Interactive, session_id.into());
+    let _ = app.drain();
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let refused = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the stale immediate message");
+    let failed_turn_id = refused.params["turn_id"]
+        .as_str()
+        .expect("a logical turn id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: refused.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "the session is already running a turn; queue this input with \
+                      interactive.follow_up"
+                .into(),
+            data: Some(json!({
+                "reason": "busy",
+                "outcome": "not_dispatched",
+                "retry_with": "interactive.follow_up",
+                "error": ["turn_dispatch_failed", "busy"]
+            })),
+        })),
+    });
+
+    let composer = app.sessions.composer.as_ref().expect("the restored draft");
+    assert_eq!(composer.editor.text(), input);
+    assert_eq!(composer.verb, ComposerVerb::FollowUp);
+
+    app.apply(key(KeyCode::Enter));
+    let queued = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the actionable retry queues");
+
+    assert_eq!(queued.params["input"], input);
+    assert_ne!(queued.params["turn_id"], failed_turn_id);
+}
+
+#[test]
+fn a_late_composer_failure_never_overwrites_the_next_draft() {
+    let mut app = with_open_session();
+
+    type_text(&mut app, "the submitted follow-up");
+    app.apply(key(KeyCode::Enter));
+    let submitted = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the submitted follow-up");
+
+    type_text(&mut app, "a newer unsent thought");
+    app.apply(Msg::Answer {
+        tag: submitted.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "the follow-up was refused".into(),
+            data: None,
+        })),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the newer draft")
+            .editor
+            .text(),
+        "a newer unsent thought"
+    );
 }
 
 #[test]
@@ -1042,10 +2177,8 @@ fn composer_history_survives_leaving_and_reopening_the_session() {
     );
 }
 
-/// `interactive.steer` is idempotent on the caller's turn id, exactly like the other two
-/// input verbs. This pins the shape the runtime is served.
 #[test]
-fn steering_sends_an_id_an_input_and_a_turn_id() {
+fn steering_sends_only_the_non_idempotent_envelope() {
     let mut app = with_open_session();
 
     apply_leader(&mut app, 's');
@@ -1060,19 +2193,104 @@ fn steering_sends_an_id_an_input_and_a_turn_id() {
 
     assert_eq!(steer.params["id"], "session-0000000000000000000001");
     assert_eq!(steer.params["input"], "stop and run the tests first");
-    assert!(
-        steer.params["turn_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()),
-        "{}",
-        steer.params
-    );
     assert_eq!(
         steer.params.as_object().expect("an object").len(),
-        3,
+        2,
         "{}",
         steer.params
     );
+    assert!(steer.params.get("turn_id").is_none(), "{}", steer.params);
+}
+
+#[test]
+fn a_transport_loss_after_steer_restores_the_draft_as_unreconcilable() {
+    let mut app = with_open_session();
+    let input = "stop and inspect the failing test first";
+
+    apply_leader(&mut app, 's');
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let steer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.steer")
+        .expect("the steer call");
+    assert!(steer.params.get("turn_id").is_none(), "{}", steer.params);
+
+    app.apply(Msg::Answer {
+        tag: steer.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the exact steer draft")
+            .editor
+            .text(),
+        input
+    );
+    assert!(
+        app.drain().is_empty(),
+        "a lost steer acknowledgement must not trigger an automatic replay"
+    );
+
+    let notice = &app
+        .notice
+        .as_ref()
+        .expect("the unreconcilable warning")
+        .text;
+    assert!(
+        notice.contains("delivery could not be confirmed"),
+        "{notice}"
+    );
+    assert!(notice.contains("not idempotent"), "{notice}");
+    assert!(
+        notice.contains("before deliberately sending it again"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn a_lost_steer_acknowledgement_preserves_a_newer_draft_without_claiming_restoration() {
+    let mut app = with_open_session();
+    let steer_input = "stop and inspect the failing test first";
+    let newer_draft = "then explain the renderer";
+
+    apply_leader(&mut app, 's');
+    type_text(&mut app, steer_input);
+    app.apply(key(KeyCode::Enter));
+    let steer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.steer")
+        .expect("the steer call");
+
+    type_text(&mut app, newer_draft);
+    app.apply(Msg::Answer {
+        tag: steer.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    assert_eq!(
+        app.sessions
+            .composer
+            .as_ref()
+            .expect("the newer draft remains active")
+            .editor
+            .text(),
+        newer_draft
+    );
+    let notice = &app
+        .notice
+        .as_ref()
+        .expect("the unreconcilable warning")
+        .text;
+    assert!(notice.contains("the newer draft was preserved"), "{notice}");
+    assert!(notice.contains("composer history"), "{notice}");
+    assert!(!notice.contains("exact draft was restored"), "{notice}");
 }
 
 /// Bracketed paste was dropped whenever an overlay was open. The workspace box of the `n`
@@ -1238,6 +2456,646 @@ fn the_approval_modal_renders_and_produces_the_right_respond_approval_params() {
 }
 
 #[test]
+fn every_remote_session_verb_keeps_the_owner_node_from_the_reference() {
+    let remote_id = "session-remote-1";
+    let remote_node = "ouro@mini.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": remote_id,
+            "node": remote_node,
+            "provider": "codex",
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }]),
+    );
+    app.open_session(Plane::Interactive, remote_id.into());
+
+    let subscribe = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("a remote subscribe");
+    assert_eq!(subscribe.params["node"], remote_node);
+    answer(&mut app, subscribe.tag, json!([]));
+
+    type_text(&mut app, "run the remote checks");
+    app.apply(key(KeyCode::Enter));
+    let follow_up = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("a remote follow-up");
+    assert_eq!(follow_up.params["node"], remote_node);
+    answer(
+        &mut app,
+        follow_up.tag,
+        json!({"id": follow_up.params["turn_id"], "status": "queued"}),
+    );
+
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "interactive.event",
+            "params": {
+                "id": remote_id,
+                "node": remote_node,
+                "event": {
+                    "id": "evt-remote-1",
+                    "session_id": remote_id,
+                    "sequence": 1,
+                    "type": "approval_requested",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "request_id": "req-remote-1",
+                    "payload": { "tool_call": { "name": "bash", "command": "mix test" } }
+                }
+            }
+        }),
+    );
+    app.apply(key(KeyCode::Enter));
+    let approval = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("a routed approval");
+    assert_eq!(approval.params["node"], remote_node);
+
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "stream.lagged",
+            "params": {
+                "id": remote_id,
+                "node": remote_node,
+                "plane": "interactive",
+                "dropped": 1,
+                "last_sequence": 2
+            }
+        }),
+    );
+    let replay = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.replay")
+        .expect("a routed replay");
+    assert_eq!(replay.params["node"], remote_node);
+
+    app.apply(key(KeyCode::Esc));
+    let interrupt = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.interrupt")
+        .expect("a routed interrupt");
+    assert_eq!(interrupt.params["node"], remote_node);
+
+    apply_leader(&mut app, 'x');
+    let Some(Overlay::Confirm { options, .. }) = app.overlay.as_ref() else {
+        panic!("a close confirmation")
+    };
+    for (_label, call) in options
+        .iter()
+        .filter_map(|(label, call)| call.as_ref().map(|call| (label, call)))
+    {
+        assert_eq!(call.params["node"], remote_node);
+    }
+}
+
+#[test]
+fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
+    let id = "explicit-duplicate";
+    let first_owner = "ouro@mini.test";
+    let second_owner = "ouro@workstation.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": id,
+            "node": first_owner,
+            "provider": "codex",
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }]),
+    );
+    app.open_session(Plane::Interactive, id.into());
+    let initial = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("the unique owner can initially be watched");
+    answer(&mut app, initial.tag, json!([]));
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([
+            {
+                "id": id,
+                "node": first_owner,
+                "provider": "codex",
+                "status": "running",
+                "updated_at": "2026-01-01T00:00:00Z"
+            },
+            {
+                "id": id,
+                "node": second_owner,
+                "provider": "codex",
+                "status": "running",
+                "updated_at": "2026-01-01T00:00:01Z"
+            }
+        ]),
+    );
+
+    let notice = app.notice.as_ref().expect("the collision is announced");
+    assert!(notice.text.contains(first_owner));
+    assert!(notice.text.contains(second_owner));
+    assert!(notice.text.contains("Explicit IDs must be fleet-unique"));
+    assert!(notice.text.contains("generated IDs already are"));
+    assert!(app
+        .cursors
+        .snapshot()
+        .iter()
+        .all(|(plane, watched, _cursor, _node)| { *plane != Plane::Interactive || watched != id }));
+
+    // A fleet list is a partial observation: an unavailable owner's RPC can be omitted.
+    // Once two owners have proved a collision, seeing only one later must never make the
+    // ambiguous id routeable again.
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": id,
+            "node": first_owner,
+            "provider": "codex",
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:02Z"
+        }]),
+    );
+
+    apply_leader(&mut app, 'l');
+    assert_eq!(
+        app.sessions
+            .merged()
+            .iter()
+            .filter(|session| session.id == id)
+            .count(),
+        1,
+        "duplicate owners collapse into one visible conflict row"
+    );
+    let picker = render(&mut app, 140, 30);
+    assert!(picker.contains("ID conflict"), "{}", picker.text());
+    assert!(picker.contains(first_owner), "{}", picker.text());
+    assert!(picker.contains(second_owner), "{}", picker.text());
+
+    app.apply(key(KeyCode::Enter));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.subscribe"));
+
+    type_text(&mut app, "do not send this to an arbitrary owner");
+    app.apply(key(KeyCode::Enter));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("interactive.")));
+    assert!(app
+        .notice
+        .as_ref()
+        .is_some_and(|notice| notice.text.contains("no request was sent")));
+}
+
+#[test]
+fn cancelling_a_remote_coding_task_keeps_its_owner_node() {
+    let remote_node = "ouro@workstation.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Coding),
+        json!([{
+            "id": "task-remote-1",
+            "node": remote_node,
+            "provider": "codex",
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }]),
+    );
+    app.open_session(Plane::Coding, "task-remote-1".into());
+    let _ = app.drain();
+    app.apply(key(KeyCode::Char('x')));
+    app.apply(key(KeyCode::Enter));
+
+    let cancel = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "coding.cancel")
+        .expect("a remote task cancellation");
+    assert_eq!(cancel.params["node"], remote_node);
+}
+
+#[test]
+fn a_remote_machine_loss_retains_the_cursor_and_resubscribes_after_reconnect() {
+    let remote_id = "session-recover-1";
+    let remote_node = "ouro@mini.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": remote_id,
+            "node": remote_node,
+            "provider": "codex",
+            "status": "running"
+        }]),
+    );
+    app.open_session(Plane::Interactive, remote_id.into());
+    let initial = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("the initial remote subscription");
+    answer(&mut app, initial.tag, json!([]));
+
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "interactive.event",
+            "params": {
+                "id": remote_id,
+                "node": remote_node,
+                "event": {
+                    "id": "evt-before-loss",
+                    "session_id": remote_id,
+                    "sequence": 1,
+                    "type": "output_text_final",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": { "text": "still running remotely" }
+                }
+            }
+        }),
+    );
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "stream.ended",
+            "params": {
+                "id": remote_id,
+                "node": remote_node,
+                "plane": "interactive",
+                "status": "unknown"
+            }
+        }),
+    );
+
+    assert!(
+        app.sessions
+            .open_watch()
+            .expect("the retained watch")
+            .ended
+            .is_none(),
+        "unknown means unreachable, not terminal"
+    );
+    assert!(app
+        .cursors
+        .snapshot()
+        .iter()
+        .any(|(plane, id, cursor, node)| {
+            *plane == Plane::Interactive
+                && id == remote_id
+                && *cursor == 1
+                && node.as_deref() == Some(remote_node)
+        }));
+
+    let status_call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "runtime.status")
+        .expect("machine recovery checks fleet status");
+    answer(
+        &mut app,
+        status_call.tag,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": remote_node, "machine": "mini", "role": "core", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.subscribe"),
+        "a known-offline owner is not hammered"
+    );
+
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [remote_node],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": remote_node, "machine": "mini", "role": "core", "state": "connected" }
+                    ]
+                }
+            }
+        }),
+    );
+    let retries = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.subscribe")
+        .collect::<Vec<_>>();
+    assert_eq!(retries.len(), 1, "one status answer starts one subscribe");
+    let retry = retries.into_iter().next().expect("the one retry");
+    assert_eq!(retry.params["node"], remote_node);
+    assert_eq!(retry.params["cursor"], 1);
+
+    app.apply(Msg::Answer {
+        tag: retry.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "owner still starting".into(),
+            data: None,
+        })),
+    });
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [remote_node],
+            "cluster": { "distributed": true }
+        }),
+    );
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.subscribe"),
+        "the retry is backed off after a refusal"
+    );
+
+    app.ticks = 13;
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [remote_node],
+            "cluster": { "distributed": true }
+        }),
+    );
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("the bounded retry becomes due");
+    answer(
+        &mut app,
+        retry.tag,
+        json!([{
+            "id": "evt-after-loss",
+            "session_id": remote_id,
+            "sequence": 2,
+            "type": "output_text_final",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "payload": { "text": "continued after reconnect" }
+        }]),
+    );
+
+    let watch = app.sessions.open_watch().expect("the recovered watch");
+    assert_eq!(watch.cursor(), 2);
+    assert!(watch.ended.is_none());
+    assert!(app.notice.as_ref().is_some_and(|notice| notice
+        .text
+        .contains("reconnected and resumed from cursor 2")));
+}
+
+#[test]
+fn a_local_gateway_reconnect_waits_for_an_offline_remote_owner_then_resumes() {
+    let remote_id = "session-owner-down-during-local-reconnect";
+    let remote_node = "ouro@mini.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": remote_id,
+            "node": remote_node,
+            "provider": "codex",
+            "status": "running"
+        }]),
+    );
+    app.open_session(Plane::Interactive, remote_id.into());
+    let initial = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("the initial remote subscription");
+    answer(&mut app, initial.tag, json!([]));
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "interactive.event",
+            "params": {
+                "id": remote_id,
+                "node": remote_node,
+                "event": {
+                    "id": "evt-before-local-reconnect",
+                    "session_id": remote_id,
+                    "sequence": 1,
+                    "type": "output_text_final",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": { "text": "owned by mini" }
+                }
+            }
+        }),
+    );
+
+    // The local gateway comes back first. Its reconnect hook tries every remembered
+    // cursor, and this remote owner is still absent when that subscribe reaches it.
+    app.apply(Msg::Reconnected(Box::new(full_hello())));
+    app.apply(Msg::Answer {
+        tag: Tag::Resync {
+            plane: Plane::Interactive,
+            id: remote_id.into(),
+            cursor: 1,
+            subscribe: true,
+        },
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::Unavailable,
+            message: "session owner is offline; Ouroboros is reconnecting".into(),
+            data: Some(json!({
+                "reason": "owner_unavailable",
+                "node": remote_node,
+                "outcome": "unknown"
+            })),
+        })),
+    });
+
+    assert!(app
+        .cursors
+        .snapshot()
+        .iter()
+        .any(|(plane, id, cursor, node)| {
+            *plane == Plane::Interactive
+                && id == remote_id
+                && *cursor == 1
+                && node.as_deref() == Some(remote_node)
+        }));
+    assert!(app
+        .sessions
+        .open_watch()
+        .expect("the cursor-preserving watch")
+        .ended
+        .is_none());
+    assert!(app
+        .notice
+        .as_ref()
+        .is_some_and(|notice| notice.text.contains("machine is still unreachable")));
+
+    let status = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "runtime.status")
+        .expect("the failed hook subscribe starts machine-status recovery");
+    answer(
+        &mut app,
+        status.tag,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": remote_node, "machine": "mini", "role": "core", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
+    assert!(app
+        .drain()
+        .into_iter()
+        .all(|call| call.method != "interactive.subscribe"));
+
+    app.ticks = 38;
+    app.apply(Msg::Tick);
+    let status = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "runtime.status")
+        .expect("recovery keeps polling while the remote owner is offline");
+    answer(
+        &mut app,
+        status.tag,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [remote_node],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": remote_node, "machine": "mini", "role": "core", "state": "connected" }
+                    ]
+                }
+            }
+        }),
+    );
+    let retries = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.subscribe")
+        .collect::<Vec<_>>();
+    assert_eq!(retries.len(), 1, "the owner rejoin starts one subscribe");
+    let retry = retries.into_iter().next().expect("the one owner retry");
+    assert_eq!(retry.params["node"], remote_node);
+    assert_eq!(retry.params["cursor"], 1);
+    answer(
+        &mut app,
+        retry.tag,
+        json!([{
+            "id": "evt-after-owner-rejoin",
+            "session_id": remote_id,
+            "sequence": 2,
+            "type": "output_text_final",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "payload": { "text": "remote owner resumed" }
+        }]),
+    );
+
+    let watch = app.sessions.open_watch().expect("the resumed remote watch");
+    assert_eq!(watch.cursor(), 2);
+    assert!(watch.ended.is_none());
+    assert!(app.notice.as_ref().is_some_and(|notice| notice
+        .text
+        .contains("reconnected and resumed from cursor 2")));
+}
+
+#[test]
+fn an_indeterminate_transport_failure_opening_a_remote_stream_enters_recovery() {
+    let id = "session-remote-open-timeout";
+    let owner = "ouro@mini.test";
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": id,
+            "node": owner,
+            "provider": "codex",
+            "status": "running"
+        }]),
+    );
+    app.open_session(Plane::Interactive, id.into());
+    let subscribe = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.subscribe")
+        .expect("opening the remembered remote stream subscribes");
+    app.apply(Msg::Answer {
+        tag: subscribe.tag,
+        result: Err(ClientError::Timeout),
+    });
+
+    assert!(app
+        .cursors
+        .snapshot()
+        .iter()
+        .any(|(plane, watched, cursor, node)| {
+            *plane == Plane::Interactive
+                && watched == id
+                && *cursor == 0
+                && node.as_deref() == Some(owner)
+        }));
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "runtime.status"));
+    assert!(app
+        .notice
+        .as_ref()
+        .is_some_and(|notice| notice.text.contains("cursor is safe")));
+}
+
+#[test]
 fn the_composer_queues_while_running_and_ctrl_c_interrupts_rather_than_quitting() {
     let mut app = with_open_session();
 
@@ -1295,7 +3153,7 @@ fn the_composer_edits_and_sends_a_multiline_bracketed_paste() {
 }
 
 #[test]
-fn the_open_composer_names_the_actual_provider_and_queues_every_later_request() {
+fn the_open_composer_names_the_provider_and_serializes_later_requests() {
     let mut app = with_open_session();
 
     let screen = render(&mut app, 180, 30);
@@ -1316,17 +3174,34 @@ fn the_open_composer_names_the_actual_provider_and_queues_every_later_request() 
 
     type_text(&mut app, "first queued request");
     app.apply(key(KeyCode::Enter));
-    type_text(&mut app, "second queued request");
-    app.apply(key(KeyCode::Enter));
-
-    let calls = app
+    let first = app
         .drain()
         .into_iter()
-        .filter(|call| call.method == "interactive.follow_up")
-        .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].params["input"], "first queued request");
-    assert_eq!(calls[1].params["input"], "second queued request");
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the first follow-up");
+
+    type_text(&mut app, "second queued request");
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "the second input remains visible until the first RPC is classified"
+    );
+    answer(
+        &mut app,
+        first.tag,
+        json!({"id": first.params["turn_id"], "status": "queued"}),
+    );
+    app.apply(key(KeyCode::Enter));
+
+    let second = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.follow_up")
+        .expect("the second follow-up after the first acknowledgement");
+    assert_eq!(first.params["input"], "first queued request");
+    assert_eq!(second.params["input"], "second queued request");
 }
 
 #[test]
@@ -1661,6 +3536,142 @@ fn n_opens_a_form_whose_every_choice_is_visible() {
 }
 
 #[test]
+fn new_session_can_choose_a_connected_machine_by_friendly_name() {
+    let mut app = ready_to_start();
+    app.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": {
+                    "summary": { "expected": 3, "connected": 2, "offline": 1 },
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local" },
+                        { "machine": "mini", "node": "ouro@mini.test", "role": "core", "state": "connected" },
+                        { "machine": "workstation", "node": "ouro@workstation.test", "role": "core", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Machine);
+    app.apply(key(KeyCode::Right));
+
+    let form = render(&mut app, 120, 30);
+    assert!(
+        form.contains("mini — connected (ouro@mini.test)"),
+        "{}",
+        form.text()
+    );
+    assert!(!form.contains("workstation — connected"));
+    assert!(form.contains("Connected checks reachability, not provider readiness"));
+    assert!(form.contains("fleet invites never copy credentials"));
+    assert!(
+        form.contains("claude_code — readiness unknown on destination"),
+        "{}",
+        form.text()
+    );
+    assert!(
+        !form.contains("claude_code (1/2)"),
+        "the local provider's green-ready label must not describe a remote machine: {}",
+        form.text()
+    );
+    assert_eq!(
+        form.colour_of("claude_code", "claude_code"),
+        Color::Yellow,
+        "remote readiness is unknown even when the gateway has this provider"
+    );
+
+    focus(&mut app, NewField::Provider);
+    app.apply(key(KeyCode::Right));
+    let remote_missing_locally = render(&mut app, 120, 30);
+    assert!(
+        remote_missing_locally.contains("gemini — readiness unknown on destination"),
+        "{}",
+        remote_missing_locally.text()
+    );
+    assert!(
+        !remote_missing_locally.contains("gemini — not installed"),
+        "the gateway's missing executable is not evidence about the destination: {}",
+        remote_missing_locally.text()
+    );
+    assert_eq!(
+        remote_missing_locally.colour_of("gemini", "gemini"),
+        Color::Yellow,
+        "remote readiness is unknown even when the gateway lacks this provider"
+    );
+    app.apply(key(KeyCode::Left));
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain().is_empty(),
+        "an inferred local cwd is never sent remotely"
+    );
+    let form = render(&mut app, 120, 30);
+    assert!(
+        form.contains("choose an absolute workspace path on the destination machine"),
+        "{}",
+        form.text()
+    );
+
+    focus(&mut app, NewField::Workspace);
+    type_text(&mut app, "/srv/project");
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a remote start");
+    assert_eq!(start.params["machine"], "mini");
+    assert_eq!(start.params["workspace"], "/srv/project");
+    assert!(start.params.get("node").is_none());
+}
+
+#[test]
+fn an_incompatible_connected_machine_is_not_offered_for_paid_work() {
+    let mut app = ready_to_start();
+    app.fleet_profile = Some(fleet_profile());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": {
+                    "summary": { "expected": 3, "connected": 2, "offline": 1 },
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local", "compatibility": "compatible" },
+                        { "machine": "mini", "node": "ouro@mini.test", "role": "core", "state": "connected", "compatibility": "incompatible" }
+                    ]
+                }
+            }
+        }),
+    );
+
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Machine);
+    app.apply(key(KeyCode::Right));
+
+    let form = render(&mut app, 120, 30);
+    assert!(!form.contains("mini — connected"), "{}", form.text());
+    assert!(form.contains("This machine"), "{}", form.text());
+}
+
+#[test]
 fn the_provider_list_greys_an_uninstalled_provider_and_still_offers_it() {
     let mut app = ready_to_start();
     app.apply(key(KeyCode::Char('n')));
@@ -1740,7 +3751,7 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
     assert_eq!(call.params["approval_mode"], "prompt");
     assert_eq!(
         call.params.as_object().expect("an object").len(),
-        3,
+        4,
         "an option outside @start_options is -32602 naming it, so none is invented: {:?}",
         call.params
     );
@@ -1829,7 +3840,8 @@ fn an_empty_workspace_is_omitted_rather_than_sent_blank() {
         "the gateway requires a nonempty string, so a blank box means no workspace: {fields:?}"
     );
     assert!(!fields.contains_key("approval_mode"));
-    assert_eq!(fields.len(), 1);
+    assert!(fields.contains_key("id"));
+    assert_eq!(fields.len(), 2);
 }
 
 #[test]
@@ -1923,6 +3935,147 @@ fn a_refused_start_stays_on_the_form_rather_than_flashing_past_in_a_notice() {
 }
 
 #[test]
+fn an_unknown_start_reconciles_the_same_id_before_any_new_start() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app.drain().into_iter().next().expect("a start");
+    let first_params = first.params.clone();
+    let first_id = first.params["id"]
+        .as_str()
+        .expect("a stable id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Timeout),
+    });
+
+    let screen = render(&mut app, 140, 30);
+    assert!(screen.contains(&first_id), "{}", screen.text());
+    assert!(screen.contains("already exist"), "{}", screen.text());
+    assert!(screen.contains("reconcile"), "{}", screen.text());
+
+    // The old request cannot be edited into a different request while retaining its id.
+    app.apply(key(KeyCode::Char('x')));
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+    let retry = app.drain().into_iter().next().expect("a reconciliation");
+    assert_eq!(retry.params, first_params);
+
+    app.apply(Msg::Answer {
+        tag: retry.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "provider is not ready".into(),
+            data: None,
+        })),
+    });
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+    let replacement = app.drain().into_iter().next().expect("a fresh start");
+    assert_ne!(replacement.params["id"], first_id);
+}
+
+#[test]
+fn a_generic_runtime_start_failure_reconciles_instead_of_minting_a_duplicate() {
+    let mut app = ready_to_start();
+    app.apply(key(KeyCode::Char('n')));
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+
+    let first = app.drain().into_iter().next().expect("a start");
+    let first_params = first.params.clone();
+    let first_id = first.params["id"]
+        .as_str()
+        .expect("a stable id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: first.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::UpstreamError,
+            message: "the provider failed after durable creation".into(),
+            data: None,
+        })),
+    });
+
+    let screen = render(&mut app, 140, 30);
+    assert!(screen.contains(&first_id), "{}", screen.text());
+    assert!(screen.contains("may already exist"), "{}", screen.text());
+
+    focus(&mut app, NewField::Start);
+    app.apply(key(KeyCode::Enter));
+    let retry = app.drain().into_iter().next().expect("a reconciliation");
+    assert_eq!(retry.params, first_params);
+}
+
+#[test]
+fn a_durable_failed_home_start_opens_the_session_without_dispatching_the_draft() {
+    let mut app = shell(full_hello());
+    app.config.defaults.provider = Some("claude_code".into());
+    let input = "keep this prompt until the provider is repaired";
+
+    type_text(&mut app, input);
+    app.apply(key(KeyCode::Enter));
+
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a home start");
+    let id = start.params["id"]
+        .as_str()
+        .expect("the caller-owned id")
+        .to_string();
+
+    app.apply(Msg::Answer {
+        tag: start.tag,
+        result: Ok(json!({
+            "id": id,
+            "node": "ouroboros@golden",
+            "outcome": "created",
+            "ready": false,
+            "error": ["session_start_failed", ["provider_not_ready", "login required"]]
+        })),
+    });
+
+    assert_eq!(app.sessions.open, Some((Plane::Interactive, id.clone())));
+    let composer = app.sessions.composer.as_ref().expect("the restored draft");
+    assert_eq!(composer.editor.text(), input);
+    assert_eq!(composer.verb, ComposerVerb::Message);
+
+    let calls = app.drain();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.method == "interactive.subscribe"),
+        "the durable failed session is still opened and watched"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.method != "interactive.send_message"),
+        "a readiness failure means the saved draft was definitely not dispatched: {calls:?}"
+    );
+
+    let notice = &app
+        .notice
+        .as_ref()
+        .expect("the created-failure notice")
+        .text;
+    assert!(notice.contains(&id), "{notice}");
+    assert!(notice.contains("did not become ready"), "{notice}");
+    assert!(
+        notice.contains("no first message was dispatched"),
+        "{notice}"
+    );
+}
+
+#[test]
 fn a_refusal_carries_the_reason_the_gateway_put_in_its_data() {
     let mut app = ready_to_start();
     app.apply(key(KeyCode::Char('n')));
@@ -1965,21 +4118,22 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
     app.apply(key(KeyCode::Enter));
 
     let call = app.drain().into_iter().next().expect("a start");
+    let id = call.params["id"]
+        .as_str()
+        .expect("the client-owned start id")
+        .to_string();
 
     app.apply(Msg::Answer {
         tag: call.tag,
         result: Ok(json!({
             "_struct": "Ouroboros.Interactive.Ref",
-            "id": "session-new-1",
+            "id": id,
             "node": "ouroboros@golden"
         })),
     });
 
     assert!(app.overlay.is_none(), "the form closes on success");
-    assert_eq!(
-        app.sessions.open,
-        Some((Plane::Interactive, "session-new-1".into()))
-    );
+    assert_eq!(app.sessions.open, Some((Plane::Interactive, id.clone())));
 
     // Subscribed at cursor 0, through the same resync path everything else uses.
     let subscribe = app
@@ -1988,12 +4142,12 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
         .find(|call| call.method == "interactive.subscribe")
         .expect("a new session is watched immediately");
 
-    assert_eq!(subscribe.params["id"], "session-new-1");
+    assert_eq!(subscribe.params["id"], id);
     assert_eq!(subscribe.params["cursor"], 0);
 
     // The composer is open, so the next thing typed is the first message.
     let screen = render(&mut app, 120, 30);
-    assert!(screen.contains("session-new-1"), "{}", screen.text());
+    assert!(screen.contains(&id), "{}", screen.text());
     assert!(screen.contains("Enter sends"), "{}", screen.text());
 
     type_text(&mut app, "read the tests");
@@ -2005,7 +4159,7 @@ fn a_started_session_is_watched_focused_and_ready_to_be_written_to() {
         .find(|call| call.method == "interactive.send_message")
         .expect("the composer was ready");
 
-    assert_eq!(message.params["id"], "session-new-1");
+    assert_eq!(message.params["id"], id);
     assert_eq!(message.params["input"], "read the tests");
 }
 
@@ -2355,7 +4509,7 @@ fn the_help_overlay_states_the_honest_limits() {
     let screen = render(&mut app, 130, 30);
 
     assert!(screen.contains("ctrl+c"), "{}", screen.text());
-    assert!(screen.contains("single-node view"));
+    assert!(screen.contains("one gateway view of the fleet"));
     assert!(screen.contains("not a sandbox"));
     assert!(screen.contains("scope `read`"));
 

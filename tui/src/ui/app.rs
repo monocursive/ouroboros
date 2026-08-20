@@ -22,7 +22,7 @@
 //! executable ([methods.ex] `@provider_probe_timeout`), so polling it beside
 //! `runtime.status` would fork a process per provider every three seconds.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,10 +32,11 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults};
+use crate::fleet::Profile as FleetProfile;
 use crate::model::{
-    self, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, CursorPruned, Event,
-    EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest,
-    StartedRef,
+    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
+    CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo,
+    StartRequest, StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -213,9 +214,19 @@ pub enum Tag {
         label: &'static str,
         plane: Plane,
         id: String,
-        /// Composer calls carry their logical turn id here, making simultaneous queued
-        /// follow-ups distinct in the in-flight set. Other one-at-a-time actions use nil.
+    },
+    /// A composer mutation retains the exact draft and, for dispatched turns, its logical
+    /// id until the answer. Steer has no durable request id; retaining a pretend one would
+    /// make a lost acknowledgement look safely replayable when it is not.
+    ComposerAction {
+        label: &'static str,
+        verb: ComposerVerb,
+        plane: Plane,
+        id: String,
         turn_id: Option<String>,
+        input: String,
+        reconciling: bool,
+        submission_sequence: u64,
     },
     /// One approval response, keyed by the runtime request id so parallel prompts cannot
     /// collapse into one in-flight action.
@@ -228,6 +239,7 @@ pub enum Tag {
     /// answer carries the id of a session that did not exist when the request was made.
     Start {
         plane: Plane,
+        id: String,
     },
     /// The first message of a session this client just started.
     FirstMessage {
@@ -235,6 +247,7 @@ pub enum Tag {
         id: String,
         turn_id: String,
         input: String,
+        submission_sequence: u64,
     },
 }
 
@@ -405,15 +418,86 @@ impl ComposerVerb {
 pub struct Composer {
     pub verb: ComposerVerb,
     pub editor: Editor,
-    /// A restored first message retries with the same logical id after an ambiguous or
-    /// refused response. Ordinary submissions mint one when they leave the editor.
-    next_turn_id: Option<String>,
+    draft_generation: u64,
+    reconciliation_owner: Option<ReconciliationDraftOwner>,
+}
+
+impl Composer {
+    fn user_changed_draft(&mut self) {
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.reconciliation_owner = None;
+    }
+
+    fn restore_reconciliation(&mut self, input: &str, turn_id: &str, catalog: &CompletionCatalog) {
+        self.editor.clear_text();
+        self.editor.paste(input, catalog);
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.reconciliation_owner = Some(ReconciliationDraftOwner {
+            turn_id: turn_id.to_string(),
+            generation: self.draft_generation,
+        });
+    }
+
+    fn owns_reconciliation(&self, turn_id: &str) -> bool {
+        self.reconciliation_owner.as_ref().is_some_and(|owner| {
+            owner.turn_id == turn_id && owner.generation == self.draft_generation
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReconciliationDraftOwner {
+    turn_id: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SavedComposerDraft {
+    input: String,
+    generation: u64,
+    reconciliation_owner: Option<ReconciliationDraftOwner>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingComposerReconciliation {
+    kind: PendingReconciliationKind,
+    input: String,
+    turn_id: String,
+    submission_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerRestoreDisposition {
+    Restored,
+    SavedForReopen,
+    ReconciliationQueued,
+    NewerDraftPreserved,
+}
+
+impl ComposerRestoreDisposition {
+    fn reconciliation_deferred(self) -> bool {
+        self == Self::ReconciliationQueued
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingReconciliationKind {
+    FirstMessage,
+    Composer(ComposerVerb),
 }
 
 #[derive(Debug)]
 struct PendingFirstMessage {
     input: String,
     turn_id: String,
+    start: StartRequest,
+    start_outcome_unknown: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionRecovery {
+    attempts: u32,
+    next_tick: u64,
 }
 
 #[derive(Debug, Default)]
@@ -423,6 +507,17 @@ pub struct SessionsTab {
     pub open: Option<(Plane, String)>,
     pub watches: HashMap<(Plane, String), Watch>,
     pub composer: Option<Composer>,
+    /// Owning node for remote references. First-party session ids carry 128 bits of
+    /// client/runtime entropy and are therefore fleet-unique; the node is routing data,
+    /// not folded into the user-facing id or map key.
+    owner_nodes: HashMap<(Plane, String), String>,
+    /// Explicit IDs can be supplied by API clients. The v1 stream envelope carries only
+    /// plane + id, so the same value on two owners is deliberately unrouteable instead of
+    /// silently choosing whichever fleet-list row happened to arrive last.
+    owner_conflicts: HashMap<(Plane, String), Vec<String>>,
+    /// Remote streams whose owner disappeared without a terminal session status. Their
+    /// cursors stay registered while fleet status watches for the owner to return.
+    recovering: HashMap<(Plane, String), SessionRecovery>,
     /// The complete normalized event ledger is an operator detail, not the default chat.
     /// It remains one key away and is never discarded from the watch.
     pub show_event_details: bool,
@@ -436,9 +531,103 @@ pub struct SessionsTab {
     /// and a recall that forgot everything typed before the last Esc is one nobody relies
     /// on twice.
     composer_history: HashMap<(Plane, String), Vec<String>>,
+    /// The unsent text in each composer. Unlike submission history this must survive a
+    /// session switch verbatim, especially while an older turn awaits reconciliation.
+    composer_drafts: HashMap<(Plane, String), SavedComposerDraft>,
+    /// Stable-id mutations that remain outcome-unknown, keyed by their session rather than
+    /// the ephemeral open composer. This survives Esc and session switching; Enter always
+    /// reconciles the oldest before it can submit a newer draft.
+    pending_reconciliations: HashMap<(Plane, String), VecDeque<PendingComposerReconciliation>>,
 }
 
 impl SessionsTab {
+    fn remember_owner(&mut self, plane: Plane, id: &str, node: Option<&str>) {
+        if self.owner_conflicts.contains_key(&(plane, id.to_string())) {
+            return;
+        }
+
+        if let Some(node) = node.map(str::trim).filter(|node| !node.is_empty()) {
+            self.owner_nodes
+                .insert((plane, id.to_string()), node.to_string());
+        }
+    }
+
+    pub fn owner_node(&self, plane: Plane, id: &str) -> Option<&str> {
+        if self.owner_conflicts.contains_key(&(plane, id.to_string())) {
+            return None;
+        }
+
+        self.owner_nodes
+            .get(&(plane, id.to_string()))
+            .map(String::as_str)
+            .or_else(|| {
+                let sessions = match plane {
+                    Plane::Interactive => self.interactive.value.as_ref()?,
+                    Plane::Coding => self.coding.value.as_ref()?,
+                };
+                sessions
+                    .iter()
+                    .find(|session| session.id == id)
+                    .and_then(|session| session.node.as_deref())
+            })
+    }
+
+    /// Reconciles one fleet-wide list without ever choosing between duplicate explicit
+    /// IDs. Conflicts are sticky for this client lifetime because a later fleet list may
+    /// be partial while one owner is offline; absence is not proof that its id vanished.
+    /// Returns newly observed/expanded conflicts for one visible notice.
+    fn remember_list_owners(
+        &mut self,
+        plane: Plane,
+        sessions: &[SessionInfo],
+    ) -> Vec<(String, Vec<String>)> {
+        let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+        for session in sessions {
+            owners.entry(session.id.clone()).or_default().insert(
+                session
+                    .node
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|node| !node.is_empty())
+                    .unwrap_or("owner not reported")
+                    .to_string(),
+            );
+        }
+
+        let mut newly_conflicted = Vec::new();
+        for (id, owners) in owners {
+            let key = (plane, id.clone());
+            let mut owners = owners;
+            if let Some(previous) = self.owner_conflicts.get(&key) {
+                owners.extend(previous.iter().cloned());
+            }
+            let nodes = owners.into_iter().collect::<Vec<_>>();
+            if nodes.len() > 1 {
+                self.owner_nodes.remove(&key);
+                let changed = self.owner_conflicts.get(&key) != Some(&nodes);
+                self.owner_conflicts.insert(key.clone(), nodes.clone());
+                if changed {
+                    newly_conflicted.push((id, nodes));
+                }
+            } else if !self.owner_conflicts.contains_key(&key) && !self.watches.contains_key(&key) {
+                if let Some(node) = nodes
+                    .first()
+                    .filter(|node| node.as_str() != "owner not reported")
+                {
+                    self.owner_nodes.insert(key, node.clone());
+                }
+            }
+        }
+
+        newly_conflicted
+    }
+
+    pub fn owner_conflict(&self, plane: Plane, id: &str) -> Option<&[String]> {
+        self.owner_conflicts
+            .get(&(plane, id.to_string()))
+            .map(Vec::as_slice)
+    }
+
     /// Both planes' sessions in one list, ordered so the list does not reshuffle under the
     /// cursor between polls: newest activity first, ties broken by plane then id.
     pub fn merged(&self) -> Vec<&SessionInfo> {
@@ -457,6 +646,11 @@ impl SessionsTab {
                 .then_with(|| left.plane.cmp(&right.plane))
                 .then_with(|| left.id.cmp(&right.id))
         });
+
+        // One row represents one addressable v1 stream. A duplicate explicit ID is still
+        // visible, but as a single conflict row whose owners are named by the renderer.
+        let mut seen = HashSet::new();
+        rows.retain(|session| seen.insert((session.plane, session.id.clone())));
 
         rows
     }
@@ -730,6 +924,7 @@ pub fn provider_choices(providers: &[ProviderEntry], stored: Option<&str>) -> Ve
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewField {
     Plane,
+    Machine,
     Provider,
     Workspace,
     ApprovalMode,
@@ -758,6 +953,8 @@ pub struct NewSession {
     /// Index into the provider list, kept rather than the name so the cursor survives a
     /// providers refresh that reordered nothing.
     pub provider: usize,
+    /// Index into [`App::machine_choices`]. Zero is always this machine.
+    pub machine: usize,
     pub approval: usize,
     pub sandbox: usize,
     /// True while `*.start` is in flight — it declares a 120s ceiling, so this is a dialog
@@ -766,6 +963,13 @@ pub struct NewSession {
     /// Why the last attempt did not start a session. Shown here rather than in the notice
     /// line: the operator is still looking at the form that produced it.
     pub error: Option<String>,
+    /// The exact request whose reply may have been lost. While present, Enter replays
+    /// these immutable params and edits are held back so the id remains meaningful.
+    pending_request: Option<StartRequest>,
+    pub reconciling: bool,
+    /// The caller's cwd is a useful local hint and an unsafe remote default. Keep it only
+    /// so cycling back to this machine can restore it before the operator edits the field.
+    inferred_local_workspace: Option<String>,
     /// The provider the config file names, until the probe list arrives and the cursor can
     /// be put on it.
     ///
@@ -777,7 +981,13 @@ pub struct NewSession {
 }
 
 impl NewSession {
-    fn new(plane: Plane, workspace: String, defaults: &Defaults) -> Self {
+    fn new(
+        plane: Plane,
+        workspace: String,
+        workspace_is_inferred: bool,
+        defaults: &Defaults,
+    ) -> Self {
+        let inferred_local_workspace = workspace_is_inferred.then(|| workspace.clone());
         Self {
             field: NewField::Provider,
             request: StartRequest {
@@ -785,10 +995,14 @@ impl NewSession {
                 ..StartRequest::new(plane)
             },
             provider: 0,
+            machine: 0,
             approval: approval_index(defaults.approval_mode()),
             sandbox: sandbox_index(defaults.sandbox_mode()),
             pending: false,
             error: None,
+            pending_request: None,
+            reconciling: false,
+            inferred_local_workspace,
             wanted_provider: defaults.provider.clone(),
         }
     }
@@ -819,7 +1033,7 @@ impl NewSession {
 
     /// The rows this plane has. `objective` exists only where the gateway accepts it.
     pub fn fields(&self) -> Vec<NewField> {
-        let mut fields = vec![NewField::Plane, NewField::Provider];
+        let mut fields = vec![NewField::Plane, NewField::Machine, NewField::Provider];
 
         if self.request.plane == Plane::Coding {
             fields.push(NewField::Objective);
@@ -877,7 +1091,7 @@ impl NewSession {
         self.field = fields[next];
     }
 
-    fn cycle(&mut self, delta: isize, providers: usize) {
+    fn cycle(&mut self, delta: isize, providers: usize, machines: &[MachineChoice]) {
         match self.field {
             NewField::Plane => {
                 self.request.plane = match self.request.plane {
@@ -898,6 +1112,23 @@ impl NewSession {
                 self.provider =
                     (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
             }
+            NewField::Machine if !machines.is_empty() => {
+                self.machine =
+                    (self.machine as isize + delta).rem_euclid(machines.len() as isize) as usize;
+                self.request.machine = machines
+                    .get(self.machine)
+                    .and_then(MachineChoice::wire_name)
+                    .unwrap_or_default()
+                    .to_string();
+
+                if let Some(local_workspace) = self.inferred_local_workspace.as_ref() {
+                    if self.request.machine.is_empty() {
+                        self.request.workspace = local_workspace.clone();
+                    } else {
+                        self.request.workspace.clear();
+                    }
+                }
+            }
             NewField::ApprovalMode => {
                 self.approval =
                     (self.approval as isize + delta).rem_euclid(APPROVAL_ROWS as isize) as usize;
@@ -912,7 +1143,10 @@ impl NewSession {
 
     fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
-            NewField::Workspace => Some(&mut self.request.workspace),
+            NewField::Workspace => {
+                self.inferred_local_workspace = None;
+                Some(&mut self.request.workspace)
+            }
             NewField::Objective => Some(&mut self.request.objective),
             _ => None,
         }
@@ -923,6 +1157,7 @@ impl NewSession {
 /// what the runtime reported, and nothing here can change them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
+    Machines,
     Provider,
     Workspace,
     ApprovalMode,
@@ -931,7 +1166,8 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 5] = [
+    pub const ALL: [SettingsField; 6] = [
+        SettingsField::Machines,
         SettingsField::Provider,
         SettingsField::Workspace,
         SettingsField::ApprovalMode,
@@ -1033,6 +1269,134 @@ impl Settings {
     }
 }
 
+/// One safe, local action in the Machines guide. The TUI explains and can copy these
+/// commands but deliberately does not execute them: creating an invite writes private
+/// membership material and joining changes how a daemon starts, so both stay explicit
+/// terminal actions whose exact command can be reviewed first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineAction {
+    Create,
+    Join,
+    Invite,
+    Service,
+    Status,
+    Doctor,
+    Sync,
+}
+
+impl MachineAction {
+    pub const ALL: [Self; 7] = [
+        Self::Create,
+        Self::Join,
+        Self::Invite,
+        Self::Service,
+        Self::Status,
+        Self::Doctor,
+        Self::Sync,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create a fleet",
+            Self::Join => "Join this fleet",
+            Self::Invite => "Add another machine",
+            Self::Service => "Keep this machine running",
+            Self::Status => "Check the machines",
+            Self::Doctor => "Diagnose a connection",
+            Self::Sync => "Update saved membership",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Create => "ouro fleet create",
+            Self::Join => "ouro fleet join INVITE.ouro",
+            Self::Invite => "ouro fleet invite --machine NAME --host HOST --out INVITE.ouro",
+            Self::Service => "ouro fleet service install",
+            Self::Status => "ouro fleet status",
+            Self::Doctor => "ouro fleet doctor",
+            Self::Sync => "ouro fleet sync export --out fleet.ouro-roster",
+        }
+    }
+}
+
+/// Keyboard state for the newcomer-facing Machines guide.
+#[derive(Debug, Default)]
+pub struct Machines {
+    pub selected: usize,
+    /// Enter opens the focused action's longer explanation. Escape first returns to the
+    /// overview, then closes the guide, so exploring never loses the fleet summary.
+    pub guide: Option<MachineAction>,
+}
+
+impl Machines {
+    pub fn selected(&self) -> MachineAction {
+        MachineAction::ALL[self.selected.min(MachineAction::ALL.len() - 1)]
+    }
+}
+
+/// The small, intentionally non-secret view model shared by Settings, the Dashboard and
+/// the Machines guide. It combines the local profile (what this machine expects) with the
+/// runtime status (what is connected now), and leaves unknown facts unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineSummary {
+    pub mode: String,
+    pub fleet: Option<String>,
+    pub machine: String,
+    pub host: Option<String>,
+    pub expected: Option<usize>,
+    pub connected: usize,
+    pub offline: Option<usize>,
+    pub offline_names: Vec<String>,
+    pub security: MachineSecurity,
+    pub recovery: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineSecurity {
+    Standalone,
+    Secure,
+    Insecure,
+    Mismatch,
+    Unknown,
+}
+
+impl MachineSecurity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standalone => "not needed while standalone",
+            Self::Secure => "encrypted and authenticated (TLS)",
+            Self::Insecure => "insecure: machine traffic is not using TLS",
+            Self::Mismatch => "configuration mismatch: fleet profile loaded, runtime is standalone",
+            Self::Unknown => "security not reported yet",
+        }
+    }
+}
+
+/// One destination in the new-session form. Local is represented by an omitted wire
+/// parameter, so an older standalone runtime behaves exactly as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineChoice {
+    Local { label: String },
+    Connected { machine: String, node: String },
+}
+
+impl MachineChoice {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local { label } => format!("This machine — {label}"),
+            Self::Connected { machine, node } => format!("{machine} — connected ({node})"),
+        }
+    }
+
+    pub fn wire_name(&self) -> Option<&str> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Connected { machine, .. } => Some(machine),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     NewSession,
@@ -1056,12 +1420,13 @@ pub enum Command {
     PreviewCapability,
     AdmitCapability,
     Logs,
+    Machines,
     Settings,
     Help,
 }
 
 impl Command {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -1080,6 +1445,7 @@ impl Command {
         Self::Plans,
         Self::Upgrades,
         Self::Logs,
+        Self::Machines,
         Self::Settings,
         Self::Help,
         Self::ListCapabilities,
@@ -1128,6 +1494,7 @@ impl Command {
             Self::PreviewCapability => "Preview a capability",
             Self::AdmitCapability => "Admit a capability",
             Self::Logs => "Logs",
+            Self::Machines => "Machines",
             Self::Settings => "Settings",
             Self::Help => "Keyboard shortcuts",
         }
@@ -1156,6 +1523,7 @@ impl Command {
             Self::PreviewCapability => "/preview",
             Self::AdmitCapability => "/admit",
             Self::Logs => "/logs",
+            Self::Machines => "/machines",
             Self::Settings => "/settings",
             Self::Help => "?",
         }
@@ -1228,6 +1596,9 @@ pub enum Overlay {
     Help,
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
+    /// A guided, read-only fleet setup surface. Commands are shown exactly and are never
+    /// run from a keypress in this overlay.
+    Machines(Box<Machines>),
     Quit {
         options: Vec<(String, Quit)>,
         choice: usize,
@@ -1303,13 +1674,25 @@ pub struct Notice {
 /// as ordinary [`Msg::Answer`]s so there is still one resync code path.
 #[derive(Debug, Clone, Default)]
 pub struct Cursors {
-    inner: Arc<Mutex<BTreeMap<(Plane, String), u64>>>,
+    inner: Arc<Mutex<BTreeMap<(Plane, String), CursorRegistration>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CursorRegistration {
+    cursor: u64,
+    node: Option<String>,
 }
 
 impl Cursors {
-    pub fn set(&self, plane: Plane, id: &str, cursor: u64) {
+    pub fn set(&self, plane: Plane, id: &str, cursor: u64, node: Option<&str>) {
         if let Ok(mut cursors) = self.inner.lock() {
-            cursors.insert((plane, id.to_string()), cursor);
+            cursors.insert(
+                (plane, id.to_string()),
+                CursorRegistration {
+                    cursor,
+                    node: node.map(str::to_string),
+                },
+            );
         }
     }
 
@@ -1319,13 +1702,20 @@ impl Cursors {
         }
     }
 
-    pub fn snapshot(&self) -> Vec<(Plane, String, u64)> {
+    pub fn snapshot(&self) -> Vec<(Plane, String, u64, Option<String>)> {
         self.inner
             .lock()
             .map(|cursors| {
                 cursors
                     .iter()
-                    .map(|((plane, id), cursor)| (*plane, id.clone(), *cursor))
+                    .map(|((plane, id), registration)| {
+                        (
+                            *plane,
+                            id.clone(),
+                            registration.cursor,
+                            registration.node.clone(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1375,6 +1765,9 @@ pub struct App {
     /// know where that runtime keeps its files, and a local path printed under a remote
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
+    /// Non-secret membership metadata loaded by the launcher from this runtime's data
+    /// directory. The App remains a pure state machine: it never reads the profile itself.
+    pub fleet_profile: Option<FleetProfile>,
     /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
     /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
     /// advertise the binding only where it exists, because in every other terminal that
@@ -1394,6 +1787,9 @@ pub struct App {
     /// The coding home's first prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<PendingFirstMessage>,
+    /// A start launched from an existing composer (currently `/write`) has no modal to
+    /// retain its retry boundary. Keep it here until success or a definite refusal.
+    pending_background_start: Option<StartRequest>,
     /// A URL the I/O driver should open in the operator's browser. Kept out of notices so
     /// a managed login URL is never copied into logs by accident.
     open_url_pending: Option<String>,
@@ -1405,6 +1801,9 @@ pub struct App {
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
+    /// Monotonic issue order for composer mutations. Outcome-unknown answers may arrive
+    /// out of order; reconciliation is sorted by this sequence, never by error arrival.
+    next_composer_submission_sequence: u64,
 }
 
 impl App {
@@ -1436,6 +1835,7 @@ impl App {
             config: Config::default(),
             config_path: None,
             data_dir: None,
+            fleet_profile: None,
             keyboard_enhanced: false,
             home_draft: Editor::default(),
             home_pending: false,
@@ -1446,11 +1846,13 @@ impl App {
             dropped_seen: 0,
             save_pending: false,
             first_message: None,
+            pending_background_start: None,
             open_url_pending: None,
             leader_until: None,
             ctrl_c_until: None,
             copy_pending: None,
             external_editor_pending: None,
+            next_composer_submission_sequence: 0,
         }
     }
 
@@ -1623,8 +2025,408 @@ impl App {
         !watch.resyncing && !watch.has_gap() && watch.waiting_for_reply()
     }
 
+    /// Outcome-unknown turns which Enter must reconcile before submitting the open draft.
+    pub fn open_pending_reconciliation_count(&self) -> usize {
+        self.sessions
+            .open
+            .as_ref()
+            .and_then(|key| self.sessions.pending_reconciliations.get(key))
+            .map_or(0, VecDeque::len)
+    }
+
     pub fn spawned(&self) -> bool {
         matches!(self.mode, Mode::Spawned { .. })
+    }
+
+    /// A successful fleet list can still be partial when an older gateway only queries
+    /// currently connected owners. Keep a prior row only when the latest runtime.status
+    /// explicitly names that exact owner node as offline. This includes members learned
+    /// transitively over BEAM and absent from this machine's original invitation profile.
+    fn retain_offline_session_rows(
+        &self,
+        plane: Plane,
+        mut fresh: Vec<SessionInfo>,
+    ) -> Vec<SessionInfo> {
+        let offline_nodes: HashSet<&str> = self
+            .status
+            .value
+            .as_ref()
+            .and_then(|status| status.cluster.get("fleet"))
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|machine| machine.get("state").and_then(Value::as_str) == Some("offline"))
+            .filter_map(|machine| machine.get("node").and_then(Value::as_str))
+            .collect();
+
+        if offline_nodes.is_empty() {
+            return fresh;
+        }
+
+        let observed: HashSet<(String, String)> = fresh
+            .iter()
+            .filter_map(|session| {
+                session
+                    .node
+                    .as_ref()
+                    .map(|node| (session.id.clone(), node.clone()))
+            })
+            .collect();
+        let previous = match plane {
+            Plane::Interactive => self.sessions.interactive.value.as_ref(),
+            Plane::Coding => self.sessions.coding.value.as_ref(),
+        };
+
+        if let Some(previous) = previous {
+            fresh.extend(previous.iter().filter_map(|session| {
+                let node = session.node.as_deref()?;
+                if !offline_nodes.contains(node)
+                    || observed.contains(&(session.id.clone(), node.to_string()))
+                {
+                    return None;
+                }
+
+                let mut retained = session.clone();
+                retained.last_known = true;
+                Some(retained)
+            }));
+        }
+
+        fresh
+    }
+
+    /// The fleet state a person needs, without the distribution vocabulary used by the
+    /// runtime protocol. Local membership says what should be present; live status says
+    /// what is present now. Neither source contains a cookie, key, or certificate.
+    pub fn machine_summary(&self) -> MachineSummary {
+        let status = self.status.value.as_ref();
+        let cluster = status.map(|status| &status.cluster);
+        let runtime_fleet = cluster.and_then(|cluster| cluster.get("fleet"));
+        let runtime_summary = runtime_fleet.and_then(|fleet| fleet.get("summary"));
+        let runtime_machines = runtime_fleet
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array);
+        let connected_nodes: HashSet<&str> = status
+            .map(|status| status.connected_nodes.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        let strategy = cluster
+            .and_then(|cluster| cluster.get("formation"))
+            .and_then(|formation| formation.get("strategy"))
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        let distributed = cluster
+            .and_then(|cluster| cluster.get("distributed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let tls = cluster
+            .and_then(|cluster| cluster.get("security"))
+            .and_then(|security| security.get("tls"))
+            .and_then(Value::as_bool);
+
+        let fleet_mode = self.fleet_profile.is_some()
+            || runtime_fleet.is_some()
+            || distributed
+            || strategy != "none";
+
+        if !fleet_mode {
+            return MachineSummary {
+                mode: "Standalone".into(),
+                fleet: None,
+                machine: friendly_machine(
+                    status
+                        .map(|status| status.node.as_str())
+                        .unwrap_or(&self.hello.node),
+                ),
+                host: None,
+                expected: Some(1),
+                connected: 1,
+                offline: Some(0),
+                offline_names: Vec::new(),
+                security: MachineSecurity::Standalone,
+                recovery:
+                    "This machine runs on its own. Create a fleet when another machine is ready."
+                        .into(),
+            };
+        }
+
+        let (fleet, machine, host, profile_expected, profile_connected, offline_names) = match self
+            .fleet_profile
+            .as_ref()
+        {
+            Some(profile) => {
+                let mut members: BTreeMap<String, String> = profile
+                    .members
+                    .iter()
+                    .map(|member| (member.node.clone(), member.machine.clone()))
+                    .collect();
+                members
+                    .entry(profile.node.clone())
+                    .or_insert_with(|| profile.machine.clone());
+
+                // Invitations are intentionally independent: an early joiner does
+                // not have to receive a rewritten secret bundle every time the owner
+                // later invites another machine. Merge the runtime's last-known
+                // directory so that a machine already observed over BEAM is still
+                // counted and named here. Otherwise the UI can claim the impossible
+                // “expected 2, connected 3”.
+                if let Some(runtime_machines) = runtime_machines {
+                    for runtime_machine in runtime_machines {
+                        let Some(node) = runtime_machine.get("node").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let machine = runtime_machine
+                            .get("machine")
+                            .and_then(Value::as_str)
+                            .unwrap_or(node);
+                        members
+                            .entry(node.to_string())
+                            .or_insert_with(|| machine.to_string());
+                    }
+                }
+
+                let mut offline_names = members
+                    .iter()
+                    .filter(|(node, _machine)| {
+                        node.as_str() != profile.node && !connected_nodes.contains(node.as_str())
+                    })
+                    .map(|(_node, machine)| machine.clone())
+                    .collect::<Vec<_>>();
+                if let Some(runtime_machines) = runtime_machines {
+                    offline_names.extend(runtime_machines.iter().filter_map(|machine| {
+                        (machine.get("state").and_then(Value::as_str) == Some("offline"))
+                            .then(|| {
+                                machine
+                                    .get("machine")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| machine.get("node").and_then(Value::as_str))
+                                    .map(str::to_string)
+                            })
+                            .flatten()
+                    }));
+                }
+                offline_names.sort();
+                offline_names.dedup();
+                let expected = members.len().max(1);
+                let connected = expected.saturating_sub(offline_names.len());
+
+                (
+                    Some(profile.name.clone()),
+                    profile.machine.clone(),
+                    Some(profile.host.clone()),
+                    Some(expected),
+                    Some(connected),
+                    offline_names,
+                )
+            }
+            None => {
+                let node = status
+                    .map(|status| status.node.as_str())
+                    .unwrap_or(&self.hello.node);
+                let offline_names = runtime_fleet
+                    .and_then(|fleet| fleet.get("machines"))
+                    .and_then(Value::as_array)
+                    .map(|machines| {
+                        machines
+                            .iter()
+                            .filter(|machine| {
+                                machine.get("state").and_then(Value::as_str) == Some("offline")
+                            })
+                            .filter_map(|machine| {
+                                machine
+                                    .get("machine")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| machine.get("node").and_then(Value::as_str))
+                            })
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                (
+                    runtime_fleet
+                        .and_then(|fleet| fleet.get("fleet_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    friendly_machine(node),
+                    node.split_once('@').map(|(_name, host)| host.to_string()),
+                    value_usize(runtime_summary.and_then(|summary| summary.get("expected"))),
+                    value_usize(runtime_summary.and_then(|summary| summary.get("connected"))),
+                    offline_names,
+                )
+            }
+        };
+
+        let connected = value_usize(runtime_summary.and_then(|summary| summary.get("connected")))
+            .or(profile_connected)
+            .unwrap_or_else(|| connected_nodes.len() + 1);
+        let expected = profile_expected
+            .into_iter()
+            .chain(value_usize(
+                runtime_summary.and_then(|summary| summary.get("expected")),
+            ))
+            .max()
+            .map(|expected| expected.max(connected));
+        let offline = value_usize(runtime_summary.and_then(|summary| summary.get("offline")))
+            .into_iter()
+            .chain(expected.map(|expected| expected.saturating_sub(connected)))
+            .chain(std::iter::once(offline_names.len()))
+            .max();
+
+        let security = match (self.fleet_profile.is_some(), distributed, tls) {
+            (true, false, Some(_)) => MachineSecurity::Mismatch,
+            (_, true, Some(true)) => MachineSecurity::Secure,
+            (_, true, Some(false)) => MachineSecurity::Insecure,
+            (true, false, None) if status.is_some() => MachineSecurity::Mismatch,
+            _ => MachineSecurity::Unknown,
+        };
+
+        let recovery = match offline {
+            Some(0) => {
+                "All known machines are connected. Running daemons retry membership after network interruptions."
+                    .into()
+            }
+            Some(offline) => format!(
+                "{offline} machine{} offline; running daemons keep retrying membership.",
+                if offline == 1 { " is" } else { "s are" }
+            ),
+            None => {
+                "Running daemons retry membership; expected membership is not known here."
+                    .into()
+            }
+        };
+
+        MachineSummary {
+            mode: "Fleet".into(),
+            fleet,
+            machine,
+            host,
+            expected,
+            connected,
+            offline,
+            offline_names,
+            security,
+            recovery,
+        }
+    }
+
+    /// Destinations that can safely be offered for a new session right now. Expected but
+    /// offline members are visible in Machines, not selectable here: a start form should
+    /// never invite a request that the runtime already knows it cannot route.
+    pub fn machine_choices(&self) -> Vec<MachineChoice> {
+        let summary = self.machine_summary();
+        let mut choices = vec![MachineChoice::Local {
+            label: summary.machine,
+        }];
+        let Some(status) = self.status.value.as_ref() else {
+            return choices;
+        };
+
+        let connected: HashSet<&str> = status.connected_nodes.iter().map(String::as_str).collect();
+        let local_node = self
+            .fleet_profile
+            .as_ref()
+            .map(|profile| profile.node.as_str())
+            .unwrap_or(status.node.as_str());
+        let mut remotes = BTreeMap::<String, String>::new();
+        let mut incompatible_nodes = HashSet::<String>::new();
+
+        if let Some(machines) = status
+            .cluster
+            .get("fleet")
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array)
+        {
+            for machine in machines {
+                let state = machine.get("state").and_then(Value::as_str);
+                let role = machine.get("role").and_then(Value::as_str);
+                let Some(node) = machine.get("node").and_then(Value::as_str) else {
+                    continue;
+                };
+                if machine.get("compatibility").and_then(Value::as_str) == Some("incompatible") {
+                    incompatible_nodes.insert(node.to_string());
+                    continue;
+                }
+                if state != Some("connected") || role.is_some_and(|role| role != "core") {
+                    continue;
+                }
+
+                let Some(name) = machine.get("machine").and_then(Value::as_str) else {
+                    continue;
+                };
+                if node != local_node {
+                    remotes.insert(name.to_string(), node.to_string());
+                }
+            }
+        }
+
+        // A profile remains useful against an older runtime that does not yet embed the
+        // fleet directory. Connectivity is still a live fact from runtime.status.
+        if let Some(profile) = self.fleet_profile.as_ref() {
+            for member in &profile.members {
+                if member.node != profile.node
+                    && connected.contains(member.node.as_str())
+                    && !incompatible_nodes.contains(&member.node)
+                {
+                    remotes
+                        .entry(member.machine.clone())
+                        .or_insert_with(|| member.node.clone());
+                }
+            }
+        }
+
+        choices.extend(
+            remotes
+                .into_iter()
+                .map(|(machine, node)| MachineChoice::Connected { machine, node }),
+        );
+        choices
+    }
+
+    /// Adds the owner only when this reference is remote. An omitted node retains the
+    /// original local protocol; a remembered node makes every subsequent verb route to
+    /// the same owner that returned the reference.
+    fn routed_session_params(&self, plane: Plane, id: &str, mut params: Value) -> Value {
+        if let (Some(node), Some(fields)) =
+            (self.session_route_node(plane, id), params.as_object_mut())
+        {
+            fields.insert("node".into(), Value::String(node.to_string()));
+        }
+        params
+    }
+
+    fn session_route_node(&self, plane: Plane, id: &str) -> Option<&str> {
+        let owner = self.sessions.owner_node(plane, id)?;
+        let local = self
+            .status
+            .value
+            .as_ref()
+            .map(|status| status.node.as_str())
+            .filter(|node| !node.is_empty())
+            .unwrap_or(self.hello.node.as_str());
+        (owner != local).then_some(owner)
+    }
+
+    /// V1 stream notifications do not carry an owner node. Until that wire contract is
+    /// versioned, two explicit IDs on different machines cannot be distinguished safely.
+    /// Every outbound session path calls this before it can choose or omit a route.
+    fn refuse_owner_conflict(&mut self, plane: Plane, id: &str) -> bool {
+        let Some(owners) = self
+            .sessions
+            .owner_conflict(plane, id)
+            .map(|owners| owners.join(" and "))
+        else {
+            return false;
+        };
+
+        self.inform(
+            format!(
+                "session ID {id} belongs to {owners}; no request was sent. Explicit IDs must be fleet-unique (generated IDs already are); stop or restart one duplicate with a unique ID, then reconnect this TUI"
+            ),
+            NoticeKind::Error,
+        );
+        true
     }
 
     pub fn apply(&mut self, message: Msg) {
@@ -1743,6 +2545,16 @@ impl App {
             }
             // The ring is local. There is nothing to ask anyone for.
             Tab::Logs => {}
+        }
+
+        // A remote session that lost only its stream keeps recovering even while the
+        // operator stays on the conversation. Machine status is the cheap, bounded signal
+        // that its owner has returned; it avoids hammering a known-offline node with
+        // subscribe calls.
+        if !self.sessions.recovering.is_empty()
+            || matches!(self.overlay, Some(Overlay::Machines(_)))
+        {
+            self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
         }
     }
 
@@ -2058,7 +2870,10 @@ impl App {
             }
             Tag::Status => match result {
                 Ok(value) => match RuntimeStatus::decode(&value) {
-                    Ok(status) => self.status.ok(status, ticks, STATUS_TICKS),
+                    Ok(status) => {
+                        self.status.ok(status, ticks, STATUS_TICKS);
+                        self.recover_remote_sessions();
+                    }
                     Err(error) => self.status.failed(
                         format!("runtime.status did not decode: {error}"),
                         ticks,
@@ -2079,19 +2894,37 @@ impl App {
                     .providers
                     .failed(error.to_string(), ticks, PROVIDER_TICKS),
             },
-            Tag::Sessions(plane) => {
-                let panel = match plane {
-                    Plane::Interactive => &mut self.sessions.interactive,
-                    Plane::Coding => &mut self.sessions.coding,
-                };
-
-                match result {
-                    Ok(value) => {
-                        panel.ok(SessionInfo::decode_list(plane, &value), ticks, LIST_TICKS)
+            Tag::Sessions(plane) => match result {
+                Ok(value) => {
+                    let sessions = self.retain_offline_session_rows(
+                        plane,
+                        SessionInfo::decode_list(plane, &value),
+                    );
+                    let conflicts = self.sessions.remember_list_owners(plane, &sessions);
+                    for (id, owners) in conflicts {
+                        self.cursors.forget(plane, &id);
+                        self.inform(
+                            format!(
+                                "session ID {id} is reported by {}; Ouroboros will not open or route it. Explicit IDs must be fleet-unique (generated IDs already are); stop or restart one duplicate with a unique ID, then reconnect this TUI",
+                                owners.join(" and ")
+                            ),
+                            NoticeKind::Error,
+                        );
                     }
-                    Err(error) => panel.failed(error.to_string(), ticks, LIST_TICKS),
+                    let panel = match plane {
+                        Plane::Interactive => &mut self.sessions.interactive,
+                        Plane::Coding => &mut self.sessions.coding,
+                    };
+                    panel.ok(sessions, ticks, LIST_TICKS)
                 }
-            }
+                Err(error) => {
+                    let panel = match plane {
+                        Plane::Interactive => &mut self.sessions.interactive,
+                        Plane::Coding => &mut self.sessions.coding,
+                    };
+                    panel.failed(error.to_string(), ticks, LIST_TICKS)
+                }
+            },
             Tag::Agents => Self::fill_rows(&mut self.agents, result, ticks, project_agent),
             Tag::Teams => Self::fill_rows(&mut self.teams, result, ticks, project_team),
             Tag::Plans => Self::fill_rows(&mut self.plans, result, ticks, project_plan),
@@ -2121,6 +2954,163 @@ impl App {
                 cursor,
                 subscribe,
             } => self.resync_answered(plane, id, cursor, subscribe, result),
+            Tag::ComposerAction {
+                label,
+                verb,
+                plane,
+                id,
+                turn_id,
+                input,
+                reconciling,
+                submission_sequence,
+            } => match result {
+                Ok(value) => match model::turn_reply(&value) {
+                    model::TurnReply::Accepted => {
+                        if reconciling {
+                            if let Some(turn_id) = turn_id.as_deref() {
+                                self.accept_reconciled_composer_draft(plane, &id, turn_id);
+                            }
+                            self.settle_pending_reconciliation(plane, &id, turn_id.as_deref());
+                        }
+                        self.inform(format!("{label} accepted for {id}"), NoticeKind::Info);
+                    }
+                    model::TurnReply::OutcomeUnknown => {
+                        // Current runtimes return these states as typed RPC errors. Keep
+                        // this branch for a same-id read from an older runtime: it is still
+                        // not proof that the turn was accepted.
+                        let retry_turn_id = if verb == ComposerVerb::Steer {
+                            None
+                        } else {
+                            turn_id
+                        };
+                        let reconciliation_id = retry_turn_id.clone();
+                        let disposition = self.restore_composer_submission(
+                            plane,
+                            &id,
+                            input,
+                            retry_turn_id,
+                            verb,
+                            submission_sequence,
+                        );
+                        if verb == ComposerVerb::Steer {
+                            self.steer_delivery_unconfirmed(&id, disposition);
+                        } else if disposition.reconciliation_deferred() {
+                            self.inform(
+                                format!(
+                                    "{label} on {id}: {}; saved outcome-unknown turn {} without \
+                                     overwriting the session draft. Open {id}; Enter reconciles \
+                                     it before newer input",
+                                    model::turn_reply_diagnostic(&value),
+                                    reconciliation_id.as_deref().unwrap_or("unknown")
+                                ),
+                                NoticeKind::Error,
+                            );
+                        } else {
+                            self.inform(
+                                format!(
+                                    "{label} on {id}: {}; the exact draft and turn id were \
+                                     restored",
+                                    model::turn_reply_diagnostic(&value)
+                                ),
+                                NoticeKind::Error,
+                            );
+                        }
+                    }
+                    model::TurnReply::Rejected => {
+                        if reconciling {
+                            self.settle_pending_reconciliation(plane, &id, turn_id.as_deref());
+                            if let Some(turn_id) = turn_id.as_deref() {
+                                self.release_reconciliation_draft(plane, &id, turn_id);
+                            }
+                        }
+                        if matches!(verb, ComposerVerb::Message | ComposerVerb::FollowUp) {
+                            self.sessions.clear_reply_pending(plane, &id);
+                        }
+
+                        let retry_verb =
+                            if verb == ComposerVerb::Message && model::turn_reply_busy(&value) {
+                                ComposerVerb::FollowUp
+                            } else {
+                                verb
+                            };
+
+                        // This id is durably terminal. Preserve the exact input but mint a
+                        // fresh logical turn if the operator deliberately retries it.
+                        self.restore_composer_submission(
+                            plane,
+                            &id,
+                            input,
+                            None,
+                            retry_verb,
+                            submission_sequence,
+                        );
+                        self.inform(
+                            format!("{label} on {id}: {}", model::turn_reply_diagnostic(&value)),
+                            NoticeKind::Error,
+                        );
+                    }
+                },
+                Err(error) => {
+                    let outcome_unknown = Self::reply_outcome_unknown(&error);
+                    let busy = matches!(
+                        &error,
+                        ClientError::Rpc(rpc) if model::turn_busy(rpc.data.as_ref())
+                    );
+
+                    if reconciling && !outcome_unknown {
+                        self.settle_pending_reconciliation(plane, &id, turn_id.as_deref());
+                        if let Some(turn_id) = turn_id.as_deref() {
+                            self.release_reconciliation_draft(plane, &id, turn_id);
+                        }
+                    }
+
+                    if matches!(label, "send_message" | "follow_up") && !outcome_unknown {
+                        self.sessions.clear_reply_pending(plane, &id);
+                    }
+
+                    // Only dispatched turns have a caller-owned reconciliation id. A
+                    // definite refusal mints a fresh one; steer has no idempotency at all.
+                    let retry_turn_id = if outcome_unknown && verb != ComposerVerb::Steer {
+                        turn_id
+                    } else {
+                        None
+                    };
+                    let retry_verb = if busy && verb == ComposerVerb::Message {
+                        ComposerVerb::FollowUp
+                    } else {
+                        verb
+                    };
+
+                    let reconciliation_id = retry_turn_id.clone();
+                    let disposition = self.restore_composer_submission(
+                        plane,
+                        &id,
+                        input,
+                        retry_turn_id,
+                        retry_verb,
+                        submission_sequence,
+                    );
+                    if outcome_unknown && verb == ComposerVerb::Steer {
+                        self.steer_delivery_unconfirmed(&id, disposition);
+                    } else if disposition.reconciliation_deferred() {
+                        let diagnostic = match &error {
+                            ClientError::Rpc(rpc) => model::refusal(rpc),
+                            other => other.to_string(),
+                        };
+                        self.inform(
+                            format!(
+                                "{label} on {id}: {diagnostic}; saved outcome-unknown turn {} \
+                                 without overwriting the session draft. Open {id}; Enter \
+                                 reconciles it before newer input",
+                                reconciliation_id.as_deref().unwrap_or("unknown")
+                            ),
+                            NoticeKind::Error,
+                        );
+                    } else {
+                        self.action_failed(label, plane, &id, error);
+                    }
+                }
+            },
             Tag::Action {
                 label, plane, id, ..
             } => match result {
@@ -2153,30 +3143,107 @@ impl App {
                     self.action_failed("respond_approval", plane, &id, error);
                 }
             },
-            Tag::Start { plane } => match result {
+            Tag::Start { plane, id } => match result {
                 Ok(value) => match StartedRef::decode(&value) {
-                    Some(started) => self.started(plane, started),
+                    Some(started) if started.id == id => {
+                        if self
+                            .pending_background_start
+                            .as_ref()
+                            .is_some_and(|request| request.id == id)
+                        {
+                            self.pending_background_start = None;
+                        }
+                        self.started(plane, started);
+                    }
+                    Some(started) => self.start_failed(
+                        plane,
+                        &id,
+                        ClientError::BadJson(format!(
+                            "the runtime answered start id {} for retry id {id}; both identities \
+                             must be inspected before another start",
+                            started.id
+                        )),
+                    ),
                     // The session exists; this client just cannot address it. Saying so is
-                    // the only honest answer — retrying would start a second one.
-                    None => self.start_failed(ClientError::BadJson(format!(
-                        "the runtime started a session but answered a reference this build \
+                    // the only honest answer. The same id makes reconciliation safe.
+                    None => self.start_failed(
+                        plane,
+                        &id,
+                        ClientError::BadJson(format!(
+                            "the runtime started a session but answered a reference this build \
                          cannot read: {value}"
-                    ))),
+                        )),
+                    ),
                 },
-                Err(error) => self.start_failed(error),
+                Err(error) => self.start_failed(plane, &id, error),
             },
             Tag::FirstMessage {
                 plane,
                 id,
                 turn_id,
                 input,
+                submission_sequence,
             } => match result {
-                Ok(_value) => self.accept_first_message(plane, &id, &turn_id, &input),
+                Ok(value) => match model::turn_reply(&value) {
+                    model::TurnReply::Accepted => {
+                        self.accept_first_message(plane, &id, &turn_id);
+                    }
+                    model::TurnReply::OutcomeUnknown => {
+                        self.restore_first_message(plane, &id, input, turn_id, submission_sequence);
+                        self.inform(
+                            format!(
+                                "send_message on {id}: {}; the exact draft and turn id were \
+                                 restored",
+                                model::turn_reply_diagnostic(&value)
+                            ),
+                            NoticeKind::Error,
+                        );
+                    }
+                    model::TurnReply::Rejected => {
+                        self.settle_pending_reconciliation(plane, &id, Some(&turn_id));
+                        self.sessions.clear_reply_pending(plane, &id);
+                        let verb = if model::turn_reply_busy(&value) {
+                            ComposerVerb::FollowUp
+                        } else {
+                            ComposerVerb::Message
+                        };
+                        self.restore_refused_first_message(plane, &id, input, verb);
+                        self.inform(
+                            format!(
+                                "send_message on {id}: {}",
+                                model::turn_reply_diagnostic(&value)
+                            ),
+                            NoticeKind::Error,
+                        );
+                    }
+                },
                 Err(error) => {
-                    if !Self::reply_outcome_unknown(&error) {
+                    let outcome_unknown = Self::reply_outcome_unknown(&error);
+                    let busy = matches!(
+                        &error,
+                        ClientError::Rpc(rpc) if model::turn_busy(rpc.data.as_ref())
+                    );
+
+                    if !outcome_unknown {
+                        self.settle_pending_reconciliation(plane, &id, Some(&turn_id));
                         self.sessions.clear_reply_pending(plane, &id);
                     }
-                    self.restore_first_message(plane, &id, input, turn_id);
+
+                    if outcome_unknown {
+                        self.restore_first_message(plane, &id, input, turn_id, submission_sequence);
+                    } else {
+                        // This logical id is durably failed. Replaying it would return the
+                        // existing failed turn as an idempotent read and falsely clear the
+                        // draft. Keep the text but mint a replacement on Enter; `:busy`
+                        // also changes the retry to Harness's safe queueing verb.
+                        let verb = if busy {
+                            ComposerVerb::FollowUp
+                        } else {
+                            ComposerVerb::Message
+                        };
+                        self.restore_refused_first_message(plane, &id, input, verb);
+                    }
+
                     self.action_failed("send_message", plane, &id, error);
                 }
             },
@@ -2306,13 +3373,113 @@ impl App {
         self.inform(text, NoticeKind::Error);
     }
 
+    fn steer_delivery_unconfirmed(&mut self, id: &str, disposition: ComposerRestoreDisposition) {
+        let preservation = match disposition {
+            ComposerRestoreDisposition::Restored => {
+                "the exact draft was restored for inspection".to_string()
+            }
+            ComposerRestoreDisposition::SavedForReopen => {
+                "the exact draft was saved for inspection when this composer is reopened"
+                    .to_string()
+            }
+            ComposerRestoreDisposition::NewerDraftPreserved => {
+                "the newer draft was preserved; the prior steer remains available in composer history"
+                    .to_string()
+            }
+            ComposerRestoreDisposition::ReconciliationQueued => {
+                unreachable!("steer has no durable reconciliation id")
+            }
+        };
+        self.inform(
+            format!(
+                "steer on {id}: delivery could not be confirmed; {preservation}. Steer is not \
+                 idempotent — check the transcript and provider state before deliberately \
+                 sending it again"
+            ),
+            NoticeKind::Error,
+        );
+    }
+
+    fn accept_reconciled_composer_draft(&mut self, plane: Plane, id: &str, turn_id: &str) {
+        let key = (plane, id.to_string());
+        let cleared = if self.sessions.open.as_ref() == Some(&key) {
+            self.sessions.composer.as_mut().is_some_and(|composer| {
+                if composer.owns_reconciliation(turn_id) {
+                    composer.editor.accept_submission();
+                    composer.user_changed_draft();
+                    true
+                } else {
+                    false
+                }
+            })
+        } else {
+            self.sessions
+                .composer_drafts
+                .get(&key)
+                .and_then(|draft| draft.reconciliation_owner.as_ref())
+                .is_some_and(|owner| {
+                    owner.turn_id == turn_id
+                        && self
+                            .sessions
+                            .composer_drafts
+                            .get(&key)
+                            .is_some_and(|draft| owner.generation == draft.generation)
+                })
+        };
+
+        if cleared {
+            self.sessions.composer_drafts.remove(&key);
+            if self.sessions.open.as_ref() == Some(&key) {
+                self.remember_composer_history();
+            }
+        }
+    }
+
+    fn release_reconciliation_draft(&mut self, plane: Plane, id: &str, turn_id: &str) {
+        let key = (plane, id.to_string());
+        if self.sessions.open.as_ref() == Some(&key) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                if composer.owns_reconciliation(turn_id) {
+                    composer.reconciliation_owner = None;
+                }
+            }
+            self.remember_composer_history();
+            return;
+        }
+
+        if let Some(draft) = self.sessions.composer_drafts.get_mut(&key) {
+            let owned = draft.reconciliation_owner.as_ref().is_some_and(|owner| {
+                owner.turn_id == turn_id && owner.generation == draft.generation
+            });
+            if owned {
+                draft.reconciliation_owner = None;
+            }
+        }
+    }
+
+    fn settle_pending_reconciliation(&mut self, plane: Plane, id: &str, turn_id: Option<&str>) {
+        let Some(turn_id) = turn_id else {
+            return;
+        };
+        let key = (plane, id.to_string());
+        if let Some(pending) = self.sessions.pending_reconciliations.get_mut(&key) {
+            pending.retain(|entry| entry.turn_id != turn_id);
+            if pending.is_empty() {
+                self.sessions.pending_reconciliations.remove(&key);
+            }
+        }
+    }
+
     fn reply_outcome_unknown(error: &ClientError) -> bool {
-        matches!(
-            error,
-            ClientError::Rpc(rpc)
-                if rpc.code == ErrorCode::UpstreamTimeout
-                    && model::outcome_unknown(rpc.data.as_ref())
-        )
+        match error {
+            ClientError::Rpc(rpc) => {
+                rpc.code == ErrorCode::UpstreamTimeout || model::outcome_unknown(rpc.data.as_ref())
+            }
+            // The transport can disappear after the gateway received the mutation but
+            // before its answer reached this client. As in the CLI first-message path,
+            // no local transport error is permission to mint a second logical turn.
+            _transport => true,
+        }
     }
 
     fn event_acknowledges_reply_request(event: &Event) -> bool {
@@ -2356,7 +3523,13 @@ impl App {
             return;
         };
 
+        if self.sessions.owner_conflict(plane, id).is_some() {
+            self.cursors.forget(plane, id);
+            return;
+        }
+
         let key = (plane, id.to_string());
+        let owner = self.session_route_node(plane, id).map(str::to_string);
 
         if !self.sessions.watches.contains_key(&key) {
             // An event for a session this client stopped watching. The gateway drops the
@@ -2384,7 +3557,7 @@ impl App {
                     self.sessions.clear_reply_pending(plane, id);
                 }
 
-                self.cursors.set(plane, id, cursor);
+                self.cursors.set(plane, id, cursor, owner.as_deref());
 
                 // A hole in the live stream that no `stream.lagged` explained: this side
                 // lost frames, and the repair is the same one.
@@ -2450,13 +3623,127 @@ impl App {
             return;
         };
 
+        self.sessions
+            .remember_owner(plane, &ended.id, params.get("node").and_then(Value::as_str));
+
+        // `unknown` means the coordinator disappeared, not that the provider session
+        // reached a terminal state. A remote BEAM node may keep running and return after
+        // the network heals, so retain the cursor and wait for fleet status to report its
+        // owner connected before resubscribing.
+        if ended.status == "unknown" && self.session_route_node(plane, &ended.id).is_some() {
+            self.wait_for_remote_owner(plane, &ended.id);
+            self.inform(
+                format!(
+                    "{} became unreachable; its cursor is safe and Ouroboros will resubscribe when the machine reconnects",
+                    ended.id
+                ),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
         if let Some(watch) = self.sessions.watches.get_mut(&key) {
             watch.end(ended.status.clone());
         }
 
+        self.sessions.recovering.remove(&key);
         self.sessions.clear_reply_pending(plane, &ended.id);
 
         self.cursors.forget(plane, &ended.id);
+    }
+
+    /// Retains a remote stream exactly where it stopped and waits for live fleet status
+    /// before trying to subscribe again. This is shared by `stream.ended status=unknown`
+    /// and by the reconnect hook: after the local gateway reconnects, the hook can be the
+    /// first caller to discover that this particular owner is still offline.
+    fn wait_for_remote_owner(&mut self, plane: Plane, id: &str) {
+        let key = (plane, id.to_string());
+
+        if let Some(watch) = self.sessions.watches.get_mut(&key) {
+            watch.ended = None;
+            watch.resyncing = false;
+            watch.resync_again = false;
+        }
+
+        self.sessions.rounds.remove(&key);
+        self.sessions
+            .recovering
+            .entry(key)
+            .or_insert(SessionRecovery {
+                attempts: 0,
+                next_tick: self.ticks,
+            });
+        self.sessions.clear_reply_pending(plane, id);
+        self.status.invalidate();
+        self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+    }
+
+    /// Whether a failed remote subscribe says only that the owner cannot be reached yet.
+    /// Typed RPC data is preferred; transport loss is necessarily outcome-unknown. Bad
+    /// frames and a stopped client are deterministic local failures and must not create a
+    /// background retry loop.
+    fn resync_waits_for_remote_owner(error: &ClientError) -> bool {
+        match error {
+            ClientError::Rpc(rpc) => {
+                rpc.data
+                    .as_ref()
+                    .and_then(|data| data.get("reason"))
+                    .and_then(Value::as_str)
+                    == Some("owner_unavailable")
+            }
+            ClientError::ConnectionClosed | ClientError::Timeout | ClientError::Io(_) => true,
+            ClientError::FrameTooLarge { .. }
+            | ClientError::BadJson(_)
+            | ClientError::Stopped(_) => false,
+        }
+    }
+
+    fn recover_remote_sessions(&mut self) {
+        let Some(status) = self.status.value.as_ref() else {
+            return;
+        };
+        let connected_nodes: HashSet<&str> =
+            status.connected_nodes.iter().map(String::as_str).collect();
+        let fleet_machines = status
+            .cluster
+            .get("fleet")
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array);
+
+        let due = self
+            .sessions
+            .recovering
+            .iter()
+            .filter_map(|(key @ (plane, id), recovery)| {
+                if self.ticks < recovery.next_tick {
+                    return None;
+                }
+                let owner = self.session_route_node(*plane, id)?;
+                let connected = connected_nodes.contains(owner)
+                    || fleet_machines.is_some_and(|machines| {
+                        machines.iter().any(|machine| {
+                            machine.get("node").and_then(Value::as_str) == Some(owner)
+                                && matches!(
+                                    machine.get("state").and_then(Value::as_str),
+                                    Some("connected" | "local")
+                                )
+                        })
+                    });
+                connected.then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for (plane, id) in due {
+            let Some(recovery) = self.sessions.recovering.get_mut(&(plane, id.clone())) else {
+                continue;
+            };
+            recovery.attempts = recovery.attempts.saturating_add(1);
+            let shift = recovery.attempts.saturating_sub(1).min(5);
+            let delay = 13_u64.checked_shl(shift).unwrap_or(375).min(375);
+            recovery.next_tick = self.ticks.saturating_add(delay);
+            self.sessions.rounds.remove(&(plane, id.clone()));
+            self.resync(plane, id, true);
+        }
     }
 
     /// A notification the transport could not hand over is indistinguishable from a lag,
@@ -2501,6 +3788,10 @@ impl App {
     /// The one repair. `subscribe` is true when the registration is gone (a first open, or
     /// a reconnect) and false when only frames were lost.
     fn resync(&mut self, plane: Plane, id: String, subscribe: bool) {
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
         let key = (plane, id.clone());
 
         let Some(watch) = self.sessions.watches.get_mut(&key) else {
@@ -2545,6 +3836,7 @@ impl App {
                 json!({ "id": id, "cursor": cursor, "limit": REPLAY_LIMIT }),
             )
         };
+        let params = self.routed_session_params(plane, &id, params);
 
         self.issue(Call::new(
             Tag::Resync {
@@ -2567,6 +3859,17 @@ impl App {
         result: Result<Value, ClientError>,
     ) {
         let key = (plane, id.clone());
+        if self.sessions.owner_conflict(plane, &id).is_some() {
+            if let Some(watch) = self.sessions.watches.get_mut(&key) {
+                watch.resyncing = false;
+                watch.resync_again = false;
+            }
+            self.cursors.forget(plane, &id);
+            return;
+        }
+
+        let owner = self.session_route_node(plane, &id).map(str::to_string);
+        let recovering = subscribe && self.sessions.recovering.contains_key(&key);
 
         let Some(watch) = self.sessions.watches.get_mut(&key) else {
             return;
@@ -2603,11 +3906,24 @@ impl App {
                 let more = batch >= REPLAY_LIMIT || watch.has_gap();
                 let again = std::mem::take(&mut watch.resync_again);
 
+                if recovering {
+                    watch.ended = None;
+                    watch.note(Note::Reconnected, cursor);
+                }
+
                 if acknowledges_reply {
                     self.sessions.clear_reply_pending(plane, &id);
                 }
 
-                self.cursors.set(plane, &id, cursor);
+                self.cursors.set(plane, &id, cursor, owner.as_deref());
+
+                if recovering {
+                    self.sessions.recovering.remove(&key);
+                    self.inform(
+                        format!("{id} reconnected and resumed from cursor {cursor}"),
+                        NoticeKind::Info,
+                    );
+                }
 
                 // Another round while it is buying something, or because an interruption
                 // arrived while this one was in flight. A replay that answered nothing new
@@ -2623,13 +3939,25 @@ impl App {
                     self.open_approval(plane, id);
                 }
             }
+            Err(error)
+                if subscribe && owner.is_some() && Self::resync_waits_for_remote_owner(&error) =>
+            {
+                watch.resync_again = false;
+                self.wait_for_remote_owner(plane, &id);
+                self.inform(
+                    format!(
+                        "{id}'s machine is still unreachable; its cursor is safe and Ouroboros will retry after it reconnects ({error})"
+                    ),
+                    NoticeKind::Warn,
+                );
+            }
             Err(ClientError::Rpc(rpc)) => {
                 match CursorPruned::from_error_data(rpc.data.as_ref()) {
                     Some(pruned) => {
                         watch.raise_floor(pruned.floor);
                         watch.resync_again = false;
                         let cursor = watch.cursor();
-                        self.cursors.set(plane, &id, cursor);
+                        self.cursors.set(plane, &id, cursor, owner.as_deref());
 
                         self.inform(
                             format!(
@@ -2680,6 +4008,18 @@ impl App {
     /// Opens (or re-opens) a session: one watch, one subscribe, and the cursor registered
     /// where the reconnect hook can find it.
     pub fn open_session(&mut self, plane: Plane, id: String) {
+        let owner = self.sessions.owner_node(plane, &id).map(str::to_string);
+        self.open_session_on(plane, id, owner);
+    }
+
+    /// Opens a returned fleet reference before the next list poll has had a chance to
+    /// report it. Callers that only have a local id use [`open_session`](Self::open_session).
+    pub fn open_session_on(&mut self, plane: Plane, id: String, node: Option<String>) {
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        self.sessions.remember_owner(plane, &id, node.as_deref());
         let key = (plane, id.clone());
         let switching = self.sessions.open.as_ref() != Some(&key);
 
@@ -2711,8 +4051,89 @@ impl App {
             .map(Watch::cursor)
             .unwrap_or(0);
 
-        self.cursors.set(plane, &id, cursor);
+        let owner = self.session_route_node(plane, &id);
+        self.cursors.set(plane, &id, cursor, owner);
         self.resync(plane, id, true);
+    }
+
+    /// Reissues an indeterminate initial message under its original logical turn id.
+    ///
+    /// This is the `ouro new -m` handoff after its pre-UI call lost a trustworthy answer.
+    /// The runtime either accepts this as the first arrival when the original request
+    /// never reached it, reports a turn whose dispatch is now known, or keeps a
+    /// checkpointed uncertain dispatch outcome-unknown. It never redispatches that
+    /// uncertain intent. [`Tag::FirstMessage`] keeps the draft and same id only while the
+    /// outcome stays unknown; a definite refusal restores the draft with a fresh id.
+    pub fn retry_first_message(&mut self, id: String, input: String, turn_id: String) {
+        let plane = Plane::Interactive;
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        let method = plane.method("send_message");
+        if !self.hello.serves(&method) {
+            self.restore_refused_first_message(plane, &id, input, ComposerVerb::Message);
+            self.inform(
+                format!("{id} is open, but this gateway no longer serves {method}"),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let submission_sequence = self.next_composer_submission_sequence();
+        self.restore_first_message(
+            plane,
+            &id,
+            input.clone(),
+            turn_id.clone(),
+            submission_sequence,
+        );
+
+        self.sessions.mark_reply_pending(plane, &id);
+        let params = self.routed_session_params(
+            plane,
+            &id,
+            json!({ "id": id, "input": input, "turn_id": turn_id }),
+        );
+        self.issue(Call::new(
+            Tag::FirstMessage {
+                plane,
+                id: id.clone(),
+                turn_id: turn_id.clone(),
+                input: input.clone(),
+                submission_sequence,
+            },
+            method,
+            params,
+        ));
+    }
+
+    /// Opens a known-created but failed `ouro new` handoff without dispatching its CLI
+    /// message. Unlike reconciliation, the gateway has already proved the start outcome:
+    /// the session exists and readiness failed before this draft was sent.
+    pub fn restore_created_start_failure(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        input: Option<String>,
+        notice: String,
+    ) {
+        if let Some(input) = input {
+            self.restore_refused_first_message(plane, id, input, ComposerVerb::Message);
+        }
+        self.inform(notice, NoticeKind::Error);
+    }
+
+    /// Marks the successful pre-UI `ouro new -m` turn so the next typed request queues
+    /// behind it instead of attempting a second immediate Harness message.
+    pub fn continue_after_first_message(&mut self, id: &str) {
+        if self.sessions.open.as_ref() != Some(&(Plane::Interactive, id.to_string())) {
+            return;
+        }
+
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.verb = ComposerVerb::FollowUp;
+        }
     }
 
     fn open_approval(&mut self, plane: Plane, id: String) {
@@ -3232,6 +4653,7 @@ impl App {
 
         if self.tab == Tab::Sessions {
             if self.sessions.composer.is_some() {
+                self.remember_composer_history();
                 self.sessions.composer = None;
                 return;
             }
@@ -3282,6 +4704,23 @@ impl App {
 
     fn home_key(&mut self, key: crossterm::event::KeyEvent) {
         if self.home_pending {
+            return;
+        }
+
+        if self
+            .first_message
+            .as_ref()
+            .is_some_and(|pending| pending.start_outcome_unknown)
+        {
+            if key.code == crossterm::event::KeyCode::Enter {
+                self.submit_home();
+            } else {
+                self.home_error = Some(
+                    "this start may already exist; press Enter to reconcile its same session id \
+                     before changing the prompt"
+                        .to_string(),
+                );
+            }
             return;
         }
 
@@ -3338,14 +4777,21 @@ impl App {
             return;
         }
 
-        let request = StartRequest {
-            plane: Plane::Interactive,
-            provider: provider.clone(),
-            workspace: self.default_workspace(),
-            approval_mode: self.config.defaults.approval_mode(),
-            sandbox_mode: self.config.defaults.sandbox_mode(),
-            objective: String::new(),
-        };
+        let request = self
+            .first_message
+            .as_ref()
+            .filter(|pending| pending.start_outcome_unknown && pending.input == prompt)
+            .map(|pending| pending.start.clone())
+            .unwrap_or_else(|| StartRequest {
+                id: new_session_id(),
+                plane: Plane::Interactive,
+                provider: provider.clone(),
+                machine: String::new(),
+                workspace: self.default_workspace(),
+                approval_mode: self.config.defaults.approval_mode(),
+                sandbox_mode: self.config.defaults.sandbox_mode(),
+                objective: String::new(),
+            });
 
         let params = match request.params() {
             Ok(params) => params,
@@ -3357,10 +4803,23 @@ impl App {
 
         self.home_pending = true;
         self.home_error = None;
-        self.first_message = Some(PendingFirstMessage {
-            input: prompt,
-            turn_id: new_turn_id(),
-        });
+        match self.first_message.as_mut() {
+            Some(pending)
+                if pending.start_outcome_unknown
+                    && pending.input == prompt
+                    && pending.start.id == request.id =>
+            {
+                pending.start_outcome_unknown = false;
+            }
+            _ => {
+                self.first_message = Some(PendingFirstMessage {
+                    input: prompt,
+                    turn_id: new_turn_id(),
+                    start: request.clone(),
+                    start_outcome_unknown: false,
+                });
+            }
+        }
         self.config.defaults.provider = Some(provider);
         self.mark_welcomed();
         self.save_pending = true;
@@ -3369,6 +4828,7 @@ impl App {
             Call::new(
                 Tag::Start {
                     plane: Plane::Interactive,
+                    id: request.id.clone(),
                 },
                 request.method(),
                 params,
@@ -3382,6 +4842,36 @@ impl App {
     /// Sandbox is a start-time option: a running read-only session cannot be promoted.
     /// This is the switch the composer chrome offers.
     fn start_writable_session(&mut self) {
+        if let Some(request) = self.pending_background_start.clone() {
+            let Ok(params) = request.params() else {
+                self.pending_background_start = None;
+                self.inform(
+                    "the saved writable-session reconciliation was invalid; no request was sent",
+                    NoticeKind::Error,
+                );
+                return;
+            };
+            self.inform(
+                format!(
+                    "reconciling the same writable session id {}; no duplicate will be started",
+                    request.id
+                ),
+                NoticeKind::Warn,
+            );
+            self.issue(
+                Call::new(
+                    Tag::Start {
+                        plane: request.plane,
+                        id: request.id.clone(),
+                    },
+                    request.method(),
+                    params,
+                )
+                .with_timeout(START_TIMEOUT),
+            );
+            return;
+        }
+
         if self.open_sandbox().is_some_and(|(_, writable)| writable) {
             self.inform(
                 "this session can already edit files in the workspace",
@@ -3447,8 +4937,10 @@ impl App {
             .unwrap_or_else(|| self.default_workspace());
 
         let request = StartRequest {
+            id: new_session_id(),
             plane: Plane::Interactive,
             provider,
+            machine: String::new(),
             workspace,
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
@@ -3468,10 +4960,13 @@ impl App {
             NoticeKind::Info,
         );
 
+        self.pending_background_start = Some(request.clone());
+
         self.issue(
             Call::new(
                 Tag::Start {
                     plane: Plane::Interactive,
+                    id: request.id.clone(),
                 },
                 request.method(),
                 params,
@@ -3538,6 +5033,7 @@ impl App {
     fn new_home(&mut self) {
         self.overlay = None;
         self.tab = Tab::Sessions;
+        self.remember_composer_history();
         self.sessions.open = None;
         self.sessions.composer = None;
         self.home_draft.clear_text();
@@ -3553,11 +5049,22 @@ impl App {
 
         if self.tab == Tab::Sessions {
             if let Some(composer) = self.sessions.composer.as_mut() {
+                let before = composer.editor.text().to_string();
                 composer.editor.paste(text, &self.completion_catalog);
+                if composer.editor.text() != before {
+                    composer.user_changed_draft();
+                }
                 return;
             }
 
-            if self.sessions.open.is_none() && self.home_ready() && !self.home_pending {
+            if self.sessions.open.is_none()
+                && self.home_ready()
+                && !self.home_pending
+                && !self
+                    .first_message
+                    .as_ref()
+                    .is_some_and(|pending| pending.start_outcome_unknown)
+            {
                 self.home_draft.paste(text, &self.completion_catalog);
                 self.home_error = None;
             }
@@ -3671,25 +5178,47 @@ impl App {
             return;
         }
 
+        let key = (plane, id);
         let mut editor = Editor::default();
         editor.restore_history(
             self.sessions
                 .composer_history
-                .get(&(plane, id))
+                .get(&key)
                 .cloned()
                 .unwrap_or_default(),
         );
+        let saved = self.sessions.composer_drafts.get(&key).cloned();
+        let (draft_generation, reconciliation_owner) = if let Some(saved) = saved {
+            editor.paste(&saved.input, &self.completion_catalog);
+            (saved.generation, saved.reconciliation_owner)
+        } else if let Some(pending) = self
+            .sessions
+            .pending_reconciliations
+            .get(&key)
+            .and_then(|pending| pending.front())
+        {
+            editor.paste(&pending.input, &self.completion_catalog);
+            (
+                1,
+                Some(ReconciliationDraftOwner {
+                    turn_id: pending.turn_id.clone(),
+                    generation: 1,
+                }),
+            )
+        } else {
+            (0, None)
+        };
 
         self.sessions.composer = Some(Composer {
             verb,
             editor,
-            next_turn_id: None,
+            draft_generation,
+            reconciliation_owner,
         });
     }
 
-    /// Copies the open composer's history where the next composer over the same session
-    /// will find it. Called wherever a submission is accepted, which is the only thing that
-    /// grows it.
+    /// Copies the open composer's history and exact unsent draft where the next composer
+    /// over the same session will find them.
     fn remember_composer_history(&mut self) {
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
@@ -3698,9 +5227,25 @@ impl App {
             return;
         };
 
-        self.sessions
-            .composer_history
-            .insert((plane, id), composer.editor.history().to_vec());
+        let key = (plane, id);
+        let history = composer.editor.history().to_vec();
+        let draft = composer.editor.text().to_string();
+        let generation = composer.draft_generation;
+        let reconciliation_owner = composer.reconciliation_owner.clone();
+
+        self.sessions.composer_history.insert(key.clone(), history);
+        if draft.is_empty() {
+            self.sessions.composer_drafts.remove(&key);
+        } else {
+            self.sessions.composer_drafts.insert(
+                key,
+                SavedComposerDraft {
+                    input: draft,
+                    generation,
+                    reconciliation_owner,
+                },
+            );
+        }
     }
 
     fn toggle_session_details(&mut self) {
@@ -3731,7 +5276,14 @@ impl App {
             .sessions
             .composer
             .as_mut()
-            .map(|composer| composer.editor.handle_key(key, &self.completion_catalog))
+            .map(|composer| {
+                let before = composer.editor.text().to_string();
+                let action = composer.editor.handle_key(key, &self.completion_catalog);
+                if composer.editor.text() != before {
+                    composer.user_changed_draft();
+                }
+                action
+            })
             .unwrap_or(EditorAction::None);
 
         match action {
@@ -3759,7 +5311,143 @@ impl App {
         })
     }
 
+    fn next_composer_submission_sequence(&mut self) -> u64 {
+        self.next_composer_submission_sequence =
+            self.next_composer_submission_sequence.saturating_add(1);
+        self.next_composer_submission_sequence
+    }
+
+    fn same_session_mutation_in_flight(&self, plane: Plane, id: &str) -> bool {
+        self.in_flight.iter().any(|tag| match tag {
+            Tag::FirstMessage {
+                plane: pending_plane,
+                id: pending_id,
+                ..
+            }
+            | Tag::ComposerAction {
+                plane: pending_plane,
+                id: pending_id,
+                ..
+            } => *pending_plane == plane && pending_id == id,
+            _ => false,
+        })
+    }
+
+    fn earlier_session_mutation_in_flight(
+        &self,
+        plane: Plane,
+        id: &str,
+        submission_sequence: u64,
+    ) -> bool {
+        self.in_flight.iter().any(|tag| match tag {
+            Tag::FirstMessage {
+                plane: pending_plane,
+                id: pending_id,
+                submission_sequence: pending_sequence,
+                ..
+            }
+            | Tag::ComposerAction {
+                plane: pending_plane,
+                id: pending_id,
+                submission_sequence: pending_sequence,
+                ..
+            } => {
+                *pending_plane == plane
+                    && pending_id == id
+                    && *pending_sequence <= submission_sequence
+            }
+            _ => false,
+        })
+    }
+
     fn submit_composer(&mut self) {
+        let open_key = self.sessions.open.clone();
+        if open_key
+            .as_ref()
+            .is_some_and(|(plane, id)| self.refuse_owner_conflict(*plane, id))
+        {
+            return;
+        }
+
+        let pending = open_key.as_ref().and_then(|key| {
+            self.sessions
+                .pending_reconciliations
+                .get(key)
+                .and_then(|pending| pending.front())
+                .cloned()
+        });
+
+        if let Some(pending) = pending {
+            let Some((plane, id)) = self.sessions.open.clone() else {
+                return;
+            };
+
+            if self.earlier_session_mutation_in_flight(plane, &id, pending.submission_sequence) {
+                self.inform(
+                    format!(
+                        "still reconciling outcome-unknown turn {}; the draft remains unsent",
+                        pending.turn_id
+                    ),
+                    NoticeKind::Info,
+                );
+                return;
+            }
+
+            self.sessions.mark_reply_pending(plane, &id);
+            self.inform(
+                format!(
+                    "reconciling outcome-unknown turn {}; the newer draft remains in the editor",
+                    pending.turn_id
+                ),
+                NoticeKind::Info,
+            );
+
+            let params = json!({
+                "id": id,
+                "input": pending.input,
+                "turn_id": pending.turn_id
+            });
+            let params = self.routed_session_params(plane, &id, params);
+            let call = match pending.kind {
+                PendingReconciliationKind::FirstMessage => Call::new(
+                    Tag::FirstMessage {
+                        plane,
+                        id: id.clone(),
+                        turn_id: pending.turn_id,
+                        input: pending.input,
+                        submission_sequence: pending.submission_sequence,
+                    },
+                    plane.method("send_message"),
+                    params,
+                ),
+                PendingReconciliationKind::Composer(verb) => {
+                    let (label, method) = match verb {
+                        ComposerVerb::Message => ("send_message", plane.method("send_message")),
+                        ComposerVerb::FollowUp => ("follow_up", plane.method("follow_up")),
+                        ComposerVerb::Steer => {
+                            unreachable!("steer has no same-id reconciliation")
+                        }
+                    };
+                    Call::new(
+                        Tag::ComposerAction {
+                            label,
+                            verb,
+                            plane,
+                            id: id.clone(),
+                            turn_id: Some(pending.turn_id),
+                            input: pending.input,
+                            reconciling: true,
+                            submission_sequence: pending.submission_sequence,
+                        },
+                        method,
+                        params,
+                    )
+                }
+            };
+            self.issue(call);
+            return;
+        }
+
         let Some(composer) = self.sessions.composer.as_mut() else {
             return;
         };
@@ -3772,30 +5460,51 @@ impl App {
         if self.activate_slash_command(&input) {
             if let Some(composer) = self.sessions.composer.as_mut() {
                 composer.editor.accept_submission();
+                composer.user_changed_draft();
             }
             self.remember_composer_history();
+            return;
+        }
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            return;
+        };
+
+        // JSON-RPC requests are handled by independent gateway tasks. Keep the next input
+        // visible and untouched until the prior same-session mutation is classified, so
+        // scheduler order can never replace the order in which the operator pressed Enter.
+        if self.same_session_mutation_in_flight(plane, &id) {
+            self.inform(
+                format!(
+                    "the earlier request for {id} is still awaiting acknowledgement; this draft remains unsent"
+                ),
+                NoticeKind::Info,
+            );
             return;
         }
 
         let Some(composer) = self.sessions.composer.as_mut() else {
             return;
         };
-        let turn_id = composer.next_turn_id.take().unwrap_or_else(new_turn_id);
+        let turn_id = if verb == ComposerVerb::Steer {
+            // A steer is an injection into an already-running provider call. There is no
+            // durable request ledger behind it, so do not manufacture an idempotency key.
+            None
+        } else {
+            Some(new_turn_id())
+        };
         composer.editor.accept_submission();
+        composer.user_changed_draft();
 
-        // Keep the composer open as a queue after the first immediate turn. `follow_up`
-        // is valid both while the provider is busy and once it becomes idle, where Harness
-        // starts it immediately, so a fast second Enter can never race into `:busy`.
+        // After the first immediate message, every later acknowledged submission uses
+        // Harness's durable queueing verb. An Enter while this acknowledgement is still
+        // outstanding was returned above with the next draft visibly untouched.
         if composer.verb == ComposerVerb::Message {
             composer.verb = ComposerVerb::FollowUp;
         }
 
         self.remember_composer_history();
-
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            return;
-        };
-
+        let submission_sequence = self.next_composer_submission_sequence();
         let (label, method) = match verb {
             ComposerVerb::Message => ("send_message", plane.method("send_message")),
             ComposerVerb::FollowUp => ("follow_up", plane.method("follow_up")),
@@ -3806,16 +5515,24 @@ impl App {
             self.sessions.mark_reply_pending(plane, &id);
         }
 
-        self.issue(Call::new(
-            Tag::Action {
-                label,
-                plane,
-                id: id.clone(),
-                turn_id: Some(turn_id.clone()),
-            },
-            method,
-            json!({ "id": id, "input": input, "turn_id": turn_id }),
-        ));
+        let tag = Tag::ComposerAction {
+            label,
+            verb,
+            plane,
+            id: id.clone(),
+            turn_id: turn_id.clone(),
+            input: input.clone(),
+            reconciling: false,
+            submission_sequence,
+        };
+
+        let params = match turn_id {
+            Some(turn_id) => json!({ "id": id, "input": input, "turn_id": turn_id }),
+            None => json!({ "id": id, "input": input }),
+        };
+        let params = self.routed_session_params(plane, &id, params);
+
+        self.issue(Call::new(tag, method, params));
     }
 
     fn activate_slash_command(&mut self, input: &str) -> bool {
@@ -3850,6 +5567,7 @@ impl App {
             "/upgrades" => Some(Command::Upgrades),
             "/capabilities" => Some(Command::ListCapabilities),
             "/logs" => Some(Command::Logs),
+            "/machines" | "/fleet" => Some(Command::Machines),
             "/settings" => Some(Command::Settings),
             "/help" | "/hotkeys" => Some(Command::Help),
             "/quit" => {
@@ -3873,7 +5591,11 @@ impl App {
         }
 
         if !self.focused_prompt_empty() {
-            if let Some(editor) = self.focused_editor_mut() {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.clear_text();
+                composer.user_changed_draft();
+                self.remember_composer_history();
+            } else if let Some(editor) = self.focused_editor_mut() {
                 editor.clear_text();
             }
             self.ctrl_c_until = None;
@@ -3931,6 +5653,10 @@ impl App {
             return;
         };
 
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
         let (label, method) = match plane {
             Plane::Interactive => ("interrupt", "interactive.interrupt".to_string()),
             // The coding plane has no interrupt; cancelling is what it offers, and it is
@@ -3946,15 +5672,15 @@ impl App {
 
         // `interactive.interrupt` defaults to the active turn, which is the only thing a
         // terminal's ctrl-c can mean.
+        let params = self.routed_session_params(plane, &id, json!({ "id": id }));
         self.issue(Call::new(
             Tag::Action {
                 label,
                 plane,
                 id: id.clone(),
-                turn_id: None,
             },
             method,
-            json!({ "id": id }),
+            params,
         ));
 
         self.inform(
@@ -4024,9 +5750,15 @@ impl App {
         // The dialog is about to list providers, and the Sessions tab never polls them.
         self.fetch_providers();
 
+        let workspace_is_inferred = self.config.defaults.workspace.is_none()
+            && self
+                .launch_dir
+                .as_ref()
+                .is_some_and(|path| !path.is_empty());
         self.overlay = Some(Overlay::New(Box::new(NewSession::new(
             Plane::Interactive,
             self.default_workspace(),
+            workspace_is_inferred,
             &self.config.defaults,
         ))));
 
@@ -4126,7 +5858,6 @@ impl App {
                 label: "list capabilities",
                 plane,
                 id,
-                turn_id: None,
             },
             "capabilities.list",
             json!({ "workspace": workspace }),
@@ -4162,7 +5893,6 @@ impl App {
                     label: "preview",
                     plane,
                     id: path.clone(),
-                    turn_id: None,
                 },
                 "capabilities.preview",
                 json!({ "workspace": workspace, "path": path }),
@@ -4213,7 +5943,6 @@ impl App {
                                 label: "admit",
                                 plane,
                                 id: path,
-                                turn_id: None,
                             },
                             "capabilities.admit",
                             params,
@@ -4250,9 +5979,10 @@ impl App {
 
         // The picker lists what the runtime reports, and most tabs never ask for it.
         self.fetch_providers();
+        self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
 
         self.overlay = Some(Overlay::Settings(Box::new(Settings {
-            field: SettingsField::Provider,
+            field: SettingsField::Machines,
             provider: 0,
             workspace: self.default_workspace(),
             approval: approval_index(self.config.defaults.approval_mode()),
@@ -4289,13 +6019,15 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if settings.field == SettingsField::Save {
-                    self.save_settings();
-                } else {
-                    // Enter never saves from a field row, for the same reason it never
-                    // starts a session from one: finishing a sentence in a text box is not
-                    // a decision to write a file.
-                    settings.move_field(1);
+                match settings.field {
+                    SettingsField::Machines => self.open_machines(),
+                    SettingsField::Save => self.save_settings(),
+                    _ => {
+                        // Enter never saves from a field row, for the same reason it never
+                        // starts a session from one: finishing a sentence in a text box is not
+                        // a decision to write a file.
+                        settings.move_field(1);
+                    }
                 }
             }
             KeyCode::Char(c) => {
@@ -4303,6 +6035,50 @@ impl App {
                     text.push(c);
                     settings.edited = true;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_machines(&mut self) {
+        self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+        self.overlay = Some(Overlay::Machines(Box::default()));
+    }
+
+    fn machines_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Esc if machines.guide.is_some() => machines.guide = None,
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Tab | KeyCode::Char('j') | KeyCode::Down => {
+                machines.guide = None;
+                machines.selected =
+                    (machines.selected + 1).min(MachineAction::ALL.len().saturating_sub(1));
+            }
+            KeyCode::BackTab | KeyCode::Char('k') | KeyCode::Up => {
+                machines.guide = None;
+                machines.selected = machines.selected.saturating_sub(1);
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                machines.guide = Some(machines.selected())
+            }
+            KeyCode::Left | KeyCode::Char('h') => machines.guide = None,
+            KeyCode::Char('y') => {
+                let command = machines.selected().command().to_string();
+                self.copy_pending = Some(command.clone());
+                self.inform(
+                    format!("copied `{command}`; review any placeholders before running it"),
+                    NoticeKind::Info,
+                );
+            }
+            KeyCode::Char('r') => {
+                self.status.invalidate();
+                self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
             }
             _ => {}
         }
@@ -4351,6 +6127,7 @@ impl App {
             .as_ref()
             .map(Vec::len)
             .unwrap_or_default();
+        let machines = self.machine_choices();
 
         let Some(Overlay::New(dialog)) = self.overlay.as_mut() else {
             return;
@@ -4360,9 +6137,28 @@ impl App {
         // the request are the ones its answer is about.
         if dialog.pending {
             if matches!(key.code, KeyCode::Esc) {
-                self.overlay = None;
+                dialog.error = Some(
+                    "start is still in flight; wait for its answer before closing this form"
+                        .to_string(),
+                );
             }
 
+            return;
+        }
+
+        if dialog.reconciling {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down => dialog.move_field(1),
+                KeyCode::BackTab | KeyCode::Up => dialog.move_field(-1),
+                KeyCode::Enter if dialog.field == NewField::Start => self.submit_new_session(),
+                _ => {
+                    dialog.error = Some(format!(
+                        "session {} may already exist; choose Start and press Enter to reconcile \
+                         that same id before editing or closing",
+                        dialog.request.id
+                    ));
+                }
+            }
             return;
         }
 
@@ -4370,8 +6166,8 @@ impl App {
             KeyCode::Esc => self.overlay = None,
             KeyCode::Tab | KeyCode::Down => dialog.move_field(1),
             KeyCode::BackTab | KeyCode::Up => dialog.move_field(-1),
-            KeyCode::Left => dialog.cycle(-1, providers),
-            KeyCode::Right => dialog.cycle(1, providers),
+            KeyCode::Left => dialog.cycle(-1, providers, &machines),
+            KeyCode::Right => dialog.cycle(1, providers, &machines),
             KeyCode::Backspace => {
                 if let Some(text) = dialog.text_mut() {
                     text.pop();
@@ -4406,7 +6202,10 @@ impl App {
             return;
         };
 
-        let request = dialog.resolved(&providers);
+        let request = dialog
+            .pending_request
+            .clone()
+            .unwrap_or_else(|| dialog.resolved(&providers));
 
         let params = match request.params() {
             Ok(params) => params,
@@ -4419,6 +6218,7 @@ impl App {
 
         dialog.error = None;
         dialog.pending = true;
+        dialog.pending_request = Some(request.clone());
 
         let plane = request.plane;
 
@@ -4426,13 +6226,27 @@ impl App {
         // readiness is legitimately unbounded upstream and this is the one call that
         // waits for it.
         self.issue(
-            Call::new(Tag::Start { plane }, request.method(), params).with_timeout(START_TIMEOUT),
+            Call::new(
+                Tag::Start {
+                    plane,
+                    id: request.id.clone(),
+                },
+                request.method(),
+                params,
+            )
+            .with_timeout(START_TIMEOUT),
         );
     }
 
     /// A session this client just created: watch it, focus it, and open the composer so
     /// the next thing typed is the first message.
     fn started(&mut self, plane: Plane, started: StartedRef) {
+        if self.refuse_owner_conflict(plane, &started.id) {
+            return;
+        }
+
+        let start_failure = started.start_failure.clone();
+
         self.overlay = None;
         self.home_pending = false;
         self.home_error = None;
@@ -4443,7 +6257,33 @@ impl App {
         self.sessions.interactive.invalidate();
         self.sessions.coding.invalidate();
 
-        self.open_session(plane, started.id.clone());
+        self.open_session_on(plane, started.id.clone(), started.node.clone());
+
+        // This exact request exists and is addressable, but its coordinator recorded a
+        // readiness failure. Open that durable record and keep any home prompt as a fresh,
+        // definitely-not-dispatched draft. Treating the typed result as an ordinary ready
+        // reference would immediately send into a terminal session; treating it as an
+        // error would trap the caller in same-id reconciliation despite a known outcome.
+        if let Some(failure) = start_failure {
+            if let Some(first_message) = self.first_message.take() {
+                self.restore_refused_first_message(
+                    plane,
+                    &started.id,
+                    first_message.input,
+                    ComposerVerb::Message,
+                );
+            }
+
+            self.inform(
+                format!(
+                    "created {} on the {plane} plane, but it did not become ready: {failure}. \
+                     The durable session is open; no first message was dispatched.",
+                    started.id
+                ),
+                NoticeKind::Error,
+            );
+            return;
+        }
 
         // The quick-start screen's prompt. Sent here rather than beside the start, because
         // until this answer arrived there was no session to send it to — the same order
@@ -4452,31 +6292,46 @@ impl App {
         if let Some(first_message) = self.first_message.take() {
             let method = plane.method("send_message");
 
-            if let Some(composer) = self.sessions.composer.as_mut() {
-                composer.editor.clear_text();
-                composer
-                    .editor
-                    .paste(&first_message.input, &self.completion_catalog);
-                composer.next_turn_id = Some(first_message.turn_id.clone());
-            }
-
             if self.hello.serves(&method) {
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.restore_reconciliation(
+                        &first_message.input,
+                        &first_message.turn_id,
+                        &self.completion_catalog,
+                    );
+                }
+                self.remember_composer_history();
+                let submission_sequence = self.next_composer_submission_sequence();
                 self.sessions.mark_reply_pending(plane, &started.id);
+                let params = self.routed_session_params(
+                    plane,
+                    &started.id,
+                    json!({
+                        "id": started.id,
+                        "input": first_message.input,
+                        "turn_id": first_message.turn_id
+                    }),
+                );
                 self.issue(Call::new(
                     Tag::FirstMessage {
                         plane,
                         id: started.id.clone(),
                         turn_id: first_message.turn_id.clone(),
                         input: first_message.input.clone(),
+                        submission_sequence,
                     },
                     method,
-                    json!({
-                        "id": started.id,
-                        "input": first_message.input,
-                        "turn_id": first_message.turn_id
-                    }),
+                    params,
                 ));
             } else {
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.editor.clear_text();
+                    composer
+                        .editor
+                        .paste(&first_message.input, &self.completion_catalog);
+                    composer.user_changed_draft();
+                }
+                self.remember_composer_history();
                 // The session exists and the message does not. Saying which is the only
                 // honest answer; the composer below is where it can be retyped.
                 self.inform(
@@ -4487,11 +6342,11 @@ impl App {
                     NoticeKind::Warn,
                 );
 
-                self.restore_first_message(
+                self.restore_refused_first_message(
                     plane,
                     &started.id,
                     first_message.input,
-                    first_message.turn_id,
+                    ComposerVerb::Message,
                 );
 
                 return;
@@ -4504,73 +6359,266 @@ impl App {
         );
     }
 
-    fn accept_first_message(&mut self, plane: Plane, id: &str, turn_id: &str, input: &str) {
-        let Some((open_plane, open_id)) = self.sessions.open.as_ref() else {
-            return;
-        };
-        if *open_plane != plane || open_id != id {
-            return;
-        }
+    fn accept_first_message(&mut self, plane: Plane, id: &str, turn_id: &str) {
+        self.accept_reconciled_composer_draft(plane, id, turn_id);
+        self.settle_pending_reconciliation(plane, id, Some(turn_id));
 
-        if let Some(composer) = self.sessions.composer.as_mut() {
-            if composer.next_turn_id.as_deref() == Some(turn_id) {
-                if composer.editor.text().trim() == input.trim() {
-                    composer.editor.accept_submission();
-                }
-                composer.next_turn_id = None;
+        if self.sessions.open.as_ref() == Some(&(plane, id.to_string())) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
                 composer.verb = ComposerVerb::FollowUp;
             }
         }
     }
 
-    fn restore_first_message(&mut self, plane: Plane, id: &str, input: String, turn_id: String) {
-        if self.sessions.open.as_ref() != Some(&(plane, id.to_string())) {
-            self.open_session(plane, id.to_string());
-        }
-
+    fn restore_first_message(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        input: String,
+        turn_id: String,
+        submission_sequence: u64,
+    ) {
         if plane != Plane::Interactive {
             return;
         }
 
-        let composer = self.sessions.composer.get_or_insert_with(|| Composer {
-            verb: ComposerVerb::Message,
-            editor: Editor::default(),
-            next_turn_id: None,
-        });
+        let key = (plane, id.to_string());
+        let pending = self
+            .sessions
+            .pending_reconciliations
+            .entry(key.clone())
+            .or_default();
+        if !pending.iter().any(|pending| pending.turn_id == turn_id) {
+            pending.push_back(PendingComposerReconciliation {
+                kind: PendingReconciliationKind::FirstMessage,
+                input: input.clone(),
+                turn_id: turn_id.clone(),
+                submission_sequence,
+            });
+            pending
+                .make_contiguous()
+                .sort_by_key(|pending| pending.submission_sequence);
+        }
 
-        if composer.editor.is_empty() || composer.next_turn_id.as_deref() == Some(&turn_id) {
-            composer.editor.clear_text();
-            composer.editor.paste(&input, &self.completion_catalog);
-            composer.next_turn_id = Some(turn_id);
-            composer.verb = ComposerVerb::Message;
+        if self.sessions.open.as_ref() == Some(&key) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                if composer.editor.is_empty() {
+                    composer.restore_reconciliation(&input, &turn_id, &self.completion_catalog);
+                    composer.verb = ComposerVerb::Message;
+                }
+            }
+            self.remember_composer_history();
         }
     }
 
-    fn start_failed(&mut self, error: ClientError) {
+    fn restore_refused_first_message(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        input: String,
+        verb: ComposerVerb,
+    ) {
+        if plane != Plane::Interactive {
+            return;
+        }
+
+        let key = (plane, id.to_string());
+        if self.sessions.open.as_ref() == Some(&key) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                let owned_retry = composer.reconciliation_owner.take().is_some();
+                let restored = composer.editor.is_empty();
+                if restored {
+                    composer.editor.paste(&input, &self.completion_catalog);
+                    composer.user_changed_draft();
+                }
+                if restored || owned_retry {
+                    composer.verb = verb;
+                }
+            }
+            self.remember_composer_history();
+        } else {
+            match self.sessions.composer_drafts.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(SavedComposerDraft {
+                        input,
+                        generation: 1,
+                        reconciliation_owner: None,
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().reconciliation_owner = None;
+                }
+            }
+        }
+    }
+
+    fn restore_composer_submission(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        input: String,
+        retry_turn_id: Option<String>,
+        verb: ComposerVerb,
+        submission_sequence: u64,
+    ) -> ComposerRestoreDisposition {
+        if plane != Plane::Interactive {
+            return ComposerRestoreDisposition::NewerDraftPreserved;
+        }
+
+        let key = (plane, id.to_string());
+        let has_reconciliation = retry_turn_id.is_some();
+        let reconciliation_turn_id = retry_turn_id.clone();
+
+        if let Some(turn_id) = retry_turn_id {
+            let pending = self
+                .sessions
+                .pending_reconciliations
+                .entry(key.clone())
+                .or_default();
+            if !pending.iter().any(|pending| pending.turn_id == turn_id) {
+                pending.push_back(PendingComposerReconciliation {
+                    kind: PendingReconciliationKind::Composer(verb),
+                    input: input.clone(),
+                    turn_id: turn_id.clone(),
+                    submission_sequence,
+                });
+                pending
+                    .make_contiguous()
+                    .sort_by_key(|pending| pending.submission_sequence);
+            }
+        }
+
+        // A reply can arrive after the operator began typing the next thought. Keep that
+        // newer draft intact. The stable-id queue above lives on the session, so switching
+        // away before this answer or closing/reopening the composer cannot discard it.
+        if self.sessions.open.as_ref() == Some(&key) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                if composer.editor.is_empty() {
+                    if let Some(turn_id) = reconciliation_turn_id.as_deref() {
+                        composer.restore_reconciliation(&input, turn_id, &self.completion_catalog);
+                    } else {
+                        composer.editor.paste(&input, &self.completion_catalog);
+                        composer.user_changed_draft();
+                    }
+                    composer.verb = verb;
+                    self.remember_composer_history();
+                    return ComposerRestoreDisposition::Restored;
+                }
+
+                self.remember_composer_history();
+                return if has_reconciliation {
+                    ComposerRestoreDisposition::ReconciliationQueued
+                } else {
+                    ComposerRestoreDisposition::NewerDraftPreserved
+                };
+            }
+        }
+
+        // A known refusal has no reconciliation id, but its exact text is still useful on
+        // return to this session. Never replace a newer draft saved during the switch.
+        if !has_reconciliation {
+            return match self.sessions.composer_drafts.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(SavedComposerDraft {
+                        input,
+                        generation: 1,
+                        reconciliation_owner: None,
+                    });
+                    ComposerRestoreDisposition::SavedForReopen
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    ComposerRestoreDisposition::NewerDraftPreserved
+                }
+            };
+        }
+
+        ComposerRestoreDisposition::ReconciliationQueued
+    }
+
+    fn start_failed(&mut self, plane: Plane, id: &str, error: ClientError) {
         let message = match &error {
             ClientError::Rpc(rpc) => model::refusal(rpc),
             other => other.to_string(),
         };
+        let outcome_unknown = model::start_outcome_unknown(&error);
 
-        // A prompt whose session never existed has nowhere to go, and must not be sent to
-        // the next session this client starts.
-        self.first_message = None;
-        self.home_pending = false;
-
-        match self.overlay.as_mut() {
-            // The form is still on screen, so the refusal belongs on it rather than in a
-            // notice line that expires in five seconds.
-            Some(Overlay::New(dialog)) => {
+        if let Some(Overlay::New(dialog)) = self.overlay.as_mut() {
+            if dialog
+                .pending_request
+                .as_ref()
+                .is_some_and(|request| request.id == id && request.plane == plane)
+            {
                 dialog.pending = false;
-                dialog.error = Some(message);
+                if outcome_unknown {
+                    dialog.reconciling = true;
+                    dialog.error = Some(format!(
+                        "{message}. Session {id} may already exist; choose Start and press Enter \
+                         to reconcile this exact id. Editing and closing stay locked until then."
+                    ));
+                } else {
+                    dialog.reconciling = false;
+                    dialog.pending_request = None;
+                    dialog.request.id = new_session_id();
+                    dialog.error = Some(message);
+                }
+                return;
             }
-            _ if self.tab == Tab::Sessions && self.sessions.open.is_none() => {
-                self.home_error = Some(message)
+        }
+
+        if self
+            .first_message
+            .as_ref()
+            .is_some_and(|pending| pending.start.id == id && pending.start.plane == plane)
+        {
+            self.home_pending = false;
+            if outcome_unknown {
+                if let Some(pending) = self.first_message.as_mut() {
+                    pending.start_outcome_unknown = true;
+                }
+                self.home_error = Some(format!(
+                    "{message}. Session {id} may already exist; press Enter to reconcile the \
+                     same id before changing this prompt."
+                ));
+            } else {
+                // A definite refusal means this id cannot become a session. Keep the
+                // visible draft, but the next submission mints a fresh start identity.
+                self.first_message = None;
+                self.home_error = Some(message);
             }
-            _ => self.inform(
-                format!("starting a session failed: {message}"),
+            return;
+        }
+
+        if self
+            .pending_background_start
+            .as_ref()
+            .is_some_and(|request| request.id == id && request.plane == plane)
+        {
+            if outcome_unknown {
+                self.inform(
+                    format!(
+                        "{message}. Writable session {id} may already exist; run /write again to \
+                         reconcile the same id."
+                    ),
+                    NoticeKind::Error,
+                );
+            } else {
+                self.pending_background_start = None;
+                self.inform(
+                    format!("starting writable session {id} was refused: {message}"),
+                    NoticeKind::Error,
+                );
+            }
+            return;
+        }
+
+        if self.tab == Tab::Sessions && self.sessions.open.is_none() {
+            self.home_pending = false;
+            self.home_error = Some(format!("start {id}: {message}"));
+        } else {
+            self.inform(
+                format!("starting session {id} failed: {message}"),
                 NoticeKind::Error,
-            ),
+            );
         }
     }
 
@@ -4582,6 +6630,10 @@ impl App {
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
         };
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+        let routed = self.routed_session_params(plane, &id, json!({ "id": id }));
 
         let options = match plane {
             Plane::Interactive => vec![
@@ -4592,10 +6644,9 @@ impl App {
                             label: "close",
                             plane,
                             id: id.clone(),
-                            turn_id: None,
                         },
                         "interactive.close",
-                        json!({ "id": id }),
+                        routed.clone(),
                     )),
                 ),
                 (
@@ -4605,10 +6656,9 @@ impl App {
                             label: "kill",
                             plane,
                             id: id.clone(),
-                            turn_id: None,
                         },
                         "interactive.kill",
-                        json!({ "id": id }),
+                        routed.clone(),
                     )),
                 ),
                 ("cancel".to_string(), None),
@@ -4621,10 +6671,9 @@ impl App {
                             label: "cancel",
                             plane,
                             id: id.clone(),
-                            turn_id: None,
                         },
                         "coding.cancel",
-                        json!({ "id": id }),
+                        routed,
                     )),
                 ),
                 ("leave it running".to_string(), None),
@@ -4705,6 +6754,11 @@ impl App {
             return;
         }
 
+        if matches!(self.overlay, Some(Overlay::Machines(_))) {
+            self.machines_key(key);
+            return;
+        }
+
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
@@ -4769,7 +6823,8 @@ impl App {
             | Overlay::Account(_)
             | Overlay::SessionPicker { .. }
             | Overlay::New(_)
-            | Overlay::Settings(_) => {}
+            | Overlay::Settings(_)
+            | Overlay::Machines(_) => {}
         }
     }
 
@@ -4909,6 +6964,10 @@ impl App {
                 self.overlay = None;
                 self.select_tab(Tab::Logs);
             }
+            Command::Machines => {
+                self.overlay = None;
+                self.open_machines();
+            }
             Command::Settings => {
                 self.overlay = None;
                 self.open_settings();
@@ -5021,6 +7080,10 @@ impl App {
             return;
         };
 
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
         let (decision, scope) = APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)];
 
         let marked = self
@@ -5033,6 +7096,11 @@ impl App {
             return;
         }
 
+        let params = self.routed_session_params(
+            plane,
+            &id,
+            model::respond_approval_params(&id, &request_id, decision, scope),
+        );
         self.issue(Call::new(
             Tag::Approval {
                 plane,
@@ -5040,7 +7108,7 @@ impl App {
                 request_id: request_id.clone(),
             },
             plane.method("respond_approval"),
-            model::respond_approval_params(&id, &request_id, decision, scope),
+            params,
         ));
     }
 
@@ -5202,6 +7270,14 @@ impl App {
         }
 
         let catalog = self.completion_catalog.clone();
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.editor.clear_text();
+            composer.editor.paste(&text, &catalog);
+            composer.user_changed_draft();
+            self.remember_composer_history();
+            return;
+        }
+
         if let Some(editor) = self.focused_editor_mut() {
             editor.clear_text();
             editor.paste(&text, &catalog);
@@ -5314,6 +7390,20 @@ fn project_run(value: &Value) -> Option<Row> {
         id,
         raw: value.clone(),
     })
+}
+
+fn friendly_machine(node: &str) -> String {
+    node.split_once('@')
+        .map(|(name, _host)| name)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("this machine")
+        .to_string()
+}
+
+fn value_usize(value: Option<&Value>) -> Option<usize> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn slash_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {

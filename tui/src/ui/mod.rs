@@ -102,13 +102,12 @@ impl ReconnectHook for StreamHook {
             // The subscription died with the socket, so every watched session is
             // re-registered here — at its own cursor, which is the contiguous high-water
             // mark and not the newest sequence seen.
-            for (plane, id, cursor) in cursors.snapshot() {
-                let result = client
-                    .call(
-                        &plane.method("subscribe"),
-                        json!({ "id": id, "cursor": cursor }),
-                    )
-                    .await;
+            for (plane, id, cursor, node) in cursors.snapshot() {
+                let mut params = json!({ "id": id.clone(), "cursor": cursor });
+                if let (Some(node), Some(fields)) = (node, params.as_object_mut()) {
+                    fields.insert("node".into(), json!(node));
+                }
+                let result = client.call(&plane.method("subscribe"), params).await;
 
                 let sent = sender.send(Msg::Answer {
                     tag: Tag::Resync {

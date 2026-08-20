@@ -31,8 +31,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
                 Line::from(""),
                 Line::from(Span::styled(
                     "this client attached to a runtime it did not start, and the gateway does \
-                     not stream the daemon's output. Read it wherever that daemon was started \
-                     — `ouro daemon` writes it to daemon.log in its data directory.",
+                     not stream the daemon's output. `ouro daemon` writes live application logs \
+                     to runtime.log and bootstrap/VM/crash output to daemon.log in its data \
+                     directory.",
                     Style::default().fg(theme::MUTED),
                 )),
             ])

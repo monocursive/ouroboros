@@ -92,27 +92,63 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn nodes(frame: &mut Frame, area: Rect, app: &App) {
-    let block = pane(
-        panel_title("connected nodes", false, None, app.ticks),
-        false,
-    );
+    let block = pane(panel_title("machines", false, None, app.ticks), false);
+    let summary = app.machine_summary();
+    let expected = summary
+        .expected
+        .map(|expected| expected.to_string())
+        .unwrap_or_else(|| "?".into());
+    let offline = summary
+        .offline
+        .map(|offline| offline.to_string())
+        .unwrap_or_else(|| "?".into());
+    let security_style = match summary.security {
+        super::app::MachineSecurity::Standalone | super::app::MachineSecurity::Secure => {
+            Style::default().fg(theme::GOOD)
+        }
+        super::app::MachineSecurity::Insecure | super::app::MachineSecurity::Mismatch => {
+            Style::default().fg(theme::BAD)
+        }
+        super::app::MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+    };
 
-    let lines: Vec<Line> = match &app.status.value {
-        Some(status) if !status.connected_nodes.is_empty() => status
-            .connected_nodes
-            .iter()
-            .map(|node| Line::from(node.clone()))
-            .collect(),
-        Some(_) => vec![Line::from(Span::styled(
-            // Not an error: a laptop daemon runs with distribution off by design.
+    let mut lines = vec![
+        field("mode", &summary.mode),
+        field("local", &summary.machine),
+        Line::from(format!(
+            "Expected {expected} · Connected {} · Offline {offline}",
+            summary.connected
+        )),
+        Line::from(Span::styled(summary.security.label(), security_style)),
+    ];
+
+    match &app.status.value {
+        Some(status) if !status.connected_nodes.is_empty() => lines.extend(
+            status
+                .connected_nodes
+                .iter()
+                .map(|node| Line::from(format!("connected  {node}"))),
+        ),
+        Some(_) if summary.mode == "Standalone" => lines.push(Line::from(Span::styled(
+            // Kept as a reassuring state, not an error: a laptop daemon is standalone by
+            // default and the guided surface is where a second machine is added.
             "none — this runtime is not connected to other nodes",
             Style::default().fg(theme::MUTED),
-        ))],
-        None => vec![Line::from(Span::styled(
-            "-",
+        ))),
+        Some(_) => lines.push(Line::from(Span::styled(
+            summary.recovery,
+            Style::default().fg(theme::WARN),
+        ))),
+        None => lines.push(Line::from(Span::styled(
+            "waiting for live machine status",
             Style::default().fg(theme::MUTED),
-        ))],
-    };
+        ))),
+    }
+
+    lines.push(Line::from(Span::styled(
+        "Open /machines for guided setup and recovery",
+        Style::default().fg(theme::ACCENT),
+    )));
 
     frame.render_widget(
         Paragraph::new(lines)

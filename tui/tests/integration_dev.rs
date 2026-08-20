@@ -45,6 +45,14 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
         repo_root: repo_root.clone(),
     };
 
+    // Mix RuntimeOwner needs the product CLI's hidden process-birth and recovery-lock
+    // commands. Naming this path is what makes cargo build `ouro` beside this harness.
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_ouro"));
+    assert!(
+        helper.is_file(),
+        "the product ouro binary must exist so Mix can claim runtime.owner"
+    );
+
     eprintln!("spawning `mix run --no-halt` in {}", repo_root.display());
 
     let mut daemon =
@@ -80,6 +88,15 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
         publication.pid,
         daemon.pid(),
         "the published pid must be the process this client is supervising"
+    );
+
+    let owner = runtime::read_owned_runtime_owner(&data_dir)
+        .expect("a readable runtime owner")
+        .expect("the core runtime claims its data directory before publishing");
+
+    assert_eq!(
+        owner.pid, publication.pid,
+        "the lifetime owner and the replaceable gateway publication name the same runtime"
     );
 
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], publication.port));
@@ -203,6 +220,13 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
             .expect("a readable data directory")
             .is_none(),
         "a gracefully stopped gateway removes its publication"
+    );
+
+    assert!(
+        runtime::read_owned_runtime_owner(&data_dir)
+            .expect("a readable data directory")
+            .is_none(),
+        "a graceful core-runtime stop releases its lifetime ownership last"
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);

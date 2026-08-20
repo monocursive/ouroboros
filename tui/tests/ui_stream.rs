@@ -168,12 +168,13 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
 
         let start = peer.request_for("interactive.start").await;
 
-        // Exactly the allowlisted options, and no `id` — the plane mints that.
+        // Exactly the allowlisted options, including the caller-owned retry identity.
+        assert_eq!(start["params"]["id"], SESSION);
         assert_eq!(start["params"]["provider"], "ouroboros_test");
         assert_eq!(start["params"]["workspace"], "/srv/work");
         assert_eq!(
             start["params"].as_object().expect("an object").len(),
-            2,
+            3,
             "an option outside @start_options is -32602 naming it: {}",
             start["params"]
         );
@@ -219,6 +220,12 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
     harness.app.apply(press('2'));
     harness.app.apply(press('n'));
     harness.settle().await;
+
+    if let Some(Overlay::New(dialog)) = harness.app.overlay.as_mut() {
+        dialog.request.id = SESSION.into();
+    } else {
+        panic!("the new-session form did not open");
+    }
 
     focus(&mut harness.app, NewField::Start);
     harness.app.apply(enter());

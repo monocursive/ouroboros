@@ -373,6 +373,10 @@ pub struct StartFlags {
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
+    /// A one-shot fleet placement choice. It is intentionally not a sticky default:
+    /// machines can be offline, and silently reusing one would turn convenience into an
+    /// unexplained start failure.
+    pub machine: Option<String>,
 }
 
 /// The parameters a start will be built from, and where each of them came from.
@@ -382,6 +386,7 @@ pub struct ResolvedStart {
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
+    pub machine: Option<String>,
 }
 
 /// The one thing no default can supply.
@@ -420,6 +425,7 @@ pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> Result<Resolved
         workspace: first(&flags.workspace, &defaults.workspace),
         approval_mode: first(&flags.approval_mode, &defaults.approval_mode),
         sandbox_mode: first(&flags.sandbox_mode, &defaults.sandbox_mode),
+        machine: first(&flags.machine, &None),
     })
 }
 
@@ -790,12 +796,14 @@ mod tests {
         assert_eq!(resolved.workspace.as_deref(), Some("/home/me/project"));
         assert_eq!(resolved.approval_mode.as_deref(), Some("auto_edit"));
         assert_eq!(resolved.sandbox_mode.as_deref(), Some("read_only"));
+        assert_eq!(resolved.machine, None);
 
         // Stated: the flag wins, field by field.
         let flags = StartFlags {
             provider: Some("codex".into()),
             approval_mode: Some("prompt".into()),
             sandbox_mode: Some("workspace_write".into()),
+            machine: Some("builder-one".into()),
             ..StartFlags::default()
         };
 
@@ -809,6 +817,7 @@ mod tests {
         );
         assert_eq!(resolved.approval_mode.as_deref(), Some("prompt"));
         assert_eq!(resolved.sandbox_mode.as_deref(), Some("workspace_write"));
+        assert_eq!(resolved.machine.as_deref(), Some("builder-one"));
     }
 
     #[test]

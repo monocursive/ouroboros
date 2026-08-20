@@ -33,12 +33,19 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand::TryRngCore;
 use serde::de::{Deserializer, Error as _};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::proto::RpcError;
+use crate::proto::{ErrorCode, RpcError};
+use crate::transport::ClientError;
+
+static SESSION_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub mod transcript;
 
@@ -455,6 +462,10 @@ pub struct SessionInfo {
     pub updated_at: Option<String>,
     pub objective: Option<String>,
     pub struct_tag: Option<String>,
+    /// This row came from the previous complete list because runtime.status explicitly
+    /// reports its owner offline. It is retained for addressability, not presented as a
+    /// fresh observation.
+    pub last_known: bool,
     pub raw: Value,
 }
 
@@ -506,6 +517,7 @@ impl SessionInfo {
             updated_at: raw.updated_at,
             objective: raw.objective,
             struct_tag: raw.struct_tag,
+            last_known: false,
             raw: value.clone(),
         })
     }
@@ -873,7 +885,9 @@ pub fn refusal(rpc: &RpcError) -> String {
     // An unrecognised payload keeps the compact JSON it always had. Guessing at a shape
     // this build has never seen is how a prettifier starts asserting things the runtime
     // did not say.
-    let rendered = humanise(data).unwrap_or_else(|| compact(data));
+    let rendered = humanise_unknown_outcome(data)
+        .or_else(|| humanise(data))
+        .unwrap_or_else(|| compact(data));
 
     format!("{rpc} — {rendered}")
 }
@@ -885,6 +899,40 @@ const EXCEPTION_MARKER: &str = "__exception__";
 
 /// Past this many fields, `details` stops being a phrase and goes back to being JSON.
 const MAX_DETAIL_FIELDS: usize = 6;
+
+/// An indeterminate mutation is a state to reconcile, not a refusal to retry under a new
+/// id. The gateway carries that distinction as an object so clients can branch on it;
+/// this renderer says the same thing to the person and keeps every diagnostic field it
+/// did not use on the following line.
+fn humanise_unknown_outcome(data: &Value) -> Option<String> {
+    let payload = data.as_object()?;
+
+    if payload.get("outcome").and_then(Value::as_str) != Some("unknown") {
+        return None;
+    }
+
+    let mut used = vec!["outcome"];
+    let mut line = String::from("outcome unknown");
+
+    if let Some(turn_id) = payload.get("turn_id") {
+        used.push("turn_id");
+        line.push_str(" (turn ");
+        line.push_str(&compact(turn_id));
+        line.push(')');
+    }
+
+    let rest: Vec<String> = payload
+        .iter()
+        .filter(|(key, _value)| !used.contains(&key.as_str()))
+        .map(|(key, value)| format!("{key}={}", compact(value)))
+        .collect();
+
+    if rest.is_empty() {
+        Some(line)
+    } else {
+        Some(format!("{line}\nalso: {}", rest.join(", ")))
+    }
+}
 
 /// One line for a `{tag, exception}` payload, plus whatever that line did not use.
 ///
@@ -992,11 +1040,162 @@ fn flatten(details: &Value) -> Option<String> {
     Some(parts.join(", "))
 }
 
-/// Whether a `-32005` admits that the runtime may still be working on the request.
+/// Whether an error admits that the runtime may still be working on the request.
+///
+/// Current gateways carry the explicit object discriminator. The tuple clauses retain
+/// the same safety with a runtime from before that discriminator was added: those exact
+/// interactive errors already meant dispatch may have crossed the boundary, even though
+/// they were incorrectly labelled as a refusal.
 pub fn outcome_unknown(data: Option<&Value>) -> bool {
-    data.and_then(|data| data.get("outcome"))
+    let Some(data) = data else {
+        return false;
+    };
+
+    if data.get("outcome").and_then(Value::as_str) == Some("unknown") {
+        return true;
+    }
+
+    let Some(items) = data.as_array() else {
+        return false;
+    };
+
+    match items.as_slice() {
+        [Value::String(tag), Value::String(marker), Value::String(turn_id)]
+            if tag == "turn_dispatch_checkpoint_failed"
+                && marker == "dispatch_may_have_started"
+                && !turn_id.trim().is_empty() =>
+        {
+            true
+        }
+        [Value::String(tag), Value::String(turn_id)]
+            if tag == "turn_dispatch_ambiguous" && !turn_id.trim().is_empty() =>
+        {
+            true
+        }
+        [Value::String(tag), Value::String(turn_id), Value::String(marker)]
+            if tag == "turn_dispatch_ambiguous"
+                && marker == "checkpoint_failed"
+                && !turn_id.trim().is_empty() =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Whether a failed `*.start` reply may have crossed the durable creation boundary.
+///
+/// A caller-owned session id makes reconciliation cheap, so this deliberately errs on
+/// the side of retaining that id. Only protocol/schema/auth/placement decisions are
+/// provably pre-dispatch. Generic upstream failures and newer error codes are not
+/// permission to mint a second potentially billable session.
+pub fn start_outcome_unknown(error: &ClientError) -> bool {
+    match error {
+        ClientError::Rpc(rpc) => {
+            if rpc.data.as_ref().and_then(|data| data.get("outcome"))
+                == Some(&Value::String("not_dispatched".into()))
+            {
+                return false;
+            }
+
+            if rpc.code == ErrorCode::UpstreamTimeout || outcome_unknown(rpc.data.as_ref()) {
+                return true;
+            }
+
+            !matches!(
+                rpc.code,
+                ErrorCode::ParseError
+                    | ErrorCode::InvalidRequest
+                    | ErrorCode::MethodNotFound
+                    | ErrorCode::InvalidParams
+                    | ErrorCode::Unauthenticated
+                    | ErrorCode::ProtocolMismatch
+                    | ErrorCode::ScopeDenied
+                    | ErrorCode::NotFound
+            )
+        }
+        // A transport can disappear after the gateway accepted the mutation but before
+        // its answer reached the client. An undecodable success has the same property.
+        _transport => true,
+    }
+}
+
+/// Whether an immediate interactive message was definitely not dispatched because the
+/// session already had an active turn.
+///
+/// Current gateways name the state and the safe queueing verb in an object. The exact
+/// legacy tuple remains recognizable so a newer TUI attached to an older runtime can
+/// still restore the draft and offer the queue rather than losing the user's input.
+pub fn turn_busy(data: Option<&Value>) -> bool {
+    let Some(data) = data else {
+        return false;
+    };
+
+    if data.get("reason").and_then(Value::as_str) == Some("busy") {
+        return true;
+    }
+
+    matches!(
+        data.as_array().map(Vec::as_slice),
+        Some([Value::String(tag), Value::String(reason)])
+            if tag == "turn_dispatch_failed" && reason == "busy"
+    )
+}
+
+/// What a successful `interactive.send_message` / `follow_up` RPC proves.
+///
+/// A same-id call is also a read of the durable turn. Most statuses prove that Harness
+/// accepted it, but `dispatching` / `ambiguous` still require reconciliation and a
+/// terminal failure must not be presented as a fresh acceptance merely because the RPC
+/// envelope itself succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnReply {
+    Accepted,
+    OutcomeUnknown,
+    Rejected,
+}
+
+pub fn turn_reply(value: &Value) -> TurnReply {
+    match value.get("status").and_then(Value::as_str) {
+        Some("dispatching" | "ambiguous") => TurnReply::OutcomeUnknown,
+        Some("failed" | "interrupted" | "cancelled") => TurnReply::Rejected,
+        // Missing and newer statuses retain the protocol's tolerant behavior. A runtime
+        // that wants a client to branch must use one of the durable statuses above.
+        _ => TurnReply::Accepted,
+    }
+}
+
+/// A readable diagnostic for a durable turn returned inside a successful RPC envelope.
+pub fn turn_reply_diagnostic(value: &Value) -> String {
+    let status = value
+        .get("status")
         .and_then(Value::as_str)
-        == Some("unknown")
+        .unwrap_or("unknown");
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty());
+
+    let mut text = match id {
+        Some(id) => format!("turn {id} is {status}"),
+        None => format!("turn status is {status}"),
+    };
+
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        text.push_str(" — error=");
+        text.push_str(&compact(error));
+    }
+
+    text
+}
+
+/// Whether a durable failed-turn read names the immediate-message `:busy` refusal.
+pub fn turn_reply_busy(value: &Value) -> bool {
+    value.get("error").is_some_and(|error| {
+        error.as_str() == Some("busy")
+            || error.get("reason").and_then(Value::as_str) == Some("busy")
+            || turn_busy(Some(error))
+    })
 }
 
 /// The three values `interactive.respond_approval` accepts for a decision and a scope,
@@ -1142,6 +1341,10 @@ impl SandboxMode {
 /// no. The gateway's own refusals arrive as `-32602` and are shown verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartError {
+    /// A client-owned id is the retry boundary for a start whose reply is lost. Starting
+    /// without one makes a timeout indistinguishable from permission to bill a second
+    /// provider session.
+    NoId,
     /// The gateway would accept a start with no provider and let the node's default
     /// decide. This client will not: a terminal that silently picked a provider would be
     /// choosing which vendor runs the operator's code.
@@ -1150,6 +1353,10 @@ pub enum StartError {
     NoObjective,
     /// `objective` is not in the interactive allowlist, so sending it would be `-32602`.
     ObjectiveOnInteractive,
+    /// A remote runtime must never inherit the packaged release's working directory.
+    NoRemoteWorkspace,
+    /// Relative paths are relative to the destination runtime, not this terminal.
+    RemoteWorkspaceNotAbsolute(String),
     UnknownApprovalMode(String),
     UnknownSandboxMode(String),
 }
@@ -1157,6 +1364,9 @@ pub enum StartError {
 impl StartError {
     pub fn message(&self) -> String {
         match self {
+            Self::NoId => {
+                "the client did not assign this start a retry-safe session id".to_string()
+            }
             Self::NoProvider => "choose a provider: this client will not let the node pick \
                                  which vendor runs your code"
                 .to_string(),
@@ -1166,6 +1376,12 @@ impl StartError {
             Self::ObjectiveOnInteractive => {
                 "an interactive session takes no objective — it takes messages".to_string()
             }
+            Self::NoRemoteWorkspace => "choose an absolute workspace path on the destination \
+                                        machine; remote sessions never guess from this terminal"
+                .to_string(),
+            Self::RemoteWorkspaceNotAbsolute(path) => format!(
+                "remote workspace {path:?} must be an absolute path on the destination machine"
+            ),
             Self::UnknownApprovalMode(name) => format!(
                 "approval_mode must be one of {}; the gateway refuses {name:?} by name",
                 ApprovalMode::ALL
@@ -1190,20 +1406,24 @@ impl StartError {
 ///
 /// The gateway's allowlist for both start verbs is `id`, `provider`, `workspace`, `model`,
 /// `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`,
-/// `reasoning_effort`, `runtime_exposure` (`Gateway.Methods` `@start_options`), and an
+/// `reasoning_effort`, `runtime_exposure`, `machine` (`Gateway.Methods` `@start_options`), and an
 /// option outside it is `-32602` naming it rather than being ignored. This type emits a
 /// strict subset of that — the ones a terminal can honestly ask a person for — and
-/// **omits** every field it has no answer for rather than sending a placeholder: the
+/// **omits** every optional field it has no answer for rather than sending a placeholder: the
 /// gateway requires a *nonempty* string for `workspace`, so an empty box means "no
 /// workspace", not `""`. Runtime exposure is default-on upstream, so this dialog does
 /// not send `runtime_exposure`.
 ///
-/// `id` is deliberately not sent. The plane generates one, and a client-chosen id buys
-/// idempotency this dialog has no way to use.
+/// `id` is always client-owned. It is retained across an indeterminate reply so retrying
+/// reconciles the same logical start instead of creating and billing another session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartRequest {
+    pub id: String,
     pub plane: Plane,
     pub provider: String,
+    /// A friendly fleet machine name. Blank means this machine, which is the safe and
+    /// backwards-compatible default.
+    pub machine: String,
     pub workspace: String,
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
@@ -1214,8 +1434,10 @@ pub struct StartRequest {
 impl StartRequest {
     pub fn new(plane: Plane) -> Self {
         Self {
+            id: new_session_id(),
             plane,
             provider: String::new(),
+            machine: String::new(),
             workspace: String::new(),
             approval_mode: None,
             sandbox_mode: None,
@@ -1229,6 +1451,12 @@ impl StartRequest {
 
     /// The exact `params` object, or the reason it was not built.
     pub fn params(&self) -> Result<Value, StartError> {
+        let id = self.id.trim();
+
+        if id.is_empty() {
+            return Err(StartError::NoId);
+        }
+
         let provider = self.provider.trim();
 
         if provider.is_empty() {
@@ -1236,7 +1464,14 @@ impl StartRequest {
         }
 
         let mut params = serde_json::Map::new();
+        params.insert("id".into(), Value::String(id.to_string()));
         params.insert("provider".into(), Value::String(provider.to_string()));
+
+        let machine = self.machine.trim();
+
+        if !machine.is_empty() {
+            params.insert("machine".into(), Value::String(machine.to_string()));
+        }
 
         let objective = self.objective.trim();
 
@@ -1252,6 +1487,16 @@ impl StartRequest {
         }
 
         let workspace = self.workspace.trim();
+
+        if !machine.is_empty() && workspace.is_empty() {
+            return Err(StartError::NoRemoteWorkspace);
+        }
+
+        if !machine.is_empty() && !Path::new(workspace).is_absolute() {
+            return Err(StartError::RemoteWorkspaceNotAbsolute(
+                workspace.to_string(),
+            ));
+        }
 
         if !workspace.is_empty() {
             params.insert("workspace".into(), Value::String(workspace.to_string()));
@@ -1275,12 +1520,44 @@ impl StartRequest {
     }
 }
 
+/// A durable identity minted before a start mutation crosses the socket.
+///
+/// OS randomness is the normal path. The process/time/sequence fallback keeps the UI
+/// usable if the platform entropy source is temporarily unavailable without reusing an
+/// id inside this process.
+pub fn new_session_id() -> String {
+    let mut bytes = [0_u8; 16];
+
+    if rand::rngs::OsRng.try_fill_bytes(&mut bytes).is_ok() {
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        return format!("ouro-session-{encoded}");
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let sequence = SESSION_ID_FALLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+
+    format!(
+        "ouro-session-{}-{timestamp:x}-{sequence:x}",
+        std::process::id()
+    )
+}
+
 /// What a start answers: `Ouroboros.Interactive.Ref` / `Ouroboros.Coding.TaskRef`,
-/// Wire-encoded — `{id, node}` plus the struct tag.
+/// Wire-encoded — `{id, node}` plus the struct tag — or the same stable identity with a
+/// typed post-checkpoint readiness failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedRef {
     pub id: String,
     pub node: Option<String>,
+    /// Present only when the runtime durably created this exact request but could not
+    /// make its provider/workspace coordinator ready. The reference remains addressable.
+    pub start_failure: Option<String>,
 }
 
 impl StartedRef {
@@ -1291,6 +1568,7 @@ impl StartedRef {
             return Some(Self {
                 id: id.to_string(),
                 node: None,
+                start_failure: None,
             });
         }
 
@@ -1300,12 +1578,22 @@ impl StartedRef {
             return None;
         }
 
+        let created_but_not_ready = value.get("outcome").and_then(Value::as_str) == Some("created")
+            && value.get("ready").and_then(Value::as_bool) == Some(false);
+        let start_failure = created_but_not_ready.then(|| {
+            value
+                .get("error")
+                .map(|error| humanise(error).unwrap_or_else(|| compact(error)))
+                .unwrap_or_else(|| "the durable session did not become ready".to_string())
+        });
+
         Some(Self {
             id: id.to_string(),
             node: value
                 .get("node")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            start_failure,
         })
     }
 }
@@ -1712,12 +2000,13 @@ mod tests {
         let params = request.params().expect("a valid start");
         let fields = params.as_object().expect("an object");
 
+        assert_eq!(fields["id"], request.id);
         assert_eq!(fields["provider"], "claude_code");
         assert_eq!(fields["workspace"], "/work");
         assert_eq!(fields["approval_mode"], "prompt");
         assert_eq!(
             fields.len(),
-            3,
+            4,
             "an option outside @start_options is -32602 naming it, so none is invented: \
              {fields:?}"
         );
@@ -1730,7 +2019,7 @@ mod tests {
             .expect("an object")
             .clone();
         assert_eq!(fields["sandbox_mode"], "read_only");
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 5);
     }
 
     #[test]
@@ -1747,8 +2036,8 @@ mod tests {
         assert!(!fields.contains_key("approval_mode"));
         assert!(!fields.contains_key("sandbox_mode"));
         assert!(!fields.contains_key("objective"));
-        assert!(!fields.contains_key("id"), "the plane generates the id");
-        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["id"], request.id);
+        assert_eq!(fields.len(), 2);
 
         // Whitespace is not an answer either.
         request.workspace = "   ".into();
@@ -1790,6 +2079,38 @@ mod tests {
 
         assert_eq!(request.params(), Err(StartError::NoProvider));
         assert!(StartError::NoProvider.message().contains("which vendor"));
+    }
+
+    #[test]
+    fn every_start_has_a_client_owned_retry_identity() {
+        let request = StartRequest::new(Plane::Interactive);
+
+        assert!(request.id.starts_with("ouro-session-"));
+
+        let mut invalid = request;
+        invalid.id.clear();
+        invalid.provider = "codex".into();
+        assert_eq!(invalid.params(), Err(StartError::NoId));
+    }
+
+    #[test]
+    fn a_remote_start_requires_an_absolute_destination_workspace() {
+        let mut request = StartRequest::new(Plane::Interactive);
+        request.provider = "codex".into();
+        request.machine = "mini".into();
+
+        assert_eq!(request.params(), Err(StartError::NoRemoteWorkspace));
+
+        request.workspace = "project".into();
+        assert_eq!(
+            request.params(),
+            Err(StartError::RemoteWorkspaceNotAbsolute("project".into()))
+        );
+
+        request.workspace = "/srv/project".into();
+        let params = request.params().expect("an explicit remote workspace");
+        assert_eq!(params["machine"], "mini");
+        assert_eq!(params["workspace"], "/srv/project");
     }
 
     #[test]
@@ -1841,6 +2162,28 @@ mod tests {
 
         assert_eq!(started.id, "session-0000000000000000000001");
         assert_eq!(started.node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(started.start_failure, None);
+
+        let created = StartedRef::decode(&serde_json::json!({
+            "id": "session-failed-after-checkpoint",
+            "node": "ouroboros@golden",
+            "outcome": "created",
+            "ready": false,
+            "error": ["session_start_failed", ["workspace_admission_failed", "busy"]]
+        }))
+        .expect("a durable failed start reference");
+
+        assert_eq!(created.id, "session-failed-after-checkpoint");
+        assert_eq!(created.node.as_deref(), Some("ouroboros@golden"));
+        assert!(
+            created
+                .start_failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("session_start_failed")
+                    && failure.contains("workspace_admission_failed")),
+            "{:?}",
+            created.start_failure
+        );
 
         assert_eq!(
             StartedRef::decode(&serde_json::json!("bare-id")).map(|r| r.id),
@@ -1895,6 +2238,112 @@ mod tests {
         assert!(
             !lines.clone().collect::<String>().is_empty(),
             "the keys the sentence did not use are still on screen: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_indeterminate_turn_dispatch_keeps_its_id_and_diagnostic() {
+        let rpc = RpcError {
+            code: ErrorCode::UpstreamTimeout,
+            message: "the runtime could not confirm the turn dispatch".into(),
+            data: Some(serde_json::json!({
+                "outcome": "unknown",
+                "turn_id": "ouro-first:session-1",
+                "error": [
+                    "turn_dispatch_checkpoint_failed",
+                    "dispatch_may_have_started",
+                    "ouro-first:session-1"
+                ]
+            })),
+        };
+
+        let rendered = refusal(&rpc);
+        let mut lines = rendered.lines();
+
+        assert_eq!(
+            lines.next(),
+            Some(
+                "upstream_timeout (-32005): the runtime could not confirm the turn dispatch — \
+                 outcome unknown (turn ouro-first:session-1)"
+            ),
+            "{rendered}"
+        );
+
+        let diagnostic = lines.next().expect("the Wire diagnostic remains visible");
+        assert!(
+            diagnostic.contains("turn_dispatch_checkpoint_failed"),
+            "{diagnostic}"
+        );
+        assert!(outcome_unknown(rpc.data.as_ref()));
+
+        // A new client attached to an older runtime still must not turn this exact legacy
+        // Wire tuple into permission to mint a second logical turn.
+        let legacy = serde_json::json!([
+            "turn_dispatch_checkpoint_failed",
+            "dispatch_may_have_started",
+            "ouro-first:session-1"
+        ]);
+        assert!(outcome_unknown(Some(&legacy)));
+        assert!(outcome_unknown(Some(&serde_json::json!([
+            "turn_dispatch_ambiguous",
+            "ouro-first:session-1"
+        ]))));
+        assert!(outcome_unknown(Some(&serde_json::json!([
+            "turn_dispatch_ambiguous",
+            "ouro-first:session-1",
+            "checkpoint_failed"
+        ]))));
+        assert!(!outcome_unknown(Some(&serde_json::json!([
+            "turn_dispatch_failed",
+            "provider_refused"
+        ]))));
+        assert!(!outcome_unknown(Some(&serde_json::json!([
+            "turn_dispatch_ambiguous"
+        ]))));
+    }
+
+    #[test]
+    fn a_busy_turn_is_distinct_from_an_unknown_dispatch() {
+        let current = serde_json::json!({
+            "reason": "busy",
+            "outcome": "not_dispatched",
+            "retry_with": "interactive.follow_up",
+            "error": ["turn_dispatch_failed", "busy"]
+        });
+        let legacy = serde_json::json!(["turn_dispatch_failed", "busy"]);
+
+        assert!(turn_busy(Some(&current)));
+        assert!(turn_busy(Some(&legacy)));
+        assert!(!outcome_unknown(Some(&current)));
+        assert!(!turn_busy(Some(&serde_json::json!([
+            "turn_dispatch_failed",
+            "closed"
+        ]))));
+    }
+
+    #[test]
+    fn successful_turn_envelopes_do_not_turn_terminal_failure_into_acceptance() {
+        let running = serde_json::json!({ "id": "t-1", "status": "running" });
+        let completed = serde_json::json!({ "id": "t-1", "status": "completed" });
+        let dispatching = serde_json::json!({ "id": "t-1", "status": "dispatching" });
+        let ambiguous = serde_json::json!({ "id": "t-1", "status": "ambiguous" });
+        let failed = serde_json::json!({
+            "id": "t-1",
+            "status": "failed",
+            "error": "busy"
+        });
+        let interrupted = serde_json::json!({ "id": "t-1", "status": "interrupted" });
+
+        assert_eq!(turn_reply(&running), TurnReply::Accepted);
+        assert_eq!(turn_reply(&completed), TurnReply::Accepted);
+        assert_eq!(turn_reply(&dispatching), TurnReply::OutcomeUnknown);
+        assert_eq!(turn_reply(&ambiguous), TurnReply::OutcomeUnknown);
+        assert_eq!(turn_reply(&failed), TurnReply::Rejected);
+        assert_eq!(turn_reply(&interrupted), TurnReply::Rejected);
+        assert!(turn_reply_busy(&failed));
+        assert_eq!(
+            turn_reply_diagnostic(&failed),
+            "turn t-1 is failed — error=busy"
         );
     }
 
