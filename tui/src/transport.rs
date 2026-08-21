@@ -370,6 +370,7 @@ enum Command {
 #[derive(Debug, Default)]
 struct Shared {
     dropped_notifications: AtomicU64,
+    lost_forgets: AtomicU64,
     reconnects: AtomicU64,
     stopped: Mutex<Option<String>>,
 }
@@ -424,10 +425,20 @@ impl Client {
         match outcome {
             Ok(result) => result,
             Err(_elapsed) => {
-                let _ = self.commands.try_send(Command::Forget(id));
+                if self.commands.try_send(Command::Forget(id)).is_err() {
+                    self.shared.lost_forgets.fetch_add(1, Ordering::Relaxed);
+                }
+
                 Err(ClientError::Timeout)
             }
         }
+    }
+
+    /// Timed-out requests whose cancellation could not be delivered because the command
+    /// inbox was full. Each one leaks its reply slot until teardown, which is why the
+    /// count exists: a number that only grows says the connection is wedged.
+    pub fn lost_forgets(&self) -> u64 {
+        self.shared.lost_forgets.load(Ordering::Relaxed)
     }
 
     /// Notifications discarded because the consumer did not keep up. Slice 3a drains

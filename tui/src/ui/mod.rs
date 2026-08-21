@@ -300,7 +300,7 @@ fn copy_pending(app: &mut App) {
     let _ = io::stdout().flush();
 
     #[cfg(target_os = "macos")]
-    {
+    tokio::task::spawn_blocking(move || {
         if let Ok(mut child) = ProcessCommand::new("pbcopy")
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -310,18 +310,22 @@ fn copy_pending(app: &mut App) {
             }
             let _ = child.wait();
         }
-    }
+    });
 }
 
-fn edit_externally(screen: &mut Screen, draft: &str) -> Result<String> {
-    screen.suspend();
+/// Runs `$VISUAL`/`$EDITOR` over `draft` and returns what came back.
+///
+/// Everything here blocks for as long as the person holding the editor keeps it open,
+/// which is why the driver calls it through [`tokio::task::spawn_blocking`] rather than
+/// inline: the render loop and the notification pump keep running meanwhile.
+fn run_external_editor(draft: &str) -> Result<String> {
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let path = draft_path();
 
-    let result = (|| {
-        let editor = env::var("VISUAL")
-            .or_else(|_| env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".to_string());
-        let path = env::temp_dir().join(format!("ouro-prompt-{}.md", std::process::id()));
-        fs::write(&path, draft).with_context(|| format!("writing {}", path.display()))?;
+    let outcome = (|| {
+        write_private_draft(&path, draft).with_context(|| format!("writing {}", path.display()))?;
 
         let status = ProcessCommand::new("sh")
             .arg("-c")
@@ -332,17 +336,65 @@ fn edit_externally(screen: &mut Screen, draft: &str) -> Result<String> {
             .with_context(|| format!("running {editor}"))?;
 
         if !status.success() {
-            anyhow::bail!("{editor} exited with {status}");
+            bail!("{editor} exited with {status}");
         }
 
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let _ = fs::remove_file(&path);
-        Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+        // An editor that saves by writing a sibling and renaming replaces the inode this
+        // module created, and the replacement carries whatever mode the editor chose.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if let Ok(metadata) = fs::metadata(&path) {
+                let mut permissions = metadata.permissions();
+                let mode = permissions.mode();
+
+                if mode & 0o077 != 0 {
+                    permissions.set_mode(mode & !0o077);
+                    let _ = fs::set_permissions(&path, permissions);
+                }
+            }
+        }
+
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
     })();
 
-    screen.resume()?;
-    result
+    let _ = fs::remove_file(&path);
+
+    outcome.map(|text| text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn draft_path() -> PathBuf {
+    env::temp_dir().join(format!("ouro-prompt-{}.md", std::process::id()))
+}
+
+/// Creates the draft exclusively, privately, and never through a symlink that got there
+/// first. A predictable name is safe under those three properties: nothing can preplant
+/// the path, and nothing but its owner can read what lands in it.
+#[cfg(unix)]
+fn write_private_draft(path: &Path, draft: &str) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+
+    file.write_all(draft.as_bytes())?;
+    file.sync_all()
+}
+
+#[cfg(not(unix))]
+fn write_private_draft(path: &Path, draft: &str) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+
+    file.write_all(draft.as_bytes())?;
+    file.sync_all()
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -625,7 +677,21 @@ pub async fn run(
         }
 
         if let Some(draft) = app.take_external_editor() {
-            match edit_externally(&mut screen, &draft) {
+            screen.suspend();
+
+            let edited = tokio::task::spawn_blocking(move || run_external_editor(&draft))
+                .await
+                .unwrap_or_else(|join_error| {
+                    Err(anyhow::anyhow!("the editor task failed: {join_error}"))
+                });
+
+            let result = if let Err(error) = screen.resume() {
+                Err(error)
+            } else {
+                edited
+            };
+
+            match result {
                 Ok(text) => app.apply(Msg::ExternalEditor(text)),
                 Err(error) => app.inform(
                     format!("external editor failed: {error:#}"),

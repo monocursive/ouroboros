@@ -14,6 +14,15 @@
 //! the destination occupied, deletes its own temporary copy, and uses what is already
 //! there. A half-written release is never reachable under its real name.
 //!
+//! ## Reuse is a lookup, and the cache repairs itself
+//!
+//! A directory whose name carries the recorded digest is reused without hashing the
+//! payload again, but it must be release-shaped — `bin/` and `releases/` present. A name
+//! that exists without the shape is a truncated or pre-planted cache entry; it is removed
+//! and the verified extraction runs instead, so a corrupted cache costs one re-unpack and
+//! never a start failure. The releases directory itself is kept private to its owner,
+//! matching every other directory this crate creates.
+//!
 //! ## A start is a use, and collection counts uses
 //!
 //! The cache is keyed by the digest, so recognising an already-extracted release costs a
@@ -102,8 +111,15 @@ pub fn extract(
     let destination = releases_dir.join(directory_name(version, &expected));
 
     if destination.is_dir() {
-        touch(&destination);
-        return Ok(destination);
+        if release_shaped(&destination) {
+            touch(&destination);
+            return Ok(destination);
+        }
+
+        // A digest-named directory without a release in it cannot have come from this
+        // module finishing: it is a truncated extraction or something pre-planted under
+        // the name. Drop it and take the verified path below.
+        let _ = fs::remove_dir_all(&destination);
     }
 
     let actual = sha256_hex(bytes);
@@ -115,8 +131,7 @@ pub fn extract(
         );
     }
 
-    fs::create_dir_all(releases_dir)
-        .with_context(|| format!("creating {}", releases_dir.display()))?;
+    prepare_releases_dir(releases_dir)?;
 
     let temporary = releases_dir.join(format!(
         ".tmp-{}-{}",
@@ -161,6 +176,29 @@ fn unpack(bytes: &[u8], destination: &Path) -> Result<()> {
     archive
         .unpack(destination)
         .with_context(|| format!("unpacking the release into {}", destination.display()))
+}
+
+fn release_shaped(release: &Path) -> bool {
+    release.join("bin").is_dir() && release.join("releases").is_dir()
+}
+
+fn prepare_releases_dir(releases_dir: &Path) -> Result<()> {
+    fs::create_dir_all(releases_dir)
+        .with_context(|| format!("creating {}", releases_dir.display()))?;
+
+    let metadata = fs::metadata(releases_dir)
+        .with_context(|| format!("reading {}", releases_dir.display()))?;
+
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+
+    if mode & 0o077 != 0 {
+        permissions.set_mode(mode & !0o077);
+        fs::set_permissions(releases_dir, permissions)
+            .with_context(|| format!("restricting {}", releases_dir.display()))?;
+    }
+
+    Ok(())
 }
 
 /// Restamps a release as used. Failure costs a suboptimal collection order and nothing
@@ -423,6 +461,48 @@ mod tests {
         assert!(
             error.to_string().contains("does not match the digest"),
             "unexpected error: {error}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A directory that carries a digest name without being a release is repaired by
+    /// extraction rather than returned to the spawner.
+    #[test]
+    fn an_unshaped_digest_named_directory_is_replaced_by_a_verified_extraction() {
+        let dir = scratch("unshaped");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+        let planted = dir.join(directory_name("9.9.9", &digest));
+
+        fs::create_dir_all(planted.join("bin")).unwrap();
+
+        let release = extract(&bytes, &digest, "9.9.9", &dir).expect("the repaired release");
+
+        assert_eq!(release, planted);
+        assert!(release.join("releases").join("start_erl.data").is_file());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_releases_directory_is_private_to_its_owner() {
+        let dir = scratch("private");
+        let releases = dir.join("releases");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+
+        fs::create_dir_all(&releases).unwrap();
+        let mut permissions = fs::metadata(&releases).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&releases, permissions).unwrap();
+
+        extract(&bytes, &digest, "9.9.9", &releases).expect("an extracted release");
+
+        let mode = fs::metadata(&releases).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "a shared cache root defeats the data-dir boundary"
         );
 
         fs::remove_dir_all(&dir).ok();

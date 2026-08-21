@@ -1122,7 +1122,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                         "`ouro --dev fleet leave` cannot safely retire a packaged fleet EPMD. Run `ouro fleet leave` with the packaged binary; no profile or daemon was changed"
                     );
                 }
-                let launcher = launcher(false, paths)?;
+                let launcher = launcher(false, paths).await?;
                 Some(launcher.packaged_epmd_program()?.ok_or_else(|| {
                     anyhow!("the packaged release did not expose its EPMD control binary")
                 })?)
@@ -1705,6 +1705,18 @@ async fn attach_remote(
         )
     })?;
 
+    // The gateway protocol is cleartext, and the token rides in the first frame. A
+    // loopback address is the boundary that makes that safe; anything else deserves a
+    // line on stderr saying so before the handshake sends the credential.
+    if !address.ip().is_loopback() {
+        eprintln!(
+            "warning: {address} is not loopback and this protocol is cleartext: the token \
+             and every payload after it cross the network readable by anyone on the path. \
+             Prefer an SSH tunnel (ssh -L <port>:127.0.0.1:<port> host) and attach to \
+             127.0.0.1."
+        );
+    }
+
     if print {
         report_dev_data_dir_override(paths, dev, &Progress::Plain);
         let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
@@ -2214,7 +2226,7 @@ async fn start(
     // and still prints nothing without one.
     progress.report(BootEvent::Preparing);
 
-    let launcher = launcher(dev, paths)?;
+    let launcher = launcher(dev, paths).await?;
     let token_path = paths.token_file();
     let token = runtime::write_token(&token_path)?;
 
@@ -2409,7 +2421,20 @@ fn ensure_publication_matches_runtime_owner(
     Ok(())
 }
 
-fn launcher(dev: bool, paths: &Paths) -> Result<Launcher> {
+/// Prepares the launch target off the async runtime.
+///
+/// A cold embedded start verifies a digest and unpacks a release tarball here, which is
+/// blocking filesystem work no tokio worker should be doing while clients and log pumps
+/// share it.
+async fn launcher(dev: bool, paths: &Paths) -> Result<Launcher> {
+    let paths = paths.clone();
+
+    tokio::task::spawn_blocking(move || launcher_blocking(dev, &paths))
+        .await
+        .context("the release preparation task failed")?
+}
+
+fn launcher_blocking(dev: bool, paths: &Paths) -> Result<Launcher> {
     if dev {
         let here = std::env::current_dir().context("reading the working directory")?;
 

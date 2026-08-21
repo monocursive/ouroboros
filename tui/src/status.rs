@@ -16,10 +16,26 @@ pub fn render_hello(address: &str, hello: &Hello) -> String {
     let mut page = String::new();
 
     let _ = writeln!(page, "connected to {address}");
-    let _ = writeln!(page, "  server     {}", blank_as_unknown(&hello.server));
-    let _ = writeln!(page, "  node       {}", blank_as_unknown(&hello.node));
-    let _ = writeln!(page, "  role       {}", blank_as_unknown(&hello.role));
-    let _ = writeln!(page, "  scope      {}", blank_as_unknown(&hello.scope));
+    let _ = writeln!(
+        page,
+        "  server     {}",
+        plain(blank_as_unknown(&hello.server))
+    );
+    let _ = writeln!(
+        page,
+        "  node       {}",
+        plain(blank_as_unknown(&hello.node))
+    );
+    let _ = writeln!(
+        page,
+        "  role       {}",
+        plain(blank_as_unknown(&hello.role))
+    );
+    let _ = writeln!(
+        page,
+        "  scope      {}",
+        plain(blank_as_unknown(&hello.scope))
+    );
     let _ = writeln!(page, "  protocol   {}", hello.protocol);
     let _ = writeln!(page, "  methods    {}", hello.methods.len());
 
@@ -100,6 +116,15 @@ fn blank_as_unknown(value: &str) -> &str {
     } else {
         value
     }
+}
+
+/// Blanks control characters, escape sequences included, before a gateway-supplied
+/// string reaches a terminal this module does not own. The ratatui renderer is immune by
+/// construction; the printed page is not, and the peer is authenticated but not trusted.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn scalar(status: &Value, key: &str) -> String {
@@ -191,7 +216,7 @@ fn connected_nodes(status: &Value) -> String {
 /// anything else keeps its JSON shape rather than being flattened into a guess.
 fn render_value(value: &Value) -> String {
     match value {
-        Value::String(text) => text.clone(),
+        Value::String(text) => plain(text),
         Value::Null => "null".into(),
         other => other.to_string(),
     }
@@ -301,5 +326,19 @@ mod tests {
 
         assert!(page.contains("server     unknown"));
         assert!(page.contains("protocol   0"));
+    }
+
+    #[test]
+    fn gateway_strings_reach_the_page_without_control_characters() {
+        let status = json!({
+            "node": "core@\u{1b}evil",
+            "availability": { "mesh": "\u{9b}4m red" }
+        });
+
+        let page = render_status(&status);
+
+        assert!(!page.contains('\u{1b}'), "{page}");
+        assert!(!page.contains('\u{9b}'), "{page}");
+        assert!(page.contains("core@ evil"), "{page}");
     }
 }
