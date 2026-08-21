@@ -59,6 +59,7 @@ use ratatui::Terminal;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::fleet_add::{self, CandidateSource};
 use crate::proto::{Hello, Notification};
 use crate::runtime::Daemon;
 use crate::transport::{Client, HookFuture, ReconnectHook};
@@ -577,6 +578,34 @@ pub async fn run(
         persist(&mut app);
         open_pending_url(&mut app);
         copy_pending(&mut app);
+        if app.take_scan_machines() {
+            spawn_machine_scan(sender.clone());
+        }
+        if let Some(job) = app.take_fleet_job() {
+            spawn_fleet_job(app.data_dir.clone(), job, sender.clone());
+        }
+        if let Some(intent) = app.take_fleet_intent() {
+            match app.data_dir.as_deref() {
+                Some(data_dir) => {
+                    if let Err(error) =
+                        fleet_add::write_intent(std::path::Path::new(data_dir), &intent)
+                    {
+                        app.inform(
+                            format!("could not save the add-machine plan: {error:#}"),
+                            app::NoticeKind::Error,
+                        );
+                        app.quit = None;
+                    }
+                }
+                None => {
+                    app.inform(
+                        "this client has no local data directory, so it cannot create a fleet",
+                        app::NoticeKind::Error,
+                    );
+                    app.quit = None;
+                }
+            }
+        }
 
         if let Some(draft) = app.take_external_editor() {
             match edit_externally(&mut screen, &draft) {
@@ -629,6 +658,124 @@ pub async fn run(
             app.apply(Msg::Notification(notification));
         }
     }
+}
+
+/// One discovery scan at a time: opening Machines twice quickly must not stack two
+/// `tailscale status` processes racing to overwrite each other's candidate list.
+static MACHINES_SCAN_INFLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn spawn_machine_scan(sender: mpsc::UnboundedSender<Msg>) {
+    if MACHINES_SCAN_INFLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    struct ClearOnExit;
+    impl Drop for ClearOnExit {
+        fn drop(&mut self) {
+            MACHINES_SCAN_INFLIGHT.store(false, Ordering::SeqCst);
+        }
+    }
+    std::thread::spawn(move || {
+        let _clear = ClearOnExit;
+        let (candidates, local) = fleet_add::discover();
+        let candidates = candidates.into_iter().map(machine_candidate).collect();
+        let _ = sender.send(Msg::MachineCandidates {
+            candidates,
+            local_machine: local.machine,
+            local_host: local.host,
+        });
+    });
+}
+
+fn machine_candidate(candidate: fleet_add::Candidate) -> app::MachineCandidate {
+    let source = match candidate.source {
+        CandidateSource::Tailscale => "tailscale",
+        CandidateSource::SshConfig => "ssh",
+    };
+    let online = match candidate.online {
+        Some(true) => "online",
+        Some(false) => "offline",
+        None => "",
+    };
+    let os = candidate.os.unwrap_or_default();
+    app::MachineCandidate {
+        label: candidate.label,
+        target: candidate.target,
+        host: candidate.host,
+        detail: format!("{source} {os} {online}")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        tailscale: candidate.source == CandidateSource::Tailscale,
+    }
+}
+
+fn spawn_fleet_job(
+    data_dir: Option<String>,
+    job: app::FleetJob,
+    sender: mpsc::UnboundedSender<Msg>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let Some(data_dir) = data_dir else {
+            let _ = sender.send(Msg::FleetJobFinished {
+                log: Vec::new(),
+                result: Err(
+                    "this client has no local data directory; add machines from the owner Mac"
+                        .into(),
+                ),
+            });
+            return;
+        };
+        let data_dir = std::path::PathBuf::from(data_dir);
+        let outcome = if job.prepare {
+            fleet_add::prepare(&data_dir, &job.machine, &job.host, None)
+        } else {
+            let Some(target) = job.target.as_deref() else {
+                let _ = sender.send(Msg::FleetJobFinished {
+                    log: Vec::new(),
+                    result: Err("SSH add needs user@host".into()),
+                });
+                return;
+            };
+            let via = match fleet_add::Via::parse(&job.via) {
+                Ok(via) => via,
+                Err(error) => {
+                    let _ = sender.send(Msg::FleetJobFinished {
+                        log: Vec::new(),
+                        result: Err(format!("{error:#}")),
+                    });
+                    return;
+                }
+            };
+            fleet_add::add(
+                &data_dir,
+                target,
+                Some(&job.machine),
+                Some(&job.host),
+                via,
+                job.binary.as_deref().map(std::path::Path::new),
+                None,
+            )
+        };
+        match outcome {
+            Ok(outcome) => {
+                let recipe = outcome
+                    .recipe
+                    .as_ref()
+                    .map(fleet_add::Recipe::text)
+                    .unwrap_or_default();
+                let _ = sender.send(Msg::FleetJobFinished {
+                    log: outcome.log,
+                    result: Ok(recipe),
+                });
+            }
+            Err(error) => {
+                let _ = sender.send(Msg::FleetJobFinished {
+                    log: Vec::new(),
+                    result: Err(format!("{error:#}")),
+                });
+            }
+        }
+    });
 }
 
 fn spawn_call(client: Client, call: Call, sender: mpsc::UnboundedSender<Msg>) {

@@ -3,19 +3,34 @@
 An implemented secure core plus the evolution design for a fleet of Ouroboros runtimes
 — a Mac, a Linux laptop, a VPS — joined as one BEAM cluster.
 
-## Current shipped core (2026-08-20)
+## Current shipped core (2026-08-21)
 
 The beginner path no longer requires the environment/OpenSSL runbook described later in
-this document:
+this document. From the first Mac you launch, `/machines` → **Add another machine** (or
+`ouro fleet add`) installs or prepares the Linux laptop and VPS. A first add restarts
+that standalone runtime once to become the fleet owner. SSH/Tailscale SSH copies a
+private invitation as a file and enrolls when the destination can run this binary; a
+Mac build is never copied onto Linux. When SSH is unavailable, `--print-script` /
+"I'll run a command myself" writes the invitation here and prints `ouro fleet enroll`.
 
 ```sh
-# First machine
+# First machine (already running ouro): /machines → Add, or:
+ouro fleet list
+ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
+ouro fleet add --print-script --machine laptop --host laptop.example-tailnet.ts.net
+
+# First add while this Mac is still standalone
+ouro stop
+ouro fleet add --init --owner-host studio.example-tailnet.ts.net \
+  --print-script --machine laptop --host laptop.example-tailnet.ts.net
+
+# Explicit file path, same membership material
 ouro fleet create
 ouro fleet invite --machine laptop --host laptop.example-tailnet.ts.net --out laptop.ouro
 
 # Invited machine, after privately copying the mode-0600 file
-ouro fleet join laptop.ouro
-ouro daemon
+ouro fleet enroll laptop.ouro --delete
+# or: ouro fleet join laptop.ouro && ouro daemon
 
 # On both machines, for crash/login recovery. Review and run the activation command it prints.
 ouro fleet service install
@@ -76,8 +91,11 @@ Implemented now:
   and follow-ups over BEAM distribution using owner-qualified references;
 - durable positive session-owner evidence that survives gateway/runtime recovery, plus an
   explicit tombstoned-offline state-loss command instead of implicit deletion on cancel;
-- Settings → Machines guidance, a connected-machine New Session picker, and retained
-  cursor recovery when a remote owner temporarily disappears;
+- Settings → Machines: **Add** can run after confirm (SSH/Tailscale push or a printed
+  enroll recipe). Other rows still copy commands. A first add on a standalone Mac
+  restarts once to create the fleet. Known Tailscale/SSH hosts are listed for picking;
+- a connected-machine New Session picker, and retained cursor recovery when a remote
+  owner temporarily disappears;
 - remote Team worker reconciliation after the worker's machine restarts;
 - generated launchd/systemd-user recovery units, with activation kept explicit;
 - separate private service logs: OTP live-rotates `runtime.log` after 2 MiB with three
@@ -105,7 +123,9 @@ inventory rather than placement fences. Bump the integer whenever fleet posture,
 session routing, or distributed ownership semantics become unsafe across revisions; do
 not replace it with a build-path or source hash.
 
-Still intentionally deferred: automatic Tailscale LocalAPI discovery, free-form tags,
+Still intentionally deferred: automatic Tailscale LocalAPI discovery and auto-join
+(Add lists `tailscale status --json` peers and `~/.ssh/config` hosts as optional
+targets; it does not join them without a confirm), free-form tags,
 logical workspace maps, heterogeneous forge orchestration, replicated journals, live
 provider migration, quorum/fencing, and multi-cluster federation. One Erlang cluster is
 one trust domain. A network partition can produce independent views; no section below

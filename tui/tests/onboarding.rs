@@ -79,6 +79,11 @@ fn ouro_opens_on_the_coding_harness_without_an_onboarding_modal() {
     assert!(screen.contains("New coding session"), "{}", screen.text());
     assert!(screen.contains("Connect ChatGPT to start coding"));
     assert!(screen.contains("Type / for commands"), "{}", screen.text());
+    assert!(
+        screen.contains("/machines adds your laptop and servers"),
+        "{}",
+        screen.text()
+    );
     assert!(screen.contains("ctrl+p commands"));
     assert!(!screen.contains("Dashboard│"));
 }
@@ -91,6 +96,11 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("ChatGPT Pro"), "{}", screen.text());
     assert!(screen.contains("Ready in this workspace"));
     assert!(screen.contains("Ask the agent to build, fix, explain, or review"));
+    assert!(
+        screen.contains("/machines adds your laptop and servers"),
+        "{}",
+        screen.text()
+    );
     assert!(screen.contains("/work/ouroboros"));
     assert!(screen.contains("FILES can edit"), "{}", screen.text());
 }

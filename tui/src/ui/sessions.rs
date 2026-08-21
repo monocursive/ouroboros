@@ -630,6 +630,10 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
                 },
                 Style::default().fg(theme::MUTED),
             )),
+            Line::from(Span::styled(
+                app.machine_hint(),
+                Style::default().fg(theme::MUTED),
+            )),
         ]
     } else {
         vec![
@@ -643,6 +647,10 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             Line::from("Use your existing ChatGPT subscription. No API key is required."),
             Line::from(Span::styled(
                 "Press Enter to connect, or type / for commands without signing in.",
+                Style::default().fg(theme::MUTED),
+            )),
+            Line::from(Span::styled(
+                app.machine_hint(),
                 Style::default().fg(theme::MUTED),
             )),
         ]

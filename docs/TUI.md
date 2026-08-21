@@ -619,6 +619,14 @@ ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       is refused, naming both places
 ouro stop             graceful stop of the locally spawned daemon
 ouro fleet create     create private CA/cookie/profile for the first machine
+ouro fleet list       Tailscale peers and SSH config hosts this Mac already knows
+ouro fleet add TARGET --machine NAME --host HOST [--via ssh|tailscale] [--binary FILE]
+                      probe over SSH, copy a matching binary when honest, copy one
+                      private invitation as a file, enroll remotely
+ouro fleet add --print-script --machine NAME --host HOST
+                      write the invitation here and print the enroll recipe
+ouro fleet enroll FILE [--delete] [--service]
+                      join from a copied invitation and start the daemon
 ouro fleet invite --machine NAME --host HOST --out FILE
                       create one private 0600 owner-attested invitation
 ouro fleet invite cancel --machine NAME --out ROSTER
@@ -866,6 +874,12 @@ rediscovered:
   dialog uses, workspace, approval mode, and sandbox mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
+- **Machines Add can install the other machines from this instance.** `/machines` (also
+  `,` → machines) opens a confirmable add: SSH/Tailscale SSH when this Mac can reach the
+  host, or a printed enroll recipe when it cannot. Known Tailscale/SSH hosts are
+  pickable. A first add on a standalone Mac restarts once to create the fleet. Invitation
+  bytes never appear on screen, in argv, or in the recipe. A Mac binary is never copied
+  onto Linux. Provider sign-in stays on the destination.
 - **Machines keeps membership removal and state retirement separate.** Its guidance says
   cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
   removed owner's state, importing the signed roster, and restarting does it show the

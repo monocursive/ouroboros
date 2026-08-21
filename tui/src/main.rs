@@ -19,6 +19,7 @@
 //! exactly the lines it always printed wherever there is no screen to draw on — a pipe,
 //! `ouro daemon`, or any `--print`.
 
+use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -34,6 +35,7 @@ use ouro::cli::{
     Cli, Command, FleetCommand, InviteCommand, ServiceCommand, SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
+use ouro::fleet_add;
 use ouro::model::{ApprovalMode, Plane, SandboxMode, StartError, StartRequest, StartedRef};
 use ouro::proto::Hello;
 use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
@@ -133,6 +135,13 @@ struct Local {
     /// in attach mode, because then it did not choose.
     data_dir: Option<String>,
     config: Loaded,
+    /// After a standalone→fleet restart, land on Machines so the operator sees the add.
+    open_machines: bool,
+    /// Progress lines from the add that triggered that restart. Empty on a normal start.
+    add_log: Vec<String>,
+    /// Enroll recipe from that add, if the destination still needs a command. Never
+    /// contains invitation bytes.
+    add_recipe: Option<String>,
 }
 
 fn version() -> String {
@@ -165,9 +174,16 @@ fn embedded_release() -> String {
 /// progress rather than of silence, and a boot that fails does so somewhere it can show
 /// the runtime's own output.
 async fn attach_local(paths: &Paths, dev: bool, config: Loaded) -> Result<()> {
-    // Local filesystem preflight happens before the alternate-screen boot UI. A derived
-    // legacy directory can be repaired invisibly; an actual operator/configuration error
-    // remains one concise stderr diagnostic rather than an empty full-screen failure.
+    attach_local_with(paths, dev, config, false, None).await
+}
+
+async fn attach_local_with(
+    paths: &Paths,
+    dev: bool,
+    config: Loaded,
+    open_machines: bool,
+    add_outcome: Option<fleet_add::Outcome>,
+) -> Result<()> {
     paths.ensure_private_data_dir()?;
 
     let mut boot = Boot::begin();
@@ -182,6 +198,12 @@ async fn attach_local(paths: &Paths, dev: bool, config: Loaded) -> Result<()> {
     let local = Local {
         data_dir: Some(paths.data_dir.display().to_string()),
         config,
+        open_machines,
+        add_log: add_outcome
+            .as_ref()
+            .map(|outcome| outcome.log.clone())
+            .unwrap_or_default(),
+        add_recipe: add_outcome.and_then(|outcome| outcome.recipe.map(|recipe| recipe.text())),
     };
 
     draw(
@@ -564,12 +586,132 @@ async fn new_session(
         Local {
             data_dir: Some(paths.data_dir.display().to_string()),
             config,
+            open_machines: false,
+            add_log: Vec::new(),
+            add_recipe: None,
         },
         created_start_failure,
         first_message_reconciliation,
         first_message_accepted,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fleet_add_command(
+    paths: &Paths,
+    target: Option<String>,
+    machine: Option<String>,
+    host: Option<String>,
+    via: String,
+    binary: Option<PathBuf>,
+    print_script: bool,
+    init: bool,
+    owner_host: Option<String>,
+    owner_machine: Option<String>,
+) -> Result<()> {
+    // Argument shape is settled before any state changes: a named target means SSH and
+    // --print-script means no SSH, so together they are refused rather than silently
+    // narrowed.
+    match target.as_deref() {
+        Some(target) if print_script => bail!(
+            "--print-script does not use TARGET; drop --print-script to run `{target}` over SSH, or omit the target to only write the invitation"
+        ),
+        None if !print_script => bail!(
+            "name the destination as `ouro fleet add user@host`, or pass `--print-script --machine NAME --host HOST` to enroll it yourself. `ouro fleet list` shows Tailscale and SSH hosts this Mac already knows"
+        ),
+        _ => {}
+    }
+
+    if init && fleet::load(&paths.data_dir)?.is_none() {
+        let owner_host = owner_host.as_deref().ok_or_else(|| {
+            anyhow!(
+                "`ouro fleet add --init` needs --owner-host with this Mac's Tailscale MagicDNS name or private IPv4 address"
+            )
+        })?;
+        let identity = fleet::resolve_identity(owner_machine.as_deref(), Some(owner_host))?;
+        fleet::create(
+            &paths.data_dir,
+            None,
+            &identity.machine,
+            &identity.host,
+            fleet::Ports::DEFAULT,
+        )?;
+        println!(
+            "Created this Mac as fleet owner `{machine}` at {host}.",
+            machine = identity.machine,
+            host = identity.host
+        );
+    }
+
+    let owner_host = fleet::load(&paths.data_dir)?
+        .map(|profile| profile.host)
+        .or(owner_host);
+
+    if print_script || target.is_none() {
+        let machine = machine.ok_or_else(|| {
+            anyhow!("`--machine NAME` is required when printing an enroll script")
+        })?;
+        let host = host
+            .ok_or_else(|| anyhow!("`--host HOST` is required when printing an enroll script"))?;
+        let outcome = fleet_add::prepare(&paths.data_dir, &machine, &host, owner_host.as_deref())?;
+        print!("{}", fleet_add::render_outcome(&outcome));
+        return Ok(());
+    }
+
+    let target = target.expect("target is present when not printing a script");
+    let via = fleet_add::Via::parse(&via)?;
+    let outcome = fleet_add::add(
+        &paths.data_dir,
+        &target,
+        machine.as_deref(),
+        host.as_deref(),
+        via,
+        binary.as_deref(),
+        owner_host.as_deref(),
+    )?;
+    print!("{}", fleet_add::render_outcome(&outcome));
+    Ok(())
+}
+
+async fn fleet_enroll_command(
+    paths: &Paths,
+    invitation: PathBuf,
+    delete: bool,
+    service: bool,
+    ports: fleet::Ports,
+) -> Result<()> {
+    fleet_add::enroll_preflight(&invitation)?;
+    let profile = fleet::join(&paths.data_dir, &invitation, ports)?;
+    println!(
+        "Joined fleet {} as {} at {}.",
+        profile.name, profile.machine, profile.host
+    );
+    if delete {
+        fs::remove_file(&invitation).with_context(|| {
+            format!(
+                "joined, but could not delete invitation {}",
+                invitation.display()
+            )
+        })?;
+    }
+    if service {
+        match fleet::service_install(&paths.data_dir) {
+            Ok(installed) => {
+                println!(
+                    "Recovery unit written at {}.\nActivate with:\n  {}\n",
+                    installed.path.display(),
+                    installed.activation
+                );
+            }
+            Err(error) => {
+                println!(
+                    "joined, but recovery was not installed: {error:#}\nRun `ouro fleet service install` after this daemon is healthy."
+                );
+            }
+        }
+    }
+    daemon(paths, false).await
 }
 
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
@@ -605,7 +747,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 ""
             };
             println!(
-                "Fleet created securely.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n  4. Add another: `ouro fleet invite --machine NAME --host HOST --out NAME.ouro`\n  5. Copy that private file to the new machine and run `ouro fleet join NAME.ouro`\n\nAllow TCP {} (this fleet's EPMD port) and {}..{} only between private fleet addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThis machine is the fleet's sole invitation/roster authority. Back up {} securely; automatic service recovery does not protect against disk loss. For optional login/crash recovery, run `ouro fleet service install` and follow its activation step.",
+                "Fleet created securely.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n  4. Add another from this machine: `ouro fleet add user@host --machine NAME --host HOST`\n  5. If SSH is unavailable, `ouro fleet add --print-script --machine NAME --host HOST` then run the printed enroll command there\n\nAllow TCP {} (this fleet's EPMD port) and {}..{} only between private fleet addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThis machine is the fleet's sole invitation/roster authority. Back up {} securely; automatic service recovery does not protect against disk loss. For optional login/crash recovery, run `ouro fleet service install` and follow its activation step.",
                 profile.name,
                 profile.machine,
                 profile.host,
@@ -617,6 +759,63 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 fleet::fleet_dir(&paths.data_dir).display()
             );
             Ok(())
+        }
+        FleetCommand::List => {
+            print!(
+                "{}",
+                fleet_add::render_list(&fleet_add::discover_candidates())
+            );
+            Ok(())
+        }
+        FleetCommand::Add {
+            target,
+            machine,
+            host,
+            via,
+            binary,
+            print_script,
+            init,
+            owner_host,
+            owner_machine,
+        } => {
+            if dev {
+                bail!("fleet add belongs to the packaged runtime data directory; omit --dev");
+            }
+            fleet_add_command(
+                paths,
+                target,
+                machine,
+                host,
+                via,
+                binary,
+                print_script,
+                init,
+                owner_host,
+                owner_machine,
+            )
+            .await
+        }
+        FleetCommand::Enroll {
+            invitation,
+            delete,
+            service,
+            gateway_port,
+            dist_port,
+        } => {
+            if dev {
+                bail!("fleet enroll belongs to the packaged runtime; omit --dev");
+            }
+            fleet_enroll_command(
+                paths,
+                invitation,
+                delete,
+                service,
+                fleet::Ports {
+                    gateway: gateway_port,
+                    dist: dist_port,
+                },
+            )
+            .await
         }
         FleetCommand::Invite {
             command,
@@ -1531,6 +1730,9 @@ async fn attach_remote(
             // anything.
             data_dir: None,
             config,
+            open_machines: false,
+            add_log: Vec::new(),
+            add_recipe: None,
         },
     )
     .await
@@ -1625,11 +1827,19 @@ async fn run_ui(
         .ok()
         .map(|here| here.display().to_string());
 
-    app.data_dir = local.data_dir;
+    app.data_dir = local.data_dir.clone();
     app.fleet_profile = app
         .data_dir
         .as_deref()
         .and_then(|data_dir| fleet::load(Path::new(data_dir)).ok().flatten());
+    app.can_invite = app
+        .data_dir
+        .as_deref()
+        .zip(app.fleet_profile.as_ref())
+        .is_some_and(|(data_dir, profile)| profile.can_invite(Path::new(data_dir)));
+    app.open_machines_on_start = local.open_machines;
+    app.resume_add_log = local.add_log;
+    app.resume_add_recipe = local.add_recipe;
     app.config_path = Some(local.config.path.clone());
     app.config = local.config.config;
 
@@ -1729,6 +1939,28 @@ async fn run_ui(
         }
     };
 
+    if quit == Quit::ApplyFleetIntent {
+        finish(Quit::Shutdown, &client, &hello, daemon).await?;
+        let data_dir = local.data_dir.ok_or_else(|| {
+            anyhow!(
+                "cannot create a fleet from an attached client that has no local data directory"
+            )
+        })?;
+        let outcome = fleet_add::apply_intent(Path::new(&data_dir))?;
+        print!("{}", fleet_add::render_outcome(&outcome));
+        let paths = runtime::Paths::discover(false)?;
+        // Reattach with this session's own configuration source rather than defaults:
+        // the restart is an implementation detail of one add, not a new invocation.
+        return Box::pin(attach_local_with(
+            &paths,
+            false,
+            config::load(local.config.path),
+            true,
+            Some(outcome),
+        ))
+        .await;
+    }
+
     finish(quit, &client, &hello, daemon).await
 }
 
@@ -1749,7 +1981,7 @@ async fn finish(quit: Quit, client: &Client, hello: &Hello, daemon: Option<Daemo
             daemon.detach();
             println!("detached; the runtime is still running (pid {pid})");
         }
-        Quit::Shutdown => {
+        Quit::Shutdown | Quit::ApplyFleetIntent => {
             if hello.serves("runtime.shutdown") && hello.operates() {
                 match client.call("runtime.shutdown", json!({})).await {
                     Ok(_result) => println!("the runtime accepted runtime.shutdown"),
@@ -2906,6 +3138,9 @@ mod tests {
                     path: data_dir.join("config.toml"),
                     problems: vec![],
                 },
+                open_machines: false,
+                add_log: Vec::new(),
+                add_recipe: None,
             },
         )
         .await

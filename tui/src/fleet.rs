@@ -34,6 +34,8 @@ use crate::runtime;
 
 pub const FLEET_DIR: &str = "fleet";
 pub const PROFILE_FILE: &str = "profile.json";
+pub const PENDING_DIR: &str = "pending";
+pub const ADD_INTENT_FILE: &str = "add-intent.json";
 pub const COOKIE_FILE: &str = "cookie";
 pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
@@ -361,6 +363,39 @@ pub fn fleet_dir(data_dir: &Path) -> PathBuf {
 
 pub fn profile_path(data_dir: &Path) -> PathBuf {
     fleet_dir(data_dir).join(PROFILE_FILE)
+}
+
+pub fn pending_dir(data_dir: &Path) -> PathBuf {
+    fleet_dir(data_dir).join(PENDING_DIR)
+}
+
+/// Where a first-run add-from-this-instance restart stores its non-secret plan.
+pub fn add_intent_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(ADD_INTENT_FILE)
+}
+
+/// Invitation path for one pending machine. The machine name is validated so it cannot
+/// escape the pending directory.
+pub fn pending_invite_path(data_dir: &Path, machine: &str) -> Result<PathBuf> {
+    validate_machine(machine)?;
+    Ok(pending_dir(data_dir).join(format!("{machine}.ouro")))
+}
+
+pub fn ensure_pending_dir(data_dir: &Path) -> Result<PathBuf> {
+    let dir = pending_dir(data_dir);
+    if dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", dir.display()))?
+    {
+        ensure_private_dir(&dir)?;
+    } else {
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| format!("creating private pending directory {}", dir.display()))?;
+        ensure_private_dir(&dir)?;
+    }
+    Ok(dir)
 }
 
 fn epmd_owner_path(data_dir: &Path) -> PathBuf {
@@ -4429,7 +4464,7 @@ fn validate_cookie(cookie: &str, description: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_machine(machine: &str) -> Result<()> {
+pub fn validate_machine(machine: &str) -> Result<()> {
     let valid = !machine.is_empty()
         && machine.len() <= 40
         && machine
@@ -4471,7 +4506,7 @@ fn local_hostname() -> Result<String> {
     Ok(hostname)
 }
 
-fn machine_from_host(host: &str) -> Result<String> {
+pub fn machine_from_host(host: &str) -> Result<String> {
     let source = if host.parse::<IpAddr>().is_ok() {
         host.to_string()
     } else {

@@ -1302,7 +1302,47 @@ verified TLS in addition to the private network.
 
 ### Create, invite, join
 
-On the first machine:
+The usual first-run path is **from the Mac you already launched**. Start coding immediately
+with `ouro`. Then `/machines` → **Add another machine** (or `,` → machines). That overlay
+lists Tailscale peers and SSH config hosts this Mac already knows.
+
+- **This Mac can SSH** (or Tailscale SSH) to the laptop or VPS: confirm the plan. Enter
+  runs it. A first add on a still-standalone Mac restarts this runtime once to create the
+  fleet, then copies a private invitation as a file and enrolls the destination when that
+  is honest.
+- **Mac → Linux / different CPU:** this Mac cannot copy its own `ouro`. Leave dest. binary
+  empty if that host already has the matching version, or pass a Linux (or other) build
+  with `--binary`. Otherwise install `ouro` on the destination and run the printed
+  `ouro fleet enroll`. GitHub Linux assets stay unproven until the first tag actually
+  publishes them; until then build on that OS with `make ouro`.
+- **Laptop asleep, no SSH, or you will set it up yourself:** choose that method. This Mac
+  writes a mode-0600 invitation and a short recipe. Copy the `.ouro` file through a
+  private channel (never paste it into chat). On the other machine:
+
+```sh
+chmod 600 laptop.ouro
+ouro fleet enroll laptop.ouro --delete
+```
+
+CLI equivalents, still on this first Mac:
+
+```sh
+ouro fleet list
+# Reachable VPS / Linux box (same OS/CPU can copy this binary; otherwise pass --binary)
+ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
+# First add while this Mac is still standalone: stop, then --init
+ouro stop
+ouro fleet add --init --owner-host studio.example-tailnet.ts.net \
+  user@vps --machine vps --host vps.example-tailnet.ts.net
+# Unreachable or other-arch: invitation + recipe only
+ouro fleet add --print-script --machine laptop --host laptop.example-tailnet.ts.net
+```
+
+`--init` (and the TUI first-add restart) refuse to rewrite a **live** runtime. Provider
+sign-in is per machine and is never copied by an invitation; connect ChatGPT or the
+provider on that host after it joins.
+
+The same membership files can still be created by hand. On the first machine:
 
 ```sh
 # If this data directory is already running standalone, stop it before changing posture.
@@ -1322,6 +1362,10 @@ the single missing fact instead of guessing:
 ```sh
 ouro fleet create --machine studio --host studio.example-tailnet.ts.net
 ```
+
+`ouro fleet add` already writes that invitation. The commands below are the explicit
+file path if you want to mint it yourself. `ouro fleet enroll FILE --delete` is join
+plus starting this machine's daemon.
 
 Still on that first machine, make one invitation for the second machine:
 

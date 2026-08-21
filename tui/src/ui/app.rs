@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults};
 use crate::fleet::Profile as FleetProfile;
+use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
     CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo,
@@ -143,6 +144,8 @@ pub enum Quit {
     Shutdown,
     /// Attach mode: close the socket and nothing else.
     Disconnect,
+    /// Stop this standalone runtime, create a fleet from the saved intent, then come back.
+    ApplyFleetIntent,
 }
 
 /// One request the driver should make. `Clone` because a confirmation dialog holds the
@@ -276,6 +279,17 @@ pub enum Msg {
     Scroll(isize),
     /// Text the I/O driver read back from `$VISUAL`/`$EDITOR`.
     ExternalEditor(String),
+    /// Tailscale peers and SSH config hosts, gathered by the driver when Machines opens.
+    MachineCandidates {
+        candidates: Vec<MachineCandidate>,
+        local_machine: Option<String>,
+        local_host: Option<String>,
+    },
+    /// Result of a confirmed `fleet add` / prepare job the driver ran.
+    FleetJobFinished {
+        log: Vec<String>,
+        result: Result<String, String>,
+    },
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -1295,12 +1309,12 @@ impl Settings {
     }
 }
 
-/// One safe, local action in the Machines guide. The TUI explains and can copy these
-/// commands but deliberately does not execute them: creating an invite writes private
-/// membership material and joining changes how a daemon starts, so both stay explicit
-/// terminal actions whose exact command can be reviewed first.
+/// One safe, local action in the Machines guide. Adding a machine is the one path that
+/// can run after an explicit confirm. The remaining rows still copy exact commands so an
+/// accidental Enter cannot mint or import membership material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineAction {
+    Add,
     Create,
     Join,
     Invite,
@@ -1311,7 +1325,8 @@ pub enum MachineAction {
 }
 
 impl MachineAction {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Add,
         Self::Create,
         Self::Join,
         Self::Invite,
@@ -1323,9 +1338,10 @@ impl MachineAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Add => "Add another machine",
             Self::Create => "Create a fleet",
             Self::Join => "Join this fleet",
-            Self::Invite => "Add another machine",
+            Self::Invite => "Add with an invitation file",
             Self::Service => "Keep this machine running",
             Self::Status => "Check the machines",
             Self::Doctor => "Diagnose a connection",
@@ -1335,6 +1351,7 @@ impl MachineAction {
 
     pub fn command(self) -> &'static str {
         match self {
+            Self::Add => "ouro fleet add user@host --machine NAME --host HOST",
             Self::Create => "ouro fleet create",
             Self::Join => "ouro fleet join INVITE.ouro",
             Self::Invite => "ouro fleet invite --machine NAME --host HOST --out INVITE.ouro",
@@ -1353,12 +1370,159 @@ pub struct Machines {
     /// Enter opens the focused action's longer explanation. Escape first returns to the
     /// overview, then closes the guide, so exploring never loses the fleet summary.
     pub guide: Option<MachineAction>,
+    pub add: Option<AddMachine>,
+    pub candidates: Vec<MachineCandidate>,
+    pub local_machine: Option<String>,
+    pub local_host: Option<String>,
 }
 
 impl Machines {
     pub fn selected(&self) -> MachineAction {
         MachineAction::ALL[self.selected.min(MachineAction::ALL.len() - 1)]
     }
+}
+
+/// A host this Mac already knows. The driver fills this from Tailscale and SSH config;
+/// the App never probes the network itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineCandidate {
+    pub label: String,
+    pub target: String,
+    pub host: Option<String>,
+    pub detail: String,
+    pub tailscale: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddMethod {
+    Ssh,
+    Prepare,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddStep {
+    Method,
+    Pick,
+    Form,
+    Confirm,
+    Working,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddField {
+    Target,
+    Machine,
+    Host,
+    Via,
+    Binary,
+    OwnerHost,
+    OwnerMachine,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddMachine {
+    pub step: AddStep,
+    pub method: AddMethod,
+    pub target: String,
+    pub machine: String,
+    pub host: String,
+    pub via: usize,
+    pub binary: String,
+    pub owner_host: String,
+    pub owner_machine: String,
+    pub field: AddField,
+    pub error: Option<String>,
+    pub log: Vec<String>,
+    pub recipe: Option<String>,
+    pub pending: bool,
+    pub candidate: usize,
+}
+
+impl AddMachine {
+    fn new() -> Self {
+        Self {
+            step: AddStep::Method,
+            method: AddMethod::Ssh,
+            target: String::new(),
+            machine: String::new(),
+            host: String::new(),
+            via: 0,
+            binary: String::new(),
+            owner_host: String::new(),
+            owner_machine: String::new(),
+            field: AddField::Target,
+            error: None,
+            log: Vec::new(),
+            recipe: None,
+            pending: false,
+            candidate: 0,
+        }
+    }
+
+    pub fn via_label(&self) -> &'static str {
+        if self.via == 0 {
+            "ssh"
+        } else {
+            "tailscale"
+        }
+    }
+
+    fn apply_candidate(&mut self, candidate: &MachineCandidate) {
+        self.target = candidate.target.clone();
+        self.host = candidate
+            .host
+            .clone()
+            .unwrap_or_else(|| candidate.target.clone());
+        self.machine = suggested_machine_name(&candidate.label, &self.host);
+        if candidate.tailscale {
+            self.via = 1;
+        }
+    }
+
+    fn form_field(&self) -> AddField {
+        match self.method {
+            AddMethod::Ssh => AddField::Target,
+            AddMethod::Prepare => AddField::Machine,
+        }
+    }
+
+    pub fn fields(&self, standalone: bool) -> Vec<AddField> {
+        let mut fields = match self.method {
+            AddMethod::Ssh => vec![
+                AddField::Target,
+                AddField::Machine,
+                AddField::Host,
+                AddField::Via,
+                AddField::Binary,
+            ],
+            AddMethod::Prepare => vec![AddField::Machine, AddField::Host],
+        };
+        if standalone {
+            fields.extend([AddField::OwnerMachine, AddField::OwnerHost]);
+        }
+        fields
+    }
+}
+
+fn suggested_machine_name(label: &str, host: &str) -> String {
+    if crate::fleet::validate_machine(label).is_ok() {
+        return label.to_ascii_lowercase();
+    }
+    crate::fleet::machine_from_host(host)
+        .or_else(|_| crate::fleet::machine_from_host(label))
+        .unwrap_or_default()
+}
+
+/// Confirmed add the I/O driver should run against the local data directory.
+#[derive(Debug, Clone)]
+pub struct FleetJob {
+    pub prepare: bool,
+    pub target: Option<String>,
+    pub machine: String,
+    pub host: String,
+    pub via: String,
+    pub binary: Option<String>,
 }
 
 /// The small, intentionally non-secret view model shared by Settings, the Dashboard and
@@ -1622,8 +1786,8 @@ pub enum Overlay {
     Help,
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
-    /// A guided, read-only fleet setup surface. Commands are shown exactly and are never
-    /// run from a keypress in this overlay.
+    /// A guided fleet setup surface. Add-another-machine can run after an explicit
+    /// confirm; the remaining rows still copy exact commands.
     Machines(Box<Machines>),
     Quit {
         options: Vec<(String, Quit)>,
@@ -1794,6 +1958,21 @@ pub struct App {
     /// Non-secret membership metadata loaded by the launcher from this runtime's data
     /// directory. The App remains a pure state machine: it never reads the profile itself.
     pub fleet_profile: Option<FleetProfile>,
+    /// Whether this data directory holds the fleet CA key. Loaded by the launcher; the
+    /// App never stats the key file.
+    pub can_invite: bool,
+    /// Ask the driver to list Tailscale/SSH hosts. Set when Machines opens.
+    scan_machines_pending: bool,
+    /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
+    fleet_intent_pending: Option<FleetIntent>,
+    /// Confirmed add/prepare for a live fleet owner. The driver runs it.
+    fleet_job_pending: Option<FleetJob>,
+    /// Open Machines after a fleet-intent restart so the operator sees what happened.
+    pub open_machines_on_start: bool,
+    /// Progress from that restart's add, shown on the Add Done step.
+    pub resume_add_log: Vec<String>,
+    /// Enroll recipe from that restart's add, if the destination still needs a command.
+    pub resume_add_recipe: Option<String>,
     /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
     /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
     /// advertise the binding only where it exists, because in every other terminal that
@@ -1865,6 +2044,13 @@ impl App {
             config_path: None,
             data_dir: None,
             fleet_profile: None,
+            can_invite: false,
+            scan_machines_pending: false,
+            fleet_intent_pending: None,
+            fleet_job_pending: None,
+            open_machines_on_start: false,
+            resume_add_log: Vec::new(),
+            resume_add_recipe: None,
             keyboard_enhanced: false,
             home_draft: Editor::default(),
             home_pending: false,
@@ -1896,6 +2082,18 @@ impl App {
 
     pub fn take_external_editor(&mut self) -> Option<String> {
         self.external_editor_pending.take()
+    }
+
+    pub fn take_scan_machines(&mut self) -> bool {
+        std::mem::take(&mut self.scan_machines_pending)
+    }
+
+    pub fn take_fleet_intent(&mut self) -> Option<FleetIntent> {
+        self.fleet_intent_pending.take()
+    }
+
+    pub fn take_fleet_job(&mut self) -> Option<FleetJob> {
+        self.fleet_job_pending.take()
     }
 
     pub fn leader_pending(&self) -> bool {
@@ -2181,7 +2379,7 @@ impl App {
                 offline_names: Vec::new(),
                 security: MachineSecurity::Standalone,
                 recovery:
-                    "This machine runs on its own. Create a fleet when another machine is ready."
+                    "This machine runs on its own. Add another from this overlay when it is reachable."
                         .into(),
             };
         }
@@ -2505,6 +2703,48 @@ impl App {
             }
             Msg::NotificationsDropped(total) => self.client_dropped(total),
             Msg::ExternalEditor(text) => self.apply_external_editor(text),
+            Msg::MachineCandidates {
+                candidates,
+                local_machine,
+                local_host,
+            } => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    machines.candidates = candidates;
+                    machines.local_machine = local_machine.clone();
+                    machines.local_host = local_host.clone();
+                    if let Some(add) = machines.add.as_mut() {
+                        if add.owner_machine.is_empty() {
+                            if let Some(name) = local_machine {
+                                add.owner_machine = name;
+                            }
+                        }
+                        if add.owner_host.is_empty() {
+                            if let Some(host) = local_host {
+                                add.owner_host = host;
+                            }
+                        }
+                    }
+                }
+            }
+            Msg::FleetJobFinished { log, result } => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    if let Some(add) = machines.add.as_mut() {
+                        add.pending = false;
+                        add.log = log;
+                        match result {
+                            Ok(recipe) => {
+                                add.step = AddStep::Done;
+                                add.recipe = (!recipe.is_empty()).then_some(recipe);
+                                add.error = None;
+                            }
+                            Err(error) => {
+                                add.step = AddStep::Confirm;
+                                add.error = Some(error);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -4732,6 +4972,32 @@ impl App {
             json!({}),
             LIST_TICKS,
         );
+        if self.open_machines_on_start {
+            self.open_machines_on_start = false;
+            self.open_machines();
+            if !self.resume_add_log.is_empty() || self.resume_add_recipe.is_some() {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    let mut add = AddMachine::new();
+                    add.step = AddStep::Done;
+                    add.log = std::mem::take(&mut self.resume_add_log);
+                    add.recipe = self.resume_add_recipe.take();
+                    machines.add = Some(add);
+                }
+            }
+        }
+    }
+
+    /// One line for the coding home: this is one machine, or how many are connected.
+    pub fn machine_hint(&self) -> String {
+        let summary = self.machine_summary();
+        if summary.mode == "Standalone" {
+            "This is one machine. /machines adds your laptop and servers.".into()
+        } else {
+            format!(
+                "Fleet: {} connected. /machines adds or repairs others.",
+                summary.connected
+            )
+        }
     }
 
     /// Records that this operator has reached the coding home once.
@@ -6086,16 +6352,26 @@ impl App {
 
     fn open_machines(&mut self) {
         self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+        self.scan_machines_pending = true;
         self.overlay = Some(Overlay::Machines(Box::default()));
     }
 
     fn machines_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
+        if matches!(
+            self.overlay.as_ref(),
+            Some(Overlay::Machines(machines)) if machines.add.is_some()
+        ) {
+            self.add_machine_key(key);
+            return;
+        }
+
         let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
             return;
         };
 
+        let mut begin_add = false;
         match key.code {
             KeyCode::Esc if machines.guide.is_some() => machines.guide = None,
             KeyCode::Esc => self.overlay = None,
@@ -6109,7 +6385,11 @@ impl App {
                 machines.selected = machines.selected.saturating_sub(1);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                machines.guide = Some(machines.selected())
+                if machines.selected() == MachineAction::Add {
+                    begin_add = true;
+                } else {
+                    machines.guide = Some(machines.selected());
+                }
             }
             KeyCode::Left | KeyCode::Char('h') => machines.guide = None,
             KeyCode::Char('y') => {
@@ -6123,8 +6403,466 @@ impl App {
             KeyCode::Char('r') => {
                 self.status.invalidate();
                 self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+                self.scan_machines_pending = true;
             }
             _ => {}
+        }
+        if begin_add {
+            self.begin_add_machine();
+        }
+    }
+
+    fn begin_add_machine(&mut self) {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+        let mut add = AddMachine::new();
+        if let Some(name) = machines.local_machine.as_deref() {
+            add.owner_machine = name.to_string();
+        }
+        if let Some(host) = machines.local_host.as_deref() {
+            add.owner_host = host.to_string();
+        }
+        machines.add = Some(add);
+    }
+
+    fn enter_add_form_or_pick(&mut self) {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+        let empty = machines.candidates.is_empty();
+        let Some(add) = machines.add.as_mut() else {
+            return;
+        };
+        if empty {
+            add.step = AddStep::Form;
+            add.field = add.form_field();
+        } else {
+            add.step = AddStep::Pick;
+            add.candidate = 0;
+        }
+    }
+
+    fn commit_add_pick(&mut self) {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+        let index = machines.add.as_ref().map(|add| add.candidate).unwrap_or(0);
+        let candidate = machines.candidates.get(index).cloned();
+        let Some(add) = machines.add.as_mut() else {
+            return;
+        };
+        if let Some(candidate) = candidate {
+            add.apply_candidate(&candidate);
+        }
+        add.step = AddStep::Form;
+        add.field = add.form_field();
+    }
+
+    fn add_machine_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let standalone = self.fleet_profile.is_none();
+        let step = match self.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.add.as_ref().map(|add| add.step),
+            _ => None,
+        };
+        let Some(step) = step else {
+            return;
+        };
+
+        match step {
+            AddStep::Working => {
+                if matches!(key.code, KeyCode::Esc) {
+                    if self.quit == Some(Quit::ApplyFleetIntent) {
+                        return;
+                    }
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = AddStep::Confirm;
+                            add.pending = false;
+                            add.error = Some(
+                                "cancelled waiting; the remote work may still be running".into(),
+                            );
+                        }
+                    }
+                }
+            }
+            AddStep::Method => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        machines.add = None;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.method = AddMethod::Ssh;
+                        }
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.method = AddMethod::Prepare;
+                        }
+                    }
+                }
+                KeyCode::Enter => self.enter_add_form_or_pick(),
+                _ => {}
+            },
+            AddStep::Pick => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = AddStep::Method;
+                        }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.candidate = add.candidate.saturating_sub(1);
+                        }
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        let last = machines.candidates.len();
+                        if let Some(add) = machines.add.as_mut() {
+                            add.candidate = (add.candidate + 1).min(last);
+                        }
+                    }
+                }
+                KeyCode::Char(digit) if digit.is_ascii_digit() && digit != '0' => {
+                    let index = (digit as u8 - b'1') as usize;
+                    let in_range = match self.overlay.as_ref() {
+                        Some(Overlay::Machines(machines)) => index < machines.candidates.len(),
+                        _ => false,
+                    };
+                    if in_range {
+                        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                            if let Some(add) = machines.add.as_mut() {
+                                add.candidate = index;
+                            }
+                        }
+                        self.commit_add_pick();
+                    }
+                }
+                KeyCode::Enter => self.commit_add_pick(),
+                _ => {}
+            },
+            AddStep::Form => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        let next = if machines.candidates.is_empty() {
+                            AddStep::Method
+                        } else {
+                            AddStep::Pick
+                        };
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = next;
+                        }
+                    }
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            let fields = add.fields(standalone);
+                            let index = fields
+                                .iter()
+                                .position(|field| *field == add.field)
+                                .unwrap_or(0);
+                            add.field = fields[(index + 1) % fields.len()];
+                        }
+                    }
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            let fields = add.fields(standalone);
+                            let index = fields
+                                .iter()
+                                .position(|field| *field == add.field)
+                                .unwrap_or(0);
+                            add.field = fields[(index + fields.len() - 1) % fields.len()];
+                        }
+                    }
+                }
+                KeyCode::Left | KeyCode::Right => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            if add.field == AddField::Via {
+                                add.via = 1 - add.via;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = AddStep::Confirm;
+                        }
+                    }
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            match add.field {
+                                AddField::Target => add.target.push(c),
+                                AddField::Machine => add.machine.push(c),
+                                AddField::Host => add.host.push(c),
+                                AddField::Binary => add.binary.push(c),
+                                AddField::OwnerHost => add.owner_host.push(c),
+                                AddField::OwnerMachine => add.owner_machine.push(c),
+                                AddField::Via => {}
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            let buffer = match add.field {
+                                AddField::Target => &mut add.target,
+                                AddField::Machine => &mut add.machine,
+                                AddField::Host => &mut add.host,
+                                AddField::Binary => &mut add.binary,
+                                AddField::OwnerHost => &mut add.owner_host,
+                                AddField::OwnerMachine => &mut add.owner_machine,
+                                AddField::Via => return,
+                            };
+                            buffer.pop();
+                        }
+                    }
+                }
+                _ => {}
+            },
+            AddStep::Confirm => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = AddStep::Form;
+                        }
+                    }
+                }
+                KeyCode::Char('y') => {
+                    let command = self.add_command_preview();
+                    self.copy_pending = Some(command.clone());
+                    self.inform(format!("copied `{command}`"), NoticeKind::Info);
+                }
+                KeyCode::Enter => self.confirm_add_machine(),
+                _ => {}
+            },
+            AddStep::Done => match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        machines.add = None;
+                    }
+                }
+                KeyCode::Char('y') => {
+                    let recipe = match self.overlay.as_ref() {
+                        Some(Overlay::Machines(machines)) => {
+                            machines.add.as_ref().and_then(|add| add.recipe.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(recipe) = recipe {
+                        self.copy_pending = Some(recipe);
+                        self.inform("copied the enroll recipe", NoticeKind::Info);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    pub fn add_command_preview(&self) -> String {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_ref() else {
+            return MachineAction::Add.command().into();
+        };
+        let Some(add) = machines.add.as_ref() else {
+            return MachineAction::Add.command().into();
+        };
+        match add.method {
+            AddMethod::Prepare => {
+                let mut command = format!(
+                    "ouro fleet add --print-script --machine {} --host {}",
+                    add.machine.trim(),
+                    add.host.trim()
+                );
+                if self.fleet_profile.is_none() {
+                    command.push_str(" --init");
+                    if !add.owner_machine.trim().is_empty() {
+                        command.push_str(&format!(" --owner-machine {}", add.owner_machine.trim()));
+                    }
+                    if !add.owner_host.trim().is_empty() {
+                        command.push_str(&format!(" --owner-host {}", add.owner_host.trim()));
+                    }
+                }
+                command
+            }
+            AddMethod::Ssh => {
+                let mut command = format!(
+                    "ouro fleet add {} --machine {} --host {} --via {}",
+                    add.target.trim(),
+                    add.machine.trim(),
+                    add.host.trim(),
+                    add.via_label()
+                );
+                if !add.binary.trim().is_empty() {
+                    command.push_str(&format!(" --binary {}", add.binary.trim()));
+                }
+                if self.fleet_profile.is_none() {
+                    command.push_str(" --init");
+                    if !add.owner_machine.trim().is_empty() {
+                        command.push_str(&format!(" --owner-machine {}", add.owner_machine.trim()));
+                    }
+                    if !add.owner_host.trim().is_empty() {
+                        command.push_str(&format!(" --owner-host {}", add.owner_host.trim()));
+                    }
+                }
+                command
+            }
+        }
+    }
+
+    fn confirm_add_machine(&mut self) {
+        if !self.spawned() && self.fleet_profile.is_none() {
+            self.set_add_error(
+                "this client is attached to a standalone runtime it did not start. Run `ouro` on this Mac (not `ouro attach`) to create the fleet from here",
+            );
+            return;
+        }
+        if self.fleet_profile.is_some() && !self.can_invite {
+            self.set_add_error(
+                "this machine joined the fleet and cannot invite others; run Add on the original owner",
+            );
+            return;
+        }
+
+        let standalone = self.fleet_profile.is_none();
+        let snapshot = match self.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.add.clone(),
+            _ => None,
+        };
+        let Some(add) = snapshot else {
+            return;
+        };
+
+        let machine = add.machine.trim().to_string();
+        let host = add.host.trim().to_string();
+        if machine.is_empty() || host.is_empty() {
+            self.set_add_error("machine name and fleet host are required");
+            self.set_add_step(AddStep::Form, None);
+            return;
+        }
+        if let Err(error) = crate::fleet::validate_machine(&machine) {
+            self.set_add_error(format!("{error:#}"));
+            self.set_add_step(AddStep::Form, None);
+            return;
+        }
+
+        if standalone {
+            let owner_host = add.owner_host.trim().to_string();
+            if owner_host.is_empty() {
+                self.set_add_error(
+                    "this Mac needs its Tailscale MagicDNS name or private IPv4 address in owner host",
+                );
+                self.set_add_step(AddStep::Form, Some(AddField::OwnerHost));
+                return;
+            }
+            let owner_machine = {
+                let named = add.owner_machine.trim();
+                if named.is_empty() {
+                    crate::fleet::machine_from_host(&owner_host).unwrap_or_else(|_| "studio".into())
+                } else {
+                    named.to_string()
+                }
+            };
+            let intent = FleetIntent {
+                schema: 1,
+                owner_machine,
+                owner_host,
+                fleet_name: None,
+                add: AddPlan {
+                    kind: match add.method {
+                        AddMethod::Ssh => AddKind::Ssh,
+                        AddMethod::Prepare => AddKind::Prepare,
+                    },
+                    machine,
+                    host,
+                    target: (add.method == AddMethod::Ssh)
+                        .then(|| add.target.trim().to_string())
+                        .filter(|target| !target.is_empty()),
+                    via: add.via_label().into(),
+                    binary: {
+                        let binary = add.binary.trim();
+                        (!binary.is_empty()).then(|| binary.to_string())
+                    },
+                },
+            };
+            if intent.add.kind == AddKind::Ssh && intent.add.target.is_none() {
+                self.set_add_error("SSH add needs user@host (or a Tailscale name)");
+                self.set_add_step(AddStep::Form, Some(AddField::Target));
+                return;
+            }
+            self.fleet_intent_pending = Some(intent);
+            if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                if let Some(add) = machines.add.as_mut() {
+                    add.step = AddStep::Working;
+                    add.pending = true;
+                    add.error = None;
+                }
+            }
+            self.quit = Some(Quit::ApplyFleetIntent);
+            return;
+        }
+
+        if add.method == AddMethod::Ssh && add.target.trim().is_empty() {
+            self.set_add_error("SSH add needs user@host (or a Tailscale name)");
+            self.set_add_step(AddStep::Form, Some(AddField::Target));
+            return;
+        }
+
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(add) = machines.add.as_mut() {
+                add.step = AddStep::Working;
+                add.pending = true;
+                add.error = None;
+            }
+        }
+        self.fleet_job_pending = Some(FleetJob {
+            prepare: add.method == AddMethod::Prepare,
+            target: (add.method == AddMethod::Ssh)
+                .then(|| add.target.trim().to_string())
+                .filter(|target| !target.is_empty()),
+            machine,
+            host,
+            via: add.via_label().into(),
+            binary: {
+                let binary = add.binary.trim();
+                (!binary.is_empty()).then(|| binary.to_string())
+            },
+        });
+    }
+
+    fn set_add_error(&mut self, error: impl Into<String>) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(add) = machines.add.as_mut() {
+                add.error = Some(error.into());
+            }
+        }
+    }
+
+    fn set_add_step(&mut self, step: AddStep, field: Option<AddField>) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(add) = machines.add.as_mut() {
+                add.step = step;
+                if let Some(field) = field {
+                    add.field = field;
+                }
+            }
         }
     }
 

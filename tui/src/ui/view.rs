@@ -14,9 +14,10 @@ use ratatui::Frame;
 use crate::model::{Plane, ProviderEntry};
 
 use super::app::{
-    provider_choices, AccountDialog, AccountFlow, App, CommandPalette, Connection, MachineAction,
-    MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice,
-    Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
+    provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
+    CommandPalette, Connection, MachineAction, MachineSecurity, Machines, Mode, NewField,
+    NewSession, NoticeKind, Overlay, ProviderChoice, Settings, SettingsField, Tab,
+    APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::theme;
 
@@ -914,13 +915,17 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
     );
 }
 
-/// Settings → Machines: a vocabulary-first fleet setup and recovery surface. It never
-/// executes a fleet command. Copying the selected command is the only mutation, and the
-/// exact command remains an ordinary terminal action so an invite can never be created or
-/// imported by an accidental keypress.
+/// Settings → Machines: a vocabulary-first fleet setup and recovery surface. Adding a
+/// machine can run after an explicit confirm; the remaining rows still copy exact commands.
 fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
-    let summary = app.machine_summary();
-    let popup = centered(area, MACHINES_WIDTH, 32.min(area.height));
+    let height = match machines.add.as_ref() {
+        // The pick step lists every host this Mac knows, so it grows rather than clips;
+        // `centered` still caps it at the terminal height.
+        Some(add) if add.step == AddStep::Pick => 8 + machines.candidates.len() as u16,
+        Some(_) => 36,
+        None => 32,
+    };
+    let popup = centered(area, MACHINES_WIDTH, height.min(area.height));
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
@@ -928,6 +933,13 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         .title(Span::styled(" machines ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+
+    if let Some(add) = machines.add.as_ref() {
+        add_machine(frame, inner, app, machines, add);
+        return;
+    }
+
+    let summary = app.machine_summary();
 
     let rows = Layout::vertical([
         Constraint::Length(9),
@@ -1005,7 +1017,7 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), rows[0]);
 
     let mut actions = vec![Line::from(Span::styled(
-        "Choose a next step — the guide shows commands but never runs them",
+        "Choose a next step — Add can run after confirm; other rows copy commands",
         theme::label(),
     ))];
     for (index, action) in MachineAction::ALL.iter().copied().enumerate() {
@@ -1051,13 +1063,194 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
                 Style::default().fg(theme::WARN),
             )),
             Line::from(Span::styled(
-                "↑↓ choose · Enter open guide · y copy command · r refresh · Esc back/close",
+                "↑↓ choose · Enter open / add · y copy command · r refresh · Esc back/close",
                 Style::default().fg(theme::MUTED),
             )),
         ])
         .wrap(Wrap { trim: false }),
         rows[3],
     );
+}
+
+fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, add: &AddMachine) {
+    let standalone = app.fleet_profile.is_none();
+    let mut lines = vec![Line::from(Span::styled(
+        "Add another machine from this instance",
+        theme::heading(),
+    ))];
+
+    match add.step {
+        AddStep::Method => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("How should this Mac reach the other machine?"));
+            lines.push(method_row(
+                add.method == AddMethod::Ssh,
+                "I can SSH to it (laptop on Tailscale, VPS with a key)",
+            ));
+            lines.push(method_row(
+                add.method == AddMethod::Prepare,
+                "I'll run a command on that machine myself",
+            ));
+            if !machines.candidates.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "Next: pick from {} hosts this Mac already knows.",
+                        machines.candidates.len()
+                    ),
+                    theme::label(),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "↑↓ choose · Enter continue · Esc back",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Pick => {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Which machine?"));
+            for (index, candidate) in machines.candidates.iter().enumerate() {
+                lines.push(method_row(
+                    add.candidate == index,
+                    &format!(
+                        "{}. {}  {}  {}",
+                        index + 1,
+                        candidate.label,
+                        candidate.target,
+                        candidate.detail
+                    ),
+                ));
+            }
+            lines.push(method_row(
+                add.candidate == machines.candidates.len(),
+                "Type a host myself",
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "↑↓ choose · 1-9 jump · Enter continue · Esc back",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Form => {
+            lines.push(Line::from(""));
+            for field in add.fields(standalone) {
+                lines.push(add_field_row(add, field, add.field == field));
+            }
+            if add.method == AddMethod::Ssh {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "A Mac binary will not run on Linux. Leave dest. binary empty if that host already has matching ouro, or pass a Linux build.",
+                    Style::default().fg(theme::MUTED),
+                )));
+            }
+            if let Some(error) = &add.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    error.clone(),
+                    Style::default().fg(theme::BAD),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Tab fields · Enter review · Esc back. Invitation contents stay off screen.",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Confirm => {
+            lines.push(Line::from(""));
+            if standalone {
+                lines.push(Line::from(Span::styled(
+                    "This Mac will restart once to become a fleet, then add the other machine.",
+                    Style::default().fg(theme::WARN),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                app.add_command_preview(),
+                Style::default().fg(theme::ACCENT),
+            )));
+            if let Some(error) = &add.error {
+                lines.push(Line::from(Span::styled(
+                    error.clone(),
+                    Style::default().fg(theme::BAD),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter runs this plan · y copy · Esc edit. No cookies are printed.",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Working => {
+            lines.push(Line::from(""));
+            lines.push(theme::working(app.ticks, "Adding the machine…"));
+            for line in add.log.iter().rev().take(8).rev() {
+                lines.push(Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(theme::MUTED),
+                )));
+            }
+        }
+        AddStep::Done => {
+            lines.push(Line::from(""));
+            for line in &add.log {
+                lines.push(Line::from(line.clone()));
+            }
+            if let Some(recipe) = &add.recipe {
+                lines.push(Line::from(""));
+                for line in recipe.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(theme::ACCENT),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter/Esc close · y copy recipe. Provider sign-in is still on that machine.",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn method_row(focused: bool, label: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            if focused { "> " } else { "  " },
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::raw(label.to_string()),
+    ])
+}
+
+fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'static> {
+    let (label, value) = match field {
+        AddField::Target => ("ssh target", add.target.as_str()),
+        AddField::Machine => ("machine", add.machine.as_str()),
+        AddField::Host => ("fleet host", add.host.as_str()),
+        AddField::Via => ("via", add.via_label()),
+        AddField::Binary => ("dest. binary", add.binary.as_str()),
+        AddField::OwnerHost => ("this Mac host", add.owner_host.as_str()),
+        AddField::OwnerMachine => ("this Mac name", add.owner_machine.as_str()),
+    };
+    let mut spans = vec![
+        Span::styled(
+            if focused { "> " } else { "  " },
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::styled(format!("{label:<16}"), theme::label()),
+        Span::raw(if value.is_empty() { "—" } else { value }.to_string()),
+    ];
+    if focused && field != AddField::Via {
+        spans.push(Span::styled(
+            "_",
+            Style::default().add_modifier(Modifier::SLOW_BLINK),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn machine_guidance(action: MachineAction, expanded: bool) -> Vec<Line<'static>> {
@@ -1069,6 +1262,11 @@ fn machine_guidance(action: MachineAction, expanded: bool) -> Vec<Line<'static>>
     }
 
     let lines: &[&str] = match action {
+        MachineAction::Add => &[
+            "Adds a laptop or VPS from this instance: SSH when this Mac can reach it, or a short enroll recipe when it cannot.",
+            "Pick a Tailscale/SSH host this Mac already knows, or type one. A first add on a standalone Mac restarts once to create the fleet.",
+            "A Mac ouro will not run on Linux. Install matching ouro there or pass dest. binary. Provider sign-in stays on that machine.",
+        ],
         MachineAction::Create => &[
             "If this TUI is attached to a standalone runtime, quit or detach first: run `ouro stop`, then `ouro fleet create`, then `ouro daemon`.",
             "On separate machines, first run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`; use the private IPv4 or one-record MagicDNS name when `--host` is requested.",

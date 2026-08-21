@@ -198,6 +198,76 @@ pub enum FleetCommand {
         replace: bool,
     },
 
+    /// Show known Tailscale peers and SSH config hosts this Mac can add.
+    List,
+
+    /// Create a private invitation, and either install the other machine over SSH or
+    /// print the enroll recipe to run there.
+    Add {
+        /// `user@host` or a Tailscale MagicDNS name. Omit with --print-script.
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Friendly unique label for the new machine.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// How the fleet reaches the new machine. A Tailscale MagicDNS name or private
+        /// IPv4 address. Omit to use what the SSH probe reports.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// `ssh` (default) or `tailscale` for Tailscale SSH.
+        #[arg(long, value_name = "VIA", default_value = "ssh")]
+        via: String,
+
+        /// A prebuilt ouro binary for the destination OS/CPU, when this Mac cannot copy
+        /// its own (the usual Mac → Linux case).
+        #[arg(long, value_name = "FILE")]
+        binary: Option<PathBuf>,
+
+        /// Do not SSH. Write the invitation and print the command to run on the other
+        /// machine.
+        #[arg(long)]
+        print_script: bool,
+
+        /// If this Mac is still standalone, create the fleet first. Requires a stopped
+        /// runtime and --owner-host.
+        #[arg(long)]
+        init: bool,
+
+        /// This Mac's fleet hostname when --init creates the owner profile.
+        #[arg(long, value_name = "HOST")]
+        owner_host: Option<String>,
+
+        /// This Mac's friendly name when --init creates the owner profile.
+        #[arg(long, value_name = "NAME")]
+        owner_machine: Option<String>,
+    },
+
+    /// Join from a copied invitation, start the daemon, and delete the invitation.
+    Enroll {
+        /// The mode-0600 invitation file. Its contents are never printed.
+        #[arg(value_name = "INVITE")]
+        invitation: PathBuf,
+
+        /// Delete the invitation after a successful join.
+        #[arg(long)]
+        delete: bool,
+
+        /// Also write the recovery unit (does not activate it).
+        #[arg(long)]
+        service: bool,
+
+        /// Override this machine's stable local gateway port.
+        #[arg(long, value_name = "PORT")]
+        gateway_port: Option<u16>,
+
+        /// Pin this machine's TLS distribution listener to one port.
+        #[arg(long, value_name = "PORT")]
+        dist_port: Option<u16>,
+    },
+
     /// Join using the private invitation copied from the fleet creator.
     Join {
         /// The mode-0600 invitation file. Its contents are never printed.
@@ -569,6 +639,56 @@ mod tests {
         assert!(matches!(
             parse(&["service-run"]).command,
             Some(Command::ServiceRun)
+        ));
+
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Add {
+                    target,
+                    machine,
+                    host,
+                    via,
+                    print_script,
+                    init,
+                    ..
+                },
+        }) = parse(&[
+            "fleet",
+            "add",
+            "op@vps",
+            "--machine",
+            "vps",
+            "--host",
+            "vps.tailnet.ts.net",
+            "--via",
+            "tailscale",
+            "--init",
+        ])
+        .command
+        else {
+            panic!("fleet add must parse");
+        };
+        assert_eq!(target.as_deref(), Some("op@vps"));
+        assert_eq!(machine.as_deref(), Some("vps"));
+        assert_eq!(host.as_deref(), Some("vps.tailnet.ts.net"));
+        assert_eq!(via, "tailscale");
+        assert!(init);
+        assert!(!print_script);
+        assert!(matches!(
+            parse(&["fleet", "list"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::List
+            })
+        ));
+        assert!(matches!(
+            parse(&["fleet", "enroll", "vps.ouro", "--delete", "--service"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Enroll {
+                    delete: true,
+                    service: true,
+                    ..
+                }
+            })
         ));
     }
 }
