@@ -19,6 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::transcript::{Diff, FileChange, PresentationEvent, ToolCall, ToolResult};
 
+use super::code;
 use super::theme;
 use super::transcript::{Entry, Note};
 
@@ -610,14 +611,47 @@ fn render_agent_message(
         Span::styled(" / RESPONSE", Style::default().fg(theme::SYSTEM)),
     ]));
 
-    let wrapped = wrap_limited(text, width.max(8), MESSAGE_LINES.saturating_add(1));
-    let shown = wrapped.len().min(MESSAGE_LINES);
+    let width = width.max(8);
+    let segments = code::split_fences(text);
+    let last = segments.len().saturating_sub(1);
+    let mut body: Vec<Line<'static>> = Vec::new();
+    let mut complete = true;
 
-    for line in wrapped.iter().take(shown) {
-        lines.push(Line::from(Span::raw(line.clone())));
+    // A segment needs room for its own frame plus this function's truncation notice;
+    // starting one with less would overshoot the cap by more than it saves.
+    for (index, segment) in segments.iter().enumerate() {
+        if MESSAGE_LINES.saturating_sub(body.len()) < 4 {
+            complete = false;
+            break;
+        }
+
+        let remaining = MESSAGE_LINES.saturating_sub(body.len());
+
+        match segment {
+            code::Segment::Prose(prose) => {
+                // The spare row is how wrap_limited reports that more prose followed.
+                let wrapped = wrap_limited(prose, width, remaining.saturating_add(1));
+                if wrapped.len() > remaining {
+                    complete = false;
+                }
+
+                for line in wrapped.into_iter().take(remaining) {
+                    body.push(Line::from(style_inline_code(&line)));
+                }
+            }
+            code::Segment::Code(block) => {
+                // While the agent is still writing this block its frame has no floor yet,
+                // so the caret can sit on the newest code row instead of a bottom border.
+                let open_tail = streaming && index == last && !block.closed;
+
+                render_code_block(&mut body, block, width, remaining, open_tail);
+            }
+        }
     }
 
-    if wrapped.len() > shown {
+    lines.extend(body);
+
+    if !complete {
         lines.push(Line::from(Span::styled(
             "… full message in event details",
             theme::quiet(),
@@ -626,11 +660,135 @@ fn render_agent_message(
 
     if streaming {
         let caret = if tick % 8 < 5 { "▌" } else { " " };
-        if let Some(last) = lines.last_mut() {
-            last.spans
-                .push(Span::styled(caret, Style::default().fg(theme::ACCENT)));
+        // A caret on a closed frame's floor reads as damage; only live content earns one.
+        let on_live_content = lines
+            .last()
+            .and_then(|line| line.spans.first())
+            .is_some_and(|span| !span.content.starts_with('└'));
+
+        if on_live_content {
+            if let Some(last_line) = lines.last_mut() {
+                last_line
+                    .spans
+                    .push(Span::styled(caret, Style::default().fg(theme::ACCENT)));
+            }
         }
     }
+}
+
+/// Lays out one fenced block inside a full-width frame with a language label:
+///
+/// ```text
+/// ┌─ rust ───────────┐
+/// │ fn main() {}     │
+/// └──────────────────┘
+/// ```
+///
+/// Grows `body` by at most `budget` rows: the header, up to `budget - 3` code rows, a
+/// truncation notice when rows were cut, and the floor. An unfinished frame (`open_tail`)
+/// omits its bottom border so streaming code can continue under the caret.
+fn render_code_block(
+    body: &mut Vec<Line<'static>>,
+    block: &code::CodeBlock<'_>,
+    width: usize,
+    budget: usize,
+    open_tail: bool,
+) {
+    let language = code::detect(block.lang);
+    let label = match block.lang {
+        Some(_) => language.label(),
+        None => "code",
+    };
+    let border = Style::default()
+        .fg(theme::MUTED)
+        .add_modifier(Modifier::DIM);
+    let label_style = Style::default()
+        .fg(theme::SYSTEM)
+        .add_modifier(Modifier::BOLD);
+
+    let heading = "┌─ ";
+    let rule = width
+        .saturating_sub(heading.width() + label.width() + 2)
+        .max(1);
+    body.push(Line::from(vec![
+        Span::styled(heading, border),
+        Span::styled(label, label_style),
+        Span::styled(format!(" {}┐", "─".repeat(rule)), border),
+    ]));
+
+    // Header, floor, and a possible notice come out of the same budget as the code.
+    let rows_budget = budget.saturating_sub(3).max(1);
+    // One row of look-ahead distinguishes "exactly filled" from "cut short", so a block
+    // that precisely fits never earns a false truncation notice.
+    let highlighted = code::highlight(
+        block.code,
+        language,
+        width.saturating_sub(4).max(8),
+        rows_budget.saturating_add(1),
+    );
+    let complete = highlighted.len() <= rows_budget;
+
+    for line in highlighted.into_iter().take(rows_budget) {
+        body.push(framed_row(line.spans, width, border));
+    }
+
+    if !complete && !open_tail {
+        body.push(framed_row(
+            vec![Span::styled(
+                "… rest of this block in event details",
+                theme::quiet(),
+            )],
+            width,
+            border,
+        ));
+    }
+
+    if !open_tail {
+        body.push(Line::from(Span::styled(
+            format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+            border,
+        )));
+    }
+}
+
+/// One framed row: left rule, content padded to the pane's width, right rule.
+fn framed_row(content: Vec<Span<'static>>, width: usize, border: Style) -> Line<'static> {
+    let used: usize = content.iter().map(|span| span.content.width()).sum();
+
+    let mut spans = Vec::with_capacity(content.len() + 2);
+    spans.push(Span::styled("│ ", border));
+    spans.extend(content);
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used.saturating_add(4))),
+    ));
+    spans.push(Span::styled(" │", border));
+
+    Line::from(spans)
+}
+
+/// Styles paired backticks inside one already-wrapped prose line. A pair split across two
+/// wrapped rows stays literal rather than guessing where it closed.
+fn style_inline_code(line: &str) -> Vec<Span<'static>> {
+    let Some(open) = line.find('`') else {
+        return vec![Span::raw(line.to_string())];
+    };
+
+    let Some(close) = line[open + 1..].find('`').map(|offset| open + 1 + offset) else {
+        return vec![Span::raw(line.to_string())];
+    };
+
+    let mut spans = Vec::with_capacity(3);
+    if open > 0 {
+        spans.push(Span::raw(line[..open].to_string()));
+    }
+    spans.push(Span::styled(
+        line[open..=close].to_string(),
+        Style::default().fg(theme::SYSTEM),
+    ));
+    if close + 1 < line.len() {
+        spans.push(Span::raw(line[close + 1..].to_string()));
+    }
+    spans
 }
 
 fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, tick: u64) {
@@ -1902,6 +2060,101 @@ mod tests {
         assert!(user_body.starts_with("│ "), "{user_body:?}");
         assert_eq!(agent, "◆ AGENT / RESPONSE");
         assert_eq!(agent_body, "The tests are fixed.");
+    }
+
+    #[test]
+    fn an_agent_code_block_is_framed_labelled_and_highlighted() {
+        let cells = vec![Cell::Message {
+            speaker: Speaker::Agent,
+            text: "Here is the entrypoint:\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\nDone.".into(),
+            streaming: false,
+        }];
+        let lines = render_cells(&cells, 60);
+        let rows: Vec<String> = lines.iter().map(plain_line).collect();
+        let text = rows.join("\n");
+
+        assert!(text.contains("┌─ rust "), "{text}");
+        assert!(text.contains("│ fn main() {"), "{text}");
+        // Indentation survives the frame; the prose wrapper would have collapsed it.
+        assert!(text.contains("│     println!(\"hi\");"), "{text}");
+        assert!(text.contains("└"), "{text}");
+        assert!(text.contains("Done."), "{text}");
+
+        let keyword = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content == "fn")
+            .expect("the fn keyword");
+        assert_eq!(keyword.style.fg, Some(ratatui::style::Color::Magenta));
+    }
+
+    #[test]
+    fn inline_backticked_prose_is_styled_without_becoming_a_block() {
+        let cells = vec![Cell::Message {
+            speaker: Speaker::Agent,
+            text: "Run `mix test` to confirm.".into(),
+            streaming: false,
+        }];
+
+        let lines = render_cells(&cells, 60);
+        let code = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("mix test"))
+            .expect("the inline code");
+
+        assert_eq!(code.content.as_ref(), "`mix test`");
+        assert_eq!(code.style.fg, Some(theme::SYSTEM));
+    }
+
+    #[test]
+    fn a_streaming_block_has_no_floor_and_carries_the_caret() {
+        let cells = vec![Cell::Message {
+            speaker: Speaker::Agent,
+            text: "Working:\n```python\nprint('hi')\n".into(),
+            streaming: true,
+        }];
+
+        let lines = render_cells_at(&cells, 60, 0);
+        let text = plain(&lines);
+
+        assert!(text.contains("┌─ python "), "{text}");
+        assert!(!text.contains('└'), "an open block has no floor: {text}");
+        assert!(text.contains("▌"), "{text}");
+
+        // The same text once closed gets its floor back.
+        let finished = render_cells(
+            &[Cell::Message {
+                speaker: Speaker::Agent,
+                text: "Working:\n```python\nprint('hi')\n```".into(),
+                streaming: false,
+            }],
+            60,
+        );
+        assert!(plain(&finished).contains('└'));
+    }
+
+    #[test]
+    fn an_oversized_code_block_is_capped_inside_its_frame() {
+        let block = format!("```elixir\n{}\n```", "line\n".repeat(600));
+        let cells = vec![Cell::Message {
+            speaker: Speaker::Agent,
+            text: block,
+            streaming: false,
+        }];
+
+        let rendered = render_cells(&cells, 60);
+        let text = plain(&rendered);
+
+        assert!(rendered.len() <= MESSAGE_LINES + 2, "{}", rendered.len());
+        assert!(
+            text.contains("rest of this block in event details"),
+            "{text}"
+        );
+        // The block's own notice replaces the message-level one; both would be noise.
+        assert!(!text.contains("full message in event details"), "{text}");
+        let floor = plain_line(rendered.last().expect("rows"));
+        assert!(floor.starts_with('└'), "the frame still closes: {floor}");
     }
 
     #[test]

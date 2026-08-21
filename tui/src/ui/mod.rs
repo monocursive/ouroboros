@@ -23,6 +23,7 @@
 
 pub mod app;
 pub mod boot;
+pub mod code;
 pub mod dashboard;
 pub mod editor;
 pub mod explorer;
