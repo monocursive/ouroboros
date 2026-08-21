@@ -460,11 +460,6 @@ defmodule Ouroboros.Provider do
       values = Enum.map(pairs, &elem(&1, 1))
       timeout_ms = codex_cache_policy_probe_timeout_ms()
 
-      timeout =
-        timeout_ms
-        |> Kernel./(1_000)
-        |> :erlang.float_to_binary(decimals: 3)
-
       command =
         [upstream | policy_args] ++
           ["sandbox", "/bin/sh", "-c", script, "ouroboros-cache-policy-probe"] ++ values
@@ -472,7 +467,7 @@ defmodule Ouroboros.Provider do
       command = Enum.map_join(command, " ", &shell_quote/1)
 
       supervised =
-        codex_supervised_probe(command, timeout, "") <>
+        codex_supervised_probe(command, timeout_ms, "") <>
           "exit \"$ouroboros_probe_status\"\n"
 
       case run_cache_policy_probe(supervised, pairs, timeout_ms) do
@@ -678,7 +673,8 @@ defmodule Ouroboros.Provider do
       # wrapper. Timeout and cancellation can then kill that exact group without ever
       # signalling Harness's provider group. Once the check passes, the final exec
       # preserves the real provider argv, exit status, and signals.
-      supervised = codex_supervised_probe(command, timeout, ">/dev/null 2>&1")
+      supervised =
+        codex_supervised_probe(command, codex_cache_policy_probe_timeout_ms(), ">/dev/null 2>&1")
 
       supervised <>
         "if [ \"$ouroboros_probe_status\" -ne 0 ]; then\n" <>
@@ -695,13 +691,15 @@ defmodule Ouroboros.Provider do
   # before that proof, so an unavailable isolation mechanism can be refused by killing a
   # child that has no descendants. The direct child remains stopped and unreaped until
   # CONT, eliminating both PID-reuse and reparenting races at the signalling boundary.
-  defp codex_supervised_probe(command, timeout, redirect) do
+  defp codex_supervised_probe(command, timeout_ms, redirect) do
+    sleep_seconds = div(timeout_ms + 999, 1_000)
+
     staged = shell_quote("/bin/kill -STOP \"$$\"\nexec #{command}\n")
 
     watchdog_staged =
       shell_quote(
         "/bin/kill -STOP \"$$\"\n" <>
-          "/bin/sleep #{timeout}\n" <>
+          "/bin/sleep #{sleep_seconds}\n" <>
           "/bin/kill -KILL -- \"-$1\" 2>/dev/null\n"
       )
 

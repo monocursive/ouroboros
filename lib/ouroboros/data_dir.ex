@@ -101,7 +101,7 @@ defmodule Ouroboros.DataDir do
 
     normalized = Path.expand(path)
     parent = Path.dirname(normalized)
-    File.mkdir_p!(parent)
+    ensure_parents_private!(parent)
 
     case File.lstat(normalized, time: :posix) do
       {:ok, stat} ->
@@ -117,6 +117,43 @@ defmodule Ouroboros.DataDir do
 
       {:error, reason} ->
         raise_inspection!(normalized, reason)
+    end
+  end
+
+  # Components that already exist are left exactly as they are, whatever their mode:
+  # a parent such as `/srv/x` may predate this runtime and be shared by design. Only the
+  # directories this boundary itself creates get the private mode, so an explicit
+  # `OUROBOROS_DATA_DIR=/srv/new/place` never leaves a umask-shaped directory behind.
+  defp ensure_parents_private!(parent) do
+    parts = Path.split(parent)
+
+    Enum.each(1..length(parts), fn depth ->
+      path = parts |> Enum.take(depth) |> Path.join()
+
+      unless File.dir?(path) do
+        mkdir_parent_private!(path)
+      end
+    end)
+  end
+
+  defp mkdir_parent_private!(path) do
+    mkdir = trusted_executable!(@mkdir_paths, "mkdir")
+
+    case trusted_command(mkdir, ["-m", "700", path]) do
+      {_output, 0} ->
+        :ok
+
+      {output, _status} ->
+        case File.lstat(path, time: :posix) do
+          {:ok, %File.Stat{type: type}} when type in [:directory, :symlink] ->
+            :ok
+
+          {:ok, _stat} ->
+            raise "cannot create private parent directory #{path}: a non-directory is in the way"
+
+          {:error, _reason} ->
+            raise "cannot create private parent directory #{path}: #{String.trim(output)}"
+        end
     end
   end
 

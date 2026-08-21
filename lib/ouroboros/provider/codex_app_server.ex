@@ -340,26 +340,42 @@ defmodule Ouroboros.Provider.CodexAppServer do
         state
 
       {{:value, {from, method, params, kind}}, queued} ->
-        id = state.next_id
-        timer = Process.send_after(self(), {:request_timeout, id}, @request_timeout)
+        if caller_gone?(from) do
+          # The caller's ceiling expired while this connection was still initializing,
+          # and nothing here noticed. Dispatching now would perform the account
+          # operation anyway — a logout with nobody waiting for its answer — and every
+          # reply would land on a dead process. Skip it and keep draining.
+          Logger.debug(fn ->
+            "dropped a queued Codex account request for #{method}; " <>
+              "its caller stopped waiting before dispatch"
+          end)
 
-        pending =
-          Map.put(state.pending, id, %{
-            from: from,
-            method: method,
-            kind: kind,
-            timer: timer
-          })
+          flush(%{state | queued: queued})
+        else
+          id = state.next_id
+          timer = Process.send_after(self(), {:request_timeout, id}, @request_timeout)
 
-        frame = %{"method" => method, "id" => id, "params" => params}
-        state = %{state | queued: queued, pending: pending, next_id: id + 1}
+          pending =
+            Map.put(state.pending, id, %{
+              from: from,
+              method: method,
+              kind: kind,
+              timer: timer
+            })
 
-        case send_frame(state.port, frame) do
-          :ok -> flush(state)
-          {:error, reason} -> reset(state, reason)
+          frame = %{"method" => method, "id" => id, "params" => params}
+          state = %{state | queued: queued, pending: pending, next_id: id + 1}
+
+          case send_frame(state.port, frame) do
+            :ok -> flush(state)
+            {:error, reason} -> reset(state, reason)
+          end
         end
     end
   end
+
+  defp caller_gone?({pid, _tag}) when is_pid(pid), do: not Process.alive?(pid)
+  defp caller_gone?(_from), do: false
 
   # `Port.command/2` answers `true` or raises; it has no false. It raises exactly when the
   # port is already gone — the child died between two frames — which is the transport
@@ -477,6 +493,19 @@ defmodule Ouroboros.Provider.CodexAppServer do
           _error -> complete_error(request, app_server_error(response), state)
         end
     end
+  end
+
+  # A response whose id this process could never have sent is unroutable by construction:
+  # every request here carries an integer id. Answering nothing would leave a caller
+  # waiting out its full timeout in silence, so the frame is named instead.
+  defp frame(%{"id" => id} = response, state) when not is_map_key(state.pending, id) do
+    Logger.warning(
+      "the Codex app-server answered with a non-integer response id, which no request " <>
+        "here could have produced; ignoring it (id: #{inspect(id, limit: 5)}, " <>
+        "method: #{inspect(response["method"], limit: 5)})"
+    )
+
+    state
   end
 
   defp frame(_unroutable, state), do: state

@@ -314,6 +314,63 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
       assert_no_orphans(executable)
     end
 
+    test "a request whose caller exits while initialization is pending is dropped, not dispatched" do
+      executable =
+        fake_app_server("""
+          *'"id":1,'*'"method":"account/read"'*)
+            echo '{"id":1,"result":{"account":{"type":"chatgpt","planType":"pro"},"requiresOpenaiAuth":true}}'
+            ;;
+        """)
+
+      server =
+        start_supervised!(
+          {CodexAppServer, name: nil, executable: executable},
+          id: :dropped_queued_request_app_server
+        )
+
+      abandoned = Task.async(fn -> CodexAppServer.read(server) end)
+
+      assert eventually(fn ->
+               state = :sys.get_state(server)
+               server_ports(server) != [] and :queue.len(state.queued) == 1
+             end),
+             "the request never queued behind initialization"
+
+      Task.shutdown(abandoned, :brutal_kill)
+
+      live = Task.async(fn -> CodexAppServer.read(server) end)
+
+      assert eventually(fn ->
+               :queue.len(:sys.get_state(server).queued) == 2
+             end),
+             "the second request never queued behind initialization"
+
+      # Initialization completing now is exactly the moment a dead caller's queued
+      # request used to be dispatched: sent upstream, answered into a corpse.
+      [port] = server_ports(server)
+
+      send(server, {port, {:data, {:eol, ~s({"id":0,"result":{"userAgent":"fake"}})}}})
+
+      assert {:ok, %{"account" => %{"type" => "chatgpt"}}} = Task.await(live, 5_000)
+      assert Process.alive?(server)
+
+      sent_reads =
+        (executable <> ".log")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&JSON.decode!/1)
+        |> Enum.filter(&(&1["method"] == "account/read"))
+
+      # Exactly one crossed the wire, under the live caller's id: the abandoned
+      # request must not have taken id 1 ahead of it.
+      assert sent_reads == [
+               %{"method" => "account/read", "id" => 1, "params" => %{"refreshToken" => false}}
+             ]
+
+      stop_supervised!(:dropped_queued_request_app_server)
+      assert_no_orphans(executable)
+    end
+
     test "an app-server that dies between frames answers its callers instead of crashing" do
       executable =
         fake_app_server("""

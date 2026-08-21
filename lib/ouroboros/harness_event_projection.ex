@@ -1,5 +1,24 @@
 defmodule Ouroboros.HarnessEventProjection do
-  @moduledoc false
+  @moduledoc """
+  Projects raw Harness events into the narrow normalized form Ouroboros persists.
+
+  ## The two redaction lanes
+
+  `before_journal/2` takes an explicit `extra_secrets` list because secret *values* are
+  context no event carries: they come from the provider configuration that produced the
+  event. `Ouroboros.Provider.CodexAdapter.run` derives that set from the effective
+  environment and threads it through its whole stream, so everything journalled from
+  that lane — live consumers included — is protected against provider-config
+  credentials landing in command or output payloads.
+
+  `durable_fields/1` deliberately defaults that set to empty. It is the mapping used
+  when a persisted event is re-read and re-projected, at which point the producing
+  request and config are gone. Baseline `Jido.Harness.Redaction` still applies to every
+  field it returns, but a caller projecting events that did **not** cross a
+  secrets-aware adapter owns passing the set itself via `before_journal/2`. Silence
+  here is not protection; it is the documented limit of what a stateless re-projection
+  can promise.
+  """
 
   alias Jido.Harness.Event
 

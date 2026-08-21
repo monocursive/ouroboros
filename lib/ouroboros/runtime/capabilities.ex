@@ -19,6 +19,7 @@ defmodule Ouroboros.Runtime.Capabilities do
   alias Ouroboros.Workspace.Path, as: WorkspacePath
 
   @capability_name ~r/^Ouroboros\.Capability\.[A-Z][A-Za-z0-9_]*(\.[A-Z][A-Za-z0-9_]*)*$/
+  @max_capability_segments 8
   @manifest_keys MapSet.new(["module", "description", "eval", "start"])
   @start_keys MapSet.new(["id", "role"])
   @source_file "source.ex"
@@ -255,8 +256,10 @@ defmodule Ouroboros.Runtime.Capabilities do
   defp ensure_nonempty(_contents, _name), do: :ok
 
   defp capability_module(name) when is_binary(name) do
-    if Regex.match?(@capability_name, name) do
-      {:ok, Module.concat(String.split(name, "."))}
+    segments = String.split(name, ".")
+
+    if Regex.match?(@capability_name, name) and length(segments) <= @max_capability_segments do
+      {:ok, Module.concat(segments)}
     else
       {:error, {:invalid_capability_module, name}}
     end
