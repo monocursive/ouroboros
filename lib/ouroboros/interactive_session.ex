@@ -60,7 +60,11 @@ defmodule Ouroboros.InteractiveSession do
                 # bound. The request already exists durably at this point. Preserve that
                 # fact when provider/workspace readiness fails so the gateway can open
                 # the failed session instead of making a same-id client reconcile
-                # forever.
+                # forever. A coordinator whose readiness never settles — a store that
+                # keeps refusing checkpoints, for instance — answers this call itself
+                # at the readiness deadline with `{:session_start_unresolved, id}`,
+                # so a caller here cannot wait forever on a session that can no
+                # longer report anything.
                 case safe_call(pid, :ready, :infinity) do
                   {:ok, _state} -> {:ok, ref}
                   {:error, reason} -> {:created, ref, reason}

@@ -20,6 +20,7 @@ defmodule Ouroboros.Interactive.Task do
   @workspace_reacquire_delay_ms 4
   @retry_backoff_max_ms 5_000
   @default_unresolved_turn_deadline_ms 10 * 60 * 1_000
+  @default_readiness_deadline_ms 10 * 60 * 1_000
 
   def child_spec(id) do
     %{
@@ -106,7 +107,9 @@ defmodule Ouroboros.Interactive.Task do
 
       true ->
         monitor = Process.monitor(elem(from, 0))
-        {:noreply, %{runtime | ready_waiters: [{from, monitor} | runtime.ready_waiters]}}
+
+        runtime = %{runtime | ready_waiters: [{from, monitor} | runtime.ready_waiters]}
+        {:noreply, arm_ready_deadline(runtime)}
     end
   end
 
@@ -214,6 +217,25 @@ defmodule Ouroboros.Interactive.Task do
   @impl true
   def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
 
+  def handle_info(:ready_deadline, %{ready_waiters: []} = runtime),
+    do: {:noreply, %{runtime | ready_timer: nil}}
+
+  def handle_info(:ready_deadline, runtime) do
+    Logger.warning(
+      "interactive session #{runtime.session.id} did not reach a ready or terminal " <>
+        "state within the readiness deadline (#{readiness_deadline_ms()}ms); answering " <>
+        "start waiters as unresolved while polling continues " <>
+        "(last retry: #{inspect(runtime.retry.signature)})"
+    )
+
+    Enum.each(runtime.ready_waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, {:error, {:session_start_unresolved, runtime.session.id}})
+    end)
+
+    {:noreply, %{runtime | ready_waiters: [], ready_timer: nil}}
+  end
+
   # A turn waiter that arrives in the window between the terminal checkpoint and
   # this message used to strand the coordinator: nothing rescheduled retirement
   # once it had been declined.
@@ -248,6 +270,7 @@ defmodule Ouroboros.Interactive.Task do
       subscriber_monitors: %{},
       turn_waiters: %{},
       ready_waiters: [],
+      ready_timer: nil,
       workspace_lease: lease,
       workspace_capability: capability,
       retry: no_retry(),
@@ -1439,6 +1462,11 @@ defmodule Ouroboros.Interactive.Task do
     Enum.reduce(Map.keys(runtime.session.turns), runtime, &reply_turn_waiters(&2, &1))
   end
 
+  defp reply_ready_waiters(%{ready_timer: timer} = runtime) when is_reference(timer) do
+    Process.cancel_timer(timer)
+    reply_ready_waiters(%{runtime | ready_timer: nil})
+  end
+
   defp reply_ready_waiters(runtime) do
     reply =
       if ready?(runtime.session),
@@ -1451,6 +1479,23 @@ defmodule Ouroboros.Interactive.Task do
     end)
 
     %{runtime | ready_waiters: []}
+  end
+
+  defp arm_ready_deadline(%{ready_timer: nil} = runtime) do
+    %{runtime | ready_timer: Process.send_after(self(), :ready_deadline, readiness_deadline_ms())}
+  end
+
+  defp arm_ready_deadline(runtime), do: runtime
+
+  defp readiness_deadline_ms do
+    case Application.get_env(
+           :ouroboros,
+           :interactive_readiness_deadline_ms,
+           @default_readiness_deadline_ms
+         ) do
+      deadline when is_integer(deadline) and deadline > 0 -> deadline
+      _invalid -> @default_readiness_deadline_ms
+    end
   end
 
   defp drop_ready_waiter_by_monitor(runtime, monitor) do

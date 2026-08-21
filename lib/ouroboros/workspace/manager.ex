@@ -12,6 +12,8 @@ defmodule Ouroboros.Workspace.Manager do
 
   alias Ouroboros.Workspace.{Lease, Path}
 
+  @released_tombstone_limit 1_000
+
   defmodule Entry do
     @moduledoc false
     @enforce_keys [:kind, :lease, :owner_pid, :owner_monitor, :capability_digest]
@@ -60,7 +62,9 @@ defmodule Ouroboros.Workspace.Manager do
          leases: %{},
          reservations: reservations,
          monitors: %{},
-         released: %{}
+         released: %{},
+         released_tombstone_limit:
+           Keyword.get(opts, :released_tombstone_limit, @released_tombstone_limit)
        }}
     else
       {:error, reason} -> {:stop, reason}
@@ -509,7 +513,25 @@ defmodule Ouroboros.Workspace.Manager do
       released_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
-    Map.update!(state, :released, &Map.put(&1, lease_id, tombstone))
+    limit = state.released_tombstone_limit
+
+    released =
+      state.released
+      |> Map.put(lease_id, tombstone)
+      |> prune_tombstones(limit)
+
+    Map.put(state, :released, released)
+  end
+
+  defp prune_tombstones(released, limit) when map_size(released) <= limit, do: released
+
+  defp prune_tombstones(released, limit) do
+    keep = map_size(released) - limit
+
+    released
+    |> Enum.sort_by(fn {_lease_id, tombstone} -> tombstone.released_at end)
+    |> Enum.drop(keep)
+    |> Map.new()
   end
 
   defp release_tombstone(state, lease_id, caller_pid, capability) do

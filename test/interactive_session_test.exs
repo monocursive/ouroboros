@@ -443,6 +443,74 @@ defmodule Ouroboros.InteractiveSessionTest do
     restore_store_after_fault(original_store, id)
   end
 
+  defmodule FailAfterCreateStorage do
+    @moduledoc false
+
+    def get_checkpoint(key, opts) do
+      fallback = Keyword.fetch!(opts, :fallback)
+      apply(fallback, :get_checkpoint, [key, Keyword.fetch!(opts, :fallback_opts)])
+    end
+
+    def put_checkpoint(key, value, opts) do
+      controller = Keyword.fetch!(opts, :controller)
+      fallback = Keyword.fetch!(opts, :fallback)
+      fallback_opts = Keyword.fetch!(opts, :fallback_opts)
+
+      if Agent.get_and_update(controller, fn count ->
+           {count, count + 1}
+         end) == 0 do
+        apply(fallback, :put_checkpoint, [key, value, fallback_opts])
+      else
+        {:error, :disk_full}
+      end
+    end
+  end
+
+  test "a coordinator whose checkpoints keep failing answers start waiters at the deadline", %{
+    id: id
+  } do
+    original_deadline = Application.get_env(:ouroboros, :interactive_readiness_deadline_ms)
+    Application.put_env(:ouroboros, :interactive_readiness_deadline_ms, 150)
+
+    on_exit(fn ->
+      case original_deadline do
+        nil -> Application.delete_env(:ouroboros, :interactive_readiness_deadline_ms)
+        value -> Application.put_env(:ouroboros, :interactive_readiness_deadline_ms, value)
+      end
+    end)
+
+    controller = start_supervised!({Agent, fn -> 0 end}, id: {:outage_counter, id})
+
+    original_store = :sys.get_state(Store)
+
+    :sys.replace_state(Store, fn state ->
+      %{
+        state
+        | adapter: FailAfterCreateStorage,
+          opts: [
+            controller: controller,
+            fallback: state.adapter,
+            fallback_opts: state.opts
+          ]
+      }
+    end)
+
+    on_exit(fn -> restore_store_after_fault(original_store, id) end)
+
+    assert {:created, %Ref{id: ^id}, {:session_start_unresolved, ^id}} =
+             InteractiveSession.start_for_gateway(
+               id: id,
+               provider: @provider,
+               workspace: File.cwd!(),
+               approval_mode: :prompt,
+               sandbox_mode: :read_only
+             )
+
+    assert {:ok, %State{status: :starting}} = Store.get(id)
+
+    restore_store_after_fault(original_store, id)
+  end
+
   test "turn attachments are canonical files contained by the leased workspace", %{id: id} do
     base =
       Path.join(

@@ -301,6 +301,37 @@ defmodule Ouroboros.WorkspaceTest do
     assert Process.alive?(manager)
   end
 
+  test "released tombstones are bounded and evict oldest first", %{allowed: allowed} do
+    manager =
+      start_supervised!(
+        {Workspace,
+         allowed_roots: [allowed],
+         name: nil,
+         id: {:workspace_manager, System.unique_integer([:positive, :monotonic])},
+         released_tombstone_limit: 3}
+      )
+
+    released_ids =
+      for index <- 1..5 do
+        assert {:ok, lease, _capability} =
+                 Workspace.acquire(allowed, "tombstone-#{index}", server: manager)
+
+        :ok = Workspace.release(lease, server: manager)
+        lease.id
+      end
+
+    [first_evicted, second_evicted | retained] = released_ids
+
+    for evicted <- [first_evicted, second_evicted] do
+      assert {:error, :lease_not_found} = Workspace.status(evicted, server: manager)
+      assert {:error, :lease_not_found} = Workspace.release(evicted, server: manager)
+    end
+
+    for lease_id <- retained do
+      assert {:ok, %{status: :released}} = Workspace.status(lease_id, server: manager)
+    end
+  end
+
   defp assert_eventually(fun, attempts \\ 100)
   defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
 

@@ -442,8 +442,23 @@ defmodule Ouroboros.Gateway.OperateTest do
           _ = DynamicSupervisor.terminate_child(supervisor, pid)
         end
 
-        _ = InteractiveStore.delete(holder_id)
-        _ = InteractiveStore.delete(interactive_id)
+        # A non-terminal session cannot be deleted directly, and leaving one behind
+        # whose workspace this callback is about to remove would poison every later
+        # full-boot recovery with an unavailable path. Terminalize first, then delete.
+        for session_id <- [holder_id, interactive_id] do
+          case InteractiveStore.get(session_id) do
+            {:ok, session} ->
+              unless Ouroboros.Interactive.State.terminal?(session) do
+                _ = InteractiveStore.put(%{session | status: :cancelled})
+              end
+
+              _ = InteractiveStore.delete(session_id)
+
+            _absent ->
+              :ok
+          end
+        end
+
         _ = CodingStore.delete(coding_id)
 
         if is_nil(previous_providers),
