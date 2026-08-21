@@ -44,11 +44,12 @@ certificate, interface, port, log, and recovery-service checks, so run doctor lo
 each machine during setup.
 
 Each machine's `OUROBOROS_DATA_DIR` leaf must be a real same-user directory at mode
-`0700`. The packaged launcher creates a missing leaf privately, but refuses symlinks,
-foreign ownership, non-directories, and broader existing modes without changing them.
-If an imported path is refused, inspect its ownership and contents before applying
-`chmod 700` (only when it is truly yours), or select a fresh absolute path; do this
-before installing or retrying the generated fleet service.
+`0700`. The packaged launcher creates a missing leaf privately and can restrict its own
+derived XDG default when upgrading same-user legacy state. Explicit fleet paths still
+refuse symlinks, foreign ownership, non-directories, and broader existing modes without
+changing them. If an imported path is refused, inspect its ownership and contents before
+applying `chmod 700` (only when it is truly yours), or select a fresh absolute path; do
+this before installing or retrying the generated fleet service.
 
 Cancel/import changes membership bookkeeping; it does not revoke credentials and does not
 erase positive session-owner evidence. An offline former owner therefore continues to

@@ -148,10 +148,12 @@ Two placement facts the implementation must respect:
   the variable otherwise); the spawner always sets it.
 - **The durable leaf is private before anything beneath it is touched.** Rust and
   BEAM both require a real same-UID directory at exactly 0700, creating a missing leaf
-  atomically at that mode. An existing symlink, foreign owner, non-directory, or broad
-  mode fails closed without chmod/replacement and names the safe operator choices:
-  inspect it and repair it only if it is truly yours, or choose a fresh absolute
-  `OUROBOROS_DATA_DIR`. Every managed child gets umask 077, including Ring output, so
+  atomically at that mode. Before it takes over the terminal, the packaged client can
+  safely restrict a same-UID legacy leaf only when it derived that XDG default itself.
+  An explicit override, symlink, foreign owner, or non-directory still fails closed
+  without replacement and names the safe operator choices: inspect it and repair it
+  only if it is truly yours, or choose a fresh absolute `OUROBOROS_DATA_DIR`. Every
+  managed child gets umask 077, including Ring output, so
   Jido stores and later log generations cannot inherit a normal caller's 022 posture.
   At the last Harness boundary, Harness-managed provider subprocesses restore workspace
   umask 022, yielding conventional 0644 files and 0755 directories whether the runtime
@@ -309,6 +311,7 @@ reading.
 | `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
+| `interactive.delete` `{id}` | `Interactive.Store.delete/1` — terminal sessions only (`closed`/`failed`/`cancelled`/`lost`). Live sessions are refused `-32006` with `reason: session_not_terminal`; the coordinator is stopped first so a retiring process cannot write the record back. The same `{id, node?}` routing as the other session verbs. |
 | `account.login.start` `{flow?}` | `CodexAppServer.login/2` — `flow` is `browser` (default) or `device_code`. The reply is the only surface that carries `authUrl`/`verificationUrl`/`userCode` (allowlisted keys), which is why it is operate-scoped while `account.read` is not |
 | `account.login.cancel` `{login_id}` | `CodexAppServer.cancel/2` — completion/cancel notifications are correlated by `loginId`; a stale completion for a superseded login cannot overwrite the pending one |
 | `account.logout` `{}` | `CodexAppServer.logout/1` — reply is `{}`; the account boundary returns nothing it has not named |
@@ -319,7 +322,7 @@ the new `account.*` methods are feature-detectable
 through `hello.methods`, but the envelope tightening and the structured-`input` capability
 are not — the compatibility bet, stated plainly, is that the only deployed client ships in
 this repository and moves in lockstep.
-| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` | same start identity, fleet routing, remote-workspace rule, immutable-intent reconciliation, and outcome-unknown 120s ceiling as `interactive.start` |
+| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` / `coding.delete` `{id}` | same start identity, fleet routing, remote-workspace rule, immutable-intent reconciliation, and outcome-unknown 120s ceiling as `interactive.start`. `coding.delete` is the coding-plane twin of `interactive.delete` (terminal `completed`/`failed`/`cancelled`/`lost` only) |
 | `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
 | `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
 | `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
@@ -817,8 +820,13 @@ rediscovered:
   reconciled under its stable turn ID—the operator presses Enter again to send the draft.
 - **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
   node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
-  `x` closes or kills the open session behind a confirmation; `r` refreshes the visible
-  tab now.
+  `ctrl+x x` or `/close` ends the open session, or the highlighted row in the session
+  switcher (`ctrl+x l`), behind a confirmation. Live interactive sessions offer close or
+  kill; a live coding task offers cancel. A terminal session (`failed`/`lost`/`closed`/
+  `completed`/`cancelled`) is removed via `interactive.delete`/`coding.delete` so it
+  leaves the list instead of lingering until the seven-day retention sweep. An offline
+  last-known row is hidden in this client only; `x` in the switcher is the key because
+  the composer owns printable characters. `r` refreshes the visible tab now.
 - **`Ctrl-C` on the coding plane is refused rather than translated.** That plane has no
   interrupt — cancelling is what it offers, and cancelling is destructive enough to go
   through the confirmation instead.

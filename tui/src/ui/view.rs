@@ -24,7 +24,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
@@ -55,9 +55,6 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(theme::MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let columns =
-        Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(inner);
 
     let workspace = if app.sessions.open.is_some() {
         app.sessions
@@ -91,10 +88,10 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let context = if app.tab == Tab::Sessions {
         match &app.sessions.open {
-            Some((_plane, id)) => {
-                let session = format!("Session: {}", super::tree::truncate(id, 36));
+            Some((_plane, _id)) => {
+                let session = "Agent chat".to_string();
                 if app.waiting_for_open_agent_reply() {
-                    format!("{}  {session}", theme::spinner(app.ticks))
+                    format!("{} {session}", theme::spinner(app.ticks))
                 } else {
                     session
                 }
@@ -105,16 +102,24 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         format!("Runtime & distribution: {}", app.tab.title())
     };
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("ouroboros", theme::heading()),
-            Span::styled("  │  ", Style::default().fg(theme::MUTED)),
-            Span::styled(workspace, Style::default().fg(theme::MUTED)),
-            Span::styled("  │  ", Style::default().fg(theme::MUTED)),
-            Span::raw(context),
-        ])),
-        columns[0],
-    );
+    let brand = Line::from(vec![
+        Span::styled("◌ ", theme::action()),
+        Span::styled("OUROBOROS", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+    let subtitle = Line::from(vec![
+        Span::styled("COMMAND WORKSPACE / LOCAL", theme::label()),
+        Span::styled("  ·  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            context,
+            if app.sessions.open.is_some() {
+                theme::heading()
+            } else {
+                theme::action()
+            },
+        ),
+        Span::styled("  ·  ", Style::default().fg(theme::MUTED)),
+        Span::styled(workspace, Style::default().fg(theme::MUTED)),
+    ]);
 
     let visible_provider = if app.sessions.open.is_some() {
         app.sessions
@@ -180,10 +185,43 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         ))
     };
 
-    frame.render_widget(
-        Paragraph::new(account).alignment(Alignment::Right),
-        columns[1],
-    );
+    let (ready_label, ready_style) = match &app.connection {
+        Connection::Live => ("LOCAL READY", Style::default().fg(theme::GOOD)),
+        Connection::Lost { .. } => ("LINK LOST", Style::default().fg(theme::BAD)),
+    };
+    let mode_label = if app.tab == Tab::Sessions {
+        "CODE".to_string()
+    } else {
+        app.tab.title().to_uppercase()
+    };
+    let badges = Line::from(vec![
+        Span::styled("[", theme::label()),
+        Span::styled("ctrl+p", theme::action()),
+        Span::styled(" COMMANDS]  [", theme::label()),
+        Span::styled("● ", ready_style),
+        Span::styled(ready_label, ready_style.add_modifier(Modifier::BOLD)),
+        Span::styled("]  [", theme::label()),
+        Span::styled(mode_label, theme::action()),
+        Span::styled("]", theme::label()),
+    ]);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
+
+    if inner.width >= 96 {
+        let top = Layout::horizontal([Constraint::Min(30), Constraint::Length(46)]).split(rows[0]);
+        frame.render_widget(Paragraph::new(brand), top[0]);
+        frame.render_widget(Paragraph::new(badges).alignment(Alignment::Right), top[1]);
+
+        let bottom =
+            Layout::horizontal([Constraint::Min(48), Constraint::Length(34)]).split(rows[1]);
+        frame.render_widget(Paragraph::new(subtitle), bottom[0]);
+        frame.render_widget(
+            Paragraph::new(account).alignment(Alignment::Right),
+            bottom[1],
+        );
+    } else {
+        frame.render_widget(Paragraph::new(brand), rows[0]);
+        frame.render_widget(Paragraph::new(subtitle), rows[1]);
+    }
 }
 
 fn status_line(frame: &mut Frame, area: Rect, app: &App) {
@@ -209,48 +247,90 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut spans = vec![Span::styled(
-        if app.tab == Tab::Sessions {
-            "ctrl+p commands  ·  ctrl+x leader  ·  esc interrupt  ·  ctrl+q quit"
-        } else {
-            "ctrl+p commands  ·  Esc returns to coding  ·  r refresh"
-        },
-        Style::default().fg(theme::MUTED),
-    )];
+    let runtime = match &app.connection {
+        Connection::Live => Line::from(vec![
+            Span::styled("● LIVE", Style::default().fg(theme::GOOD)),
+            Span::styled(
+                format!(
+                    "  {} · {} · {}",
+                    if app.spawned() {
+                        "OWN RUNTIME"
+                    } else {
+                        "ATTACHED"
+                    },
+                    if app.hello.scope.trim().is_empty() {
+                        "scope?"
+                    } else {
+                        app.hello.scope.trim()
+                    },
+                    super::tree::truncate(&app.address, 22)
+                ),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]),
+        Connection::Lost { reason } => Line::from(vec![
+            Span::styled("● DISCONNECTED  ", Style::default().fg(theme::BAD)),
+            Span::styled(
+                super::tree::truncate(reason, 27),
+                Style::default().fg(theme::BAD),
+            ),
+        ]),
+    };
+    let shortcuts = if app.tab == Tab::Sessions {
+        "ctrl+p commands  ·  ctrl+x leader  ·  esc interrupt  ·  ctrl+q quit"
+    } else {
+        "ctrl+p commands  ·  Esc returns to coding  ·  r refresh"
+    };
 
-    // Which runtime this is talking to, and at what scope. Terse, and always present: an
-    // `ouro` attached over a tunnel is driving a node somewhere else, and every path it
-    // names — every workspace, every log file — belongs to that node rather than to this
-    // machine. The scope rides along because it is what decides whether a verb will be
-    // refused at all.
-    spans.push(Span::styled(
-        format!(
-            "  ·  {} {} {}",
-            if app.spawned() { "own" } else { "attached" },
-            if app.hello.scope.trim().is_empty() {
-                "scope?"
-            } else {
-                app.hello.scope.trim()
-            },
-            super::tree::truncate(&app.address, 30)
-        ),
-        Style::default().fg(theme::MUTED),
-    ));
-
-    if let Connection::Lost { reason } = &app.connection {
-        spans.push(Span::styled(
-            format!("  disconnected: {reason}"),
-            Style::default().fg(theme::BAD),
-        ));
+    if area.width >= 112 {
+        // Size this column from what Ratatui will actually draw. A fixed 43-cell column
+        // clipped the last digit from ordinary five-digit loopback ports, making two
+        // attached local runtimes look identical in the footer.
+        let runtime_width = runtime.width().min(area.width as usize) as u16;
+        let columns =
+            Layout::horizontal([Constraint::Length(runtime_width), Constraint::Min(1)]).split(area);
+        frame.render_widget(Paragraph::new(runtime), columns[0]);
+        frame.render_widget(
+            Paragraph::new(Span::styled(shortcuts, Style::default().fg(theme::MUTED)))
+                .alignment(Alignment::Right),
+            columns[1],
+        );
+    } else {
+        let compact = match &app.connection {
+            Connection::Lost { reason } => format!(
+                "● DISCONNECTED · {} · ctrl+p commands",
+                super::tree::truncate(reason, area.width.saturating_sub(39) as usize)
+            ),
+            Connection::Live if app.tab == Tab::Sessions => {
+                "ctrl+p commands · ctrl+x leader · ctrl+q quit".to_string()
+            }
+            Connection::Live => shortcuts.to_string(),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                compact,
+                if matches!(&app.connection, Connection::Lost { .. }) {
+                    Style::default().fg(theme::BAD)
+                } else {
+                    Style::default().fg(theme::MUTED)
+                },
+            )),
+            area,
+        );
     }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn overlay(frame: &mut Frame, area: Rect, app: &App) {
     let Some(overlay) = &app.overlay else {
         return;
     };
+
+    // Preserve spatial context behind a modal, but drop it out of the active visual
+    // hierarchy. This also keeps the few columns outside a narrow popup from competing
+    // with wrapped dialog copy.
+    frame
+        .buffer_mut()
+        .set_style(area, Style::default().add_modifier(Modifier::DIM));
 
     match overlay {
         Overlay::Commands(palette) => command_palette(frame, area, palette),
@@ -561,9 +641,10 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     let popup = centered(area, 62, height);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" switch session ", theme::heading()));
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " switch session · enter open · x end ",
+        theme::heading(),
+    ));
 
     if sessions.is_empty() {
         frame.render_widget(
@@ -1375,8 +1456,20 @@ fn chooser(
     options: &[String],
     choice: usize,
 ) {
-    let height = (options.len() + detail.lines().count() + 4).min(area.height as usize) as u16;
-    let popup = centered(area, 70, height);
+    // A 70% dialog is comfortably readable on a wide terminal but needlessly clips the
+    // consequence of destructive choices at 80 columns. Measure the wrapped explanation
+    // against the width it will actually receive and let narrow terminals use the edges.
+    let width_percent = if area.width < 90 {
+        100
+    } else if area.width < 110 {
+        92
+    } else {
+        70
+    };
+    let detail_lines = detail.lines().map(Line::from).collect::<Vec<_>>();
+    let detail_height = wrapped(&detail_lines, inner_width(area, width_percent)).max(1);
+    let height = (options.len() as u16 + detail_height + 4).min(area.height);
+    let popup = centered(area, width_percent, height);
 
     frame.render_widget(Clear, popup);
 
@@ -1389,10 +1482,7 @@ fn chooser(
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(detail.lines().count() as u16),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(detail_height), Constraint::Min(1)])
         .split(inner);
 
     frame.render_widget(
@@ -1455,7 +1545,7 @@ const KEYS: &[(&str, &str)] = &[
     ("ctrl+p", "command palette"),
     (
         "ctrl+x",
-        "leader: n new · l sessions · e editor · y copy · q quit",
+        "leader: n new · l sessions · x end · e editor · y copy · q quit",
     ),
     ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
     ("ctrl+o", "toggle agent chat and complete event details"),
@@ -1470,7 +1560,7 @@ const KEYS: &[(&str, &str)] = &[
     ("alt+b / alt+f", "move by word"),
     (
         "/ commands",
-        "new, write, switch, preview, admit, capabilities, help, quit",
+        "new, write, switch, close, preview, admit, capabilities, help, quit",
     ),
     ("1-7 / Tab", "runtime tabs when the prompt is not focused"),
 ];

@@ -336,11 +336,13 @@ signal.
 
 That data-directory leaf is itself a security boundary. Before any lifecycle lock,
 storage probe, publication, token, or journal write, Ouroboros requires a real
-same-user directory at exactly mode `0700`; a missing leaf is created that way. A
-pre-existing symlink, foreign-owned directory, non-directory, or broader mode is
-refused without being replaced or silently chmodded. Inspect an existing directory's
-ownership and contents first, then use `chmod 700 <path>` only when it is truly yours,
-or point `OUROBOROS_DATA_DIR` at a fresh absolute path. Every runtime spawned by `ouro`
+same-user directory at exactly mode `0700`; a missing leaf is created that way. When
+the packaged client chose the normal XDG default itself, it also restricts a same-user
+legacy leaf from a broader mode to `0700` in place before taking over the terminal. An
+explicit `OUROBOROS_DATA_DIR`, symlink, foreign-owned directory, or non-directory is
+never repaired implicitly. Inspect an unsafe explicit directory's ownership and
+contents first, then use `chmod 700 <path>` only when it is truly yours, or choose a
+fresh absolute path. Every runtime spawned by `ouro`
 also starts with umask `077`, including foreground/TUI Ring mode, so later Jido stores,
 checkpoints, and rotated logs remain private inside that boundary. Harness-managed
 provider subprocesses cross one boundary that restores the conventional workspace umask

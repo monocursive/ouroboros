@@ -1673,6 +1673,8 @@ mod tests {
         assert_eq!(hello.node, "ouroboros@golden");
         assert_eq!(hello.role, "core");
         assert!(hello.operates());
+        assert!(hello.serves("interactive.delete"));
+        assert!(hello.serves("coding.delete"));
         assert!(hello.serves("interactive.respond_approval"));
         assert!(hello.serves("runtime.shutdown"));
         assert!(hello.serves("capabilities.preview"));

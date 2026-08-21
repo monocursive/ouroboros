@@ -217,6 +217,47 @@ defmodule Ouroboros.InteractiveSession do
   @doc "Forcibly cancels the provider session."
   def kill(session), do: call(session, :kill)
 
+  @doc """
+  Deletes a terminal session's durable record.
+
+  Live sessions must be closed or killed first. The coordinator is stopped before the
+  checkpoint is removed so a retiring process cannot write the session back.
+  """
+  @spec delete(session()) :: :ok | :not_found | {:error, term()}
+  def delete(session) do
+    with {:ok, id, owner} <- session_identity(session) do
+      if owner == node() do
+        local_delete(id)
+      else
+        route(owner, __MODULE__, :local_delete, [id], call_timeout())
+      end
+    end
+  end
+
+  @doc false
+  def local_delete(id) do
+    with :ok <- validate_id(id) do
+      case Store.get(id) do
+        :not_found ->
+          :not_found
+
+        {:error, reason} ->
+          {:error, {:storage_error, reason}}
+
+        {:ok, %State{node: owner}} when owner != node() ->
+          {:error, {:wrong_owner, owner}}
+
+        {:ok, %State{} = session} ->
+          if State.terminal?(session) do
+            stop_local_coordinator(id)
+            Store.delete(id)
+          else
+            {:error, {:session_not_terminal, session.status}}
+          end
+      end
+    end
+  end
+
   @doc false
   def local_call(id, message) do
     with :ok <- validate_id(id),
@@ -257,6 +298,17 @@ defmodule Ouroboros.InteractiveSession do
       if owner == node(),
         do: local_call(id, message),
         else: route(owner, __MODULE__, :local_call, [id, message], call_timeout())
+    end
+  end
+
+  defp stop_local_coordinator(id) do
+    case Task.whereis(id) do
+      pid when is_pid(pid) ->
+        _ = DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
+        :ok
+
+      _absent ->
+        :ok
     end
   end
 

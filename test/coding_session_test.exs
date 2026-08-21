@@ -2,7 +2,7 @@ defmodule Ouroboros.CodingSessionTest do
   use ExUnit.Case, async: false
 
   alias Jido.Harness.{Run, RunInfo, RunRequest}
-  alias Ouroboros.Coding.{Event, Task, TaskRef, TaskState}
+  alias Ouroboros.Coding.{Event, Store, Task, TaskRef, TaskState}
   alias Ouroboros.CodingSession
   alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Workspace
@@ -268,6 +268,28 @@ defmodule Ouroboros.CodingSessionTest do
 
     assert :ok = HarnessAdapter.finish(adapter)
     assert {:ok, %TaskState{status: :completed}} = CodingSession.await(holder, 2_000)
+  end
+
+  test "delete removes a terminal task and refuses a live one", %{id: id} do
+    {:ok, live} =
+      TaskState.new(id, "delete refuses live work", provider: @provider, workspace: File.cwd!())
+
+    assert :ok = Store.create(live)
+    assert {:error, {:task_not_terminal, :starting}} = CodingSession.delete(id)
+    assert {:ok, %TaskState{status: :starting}} = Store.get(id)
+
+    dead_id = unique_id("coding-delete")
+
+    {:ok, dead} =
+      TaskState.new(dead_id, "finished work", provider: @provider, workspace: File.cwd!())
+
+    assert :ok = Store.create(%{dead | status: :failed, error: :provider_gone})
+    assert :ok = CodingSession.delete(dead_id)
+    assert :not_found = Store.get(dead_id)
+    assert :not_found = CodingSession.delete(dead_id)
+
+    assert :ok = Store.put(%{live | status: :cancelled})
+    assert :ok = CodingSession.delete(id)
   end
 
   defp start_controlled_session(id, objective) do

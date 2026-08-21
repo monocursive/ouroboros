@@ -337,6 +337,62 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert response["error"]["message"] =~ "workspace_write"
     end
 
+    test "delete removes a terminal session and refuses a live one", %{client: client} do
+      assert hello(client)["result"]
+
+      live_id = "gateway-delete-live-#{System.unique_integer([:positive, :monotonic])}"
+      dead_id = "gateway-delete-dead-#{System.unique_integer([:positive, :monotonic])}"
+
+      {:ok, live} =
+        Ouroboros.Interactive.State.new(live_id, provider: :codex, workspace: File.cwd!())
+
+      {:ok, dead} =
+        Ouroboros.Interactive.State.new(dead_id, provider: :codex, workspace: File.cwd!())
+
+      assert :ok = InteractiveStore.create(live)
+      assert :ok = InteractiveStore.create(%{dead | status: :lost, error: :provider_gone})
+
+      live_error = call(client, "interactive.delete", %{"id" => live_id})["error"]
+      assert live_error["code"] == -32006
+      assert live_error["data"]["reason"] == "session_not_terminal"
+      assert {:ok, _} = InteractiveStore.get(live_id)
+      assert :ok = InteractiveStore.put(%{live | status: :cancelled})
+      assert :ok = InteractiveStore.delete(live_id)
+
+      assert call(client, "interactive.delete", %{"id" => dead_id})["result"] == "ok"
+      assert :not_found = InteractiveStore.get(dead_id)
+
+      assert call(client, "interactive.delete", %{"id" => "no-such-session"})["error"]["code"] ==
+               -32007
+
+      coding_live = "gateway-coding-delete-live-#{System.unique_integer([:positive, :monotonic])}"
+      coding_dead = "gateway-coding-delete-dead-#{System.unique_integer([:positive, :monotonic])}"
+
+      {:ok, coding_live_task} =
+        Ouroboros.Coding.TaskState.new(coding_live, "still running",
+          provider: :codex,
+          workspace: File.cwd!()
+        )
+
+      {:ok, coding_dead_task} =
+        Ouroboros.Coding.TaskState.new(coding_dead, "already failed",
+          provider: :codex,
+          workspace: File.cwd!()
+        )
+
+      assert :ok = CodingStore.create(coding_live_task)
+      assert :ok = CodingStore.create(%{coding_dead_task | status: :failed, error: :boom})
+
+      coding_live_error = call(client, "coding.delete", %{"id" => coding_live})["error"]
+      assert coding_live_error["code"] == -32006
+      assert coding_live_error["data"]["reason"] == "task_not_terminal"
+      assert :ok = CodingStore.put(%{coding_live_task | status: :cancelled})
+      assert :ok = CodingStore.delete(coding_live)
+
+      assert call(client, "coding.delete", %{"id" => coding_dead})["result"] == "ok"
+      assert :not_found = CodingStore.get(coding_dead)
+    end
+
     test "durable failed starts return their stable reference and mismatches are definite", %{
       client: client
     } do

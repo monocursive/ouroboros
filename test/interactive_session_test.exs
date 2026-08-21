@@ -1046,6 +1046,23 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.close(ref)
   end
 
+  test "delete removes a terminal session and refuses a live one", %{id: id} do
+    {:ok, live} = State.new(id, provider: @provider, workspace: File.cwd!())
+    assert :ok = Store.create(live)
+    assert {:error, {:session_not_terminal, :starting}} = InteractiveSession.delete(id)
+    assert {:ok, %State{status: :starting}} = Store.get(id)
+
+    dead_id = unique_id("interactive-delete")
+    {:ok, dead} = State.new(dead_id, provider: @provider, workspace: File.cwd!())
+    assert :ok = Store.create(%{dead | status: :lost, error: :provider_gone})
+    assert :ok = InteractiveSession.delete(dead_id)
+    assert :not_found = Store.get(dead_id)
+    assert :not_found = InteractiveSession.delete(dead_id)
+
+    assert :ok = Store.put(%{live | status: :failed, error: :cleanup})
+    assert :ok = InteractiveSession.delete(id)
+  end
+
   # A durable session whose one turn was checkpointed as intended but never dispatched:
   # exactly what recovery finds after a coordinator dies between the two writes.
   defp checkpoint_unsent_turn(id, workspace, attachments) do

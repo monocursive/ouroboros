@@ -13,9 +13,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Event, EventType, Plane, SessionInfo};
+use crate::model::{Event, EventType, Plane, SessionInfo, SessionStatus};
 
-use super::app::App;
+use super::app::{App, Connection};
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
@@ -26,15 +26,546 @@ use super::transcript_cells;
 // useful recent suffix. The complete retained ledger remains available through Ctrl-O.
 const CHAT_ENTRY_WINDOW: usize = 128;
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    if app.sessions.open.is_none() {
-        home(frame, area, app);
+/// Progressive disclosure keeps the conversation usable before it keeps the ornament.
+/// The Figma workspace deliberately keeps all three surfaces on a tall, laptop-sized
+/// terminal: the rails become narrower before either disappears. Short terminals still
+/// spend their rows on the transcript and composer because stacked telemetry is not useful
+/// when it can only show card headings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceLayout {
+    Focused,
+    SessionRail,
+    Full,
+}
+
+fn workspace_layout(area: Rect) -> WorkspaceLayout {
+    if area.width >= 112 && area.height >= 34 {
+        WorkspaceLayout::Full
+    } else if area.width >= 96 && area.height >= 22 {
+        WorkspaceLayout::SessionRail
     } else {
-        detail(frame, area, app);
+        WorkspaceLayout::Focused
     }
 }
 
-fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
+pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    // The empty harness is intentionally singular: a session rail with nothing to select
+    // spends width while a person is composing the task that will create the first row.
+    // The full mark and any reconciliation error therefore retain the entire terminal.
+    if app.sessions.open.is_none() {
+        home(frame, area, app);
+        return;
+    }
+
+    match workspace_layout(area) {
+        WorkspaceLayout::Focused => primary(frame, area, app, true),
+        WorkspaceLayout::SessionRail => {
+            let columns =
+                Layout::horizontal([Constraint::Length(24), Constraint::Min(60)]).split(area);
+            session_rail(frame, columns[0], app);
+            primary(frame, columns[1], app, true);
+        }
+        WorkspaceLayout::Full => {
+            let left = if area.width >= 140 { 27 } else { 23 };
+            let right = if area.width >= 140 { 37 } else { 30 };
+            let columns = Layout::horizontal([
+                Constraint::Length(left),
+                Constraint::Min(58),
+                Constraint::Length(right),
+            ])
+            .split(area);
+            session_rail(frame, columns[0], app);
+            context_rail(frame, columns[2], app);
+            primary(frame, columns[1], app, false);
+        }
+    }
+}
+
+fn primary(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
+    if app.sessions.open.is_none() {
+        home(frame, area, app);
+    } else {
+        detail(frame, area, app, inline_context);
+    }
+}
+
+fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(theme::MUTED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sessions = app.sessions.merged();
+    let summary = app.machine_summary();
+    let footer_height = 7.min(inner.height.saturating_sub(4));
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(footer_height),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" SESSIONS", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" / {:02}", sessions.len()),
+                    Style::default().fg(theme::MUTED),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" ctrl+x l ", theme::action()),
+                Span::styled("switch", Style::default().fg(theme::MUTED)),
+            ]),
+            Line::from(Span::styled(
+                "─".repeat(inner.width as usize),
+                Style::default().fg(theme::MUTED),
+            )),
+        ]),
+        rows[0],
+    );
+
+    // Four cards are enough to preserve peripheral awareness without allowing a long tail
+    // of dead sessions to turn the navigation rail into the visually dominant surface.
+    // The complete list remains one leader chord away.
+    let raw_capacity = ((rows[1].height as usize).saturating_add(1) / 5).max(1);
+    let needs_summary = sessions.len() > raw_capacity.min(4);
+    let capacity = if needs_summary {
+        ((rows[1].height as usize) / 5).max(1)
+    } else {
+        raw_capacity
+    };
+    let visible_count = capacity.min(4);
+    let selected_index = app.sessions.open.as_ref().and_then(|(plane, id)| {
+        sessions
+            .iter()
+            .position(|session| session.plane == *plane && session.id == *id)
+    });
+    let start = selected_index
+        .unwrap_or(0)
+        .saturating_sub(visible_count.saturating_sub(1))
+        .min(sessions.len().saturating_sub(visible_count));
+    for (offset, session) in sessions.iter().skip(start).take(visible_count).enumerate() {
+        let selected = app
+            .sessions
+            .open
+            .as_ref()
+            .is_some_and(|(plane, id)| *plane == session.plane && id == &session.id);
+        let title_style = if selected {
+            theme::action()
+        } else if session.last_known {
+            theme::quiet()
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        let card_width = rows[1].width;
+        let label = session
+            .objective
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| super::tree::truncate(value, card_width.saturating_sub(6) as usize))
+            .unwrap_or_else(|| {
+                format!(
+                    "Session {}",
+                    session_id_suffix(&session.id, card_width.saturating_sub(12))
+                )
+            });
+        let provider = session.provider.as_deref().unwrap_or(session.plane.tag());
+        let (signal, status) = session_signal(&session.status);
+        let border_style = if selected {
+            Style::default().fg(theme::ACTION)
+        } else {
+            match &session.status {
+                SessionStatus::Running | SessionStatus::Starting => {
+                    Style::default().fg(theme::SYSTEM)
+                }
+                SessionStatus::Failed | SessionStatus::Lost => Style::default().fg(theme::BAD),
+                _ => Style::default().fg(theme::MUTED),
+            }
+        };
+        let card = Rect::new(
+            rows[1].x,
+            rows[1].y.saturating_add((offset as u16).saturating_mul(5)),
+            rows[1].width,
+            4.min(rows[1].height),
+        );
+        if card.y.saturating_add(card.height) > rows[1].bottom() {
+            break;
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let content = block.inner(card);
+        frame.render_widget(block, card);
+        let marker = if selected { "▌" } else { signal };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(format!("{marker} "), border_style),
+                    Span::styled(label, title_style),
+                ]),
+                Line::from(vec![
+                    Span::styled(session.status.as_str().to_uppercase(), status),
+                    Span::styled(
+                        format!(" · {}", super::tree::truncate(provider, 9)),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ]),
+            ]),
+            content,
+        );
+    }
+
+    if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    " No sessions yet",
+                    Style::default().fg(theme::MUTED),
+                )),
+                Line::from(Span::styled(
+                    " Start in the composer",
+                    Style::default().fg(theme::MUTED),
+                )),
+            ]),
+            rows[1],
+        );
+    } else if sessions.len() > visible_count {
+        let summary_y = rows[1]
+            .y
+            .saturating_add((visible_count as u16).saturating_mul(5));
+        if summary_y < rows[1].bottom() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        " +{:02} more · ctrl+x l",
+                        sessions.len().saturating_sub(visible_count)
+                    ),
+                    Style::default().fg(theme::MUTED),
+                ))),
+                Rect::new(rows[1].x, summary_y, rows[1].width, 1),
+            );
+        }
+    }
+
+    let fleet = summary.fleet.as_deref().unwrap_or(summary.mode.as_str());
+    let health_style = if summary.offline.unwrap_or(0) > 0 {
+        Style::default().fg(theme::WARN)
+    } else {
+        Style::default().fg(theme::GOOD)
+    };
+    let fleet_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            format!(
+                " FLEET / {} ",
+                super::tree::truncate(&summary.machine, inner.width.saturating_sub(11) as usize)
+            ),
+            theme::label(),
+        ));
+    let fleet_inner = fleet_block.inner(rows[2]);
+    frame.render_widget(fleet_block, rows[2]);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" ● ", health_style),
+                Span::styled(
+                    super::tree::truncate(fleet, inner.width.saturating_sub(4) as usize),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!(
+                    "   {} / {} connected",
+                    summary.connected,
+                    summary.expected.unwrap_or(summary.connected)
+                ),
+                Style::default().fg(theme::MUTED),
+            )),
+            Line::from(Span::styled(summary.mode.to_uppercase(), theme::label())),
+        ]),
+        fleet_inner,
+    );
+}
+
+fn compact_session_id(id: &str, width: u16) -> String {
+    let width = width.max(8) as usize;
+    if id.width() <= width {
+        return id.to_string();
+    }
+
+    let tail = id
+        .chars()
+        .rev()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("…{tail}")
+}
+
+fn session_id_suffix(id: &str, width: u16) -> String {
+    id.chars()
+        .rev()
+        .take(width.max(6) as usize)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn session_signal(status: &SessionStatus) -> (&'static str, Style) {
+    let signal = match status {
+        SessionStatus::Starting | SessionStatus::Running | SessionStatus::Closing => "◆",
+        SessionStatus::AwaitingApproval => "!",
+        SessionStatus::Idle => "○",
+        SessionStatus::Completed | SessionStatus::Closed => "✓",
+        SessionStatus::Failed | SessionStatus::Lost => "×",
+        SessionStatus::Cancelled => "–",
+        SessionStatus::Other(_) => "?",
+    };
+    (signal, theme::session_status(status))
+}
+
+fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(theme::MUTED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let session = app.sessions.open_info();
+    let watch = app.sessions.open_watch();
+    let summary = app.machine_summary();
+    let (sandbox, writable) = app.open_sandbox().unwrap_or_else(|| {
+        let (label, writable) = app.home_sandbox();
+        (label.to_string(), writable)
+    });
+    let approval = session
+        .map(|session| session_policy(Some(session), "approval_mode"))
+        .unwrap_or_else(|| {
+            app.config
+                .defaults
+                .approval_mode()
+                .map(|mode| mode.as_str().to_string())
+                .unwrap_or_else(|| "ask".to_string())
+        });
+    let panel_width = inner.width.saturating_sub(2);
+    let provider = session
+        .and_then(|session| session.provider.as_deref())
+        .unwrap_or("unknown");
+    let workspace = session
+        .and_then(|session| session.workspace.as_deref())
+        .unwrap_or("unknown");
+    let (session_label, session_style) = session
+        .map(|session| {
+            let (signal, style) = session_signal(&session.status);
+            (
+                format!("{signal} {}", session.status.as_str().to_uppercase()),
+                style.add_modifier(Modifier::BOLD),
+            )
+        })
+        .unwrap_or_else(|| ("○ NEW SESSION".to_string(), theme::action()));
+    let (stream_label, stream_style) = if let Some(watch) = watch {
+        if watch.resyncing {
+            ("RESTORING", Style::default().fg(theme::SYSTEM))
+        } else if watch.ended.is_some() {
+            ("ENDED", Style::default().fg(theme::MUTED))
+        } else if watch.follow {
+            ("STREAMING", Style::default().fg(theme::SYSTEM))
+        } else {
+            ("SCROLLED", Style::default().fg(theme::WARN))
+        }
+    } else {
+        ("DETACHED", Style::default().fg(theme::MUTED))
+    };
+    let (link_label, link_style) = match &app.connection {
+        Connection::Live => ("LINK HEALTHY".to_string(), Style::default().fg(theme::GOOD)),
+        Connection::Lost { reason } => (
+            format!("LINK LOST · {}", super::tree::truncate(reason, 12)),
+            Style::default().fg(theme::BAD),
+        ),
+    };
+    let event_count = watch.map(Watch::len).unwrap_or(0);
+    let cursor = watch.map(Watch::cursor).unwrap_or(0);
+    let dropped = watch.map(|watch| watch.dropped).unwrap_or(0);
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+        Constraint::Length(7),
+        Constraint::Length(1),
+        Constraint::Length(7),
+        Constraint::Length(1),
+        Constraint::Length(7),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let compact_header = inner.width < 33;
+    let header_columns = Layout::horizontal([
+        Constraint::Min(16),
+        Constraint::Length(if compact_header { 7 } else { 11 }),
+    ])
+    .split(rows[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " RUNTIME / CONTEXT",
+            theme::label(),
+        ))),
+        header_columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("● ", stream_style),
+            Span::styled(
+                if compact_header { "LIVE" } else { stream_label },
+                stream_style.add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        header_columns[1],
+    );
+
+    render_context_panel(
+        frame,
+        rows[2],
+        " SIGIL / CONTEXT CHANNEL ",
+        theme::SYSTEM,
+        vec![
+            Line::from(Span::styled(
+                format!(
+                    "◇──[ {} ]──◇",
+                    super::tree::truncate(
+                        &summary.machine,
+                        panel_width.saturating_sub(12) as usize
+                    )
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("{event_count} events · {stream_label}"),
+                Style::default().fg(theme::MUTED),
+            )),
+        ],
+    );
+
+    render_context_panel(
+        frame,
+        rows[4],
+        " ACTIVE CONTEXT ",
+        theme::MUTED,
+        vec![
+            context_panel_value("PROVIDER", provider, panel_width, Style::default()),
+            context_panel_value("WORKSPACE", workspace, panel_width, Style::default()),
+            context_panel_value("APPROVAL", &approval, panel_width, theme::action()),
+            context_panel_value(
+                "FILES",
+                &sandbox,
+                panel_width,
+                Style::default().fg(if writable { theme::GOOD } else { theme::WARN }),
+            ),
+            Line::from(Span::styled(session_label, session_style)),
+        ],
+    );
+
+    render_context_panel(
+        frame,
+        rows[6],
+        " EXECUTION TRACE ",
+        theme::MUTED,
+        vec![
+            context_panel_value(
+                "EVENTS",
+                &event_count.to_string(),
+                panel_width,
+                Style::default(),
+            ),
+            context_panel_value("CURSOR", &cursor.to_string(), panel_width, Style::default()),
+            context_panel_value(
+                "DROPPED",
+                &dropped.to_string(),
+                panel_width,
+                Style::default(),
+            ),
+            context_panel_value(
+                "NODES",
+                &format!(
+                    "{} / {} connected",
+                    summary.connected,
+                    summary.expected.unwrap_or(summary.connected)
+                ),
+                panel_width,
+                Style::default(),
+            ),
+            Line::from(Span::styled(link_label, link_style)),
+        ],
+    );
+
+    render_context_panel(
+        frame,
+        rows[8],
+        " BOUNDARIES ",
+        theme::MUTED,
+        vec![
+            context_panel_value("MODE", &summary.mode, panel_width, Style::default()),
+            context_panel_value("MACHINE", &summary.machine, panel_width, Style::default()),
+            context_panel_value("ENDPOINT", &app.address, panel_width, Style::default()),
+            context_panel_value("APPROVAL", &approval, panel_width, theme::action()),
+            context_panel_value(
+                "FILES",
+                &sandbox,
+                panel_width,
+                Style::default().fg(if writable { theme::GOOD } else { theme::WARN }),
+            ),
+        ],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " HERMETIC CORE · LEGIBLE EDGE",
+            Style::default().fg(theme::MUTED),
+        ))),
+        rows[10],
+    );
+}
+
+fn render_context_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title: &'static str,
+    colour: ratatui::style::Color,
+    lines: Vec<Line<'static>>,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            title,
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+        ));
+    let content = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
+}
+
+fn context_panel_value(label: &str, value: &str, width: u16, style: Style) -> Line<'static> {
+    let available = width
+        .saturating_sub(label.width() as u16)
+        .saturating_sub(1)
+        .max(4) as usize;
+    Line::from(vec![
+        Span::styled(format!("{label} "), theme::label()),
+        Span::styled(super::tree::truncate(value, available), style),
+    ])
+}
+
+fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
     let composer_height = if app
         .sessions
         .open
@@ -61,7 +592,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App) {
     transcript(frame, rows[0], app);
 
     if composer_height > 0 {
-        composer(frame, rows[1], app);
+        composer(frame, rows[1], app, inline_context);
     }
 }
 
@@ -150,6 +681,19 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .sessions
         .open_info()
         .map(|session| session.status.as_str().to_string());
+    let conversation_title = app
+        .sessions
+        .open_info()
+        .and_then(|session| session.objective.as_deref())
+        .filter(|objective| !objective.trim().is_empty())
+        .map(str::to_uppercase)
+        .unwrap_or_else(|| "AGENT CHAT".to_string());
+    let conversation_provider = app
+        .sessions
+        .open_info()
+        .and_then(|session| session.provider.as_deref())
+        .unwrap_or("unknown")
+        .to_string();
 
     let Some((plane, id)) = app.sessions.open.clone() else {
         frame.render_widget(
@@ -174,7 +718,13 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let ticks = app.ticks;
     let show_event_details = app.sessions.show_event_details;
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    let header_height = if area.width >= 52 && area.height >= 12 {
+        3
+    } else {
+        1
+    };
+    let rows =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(1)]).split(area);
     let inner = rows[1];
 
     let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
@@ -225,10 +775,25 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // the only thing that can hold a scrolled-back viewport still while the tail grows.
     watch.measured(lines.len(), inner.height as usize);
 
-    frame.render_widget(
-        Paragraph::new(header(watch, &id, plane, ticks, show_event_details)),
-        rows[0],
-    );
+    if header_height == 1 {
+        frame.render_widget(
+            Paragraph::new(header(watch, &id, plane, ticks, show_event_details)),
+            rows[0],
+        );
+    } else {
+        render_conversation_header(
+            frame,
+            rows[0],
+            watch,
+            ConversationHeader {
+                id: &id,
+                plane,
+                title: &conversation_title,
+                provider: &conversation_provider,
+                show_event_details,
+            },
+        );
+    }
 
     if lines.is_empty() {
         frame.render_widget(
@@ -256,6 +821,100 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let end = (start + height).min(lines.len());
 
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);
+}
+
+struct ConversationHeader<'a> {
+    id: &'a str,
+    plane: Plane,
+    title: &'a str,
+    provider: &'a str,
+    show_event_details: bool,
+}
+
+fn render_conversation_header(
+    frame: &mut Frame,
+    area: Rect,
+    watch: &Watch,
+    header: ConversationHeader<'_>,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let action_width = if area.width >= 72 { 24 } else { 13 };
+    let columns =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(action_width)]).split(rows[0]);
+    let heading = if header.show_event_details {
+        "EVENT DETAILS".to_string()
+    } else {
+        super::tree::truncate(header.title, columns[0].width.saturating_sub(1) as usize)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {heading}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        columns[0],
+    );
+
+    let (stream, stream_style) = if watch.resyncing {
+        ("RESTORING", Style::default().fg(theme::SYSTEM))
+    } else if watch.ended.is_some() {
+        ("ENDED", Style::default().fg(theme::MUTED))
+    } else if watch.follow {
+        ("FOLLOWING", Style::default().fg(theme::SYSTEM))
+    } else {
+        ("SCROLLED", Style::default().fg(theme::WARN))
+    };
+    let action = if area.width >= 72 {
+        Line::from(vec![
+            Span::styled("● ", stream_style),
+            Span::styled(stream, stream_style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if header.show_event_details {
+                    "  ^O CHAT"
+                } else {
+                    "  ^O EVENTS"
+                },
+                theme::label(),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("● ", stream_style),
+            Span::styled(stream, stream_style.add_modifier(Modifier::BOLD)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(action), columns[1]);
+
+    let meta = if header.show_event_details {
+        format!(
+            " {} · {} · cursor {}",
+            header.plane,
+            compact_session_id(header.id, 14),
+            watch.cursor()
+        )
+    } else {
+        format!(
+            " {} · {} · {}",
+            header.plane,
+            super::tree::truncate(header.provider, 14),
+            compact_session_id(header.id, area.width.saturating_sub(24))
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(meta, theme::label()))),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(theme::MUTED),
+        ))),
+        rows[2],
+    );
 }
 
 fn header(
@@ -540,7 +1199,7 @@ fn cell_split(text: &str, width: usize) -> usize {
     text.len()
 }
 
-fn composer(frame: &mut Frame, area: Rect, app: &App) {
+fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     let active = app.sessions.composer.as_ref();
     let verb = active
         .map(|composer| composer.verb.title())
@@ -559,22 +1218,31 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::WARN)
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if active.is_some() {
-            theme::ACCENT
-        } else {
-            theme::MUTED
-        }))
-        .title(Line::from(vec![
-            Span::styled(" PROVIDER ", theme::label()),
+    let title = if inline_context {
+        Line::from(vec![
+            Span::styled(" INSERT ", theme::action()),
+            Span::styled("· PROVIDER ", theme::label()),
             Span::raw(provider.to_string()),
             Span::styled("  ·  APPROVAL ", theme::label()),
             Span::styled(approval, Style::default().fg(theme::WARN)),
             Span::styled("  ·  FILES ", theme::label()),
             Span::styled(sandbox, sandbox_style),
             Span::styled(format!("   {verb}"), Style::default().fg(theme::MUTED)),
-        ]));
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" INSERT ", theme::action()),
+            Span::styled(format!("· {verb}"), Style::default().fg(theme::MUTED)),
+        ])
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if active.is_some() {
+            theme::ACTION
+        } else {
+            theme::MUTED
+        }))
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -617,6 +1285,15 @@ fn composer(frame: &mut Frame, area: Rect, app: &App) {
             "↑↓ choose · Tab complete · Esc close",
             app.keyboard_enhanced,
             "sends",
+        )
+    } else if area.width < 76 {
+        format!(
+            "Esc abort · {} · Ctrl+J newline · Enter sends",
+            if sandbox_writable {
+                "/ commands"
+            } else {
+                "/write"
+            }
         )
     } else {
         key_footer(
@@ -668,7 +1345,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if ready { theme::ACCENT } else { theme::MUTED }))
+        .border_style(Style::default().fg(if ready { theme::ACTION } else { theme::MUTED }))
         .title(Line::from(vec![
             Span::styled(" PROVIDER ", theme::label()),
             Span::raw(app.home_provider().to_string()),
@@ -827,7 +1504,7 @@ fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &s
     if editor.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("▌ ", Style::default().fg(theme::ACCENT)),
+                Span::styled("▌ ", Style::default().fg(theme::ACTION)),
                 Span::styled(placeholder.to_string(), Style::default().fg(theme::MUTED)),
             ])),
             area,
@@ -853,7 +1530,7 @@ fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &s
                 "  "
             };
             Line::from(vec![
-                Span::styled(prefix, Style::default().fg(theme::ACCENT)),
+                Span::styled(prefix, Style::default().fg(theme::ACTION)),
                 Span::raw(content),
             ])
         })
@@ -1010,5 +1687,31 @@ mod tests {
         assert_eq!(visual_line_count("one line", 40), 1);
         assert_eq!(visual_line_count("one\ntwo\nthree", 40), 3);
         assert_eq!(visual_line_count("abcdefghij", 4), 3);
+    }
+
+    #[test]
+    fn workspace_layout_protects_the_conversation_before_disclosing_telemetry() {
+        assert_eq!(
+            workspace_layout(Rect::new(0, 0, 80, 24)),
+            WorkspaceLayout::Focused
+        );
+        assert_eq!(
+            workspace_layout(Rect::new(0, 0, 120, 30)),
+            WorkspaceLayout::SessionRail
+        );
+        assert_eq!(
+            workspace_layout(Rect::new(0, 0, 116, 58)),
+            WorkspaceLayout::Full,
+            "a tall laptop viewport keeps the designed contextual rail"
+        );
+        assert_eq!(
+            workspace_layout(Rect::new(0, 0, 160, 40)),
+            WorkspaceLayout::Full
+        );
+        assert_eq!(
+            workspace_layout(Rect::new(0, 0, 160, 20)),
+            WorkspaceLayout::Focused,
+            "short terminals must spend their rows on chat and the composer"
+        );
     }
 }

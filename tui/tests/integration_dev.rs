@@ -21,9 +21,13 @@ fn enabled() -> bool {
 }
 
 fn scratch_data_dir() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = std::env::temp_dir().join(format!("ouro-integration-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch data directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .expect("a private scratch data directory");
     dir
 }
 

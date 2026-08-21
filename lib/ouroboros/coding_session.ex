@@ -159,6 +159,46 @@ defmodule Ouroboros.CodingSession do
   @spec cancel(task()) :: :ok | {:error, term()}
   def cancel(task), do: call(task, :cancel)
 
+  @doc """
+  Deletes a terminal coding task's durable record.
+
+  Live tasks must be cancelled first. The coordinator is stopped before the checkpoint is
+  removed so a retiring process cannot write the task back.
+  """
+  @spec delete(task()) :: :ok | :not_found | {:error, term()}
+  def delete(task) do
+    owner = owner(task)
+    id = id(task)
+
+    if owner == node() do
+      local_delete(id)
+    else
+      route(owner, __MODULE__, :local_delete, [id], call_timeout())
+    end
+  end
+
+  @doc false
+  def local_delete(id) when is_binary(id) do
+    case Store.get(id) do
+      :not_found ->
+        :not_found
+
+      {:error, reason} ->
+        {:error, {:storage_error, reason}}
+
+      {:ok, %TaskState{node: owner}} when owner != node() ->
+        {:error, {:wrong_owner, owner}}
+
+      {:ok, %TaskState{} = task} ->
+        if TaskState.terminal?(task) do
+          stop_local_coordinator(id)
+          Store.delete(id)
+        else
+          {:error, {:task_not_terminal, task.status}}
+        end
+    end
+  end
+
   @doc false
   def local_call(id, message) do
     with {:ok, pid} <- ensure_coordinator(id) do
@@ -167,6 +207,17 @@ defmodule Ouroboros.CodingSession do
   catch
     :exit, {:timeout, _call} -> {:error, :timeout}
     :exit, reason -> {:error, {:task_call_failed, reason}}
+  end
+
+  defp stop_local_coordinator(id) do
+    case Task.whereis(id) do
+      pid when is_pid(pid) ->
+        _ = DynamicSupervisor.terminate_child(Ouroboros.Coding.TaskSupervisor, pid)
+        :ok
+
+      _absent ->
+        :ok
+    end
   end
 
   defp call(task, message) do

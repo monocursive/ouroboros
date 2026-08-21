@@ -208,8 +208,10 @@ defmodule Ouroboros.Gateway.Methods do
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
     "interactive.close" => %{scope: :operate, timeout: @default_timeout},
     "interactive.kill" => %{scope: :operate, timeout: @default_timeout},
+    "interactive.delete" => %{scope: :operate, timeout: @default_timeout},
     "coding.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "coding.cancel" => %{scope: :operate, timeout: @default_timeout},
+    "coding.delete" => %{scope: :operate, timeout: @default_timeout},
     "teams.add_worker" => %{scope: :operate, timeout: @team_timeout},
     "teams.delegate" => %{scope: :operate, timeout: @team_timeout},
     # The two verbs whose upstream call is `:infinity`. A gateway timeout here does not
@@ -654,6 +656,12 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
+  def invoke("interactive.delete", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.delete(session)) end)
+    end)
+  end
+
   def invoke("coding.start", params) do
     safe(fn ->
       with {:ok, objective} <- fetch_string(params, "objective"),
@@ -669,6 +677,12 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("coding.cancel", params) do
     with_session(params, :coding, ["id", "node"], fn session ->
       safe(fn -> reply(CodingSession.cancel(session)) end)
+    end)
+  end
+
+  def invoke("coding.delete", params) do
+    with_session(params, :coding, ["id", "node"], fn session ->
+      safe(fn -> reply(CodingSession.delete(session)) end)
     end)
   end
 
@@ -1551,6 +1565,18 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp reply({:error, {:team_not_found, id}}),
     do: not_found("no team #{inspect(id)} is visible from this node")
+
+  defp reply({:error, {:session_not_terminal, status}}) do
+    {:error, code(:upstream_error),
+     "the session is still #{status}; close or kill it before removing the durable record",
+     %{"reason" => "session_not_terminal", "status" => to_string(status)}}
+  end
+
+  defp reply({:error, {:task_not_terminal, status}}) do
+    {:error, code(:upstream_error),
+     "the coding task is still #{status}; cancel it before removing the durable record",
+     %{"reason" => "task_not_terminal", "status" => to_string(status)}}
+  end
 
   defp reply({:error, :control_disabled_or_unavailable}),
     do: unavailable("the control plane is disabled or not running on this node")

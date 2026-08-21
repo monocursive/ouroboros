@@ -4,8 +4,9 @@
 //! cells, but no decision made here is sent back to the runtime. Ctrl-O continues to show
 //! every raw event when this best-effort presentation cannot recognize a newer payload.
 //!
-//! Chat layout is classical: the user's words sit in a right-hand bubble, the agent's on
-//! the left, and tool/command activity is dimmer and more compact than either speaker.
+//! Chat layout is editorial rather than phone-like: both voices share one readable measure,
+//! human intent is marked in amber, runtime output in cyan, and tool/command activity is
+//! dimmer and more compact than either speaker.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -534,40 +535,61 @@ fn render_message(
     }
 }
 
-/// User turns sit in a right-hand column, like a phone chat. The label hugs the pane
-/// edge; the body is a right-aligned block whose width shrinks to the words, so a short
-/// "ok" sits on the right instead of floating in the middle of the column.
 fn render_user_message(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
-    let column = user_column(width);
-    let label_style = Style::default()
-        .fg(theme::ACCENT)
-        .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(theme::ACCENT);
+    if width < 16 {
+        lines.push(Line::from(vec![
+            Span::styled("▌ ", theme::action()),
+            Span::styled("YOU", theme::action()),
+        ]));
+        for line in wrap_limited(text, width.saturating_sub(2).max(8), MESSAGE_LINES) {
+            lines.push(Line::from(Span::raw(line)));
+        }
+        return;
+    }
 
-    lines.push(flush_right("You", label_style, width));
+    let border = Style::default().fg(theme::MUTED);
+    let heading_width = "┌─ ▌ YOU ".width();
+    lines.push(Line::from(vec![
+        Span::styled("┌─ ", border),
+        Span::styled("▌ YOU ", theme::action()),
+        Span::styled(
+            format!("{}┐", "─".repeat(width.saturating_sub(heading_width + 1))),
+            border,
+        ),
+    ]));
 
-    let wrapped = wrap_limited(text, column, MESSAGE_LINES.saturating_add(1));
+    let wrapped = wrap_limited(
+        text,
+        width.saturating_sub(4).max(8),
+        MESSAGE_LINES.saturating_add(1),
+    );
     let shown = wrapped.len().min(MESSAGE_LINES);
-    let block = wrapped
-        .iter()
-        .take(shown)
-        .map(|line| line.width())
-        .max()
-        .unwrap_or(0)
-        .min(column);
-    let gutter = width.saturating_sub(1).saturating_sub(block);
 
     for line in wrapped.iter().take(shown) {
-        lines.push(guttered(gutter, line.clone(), body_style));
+        let padding = width.saturating_sub(line.width() + 4);
+        lines.push(Line::from(vec![
+            Span::styled("│ ", border),
+            Span::raw(line.clone()),
+            Span::raw(" ".repeat(padding)),
+            Span::styled(" │", border),
+        ]));
     }
 
     if wrapped.len() > shown {
-        lines.push(guttered(
-            gutter,
-            "… full message in event details".into(),
-            theme::quiet(),
-        ));
+        let omitted = "… full message in event details";
+        let padding = width.saturating_sub(omitted.width() + 4);
+        lines.push(Line::from(vec![
+            Span::styled("│ ", border),
+            Span::styled(omitted, theme::quiet()),
+            Span::raw(" ".repeat(padding)),
+            Span::styled(" │", border),
+        ]));
     }
+
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+        border,
+    )));
 }
 
 fn render_agent_message(
@@ -577,12 +599,16 @@ fn render_agent_message(
     streaming: bool,
     tick: u64,
 ) {
-    lines.push(Line::from(Span::styled(
-        "Agent",
-        Style::default()
-            .fg(theme::GOOD)
-            .add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(vec![
+        Span::styled("◆ ", Style::default().fg(theme::SYSTEM)),
+        Span::styled(
+            "AGENT",
+            Style::default()
+                .fg(theme::SYSTEM)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" / RESPONSE", Style::default().fg(theme::SYSTEM)),
+    ]));
 
     let wrapped = wrap_limited(text, width.max(8), MESSAGE_LINES.saturating_add(1));
     let shown = wrapped.len().min(MESSAGE_LINES);
@@ -608,36 +634,40 @@ fn render_agent_message(
 }
 
 fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, tick: u64) {
-    let quiet = tool.state != ToolState::Failed;
-    if !quiet {
-        separate(lines);
-    }
+    separate(lines);
 
     let (mark, mark_style) = match tool.state {
         ToolState::Running => (
             theme::spinner(tick).to_string(),
             Style::default().fg(theme::ACCENT),
         ),
-        ToolState::Completed => ("·".to_string(), theme::quiet()),
+        ToolState::Completed => ("✓".to_string(), Style::default().fg(theme::GOOD)),
         ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::BAD)),
     };
     let name_style = match tool.state {
         ToolState::Failed => Style::default().fg(theme::BAD),
-        _ => theme::quiet(),
+        _ => Style::default(),
     };
     let input = tool_input(&tool.name, &tool.input);
+    let state_suffix = match tool.state {
+        ToolState::Running => "  running",
+        ToolState::Failed => "  failed",
+        ToolState::Completed => "",
+    };
+    let display_name = display_tool_name(&tool.name);
+    let reserved = mark.width() + display_name.width() + state_suffix.width() + 3;
+    let shown_input = super::tree::truncate(
+        &input.replace('\n', " "),
+        width.saturating_sub(4).saturating_sub(reserved),
+    );
     let mut head = vec![
-        Span::raw("  "),
         Span::styled(format!("{mark} "), mark_style),
-        Span::styled(display_tool_name(&tool.name), name_style),
+        Span::styled(display_name, name_style),
     ];
 
-    if !input.is_empty() {
+    if !shown_input.is_empty() {
         head.push(Span::raw("  "));
-        head.push(Span::styled(
-            super::tree::truncate(&input.replace('\n', " "), width.saturating_sub(16)),
-            theme::quiet(),
-        ));
+        head.push(Span::styled(shown_input, theme::quiet()));
     }
 
     match tool.state {
@@ -648,7 +678,38 @@ fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, ti
         ToolState::Completed => {}
     }
 
-    lines.push(Line::from(head));
+    if width < 24 {
+        lines.push(Line::from(head));
+        if let Some(output) = &tool.output {
+            let output = value_text(output);
+            if !output.trim().is_empty() {
+                render_excerpt(
+                    lines,
+                    &output,
+                    width,
+                    TOOL_OUTPUT_LINES,
+                    "full result in event details",
+                    if tool.state == ToolState::Failed {
+                        Style::default().fg(theme::BAD)
+                    } else {
+                        theme::quiet()
+                    },
+                );
+            }
+        }
+        return;
+    }
+
+    let border = match tool.state {
+        ToolState::Running => Style::default().fg(theme::SYSTEM),
+        ToolState::Completed => Style::default().fg(theme::GOOD),
+        ToolState::Failed => Style::default().fg(theme::BAD),
+    };
+    lines.push(Line::from(Span::styled(
+        format!("┌{}┐", "─".repeat(width.saturating_sub(2))),
+        border,
+    )));
+    lines.push(boxed_tool_row(head, width, border));
 
     if let Some(output) = &tool.output {
         let output = value_text(output);
@@ -657,16 +718,45 @@ fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, ti
                 ToolState::Failed => Style::default().fg(theme::BAD),
                 _ => theme::quiet(),
             };
-            render_excerpt(
-                lines,
-                &output,
-                width,
-                TOOL_OUTPUT_LINES,
-                "full result in event details",
-                body,
-            );
+            let content_width = width.saturating_sub(4).max(8);
+            let wrapped = wrap_limited(&output, content_width, 2);
+            if let Some(first) = wrapped.first() {
+                lines.push(boxed_tool_row(
+                    vec![Span::styled(first.clone(), body)],
+                    width,
+                    border,
+                ));
+            }
+            if wrapped.len() > 1 {
+                lines.push(boxed_tool_row(
+                    vec![Span::styled(
+                        super::tree::truncate("… full result in event details", content_width),
+                        theme::quiet(),
+                    )],
+                    width,
+                    border,
+                ));
+            }
         }
     }
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+        border,
+    )));
+}
+
+fn boxed_tool_row(mut content: Vec<Span<'static>>, width: usize, border: Style) -> Line<'static> {
+    let used = content
+        .iter()
+        .map(|span| span.content.as_ref().width())
+        .sum::<usize>();
+    let mut spans = vec![Span::styled("│ ", border)];
+    spans.append(&mut content);
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used.saturating_add(4))),
+    ));
+    spans.push(Span::styled(" │", border));
+    Line::from(spans)
 }
 
 fn render_command_output(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
@@ -965,28 +1055,6 @@ fn colour(tone: Tone) -> Color {
         Tone::Warning => theme::WARN,
         Tone::Error => theme::BAD,
     }
-}
-
-/// Right-hand column for the user's words. Capped so a wide pane still reads as a
-/// bubble rather than a second full-width transcript.
-fn user_column(width: usize) -> usize {
-    let inner = width.saturating_sub(1);
-    (inner * 7 / 12).clamp(8, 56).min(inner.max(8))
-}
-
-fn flush_right(text: &str, style: Style, width: usize) -> Line<'static> {
-    let pad = width.saturating_sub(text.width().saturating_add(1));
-    Line::from(vec![
-        Span::raw(" ".repeat(pad)),
-        Span::styled(text.to_string(), style),
-    ])
-}
-
-fn guttered(gutter: usize, text: String, style: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(" ".repeat(gutter)),
-        Span::styled(text, style),
-    ])
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
@@ -1373,7 +1441,7 @@ mod tests {
         assert_eq!(tool.state, ToolState::Completed);
 
         let text = plain(&render_cells(&cells, 80));
-        assert!(text.contains("· read"), "{text}");
+        assert!(text.contains("✓ read"), "{text}");
         assert!(text.contains("README.md"), "{text}");
         assert!(text.contains("project docs"), "{text}");
         assert!(
@@ -1794,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn user_messages_occupy_the_right_column_and_agent_messages_the_left() {
+    fn user_and_agent_messages_share_one_readable_editorial_column() {
         let cells = vec![
             Cell::Message {
                 speaker: Speaker::You,
@@ -1811,8 +1879,8 @@ mod tests {
         let you = lines
             .iter()
             .map(plain_line)
-            .find(|line| line.contains("You"))
-            .expect("a You label");
+            .find(|line| line.contains("YOU"))
+            .expect("a YOU label");
         let user_body = lines
             .iter()
             .map(plain_line)
@@ -1821,28 +1889,19 @@ mod tests {
         let agent = lines
             .iter()
             .map(plain_line)
-            .find(|line| line.trim() == "Agent")
-            .expect("an Agent label");
+            .find(|line| line.trim() == "◆ AGENT / RESPONSE")
+            .expect("an AGENT label");
         let agent_body = lines
             .iter()
             .map(plain_line)
             .find(|line| line.contains("The tests are fixed."))
             .expect("the agent body");
 
-        assert!(you.ends_with("You"), "{you:?}");
-        assert!(you.starts_with(' '), "{you:?}");
-        assert!(user_body.starts_with(' '), "{user_body:?}");
-        assert_eq!(agent, "Agent");
+        assert!(you.starts_with("┌─ ▌ YOU "), "{you:?}");
+        assert!(you.ends_with('┐'), "{you:?}");
+        assert!(user_body.starts_with("│ "), "{user_body:?}");
+        assert_eq!(agent, "◆ AGENT / RESPONSE");
         assert_eq!(agent_body, "The tests are fixed.");
-
-        let gutter = user_body
-            .chars()
-            .take_while(|character| *character == ' ')
-            .count();
-        assert!(
-            gutter >= 8,
-            "the user bubble should sit on the right: {user_body:?}"
-        );
     }
 
     #[test]
@@ -1865,16 +1924,16 @@ mod tests {
         let text = plain(&lines);
 
         assert!(text.contains("I'll run the suite."), "{text}");
-        assert!(text.contains("· command"), "{text}");
+        assert!(text.contains("✓ command"), "{text}");
         assert!(text.contains("mix test"), "{text}");
         assert!(text.contains("3 tests, 0 failures"), "{text}");
         assert!(!text.contains("Run  "), "{text}");
         assert!(!text.contains("  done"), "{text}");
-        assert!(!text.contains('│'), "{text}");
+        assert!(text.contains('┌') && text.contains('└'), "{text}");
 
         let command = lines
             .iter()
-            .find(|line| plain_line(line).contains("· command"))
+            .find(|line| plain_line(line).contains("✓ command"))
             .expect("a command row");
         assert!(
             command

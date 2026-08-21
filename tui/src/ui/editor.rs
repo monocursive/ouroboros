@@ -40,7 +40,7 @@ const COMMANDS: [(&str, &str); 26] = [
     ("/hotkeys", "show keyboard help"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
-    ("/close", "end the open session"),
+    ("/close", "end or remove the selected session"),
     (
         "/options",
         "new session with provider and workspace options",

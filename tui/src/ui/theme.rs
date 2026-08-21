@@ -13,14 +13,26 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::model::{Availability, SessionStatus};
 
-pub const ACCENT: Color = Color::Cyan;
+/// Machine activity and agent output. Cyan is deliberately reserved for things the
+/// runtime is doing, so a moving cyan mark always means "system" rather than "click me".
+pub const SYSTEM: Color = Color::Cyan;
+/// Human intent: the composer caret, the selected session, and actionable prompts.
+pub const ACTION: Color = Color::Yellow;
+/// Backwards-compatible name for the system channel used throughout the operator views.
+pub const ACCENT: Color = SYSTEM;
 pub const MUTED: Color = Color::DarkGray;
 pub const GOOD: Color = Color::Green;
-pub const WARN: Color = Color::Yellow;
+/// Warnings remain distinct from the warmer action channel on ANSI terminals that expose
+/// both yellow intensities. Terminal palettes still own the exact hue.
+pub const WARN: Color = Color::LightYellow;
 pub const BAD: Color = Color::Red;
 
 pub fn heading() -> Style {
-    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    Style::default().fg(SYSTEM).add_modifier(Modifier::BOLD)
+}
+
+pub fn action() -> Style {
+    Style::default().fg(ACTION).add_modifier(Modifier::BOLD)
 }
 
 pub fn label() -> Style {

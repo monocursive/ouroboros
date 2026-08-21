@@ -187,6 +187,151 @@ fn with_open_session() -> App {
     app
 }
 
+#[test]
+fn coding_workspace_progressively_discloses_context_without_sacrificing_the_composer() {
+    let mut app = with_open_session();
+    notify(
+        &mut app,
+        event(1, "input_accepted", "inspect the runtime boundary"),
+    );
+    notify(
+        &mut app,
+        event(2, "output_text_final", "The boundary is contained."),
+    );
+    notify(
+        &mut app,
+        event_with(
+            3,
+            "tool_call",
+            json!({"call_id": "check-1", "name": "exec_command", "input": {"cmd": "cargo test"}}),
+        ),
+    );
+    notify(
+        &mut app,
+        event_with(
+            4,
+            "tool_result",
+            json!({"call_id": "check-1", "output": "109 checks passed", "is_error": false}),
+        ),
+    );
+
+    let wide = render(&mut app, 160, 40);
+    if std::env::var_os("OUROBOROS_DUMP_VIEWPORTS").is_some() {
+        eprintln!("\n--- wide 160x40 ---\n{}", wide.text());
+    }
+    for visible in [
+        "SESSIONS / 01",
+        "CONTEXT CHANNEL",
+        "ACTIVE CONTEXT",
+        "EXECUTION TRACE",
+        "BOUNDARIES",
+        "HERMETIC CORE",
+        "YOU",
+        "AGENT",
+        "✓ command",
+        "Ask a follow-up or request edits",
+    ] {
+        assert!(
+            wide.contains(visible),
+            "wide workspace lost {visible:?}:\n{}",
+            wide.text()
+        );
+    }
+    assert_eq!(wide.colour_of("▌ YOU", "YOU"), Color::Yellow);
+    assert_eq!(wide.colour_of("◆ AGENT", "AGENT"), Color::Cyan);
+    assert_eq!(wide.colour_of("✓ command", "✓"), Color::Green);
+
+    let laptop = render(&mut app, 116, 58);
+    if std::env::var_os("OUROBOROS_DUMP_VIEWPORTS").is_some() {
+        eprintln!("\n--- laptop 116x58 ---\n{}", laptop.text());
+    }
+    for visible in [
+        "SESSIONS / 01",
+        "AGENT CHAT",
+        "RUNTIME / CONTEXT",
+        "ACTIVE CONTEXT",
+        "EXECUTION TRACE",
+        "BOUNDARIES",
+        "INSERT",
+    ] {
+        assert!(
+            laptop.contains(visible),
+            "laptop workspace lost {visible:?}:\n{}",
+            laptop.text()
+        );
+    }
+
+    let standard = render(&mut app, 120, 30);
+    if std::env::var_os("OUROBOROS_DUMP_VIEWPORTS").is_some() {
+        eprintln!("\n--- standard 120x30 ---\n{}", standard.text());
+    }
+    assert!(standard.contains("SESSIONS / 01"), "{}", standard.text());
+    assert!(standard.contains("YOU"), "{}", standard.text());
+    assert!(
+        standard.contains("Ask a follow-up or request edits"),
+        "{}",
+        standard.text()
+    );
+    assert!(
+        !standard.contains("CONTEXT CHANNEL"),
+        "the telemetry rail must yield before the reading pane:\n{}",
+        standard.text()
+    );
+
+    let narrow = render(&mut app, 80, 24);
+    if std::env::var_os("OUROBOROS_DUMP_VIEWPORTS").is_some() {
+        eprintln!("\n--- narrow 80x24 ---\n{}", narrow.text());
+    }
+    assert!(narrow.contains("Agent chat"), "{}", narrow.text());
+    assert!(narrow.contains("YOU"), "{}", narrow.text());
+    assert!(narrow.contains("AGENT"), "{}", narrow.text());
+    assert!(narrow.contains("PROVIDER"), "{}", narrow.text());
+    assert!(!narrow.contains("SESSIONS /"), "{}", narrow.text());
+    assert!(!narrow.contains("CONTEXT CHANNEL"), "{}", narrow.text());
+}
+
+#[test]
+fn session_rail_caps_visual_noise_and_keeps_the_complete_picker_available() {
+    let mut app = with_open_session();
+    let sessions = (1..=8)
+        .map(|number| {
+            json!({
+                "_struct": "Ouroboros.Interactive.State",
+                "id": format!("session-000000000000000000000{number}"),
+                "objective": format!("Task {number}"),
+                "node": "ouroboros@golden",
+                "provider": "codex",
+                "workspace": "/tmp/w",
+                "status": if number == 1 { "running" } else { "lost" },
+                "options": {
+                    "approval_mode": "auto_edit",
+                    "sandbox_mode": "workspace_write"
+                },
+                "created_at": "2026-01-01T00:00:00.000000Z",
+                "updated_at": "2026-01-01T00:00:00.000000Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        serde_json::Value::Array(sessions),
+    );
+
+    let screen = render(&mut app, 116, 58);
+    for visible in [
+        "Task 1",
+        "Task 2",
+        "Task 3",
+        "Task 4",
+        "+04 more · ctrl+x l",
+    ] {
+        assert!(screen.contains(visible), "{}", screen.text());
+    }
+    assert!(!screen.contains("Task 5"), "{}", screen.text());
+    assert!(screen.contains("RUNTIME / CONTEXT"), "{}", screen.text());
+}
+
 fn event(sequence: u64, kind: &str, text: &str) -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
@@ -656,7 +801,10 @@ fn availability_is_three_colours_and_disabled_is_not_one_of_the_alarming_ones() 
 
     assert_eq!(screen.colour_of("mesh", "unavailable"), Color::Red);
     // A state this build has never heard of is neither good nor an outage.
-    assert_eq!(screen.colour_of("forged_lane", "degraded"), Color::Yellow);
+    assert_eq!(
+        screen.colour_of("forged_lane", "degraded"),
+        Color::LightYellow
+    );
 }
 
 #[test]
@@ -1010,7 +1158,7 @@ fn the_transcript_renders_the_golden_interactive_event() {
     // The complete event ledger remains one key away.
     app.apply(ctrl('o'));
     let details = render(&mut app, 120, 24);
-    assert!(details.contains("Event details"), "{}", details.text());
+    assert!(details.contains("EVENT DETAILS"), "{}", details.text());
     assert!(details.contains("output_text_final"), "{}", details.text());
     assert!(details.contains("cursor 42"), "{}", details.text());
     assert!(
@@ -1044,9 +1192,9 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
     notify(&mut app, event(5, "usage", "input_tokens=21088"));
 
     let chat = render(&mut app, 120, 26);
-    assert!(chat.contains("You"), "{}", chat.text());
+    assert!(chat.contains("YOU"), "{}", chat.text());
     assert!(chat.contains("please fix the tests"), "{}", chat.text());
-    assert!(chat.contains("Agent"), "{}", chat.text());
+    assert!(chat.contains("AGENT"), "{}", chat.text());
     assert!(chat.contains("The tests are fixed."), "{}", chat.text());
 
     for hidden in [
@@ -1804,7 +1952,7 @@ fn a_scrolled_back_transcript_holds_still_while_the_tail_grows() {
     }
 
     let before = render(&mut app, 120, 24);
-    assert!(before.contains("scrolled back"), "{}", before.text());
+    assert!(before.contains("SCROLLED"), "{}", before.text());
     let anchored = message_rows(&before);
     assert!(!anchored.is_empty(), "{}", before.text());
 
@@ -1900,7 +2048,7 @@ fn the_wheel_and_shift_up_scroll_the_transcript_not_prompt_history() {
 
     app.apply(modified(KeyCode::Up, KeyModifiers::SHIFT));
     let shifted = render(&mut app, 120, 24);
-    assert!(shifted.contains("scrolled back"), "{}", shifted.text());
+    assert!(shifted.contains("SCROLLED"), "{}", shifted.text());
     assert_eq!(
         app.sessions
             .composer
@@ -1913,7 +2061,7 @@ fn the_wheel_and_shift_up_scroll_the_transcript_not_prompt_history() {
 
     app.apply(Msg::Scroll(-12));
     let wheeled = render(&mut app, 120, 24);
-    assert!(wheeled.contains("scrolled back"), "{}", wheeled.text());
+    assert!(wheeled.contains("SCROLLED"), "{}", wheeled.text());
     assert_eq!(
         app.sessions
             .composer
@@ -1959,7 +2107,7 @@ fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
     );
 
     let screen = render(&mut app, 120, 40);
-    assert!(!screen.contains("scrolled back"), "{}", screen.text());
+    assert!(!screen.contains("SCROLLED"), "{}", screen.text());
 
     // And on a transcript that does have history, the offset stops at the top rather than
     // climbing: returning costs the pages that exist, not the keys that were pressed.
@@ -3428,6 +3576,194 @@ fn x_confirms_before_ending_a_session() {
 }
 
 #[test]
+fn x_in_the_session_switcher_removes_a_terminal_session() {
+    let mut app = with_open_session();
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([
+            {
+                "id": "session-0000000000000000000001",
+                "status": "running",
+                "updated_at": "2026-01-01T00:00:02.000000Z"
+            },
+            {
+                "id": "session-dead",
+                "status": "lost",
+                "provider": "codex",
+                "updated_at": "2026-01-01T00:00:01.000000Z"
+            }
+        ]),
+    );
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+
+    apply_leader(&mut app, 'l');
+    let _ = app.drain();
+    let picker = render(&mut app, 80, 20);
+    assert!(picker.contains("x end"), "{}", picker.text());
+
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Char('x')));
+
+    let screen = render(&mut app, 120, 24);
+    assert!(screen.contains("remove session-dead"), "{}", screen.text());
+    assert!(
+        screen.contains("remove from this machine"),
+        "{}",
+        screen.text()
+    );
+    assert!(app.drain().is_empty(), "confirming is what deletes");
+
+    app.apply(key(KeyCode::Enter));
+    let call = app.drain().into_iter().next().expect("a delete");
+    assert_eq!(call.method, "interactive.delete");
+    assert_eq!(call.params["id"], "session-dead");
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Ok(json!("ok")),
+    });
+
+    assert!(app
+        .sessions
+        .merged()
+        .iter()
+        .all(|session| session.id != "session-dead"));
+    assert_eq!(
+        app.sessions.open.as_ref().map(|(_plane, id)| id.as_str()),
+        Some("session-0000000000000000000001")
+    );
+    assert!(
+        matches!(app.overlay, Some(Overlay::SessionPicker { .. })),
+        "the switcher returns so several dead rows can be cleared"
+    );
+}
+
+#[test]
+fn x_on_a_lost_open_session_offers_remove_instead_of_kill() {
+    let mut app = with_open_session();
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "session-0000000000000000000001",
+            "status": "lost",
+            "updated_at": "2026-01-01T00:00:00.000000Z"
+        }]),
+    );
+
+    apply_leader(&mut app, 'x');
+
+    let screen = render(&mut app, 120, 24);
+    assert!(screen.contains("remove session-"), "{}", screen.text());
+    assert!(!screen.contains("kill (stop it now)"), "{}", screen.text());
+
+    app.apply(key(KeyCode::Enter));
+    let call = app.drain().into_iter().next().expect("a delete");
+    assert_eq!(call.method, "interactive.delete");
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Ok(json!("ok")),
+    });
+
+    assert!(app.sessions.open.is_none());
+    assert!(app.sessions.merged().is_empty());
+}
+
+#[test]
+fn x_hides_a_last_known_offline_row_without_calling_the_runtime() {
+    let mut app = shell(full_hello());
+    app.apply(key(KeyCode::Char('2')));
+    let remote_node = "ouro@late-member.test";
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "late-member-session",
+            "node": remote_node,
+            "status": "running",
+            "updated_at": "2026-01-01T00:00:02.000000Z"
+        }]),
+    );
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouroboros@golden",
+            "connected_nodes": [],
+            "cluster": {
+                "distributed": true,
+                "fleet": {
+                    "machines": [
+                        { "node": "ouroboros@golden", "machine": "local", "state": "local" },
+                        { "node": remote_node, "machine": "late-member", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "local-session",
+            "node": "ouroboros@golden",
+            "status": "idle",
+            "updated_at": "2026-01-01T00:00:03.000000Z"
+        }]),
+    );
+
+    let _ = app.drain();
+    app.overlay = Some(Overlay::SessionPicker {
+        selected: Some((Plane::Interactive, "late-member-session".into())),
+    });
+    app.apply(key(KeyCode::Char('x')));
+
+    let screen = render(&mut app, 120, 24);
+    assert!(
+        screen.contains("hide late-member-session"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("hide here"), "{}", screen.text());
+
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain().is_empty(),
+        "an offline last-known row is hidden here; its owner cannot be reached"
+    );
+    assert!(app
+        .sessions
+        .merged()
+        .iter()
+        .all(|session| session.id != "late-member-session"));
+    assert!(app
+        .sessions
+        .merged()
+        .iter()
+        .any(|session| session.id == "local-session"));
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "id": "local-session",
+            "node": "ouroboros@golden",
+            "status": "idle",
+            "updated_at": "2026-01-01T00:00:04.000000Z"
+        }]),
+    );
+    assert!(app
+        .sessions
+        .merged()
+        .iter()
+        .all(|session| session.id != "late-member-session"));
+}
+
+#[test]
 fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
     let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
@@ -3585,7 +3921,7 @@ fn new_session_can_choose_a_connected_machine_by_friendly_name() {
     );
     assert_eq!(
         form.colour_of("claude_code", "claude_code"),
-        Color::Yellow,
+        Color::LightYellow,
         "remote readiness is unknown even when the gateway has this provider"
     );
 
@@ -3604,7 +3940,7 @@ fn new_session_can_choose_a_connected_machine_by_friendly_name() {
     );
     assert_eq!(
         remote_missing_locally.colour_of("gemini", "gemini"),
-        Color::Yellow,
+        Color::LightYellow,
         "remote readiness is unknown even when the gateway lacks this provider"
     );
     app.apply(key(KeyCode::Left));
@@ -4450,7 +4786,7 @@ fn every_tab_draws_without_any_data_at_all() {
         let screen = render(&mut app, 100, 24);
 
         assert!(
-            screen.contains("ouroboros")
+            screen.contains("OUROBOROS")
                 && (screen.contains("Runtime & distribution")
                     || screen.contains("New coding session")),
             "surface {digit} lost its shell:\n{}",
@@ -4467,6 +4803,14 @@ fn the_quit_dialog_offers_shutdown_only_where_the_gateway_advertises_it() {
     let screen = render(&mut app, 120, 24);
     assert!(screen.contains("detach"), "{}", screen.text());
     assert!(screen.contains("runtime.shutdown, then SIGTERM"));
+
+    let narrow = render(&mut app, 80, 24);
+    assert!(narrow.contains("`ouro attach`"), "{}", narrow.text());
+    assert!(
+        narrow.contains("runtime.shutdown, then SIGTERM, then SIGKILL"),
+        "a narrow terminal must still name the full shutdown consequence:\n{}",
+        narrow.text()
+    );
 
     // The same client against a gateway that does not serve it falls back to a signal.
     let mut without = app_without_shutdown();
@@ -4633,6 +4977,28 @@ fn a_notice_replaces_the_status_line_and_expires() {
         screen.contains("ctrl+p commands"),
         "the shell footer comes back"
     );
+}
+
+#[test]
+fn attached_runtime_footer_preserves_the_complete_endpoint_at_standard_width() {
+    for address in ["127.0.0.1:54272", "127.0.0.1:54274"] {
+        let mut app = App::new(Mode::Attached, address.into(), full_hello(), None);
+        resolve_account(&mut app);
+
+        let screen = render(&mut app, 120, 30);
+        let footer = screen.row("● LIVE");
+
+        assert!(
+            footer.contains(address),
+            "the footer clipped {address:?}:\n{}",
+            screen.text()
+        );
+        assert!(
+            footer.contains("ctrl+p commands"),
+            "making room for the endpoint must not discard the primary shortcut:\n{}",
+            screen.text()
+        );
+    }
 }
 
 #[test]

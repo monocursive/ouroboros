@@ -206,6 +206,15 @@ impl Paths {
     pub fn releases(&self) -> PathBuf {
         self.cache_dir.join("releases")
     }
+
+    /// Establishes the local runtime boundary before the boot screen takes the terminal.
+    ///
+    /// A derived XDG leaf belongs to this client, so an older same-user installation that
+    /// created it too broadly can be restricted in place. An explicit operator path keeps
+    /// the strict contract: Ouroboros never changes it implicitly.
+    pub fn ensure_private_data_dir(&self) -> Result<()> {
+        ensure_private_data_dir_with_policy(&self.data_dir, !self.data_dir_overridden)
+    }
 }
 
 /// Resolves the rendezvous directory shared by the client and the runtime it starts.
@@ -223,10 +232,16 @@ struct ResolvedDataDir {
 /// Establishes the durable-directory leaf as a private same-user boundary.
 ///
 /// Parent directories retain their operator/XDG posture, but the leaf itself is created
-/// atomically at 0700 and is never followed or silently repaired. A pre-existing broad,
-/// foreign, symlinked, or non-directory leaf may already expose or redirect durable
-/// state, so callers must stop before reading or mutating anything beneath it.
+/// atomically at 0700 and is never followed or silently repaired. This strict entrypoint
+/// is used for explicit/operator paths and every lower-level revalidation.
 pub fn ensure_private_data_dir(data_dir: &Path) -> Result<()> {
+    ensure_private_data_dir_with_policy(data_dir, false)
+}
+
+fn ensure_private_data_dir_with_policy(
+    data_dir: &Path,
+    repair_same_user_permissions: bool,
+) -> Result<()> {
     if !data_dir.is_absolute() {
         bail!(
             "durable data directory {} must be an absolute path",
@@ -253,7 +268,9 @@ pub fn ensure_private_data_dir(data_dir: &Path) -> Result<()> {
         .with_context(|| format!("creating data-directory parent {}", parent.display()))?;
 
     match fs::symlink_metadata(&normalized) {
-        Ok(metadata) => validate_private_data_dir(&normalized, &metadata),
+        Ok(metadata) => {
+            validate_private_data_dir(&normalized, &metadata, repair_same_user_permissions)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut builder = DirBuilder::new();
             builder.mode(0o700);
@@ -270,19 +287,27 @@ pub fn ensure_private_data_dir(data_dir: &Path) -> Result<()> {
             let metadata = fs::symlink_metadata(&normalized).with_context(|| {
                 format!("inspecting new data directory {}", normalized.display())
             })?;
-            validate_private_data_dir(&normalized, &metadata)
+            validate_private_data_dir(&normalized, &metadata, false)
         }
         Err(error) => Err(error)
             .with_context(|| format!("inspecting data directory {}", normalized.display())),
     }
 }
 
-fn validate_private_data_dir(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+fn validate_private_data_dir(
+    path: &Path,
+    metadata: &fs::Metadata,
+    repair_same_user_permissions: bool,
+) -> Result<()> {
     // SAFETY: geteuid cannot fail and touches no memory.
     let us = unsafe { libc::geteuid() };
     let mode = metadata.mode() & 0o777;
     if metadata.file_type().is_dir() && metadata.uid() == us && mode == 0o700 {
         return Ok(());
+    }
+
+    if repair_same_user_permissions && metadata.file_type().is_dir() && metadata.uid() == us {
+        return restrict_owned_default_data_dir(path, metadata, us);
     }
 
     bail!(
@@ -292,6 +317,73 @@ fn validate_private_data_dir(path: &Path, metadata: &fs::Metadata) -> Result<()>
         metadata.uid(),
         path.display()
     )
+}
+
+/// Restricts the exact directory inode that was inspected, without following a symlink
+/// substituted between validation and chmod. The path is revalidated after `fchmod` too:
+/// subsequent lifecycle operations must still reach the inode that was made private.
+fn restrict_owned_default_data_dir(path: &Path, inspected: &fs::Metadata, us: u32) -> Result<()> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("opening the app-managed data directory {}", path.display()))?;
+    let opened = directory.metadata().with_context(|| {
+        format!(
+            "inspecting the app-managed data directory {}",
+            path.display()
+        )
+    })?;
+
+    if !opened.file_type().is_dir()
+        || opened.uid() != us
+        || opened.dev() != inspected.dev()
+        || opened.ino() != inspected.ino()
+    {
+        bail!(
+            "the app-managed data directory {} changed while Ouroboros was securing it; retry startup",
+            path.display()
+        );
+    }
+
+    // SAFETY: the descriptor is an O_NOFOLLOW handle for the exact same-user directory
+    // inode validated above. fchmod affects that inode rather than resolving the path again.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "restricting the app-managed data directory {} to mode 0700",
+                path.display()
+            )
+        });
+    }
+
+    let secured = directory.metadata().with_context(|| {
+        format!(
+            "verifying the app-managed data directory {} after repair",
+            path.display()
+        )
+    })?;
+    let current = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "revalidating the app-managed data directory {} after repair",
+            path.display()
+        )
+    })?;
+
+    if secured.mode() & 0o777 != 0o700
+        || !current.file_type().is_dir()
+        || current.uid() != us
+        || current.mode() & 0o777 != 0o700
+        || current.dev() != secured.dev()
+        || current.ino() != secured.ino()
+    {
+        bail!(
+            "the app-managed data directory {} did not remain the same private mode-0700 directory after repair; retry startup",
+            path.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn resolve_data_dir<F>(
@@ -2604,6 +2696,53 @@ mod tests {
         assert_eq!(fs::read(data_dir.join("sentinel")).unwrap(), b"unchanged");
         assert!(!data_dir.join(SPAWN_LOCK_FILE).exists());
         assert!(!data_dir.join(SPAWN_LOCK_RECOVERY_FILE).exists());
+        assert_eq!(fs::metadata(&data_dir).unwrap().mode() & 0o777, 0o755);
+
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn app_managed_default_restricts_an_owned_legacy_leaf_in_place() {
+        let parent = scratch("legacy-default-data-dir-parent");
+        let data_dir = parent.join("ouroboros");
+        fs::create_dir(&data_dir).expect("a legacy app data directory");
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755))
+            .expect("legacy broad permissions");
+        fs::write(data_dir.join("sentinel"), b"unchanged").expect("existing durable state");
+        let paths = Paths {
+            data_dir: data_dir.clone(),
+            cache_dir: parent.join("cache"),
+            data_dir_overridden: false,
+        };
+
+        paths
+            .ensure_private_data_dir()
+            .expect("the derived same-user leaf is safely restricted");
+
+        assert_eq!(fs::read(data_dir.join("sentinel")).unwrap(), b"unchanged");
+        assert_eq!(fs::metadata(&data_dir).unwrap().mode() & 0o777, 0o700);
+
+        fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn explicit_data_dir_keeps_the_no_implicit_chmod_contract() {
+        let parent = scratch("explicit-data-dir-parent");
+        let data_dir = parent.join("ouroboros");
+        fs::create_dir(&data_dir).expect("an explicit data directory");
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755))
+            .expect("deliberately broad permissions");
+        let paths = Paths {
+            data_dir: data_dir.clone(),
+            cache_dir: parent.join("cache"),
+            data_dir_overridden: true,
+        };
+
+        let error = paths
+            .ensure_private_data_dir()
+            .expect_err("an explicit path still requires operator repair");
+
+        assert!(format!("{error:#}").contains("will not chmod or replace"));
         assert_eq!(fs::metadata(&data_dir).unwrap().mode() & 0o777, 0o755);
 
         fs::remove_dir_all(parent).ok();

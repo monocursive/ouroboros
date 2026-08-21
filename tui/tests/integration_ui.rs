@@ -47,9 +47,13 @@ fn enabled() -> bool {
 }
 
 fn scratch_data_dir() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = std::env::temp_dir().join(format!("ouro-ui-integration-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch data directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .expect("a private scratch data directory");
     dir
 }
 
@@ -199,8 +203,12 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     // smoke still visits the runtime dashboard explicitly so it can exercise every live
     // read surface without weakening the coding-first startup contract.
     assert_eq!(app.tab, Tab::Sessions);
-    let screen = render(&mut app, 140, 34);
-    assert!(screen.contains("New coding session"), "{}", screen.text());
+    for (width, height) in [(80, 24), (120, 30), (160, 40)] {
+        let screen = render(&mut app, width, height);
+        assert!(screen.contains("New coding session"), "{}", screen.text());
+        assert!(screen.contains("PROVIDER"), "{}", screen.text());
+        assert!(screen.contains("ctrl+p commands"), "{}", screen.text());
+    }
 
     // ----- tab 1: the Dashboard, from live data -------------------------------------
 
@@ -285,13 +293,17 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
         "a freshly started dev runtime has no sessions"
     );
 
-    let screen = render(&mut app, 140, 34);
-    eprintln!("--- Sessions ---\n{}", screen.text());
-    assert!(
-        screen.contains("Ready in this workspace"),
-        "{}",
-        screen.text()
-    );
+    for (width, height) in [(80, 24), (120, 30), (160, 40)] {
+        let screen = render(&mut app, width, height);
+        eprintln!("--- Sessions {width}x{height} ---\n{}", screen.text());
+        assert!(
+            screen.contains("Ready in this workspace"),
+            "{}",
+            screen.text()
+        );
+        assert!(screen.contains("FILES"), "{}", screen.text());
+        assert!(screen.contains("Enter starts"), "{}", screen.text());
+    }
 
     // Subscribing to a session that does not exist is the closest this can get to the
     // streaming path without invoking a real provider. The point is that the refusal is

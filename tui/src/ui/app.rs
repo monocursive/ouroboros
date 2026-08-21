@@ -538,6 +538,9 @@ pub struct SessionsTab {
     /// the ephemeral open composer. This survives Esc and session switching; Enter always
     /// reconciles the oldest before it can submit a newer draft.
     pending_reconciliations: HashMap<(Plane, String), VecDeque<PendingComposerReconciliation>>,
+    /// Rows the operator hid or deleted in this client. Last-known reconstruction must
+    /// not bring them back; a later list that actually observes the id clears the hide.
+    hidden: HashSet<(Plane, String)>,
 }
 
 impl SessionsTab {
@@ -669,6 +672,29 @@ impl SessionsTab {
         self.merged()
             .get(index)
             .map(|session| (session.plane, session.id.clone()))
+    }
+
+    pub fn get(&self, plane: Plane, id: &str) -> Option<&SessionInfo> {
+        let sessions = match plane {
+            Plane::Interactive => self.interactive.value.as_ref()?,
+            Plane::Coding => self.coding.value.as_ref()?,
+        };
+
+        sessions
+            .iter()
+            .find(|session| session.plane == plane && session.id == id)
+    }
+
+    fn drop_row(&mut self, plane: Plane, id: &str) {
+        self.hidden.insert((plane, id.to_string()));
+        let sessions = match plane {
+            Plane::Interactive => &mut self.interactive.value,
+            Plane::Coding => &mut self.coding.value,
+        };
+
+        if let Some(sessions) = sessions {
+            sessions.retain(|session| session.id != id);
+        }
     }
 
     pub fn open_watch(&self) -> Option<&Watch> {
@@ -1482,7 +1508,7 @@ impl Command {
             Self::Interrupt => "Interrupt the running turn",
             Self::Steer => "Steer the running turn",
             Self::ExternalEditor => "Edit prompt in $EDITOR",
-            Self::CloseSession => "End open session",
+            Self::CloseSession => "End or remove session",
             Self::ConnectChatGpt => "Connect ChatGPT",
             Self::Runtime => "Runtime & distribution",
             Self::Agents => "Agents",
@@ -1636,7 +1662,7 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("s", "steer"),
     ("a", "approval"),
     ("w", "writable session"),
-    ("x", "end session"),
+    ("x", "end or remove session"),
     ("o", "event details"),
     ("q", "quit"),
     ("?", "keyboard help"),
@@ -1804,6 +1830,9 @@ pub struct App {
     /// Monotonic issue order for composer mutations. Outcome-unknown answers may arrive
     /// out of order; reconciliation is sorted by this sequence, never by error arrival.
     next_composer_submission_sequence: u64,
+    /// After ending a session chosen from the switcher, put the switcher back so several
+    /// dead rows can be cleared without reopening it each time.
+    resume_session_picker: bool,
 }
 
 impl App {
@@ -1853,6 +1882,7 @@ impl App {
             copy_pending: None,
             external_editor_pending: None,
             next_composer_submission_sequence: 0,
+            resume_session_picker: false,
         }
     }
 
@@ -2043,10 +2073,14 @@ impl App {
     /// explicitly names that exact owner node as offline. This includes members learned
     /// transitively over BEAM and absent from this machine's original invitation profile.
     fn retain_offline_session_rows(
-        &self,
+        &mut self,
         plane: Plane,
         mut fresh: Vec<SessionInfo>,
     ) -> Vec<SessionInfo> {
+        for session in &fresh {
+            self.sessions.hidden.remove(&(plane, session.id.clone()));
+        }
+
         let offline_nodes: HashSet<&str> = self
             .status
             .value
@@ -2081,7 +2115,8 @@ impl App {
         if let Some(previous) = previous {
             fresh.extend(previous.iter().filter_map(|session| {
                 let node = session.node.as_deref()?;
-                if !offline_nodes.contains(node)
+                if self.sessions.hidden.contains(&(plane, session.id.clone()))
+                    || !offline_nodes.contains(node)
                     || observed.contains(&(session.id.clone(), node.to_string()))
                 {
                     return None;
@@ -3117,7 +3152,15 @@ impl App {
                 Ok(value) if matches!(label, "preview" | "admit" | "list capabilities") => {
                     self.capability_answered(label, &id, value)
                 }
-                Ok(_value) => self.inform(format!("{label} accepted for {id}"), NoticeKind::Info),
+                Ok(_) if label == "remove" => self.session_removed(plane, &id),
+                Err(error) if label == "remove" && error.code() == Some(ErrorCode::NotFound) => {
+                    self.session_removed(plane, &id)
+                }
+                Ok(_value) => {
+                    self.inform(format!("{label} accepted for {id}"), NoticeKind::Info);
+                    self.refresh_session_lists();
+                    self.resume_picker_if_requested();
+                }
                 Err(error) => {
                     if matches!(label, "send_message" | "follow_up")
                         && !Self::reply_outcome_unknown(&error)
@@ -3125,6 +3168,7 @@ impl App {
                         self.sessions.clear_reply_pending(plane, &id);
                     }
                     self.action_failed(label, plane, &id, error);
+                    self.resume_picker_if_requested();
                 }
             },
             Tag::Approval {
@@ -6623,16 +6667,94 @@ impl App {
     }
 
     fn open_close_confirm(&mut self) {
-        if self.tab != Tab::Sessions {
+        let from_picker = matches!(self.overlay, Some(Overlay::SessionPicker { .. }));
+        let Some((plane, id)) = self.session_action_target() else {
+            if !self.sessions.merged().is_empty() {
+                self.activate_command(Command::SwitchSession);
+                self.inform(
+                    "choose a session, then press x to end or remove it",
+                    NoticeKind::Info,
+                );
+            }
+            return;
+        };
+        self.open_close_confirm_for(plane, id, from_picker);
+    }
+
+    fn session_action_target(&self) -> Option<(Plane, String)> {
+        match &self.overlay {
+            Some(Overlay::SessionPicker { selected }) => selected
+                .clone()
+                .or_else(|| self.sessions.picker_key(self.sessions.picker_index(None))),
+            _ => self.sessions.open.clone(),
+        }
+    }
+
+    fn open_close_confirm_for(&mut self, plane: Plane, id: String, from_picker: bool) {
+        if self.tab != Tab::Sessions && !from_picker {
             return;
         }
 
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            return;
-        };
         if self.refuse_owner_conflict(plane, &id) {
             return;
         }
+
+        self.resume_session_picker = from_picker;
+        let session = self.sessions.get(plane, &id);
+
+        if session.is_some_and(|session| session.last_known) {
+            self.overlay = Some(Overlay::Confirm {
+                title: format!("hide {id}?"),
+                detail: "its owner is offline, so this only hides the last-known row in this client; the durable record stays on that machine"
+                    .to_string(),
+                options: vec![
+                    (
+                        "hide here".to_string(),
+                        Some(Call::new(
+                            Tag::Action {
+                                label: "hide",
+                                plane,
+                                id: id.clone(),
+                            },
+                            "interactive.delete",
+                            json!({ "id": id }),
+                        )),
+                    ),
+                    ("keep it".to_string(), None),
+                ],
+                choice: 0,
+            });
+            return;
+        }
+
+        if session.is_some_and(|session| session.status.terminal()) {
+            let routed = self.routed_session_params(plane, &id, json!({ "id": id }));
+            let method = plane.method("delete");
+            self.overlay = Some(Overlay::Confirm {
+                title: format!("remove {id}?"),
+                detail:
+                    "this deletes the durable record on its owner; it is not undone by reattaching"
+                        .to_string(),
+                options: vec![
+                    (
+                        "remove from this machine".to_string(),
+                        Some(Call::new(
+                            Tag::Action {
+                                label: "remove",
+                                plane,
+                                id: id.clone(),
+                            },
+                            method,
+                            routed,
+                        )),
+                    ),
+                    ("keep it".to_string(), None),
+                ],
+                choice: 0,
+            });
+            return;
+        }
+
         let routed = self.routed_session_params(plane, &id, json!({ "id": id }));
 
         let options = match plane {
@@ -6689,6 +6811,70 @@ impl App {
             // presses Enter on a dialog they did not expect must not kill a session.
             choice: 0,
         });
+    }
+
+    fn submit_confirm(&mut self, call: Call) {
+        if let Tag::Action {
+            label: "hide",
+            plane,
+            id,
+        } = &call.tag
+        {
+            let plane = *plane;
+            let id = id.clone();
+            self.session_removed(plane, &id);
+            return;
+        }
+
+        self.issue(call);
+    }
+
+    fn session_removed(&mut self, plane: Plane, id: &str) {
+        self.drop_local_session(plane, id);
+        self.inform(format!("{id} removed from this client"), NoticeKind::Info);
+        self.resume_picker_if_requested();
+    }
+
+    fn drop_local_session(&mut self, plane: Plane, id: &str) {
+        let key = (plane, id.to_string());
+        self.cursors.forget(plane, id);
+        self.sessions.watches.remove(&key);
+        self.sessions.rounds.remove(&key);
+        self.sessions.clear_reply_pending(plane, id);
+        self.sessions.composer_history.remove(&key);
+        self.sessions.composer_drafts.remove(&key);
+        self.sessions.pending_reconciliations.remove(&key);
+        self.sessions.recovering.remove(&key);
+        self.sessions.drop_row(plane, id);
+
+        if self.sessions.open.as_ref() == Some(&key) {
+            self.sessions.open = None;
+            self.sessions.composer = None;
+        }
+    }
+
+    fn refresh_session_lists(&mut self) {
+        self.sessions.interactive.invalidate();
+        self.sessions.coding.invalidate();
+        self.poll();
+    }
+
+    fn resume_picker_if_requested(&mut self) {
+        if !self.resume_session_picker {
+            return;
+        }
+
+        self.resume_session_picker = false;
+        if self.sessions.merged().is_empty() {
+            return;
+        }
+
+        let selected = self
+            .sessions
+            .open
+            .clone()
+            .or_else(|| self.sessions.picker_key(0));
+        self.overlay = Some(Overlay::SessionPicker { selected });
     }
 
     // ----- overlays ------------------------------------------------------------------
@@ -6784,7 +6970,10 @@ impl App {
             Overlay::Confirm {
                 options, choice, ..
             } => match key.code {
-                KeyCode::Esc => self.overlay = None,
+                KeyCode::Esc => {
+                    self.overlay = None;
+                    self.resume_picker_if_requested();
+                }
                 KeyCode::Char('j') | KeyCode::Down => {
                     *choice = (*choice + 1).min(options.len().saturating_sub(1))
                 }
@@ -6794,7 +6983,9 @@ impl App {
                     self.overlay = None;
 
                     if let Some(call) = call {
-                        self.issue(call);
+                        self.submit_confirm(call);
+                    } else {
+                        self.resume_picker_if_requested();
                     }
                 }
                 _ => {}
@@ -6915,7 +7106,6 @@ impl App {
                 self.request_external_editor();
             }
             Command::CloseSession => {
-                self.overlay = None;
                 self.open_close_confirm();
             }
             Command::ConnectChatGpt => {
@@ -7014,6 +7204,11 @@ impl App {
                 self.overlay = None;
                 if let Some((plane, id)) = session {
                     self.open_session(plane, id);
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some((plane, id)) = selected.or_else(|| self.sessions.picker_key(index)) {
+                    self.open_close_confirm_for(plane, id, true);
                 }
             }
             _ => {}

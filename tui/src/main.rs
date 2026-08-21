@@ -165,6 +165,11 @@ fn embedded_release() -> String {
 /// progress rather than of silence, and a boot that fails does so somewhere it can show
 /// the runtime's own output.
 async fn attach_local(paths: &Paths, dev: bool, config: Loaded) -> Result<()> {
+    // Local filesystem preflight happens before the alternate-screen boot UI. A derived
+    // legacy directory can be repaired invisibly; an actual operator/configuration error
+    // remains one concise stderr diagnostic rather than an empty full-screen failure.
+    paths.ensure_private_data_dir()?;
+
     let mut boot = Boot::begin();
     let progress = boot.progress();
 
@@ -206,6 +211,8 @@ async fn new_session(
     message: Option<String>,
     print: bool,
 ) -> Result<()> {
+    paths.ensure_private_data_dir()?;
+
     let resolved = config::resolve_start(&flags, &config.config.defaults)
         .map_err(|missing| anyhow!("{}", missing.message(&config.path)))?;
     // This identity exists before the mutation and survives its one safe reconciliation.
@@ -566,7 +573,7 @@ async fn new_session(
 }
 
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
-    runtime::ensure_private_data_dir(&paths.data_dir)?;
+    paths.ensure_private_data_dir()?;
 
     match command {
         FleetCommand::Create {
@@ -1039,7 +1046,7 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
     if dev {
         bail!("service-run only supports the packaged runtime");
     }
-    runtime::ensure_private_data_dir(&paths.data_dir)?;
+    paths.ensure_private_data_dir()?;
     if fleet::load(&paths.data_dir)?.is_none() {
         bail!("service-run requires a fleet profile; run `ouro fleet create` or `ouro fleet join` first");
     }
@@ -1406,6 +1413,7 @@ fn dev_data_dir_override_warning(paths: &Paths, dev: bool) -> Option<String> {
 
 /// `ouro daemon`: start (or find) a runtime, say how to reach it, and exit.
 async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
+    paths.ensure_private_data_dir()?;
     report_dev_data_dir_override(paths, dev, &Progress::Plain);
 
     if let Some(publication) = live_publication_to_adopt(paths)? {
@@ -1467,6 +1475,12 @@ async fn attach_remote(
     print: bool,
     config: Loaded,
 ) -> Result<()> {
+    // An explicit address plus token file is fully remote and must not touch local runtime
+    // state. Every other form consults the local publication or default token path.
+    if addr.is_none() || token_file.is_none() {
+        paths.ensure_private_data_dir()?;
+    }
+
     let address = match addr {
         Some(addr) => resolve(&addr).await?,
         None => {
@@ -1790,6 +1804,7 @@ async fn print_page(address: SocketAddr, attached: Connected) -> Result<()> {
 /// `ouro stop`: ask the authenticated runtime to exit without ever signalling a PID
 /// learned from a replaceable publication.
 async fn stop(paths: &Paths, dev: bool) -> Result<()> {
+    paths.ensure_private_data_dir()?;
     stop_with_locked_publication(paths, dev, || std::future::ready(())).await
 }
 
