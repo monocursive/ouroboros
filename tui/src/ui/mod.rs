@@ -38,9 +38,11 @@ pub mod view;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Stdout, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
@@ -59,6 +61,7 @@ use ratatui::Terminal;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::fleet::{self, Ports};
 use crate::fleet_add::{self, CandidateSource};
 use crate::proto::{Hello, Notification};
 use crate::runtime::Daemon;
@@ -582,7 +585,7 @@ pub async fn run(
             spawn_machine_scan(sender.clone());
         }
         if let Some(job) = app.take_fleet_job() {
-            spawn_fleet_job(app.data_dir.clone(), job, sender.clone());
+            spawn_fleet_job(app.data_dir.clone(), job, client.clone(), sender.clone());
         }
         if let Some(intent) = app.take_fleet_intent() {
             match app.data_dir.as_deref() {
@@ -590,19 +593,33 @@ pub async fn run(
                     if let Err(error) =
                         fleet_add::write_intent(std::path::Path::new(data_dir), &intent)
                     {
-                        app.inform(
-                            format!("could not save the add-machine plan: {error:#}"),
-                            app::NoticeKind::Error,
-                        );
-                        app.quit = None;
+                        app.fleet_plan_write_failed(format!(
+                            "could not save the add-machine plan: {error:#}"
+                        ));
                     }
                 }
                 None => {
-                    app.inform(
+                    app.fleet_plan_write_failed(
                         "this client has no local data directory, so it cannot create a fleet",
-                        app::NoticeKind::Error,
                     );
-                    app.quit = None;
+                }
+            }
+        }
+        if let Some(intent) = app.take_join_intent() {
+            match app.data_dir.as_deref() {
+                Some(data_dir) => {
+                    if let Err(error) =
+                        fleet_add::write_join_intent(std::path::Path::new(data_dir), &intent)
+                    {
+                        app.fleet_plan_write_failed(format!(
+                            "could not save the join plan: {error:#}"
+                        ));
+                    }
+                }
+                None => {
+                    app.fleet_plan_write_failed(
+                        "this client has no local data directory, so it cannot join a fleet",
+                    );
                 }
             }
         }
@@ -712,70 +729,187 @@ fn machine_candidate(candidate: fleet_add::Candidate) -> app::MachineCandidate {
 fn spawn_fleet_job(
     data_dir: Option<String>,
     job: app::FleetJob,
+    client: Client,
     sender: mpsc::UnboundedSender<Msg>,
 ) {
-    tokio::task::spawn_blocking(move || {
-        let Some(data_dir) = data_dir else {
-            let _ = sender.send(Msg::FleetJobFinished {
-                log: Vec::new(),
-                result: Err(
-                    "this client has no local data directory; add machines from the owner Mac"
-                        .into(),
-                ),
+    match job {
+        app::FleetJob::Status => {
+            tokio::spawn(async move {
+                let live = client
+                    .call_with_timeout("fleet.status", json!({}), Duration::from_secs(5))
+                    .await;
+                let result = tokio::task::spawn_blocking(move || fleet_status_text(data_dir, live))
+                    .await
+                    .unwrap_or_else(|error| Err(format!("{error:#}")));
+                send_fleet_job(sender, Vec::new(), result);
             });
-            return;
-        };
-        let data_dir = std::path::PathBuf::from(data_dir);
-        let outcome = if job.prepare {
-            fleet_add::prepare(&data_dir, &job.machine, &job.host, None)
-        } else {
-            let Some(target) = job.target.as_deref() else {
-                let _ = sender.send(Msg::FleetJobFinished {
-                    log: Vec::new(),
-                    result: Err("SSH add needs user@host".into()),
-                });
-                return;
-            };
-            let via = match fleet_add::Via::parse(&job.via) {
-                Ok(via) => via,
-                Err(error) => {
-                    let _ = sender.send(Msg::FleetJobFinished {
-                        log: Vec::new(),
-                        result: Err(format!("{error:#}")),
-                    });
-                    return;
-                }
-            };
-            fleet_add::add(
-                &data_dir,
-                target,
-                Some(&job.machine),
-                Some(&job.host),
-                via,
-                job.binary.as_deref().map(std::path::Path::new),
-                None,
-            )
-        };
-        match outcome {
-            Ok(outcome) => {
-                let recipe = outcome
-                    .recipe
-                    .as_ref()
-                    .map(fleet_add::Recipe::text)
-                    .unwrap_or_default();
-                let _ = sender.send(Msg::FleetJobFinished {
-                    log: outcome.log,
-                    result: Ok(recipe),
-                });
-            }
-            Err(error) => {
-                let _ = sender.send(Msg::FleetJobFinished {
-                    log: Vec::new(),
-                    result: Err(format!("{error:#}")),
-                });
-            }
         }
-    });
+        app::FleetJob::Doctor => {
+            tokio::spawn(async move {
+                let live = client
+                    .call_with_timeout("fleet.doctor", json!({}), Duration::from_secs(8))
+                    .await;
+                let result = tokio::task::spawn_blocking(move || fleet_doctor_text(data_dir, live))
+                    .await
+                    .unwrap_or_else(|error| Err(format!("{error:#}")));
+                send_fleet_job(sender, Vec::new(), result);
+            });
+        }
+        job => {
+            tokio::task::spawn_blocking(move || {
+                let result = run_blocking_fleet_job(data_dir, job);
+                match result {
+                    Ok((log, recipe)) => send_fleet_job(sender, log, Ok(recipe)),
+                    Err(error) => send_fleet_job(sender, Vec::new(), Err(error)),
+                }
+            });
+        }
+    }
+}
+
+fn send_fleet_job(
+    sender: mpsc::UnboundedSender<Msg>,
+    log: Vec<String>,
+    result: Result<String, String>,
+) {
+    let _ = sender.send(Msg::FleetJobFinished { log, result });
+}
+
+fn require_data_dir(data_dir: Option<String>) -> Result<PathBuf, String> {
+    data_dir.map(PathBuf::from).ok_or_else(|| {
+        "this client has no local data directory; run this from the machine that owns the fleet"
+            .into()
+    })
+}
+
+fn fleet_status_text(
+    data_dir: Option<String>,
+    live: Result<serde_json::Value, crate::transport::ClientError>,
+) -> Result<String, String> {
+    let data_dir = require_data_dir(data_dir)?;
+    match live {
+        Ok(value) => fleet::render_live_status(&data_dir, &value)
+            .or_else(|| fleet::render_status(&data_dir).ok())
+            .ok_or_else(|| "fleet status could not be rendered".into()),
+        Err(error) => fleet::render_status(&data_dir).map_err(|render| {
+            format!("live fleet.status failed ({error}); local status also failed: {render:#}")
+        }),
+    }
+}
+
+fn fleet_doctor_text(
+    data_dir: Option<String>,
+    live: Result<serde_json::Value, crate::transport::ClientError>,
+) -> Result<String, String> {
+    let data_dir = require_data_dir(data_dir)?;
+    let local = fleet::doctor(&data_dir);
+    let report = match live {
+        Ok(value) => fleet::merge_live_doctor(local, &value),
+        Err(error) => fleet::doctor_live_unavailable(local, format!("{error:#}")),
+    };
+    Ok(report.text)
+}
+
+fn run_blocking_fleet_job(
+    data_dir: Option<String>,
+    job: app::FleetJob,
+) -> Result<(Vec<String>, String), String> {
+    let data_dir = require_data_dir(data_dir)?;
+    match job {
+        app::FleetJob::Add {
+            prepare,
+            target,
+            machine,
+            host,
+            via,
+            binary,
+        } => {
+            let outcome = if prepare {
+                fleet_add::prepare(&data_dir, &machine, &host, None)
+            } else {
+                let target = target.ok_or_else(|| "SSH add needs user@host".to_string())?;
+                let via = fleet_add::Via::parse(&via).map_err(|error| format!("{error:#}"))?;
+                fleet_add::add(
+                    &data_dir,
+                    &target,
+                    Some(&machine),
+                    Some(&host),
+                    via,
+                    binary.as_deref().map(Path::new),
+                    None,
+                )
+            }
+            .map_err(|error| format!("{error:#}"))?;
+            let recipe = outcome
+                .recipe
+                .as_ref()
+                .map(fleet_add::Recipe::text)
+                .unwrap_or_default();
+            Ok((outcome.log, recipe))
+        }
+        app::FleetJob::Invite { machine, host, out } => {
+            let output = match out.as_deref() {
+                Some(path) if !path.is_empty() => PathBuf::from(path),
+                _ => fleet::pending_invite_path(&data_dir, &machine)
+                    .map_err(|error| format!("{error:#}"))?,
+            };
+            if let Some(parent) = output.parent() {
+                if parent == fleet::pending_dir(&data_dir) {
+                    fleet::ensure_pending_dir(&data_dir).map_err(|error| format!("{error:#}"))?;
+                }
+            }
+            let member = fleet::invite(&data_dir, &machine, &host, &output, Ports::DEFAULT)
+                .map_err(|error| format!("{error:#}"))?;
+            let quoted =
+                fleet::shell_quote_path(&output).unwrap_or_else(|_| output.display().to_string());
+            Ok((
+                vec![
+                    format!("private invitation created for {}", member.machine),
+                    format!("address {}", member.host),
+                    format!("file {quoted} (mode 0600)"),
+                ],
+                format!(
+                    "Copy it through a private channel. Copy tools may widen permissions; on the receiving machine:\n  chmod 600 {quoted}\n  ouro fleet enroll {quoted} --delete\n\nContents were not printed."
+                ),
+            ))
+        }
+        app::FleetJob::Service => {
+            let installed =
+                fleet::service_install(&data_dir).map_err(|error| format!("{error:#}"))?;
+            let status = if installed.installed {
+                "recovery unit written"
+            } else {
+                "recovery unit already matches"
+            };
+            Ok((
+                vec![
+                    status.into(),
+                    format!("unit {}", installed.path.display()),
+                    format!("manager {}", installed.kind.label()),
+                ],
+                format!(
+                    "Activate (does not start on its own):\n  {}\n\nDeactivate:\n  {}",
+                    installed.activation, installed.deactivation
+                ),
+            ))
+        }
+        app::FleetJob::SyncExport { out } => {
+            let path = PathBuf::from(out);
+            let revision =
+                fleet::export_roster(&data_dir, &path).map_err(|error| format!("{error:#}"))?;
+            let quoted =
+                fleet::shell_quote_path(&path).unwrap_or_else(|_| path.display().to_string());
+            Ok((
+                vec![format!("signed roster revision {revision}")],
+                format!(
+                    "Wrote {quoted} (mode 0600). Copy it privately. On each recipient: stop the runtime, `ouro fleet sync import {quoted}`, then start it again."
+                ),
+            ))
+        }
+        app::FleetJob::Status | app::FleetJob::Doctor => {
+            Err("status and doctor run on the live client, not this worker".into())
+        }
+    }
 }
 
 fn spawn_call(client: Client, call: Call, sender: mpsc::UnboundedSender<Msg>) {

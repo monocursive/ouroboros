@@ -36,6 +36,7 @@ pub const FLEET_DIR: &str = "fleet";
 pub const PROFILE_FILE: &str = "profile.json";
 pub const PENDING_DIR: &str = "pending";
 pub const ADD_INTENT_FILE: &str = "add-intent.json";
+pub const JOIN_INTENT_FILE: &str = "join-intent.json";
 pub const COOKIE_FILE: &str = "cookie";
 pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
@@ -372,6 +373,11 @@ pub fn pending_dir(data_dir: &Path) -> PathBuf {
 /// Where a first-run add-from-this-instance restart stores its non-secret plan.
 pub fn add_intent_path(data_dir: &Path) -> PathBuf {
     data_dir.join(ADD_INTENT_FILE)
+}
+
+/// Where a first-run join-from-this-instance restart stores the invitation path.
+pub fn join_intent_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(JOIN_INTENT_FILE)
 }
 
 /// Invitation path for one pending machine. The machine name is validated so it cannot

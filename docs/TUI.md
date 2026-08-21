@@ -874,12 +874,13 @@ rediscovered:
   dialog uses, workspace, approval mode, and sandbox mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
-- **Machines Add can install the other machines from this instance.** `/machines` (also
-  `,` → machines) opens a confirmable add: SSH/Tailscale SSH when this Mac can reach the
-  host, or a printed enroll recipe when it cannot. Known Tailscale/SSH hosts are
-  pickable. A first add on a standalone Mac restarts once to create the fleet. Invitation
-  bytes never appear on screen, in argv, or in the recipe. A Mac binary is never copied
-  onto Linux. Provider sign-in stays on the destination.
+- **Machines is a runnable fleet menu.** `/machines` (also `,` → machines) lists known
+  Tailscale/SSH hosts and the rest of the fleet actions. Enter runs the selected row
+  after any form/confirm it needs: add (SSH or an enroll recipe), create, join/enroll,
+  invite, service install, status, doctor, and roster export. A first create or add on a
+  standalone Mac restarts once. Invitation bytes never appear on screen, in argv, or in
+  the recipe. A Mac binary is never copied onto Linux. Provider sign-in stays on the
+  destination. `y` still copies the equivalent CLI.
 - **Machines keeps membership removal and state retirement separate.** Its guidance says
   cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
   removed owner's state, importing the signed roster, and restarting does it show the

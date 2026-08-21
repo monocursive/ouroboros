@@ -15,9 +15,9 @@ use crate::model::{Plane, ProviderEntry};
 
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
-    CommandPalette, Connection, MachineAction, MachineSecurity, Machines, Mode, NewField,
-    NewSession, NoticeKind, Overlay, ProviderChoice, Settings, SettingsField, Tab,
-    APPROVAL_CHOICES, LEADER_KEYS,
+    CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport, MachineSecurity,
+    Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, Settings,
+    SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::theme;
 
@@ -915,15 +915,13 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
     );
 }
 
-/// Settings → Machines: a vocabulary-first fleet setup and recovery surface. Adding a
-/// machine can run after an explicit confirm; the remaining rows still copy exact commands.
+/// Settings → Machines: a menu of fleet actions that run after confirm, not a CLI cheat sheet.
 fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
-    let height = match machines.add.as_ref() {
-        // The pick step lists every host this Mac knows, so it grows rather than clips;
-        // `centered` still caps it at the terminal height.
-        Some(add) if add.step == AddStep::Pick => 8 + machines.candidates.len() as u16,
-        Some(_) => 36,
-        None => 32,
+    let items = app.machine_menu_for(machines);
+    let height = match (&machines.add, &machines.form, &machines.report) {
+        (Some(add), _, _) if add.step == AddStep::Pick => 8 + machines.candidates.len() as u16,
+        (Some(_), _, _) | (_, Some(_), _) | (_, _, Some(_)) => 36,
+        _ => 10 + items.len() as u16 + 8,
     };
     let popup = centered(area, MACHINES_WIDTH, height.min(area.height));
 
@@ -938,14 +936,22 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         add_machine(frame, inner, app, machines, add);
         return;
     }
+    if let Some(form) = machines.form.as_ref() {
+        machine_form(frame, inner, form);
+        return;
+    }
+    if let Some(report) = machines.report.as_ref() {
+        machine_report(frame, inner, report);
+        return;
+    }
 
     let summary = app.machine_summary();
 
     let rows = Layout::vertical([
-        Constraint::Length(9),
-        Constraint::Length(MachineAction::ALL.len() as u16 + 1),
-        Constraint::Min(6),
-        Constraint::Length(4),
+        Constraint::Length(6),
+        Constraint::Length(items.len() as u16 + 1),
+        Constraint::Min(4),
+        Constraint::Length(2),
     ])
     .split(inner);
 
@@ -972,104 +978,285 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         Some(host) => format!("{} at {host}", summary.machine),
         None => summary.machine.clone(),
     };
-    let offline_names = if summary.offline_names.is_empty() {
-        None
-    } else {
-        Some(format!("Offline: {}", summary.offline_names.join(", ")))
-    };
-
     let security_style = match summary.security {
         MachineSecurity::Standalone | MachineSecurity::Secure => Style::default().fg(theme::GOOD),
         MachineSecurity::Insecure | MachineSecurity::Mismatch => Style::default().fg(theme::BAD),
         MachineSecurity::Unknown => Style::default().fg(theme::WARN),
     };
-
     let mut facts = vec![
-        Line::from(Span::styled(
-            "Run agents on this machine alone, or connect trusted machines as one fleet.",
-            theme::label(),
-        )),
-        field("mode", &summary.mode),
-        field("fleet", &fleet),
-        field("local", &local),
         Line::from(vec![
-            Span::styled("machines    ", theme::label()),
+            Span::styled(format!("{} · ", summary.mode), theme::heading()),
+            Span::raw(fleet),
+        ]),
+        Line::from(Span::raw(local)),
+        Line::from(vec![
             Span::raw(format!(
-                "Known {expected} · Connected {} · Offline {offline}",
+                "Known {expected} · Connected {} · Offline {offline} · ",
                 summary.connected
             )),
-        ]),
-        Line::from(vec![
-            Span::styled("security    ", theme::label()),
             Span::styled(summary.security.label(), security_style),
         ]),
-        Line::from(vec![
-            Span::styled("recovery    ", theme::label()),
-            Span::raw(summary.recovery),
-        ]),
+        Line::from(Span::styled(summary.recovery, theme::label())),
+        Line::from(Span::styled(
+            "Boundary: live provider work does not migrate after a full host loss.",
+            Style::default().fg(theme::WARN),
+        )),
     ];
-    if let Some(offline_names) = offline_names {
+    if !summary.offline_names.is_empty() {
         facts.push(Line::from(Span::styled(
-            offline_names,
+            format!("Offline: {}", summary.offline_names.join(", ")),
             Style::default().fg(theme::WARN),
         )));
     }
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), rows[0]);
 
     let mut actions = vec![Line::from(Span::styled(
-        "Choose a next step — Add can run after confirm; other rows copy commands",
+        "Enter runs the selected action",
         theme::label(),
     ))];
-    for (index, action) in MachineAction::ALL.iter().copied().enumerate() {
-        let focused = machines.selected == index;
+    let selected = machines.selected.min(items.len().saturating_sub(1));
+    for (index, item) in items.iter().copied().enumerate() {
+        let focused = selected == index;
         actions.push(Line::from(vec![
             Span::styled(
                 if focused { "> " } else { "  " },
                 Style::default().fg(theme::ACCENT),
             ),
-            Span::styled(format!("{:<28}", action.label()), Style::default()),
-            Span::styled(action.command(), Style::default().fg(theme::ACCENT)),
+            Span::styled(format!("{:<28}", item.label(machines)), Style::default()),
+            Span::styled(item.hint(machines), Style::default().fg(theme::MUTED)),
         ]));
     }
     frame.render_widget(Paragraph::new(actions), rows[1]);
 
-    let selected = machines.guide.unwrap_or_else(|| machines.selected());
-    let mut detail = vec![Line::from(vec![
-        Span::styled(
-            if machines.guide.is_some() {
-                format!("{}  ", selected.label())
-            } else {
-                format!("Preview: {}  ", selected.label())
-            },
+    let mut detail = Vec::new();
+    if let Some(item) = items.get(selected).copied() {
+        detail.push(Line::from(Span::styled(
+            item.label(machines),
             theme::heading(),
-        ),
-        Span::styled(selected.command(), Style::default().fg(theme::ACCENT)),
-    ])];
-    detail.extend(machine_guidance(selected, machines.guide.is_some()));
+        )));
+        detail.push(Line::from(item.preview().to_string()));
+        detail.push(Line::from(Span::styled(
+            item.command(machines),
+            Style::default().fg(theme::ACCENT),
+        )));
+    }
     frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), rows[2]);
 
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Network recovery: a running Ouroboros process retries fleet membership automatically.",
-                Style::default().fg(theme::WARN),
-            )),
-            Line::from(Span::styled(
-                "Process/reboot: activate the service for crash/login recovery; Linux pre-login boot needs optional linger.",
-                Style::default().fg(theme::WARN),
-            )),
-            Line::from(Span::styled(
-                "Boundary: live provider work does not migrate after a full host loss.",
-                Style::default().fg(theme::WARN),
-            )),
-            Line::from(Span::styled(
-                "↑↓ choose · Enter open / add · y copy command · r refresh · Esc back/close",
-                Style::default().fg(theme::MUTED),
-            )),
-        ])
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ choose · Enter run · y copy CLI · r refresh · Esc close",
+            Style::default().fg(theme::MUTED),
+        ))),
         rows[3],
     );
+}
+
+fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
+    let mut lines = vec![Line::from(Span::styled(form.title(), theme::heading()))];
+    lines.push(Line::from(""));
+    match form.step {
+        AddStep::Form => {
+            for (index, field) in form.fields().iter().copied().enumerate() {
+                let focused = form.field == index;
+                lines.push(form_field_row(form, field, focused));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Tab moves · Enter reviews · Esc back",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Confirm => {
+            lines.push(Line::from("Review, then Enter runs this on this machine:"));
+            lines.push(Line::from(""));
+            match form.kind {
+                FormKind::Create => {
+                    lines.push(form_fact("this Mac", &form.machine));
+                    lines.push(form_fact("host", &form.host));
+                    lines.push(Line::from(
+                        "The running standalone daemon will stop, this Mac becomes the owner, then the TUI comes back.",
+                    ));
+                }
+                FormKind::Join => {
+                    lines.push(form_fact("invitation", &form.path));
+                    lines.push(form_fact(
+                        "delete after join",
+                        if form.delete_invite { "yes" } else { "no" },
+                    ));
+                    lines.push(form_fact(
+                        "write recovery unit",
+                        if form.install_service { "yes" } else { "no" },
+                    ));
+                    lines.push(Line::from(
+                        "The invitation file is never printed. This machine restarts once to join.",
+                    ));
+                }
+                FormKind::Invite => {
+                    lines.push(form_fact("machine", &form.machine));
+                    lines.push(form_fact("host", &form.host));
+                    lines.push(form_fact(
+                        "out",
+                        if form.path.trim().is_empty() {
+                            "private pending file"
+                        } else {
+                            form.path.trim()
+                        },
+                    ));
+                    lines.push(Line::from(
+                        "The file stays mode 0600. Copy it privately; contents never appear here.",
+                    ));
+                }
+                FormKind::Service => {
+                    lines.push(Line::from(
+                        "Writes a launchd or systemd user unit. It does not start the daemon.",
+                    ));
+                    lines.push(Line::from(
+                        "After it writes, run the activation command it prints. Do not also run ouro daemon.",
+                    ));
+                }
+                FormKind::SyncExport => {
+                    lines.push(form_fact("roster", &form.path));
+                    lines.push(Line::from(
+                        "Copy the signed roster privately. Import on other members still needs them stopped.",
+                    ));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter run · y copy CLI · Esc back",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Working => {
+            lines.push(Line::from("Working…"));
+            for line in &form.log {
+                lines.push(Line::from(line.clone()));
+            }
+        }
+        AddStep::Done => {
+            lines.push(Line::from(Span::styled(
+                "Done",
+                Style::default().fg(theme::GOOD),
+            )));
+            for line in &form.log {
+                lines.push(Line::from(line.clone()));
+            }
+            if let Some(recipe) = &form.recipe {
+                lines.push(Line::from(""));
+                for line in recipe.lines() {
+                    lines.push(Line::from(line.to_string()));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter or Esc back to the menu · y copy result",
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        AddStep::Method | AddStep::Pick => {}
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(theme::BAD),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn form_field_row(form: &MachineForm, field: FormField, focused: bool) -> Line<'static> {
+    let (label, value) = match field {
+        FormField::Machine => (
+            "machine",
+            if form.machine.is_empty() {
+                "—"
+            } else {
+                form.machine.as_str()
+            }
+            .to_string(),
+        ),
+        FormField::Host => (
+            "host",
+            if form.host.is_empty() {
+                "—"
+            } else {
+                form.host.as_str()
+            }
+            .to_string(),
+        ),
+        FormField::Path => (
+            match form.kind {
+                FormKind::Join => "invitation",
+                FormKind::Invite => "out",
+                FormKind::SyncExport => "roster",
+                _ => "path",
+            },
+            if form.path.is_empty() {
+                "—"
+            } else {
+                form.path.as_str()
+            }
+            .to_string(),
+        ),
+        FormField::DeleteInvite => (
+            "delete after join",
+            if form.delete_invite { "yes" } else { "no" }.into(),
+        ),
+        FormField::InstallService => (
+            "write recovery unit",
+            if form.install_service { "yes" } else { "no" }.into(),
+        ),
+    };
+    let mut spans = vec![
+        Span::styled(
+            if focused { "> " } else { "  " },
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::styled(format!("{label:<20}"), theme::label()),
+        Span::raw(value),
+    ];
+    if focused && !matches!(field, FormField::DeleteInvite | FormField::InstallService) {
+        spans.push(Span::styled(
+            "_",
+            Style::default().add_modifier(Modifier::SLOW_BLINK),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn form_fact(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<20}"), theme::label()),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn machine_report(frame: &mut Frame, area: Rect, report: &MachineReport) {
+    let mut lines = vec![Line::from(Span::styled(
+        report.title.clone(),
+        theme::heading(),
+    ))];
+    lines.push(Line::from(""));
+    if report.pending {
+        lines.push(Line::from("Working…"));
+    } else if report.body.is_empty() {
+        lines.push(Line::from("No output."));
+    } else {
+        for line in report.body.lines() {
+            lines.push(Line::from(line.to_string()));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if report.pending {
+            "Esc waits for this check to finish"
+        } else {
+            "Enter or Esc back to the menu · y copy"
+        },
+        Style::default().fg(theme::MUTED),
+    )));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, add: &AddMachine) {
@@ -1251,69 +1438,6 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
         ));
     }
     Line::from(spans)
-}
-
-fn machine_guidance(action: MachineAction, expanded: bool) -> Vec<Line<'static>> {
-    if !expanded {
-        return vec![Line::from(Span::styled(
-            "Press Enter for plain-language steps, or y to copy this command. No Erlang settings are needed.",
-            Style::default().fg(theme::MUTED),
-        ))];
-    }
-
-    let lines: &[&str] = match action {
-        MachineAction::Add => &[
-            "Adds a laptop or VPS from this instance: SSH when this Mac can reach it, or a short enroll recipe when it cannot.",
-            "Pick a Tailscale/SSH host this Mac already knows, or type one. A first add on a standalone Mac restarts once to create the fleet.",
-            "A Mac ouro will not run on Linux. Install matching ouro there or pass dest. binary. Provider sign-in stays on that machine.",
-        ],
-        MachineAction::Create => &[
-            "If this TUI is attached to a standalone runtime, quit or detach first: run `ouro stop`, then `ouro fleet create`, then `ouro daemon`.",
-            "On separate machines, first run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`; use the private IPv4 or one-record MagicDNS name when `--host` is requested.",
-            "Fleet creation refuses to change a live runtime. On a stopped first machine, Ouroboros safely detects its name and reachable hostname.",
-            "If detection cannot prove the hostname is reachable, it asks for `--host HOST`; `--machine NAME` is an optional friendly-name override.",
-            "The output prints the exact private TCP ports to allow between fleet devices. Keys and cookies stay in mode-0600 files, never process arguments.",
-            "Then choose Add another machine to make one invite per machine.",
-        ],
-        MachineAction::Join => &[
-            "Install the same Ouroboros release on the invited machine and copy its .ouro invite there using a private channel.",
-            "Set the copied invite to mode 0600, then run the join command. It imports identity; you do not type cookies, certificates, or node names.",
-            "Start `ouro daemon`, then use `ouro fleet status` on either machine.",
-        ],
-        MachineAction::Invite => &[
-            "Run this on the fleet's original owner machine (the one holding invitation authority). NAME is a friendly label; HOST is how the other machines reach the new one.",
-            "The invite is private membership material. Send it only to that machine and do not paste its contents into chat or logs.",
-            "Create a separate invite for every machine. A lost file can be reissued for the exact same identity with `--replace`.",
-            "For an abandoned or mistyped invite, run `ouro fleet invite cancel --machine NAME --out fleet.ouro-roster`. It is safe live; restart the owner when convenient so its boot-time seeds refresh.",
-            "Cancel fixes the expected list but does not revoke a copied credential. A leak requires whole-fleet credential rotation, so keep every invite private even before it is used.",
-        ],
-        MachineAction::Service => &[
-            "Run this after create or join on every packaged macOS or Linux machine that should recover without you.",
-            "Install only writes a private user service; it deliberately does not start anything behind your back.",
-            "Review and run the exact activation command it prints, then check `ouro fleet service status`; do not also run a separate daemon.",
-            "Once activated, the OS service restores Ouroboros after a crash and at login; Linux pre-login boot is an optional advanced setup printed by the command.",
-        ],
-        MachineAction::Status => &[
-            "Shows which machines are known, connected, or offline and whether encrypted distribution is active.",
-            "An offline known machine stays visible. Its running daemon retries membership; the recovery service handles process crashes and reboots.",
-            "Start work with `ouro new --machine NAME --provider PROVIDER --workspace /absolute/path/on/NAME/project`; that path is on the destination. The New Session form enforces the same rule.",
-        ],
-        MachineAction::Doctor => &[
-            "Checks names, reachability, versions, encrypted distribution, and the daemon's restart setup.",
-            "Each failed check includes a concrete fix. The command never prints cookies, private keys, or invite contents.",
-        ],
-        MachineAction::Sync => &[
-            "Owner: `ouro fleet sync export --out fleet.ouro-roster`. On each recipient, first run `ouro fleet service status`.",
-            "Use its exact deactivation command when installed; otherwise run `ouro stop`.",
-            "Then run `ouro fleet sync import fleet.ouro-roster`. Copy this mode-0600 file privately; sync does not revoke credentials.",
-            "After import, reactivate that unit with its printed command or run `ouro daemon`, then `ouro fleet doctor`. Doctor's host/service checks are local.",
-        ],
-    };
-
-    lines
-        .iter()
-        .map(|line| Line::from((*line).to_string()))
-        .collect()
 }
 
 fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -> (String, Style) {

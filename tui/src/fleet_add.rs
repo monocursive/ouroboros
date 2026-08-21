@@ -69,6 +69,10 @@ pub enum OutcomeKind {
     InviteDelivered,
     /// No SSH. The invitation is on this Mac; the recipe is what to run on the other one.
     Prepared,
+    /// This Mac became a fleet owner; no second machine was added yet.
+    Created,
+    /// This Mac joined from a copied invitation and is ready to run.
+    Joined,
 }
 
 /// Operator-facing steps that never include cookies, keys, or invitation JSON.
@@ -149,7 +153,8 @@ pub struct Intent {
     pub owner_host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet_name: Option<String>,
-    pub add: AddPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<AddPlan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +175,17 @@ pub struct AddPlan {
 pub enum AddKind {
     Ssh,
     Prepare,
+}
+
+/// Non-secret restart plan for joining from a copied invitation on this machine.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JoinIntent {
+    pub schema: u8,
+    pub invitation: String,
+    #[serde(default)]
+    pub delete: bool,
+    #[serde(default)]
+    pub service: bool,
 }
 
 const INTENT_SCHEMA: u8 = 1;
@@ -511,7 +527,9 @@ fn candidate_from_tailscale_peer(peer: &serde_json::Value) -> Option<Candidate> 
 
 pub fn write_intent(data_dir: &Path, intent: &Intent) -> Result<()> {
     fleet::validate_machine(&intent.owner_machine)?;
-    fleet::validate_machine(&intent.add.machine)?;
+    if let Some(add) = &intent.add {
+        fleet::validate_machine(&add.machine)?;
+    }
     if intent.schema != INTENT_SCHEMA {
         bail!("unsupported add-intent schema {}", intent.schema);
     }
@@ -589,34 +607,177 @@ pub fn apply_intent(data_dir: &Path) -> Result<Outcome> {
             Ports::DEFAULT,
         )?;
     }
-    let outcome = match intent.add.kind {
-        AddKind::Prepare => prepare(
-            data_dir,
-            &intent.add.machine,
-            &intent.add.host,
-            Some(&intent.owner_host),
-        )?,
-        AddKind::Ssh => {
-            let target = intent
-                .add
-                .target
-                .ok_or_else(|| anyhow!("the saved add-machine intent is missing the SSH target"))?;
-            let via = Via::parse(&intent.add.via)?;
-            let binary = intent.add.binary.as_deref().map(Path::new);
-            add_with(
-                data_dir,
-                &target,
-                Some(&intent.add.machine),
-                Some(&intent.add.host),
-                via,
-                binary,
-                Some(&intent.owner_host),
-                &SshRemote { via },
-            )?
-        }
+    let outcome = match &intent.add {
+        None => Outcome {
+            machine: intent.owner_machine.clone(),
+            host: intent.owner_host.clone(),
+            kind: OutcomeKind::Created,
+            log: vec![format!(
+                "this Mac is fleet owner `{}` at {}",
+                intent.owner_machine, intent.owner_host
+            )],
+            recipe: None,
+        },
+        Some(add) => match add.kind {
+            AddKind::Prepare => {
+                prepare(data_dir, &add.machine, &add.host, Some(&intent.owner_host))?
+            }
+            AddKind::Ssh => {
+                let target = add.target.as_deref().ok_or_else(|| {
+                    anyhow!("the saved add-machine intent is missing the SSH target")
+                })?;
+                let via = Via::parse(&add.via)?;
+                let binary = add.binary.as_deref().map(Path::new);
+                add_with(
+                    data_dir,
+                    target,
+                    Some(&add.machine),
+                    Some(&add.host),
+                    via,
+                    binary,
+                    Some(&intent.owner_host),
+                    &SshRemote { via },
+                )?
+            }
+        },
     };
     let _ = take_intent(data_dir)?;
     Ok(outcome)
+}
+
+pub fn write_join_intent(data_dir: &Path, intent: &JoinIntent) -> Result<()> {
+    if intent.schema != INTENT_SCHEMA {
+        bail!("unsupported join-intent schema {}", intent.schema);
+    }
+    if intent.invitation.trim().is_empty() {
+        bail!("join needs the path to the invitation file");
+    }
+    enroll_preflight(Path::new(&intent.invitation))?;
+    let path = fleet::join_intent_path(data_dir);
+    let bytes = serde_json::to_vec_pretty(intent).context("encoding the join intent")?;
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("removing {}", path.display()));
+        }
+    }
+    write_private_new(&path, &bytes, "join intent")
+}
+
+pub fn load_join_intent(data_dir: &Path) -> Result<Option<JoinIntent>> {
+    let path = fleet::join_intent_path(data_dir);
+    if !path
+        .try_exists()
+        .with_context(|| format!("inspecting {}", path.display()))?
+    {
+        return Ok(None);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let intent: JoinIntent = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a valid join intent", path.display()))?;
+    if intent.schema != INTENT_SCHEMA {
+        bail!(
+            "{} has unsupported schema {}; leave it in place and inspect it before retrying",
+            path.display(),
+            intent.schema
+        );
+    }
+    Ok(Some(intent))
+}
+
+pub fn take_join_intent(data_dir: &Path) -> Result<Option<JoinIntent>> {
+    let intent = load_join_intent(data_dir)?;
+    if intent.is_some() {
+        fs::remove_file(fleet::join_intent_path(data_dir)).with_context(|| {
+            format!(
+                "removing consumed join intent {}",
+                fleet::join_intent_path(data_dir).display()
+            )
+        })?;
+    }
+    Ok(intent)
+}
+
+/// Join from a saved invitation path after this standalone runtime has been stopped.
+pub fn apply_join_intent(data_dir: &Path) -> Result<Outcome> {
+    let intent = load_join_intent(data_dir)?.ok_or_else(|| {
+        anyhow!(
+            "no join intent at {}; this restart has nothing to apply",
+            fleet::join_intent_path(data_dir).display()
+        )
+    })?;
+    let invitation = PathBuf::from(&intent.invitation);
+    enroll_preflight(&invitation)?;
+    let profile = fleet::join(data_dir, &invitation, Ports::DEFAULT)?;
+    let mut log = vec![format!(
+        "joined {} as {} at {}",
+        profile.name, profile.machine, profile.host
+    )];
+    if intent.delete {
+        fs::remove_file(&invitation).with_context(|| {
+            format!(
+                "joined, but could not delete invitation {}",
+                invitation.display()
+            )
+        })?;
+        log.push(format!("deleted {}", invitation.display()));
+    }
+    let recipe = if intent.service {
+        match fleet::service_install(data_dir) {
+            Ok(installed) => {
+                log.push(format!(
+                    "recovery unit written at {}",
+                    installed.path.display()
+                ));
+                Some(Recipe {
+                    machine: profile.machine.clone(),
+                    invite_path: invitation,
+                    lines: vec![
+                        format!("# Activate recovery (does not start on its own):"),
+                        installed.activation,
+                    ],
+                })
+            }
+            Err(error) => {
+                log.push(format!(
+                    "joined, but recovery was not installed: {error:#}. Run Keep this machine running after the daemon is healthy."
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let _ = take_join_intent(data_dir)?;
+    Ok(Outcome {
+        machine: profile.machine,
+        host: profile.host,
+        kind: OutcomeKind::Joined,
+        log,
+        recipe,
+    })
+}
+
+/// Apply a saved first-run add or join. The owner runtime must already be stopped.
+pub fn apply_pending(data_dir: &Path) -> Result<Outcome> {
+    if load_intent(data_dir)?.is_some() {
+        apply_intent(data_dir)
+    } else if load_join_intent(data_dir)?.is_some() {
+        apply_join_intent(data_dir)
+    } else {
+        bail!(
+            "no add-machine or join intent in {}; this restart has nothing to apply",
+            data_dir.display()
+        )
+    }
 }
 
 pub fn prepare(
@@ -1028,6 +1189,22 @@ pub fn render_outcome(outcome: &Outcome) -> String {
                 text.push('\n');
             }
         }
+        OutcomeKind::Created => {
+            text.push_str(
+                "This Mac is the fleet owner. /machines still adds the laptop and servers.\n",
+            );
+        }
+        OutcomeKind::Joined => {
+            text.push_str(&format!(
+                "This machine is {machine} at {host}. Provider sign-in stays here.\n",
+                machine = outcome.machine,
+                host = outcome.host
+            ));
+            if let Some(recipe) = &outcome.recipe {
+                text.push_str(&recipe.text());
+                text.push('\n');
+            }
+        }
     }
     text
 }
@@ -1288,28 +1465,52 @@ mod tests {
             owner_machine: "studio".into(),
             owner_host: "localhost".into(),
             fleet_name: Some("Studio fleet".into()),
-            add: AddPlan {
+            add: Some(AddPlan {
                 kind: AddKind::Prepare,
                 machine: "laptop".into(),
                 host: "localhost".into(),
                 target: None,
                 via: "ssh".into(),
                 binary: None,
-            },
+            }),
         };
         write_intent(&data, &intent).unwrap();
         let path = fleet::add_intent_path(&data);
         assert_eq!(fs::symlink_metadata(&path).unwrap().mode() & 0o777, 0o600);
         // A stale plan from a failed restart must never wedge the next confirm.
         let mut retry = intent.clone();
-        retry.add.machine = "vps".into();
+        retry.add.as_mut().unwrap().machine = "vps".into();
         write_intent(&data, &retry).unwrap();
-        assert_eq!(load_intent(&data).unwrap().unwrap().add.machine, "vps");
+        assert_eq!(
+            load_intent(&data).unwrap().unwrap().add.unwrap().machine,
+            "vps"
+        );
         let outcome = apply_intent(&data).unwrap();
         assert_eq!(outcome.machine, "vps");
         assert!(fleet::load(&data).unwrap().is_some());
         assert!(!path.exists(), "the intent is consumed");
         assert!(fleet::pending_invite_path(&data, "vps").unwrap().is_file());
+    }
+
+    #[test]
+    fn create_only_intent_makes_this_mac_the_owner() {
+        let data = scratch("create-only");
+        write_intent(
+            &data,
+            &Intent {
+                schema: 1,
+                owner_machine: "studio".into(),
+                owner_host: "localhost".into(),
+                fleet_name: Some("Studio fleet".into()),
+                add: None,
+            },
+        )
+        .unwrap();
+        let outcome = apply_intent(&data).unwrap();
+        assert_eq!(outcome.kind, OutcomeKind::Created);
+        assert_eq!(outcome.machine, "studio");
+        assert!(fleet::load(&data).unwrap().is_some());
+        assert!(!fleet::add_intent_path(&data).exists());
     }
 
     #[test]

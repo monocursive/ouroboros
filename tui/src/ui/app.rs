@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults};
 use crate::fleet::Profile as FleetProfile;
-use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent};
+use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
     CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo,
@@ -1309,9 +1309,127 @@ impl Settings {
     }
 }
 
-/// One safe, local action in the Machines guide. Adding a machine is the one path that
-/// can run after an explicit confirm. The remaining rows still copy exact commands so an
-/// accidental Enter cannot mint or import membership material.
+/// One row in the Machines menu. Enter runs it after any form/confirm the action needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    AddHost(usize),
+    AddSsh,
+    AddRecipe,
+    Create,
+    Join,
+    Invite,
+    Service,
+    Status,
+    Doctor,
+    Sync,
+}
+
+impl MenuItem {
+    pub fn label(self, machines: &Machines) -> String {
+        match self {
+            Self::AddHost(index) => machines
+                .candidates
+                .get(index)
+                .map(|candidate| format!("Add {}", candidate.label))
+                .unwrap_or_else(|| "Add a known host".into()),
+            Self::AddSsh => "Add a reachable machine".into(),
+            Self::AddRecipe => "I'll set it up myself".into(),
+            Self::Create => "Create a fleet".into(),
+            Self::Join => "Join with an invitation".into(),
+            Self::Invite => "Write an invitation file".into(),
+            Self::Service => "Keep this machine running".into(),
+            Self::Status => "Check the machines".into(),
+            Self::Doctor => "Diagnose a connection".into(),
+            Self::Sync => "Export saved membership".into(),
+        }
+    }
+
+    pub fn hint(self, machines: &Machines) -> String {
+        match self {
+            Self::AddHost(index) => machines
+                .candidates
+                .get(index)
+                .map(|candidate| {
+                    if candidate.detail.is_empty() {
+                        candidate.target.clone()
+                    } else {
+                        format!("{} · {}", candidate.target, candidate.detail)
+                    }
+                })
+                .unwrap_or_default(),
+            Self::AddSsh => "SSH or Tailscale from this Mac".into(),
+            Self::AddRecipe => "Write a private invite; run enroll there".into(),
+            Self::Create => "Make this Mac the owner (restarts once)".into(),
+            Self::Join => "On the invited machine (restarts once)".into(),
+            Self::Invite => "Owner-only; copy the file privately".into(),
+            Self::Service => "Write a recovery unit; you activate it".into(),
+            Self::Status => "Who is known, connected, or offline".into(),
+            Self::Doctor => "Names, TLS, versions, recovery".into(),
+            Self::Sync => "Signed roster for other existing members".into(),
+        }
+    }
+
+    pub fn command(self, machines: &Machines) -> String {
+        match self {
+            Self::AddHost(index) => machines
+                .candidates
+                .get(index)
+                .map(|candidate| {
+                    let machine = suggested_machine_name(
+                        &candidate.label,
+                        candidate.host.as_deref().unwrap_or(&candidate.target),
+                    );
+                    let host = candidate.host.as_deref().unwrap_or(&candidate.target);
+                    format!(
+                        "ouro fleet add {} --machine {machine} --host {host}",
+                        candidate.target
+                    )
+                })
+                .unwrap_or_else(|| MachineAction::Add.command().into()),
+            Self::AddSsh => MachineAction::Add.command().into(),
+            Self::AddRecipe => "ouro fleet add --print-script --machine NAME --host HOST".into(),
+            Self::Create => MachineAction::Create.command().into(),
+            Self::Join => "ouro fleet enroll INVITE.ouro --delete".into(),
+            Self::Invite => MachineAction::Invite.command().into(),
+            Self::Service => MachineAction::Service.command().into(),
+            Self::Status => MachineAction::Status.command().into(),
+            Self::Doctor => MachineAction::Doctor.command().into(),
+            Self::Sync => MachineAction::Sync.command().into(),
+        }
+    }
+
+    pub fn preview(self) -> &'static str {
+        match self {
+            Self::AddHost(_) | Self::AddSsh => {
+                "Enter opens a short form, then runs the add after you confirm. A Mac binary is never copied onto Linux."
+            }
+            Self::AddRecipe => {
+                "Enter writes a private invitation on this Mac and shows the enroll command to run on the other machine."
+            }
+            Self::Create => {
+                "Enter names this Mac, then restarts once to become the fleet owner. Add the laptop and servers afterward."
+            }
+            Self::Join => {
+                "Enter the invitation path. This machine restarts once, joins, and comes back as a fleet member."
+            }
+            Self::Invite => {
+                "Enter machine name and host, then writes a mode-0600 invitation. Contents never appear on screen."
+            }
+            Self::Service => {
+                "Writes a launchd or systemd user unit. It does not start anything; review and run the activation command."
+            }
+            Self::Status => "Enter shows known, connected, and offline machines from this runtime.",
+            Self::Doctor => {
+                "Enter runs local setup checks and live fleet diagnostics. No cookies or keys are printed."
+            }
+            Self::Sync => {
+                "Enter writes a signed roster file to copy privately. Import on other members still needs them stopped."
+            }
+        }
+    }
+}
+
+/// Kept for CLI copy strings. The on-screen menu is [`MenuItem`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineAction {
     Add,
@@ -1325,34 +1443,10 @@ pub enum MachineAction {
 }
 
 impl MachineAction {
-    pub const ALL: [Self; 8] = [
-        Self::Add,
-        Self::Create,
-        Self::Join,
-        Self::Invite,
-        Self::Service,
-        Self::Status,
-        Self::Doctor,
-        Self::Sync,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Add => "Add another machine",
-            Self::Create => "Create a fleet",
-            Self::Join => "Join this fleet",
-            Self::Invite => "Add with an invitation file",
-            Self::Service => "Keep this machine running",
-            Self::Status => "Check the machines",
-            Self::Doctor => "Diagnose a connection",
-            Self::Sync => "Update saved membership",
-        }
-    }
-
     pub fn command(self) -> &'static str {
         match self {
             Self::Add => "ouro fleet add user@host --machine NAME --host HOST",
-            Self::Create => "ouro fleet create",
+            Self::Create => "ouro fleet create --machine NAME --host HOST",
             Self::Join => "ouro fleet join INVITE.ouro",
             Self::Invite => "ouro fleet invite --machine NAME --host HOST --out INVITE.ouro",
             Self::Service => "ouro fleet service install",
@@ -1363,23 +1457,16 @@ impl MachineAction {
     }
 }
 
-/// Keyboard state for the newcomer-facing Machines guide.
+/// Keyboard state for the Machines menu.
 #[derive(Debug, Default)]
 pub struct Machines {
     pub selected: usize,
-    /// Enter opens the focused action's longer explanation. Escape first returns to the
-    /// overview, then closes the guide, so exploring never loses the fleet summary.
-    pub guide: Option<MachineAction>,
     pub add: Option<AddMachine>,
+    pub form: Option<MachineForm>,
+    pub report: Option<MachineReport>,
     pub candidates: Vec<MachineCandidate>,
     pub local_machine: Option<String>,
     pub local_host: Option<String>,
-}
-
-impl Machines {
-    pub fn selected(&self) -> MachineAction {
-        MachineAction::ALL[self.selected.min(MachineAction::ALL.len() - 1)]
-    }
 }
 
 /// A host this Mac already knows. The driver fills this from Tailscale and SSH config;
@@ -1505,6 +1592,102 @@ impl AddMachine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormKind {
+    Create,
+    Join,
+    Invite,
+    Service,
+    SyncExport,
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineForm {
+    pub kind: FormKind,
+    pub step: AddStep,
+    pub field: usize,
+    pub machine: String,
+    pub host: String,
+    pub path: String,
+    pub delete_invite: bool,
+    pub install_service: bool,
+    pub error: Option<String>,
+    pub log: Vec<String>,
+    pub recipe: Option<String>,
+    pub pending: bool,
+}
+
+impl MachineForm {
+    fn new(kind: FormKind) -> Self {
+        Self {
+            kind,
+            step: if kind == FormKind::Service {
+                AddStep::Confirm
+            } else {
+                AddStep::Form
+            },
+            field: 0,
+            machine: String::new(),
+            host: String::new(),
+            path: String::new(),
+            delete_invite: true,
+            install_service: false,
+            error: None,
+            log: Vec::new(),
+            recipe: None,
+            pending: false,
+        }
+    }
+
+    pub fn fields(&self) -> Vec<FormField> {
+        match self.kind {
+            FormKind::Create => vec![FormField::Machine, FormField::Host],
+            FormKind::Join => vec![
+                FormField::Path,
+                FormField::DeleteInvite,
+                FormField::InstallService,
+            ],
+            FormKind::Invite => vec![FormField::Machine, FormField::Host, FormField::Path],
+            FormKind::Service => Vec::new(),
+            FormKind::SyncExport => vec![FormField::Path],
+        }
+    }
+
+    fn field(&self) -> Option<FormField> {
+        let fields = self.fields();
+        fields
+            .get(self.field.min(fields.len().saturating_sub(1)))
+            .copied()
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self.kind {
+            FormKind::Create => "Create a fleet on this Mac",
+            FormKind::Join => "Join with an invitation",
+            FormKind::Invite => "Write an invitation file",
+            FormKind::Service => "Keep this machine running",
+            FormKind::SyncExport => "Export saved membership",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
+    Machine,
+    Host,
+    Path,
+    DeleteInvite,
+    InstallService,
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineReport {
+    pub title: String,
+    pub body: String,
+    pub copy: Option<String>,
+    pub pending: bool,
+}
+
 fn suggested_machine_name(label: &str, host: &str) -> String {
     if crate::fleet::validate_machine(label).is_ok() {
         return label.to_ascii_lowercase();
@@ -1514,15 +1697,28 @@ fn suggested_machine_name(label: &str, host: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Confirmed add the I/O driver should run against the local data directory.
+/// Confirmed work the I/O driver should run against the local data directory.
 #[derive(Debug, Clone)]
-pub struct FleetJob {
-    pub prepare: bool,
-    pub target: Option<String>,
-    pub machine: String,
-    pub host: String,
-    pub via: String,
-    pub binary: Option<String>,
+pub enum FleetJob {
+    Add {
+        prepare: bool,
+        target: Option<String>,
+        machine: String,
+        host: String,
+        via: String,
+        binary: Option<String>,
+    },
+    Invite {
+        machine: String,
+        host: String,
+        out: Option<String>,
+    },
+    Service,
+    Status,
+    Doctor,
+    SyncExport {
+        out: String,
+    },
 }
 
 /// The small, intentionally non-secret view model shared by Settings, the Dashboard and
@@ -1965,6 +2161,8 @@ pub struct App {
     scan_machines_pending: bool,
     /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
     fleet_intent_pending: Option<FleetIntent>,
+    /// Restart-and-join plan. The driver writes the invitation path, then shuts down.
+    join_intent_pending: Option<JoinIntent>,
     /// Confirmed add/prepare for a live fleet owner. The driver runs it.
     fleet_job_pending: Option<FleetJob>,
     /// Open Machines after a fleet-intent restart so the operator sees what happened.
@@ -2047,6 +2245,7 @@ impl App {
             can_invite: false,
             scan_machines_pending: false,
             fleet_intent_pending: None,
+            join_intent_pending: None,
             fleet_job_pending: None,
             open_machines_on_start: false,
             resume_add_log: Vec::new(),
@@ -2090,6 +2289,28 @@ impl App {
 
     pub fn take_fleet_intent(&mut self) -> Option<FleetIntent> {
         self.fleet_intent_pending.take()
+    }
+
+    pub fn take_join_intent(&mut self) -> Option<JoinIntent> {
+        self.join_intent_pending.take()
+    }
+
+    pub fn fleet_plan_write_failed(&mut self, error: impl Into<String>) {
+        self.quit = None;
+        let error = error.into();
+        self.inform(error.clone(), NoticeKind::Error);
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(add) = machines.add.as_mut() {
+                add.pending = false;
+                add.step = AddStep::Confirm;
+                add.error = Some(error.clone());
+            }
+            if let Some(form) = machines.form.as_mut() {
+                form.pending = false;
+                form.step = AddStep::Confirm;
+                form.error = Some(error);
+            }
+        }
     }
 
     pub fn take_fleet_job(&mut self) -> Option<FleetJob> {
@@ -2730,8 +2951,8 @@ impl App {
                 if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                     if let Some(add) = machines.add.as_mut() {
                         add.pending = false;
-                        add.log = log;
-                        match result {
+                        add.log = log.clone();
+                        match result.clone() {
                             Ok(recipe) => {
                                 add.step = AddStep::Done;
                                 add.recipe = (!recipe.is_empty()).then_some(recipe);
@@ -2740,6 +2961,38 @@ impl App {
                             Err(error) => {
                                 add.step = AddStep::Confirm;
                                 add.error = Some(error);
+                            }
+                        }
+                    } else if let Some(form) = machines.form.as_mut() {
+                        form.pending = false;
+                        form.log = log.clone();
+                        match result.clone() {
+                            Ok(recipe) => {
+                                form.step = AddStep::Done;
+                                form.recipe = (!recipe.is_empty()).then_some(recipe);
+                                form.error = None;
+                            }
+                            Err(error) => {
+                                form.step = AddStep::Confirm;
+                                form.error = Some(error);
+                            }
+                        }
+                    } else if let Some(report) = machines.report.as_mut() {
+                        report.pending = false;
+                        match result {
+                            Ok(recipe) => {
+                                let mut body = log.join("\n");
+                                if !recipe.is_empty() {
+                                    if !body.is_empty() {
+                                        body.push_str("\n\n");
+                                    }
+                                    body.push_str(&recipe);
+                                }
+                                report.body = body;
+                                report.copy = (!recipe.is_empty()).then_some(recipe);
+                            }
+                            Err(error) => {
+                                report.body = error;
                             }
                         }
                     }
@@ -6357,43 +6610,92 @@ impl App {
     }
 
     fn machines_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-
-        if matches!(
-            self.overlay.as_ref(),
-            Some(Overlay::Machines(machines)) if machines.add.is_some()
-        ) {
-            self.add_machine_key(key);
-            return;
-        }
-
-        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_ref() else {
             return;
         };
+        if machines.add.is_some() {
+            self.add_machine_key(key);
+        } else if machines.form.is_some() {
+            self.machine_form_key(key);
+        } else if machines.report.is_some() {
+            self.machine_report_key(key);
+        } else {
+            self.machine_menu_key(key);
+        }
+    }
 
-        let mut begin_add = false;
+    pub fn machine_menu(&self) -> Vec<MenuItem> {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_ref() else {
+            return Vec::new();
+        };
+        self.machine_menu_for(machines)
+    }
+
+    pub fn machine_menu_for(&self, machines: &Machines) -> Vec<MenuItem> {
+        let standalone = self.fleet_profile.is_none();
+        let mut items = Vec::new();
+        if standalone || self.can_invite {
+            for (index, _) in machines.candidates.iter().take(8).enumerate() {
+                items.push(MenuItem::AddHost(index));
+            }
+            items.push(MenuItem::AddSsh);
+            items.push(MenuItem::AddRecipe);
+        }
+        if standalone {
+            items.push(MenuItem::Create);
+            items.push(MenuItem::Join);
+        }
+        if self.can_invite {
+            items.push(MenuItem::Invite);
+        }
+        if self.fleet_profile.is_some() {
+            items.push(MenuItem::Service);
+        }
+        items.push(MenuItem::Status);
+        items.push(MenuItem::Doctor);
+        if self.fleet_profile.is_some() {
+            items.push(MenuItem::Sync);
+        }
+        items
+    }
+
+    fn machine_menu_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let items = self.machine_menu();
+        if items.is_empty() {
+            if key.code == KeyCode::Esc {
+                self.overlay = None;
+            }
+            return;
+        }
+        let last = items.len().saturating_sub(1);
+        let selected = match self.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.selected.min(last),
+            _ => 0,
+        };
+        let item = items[selected];
+
         match key.code {
-            KeyCode::Esc if machines.guide.is_some() => machines.guide = None,
             KeyCode::Esc => self.overlay = None,
             KeyCode::Tab | KeyCode::Char('j') | KeyCode::Down => {
-                machines.guide = None;
-                machines.selected =
-                    (machines.selected + 1).min(MachineAction::ALL.len().saturating_sub(1));
-            }
-            KeyCode::BackTab | KeyCode::Char('k') | KeyCode::Up => {
-                machines.guide = None;
-                machines.selected = machines.selected.saturating_sub(1);
-            }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                if machines.selected() == MachineAction::Add {
-                    begin_add = true;
-                } else {
-                    machines.guide = Some(machines.selected());
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    machines.selected = (selected + 1).min(last);
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => machines.guide = None,
+            KeyCode::BackTab | KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    machines.selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.run_menu_item(item);
+            }
             KeyCode::Char('y') => {
-                let command = machines.selected().command().to_string();
+                let command = match self.overlay.as_ref() {
+                    Some(Overlay::Machines(machines)) => item.command(machines),
+                    _ => String::new(),
+                };
                 self.copy_pending = Some(command.clone());
                 self.inform(
                     format!("copied `{command}`; review any placeholders before running it"),
@@ -6407,23 +6709,447 @@ impl App {
             }
             _ => {}
         }
-        if begin_add {
-            self.begin_add_machine();
+    }
+
+    fn run_menu_item(&mut self, item: MenuItem) {
+        match item {
+            MenuItem::AddHost(index) => self.begin_add_from_menu(AddMethod::Ssh, Some(index)),
+            MenuItem::AddSsh => self.begin_add_from_menu(AddMethod::Ssh, None),
+            MenuItem::AddRecipe => self.begin_add_from_menu(AddMethod::Prepare, None),
+            MenuItem::Create => self.begin_machine_form(FormKind::Create),
+            MenuItem::Join => self.begin_machine_form(FormKind::Join),
+            MenuItem::Invite => self.begin_machine_form(FormKind::Invite),
+            MenuItem::Service => self.begin_machine_form(FormKind::Service),
+            MenuItem::Sync => self.begin_machine_form(FormKind::SyncExport),
+            MenuItem::Status => self.start_machine_report("Check the machines", FleetJob::Status),
+            MenuItem::Doctor => {
+                self.start_machine_report("Diagnose a connection", FleetJob::Doctor)
+            }
         }
     }
 
-    fn begin_add_machine(&mut self) {
+    fn begin_add_from_menu(&mut self, method: AddMethod, host: Option<usize>) {
         let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
             return;
         };
+        let candidate = host.and_then(|index| machines.candidates.get(index).cloned());
         let mut add = AddMachine::new();
+        add.method = method;
+        add.step = AddStep::Form;
+        add.field = add.form_field();
         if let Some(name) = machines.local_machine.as_deref() {
             add.owner_machine = name.to_string();
         }
         if let Some(host) = machines.local_host.as_deref() {
             add.owner_host = host.to_string();
         }
+        if let Some(candidate) = candidate {
+            add.apply_candidate(&candidate);
+        }
         machines.add = Some(add);
+    }
+
+    fn begin_machine_form(&mut self, kind: FormKind) {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+        let mut form = MachineForm::new(kind);
+        if kind == FormKind::Create {
+            if let Some(name) = machines.local_machine.as_deref() {
+                form.machine = name.to_string();
+            }
+            if let Some(host) = machines.local_host.as_deref() {
+                form.host = host.to_string();
+            }
+        }
+        if kind == FormKind::SyncExport {
+            form.path = "fleet.ouro-roster".into();
+        }
+        machines.form = Some(form);
+    }
+
+    fn start_machine_report(&mut self, title: &str, job: FleetJob) {
+        if self.data_dir.is_none() {
+            self.inform(
+                "this client has no local data directory, so it cannot run that check here",
+                NoticeKind::Error,
+            );
+            return;
+        }
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            machines.report = Some(MachineReport {
+                title: title.into(),
+                body: String::new(),
+                copy: None,
+                pending: true,
+            });
+        }
+        self.fleet_job_pending = Some(job);
+    }
+
+    fn machine_report_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    if machines
+                        .report
+                        .as_ref()
+                        .is_some_and(|report| report.pending)
+                    {
+                        return;
+                    }
+                    machines.report = None;
+                }
+            }
+            KeyCode::Char('y') => {
+                let copy = match self.overlay.as_ref() {
+                    Some(Overlay::Machines(machines)) => {
+                        machines.report.as_ref().and_then(|report| {
+                            report.copy.clone().or_else(|| {
+                                Some(report.body.clone()).filter(|body| !body.is_empty())
+                            })
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(copy) = copy {
+                    self.copy_pending = Some(copy);
+                    self.inform("copied the report", NoticeKind::Info);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn machine_form_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let step = match self.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.form.as_ref().map(|form| form.step),
+            _ => None,
+        };
+        let Some(step) = step else {
+            return;
+        };
+
+        match step {
+            AddStep::Working => {
+                if key.code == KeyCode::Esc && self.quit != Some(Quit::ApplyFleetIntent) {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(form) = machines.form.as_mut() {
+                            form.step = AddStep::Confirm;
+                            form.pending = false;
+                            form.error =
+                                Some("cancelled waiting; the work may still be running".into());
+                        }
+                    }
+                }
+            }
+            AddStep::Form => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        machines.form = None;
+                    }
+                }
+                KeyCode::Tab | KeyCode::Down => self.move_form_field(1),
+                KeyCode::BackTab | KeyCode::Up => self.move_form_field(-1),
+                KeyCode::Left | KeyCode::Right => self.toggle_form_bool(),
+                KeyCode::Enter => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(form) = machines.form.as_mut() {
+                            form.step = AddStep::Confirm;
+                        }
+                    }
+                }
+                KeyCode::Char(c) if !c.is_control() => self.push_form_char(c),
+                KeyCode::Backspace => self.pop_form_char(),
+                _ => {}
+            },
+            AddStep::Confirm => match key.code {
+                KeyCode::Esc => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(form) = machines.form.as_mut() {
+                            if form.kind == FormKind::Service {
+                                machines.form = None;
+                            } else {
+                                form.step = AddStep::Form;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char('y') => {
+                    let command = self.form_command_preview();
+                    self.copy_pending = Some(command.clone());
+                    self.inform(format!("copied `{command}`"), NoticeKind::Info);
+                }
+                KeyCode::Enter => self.confirm_machine_form(),
+                _ => {}
+            },
+            AddStep::Done => match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        machines.form = None;
+                    }
+                }
+                KeyCode::Char('y') => {
+                    let recipe = match self.overlay.as_ref() {
+                        Some(Overlay::Machines(machines)) => {
+                            machines.form.as_ref().and_then(|form| form.recipe.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(recipe) = recipe {
+                        self.copy_pending = Some(recipe);
+                        self.inform("copied the result", NoticeKind::Info);
+                    }
+                }
+                _ => {}
+            },
+            AddStep::Method | AddStep::Pick => {}
+        }
+    }
+
+    fn move_form_field(&mut self, delta: isize) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                let len = form.fields().len() as isize;
+                if len == 0 {
+                    return;
+                }
+                let next = (form.field as isize + delta).rem_euclid(len) as usize;
+                form.field = next;
+            }
+        }
+    }
+
+    fn toggle_form_bool(&mut self) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                match form.field() {
+                    Some(FormField::DeleteInvite) => form.delete_invite = !form.delete_invite,
+                    Some(FormField::InstallService) => form.install_service = !form.install_service,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn push_form_char(&mut self, c: char) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                match form.field() {
+                    Some(FormField::Machine) => form.machine.push(c),
+                    Some(FormField::Host) => form.host.push(c),
+                    Some(FormField::Path) => form.path.push(c),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn pop_form_char(&mut self) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                match form.field() {
+                    Some(FormField::Machine) => {
+                        form.machine.pop();
+                    }
+                    Some(FormField::Host) => {
+                        form.host.pop();
+                    }
+                    Some(FormField::Path) => {
+                        form.path.pop();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn form_command_preview(&self) -> String {
+        let Some(Overlay::Machines(machines)) = self.overlay.as_ref() else {
+            return String::new();
+        };
+        let Some(form) = machines.form.as_ref() else {
+            return String::new();
+        };
+        match form.kind {
+            FormKind::Create => {
+                let mut command = "ouro fleet create".to_string();
+                if !form.machine.trim().is_empty() {
+                    command.push_str(&format!(" --machine {}", form.machine.trim()));
+                }
+                if !form.host.trim().is_empty() {
+                    command.push_str(&format!(" --host {}", form.host.trim()));
+                }
+                command
+            }
+            FormKind::Join => {
+                let mut command = format!("ouro fleet enroll {}", form.path.trim());
+                if form.delete_invite {
+                    command.push_str(" --delete");
+                }
+                if form.install_service {
+                    command.push_str(" --service");
+                }
+                command
+            }
+            FormKind::Invite => format!(
+                "ouro fleet invite --machine {} --host {} --out {}",
+                form.machine.trim(),
+                form.host.trim(),
+                if form.path.trim().is_empty() {
+                    "INVITE.ouro"
+                } else {
+                    form.path.trim()
+                }
+            ),
+            FormKind::Service => MachineAction::Service.command().into(),
+            FormKind::SyncExport => format!(
+                "ouro fleet sync export --out {}",
+                if form.path.trim().is_empty() {
+                    "fleet.ouro-roster"
+                } else {
+                    form.path.trim()
+                }
+            ),
+        }
+    }
+
+    fn confirm_machine_form(&mut self) {
+        let snapshot = match self.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.form.clone(),
+            _ => None,
+        };
+        let Some(form) = snapshot else {
+            return;
+        };
+
+        match form.kind {
+            FormKind::Create => {
+                if !self.spawned() {
+                    self.set_form_error(
+                        "run `ouro` on this Mac (not `ouro attach`) to create the fleet from here",
+                    );
+                    return;
+                }
+                if self.fleet_profile.is_some() {
+                    self.set_form_error("this machine already has a fleet");
+                    return;
+                }
+                let host = form.host.trim().to_string();
+                if host.is_empty() {
+                    self.set_form_error(
+                        "this Mac needs its Tailscale MagicDNS name or private IPv4 address",
+                    );
+                    return;
+                }
+                let machine = {
+                    let named = form.machine.trim();
+                    if named.is_empty() {
+                        crate::fleet::machine_from_host(&host).unwrap_or_else(|_| "studio".into())
+                    } else {
+                        named.to_string()
+                    }
+                };
+                if let Err(error) = crate::fleet::validate_machine(&machine) {
+                    self.set_form_error(format!("{error:#}"));
+                    return;
+                }
+                self.fleet_intent_pending = Some(FleetIntent {
+                    schema: 1,
+                    owner_machine: machine,
+                    owner_host: host,
+                    fleet_name: None,
+                    add: None,
+                });
+                self.set_form_working();
+                self.quit = Some(Quit::ApplyFleetIntent);
+            }
+            FormKind::Join => {
+                if !self.spawned() {
+                    self.set_form_error(
+                        "run `ouro` on this machine (not `ouro attach`) to join from here",
+                    );
+                    return;
+                }
+                if self.fleet_profile.is_some() {
+                    self.set_form_error("this machine already has a fleet");
+                    return;
+                }
+                let invitation = form.path.trim().to_string();
+                if invitation.is_empty() {
+                    self.set_form_error("invitation path is required");
+                    return;
+                }
+                self.join_intent_pending = Some(JoinIntent {
+                    schema: 1,
+                    invitation,
+                    delete: form.delete_invite,
+                    service: form.install_service,
+                });
+                self.set_form_working();
+                self.quit = Some(Quit::ApplyFleetIntent);
+            }
+            FormKind::Invite => {
+                if !self.can_invite {
+                    self.set_form_error(
+                        "this machine joined the fleet and cannot invite others; run this on the original owner",
+                    );
+                    return;
+                }
+                let machine = form.machine.trim().to_string();
+                let host = form.host.trim().to_string();
+                if machine.is_empty() || host.is_empty() {
+                    self.set_form_error("machine name and fleet host are required");
+                    return;
+                }
+                self.set_form_working();
+                self.fleet_job_pending = Some(FleetJob::Invite {
+                    machine,
+                    host,
+                    out: {
+                        let path = form.path.trim();
+                        (!path.is_empty()).then(|| path.to_string())
+                    },
+                });
+            }
+            FormKind::Service => {
+                self.set_form_working();
+                self.fleet_job_pending = Some(FleetJob::Service);
+            }
+            FormKind::SyncExport => {
+                let out = form.path.trim().to_string();
+                if out.is_empty() {
+                    self.set_form_error("output path is required");
+                    return;
+                }
+                self.set_form_working();
+                self.fleet_job_pending = Some(FleetJob::SyncExport { out });
+            }
+        }
+    }
+
+    fn set_form_error(&mut self, error: impl Into<String>) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                form.error = Some(error.into());
+                if form.kind != FormKind::Service {
+                    form.step = AddStep::Form;
+                }
+            }
+        }
+    }
+
+    fn set_form_working(&mut self) {
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(form) = machines.form.as_mut() {
+                form.step = AddStep::Working;
+                form.pending = true;
+                form.error = None;
+            }
+        }
     }
 
     fn enter_add_form_or_pick(&mut self) {
@@ -6785,7 +7511,7 @@ impl App {
                 owner_machine,
                 owner_host,
                 fleet_name: None,
-                add: AddPlan {
+                add: Some(AddPlan {
                     kind: match add.method {
                         AddMethod::Ssh => AddKind::Ssh,
                         AddMethod::Prepare => AddKind::Prepare,
@@ -6800,9 +7526,13 @@ impl App {
                         let binary = add.binary.trim();
                         (!binary.is_empty()).then(|| binary.to_string())
                     },
-                },
+                }),
             };
-            if intent.add.kind == AddKind::Ssh && intent.add.target.is_none() {
+            if intent
+                .add
+                .as_ref()
+                .is_some_and(|add| add.kind == AddKind::Ssh && add.target.is_none())
+            {
                 self.set_add_error("SSH add needs user@host (or a Tailscale name)");
                 self.set_add_step(AddStep::Form, Some(AddField::Target));
                 return;
@@ -6832,7 +7562,7 @@ impl App {
                 add.error = None;
             }
         }
-        self.fleet_job_pending = Some(FleetJob {
+        self.fleet_job_pending = Some(FleetJob::Add {
             prepare: add.method == AddMethod::Prepare,
             target: (add.method == AddMethod::Ssh)
                 .then(|| add.target.trim().to_string())

@@ -16,7 +16,8 @@ use ouro::model::Plane;
 use ouro::proto::{ErrorCode, RpcError};
 use ouro::transport::ClientError;
 use ouro::ui::app::{
-    App, Call, ComposerVerb, MachineCandidate, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag,
+    App, Call, ComposerVerb, FleetJob, MachineCandidate, Mode, Msg, NewField, NoticeKind, Overlay,
+    Tab, Tag,
 };
 use ouro::ui::theme;
 
@@ -459,22 +460,37 @@ fn settings_makes_standalone_machine_setup_discoverable() {
     assert!(machines.contains("Standalone"), "{}", machines.text());
     assert!(machines.contains("Known 1 · Connected 1 · Offline 0"));
     assert!(
-        machines.contains("Add another machine"),
+        machines.contains("Add a reachable machine"),
         "{}",
         machines.text()
     );
-    assert!(machines.contains("ouro fleet add"));
-    assert!(machines.contains("ouro fleet create"));
-    assert!(machines.contains("ouro fleet join INVITE.ouro"));
-    assert!(machines.contains("ouro fleet service install"));
-    assert!(machines.contains("ouro fleet status"));
-    assert!(machines.contains("ouro fleet doctor"));
-    assert!(machines.contains("ouro fleet sync export"));
     assert!(
-        machines.contains("Add can run after confirm"),
+        machines.contains("I'll set it up myself"),
         "{}",
         machines.text()
     );
+    assert!(machines.contains("Create a fleet"), "{}", machines.text());
+    assert!(
+        machines.contains("Join with an invitation"),
+        "{}",
+        machines.text()
+    );
+    assert!(
+        machines.contains("Check the machines"),
+        "{}",
+        machines.text()
+    );
+    assert!(
+        machines.contains("Diagnose a connection"),
+        "{}",
+        machines.text()
+    );
+    assert!(
+        machines.contains("Enter runs the selected action"),
+        "{}",
+        machines.text()
+    );
+    assert!(machines.contains("ouro fleet add"), "{}", machines.text());
 }
 
 #[test]
@@ -679,7 +695,7 @@ fn machines_calls_out_insecure_and_mismatched_runtime_states() {
 }
 
 #[test]
-fn machines_create_and_join_open_guidance_without_running_any_command() {
+fn machines_create_join_and_service_open_runnable_forms() {
     let mut app = dashboard();
     open_machines(&mut app);
     assert!(app
@@ -688,47 +704,27 @@ fn machines_create_and_join_open_guidance_without_running_any_command() {
         .all(|call| !call.method.starts_with("fleet.")));
 
     app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
     let create = render(&mut app, 120, 34);
     assert!(
-        create.contains("attached to a standalone runtime"),
+        create.contains("Create a fleet on this Mac"),
         "{}",
         create.text()
     );
-    assert!(create.contains("ouro fleet create"));
-    assert!(create.contains("ouro stop"));
-    assert!(create.contains("ouro daemon"));
-    assert!(create.contains("refuses to change a live runtime"));
+    assert!(create.contains("machine"), "{}", create.text());
+    assert!(create.contains("host"), "{}", create.text());
+    assert!(app.take_fleet_intent().is_none());
+    assert!(app.quit.is_none());
 
     app.apply(key(KeyCode::Esc));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
     let join = render(&mut app, 120, 34);
-    assert!(
-        join.contains("Install the same Ouroboros release"),
-        "{}",
-        join.text()
-    );
-    assert!(join.contains("mode 0600"));
-    assert!(join.contains("you do not type cookies"));
-    assert!(join.contains("certificates"));
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-
-    app.apply(key(KeyCode::Esc));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    let service = render(&mut app, 120, 34);
-    assert!(service.contains("Keep this machine running"));
-    assert!(service.contains("ouro fleet service install"));
-    assert!(service.contains("deliberately does not start anything"));
-    assert!(service.contains("exact activation command"));
-    assert!(service.contains("ouro fleet service status"));
-    assert!(service.contains("do not also run"));
-    assert!(service.contains("after a crash and at login"));
+    assert!(join.contains("Join with an invitation"), "{}", join.text());
+    assert!(join.contains("invitation"), "{}", join.text());
+    assert!(join.contains("delete after join"), "{}", join.text());
+    assert!(app.take_join_intent().is_none());
     assert!(app
         .drain()
         .iter()
@@ -736,12 +732,42 @@ fn machines_create_and_join_open_guidance_without_running_any_command() {
 }
 
 #[test]
-fn machines_copies_the_selected_command_but_never_executes_it() {
+fn machines_service_confirms_before_writing_a_unit() {
+    let mut app = dashboard();
+    app.fleet_profile = Some(fleet_profile());
+    app.can_invite = true;
+    open_machines(&mut app);
+
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+    let service = render(&mut app, 120, 34);
+    assert!(
+        service.contains("Keep this machine running"),
+        "{}",
+        service.text()
+    );
+    assert!(
+        service.contains("does not start the daemon"),
+        "{}",
+        service.text()
+    );
+    assert!(service.contains("activation command"), "{}", service.text());
+    assert!(app.take_fleet_job().is_none());
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| !call.method.starts_with("fleet.")));
+}
+
+#[test]
+fn machines_copies_the_selected_command_without_running_it() {
     let mut app = dashboard();
     open_machines(&mut app);
 
     let overview = render(&mut app, 120, 34);
-    assert!(overview.contains("y copy command"), "{}", overview.text());
+    assert!(overview.contains("y copy CLI"), "{}", overview.text());
 
     app.apply(key(KeyCode::Char('y')));
     assert_eq!(
@@ -753,21 +779,65 @@ fn machines_copies_the_selected_command_but_never_executes_it() {
         .iter()
         .all(|call| !call.method.starts_with("fleet.")));
 
-    // Copy follows the focused row even after opening its longer guide. Placeholders are
-    // copied verbatim for the operator to review and replace in their terminal.
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
     app.apply(key(KeyCode::Char('y')));
     assert_eq!(
         app.take_copy().as_deref(),
-        Some("ouro fleet invite --machine NAME --host HOST --out INVITE.ouro")
+        Some("ouro fleet enroll INVITE.ouro --delete")
     );
+    assert!(app.take_join_intent().is_none());
     assert!(app
         .drain()
         .iter()
         .all(|call| !call.method.starts_with("fleet.")));
+}
+
+#[test]
+fn machines_create_restarts_this_mac_as_the_owner() {
+    let mut app = dashboard();
+    app.mode = ouro::ui::app::Mode::Spawned { pid: 7 };
+    open_machines(&mut app);
+
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+    type_text(&mut app, "studio");
+    app.apply(key(KeyCode::Tab));
+    type_text(&mut app, "studio.tailnet.ts.net");
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Enter));
+
+    let intent = app.take_fleet_intent().expect("a create-only plan");
+    assert!(intent.add.is_none());
+    assert_eq!(intent.owner_machine, "studio");
+    assert_eq!(intent.owner_host, "studio.tailnet.ts.net");
+    assert_eq!(app.quit, Some(ouro::ui::Quit::ApplyFleetIntent));
+}
+
+#[test]
+fn machines_status_and_doctor_run_from_the_menu() {
+    let mut app = dashboard();
+    app.data_dir = Some("/tmp/ouro-machines-test".into());
+    open_machines(&mut app);
+
+    for _ in 0..4 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.take_fleet_job(), Some(FleetJob::Status)));
+    let report = render(&mut app, 120, 34);
+    assert!(report.contains("Check the machines"), "{}", report.text());
+    assert!(report.contains("Working"), "{}", report.text());
+
+    app.apply(Msg::FleetJobFinished {
+        log: vec!["Studio fleet".into(), "  machine      studio".into()],
+        result: Ok(String::new()),
+    });
+    let done = render(&mut app, 120, 34);
+    assert!(done.contains("Studio fleet"), "{}", done.text());
+    assert!(done.contains("studio"), "{}", done.text());
 }
 
 #[test]
@@ -776,17 +846,16 @@ fn machines_add_flow_reviews_a_plan_then_requests_a_fleet_restart() {
     app.mode = ouro::ui::app::Mode::Spawned { pid: 7 };
     open_machines(&mut app);
 
-    app.apply(key(KeyCode::Enter));
-    let method = render(&mut app, 120, 34);
-    assert!(method.contains("I can SSH to it"), "{}", method.text());
-    assert!(
-        method.contains("I'll run a command on that machine myself"),
-        "{}",
-        method.text()
-    );
-
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
+    let form = render(&mut app, 120, 34);
+    assert!(
+        form.contains("I'll set it up myself") || form.contains("machine"),
+        "{}",
+        form.text()
+    );
+    assert!(form.contains("host"), "{}", form.text());
+
     type_text(&mut app, "linux-laptop");
     app.apply(key(KeyCode::Tab));
     type_text(&mut app, "linux-laptop.tailnet.ts.net");
@@ -812,7 +881,7 @@ fn machines_add_flow_reviews_a_plan_then_requests_a_fleet_restart() {
 
     app.apply(key(KeyCode::Enter));
     let intent = app.take_fleet_intent().expect("a saved add plan");
-    assert_eq!(intent.add.machine, "linux-laptop");
+    assert_eq!(intent.add.as_ref().unwrap().machine, "linux-laptop");
     assert_eq!(intent.owner_host, "studio.tailnet.ts.net");
     assert_eq!(app.quit, Some(ouro::ui::Quit::ApplyFleetIntent));
     assert!(app
@@ -846,20 +915,17 @@ fn machines_add_picks_a_known_tailscale_host_and_prefills_this_mac() {
         local_host: Some("studio.tailnet.ts.net".into()),
     });
 
-    app.apply(key(KeyCode::Enter));
-    let method = render(&mut app, 120, 34);
+    let menu = render(&mut app, 120, 34);
+    assert!(menu.contains("Add vps"), "{}", menu.text());
+    assert!(menu.contains("Add linux-laptop"), "{}", menu.text());
     assert!(
-        method.contains("pick from 2 hosts this Mac already knows"),
+        menu.contains("linux-laptop.tailnet.ts.net"),
         "{}",
-        method.text()
+        menu.text()
     );
 
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
-    let pick = render(&mut app, 120, 34);
-    assert!(pick.contains("Which machine?"), "{}", pick.text());
-    assert!(pick.contains("vps.tailnet.ts.net"), "{}", pick.text());
-
-    app.apply(key(KeyCode::Char('2')));
     let form = render(&mut app, 120, 34);
     assert!(form.contains("linux-laptop"), "{}", form.text());
     assert!(
@@ -884,7 +950,6 @@ fn machines_add_on_a_live_owner_runs_without_restarting() {
     open_machines(&mut app);
 
     app.apply(key(KeyCode::Enter));
-    app.apply(key(KeyCode::Enter));
     type_text(&mut app, "op@vps");
     app.apply(key(KeyCode::Tab));
     type_text(&mut app, "vps");
@@ -894,9 +959,19 @@ fn machines_add_on_a_live_owner_runs_without_restarting() {
     app.apply(key(KeyCode::Enter));
 
     let job = app.take_fleet_job().expect("a live owner add");
-    assert_eq!(job.target.as_deref(), Some("op@vps"));
-    assert_eq!(job.machine, "vps");
-    assert!(!job.prepare);
+    match job {
+        FleetJob::Add {
+            prepare,
+            target,
+            machine,
+            ..
+        } => {
+            assert_eq!(target.as_deref(), Some("op@vps"));
+            assert_eq!(machine, "vps");
+            assert!(!prepare);
+        }
+        other => panic!("expected an add job, got {other:?}"),
+    }
     assert!(app.quit.is_none());
     assert!(app
         .drain()
@@ -910,7 +985,6 @@ fn machines_add_refuses_an_attached_standalone_client() {
     app.mode = Mode::Attached;
     open_machines(&mut app);
 
-    app.apply(key(KeyCode::Enter));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
     type_text(&mut app, "linux-laptop");
@@ -959,19 +1033,19 @@ fn machines_reopens_the_add_result_after_a_fleet_restart() {
 #[test]
 fn machines_explains_signed_membership_updates_and_non_revocation() {
     let mut app = dashboard();
+    app.fleet_profile = Some(fleet_profile());
+    app.can_invite = true;
     open_machines(&mut app);
 
-    for _ in 0..7 {
+    for _ in 0..6 {
         app.apply(key(KeyCode::Down));
     }
     app.apply(key(KeyCode::Enter));
 
     let sync = render(&mut app, 120, 34);
-    assert!(sync.contains("Update saved membership"), "{}", sync.text());
-    assert!(sync.contains("ouro fleet sync export"));
-    assert!(sync.contains("ouro fleet sync import"));
-    assert!(sync.contains("mode-0600"));
-    assert!(sync.contains("does not revoke"));
+    assert!(sync.contains("Export saved membership"), "{}", sync.text());
+    assert!(sync.contains("roster"), "{}", sync.text());
+    assert!(app.take_fleet_job().is_none());
     assert!(app
         .drain()
         .iter()

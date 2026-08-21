@@ -1946,7 +1946,7 @@ async fn run_ui(
                 "cannot create a fleet from an attached client that has no local data directory"
             )
         })?;
-        let outcome = fleet_add::apply_intent(Path::new(&data_dir))?;
+        let outcome = fleet_add::apply_pending(Path::new(&data_dir))?;
         print!("{}", fleet_add::render_outcome(&outcome));
         let paths = runtime::Paths::discover(false)?;
         // Reattach with this session's own configuration source rather than defaults:

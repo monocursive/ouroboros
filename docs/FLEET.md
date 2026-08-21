@@ -6,12 +6,13 @@ An implemented secure core plus the evolution design for a fleet of Ouroboros ru
 ## Current shipped core (2026-08-21)
 
 The beginner path no longer requires the environment/OpenSSL runbook described later in
-this document. From the first Mac you launch, `/machines` → **Add another machine** (or
-`ouro fleet add`) installs or prepares the Linux laptop and VPS. A first add restarts
-that standalone runtime once to become the fleet owner. SSH/Tailscale SSH copies a
-private invitation as a file and enrolls when the destination can run this binary; a
-Mac build is never copied onto Linux. When SSH is unavailable, `--print-script` /
-"I'll run a command myself" writes the invitation here and prints `ouro fleet enroll`.
+this document. From the first Mac you launch, `/machines` is a menu that can add, create,
+join, invite, check, and diagnose. Known Tailscale/SSH hosts are rows you can run. A first
+create or add restarts that standalone runtime once to become the fleet owner. SSH/Tailscale
+SSH copies a private invitation as a file and enrolls when the destination can run this
+binary; a Mac build is never copied onto Linux. When SSH is unavailable, "I'll set it up
+myself" / `ouro fleet add --print-script` writes the invitation here and prints
+`ouro fleet enroll`.
 
 ```sh
 # First machine (already running ouro): /machines → Add, or:
@@ -91,9 +92,10 @@ Implemented now:
   and follow-ups over BEAM distribution using owner-qualified references;
 - durable positive session-owner evidence that survives gateway/runtime recovery, plus an
   explicit tombstoned-offline state-loss command instead of implicit deletion on cancel;
-- Settings → Machines: **Add** can run after confirm (SSH/Tailscale push or a printed
-  enroll recipe). Other rows still copy commands. A first add on a standalone Mac
-  restarts once to create the fleet. Known Tailscale/SSH hosts are listed for picking;
+- Settings → Machines: a runnable menu. Known Tailscale/SSH hosts are first-class add
+  targets. Enter runs add, create, join/enroll, invite, service install, status, doctor,
+  and roster export after confirm. A first create or add on a standalone Mac restarts
+  once. Invitation bytes never appear on screen;
 - a connected-machine New Session picker, and retained cursor recovery when a remote
   owner temporarily disappears;
 - remote Team worker reconciliation after the worker's machine restarts;

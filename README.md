@@ -1303,8 +1303,9 @@ verified TLS in addition to the private network.
 ### Create, invite, join
 
 The usual first-run path is **from the Mac you already launched**. Start coding immediately
-with `ouro`. Then `/machines` → **Add another machine** (or `,` → machines). That overlay
-lists Tailscale peers and SSH config hosts this Mac already knows.
+with `ouro`. Then `/machines` (or `,` → machines). That overlay is a menu: known Tailscale
+and SSH hosts are rows you can run, plus add, create, join, invite, service, status, and
+doctor.
 
 - **This Mac can SSH** (or Tailscale SSH) to the laptop or VPS: confirm the plan. Enter
   runs it. A first add on a still-standalone Mac restarts this runtime once to create the
