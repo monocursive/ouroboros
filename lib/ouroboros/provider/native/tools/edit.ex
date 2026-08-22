@@ -244,7 +244,12 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
     Enum.map(lines, fn line ->
       stripped =
         if needle_indent != "" and String.starts_with?(line, needle_indent),
-          do: binary_part(line, byte_size(needle_indent), byte_size(line) - byte_size(needle_indent)),
+          do:
+            binary_part(
+              line,
+              byte_size(needle_indent),
+              byte_size(line) - byte_size(needle_indent)
+            ),
           else: line
 
       if String.trim(stripped) == "", do: stripped, else: file_indent <> stripped
@@ -332,7 +337,9 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
     content
     |> String.split("\n")
     |> Enum.with_index(1)
-    |> Enum.map(fn {line, number} -> {String.jaro_distance(String.trim(line), target), number, line} end)
+    |> Enum.map(fn {line, number} ->
+      {String.jaro_distance(String.trim(line), target), number, line}
+    end)
     |> Enum.filter(fn {score, _number, _line} -> score > 0.7 end)
     |> Enum.sort_by(fn {score, _number, _line} -> -score end)
     |> Enum.take(@similar_lines)

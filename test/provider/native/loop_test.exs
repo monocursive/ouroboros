@@ -53,13 +53,15 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
   defp collect(acc \\ []) do
     receive do
-      {:event, %{type: type} = event} when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
+      {:event, %{type: type} = event}
+      when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
         Enum.reverse([event | acc])
 
       {:event, event} ->
         collect([event | acc])
     after
-      15_000 -> flunk("no terminal turn event within 15s; collected: #{inspect(Enum.reverse(acc))}")
+      15_000 ->
+        flunk("no terminal turn event within 15s; collected: #{inspect(Enum.reverse(acc))}")
     end
   end
 
@@ -136,7 +138,10 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert bash_result.payload["output"] =~ "checked"
 
       change = find(events, :file_change)
-      assert [%{"kind" => "modify", "diff" => diff, "relative_path" => "lib/a.ex"}] = change.payload["changes"]
+
+      assert [%{"kind" => "modify", "diff" => diff, "relative_path" => "lib/a.ex"}] =
+               change.payload["changes"]
+
       assert diff =~ "-  def x, do: 1"
       assert diff =~ "+  def x, do: 2"
 
@@ -206,7 +211,10 @@ defmodule Ouroboros.Provider.Native.LoopTest do
     test "fails the turn by name at max_iterations", context do
       script =
         List.duplicate(
-          [{:tool_call, %{id: "c", name: "bash", input: %{"command" => "echo #{:rand.uniform()}"}}}],
+          [
+            {:tool_call,
+             %{id: "c", name: "bash", input: %{"command" => "echo #{:rand.uniform()}"}}}
+          ],
           10
         )
 
@@ -271,11 +279,19 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert ask.payload["kind"] == "file_change"
       assert ask.payload["tool_call"]["name"] == "write"
       assert ask.payload["tool_call"]["cwd"] == context.workspace
-      assert ask.payload["suggested_rule"] == %{"tool" => "write", "paths" => ask.payload["paths"]}
+
+      assert ask.payload["suggested_rule"] == %{
+               "tool" => "write",
+               "paths" => ask.payload["paths"]
+             }
+
       assert ask.payload["reason"] =~ "no permission rule engine"
       assert is_binary(ask.request_id)
 
-      send(pid, {:native_approval, ask.request_id, %ApprovalResponse{decision: :approve, scope: :once}})
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :approve, scope: :once}}
+      )
 
       events = collect()
       assert File.read!(Path.join(context.workspace, "lib/new.ex")) == "hello\n"
@@ -376,13 +392,20 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert ask.payload["tool_call"]["command"] == "rm -rf /"
       assert ask.payload["suggested_rule"]["command_prefix"] == "rm"
 
-      send(pid, {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}})
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}}
+      )
+
       collect()
     end
 
-    test ":auto_edit does not auto-approve a write into a declared add_dir", %{root: root} = context do
+    test ":auto_edit does not auto-approve a write into a declared add_dir",
+         %{root: root} = context do
       File.mkdir_p!(Path.join(root, "extra"))
-      {:ok, scope} = Paths.scope(Path.join(root, "workspace"), [Path.join(root, "extra")], :workspace_write)
+
+      {:ok, scope} =
+        Paths.scope(Path.join(root, "workspace"), [Path.join(root, "extra")], :workspace_write)
 
       script = [
         [
@@ -402,7 +425,12 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       pid = run(loop)
 
       assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
-      send(pid, {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}})
+
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}}
+      )
+
       collect()
     end
 

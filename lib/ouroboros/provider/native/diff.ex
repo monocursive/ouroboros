@@ -74,8 +74,7 @@ defmodule Ouroboros.Provider.Native.Diff do
       true ->
         script = ops(before_content, after_content)
 
-        {Enum.count(script, &(elem(&1, 0) == :ins)),
-         Enum.count(script, &(elem(&1, 0) == :del))}
+        {Enum.count(script, &(elem(&1, 0) == :ins)), Enum.count(script, &(elem(&1, 0) == :del))}
     end
   end
 

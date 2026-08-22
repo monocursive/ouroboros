@@ -227,7 +227,10 @@ defmodule Ouroboros.Provider.Native.Loop do
           # Interrupt is honoured *after* the tool that was already running, never in
           # the middle of it: a half-applied edit is worse than one extra tool call.
           state = drain_control(state)
-          if state.interrupted?, do: {:halt, {:interrupted, state}}, else: {:cont, {:continue, state}}
+
+          if state.interrupted?,
+            do: {:halt, {:interrupted, state}},
+            else: {:cont, {:continue, state}}
 
         other ->
           {:halt, other}

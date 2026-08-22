@@ -53,7 +53,8 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     }
 
     with {:ok, json} <- encode_json(payload),
-         temporary = path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
+         temporary =
+           path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
          :ok <- File.write(temporary, json, [:binary, :sync]),
          :ok <- File.chmod(temporary, 0o600),
          :ok <- File.rename(temporary, path) do

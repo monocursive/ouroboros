@@ -59,7 +59,13 @@ defmodule Ouroboros.Provider.Native.Cost do
   separately where the entry declares them; a cache read priced as an ordinary input
   token would overstate every turn of a long session.
   """
-  @spec cost_usd(String.t() | nil, non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec cost_usd(
+          String.t() | nil,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           float() | nil
   def cost_usd(nil, _input, _output, _cache_read, _cache_creation), do: nil
 

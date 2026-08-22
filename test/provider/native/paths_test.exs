@@ -54,7 +54,9 @@ defmodule Ouroboros.Provider.Native.PathsTest do
     end
 
     test "refuses a `..` segment outright", %{scope: scope} do
-      assert {:error, {:path_traversal, _path}} = Paths.resolve("lib/../../outside/secret.txt", scope)
+      assert {:error, {:path_traversal, _path}} =
+               Paths.resolve("lib/../../outside/secret.txt", scope)
+
       assert {:error, {:path_traversal, _path}} = Paths.resolve("../outside/secret.txt", scope)
     end
 

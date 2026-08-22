@@ -45,7 +45,11 @@ defmodule Ouroboros.Provider.Native.CostTest do
   test "prices a known model from llm_db, charging cached reads separately" do
     known =
       Enum.find(
-        ["anthropic:claude-sonnet-4-5", "openai:gpt-4o-mini", "anthropic:claude-3-5-haiku-latest"],
+        [
+          "anthropic:claude-sonnet-4-5",
+          "openai:gpt-4o-mini",
+          "anthropic:claude-3-5-haiku-latest"
+        ],
         fn spec -> is_number(Cost.cost_usd(spec, 1_000_000, 0, 0, 0)) end
       )
 

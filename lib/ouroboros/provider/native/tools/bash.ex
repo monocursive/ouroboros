@@ -114,7 +114,10 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
         # what actually reaps the direct child. A process the command detached from its
         # own group can outlive this; that limit is stated in the README rather than
         # pretended away.
-        if os_pid, do: System.cmd("/bin/kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+        if os_pid,
+          do:
+            System.cmd("/bin/kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
         drained = drain(port, [], System.monotonic_time(:millisecond) + 500)
         if Port.info(port), do: Port.close(port)
         {:ok, drained, 124, true}
@@ -169,7 +172,8 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
     case spill(output, context) do
       {:ok, path} ->
-        {inline, "\n(full output, #{byte_size(output)} bytes: #{path} — read it if you need the middle)"}
+        {inline,
+         "\n(full output, #{byte_size(output)} bytes: #{path} — read it if you need the middle)"}
 
       {:error, _reason} ->
         {inline, "\n(#{elided} bytes could not be spilled to a file and are lost)"}
@@ -179,7 +183,9 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   defp spill(output, context) do
     case context[:session_dir] do
       dir when is_binary(dir) ->
-        name = "bash-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false) <> ".txt"
+        name =
+          "bash-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false) <> ".txt"
+
         path = Path.join([dir, "output", name])
 
         with :ok <- File.mkdir_p(Path.dirname(path)),

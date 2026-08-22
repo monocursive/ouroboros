@@ -69,7 +69,13 @@ defmodule Ouroboros.Provider.NativeTest do
     test "offers every approval mode and no sandbox mode it cannot enforce" do
       spec = Native.spec()
 
-      assert spec.normalized_values.approval_mode == [:default, :prompt, :auto_edit, :auto_approve]
+      assert spec.normalized_values.approval_mode == [
+               :default,
+               :prompt,
+               :auto_edit,
+               :auto_approve
+             ]
+
       assert spec.normalized_values.sandbox_mode == [:default, :read_only, :workspace_write]
       refute :unrestricted in spec.normalized_values.sandbox_mode
     end
@@ -146,7 +152,9 @@ defmodule Ouroboros.Provider.NativeTest do
     end
 
     test "accepts read_only" do
-      assert {:ok, options} = Provider.safety_options(:native, [sandbox_mode: :read_only], :coding)
+      assert {:ok, options} =
+               Provider.safety_options(:native, [sandbox_mode: :read_only], :coding)
+
       assert Keyword.get(options, :sandbox_mode) == :read_only
     end
   end
@@ -158,7 +166,11 @@ defmodule Ouroboros.Provider.NativeTest do
 
       # Probe the real client, not the scripted one: the claim under test is about what
       # `Model.ReqLLM.credential_report/0` puts on the wire.
-      Application.put_env(:ouroboros, :native_model_module, Ouroboros.Provider.Native.Model.ReqLLM)
+      Application.put_env(
+        :ouroboros,
+        :native_model_module,
+        Ouroboros.Provider.Native.Model.ReqLLM
+      )
 
       assert {:ok, status} = Native.status(%{})
 

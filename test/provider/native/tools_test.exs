@@ -64,7 +64,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   end
 
   describe "classify/3" do
-    test "names the mode, the canonical paths, and the command", %{scope: scope, workspace: workspace} do
+    test "names the mode, the canonical paths, and the command", %{
+      scope: scope,
+      workspace: workspace
+    } do
       write_file(workspace, "lib/a.ex", "x")
 
       assert %{tool: "read", mode: :read, paths: [path], command: nil} =
@@ -85,7 +88,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   end
 
   describe "read" do
-    test "returns line-numbered text and records a fingerprint", %{context: context, workspace: workspace} do
+    test "returns line-numbered text and records a fingerprint", %{
+      context: context,
+      workspace: workspace
+    } do
       path = write_file(workspace, "lib/a.ex", "defmodule A do\n  def x, do: 1\nend\n")
 
       result = run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "lib/a.ex"}, context)
@@ -97,11 +103,18 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert is_binary(hash) and size > 0
     end
 
-    test "honours offset and limit and says how much is left", %{context: context, workspace: workspace} do
+    test "honours offset and limit and says how much is left", %{
+      context: context,
+      workspace: workspace
+    } do
       write_file(workspace, "big.txt", Enum.map_join(1..100, "", &"line #{&1}\n"))
 
       result =
-        run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "big.txt", "offset" => 10, "limit" => 5}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Read,
+          %{"path" => "big.txt", "offset" => 10, "limit" => 5},
+          context
+        )
 
       assert result.output =~ "    11\tline 11"
       assert result.output =~ "    15\tline 15"
@@ -111,7 +124,11 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "refuses a path outside the workspace", %{context: context, root: root} do
       result =
-        run(Ouroboros.Provider.Native.Tools.Read, %{"path" => Path.join(root, "outside/secret.txt")}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Read,
+          %{"path" => Path.join(root, "outside/secret.txt")},
+          context
+        )
 
       assert result.is_error
       assert result.output =~ "outside this session's workspace"
@@ -119,13 +136,19 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
     end
 
     test "refuses a `..` traversal", %{context: context} do
-      result = run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "../outside/secret.txt"}, context)
+      result =
+        run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "../outside/secret.txt"}, context)
+
       assert result.is_error
       assert result.output =~ "`..`"
     end
 
     test "is bounded at 64 KiB per call", %{context: context, workspace: workspace} do
-      write_file(workspace, "huge.txt", Enum.map_join(1..40_000, "", &"#{&1} #{String.duplicate("x", 60)}\n"))
+      write_file(
+        workspace,
+        "huge.txt",
+        Enum.map_join(1..40_000, "", &"#{&1} #{String.duplicate("x", 60)}\n")
+      )
 
       result = run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "huge.txt"}, context)
 
@@ -133,7 +156,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "truncated at"
     end
 
-    test "describes a binary file instead of dumping it", %{context: context, workspace: workspace} do
+    test "describes a binary file instead of dumping it", %{
+      context: context,
+      workspace: workspace
+    } do
       write_file(workspace, "blob.bin", <<0, 159, 146, 150, 0>>)
       result = run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "blob.bin"}, context)
       assert result.output =~ "binary file"
@@ -143,7 +169,11 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   describe "write" do
     test "creates a file and emits a real diff", %{context: context, workspace: workspace} do
       result =
-        run(Ouroboros.Provider.Native.Tools.Write, %{"path" => "lib/new.ex", "content" => "hello\n"}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Write,
+          %{"path" => "lib/new.ex", "content" => "hello\n"},
+          context
+        )
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "lib/new.ex")) == "hello\n"
@@ -153,9 +183,16 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert change["relative_path"] == "lib/new.ex"
     end
 
-    test "creates missing parent directories inside the workspace", %{context: context, workspace: workspace} do
+    test "creates missing parent directories inside the workspace", %{
+      context: context,
+      workspace: workspace
+    } do
       result =
-        run(Ouroboros.Provider.Native.Tools.Write, %{"path" => "a/b/c/d.txt", "content" => "x"}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Write,
+          %{"path" => "a/b/c/d.txt", "content" => "x"},
+          context
+        )
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "a/b/c/d.txt")) == "x"
@@ -165,7 +202,11 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       context = %{scope: read_only, session_dir: session_dir, reads: %{}}
 
       result =
-        run(Ouroboros.Provider.Native.Tools.Write, %{"path" => "lib/new.ex", "content" => "x"}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Write,
+          %{"path" => "lib/new.ex", "content" => "x"},
+          context
+        )
 
       assert result.is_error
       assert result.output =~ "read_only"
@@ -234,7 +275,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "changed since it was read"
     end
 
-    test "refuses an ambiguous match and names the count", %{context: context, workspace: workspace} do
+    test "refuses an ambiguous match and names the count", %{
+      context: context,
+      workspace: workspace
+    } do
       write_file(workspace, "lib/c.ex", "same\nsame\nsame\n")
       read = run(Ouroboros.Provider.Native.Tools.Read, %{"path" => "lib/c.ex"}, context)
       context = %{context | reads: read.reads}
@@ -361,7 +405,8 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
   describe "bash" do
     test "runs in the workspace and returns output", %{context: context} do
-      result = run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "pwd && echo hi"}, context)
+      result =
+        run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "pwd && echo hi"}, context)
 
       refute result.is_error
       assert result.output =~ "hi"
@@ -374,8 +419,12 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "exited 3"
     end
 
-    test "applies umask 022 like every other provider child", %{context: context, workspace: workspace} do
-      result = run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "touch umasked.txt"}, context)
+    test "applies umask 022 like every other provider child", %{
+      context: context,
+      workspace: workspace
+    } do
+      result =
+        run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "touch umasked.txt"}, context)
 
       refute result.is_error
       {:ok, %File.Stat{mode: mode}} = File.stat(Path.join(workspace, "umasked.txt"))
@@ -399,7 +448,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       result =
         run(
           Ouroboros.Provider.Native.Tools.Bash,
-          %{"command" => ~s|awk 'BEGIN { for (i = 0; i < 60000; i++) print i " padding padding padding" }'|},
+          %{
+            "command" =>
+              ~s|awk 'BEGIN { for (i = 0; i < 60000; i++) print i " padding padding padding" }'|
+          },
           context
         )
 
@@ -413,7 +465,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert Bitwise.band(mode, 0o777) == 0o600
     end
 
-    test "is refused entirely under read_only, and says why", %{read_only: read_only, session_dir: session_dir} do
+    test "is refused entirely under read_only, and says why", %{
+      read_only: read_only,
+      session_dir: session_dir
+    } do
       context = %{scope: read_only, session_dir: session_dir, reads: %{}}
       result = run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "echo hi"}, context)
 
@@ -424,7 +479,11 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "clamps a timeout above the documented maximum", %{context: context} do
       result =
-        run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "echo ok", "timeout_ms" => 99_999_999}, context)
+        run(
+          Ouroboros.Provider.Native.Tools.Bash,
+          %{"command" => "echo ok", "timeout_ms" => 99_999_999},
+          context
+        )
 
       refute result.is_error
       assert result.output =~ "ok"

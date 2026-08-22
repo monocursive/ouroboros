@@ -68,7 +68,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   end
 
   @doc "The module a tool name resolves to, honouring the session's tool filters."
-  @spec lookup(String.t(), list() | nil, list() | nil) :: {:ok, module()} | {:error, :unknown_tool}
+  @spec lookup(String.t(), list() | nil, list() | nil) ::
+          {:ok, module()} | {:error, :unknown_tool}
   def lookup(name, allowed, disallowed) do
     allowed = normalize(allowed)
     disallowed = normalize(disallowed)

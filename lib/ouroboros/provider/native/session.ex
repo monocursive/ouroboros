@@ -150,7 +150,8 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   @impl GenServer
-  def handle_call(:initialize, _from, state), do: {:reply, {:ok, state.provider_session_id}, state}
+  def handle_call(:initialize, _from, state),
+    do: {:reply, {:ok, state.provider_session_id}, state}
 
   def handle_call({:send, _request, _turn_id}, _from, %{loop: loop} = state)
       when not is_nil(loop),

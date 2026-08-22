@@ -90,7 +90,9 @@ defmodule Ouroboros.Provider.Native.SessionTest do
     end
   end
 
-  @simple_script [[{:text, "hello"}, {:usage, %{input_tokens: 5, output_tokens: 2}}, {:finish, :stop}]]
+  @simple_script [
+    [{:text, "hello"}, {:usage, %{input_tokens: 5, output_tokens: 2}}, {:finish, :stop}]
+  ]
 
   describe "open and close" do
     test "reports a native provider_session_id and a ready event", context do
@@ -293,13 +295,15 @@ defmodule Ouroboros.Provider.Native.SessionTest do
     end
 
     test "configure changes the model, mode, and sandbox for the next turn", context do
-      {other_spec, other_agent} = NativeModelScript.start([[{:text, "from the new model"}, {:finish, :stop}]])
+      {other_spec, other_agent} =
+        NativeModelScript.start([[{:text, "from the new model"}, {:finish, :stop}]])
 
       %{handle: handle} = open(context, @simple_script)
       await_event(:provider_event)
 
       assert :ok = Session.configure(handle, %{model: other_spec, approval_mode: :prompt})
       assert :ok = Session.configure(handle, %{sandbox_mode: :read_only})
+
       assert {:error, {:unsupported_configuration, :nonsense, 1}} =
                Session.configure(handle, %{nonsense: 1})
 
@@ -387,7 +391,8 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       assert Enum.at(request.messages, 1).content == "first answer"
     end
 
-    test "a corrupt checkpoint refuses the resume rather than starting empty under that id", context do
+    test "a corrupt checkpoint refuses the resume rather than starting empty under that id",
+         context do
       %{handle: handle} = open(context, @simple_script)
       ready = await_event(:provider_event)
       provider_session_id = ready.provider_session_id
