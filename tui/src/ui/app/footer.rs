@@ -301,6 +301,16 @@ impl App {
     /// is exactly the state a title bar exists to surface. "Working" is the open
     /// session's own status, because that is what the window is showing.
     pub fn activity(&self) -> Activity {
+        self.activity_of(self.session_facts().as_ref())
+    }
+
+    /// The same answer for facts a caller has already gathered.
+    ///
+    /// Reading them costs a walk of the retained event window, and the tick and the frame
+    /// each want them three or four times over. Gathered once and passed down rather than
+    /// cached: a cache would answer with the previous tick's numbers, and these are the
+    /// numbers the footer is claiming are current.
+    pub(super) fn activity_of(&self, facts: Option<&SessionFacts>) -> Activity {
         if self
             .sessions
             .watches
@@ -310,7 +320,7 @@ impl App {
             return Activity::NeedsInput;
         }
 
-        match self.session_facts() {
+        match facts {
             Some(facts) if facts.working => Activity::Working,
             _idle_or_absent => Activity::Idle,
         }
@@ -318,9 +328,9 @@ impl App {
 
     /// The workspace the title names: the open session's, else the one this client would
     /// start a session in.
-    pub(super) fn title_workspace(&self) -> Option<String> {
-        self.session_facts()
-            .and_then(|facts| facts.workspace)
+    pub(super) fn title_workspace_of(&self, facts: Option<&SessionFacts>) -> Option<String> {
+        facts
+            .and_then(|facts| facts.workspace.clone())
             .or_else(|| self.config.defaults.workspace.clone())
             .or_else(|| self.launch_dir.clone())
     }
@@ -331,10 +341,11 @@ impl App {
     /// that reads `.session.model` should get `null` on a session whose model was never
     /// reported instead of having to distinguish two spellings of the same silence.
     pub fn statusline_payload(&self) -> Value {
-        let facts = self.session_facts();
+        self.statusline_payload_of(self.session_facts().as_ref())
+    }
 
+    pub(super) fn statusline_payload_of(&self, facts: Option<&SessionFacts>) -> Value {
         let session = facts
-            .as_ref()
             .map(|facts| {
                 json!({
                     "id": facts.id,
@@ -348,7 +359,6 @@ impl App {
             .unwrap_or(Value::Null);
 
         let modes = facts
-            .as_ref()
             .map(|facts| {
                 json!({
                     "approval_mode": facts.approval_mode,
@@ -358,7 +368,6 @@ impl App {
             .unwrap_or(Value::Null);
 
         let usage = facts
-            .as_ref()
             .and_then(|facts| facts.usage.as_ref())
             .map(|usage| {
                 json!({
@@ -383,10 +392,9 @@ impl App {
             "modes": modes,
             "usage": usage,
             "cost_usd": facts
-                .as_ref()
                 .and_then(|facts| facts.usage.as_ref())
                 .and_then(|usage| usage.cost_usd),
-            "elapsed_ms": facts.as_ref().and_then(|facts| facts.elapsed_ms),
+            "elapsed_ms": facts.and_then(|facts| facts.elapsed_ms),
             "connection": {
                 "state": state,
                 "reason": reason,
@@ -403,10 +411,12 @@ impl App {
     /// Both halves have to hold: a turn is running, and the transport declared an
     /// interrupt. A key that cannot work on the open session is not advertised (D14).
     pub fn interrupt_offered(&self) -> bool {
+        self.interrupt_offered_for(self.session_facts().as_ref())
+    }
+
+    pub fn interrupt_offered_for(&self, facts: Option<&SessionFacts>) -> bool {
         self.tab == Tab::Sessions
-            && self
-                .session_facts()
-                .is_some_and(|facts| facts.working && facts.capabilities.interrupt.offered())
+            && facts.is_some_and(|facts| facts.working && facts.capabilities.interrupt.offered())
     }
 }
 

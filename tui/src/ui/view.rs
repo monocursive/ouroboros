@@ -14,8 +14,8 @@ use ratatui::Frame;
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
     CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport, MachineSecurity,
-    Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, Settings,
-    SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
+    Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, SessionFacts,
+    Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::editor::COMMANDS;
 use super::theme;
@@ -288,9 +288,12 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // Read once for the whole row: gathering them walks the retained event window, and
+    // both halves of the footer want the same answer.
+    let facts = app.session_facts();
     let mut left = runtime_identity(app);
-    left.extend(footer_facts(app));
-    let keys = footer_keys(app);
+    left.extend(footer_facts(app, facts.as_ref()));
+    let keys = footer_keys(app, facts.as_ref());
 
     if area.width >= 112 {
         // One ranking across both columns, not a budget each. The two halves compete for
@@ -505,8 +508,8 @@ fn join(segments: Vec<Segment>) -> Vec<Span<'static>> {
 /// Every entry comes from `interactive.info` or from the event stream. Nothing here is a
 /// client-side table of what a provider "usually" does, and a fact the runtime has not
 /// reported is absent rather than guessed (D14).
-fn footer_facts(app: &App) -> Vec<Segment> {
-    let Some(facts) = app.session_facts() else {
+fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
+    let Some(facts) = facts else {
         return Vec::new();
     };
 
@@ -606,7 +609,7 @@ fn footer_facts(app: &App) -> Vec<Segment> {
 /// `esc interrupt` appears only while a turn is running *and* the session's transport
 /// declared an interrupt — a footer that offers a key the open session cannot honour is
 /// the exact failure D14 names.
-fn footer_keys(app: &App) -> Vec<Segment> {
+fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if app.tab != Tab::Sessions {
         return vec![
             Segment::key("ctrl+p commands"),
@@ -617,7 +620,7 @@ fn footer_keys(app: &App) -> Vec<Segment> {
 
     let mut keys = Vec::new();
 
-    if app.interrupt_offered() {
+    if app.interrupt_offered_for(facts) {
         keys.push(Segment::new(
             "esc interrupt",
             Style::default().fg(theme::ACTION),

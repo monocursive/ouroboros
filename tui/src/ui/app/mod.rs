@@ -903,8 +903,8 @@ impl App {
     /// runs, and a status line that re-ran twelve times a second would never settle and
     /// would fork a process for each attempt. Claude Code's own contract is the same one —
     /// the command runs on discrete events, not on a clock.
-    fn statusline_key(&self) -> Value {
-        let mut payload = self.statusline_payload();
+    fn statusline_key(&self, facts: Option<&SessionFacts>) -> Value {
+        let mut payload = self.statusline_payload_of(facts);
 
         if let Some(map) = payload.as_object_mut() {
             map.remove("elapsed_ms");
@@ -920,7 +920,13 @@ impl App {
     fn refresh_chrome(&mut self) {
         self.refresh_offered_commands();
 
-        let title = notify::title(self.activity(), self.title_workspace().as_deref());
+        // Read once. Gathering them walks the retained event window, and the title, the
+        // debounce key, and the payload all want the same answer.
+        let facts = self.session_facts();
+        let title = notify::title(
+            self.activity_of(facts.as_ref()),
+            self.title_workspace_of(facts.as_ref()).as_deref(),
+        );
 
         if self.title_shown.as_deref() != Some(title.as_str()) {
             self.title_shown = Some(title.clone());
@@ -936,7 +942,7 @@ impl App {
             return;
         }
 
-        let key = self.statusline_key();
+        let key = self.statusline_key(facts.as_ref());
 
         if self.statusline.dispatched.as_ref() == Some(&key) {
             self.statusline.settling = None;
