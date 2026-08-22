@@ -253,11 +253,19 @@ fn prose_rows(prose: &str, width: usize, max_lines: usize, live: bool) -> Render
         return rendered;
     }
 
-    // The held-out fragment belongs to the block above it — it is the next few words of
-    // that paragraph, or the rest of that list item. Dropping the separator keeps it where
-    // the reader's eye already is instead of pushing it into a block of its own.
-    while rendered.lines.last().is_some_and(|line| line.width() == 0) {
-        rendered.lines.pop();
+    // Where the fragment sits while it is being typed is where it lands. A blank line in
+    // the source already announced a new block, so it gets its gap now rather than gaining
+    // one — and shunting everything down a row — when the newline arrives. Without one it
+    // is the next few words of the paragraph above, or the rest of that list item, and it
+    // stays with the block it belongs to.
+    match settled.ends_with("\n\n") {
+        true if rendered.lines.len() < max_lines => separate(&mut rendered.lines),
+        true => {}
+        false => {
+            while rendered.lines.last().is_some_and(|line| line.width() == 0) {
+                rendered.lines.pop();
+            }
+        }
     }
 
     let budget = max_lines.saturating_sub(rendered.lines.len());
@@ -1427,7 +1435,7 @@ Done.";
         assert!(text.len() >= 128 * 1024, "{}", text.len());
 
         // Warm the code paths so the measurement is of rendering, not of first touch.
-        let _ = render_limited(&text, 100, MEMO_ENTRIES, false);
+        let _ = render_limited(&text, 100, 16, false);
 
         let started = std::time::Instant::now();
         let rendered = render_limited(&text, 100, 256, false);
@@ -1644,6 +1652,52 @@ Done.";
             Some("| 3 "),
             "the half row stays outside the frame: {shown}"
         );
+    }
+
+    #[test]
+    fn where_the_fragment_sits_while_it_is_typed_is_where_it_lands() {
+        // A blank line in the source has already announced a new block, so the fragment
+        // gets its gap now. Gaining one when the newline arrives would shunt the row down
+        // at every paragraph boundary of every reply — one row of flicker, endlessly.
+        assert_eq!(
+            plain(&render("A claim.\n\nA seco", 60, true)),
+            "A claim.\n\nA seco"
+        );
+        assert_eq!(
+            plain(&render("- one\n\nAfter th", 60, true)),
+            "• one\n\nAfter th"
+        );
+
+        // Without one the fragment is the next words of the block above, and stays there.
+        assert_eq!(
+            plain(&render("A claim.\nAnd its se", 60, true)),
+            "A claim.\nAnd its se"
+        );
+        assert_eq!(plain(&render("- one\n- tw", 60, true)), "• one\n- tw");
+
+        // And in every case the rows above it are already in their settled places.
+        for (partial, whole) in [
+            ("A claim.\n\nA seco", "A claim.\n\nA second claim.\n"),
+            ("- one\n\nAfter th", "- one\n\nAfter the list.\n"),
+            ("- one\n- tw", "- one\n- two\n"),
+            (
+                "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAnd th",
+                "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAnd then some prose.\n",
+            ),
+        ] {
+            let streaming = plain(&render(partial, 60, true));
+            let settled = plain(&render(whole, 60, false));
+
+            let rows: Vec<&str> = streaming.lines().collect();
+            let above = &rows[..rows.len() - 1];
+            let landed: Vec<&str> = settled.lines().take(above.len()).collect();
+
+            assert_eq!(
+                above,
+                landed.as_slice(),
+                "{partial:?} moved when it settled"
+            );
+        }
     }
 
     #[test]

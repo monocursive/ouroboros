@@ -1042,7 +1042,10 @@ redraws, so the end of the text is at any moment half of something. Following Go
 terminated yet is held out of the block parse and drawn as the characters that arrived. A
 half-typed `**bold`, an unfinished `[text](htt`, a lone `*` and a half-written table row
 read as themselves; `Hello` does not become a heading for the one frame between the second
-and third hyphen of the `---` under it. A fence still open is the exception — it keeps its
+and third hyphen of the `---` under it. Where the fragment sits while it is being typed is
+where it lands: a blank line in the source has already announced a new block, so the gap
+above it is drawn now rather than appearing — and shunting the row down — when the newline
+arrives. A fence still open is the exception — it keeps its
 frame, without a floor, so streaming code keeps its highlighting — and a fence opener whose
 info line has not ended yet is not yet a fence, because `ru` is neither `rust` nor `ruby`.
 
