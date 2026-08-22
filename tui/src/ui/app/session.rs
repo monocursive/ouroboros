@@ -142,6 +142,10 @@ pub struct SessionsTab {
     pub verbose_transcript: bool,
     /// Whether the plan/tasks panel is drawn above the composer.
     pub show_plan: bool,
+    /// Codex's `/raw`: every cell drawn with no frame, gutter, glyph column, or app-side
+    /// wrapping, so a native terminal selection yields logical lines. Read by the footer,
+    /// which shows a `raw` badge while it is on.
+    pub raw_mode: bool,
     /// Per-session resync rounds since the last interruption, bounded.
     pub(super) rounds: HashMap<(Plane, String), u32>,
     /// Requests accepted by this client that have not produced their first lifecycle
@@ -563,6 +567,39 @@ impl App {
         }
     }
 
+    /// `/raw`: Codex's copy mode.
+    ///
+    /// Deliberately palette- and slash-only, with no chord of its own: the composer owns
+    /// the keyboard while a session is open, and spending another leader key on a toggle
+    /// that is reached twice a week is how a key map stops being learnable.
+    pub(super) fn toggle_raw_transcript(&mut self) {
+        if self.tab != Tab::Sessions || self.sessions.open.is_none() {
+            self.inform(
+                "open a session before switching it to raw",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        self.sessions.raw_mode = !self.sessions.raw_mode;
+
+        if let Some(watch) = self.sessions.open_watch_mut() {
+            // Undecorating rewrites every cell's height, so a line-based offset taken
+            // against the framed layout no longer points at the rows it was taken from.
+            watch.follow = true;
+            watch.scroll = 0;
+        }
+
+        self.inform(
+            if self.sessions.raw_mode {
+                "raw: no frames or gutters — select with shift or option to copy logical lines"
+            } else {
+                "raw off"
+            },
+            NoticeKind::Info,
+        );
+    }
+
     /// `Ctrl+T`: the plan panel. It stays open while the session is idle on purpose —
     /// a task list that vanishes the moment the agent stops is Codex #18920.
     pub(super) fn toggle_plan_panel(&mut self) {
@@ -878,6 +915,8 @@ impl App {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),
             "/details" => Some(Command::SessionDetails),
+            "/diff" | "/changes" => Some(Command::ShowDiff),
+            "/raw" => Some(Command::RawMode),
             "/copy" => Some(Command::CopyLast),
             "/interrupt" => Some(Command::Interrupt),
             "/steer" => Some(Command::Steer),

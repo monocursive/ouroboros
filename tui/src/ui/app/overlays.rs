@@ -109,13 +109,20 @@ pub enum Command {
     Machines,
     Settings,
     Help,
+    /// Claude Code's `/diff`: the files this session changed, by turn.
+    ShowDiff,
+    /// Codex's `/raw`: cells with no frame, gutter, or app wrapping, so a native
+    /// selection copies logical lines.
+    RawMode,
 }
 
 impl Command {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
+        Self::ShowDiff,
+        Self::RawMode,
         Self::CopyLast,
         Self::DumpScrollback,
         Self::ViewTranscript,
@@ -156,6 +163,8 @@ impl Command {
             | Self::ExternalEditor
             | Self::CloseSession
             | Self::ConnectChatGpt
+            | Self::ShowDiff
+            | Self::RawMode
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -189,6 +198,8 @@ impl Command {
             Self::Machines => "Machines",
             Self::Settings => "Settings",
             Self::Help => "Keyboard shortcuts",
+            Self::ShowDiff => "Show changed files",
+            Self::RawMode => "Toggle raw copy mode",
         }
     }
 
@@ -220,6 +231,8 @@ impl Command {
             Self::Machines => "/machines",
             Self::Settings => "/settings",
             Self::Help => "?",
+            Self::ShowDiff => "/diff",
+            Self::RawMode => "/raw",
         }
     }
 
@@ -341,11 +354,17 @@ pub enum Overlay {
         buffer: String,
     },
     New(Box<NewSession>),
+    /// Claude Code's `/diff`, scoped to what this client holds. Built when it opens.
+    Diff(Box<super::super::diff::DiffOverlay>),
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
 /// them. Exactly `Jido.Harness.ApprovalResponse`'s two enums crossed; nothing else is
 /// offered because nothing else is accepted.
+/// How far `PageDown` moves inside the `/diff` pager. A fixed page rather than the drawn
+/// height because the overlay's key handler runs outside the frame that knows it.
+pub const DIFF_PAGE: usize = 16;
+
 pub const APPROVAL_CHOICES: [(ApprovalDecision, ApprovalScope); 4] = [
     (ApprovalDecision::Approve, ApprovalScope::Once),
     (ApprovalDecision::Approve, ApprovalScope::Session),
@@ -476,6 +495,13 @@ impl App {
         match overlay {
             Overlay::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
+                    self.overlay = None;
+                }
+            }
+            // The overlay owns its own cursor discipline, in the module that knows what a
+            // page of a diff is.
+            Overlay::Diff(diff) => {
+                if !diff.key(key.code, DIFF_PAGE) {
                     self.overlay = None;
                 }
             }
@@ -720,6 +746,27 @@ impl App {
             }
             Command::Help => {
                 self.overlay = Some(Overlay::Help);
+            }
+            Command::ShowDiff => {
+                self.overlay = None;
+                let Some(watch) = self.sessions.open_watch() else {
+                    self.inform(
+                        "open a session before reviewing what it changed",
+                        NoticeKind::Info,
+                    );
+                    return;
+                };
+                // Built once, when it opens. The projection is the transcript's, so this
+                // list cannot disagree with the conversation about which turn changed what.
+                let cells = super::super::transcript_cells::project(watch.entries());
+                let pruned = watch.floor();
+                self.overlay = Some(Overlay::Diff(Box::new(
+                    super::super::diff::DiffOverlay::new(&cells, pruned),
+                )));
+            }
+            Command::RawMode => {
+                self.overlay = None;
+                self.toggle_raw_transcript();
             }
         }
     }

@@ -54,6 +54,9 @@ const MAX_FILES: usize = 64;
 const MAX_LINES: usize = 20_000;
 /// Row budget for a collapsed diff cell.
 pub const COMPACT_LINES: usize = 12;
+/// Row ceiling for one file laid out in the `/diff` pager. Larger than any transcript cell
+/// spends and still bounded, because the pager lays a whole file out before windowing it.
+pub const MAX_OVERLAY_ROWS: usize = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
@@ -818,8 +821,12 @@ pub struct ChangedFile {
     pub in_excerpt: bool,
 }
 
-/// The files one turn changed. Turn 0 is everything that arrived before the first turn
-/// boundary this window still holds.
+/// The files one turn changed.
+///
+/// Turns are numbered from the *oldest turn this client still holds*, not from the start of
+/// the session: the window prunes, and a number counted off a floor that moved would point
+/// at a different turn every time history was dropped. The overlay's footer says the list
+/// is partial whenever that floor is above zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnChanges {
     pub turn: usize,
@@ -828,11 +835,7 @@ pub struct TurnChanges {
 
 impl TurnChanges {
     pub fn label(&self) -> String {
-        if self.turn == 0 {
-            "before the first turn held".to_string()
-        } else {
-            format!("turn {}", self.turn)
-        }
+        format!("turn {}", self.turn)
     }
 
     pub fn additions(&self) -> usize {
@@ -856,7 +859,8 @@ impl TurnChanges {
 /// summed and the newest parse kept for the pager.
 pub fn changes_by_turn(cells: &[Cell]) -> Vec<TurnChanges> {
     let mut turns: Vec<TurnChanges> = Vec::new();
-    let mut turn = 0usize;
+    // The first block belongs to the turn the first divider ends, not to a turn before it.
+    let mut turn = 1usize;
     let mut current: Vec<ChangedFile> = Vec::new();
 
     for cell in cells {
@@ -916,13 +920,13 @@ pub struct DiffOverlay {
     /// `Some(first visible row)` once Enter opened the selected file.
     pub pager: Option<usize>,
     pub turns: Vec<TurnChanges>,
-    /// Chat entries the projection window dropped before this list was built, so the footer
-    /// can say the list is partial rather than implying it is the session.
-    pub pruned: usize,
+    /// The sequence below which this client holds nothing. Non-zero means the list is a
+    /// partial view of the session, and the footer says so rather than implying otherwise.
+    pub pruned: u64,
 }
 
 impl DiffOverlay {
-    pub fn new(cells: &[Cell], pruned: usize) -> Self {
+    pub fn new(cells: &[Cell], pruned: u64) -> Self {
         Self {
             scope: 0,
             selected: 0,

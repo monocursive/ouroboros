@@ -966,9 +966,16 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
         Cell::Plan(plan) => {
             label(lines, format!("plan · {} steps", plan.step_count));
             for step in &plan.steps {
+                // ASCII marks, the same ones the export uses: a glyph column is the first
+                // thing a copy loses, and `[x]` says what `✓` says without one.
+                let mark = match &step.status {
+                    PlanStatus::Done => "[x]".to_string(),
+                    PlanStatus::InProgress => "[>]".to_string(),
+                    PlanStatus::Pending => "[ ]".to_string(),
+                    PlanStatus::Other(word) => format!("[{word}]"),
+                };
                 lines.push(Line::from(Span::raw(format!(
-                    "{} {}",
-                    step.status.glyph(),
+                    "{mark} {}",
                     step.text.replace('\n', " ")
                 ))));
             }
@@ -1046,7 +1053,9 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
             body(lines, detail, Style::default());
         }
         Cell::ChatNote { text } => label(lines, text.clone()),
-        Cell::Divider { text, .. } => label(lines, format!("── {text}")),
+        // ASCII, not a box rule: a boundary is still content, and a copied line should not
+        // arrive somewhere else carrying U+2500.
+        Cell::Divider { text, .. } => label(lines, format!("-- {text}")),
     }
 }
 
@@ -5361,5 +5370,233 @@ diff --git a/src/lex.rs b/src/lex.rs
             text.contains("the model rewrote three paragraphs"),
             "{text}"
         );
+    }
+
+    // ---------------------------------------------------------------------------------
+    // A1 — `/raw`, Codex's copy mode
+    // ---------------------------------------------------------------------------------
+
+    /// Every cell kind, drawn raw, with nothing a selection would have to survive.
+    #[test]
+    fn raw_draws_no_box_no_gutter_and_no_glyph_column_for_any_cell() {
+        let events = vec![
+            event(1, "input_accepted", json!({"text": "please look"})),
+            event(2, "thinking_delta", json!({"text": "considering"})),
+            event(
+                3,
+                "output_text_final",
+                json!({"text": "here is what I found"}),
+            ),
+            call(
+                4,
+                json!({"call_id": "r", "name": "read", "input": {"path": "a.ex"}}),
+            ),
+            result(5, json!({"call_id": "r", "output": "one\ntwo"})),
+            call(
+                6,
+                json!({"call_id": "b", "name": "bash", "input": {"cmd": "mix test"}}),
+            ),
+            result(7, json!({"call_id": "b", "output": "3 tests, 0 failures"})),
+            event(8, "command_output_delta", json!({"text": "compiling\n"})),
+            change(9, "src/lex.rs", PATCH),
+            event(
+                10,
+                "plan_updated",
+                json!({"steps": [{"content": "read", "status": "completed"}]}),
+            ),
+            event(11, "usage", json!({"total_tokens": 42})),
+            event(12, "session_idle", json!({})),
+            event(13, "turn_completed", json!({})),
+        ];
+        let cells = project(events.iter().map(Entry::Event).collect());
+
+        // Every cell kind this projection can produce is present, so the assertion below is
+        // about the renderer and not about one lucky fixture.
+        for expected in [
+            "Message",
+            "Thinking",
+            "Tool",
+            "Exploration",
+            "CommandOutput",
+            "File",
+            "Diff",
+            "DiffStat",
+            "Plan",
+            "ChatNote",
+            "Divider",
+        ] {
+            assert!(
+                cells
+                    .iter()
+                    .any(|cell| format!("{cell:?}").starts_with(expected)),
+                "the fixture never produced a {expected} cell: {cells:?}"
+            );
+        }
+
+        let raw = render_cells_at(&cells, 80, 0, Verbosity::Raw);
+        let text = plain(&raw);
+
+        for glyph in [
+            '┌', '┐', '└', '┘', '│', '├', '┤', '─', '▌', '◆', '◇', '•', '✓', '✗', '±', '›',
+        ] {
+            assert!(!text.contains(glyph), "raw kept {glyph:?}:\n{text}");
+        }
+
+        // A diff keeps its own `+`/`-`/space column — that is the file format, not this
+        // app's gutter — but the line numbers this app adds are gone.
+        assert!(
+            text.lines()
+                .any(|line| line == "-    let end = text.find('\\n');"),
+            "raw kept a line-number gutter on a diff:\n{text}"
+        );
+        assert!(
+            !text.contains("Read a.ex") || !text.contains("  Read a.ex"),
+            "raw indented a grouped call:\n{text}"
+        );
+
+        // And the content survived.
+        for expected in [
+            "please look",
+            "here is what I found",
+            "Read a.ex",
+            "Bash $ mix test",
+            "3 tests, 0 failures",
+            "compiling",
+            "1 file · +1 −1",
+        ] {
+            assert!(text.contains(expected), "raw lost {expected:?}:\n{text}");
+        }
+    }
+
+    /// Raw does not wrap: one logical line stays one row, so the terminal owns the fold.
+    #[test]
+    fn raw_puts_one_logical_line_on_one_row_at_any_width() {
+        let long = "a sentence that is a great deal wider than sixty columns of terminal, \
+                    deliberately, so that any app-side wrapping would show up as two rows";
+        let said = event(1, "output_text_final", json!({ "text": long }));
+        let cells = project(vec![Entry::Event(&said)]);
+
+        for width in [40usize, 60, 200] {
+            let raw = render_cells_at(&cells, width, 0, Verbosity::Raw);
+            let rows = raw
+                .iter()
+                .filter(|line| plain_line(line).contains("a sentence that is"))
+                .count();
+
+            assert_eq!(rows, 1, "raw wrapped at width {width}");
+        }
+
+        // Compact, by contrast, folds it to the measure.
+        let compact = render_cells(&cells, 60);
+        assert!(
+            compact
+                .iter()
+                .filter(|line| !plain_line(line).trim().is_empty())
+                .count()
+                > 2,
+            "the ordinary renderer wraps"
+        );
+    }
+
+    /// Raw shows everything, because a copying view that folded half the transcript away
+    /// would not be one.
+    #[test]
+    fn raw_expands_what_compact_collapses() {
+        let call = call(
+            1,
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "ls"}}),
+        );
+        let body: String = (0..40).map(|n| format!("row {n}\n")).collect();
+        let result = result(2, json!({"call_id": "b", "output": body}));
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+
+        let raw = plain(&render_cells_at(&cells, 80, 0, Verbosity::Raw));
+        assert!(raw.contains("row 20"), "the middle is there: {raw}");
+        assert!(
+            !raw.contains("ctrl+o"),
+            "and no marker says otherwise: {raw}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------
+    // A4 — the `/diff` overlay's grouping
+    // ---------------------------------------------------------------------------------
+
+    #[test]
+    fn changes_group_by_the_turn_dividers_the_transcript_already_drew() {
+        let first = change(
+            1,
+            "a.rs",
+            "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n keep\n+one\n",
+        );
+        let end_one = event(2, "turn_completed", json!({}));
+        let second = change(
+            3,
+            "b.rs",
+            "--- a/b.rs\n+++ b/b.rs\n@@ -1,1 +1,2 @@\n keep\n+two\n",
+        );
+        let again = change(
+            4,
+            "a.rs",
+            "--- a/a.rs\n+++ b/a.rs\n@@ -9,1 +9,2 @@\n keep\n+three\n",
+        );
+        let end_two = event(5, "turn_completed", json!({}));
+
+        let cells = project(vec![
+            Entry::Event(&first),
+            Entry::Event(&end_one),
+            Entry::Event(&second),
+            Entry::Event(&again),
+            Entry::Event(&end_two),
+        ]);
+        let turns = super::super::diff::changes_by_turn(&cells);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].label(), "turn 1");
+        assert_eq!(turns[1].label(), "turn 2");
+        assert_eq!(
+            turns[1]
+                .files
+                .iter()
+                .map(|file| file.file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.rs", "a.rs"]
+        );
+
+        // "This session" folds the same file's two turns into one row with summed counts.
+        let overlay = super::super::diff::DiffOverlay::new(&cells, 0);
+        let rows = overlay.rows();
+        assert_eq!(rows.len(), 2, "a.rs once and b.rs once, not three rows");
+        let a = rows
+            .iter()
+            .find(|row| row.file.path == "a.rs")
+            .expect("a.rs is listed once");
+        assert_eq!((a.file.additions, a.file.deletions), (2, 0));
+    }
+
+    /// A turn still running has its changes listed under the turn it belongs to.
+    #[test]
+    fn an_unfinished_turn_still_gets_a_scope_of_its_own() {
+        let done = change(
+            1,
+            "a.rs",
+            "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n keep\n+one\n",
+        );
+        let end = event(2, "turn_completed", json!({}));
+        let live = change(
+            3,
+            "b.rs",
+            "--- a/b.rs\n+++ b/b.rs\n@@ -1,1 +1,2 @@\n keep\n+two\n",
+        );
+
+        let cells = project(vec![
+            Entry::Event(&done),
+            Entry::Event(&end),
+            Entry::Event(&live),
+        ]);
+        let overlay = super::super::diff::DiffOverlay::new(&cells, 0);
+
+        assert_eq!(overlay.scopes(), 3, "this session, turn 1, turn 2");
+        assert_eq!(overlay.turns[1].label(), "turn 2");
     }
 }
