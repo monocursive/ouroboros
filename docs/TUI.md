@@ -802,8 +802,9 @@ omission marker; `Ctrl-O` still exposes every event retained by the local 5,000-
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `Ctrl-O` chat/event details (`Ctrl-E` opens `$EDITOR`), `,` settings, `q` quit dialog, `?` help with the
-authoritative key map.
+`s` steer, `Ctrl-O` chat/event details (`Ctrl-E` opens `$EDITOR`), `ctrl+x [` transcript
+into the terminal's scrollback, `ctrl+x v` transcript in `$EDITOR`, `,` settings, `q` quit
+dialog, `?` help with the authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:
@@ -875,6 +876,42 @@ rediscovered:
   (`:busy` switches to the durable follow-up queue). Pending reconciliation IDs are kept
   per session across composer closure and session switches. Recent sessions and account
   state load behind this first frame.
+- **Every frame is one synchronized update.** `terminal.draw` is wrapped in DEC mode 2026
+  (`ESC [ ? 2026 h` … `ESC [ ? 2026 l`), written through the backend's own writer so the
+  bracket cannot race the frame's bytes. Ratatui hides and shows the cursor at the end of
+  `draw`, which puts those escapes *inside* the atomic update — leaking them outside is
+  what makes a cursor flicker visibly in WezTerm ([R2 §8](research/agent-ux-2026/R2-display-rendering.md)).
+  Both sequences are emitted unconditionally: a terminal that does not know the mode
+  ignores a private mode set and reset, and probing would buy a round trip and a wrong
+  answer from every terminal that lies about `DECRQM`.
+- **The alternate screen has two doors back out.** Owning the screen costs `Cmd+F`, tmux
+  copy mode, and drag-to-select, and shipping that without an escape hatch produced the
+  loudest rendering complaints of 2026. `ctrl+x [` (palette: "Print transcript into
+  terminal scrollback") leaves the alternate screen, writes the whole retained
+  conversation into the *normal* buffer where the terminal's own scrollback keeps it,
+  re-enters, and repaints. `ctrl+x v` ("Open transcript in `$EDITOR`") writes the same
+  text 0600 under the data directory, opens it in `$VISUAL`/`$EDITOR` through the same
+  suspend/restore the composer's `ctrl+g` uses, then removes the file; it never touches
+  the draft. Both render `ui::export`, which projects through the same
+  `transcript_cells::project` the pane does and then drops the render caps and the
+  gutters: full tool results, full diffs, dividers, notes, and a timestamp on each of the
+  operator's own messages. Prose folds to the terminal's current width; diffs, tool
+  output, and command output stay **verbatim**, because re-wrapping a unified diff
+  destroys it and a terminal's own soft wrap is what makes a selection yield the logical
+  line back. The last line states whether the retained window dropped anything — the
+  export can only carry what this client still holds.
+- **The captured mouse says so, once, and can be turned off.** `[terminal] mouse = false`
+  in `config.toml` captures nothing: native selection and the terminal's own wheel
+  scrolling work exactly as they do in a shell, and `ouro` scrolls by keyboard only. The
+  default stays `true` — a setting that changed behaviour by appearing would be the silent
+  screen-model change this client refuses to make — and it is read before the boot screen
+  takes the terminal, because a capture enabled there and dropped a second later would
+  already have cost the operator their first selection. Where the mouse *is* captured, one
+  line says so on the first frame (or on the first wheel event, if something ate that
+  notice) and never again: `onboarding.mouse_hint_shown`. It names the modifier only where
+  this build knows it — Option on iTerm2, Fn on Terminal.app, Shift on the terminals that
+  identify themselves in `TERM_PROGRAM` — and an unidentified terminal is told all three
+  rather than the wrong one.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
   this client's own `[defaults]` — provider picker over the same probed list the `n`
   dialog uses, workspace, approval mode, and sandbox mode — with an explicit

@@ -439,6 +439,29 @@ existing server workflow is unchanged, because nothing else is set.
 bindings would be the second place they are written down and the first place they go
 stale.
 
+Two of them are worth naming here because they are how you get *out* of the client's
+screen and back into your terminal's own:
+
+- `ctrl+x [` prints the whole conversation into this terminal's native scrollback —
+  every tool result and diff expanded, no gutters — so `Cmd+F`, tmux copy mode, and
+  drag-to-select work on it. The lines stay there after `ouro` exits.
+- `ctrl+x v` opens the same text in `$VISUAL`/`$EDITOR` and leaves your draft alone.
+
+Both are also in the command palette (`ctrl+p`).
+
+`ouro` captures the mouse so the wheel scrolls the transcript, which means selecting
+text needs a modifier — Shift on most terminals, Option on iTerm2, Fn on Terminal.app.
+It says so once, the first time. To keep native selection instead, put this in
+`~/.config/ouroboros/config.toml`:
+
+```toml
+[terminal]
+mouse = false
+```
+
+Nothing is then captured: selection and your terminal's own scrolling behave exactly as
+they do in a shell, and `ouro` scrolls by keyboard.
+
 ### Honest limits
 
 - **The token is transport authentication, not a sandbox.** It decides who may open a
@@ -464,6 +487,15 @@ stale.
   deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
   one whose data directory this user cannot read, is reachable only by naming `--addr`
   and `--token-file` explicitly. There is no discovery beyond the file.
+- **What `ctrl+x [` and `ctrl+x v` carry is bounded by what this client still holds.**
+  The transcript window keeps 5,000 events per session and the gateway prunes below its
+  own floor; past either, the export's last line says what was dropped and names the
+  sequence. It is a copy of a conversation, not an archive of one.
+- **The scrollback dump is a terminal behaviour, not a runtime one.** Leaving the
+  alternate screen restores the normal buffer, and lines printed into it land in the
+  scrollback the terminal keeps — verified here under tmux 3.7. A terminal that does not
+  restore the normal buffer, or one configured with no scrollback, will not keep them;
+  `ctrl+x v` is the escape hatch that does not depend on the terminal at all.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.
