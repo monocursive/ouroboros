@@ -330,12 +330,26 @@ pub fn write_image(workspace: &Path, id: &str, bytes: &[u8]) -> Result<String> {
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("creating {}", directory.display()))?;
     restrict(&directory, 0o700);
+    ignore_in_git(&workspace.join(".ouroboros"));
 
     let relative = format!("{IMAGE_DIR}/image-{id}.png");
     let path = workspace.join(&relative);
     write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
 
     Ok(relative)
+}
+
+/// A pasted image lives inside the workspace because that is the only place the runtime
+/// admits an attachment from — and a workspace is usually a repository. The client-owned
+/// `.ouroboros/` directory ignores itself so a paste never lands in `git status`.
+/// Best-effort and written once: an operator who removes the marker on purpose keeps it
+/// removed, and a failure here is never a reason to fail the paste.
+fn ignore_in_git(directory: &Path) {
+    let marker = directory.join(".gitignore");
+    if marker.exists() {
+        return;
+    }
+    let _ = std::fs::write(&marker, "*\n");
 }
 
 #[cfg(unix)]
@@ -472,6 +486,25 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn the_client_owned_directory_ignores_itself_so_a_paste_never_reaches_git_status() {
+        let workspace =
+            std::env::temp_dir().join(format!("ouro-clip-ignore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        write_image(&workspace, "01IGNORE", PNG).expect("an image");
+        let marker =
+            std::fs::read_to_string(workspace.join(".ouroboros/.gitignore")).expect("the marker");
+        assert_eq!(marker, "*\n");
+        // Written once: an operator's edit is kept.
+        std::fs::write(workspace.join(".ouroboros/.gitignore"), "images/\n").unwrap();
+        write_image(&workspace, "01IGNOR2", PNG).expect("a second image");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".ouroboros/.gitignore")).unwrap(),
+            "images/\n"
+        );
     }
 
     #[test]
