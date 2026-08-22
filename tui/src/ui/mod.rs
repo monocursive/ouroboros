@@ -20,6 +20,20 @@
 //! spawn into it and then hands the same live terminal to [`run`]. So the alternate screen
 //! is entered exactly once per process, and there is no window between the boot screen and
 //! the first frame in which a panic would land on a terminal nobody owns.
+//!
+//! ## Every frame is one atomic update
+//!
+//! [`draw_synchronized`] brackets each `terminal.draw` in DEC mode 2026
+//! (`BeginSynchronizedUpdate` … `EndSynchronizedUpdate`), so a terminal that supports it
+//! presents the whole frame at once instead of painting it in pieces — the difference
+//! between a readable transcript and a torn one under tmux and VS Code. Terminals that do
+//! not know the mode ignore both sequences, which is why they are always emitted rather
+//! than probed for.
+//!
+//! Ratatui hides and shows the cursor *inside* `draw`, and that is exactly where those
+//! escapes belong: Codex's visible cursor flicker in WezTerm was cursor hide/show leaking
+//! outside the synchronized frame ([R2 §8](../../../docs/research/agent-ux-2026/R2-display-rendering.md)).
+//! Nothing in this module may move them out.
 
 pub mod app;
 pub mod boot;
@@ -53,8 +67,8 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, Clear, ClearType,
-    EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, BeginSynchronizedUpdate,
+    Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
@@ -289,6 +303,45 @@ fn restore() {
         .execute(DisableMouseCapture)
         .and_then(|stdout| stdout.execute(DisableBracketedPaste))
         .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
+}
+
+/// Draws one frame as a single atomic terminal update.
+///
+/// `BeginSynchronizedUpdate` (`ESC [ ? 2026 h`) tells the terminal to stop presenting until
+/// `EndSynchronizedUpdate` (`ESC [ ? 2026 l`), so a frame is never seen half-painted. Both
+/// go through the backend's own writer rather than a second handle on stdout, which is what
+/// guarantees they bracket the frame's bytes rather than racing them.
+///
+/// **The cursor escapes belong inside.** Ratatui hides or shows the cursor at the end of
+/// `draw`, after the buffer diff and before its flush, so calling `draw` between the two
+/// sequences puts them inside the atomic update by construction. Moving them out is the
+/// exact shape of Codex's WezTerm cursor flicker.
+///
+/// Neither sequence is conditional on support. A terminal that does not know mode 2026
+/// ignores both — it is a private mode set and reset, not a query — so probing would buy a
+/// round trip and a wrong answer on every terminal that lies about `DECRQM`.
+pub fn draw_synchronized<W, F>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    render: F,
+) -> Result<()>
+where
+    W: Write,
+    F: FnOnce(&mut ratatui::Frame),
+{
+    // Best-effort on the way in: a terminal that refused the sequence is still a terminal
+    // this client owes a frame to.
+    let _ = terminal.backend_mut().execute(BeginSynchronizedUpdate);
+
+    // The `CompletedFrame` borrows the terminal, and this needs it back to close the
+    // bracket. Nothing here reads the frame, so the borrow ends on the same line.
+    let drawn = terminal.draw(render).map(|_frame| ());
+
+    // Closed on the way out whatever happened above. Leaving mode 2026 set would freeze
+    // the operator's terminal on the last frame it managed to present.
+    let _ = terminal.backend_mut().execute(EndSynchronizedUpdate);
+
+    drawn.context("drawing the terminal")?;
+    Ok(())
 }
 
 fn copy_pending(app: &mut App) {
@@ -701,10 +754,7 @@ pub async fn run(
             }
         }
 
-        screen
-            .terminal
-            .draw(|frame| view::draw(frame, &mut app))
-            .context("drawing the terminal")?;
+        draw_synchronized(&mut screen.terminal, |frame| view::draw(frame, &mut app))?;
 
         if let Some(quit) = app.quit {
             return Ok(quit);
@@ -996,4 +1046,125 @@ fn spawn_call(client: Client, call: Call, sender: mpsc::UnboundedSender<Msg>) {
             result,
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Paragraph;
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::*;
+
+    const BEGIN: &str = "\x1b[?2026h";
+    const END: &str = "\x1b[?2026l";
+    const HIDE: &str = "\x1b[?25l";
+    const SHOW: &str = "\x1b[?25h";
+
+    /// Every byte the backend wrote, in order, readable while the terminal still owns it.
+    #[derive(Clone, Default)]
+    struct Recorder(Rc<RefCell<Vec<u8>>>);
+
+    impl Recorder {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.borrow()).into_owned()
+        }
+    }
+
+    impl Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal writing into a [`Recorder`] rather than a tty.
+    ///
+    /// `Viewport::Fixed` because `Fullscreen` asks the backend for the real terminal's size,
+    /// which is a question a buffer cannot answer and CI has no tty to answer either.
+    fn buffered() -> (Terminal<CrosstermBackend<Recorder>>, Recorder) {
+        let recorder = Recorder::default();
+        let terminal = Terminal::with_options(
+            CrosstermBackend::new(recorder.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 20, 3)),
+            },
+        )
+        .expect("a terminal over a buffer");
+
+        (terminal, recorder)
+    }
+
+    #[test]
+    fn every_frame_is_bracketed_by_the_synchronized_update_mode() {
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("hello"), frame.area());
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("the frame opened mode 2026");
+        let end = bytes.find(END).expect("the frame closed mode 2026");
+
+        assert!(begin < end, "the bracket was written inside out: {bytes:?}");
+        assert!(
+            bytes[begin + BEGIN.len()..end].contains("hello"),
+            "the frame's own bytes fell outside the bracket: {bytes:?}"
+        );
+
+        // And exactly one of each: a second open inside the first would nest a mode that
+        // does not nest.
+        assert_eq!(bytes.matches(BEGIN).count(), 1, "{bytes:?}");
+        assert_eq!(bytes.matches(END).count(), 1, "{bytes:?}");
+    }
+
+    #[test]
+    fn the_cursor_is_hidden_and_shown_inside_the_bracket_not_around_it() {
+        // A frame that sets no cursor: Ratatui hides it.
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("quiet"), frame.area());
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("an opened bracket");
+        let end = bytes.find(END).expect("a closed bracket");
+        let hide = bytes.find(HIDE).expect("the cursor was hidden");
+
+        assert!(
+            begin < hide && hide < end,
+            "the cursor hide leaked outside the synchronized frame — this is Codex's \
+             WezTerm flicker: {bytes:?}"
+        );
+
+        // And a frame that does set one: Ratatui shows it and moves it.
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("typing"), frame.area());
+            frame.set_cursor_position((3, 0));
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("an opened bracket");
+        let end = bytes.find(END).expect("a closed bracket");
+        let show = bytes.find(SHOW).expect("the cursor was shown");
+
+        assert!(
+            begin < show && show < end,
+            "the cursor show leaked outside the synchronized frame: {bytes:?}"
+        );
+    }
 }
