@@ -123,6 +123,11 @@ defmodule Ouroboros.Gateway.Methods do
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
   @approval_prompt_timeout 15 * 60 * 1_000
 
+  # D9. A compaction that has to summarise makes one model call on the session's own
+  # model with no tools. That is provider latency, not control-plane latency, so it gets
+  # a ceiling of its own — well above the default and well below a start's.
+  @compaction_timeout 120_000
+
   # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
   # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
   @forge_timeout 120_000
@@ -177,6 +182,9 @@ defmodule Ouroboros.Gateway.Methods do
     # routing, same ceiling — so the only thing that makes it a separate method is the
     # larger per-leaf byte cap it encodes the answer under.
     "interactive.event_detail" => %{scope: :read, timeout: @default_timeout},
+    # D9. What a session can honestly say about its own context window. Read scope: it
+    # asks a live transport a question and starts nothing.
+    "interactive.context" => %{scope: :read, timeout: @default_timeout},
     "interactive.subscribe" => %{scope: :read, timeout: @default_timeout},
     "interactive.unsubscribe" => %{scope: :read, timeout: @default_timeout},
     "coding.list" => %{scope: :read, timeout: @default_timeout},
@@ -238,6 +246,12 @@ defmodule Ouroboros.Gateway.Methods do
     # admission: a gateway timeout here cannot prove the child was not created, and the
     # caller-owned `id` is what makes reconciling it possible rather than guesswork.
     "interactive.fork" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
+    # D9. The three context verbs. `compact` and `handoff` move a session's conversation
+    # and are therefore `:operate`; `context` reads what the session already knows and
+    # starts nothing, so it sits with the other reads. `handoff` starts a session, so it
+    # inherits `interactive.start`'s ceiling and its outcome admission.
+    "interactive.compact" => %{scope: :operate, timeout: @compaction_timeout},
+    "interactive.handoff" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     # C2. The one method whose latency is a person's: it asks the session's owner for a
     # decision and holds the request open until a human answers, the permission engine
@@ -334,6 +348,11 @@ defmodule Ouroboros.Gateway.Methods do
     "sandbox_mode" => {:enum, @sandbox_modes},
     "reasoning_effort" => {:enum, @reasoning_efforts},
     "runtime_exposure" => :boolean,
+    # D7. Both planes already carry `worktree_requested` durably and provision before the
+    # lease; this is the option that lets `ouro new --worktree` reach it. Deliberately not
+    # in `@configuration_options`: a session cannot be moved into a worktree after its
+    # workspace has been admitted and leased.
+    "worktree" => :boolean,
     "machine" => :node,
     "node" => :node
   }
@@ -813,6 +832,46 @@ defmodule Ouroboros.Gateway.Methods do
       else
         {:invalid, message} -> invalid_params(message)
       end
+    end)
+  end
+
+  # D9. Compaction is the one verb here whose refusal is a capability answer rather than a
+  # parameter one: `unsupported_on_transport` names the transport that cannot do it, so a
+  # client greys the key out instead of offering an action that will always fail.
+  def invoke("interactive.compact", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "focus", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, focus} <- fetch_optional_string(params, "focus") do
+        reply(InteractiveSession.compact(session, focus))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # A handoff starts a session, so it answers in `interactive.start`'s shape and carries
+  # the same admission a ceiling forces: the caller-owned `handoff_id` is what makes a
+  # timed-out handoff reconcilable rather than a second child.
+  def invoke("interactive.handoff", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "prompt", "handoff_id", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, prompt} <- fetch_optional_string(params, "prompt"),
+           {:ok, handoff_id} <- fetch_optional_string(params, "handoff_id") do
+        fork_reply(InteractiveSession.handoff(session, prompt, handoff_id))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # Read scope, and it answers for every transport. `source` is the field that keeps it
+  # honest: `"native"` means the session counted these figures itself, `"usage"` means
+  # they are what the provider reported and nothing more was known.
+  def invoke("interactive.context", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.context(session)) end)
     end)
   end
 
@@ -1375,6 +1434,7 @@ defmodule Ouroboros.Gateway.Methods do
     "sandbox_mode" => :sandbox_mode,
     "reasoning_effort" => :reasoning_effort,
     "runtime_exposure" => :runtime_exposure,
+    "worktree" => :worktree,
     "role" => :role,
     "machine" => :node,
     "node" => :node,

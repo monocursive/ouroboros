@@ -28,6 +28,18 @@ defmodule Ouroboros.Provider.Native.Session do
   the terminal turn event reaches the owner. The failure that ordering chooses is
   replaying one turn after a crash, over losing one — the same rule the interactive
   coordinator already follows for its own checkpoints.
+
+  ## Why this process is findable by name
+
+  `info/1`, `compact/2` and `handoff/2` are not `SessionAdapter` callbacks — the harness
+  has no notion of a context window or a curated handoff packet, so there is no worker
+  method to pass them through, and the transport handle is private worker state. Rather
+  than reach into that state, this process registers itself under its own
+  `provider_session_id` in `Ouroboros.Provider.Native.Registry`, which the interactive
+  coordinator already holds durably. Registration is best effort and never fails an
+  open: a duplicate id (two coordinators resuming the same provider session at once) is
+  a state this runtime does not create, and the honest answer for the loser is that
+  these three verbs cannot reach a transport, not that the session refused to start.
   """
 
   use GenServer, restart: :temporary
@@ -53,6 +65,8 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @startup_timeout 30_000
   @checkpoint_timeout 15_000
+
+  @registry Ouroboros.Provider.Native.Registry
 
   # ---------------------------------------------------------------- adapter
 
@@ -113,6 +127,27 @@ defmodule Ouroboros.Provider.Native.Session do
   @doc false
   def start_link({request, context}), do: GenServer.start_link(__MODULE__, {request, context})
 
+  @doc """
+  Finds the transport process serving one `provider_session_id`, or `nil`.
+
+  The registry may not be running at all — the native provider is usable from a bare
+  `Session.open/2` in a test with no Ouroboros application behind it — so an absent
+  registry answers `nil` rather than raising.
+  """
+  @spec whereis(String.t()) :: pid() | nil
+  def whereis(provider_session_id) when is_binary(provider_session_id) do
+    case Registry.lookup(@registry, provider_session_id) do
+      [{pid, _value}] -> pid
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  catch
+    :exit, _reason -> nil
+  end
+
+  def whereis(_provider_session_id), do: nil
+
   # ---------------------------------------------------------------- lifecycle
 
   @impl GenServer
@@ -167,12 +202,27 @@ defmodule Ouroboros.Provider.Native.Session do
       }
 
       case build_context(state) do
-        {:ok, state} -> {:ok, state}
-        {:error, reason} -> {:stop, reason}
+        {:ok, state} ->
+          register(provider_session_id)
+          {:ok, state}
+
+        {:error, reason} ->
+          {:stop, reason}
       end
     else
       {:error, reason} -> {:stop, reason}
     end
+  end
+
+  # Best effort, and deliberately not part of the process name: a registry that is not
+  # running, or an id something else already holds, must not stop a session opening.
+  defp register(provider_session_id) do
+    _ = Registry.register(@registry, provider_session_id, nil)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   @impl GenServer
@@ -243,8 +293,8 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  def handle_call({:handoff, prompt}, _from, state) do
-    case start_handoff(state, prompt) do
+  def handle_call({:handoff, prompt, open_child?}, _from, state) do
+    case start_handoff(state, prompt, open_child?) do
       {:ok, state, result} -> {:reply, {:ok, result}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -519,9 +569,24 @@ defmodule Ouroboros.Provider.Native.Session do
   Returns the new session's `provider_session_id`. The parent records `handed_off_to` and
   keeps running: a handoff is not a close, and deciding to end the parent is the
   operator's.
+
+  ## `open_child`
+
+  `true` (the default) opens the child transport here, inheriting this session's
+  `context.owner` because a runtime-level handoff has nowhere else to send events.
+
+  `false` writes the packet, names the child, and stops. That is the shape the
+  interactive plane needs: there, the child is a *session* with its own coordinator and
+  its own harness worker, and it opens its own transport from the checkpoint this call
+  already wrote. Opening one here as well would put two processes on one
+  `provider_session_id` and — because the worker adopts the `provider_session_id` of any
+  adapter event it receives ([session/worker.ex:289](../../../../deps/jido_harness/lib/jido_harness/session/worker.ex))
+  — the orphan's `native_ready` would rename the *parent's* provider session to the
+  child's.
   """
-  @spec handoff(pid(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def handoff(handle, prompt \\ nil), do: SessionAdapter.call(handle, {:handoff, prompt})
+  @spec handoff(pid(), String.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
+  def handoff(handle, prompt \\ nil, opts \\ []),
+    do: SessionAdapter.call(handle, {:handoff, prompt, Keyword.get(opts, :open_child, true)})
 
   # ---------------------------------------------------------------- prefix
 
@@ -783,7 +848,7 @@ defmodule Ouroboros.Provider.Native.Session do
   # The packet is made durable *before* the child is started. A handoff whose child
   # failed to start is then still a handoff the operator can open by id, rather than a
   # summary that existed only inside a call that returned an error.
-  defp start_handoff(state, prompt) do
+  defp start_handoff(state, prompt, open_child?) do
     packet =
       Handoff.packet(
         summary: handoff_summary(state),
@@ -799,7 +864,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
     with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
          :ok <- Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
-         {:ok, pid} <- open_child(state, child_id) do
+         {:ok, pid} <- maybe_open_child(state, child_id, open_child?) do
       result = %{
         provider_session_id: child_id,
         pid: pid,
@@ -833,6 +898,12 @@ defmodule Ouroboros.Provider.Native.Session do
     request = %{state.request | provider_session_id: child_id}
     open(request, state.context)
   end
+
+  # `{:ok, nil}` rather than a separate result shape: the caller that asked for no child
+  # process is the one that is about to open it properly, and the packet on disk is the
+  # thing a handoff actually is.
+  defp maybe_open_child(state, child_id, true), do: open_child(state, child_id)
+  defp maybe_open_child(_state, _child_id, false), do: {:ok, nil}
 
   # A handoff summarises the whole conversation, not the part past `keep_recent_tokens`:
   # the new session gets no verbatim tail, so a summary that stopped short of the last

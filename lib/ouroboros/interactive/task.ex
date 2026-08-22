@@ -8,6 +8,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Provider
+  alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
@@ -267,6 +268,36 @@ defmodule Ouroboros.Interactive.Task do
       {:ok, result, runtime} -> {:reply, {:ok, result}, schedule_poll(runtime, 0)}
       {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
     end
+  end
+
+  # D9. Compaction is native-only because only there does this runtime hold the
+  # conversation to fold. A vendor CLI's own compaction is surfaced as an event when it
+  # reports one; imitating it here would be a summary Ouroboros invented for a transcript
+  # it never had.
+  def handle_call({:compact, focus}, _from, runtime) do
+    case native_transport(runtime.session, :compact) do
+      {:ok, pid} ->
+        {:reply, compact_native(pid, focus), runtime}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  # Read-only, and it answers for every transport — with different amounts of truth. The
+  # native session knows its own prefix, window, compactions and instruction files; every
+  # other transport knows only what its `usage` events reported, and that is what it says
+  # rather than a shape padded out with nulls that look like measurements.
+  def handle_call(:context, _from, runtime) do
+    {:reply, {:ok, session_context(runtime.session)}, runtime}
+  end
+
+  # Same three-step shape as a fork, and for the same reason: this coordinator writes the
+  # packet and names the child, and `Ouroboros.InteractiveSession.handoff/3` starts the
+  # child outside this process so a parent is never blocked behind provider readiness it
+  # does not own.
+  def handle_call({:handoff_plan, prompt, id}, _from, runtime) do
+    {:reply, handoff_plan(runtime, prompt, id), runtime}
   end
 
   # Planning a fork is this coordinator's job; *starting* one is not. A session start
@@ -1702,6 +1733,188 @@ defmodule Ouroboros.Interactive.Task do
            Provider.session_fork_options(session.provider, Map.get(session.options, :transport)) do
       {:ok, fork_start_options(session, id, parent_session_id, fork_options)}
     end
+  end
+
+  # ---------------------------------------------------------------- context (D9)
+
+  # The transport a session actually reaches its provider over, asked of the provider spec
+  # rather than read off the stored option: a session that named none still runs on the
+  # provider's default, and refusing it by a `nil` transport would name the wrong thing.
+  defp session_transport(%State{} = session) do
+    case Provider.session_capabilities(session.provider, Map.get(session.options, :transport)) do
+      %{transport: transport} -> transport
+      _unresolvable -> Map.get(session.options, :transport)
+    end
+  end
+
+  # Two refusals, and they say different things. `unsupported_on_transport` is a
+  # capability answer — this verb does not exist on this wire, and no amount of waiting
+  # changes that. `native_transport_unavailable` is a liveness answer — the verb exists,
+  # the session has not opened its transport yet or it has gone away, and retrying is
+  # sensible.
+  defp native_transport(%State{} = session, verb) do
+    case session_transport(session) do
+      :native ->
+        case NativeSession.whereis(session.provider_session_id || "") do
+          pid when is_pid(pid) ->
+            {:ok, pid}
+
+          nil ->
+            {:error,
+             {:native_transport_unavailable,
+              %{
+                verb: verb,
+                reason: if(session.provider_session_id, do: :no_live_transport, else: :not_started),
+                message:
+                  "this session has no live native transport to ask; send a turn first, " <>
+                    "or reopen the session."
+              }}}
+        end
+
+      transport ->
+        {:error,
+         {:unsupported_on_transport,
+          %{
+            transport: transport,
+            verb: verb,
+            provider: session.provider,
+            message:
+              "#{inspect(session.provider)} reaches this session over the " <>
+                "#{inspect(transport)} transport, which does not hand its conversation to " <>
+                "this runtime. Only a `native` session can #{verb}."
+          }}}
+    end
+  end
+
+  defp compact_native(pid, focus) do
+    case safe_session_call(fn -> NativeSession.compact(pid, focus) end) do
+      {:ok, report} when is_map(report) -> {:ok, durable(report)}
+      {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
+      other -> {:error, {:compaction_refused, durable(other)}}
+    end
+  end
+
+  # Never a guess. A native session answers with the facts it holds; every other transport
+  # answers with the two numbers its `usage` events carried and says so in `source`, so a
+  # footer can tell "this provider never reported a window" from "the window is zero".
+  defp session_context(%State{} = session) do
+    usage = Map.get(session, :usage) || %{}
+
+    base = %{
+      session_id: session.id,
+      provider: session.provider,
+      transport: session_transport(session),
+      model: Map.get(session.options, :model),
+      provider_session_id: session.provider_session_id,
+      context_window: Map.get(usage, :context_window),
+      context_used: Map.get(usage, :context_used),
+      total_tokens: Map.get(usage, :total_tokens),
+      handed_off_from: State.handed_off_from(session),
+      source: :usage
+    }
+
+    case native_transport(session, :context) do
+      {:ok, pid} -> Map.merge(base, native_context(pid))
+      {:error, _reason} -> base
+    end
+  end
+
+  defp native_context(pid) do
+    case safe_session_call(fn -> NativeSession.info(pid) end) do
+      {:ok, info} when is_map(info) ->
+        %{
+          source: :native,
+          prefix_fingerprint: Map.get(info, :prefix_fingerprint),
+          # The native session's own figures win over the folded `usage` account: it is
+          # the thing that counted them, and the fold is a projection of its events.
+          context_window: Map.get(info, :context_window),
+          context_used: Map.get(info, :context_used),
+          compact_at: Map.get(info, :compact_at),
+          keep_recent_tokens: Map.get(info, :keep_recent_tokens),
+          messages: Map.get(info, :messages),
+          compaction_thrashing: Map.get(info, :compaction_thrashing),
+          compactions: durable(List.wrap(Map.get(info, :compactions))),
+          # Ids, not archives: the archive bodies are the conversation this runtime just
+          # folded away, and a context reply that carried them would undo the fold.
+          archive_ids: info |> Map.get(:archives) |> List.wrap() |> Enum.map(&Map.get(&1, :id)),
+          instruction_files: List.wrap(Map.get(info, :instruction_files)),
+          instruction_files_dropped: durable(List.wrap(Map.get(info, :instruction_files_dropped))),
+          instruction_bytes: Map.get(info, :instruction_bytes),
+          tools: List.wrap(Map.get(info, :tools)),
+          handed_off_to: Map.get(info, :handed_off_to)
+        }
+
+      _unavailable ->
+        %{}
+    end
+  end
+
+  # ---------------------------------------------------------------- handoff (D9)
+
+  # The packet is written and the child is named here; the child session is started by the
+  # caller. `open_child: false` is load-bearing — a transport process opened here would
+  # inherit this session's harness owner, and the worker adopts the `provider_session_id`
+  # of any adapter event it receives, so the orphan's readiness event would rename *this*
+  # session's provider session to the child's.
+  defp handoff_plan(runtime, prompt, id) do
+    session = runtime.session
+
+    with {:ok, id} <- validate_fork_id(id),
+         {:ok, prompt} <- validate_handoff_prompt(prompt),
+         {:ok, pid} <- native_transport(session, :handoff),
+         {:ok, result} <-
+           safe_session_call(fn -> NativeSession.handoff(pid, prompt, open_child: false) end) do
+      {:ok, handoff_start_options(session, id, result.provider_session_id)}
+    else
+      {:error, reason} -> {:error, handoff_error(reason)}
+      other -> {:error, {:handoff_refused, durable(other)}}
+    end
+  end
+
+  defp handoff_error({tag, _detail} = reason)
+       when tag in [:unsupported_on_transport, :native_transport_unavailable, :invalid_fork_id],
+       do: reason
+
+  defp handoff_error(:invalid_fork_id), do: :invalid_handoff_id
+  defp handoff_error({:invalid_handoff_prompt, _detail} = reason), do: reason
+  defp handoff_error(reason), do: {:handoff_refused, durable(reason)}
+
+  defp validate_handoff_prompt(prompt) when is_binary(prompt) do
+    cond do
+      String.trim(prompt) == "" ->
+        {:error, {:invalid_handoff_prompt, %{reason: :blank}}}
+
+      not String.valid?(prompt) ->
+        {:error, {:invalid_handoff_prompt, %{reason: :not_utf8}}}
+
+      Ouroboros.AgentProfile.reserved_delimiter?(prompt) ->
+        {:error, {:invalid_handoff_prompt, %{reason: :reserved_delimiter}}}
+
+      true ->
+        {:ok, prompt}
+    end
+  end
+
+  defp validate_handoff_prompt(nil), do: {:ok, nil}
+  defp validate_handoff_prompt(prompt), do: {:error, {:invalid_handoff_prompt, %{value: prompt}}}
+
+  # The child's start intent is the parent's, minus this session's identity and plus the
+  # provider session the packet was written under. Unlike a fork it carries no branch
+  # option: the child is a *new* conversation seeded with a packet, and telling the
+  # provider to branch would be a second, contradictory claim about the same session.
+  defp handoff_start_options(%State{} = session, id, child_provider_session_id) do
+    session.options
+    |> Map.drop([:provider_options, :provider_session_id, :attachments])
+    |> Map.to_list()
+    |> Keyword.merge(
+      id: id,
+      provider: session.provider,
+      workspace: session.workspace,
+      workspace_mode: session.workspace_mode,
+      event_limit: session.event_limit,
+      provider_session_id: child_provider_session_id,
+      handed_off_from: session.id
+    )
   end
 
   defp validate_fork_id(nil), do: {:ok, Jido.Signal.ID.generate!()}

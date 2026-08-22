@@ -13,10 +13,11 @@ defmodule Ouroboros.Interactive.State do
     :approval_timeout_ms
   ]
 
-  # Start options that land on the struct rather than in `options`. `forked_from` is a
-  # relationship between two sessions, not something the provider is ever told; putting it
-  # in `options` would send it to `State.request/1` and on to a harness that never asked.
-  @struct_options [:forked_from]
+  # Start options that land on the struct rather than in `options`. `forked_from` and
+  # `handed_off_from` are relationships between two sessions, not something the provider
+  # is ever told; putting either in `options` would send it to `State.request/1` and on to
+  # a harness that never asked.
+  @struct_options [:forked_from, :handed_off_from]
 
   # What `configure/2` may write into a session's durable options. Deliberately a literal
   # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
@@ -47,6 +48,10 @@ defmodule Ouroboros.Interactive.State do
                 :provider_session_id,
                 :title,
                 :forked_from,
+                # D9. The durable half of a handoff, held apart from `forked_from`
+                # because they are different claims: a fork carries the parent's
+                # conversation, a handoff carries a curated packet *about* it.
+                :handed_off_from,
                 title_source: nil,
                 forks: 0,
                 # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
@@ -126,6 +131,7 @@ defmodule Ouroboros.Interactive.State do
           title: String.t() | nil,
           title_source: title_source(),
           forked_from: String.t() | nil,
+          handed_off_from: String.t() | nil,
           forks: non_neg_integer(),
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
@@ -167,6 +173,7 @@ defmodule Ouroboros.Interactive.State do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
            :ok <- validate_parent(Keyword.get(opts, :forked_from)),
+           :ok <- validate_parent(Keyword.get(opts, :handed_off_from)),
            {:ok, base} <-
              TaskState.new(
                id,
@@ -197,6 +204,7 @@ defmodule Ouroboros.Interactive.State do
            # Immutable start intent, like the workspace: which session this one branched
            # from is not something a fork can be talked out of afterwards.
            forked_from: Keyword.get(opts, :forked_from),
+           handed_off_from: Keyword.get(opts, :handed_off_from),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -438,6 +446,17 @@ defmodule Ouroboros.Interactive.State do
   def forked_from(%__MODULE__{} = state), do: Map.get(state, :forked_from)
 
   @doc """
+  Returns the session this one was handed off from, or `nil`.
+
+  Held apart from `forked_from` because the two are different claims: a fork carries the
+  parent's conversation, a handoff carries a curated packet *about* it. Read through
+  `Map.get/2` so a checkpoint from a build before handoffs existed projects as an
+  unrelated session rather than a missing key.
+  """
+  @spec handed_off_from(t()) :: String.t() | nil
+  def handed_off_from(%__MODULE__{} = state), do: Map.get(state, :handed_off_from)
+
+  @doc """
   Returns how many forks this session has successfully started.
 
   A count, not a list: the children are addressable by their own ids and carry
@@ -532,6 +551,7 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:title, title(state))
     |> Map.put(:title_source, title_source(state))
     |> Map.put(:forked_from, forked_from(state))
+    |> Map.put(:handed_off_from, handed_off_from(state))
     |> Map.put(:forks, forks(state))
   end
 
@@ -700,7 +720,8 @@ defmodule Ouroboros.Interactive.State do
       is_binary(state.created_at) and is_binary(state.updated_at) and
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and valid_title?(state) and
-      optional_id?(forked_from(state)) and is_integer(forks(state)) and forks(state) >= 0 and
+      optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
+      is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
       sequence_offset(state) <= state.cursor and
