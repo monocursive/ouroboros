@@ -13,6 +13,7 @@ pub mod fleet;
 pub mod fleet_add;
 pub mod model;
 pub mod proto;
+pub mod run;
 pub mod runtime;
 pub mod status;
 pub mod transport;

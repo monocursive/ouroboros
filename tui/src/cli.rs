@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -86,6 +86,14 @@ pub enum Command {
         print: bool,
     },
 
+    /// Run one prompt without a screen and stream the normalised events.
+    ///
+    /// The scriptable surface: no alternate screen, ever, and stdout carries exactly one
+    /// of three things — the agent's final text, the result object, or the event stream
+    /// followed by the result object. Progress and warnings go to stderr so none of the
+    /// three can be corrupted by them.
+    Run(Box<RunArgs>),
+
     /// Start a runtime, print how to reach it, and leave it running.
     Daemon,
 
@@ -135,6 +143,82 @@ pub enum Command {
 
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+}
+
+/// `ouro run`'s flags, in one struct so the dispatch stays one line.
+///
+/// The start options are `ouro new`'s, resolved by the same
+/// [`crate::config::resolve_start`] against the same `[defaults]`; `--addr`/`--token-file`
+/// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
+/// Nothing here is a second way to say something the other two commands already say.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// The prompt to run.
+    #[arg(value_name = "PROMPT")]
+    pub prompt: String,
+
+    /// Send the prompt into a session that already exists instead of starting one. The
+    /// start options are refused with it: that session's provider and workspace were
+    /// chosen when it started.
+    #[arg(
+        long,
+        value_name = "SESSION-ID",
+        conflicts_with_all = ["provider", "workspace", "approval_mode", "sandbox_mode", "machine"]
+    )]
+    pub resume: Option<String>,
+
+    /// A provider this runtime serves. Omitted, the config file's `defaults.provider` is
+    /// used, and with neither this refuses.
+    #[arg(long, value_name = "NAME")]
+    pub provider: Option<String>,
+
+    /// The directory the session works in. With --machine it must be an absolute
+    /// destination path on that machine.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+
+    /// One of: default, prompt, auto_edit, auto_approve.
+    #[arg(long, value_name = "MODE")]
+    pub approval_mode: Option<String>,
+
+    /// One of: default, read_only, workspace_write, unrestricted.
+    #[arg(long, value_name = "MODE")]
+    pub sandbox_mode: Option<String>,
+
+    /// Run the session on this fleet machine rather than locally.
+    #[arg(long, value_name = "NAME")]
+    pub machine: Option<String>,
+
+    /// One JSON object per normalised event on stdout, then the result object. The event
+    /// objects are the gateway's own, unchanged.
+    #[arg(long, conflicts_with = "json")]
+    pub stream_json: bool,
+
+    /// The result object on stdout and nothing else.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Answer every approval request `approve` with scope `once`. Without it a headless
+    /// run answers `deny`/`once` with a reason saying there was no approver — it never
+    /// waits for one.
+    #[arg(long)]
+    pub approve_all: bool,
+
+    /// Seconds before the turn is interrupted and reported as `timeout` (exit 4).
+    #[arg(long, value_name = "SECS", default_value_t = 600)]
+    pub timeout: u64,
+
+    /// Progress on stderr. Stdout is never touched by it.
+    #[arg(long, short = 'v')]
+    pub verbose: bool,
+
+    /// Where the gateway listens. Omitted, a local runtime is adopted or started.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -449,6 +533,7 @@ mod tests {
             vec!["--token", "secret"],
             vec!["attach", "--token", "secret"],
             vec!["new", "--token", "secret"],
+            vec!["run", "prompt", "--token", "secret"],
             vec!["daemon", "--token", "secret"],
             vec!["fleet", "join", "invite", "--token", "secret"],
             vec!["fleet", "service", "install", "--token", "secret"],
@@ -458,6 +543,88 @@ mod tests {
                 "a secret on a command line is readable by every process on the host: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn ouro_run_takes_a_prompt_and_defaults_the_rest() {
+        let Some(Command::Run(args)) = parse(&["run", "fix the tests"]).command else {
+            panic!("`ouro run \"fix the tests\"` must parse as Run");
+        };
+
+        assert_eq!(args.prompt, "fix the tests");
+        assert_eq!(args.resume, None);
+        // The one number with a default, because a headless run that never ends is the
+        // failure this command exists to prevent.
+        assert_eq!(args.timeout, 600);
+        assert!(!args.json && !args.stream_json && !args.approve_all && !args.verbose);
+    }
+
+    #[test]
+    fn the_two_json_surfaces_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from(["ouro", "run", "hi", "--json", "--stream-json"]).is_err(),
+            "stdout is one contract, not two"
+        );
+    }
+
+    /// A resumed session's provider and workspace were chosen when it started. Accepting
+    /// them again would look like they applied.
+    #[test]
+    fn resume_refuses_the_start_options_rather_than_ignoring_them() {
+        for flag in [
+            vec!["--provider", "codex"],
+            vec!["--workspace", "/srv/work"],
+            vec!["--approval-mode", "auto_edit"],
+            vec!["--sandbox-mode", "read_only"],
+            vec!["--machine", "beta"],
+        ] {
+            let args = ["ouro", "run", "hi", "--resume", "s-1"];
+            assert!(
+                Cli::try_parse_from(args.iter().copied().chain(flag.iter().copied())).is_err(),
+                "--resume {flag:?} must be refused, not quietly dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn ouro_run_carries_every_surface_it_was_typed_with() {
+        let Some(Command::Run(args)) = parse(&[
+            "run",
+            "fix the tests",
+            "--provider",
+            "codex",
+            "--workspace",
+            "/srv/work",
+            "--approval-mode",
+            "auto_edit",
+            "--sandbox-mode",
+            "workspace_write",
+            "--machine",
+            "beta",
+            "--stream-json",
+            "--approve-all",
+            "--timeout",
+            "30",
+            "--verbose",
+            "--addr",
+            "127.0.0.1:4560",
+            "--token-file",
+            "/tmp/token",
+        ])
+        .command
+        else {
+            panic!("a fully-specified `ouro run` must parse");
+        };
+
+        assert_eq!(args.provider.as_deref(), Some("codex"));
+        assert_eq!(args.workspace, Some(PathBuf::from("/srv/work")));
+        assert_eq!(args.approval_mode.as_deref(), Some("auto_edit"));
+        assert_eq!(args.sandbox_mode.as_deref(), Some("workspace_write"));
+        assert_eq!(args.machine.as_deref(), Some("beta"));
+        assert!(args.stream_json && args.approve_all && args.verbose);
+        assert_eq!(args.timeout, 30);
+        assert_eq!(args.addr.as_deref(), Some("127.0.0.1:4560"));
+        assert_eq!(args.token_file, Some(PathBuf::from("/tmp/token")));
     }
 
     #[test]
