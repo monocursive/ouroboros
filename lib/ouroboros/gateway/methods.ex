@@ -154,6 +154,11 @@ defmodule Ouroboros.Gateway.Methods do
     "hello" => %{scope: :read, timeout: @hello_deadline},
     "runtime.status" => %{scope: :read, timeout: @default_timeout},
     "runtime.providers" => %{scope: :read, timeout: @default_timeout},
+    # A3/F3. What `llm_db` knows about the models each configured provider draws from —
+    # the window and the price a client needs to turn a session's `usage` into a context
+    # percentage and a cost. Read scope: it consults a packaged snapshot and the node's
+    # own provider configuration, and starts nothing.
+    "runtime.models" => %{scope: :read, timeout: @default_timeout},
     "fleet.status" => %{scope: :read, timeout: @default_timeout},
     "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
     "account.read" => %{scope: :read, timeout: @default_timeout},
@@ -456,6 +461,8 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
 
   def invoke("runtime.providers", _params), do: safe(fn -> {:ok, providers()} end)
+
+  def invoke("runtime.models", _params), do: safe(fn -> {:ok, Ouroboros.Models.list()} end)
 
   def invoke("fleet.status", _params), do: safe(fn -> {:ok, Cluster.fleet_status()} end)
 

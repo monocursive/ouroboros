@@ -51,6 +51,7 @@
       "interactive.unsubscribe",
       "plans.get",
       "plans.list",
+      "runtime.models",
       "runtime.providers",
       "runtime.shutdown",
       "runtime.status",

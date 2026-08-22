@@ -254,6 +254,48 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     end
   end
 
+  describe "runtime.models" do
+    test "the catalogue is a read method and answers with bounded per-provider rows" do
+      assert Methods.table()["runtime.models"].scope == :read
+      assert "runtime.models" in Methods.names()
+      assert Methods.permits?(:read, Methods.table()["runtime.models"])
+
+      assert {:ok, catalogue} = Methods.invoke("runtime.models", %{})
+      assert catalogue.source == "llm_db"
+      assert is_list(catalogue.providers)
+
+      claude = Enum.find(catalogue.providers, &(&1.provider == :claude))
+      assert claude.catalog == :anthropic
+      assert length(claude.models) <= catalogue.limit
+      assert length(claude.models) > 0
+
+      model = hd(claude.models)
+      assert is_integer(model.context_window)
+      assert is_integer(model.max_output_tokens)
+    end
+
+    test "a session's own model is on interactive.info, so a client can divide by the window",
+         %{id: id} do
+      # The two halves of a context meter: `usage.total_tokens` from the session, and the
+      # window from the catalogue keyed by the model the session says it is running.
+      ref = start_session(id)
+
+      assert {:ok, session} = Methods.invoke("interactive.info", %{"id" => id})
+      assert Map.has_key?(session.options, :model)
+      assert Map.has_key?(session, :usage)
+
+      # This provider normalizes no model, so it honestly reports none rather than a
+      # default it did not select — and `runtime.models` says the picker is unavailable.
+      assert session.options.model == nil
+
+      assert {:ok, catalogue} = Methods.invoke("runtime.models", %{})
+      assert %{model_option: false} = Enum.find(catalogue.providers, &(&1.provider == :amp))
+
+      assert {:ok, %State{}} = InteractiveSession.info(ref)
+      retire_session(id)
+    end
+  end
+
   defp name_provider_session(ref) do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))

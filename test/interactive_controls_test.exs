@@ -255,6 +255,26 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
+    test "the model a session is running is on its public state, before and after a change" do
+      # A context meter divides `usage.total_tokens` by the window `runtime.models` gives
+      # for *this* model, so the session has to say which model that is. Asserted against
+      # a provider that normalizes `:model`, without starting its CLI.
+      assert {:ok, session} =
+               State.new("controls-model-projection",
+                 provider: :claude,
+                 approval_mode: :auto_edit,
+                 model: "claude-sonnet-5"
+               )
+
+      assert State.public(session).options.model == "claude-sonnet-5"
+
+      configured = State.configure(session, %{model: "claude-opus-5"})
+      assert State.public(configured).options.model == "claude-opus-5"
+
+      # And the request a resume rebuilds carries it, so the change is not projection-only.
+      assert State.request(configured).model == "claude-opus-5"
+    end
+
     test "a terminal session is not configurable", %{id: id} do
       ref = start_session(id)
       assert :ok = InteractiveSession.kill(ref)
