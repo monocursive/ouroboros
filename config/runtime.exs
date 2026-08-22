@@ -450,6 +450,39 @@ config :ouroboros, :provider_execution_defaults, %{
   }
 }
 
+# Language servers are a liability as much as an asset — OpenCode turned theirs off by
+# default over memory and staleness, and Anthropic tells users to disable plugins under
+# pressure (R4 §1). So the two switches an operator reaches for under pressure are
+# environment variables, readable in every environment: turn the pool off entirely, and
+# lower the per-host memory budget. Everything else stays in `config/config.exs`, where a
+# deployment can set it deliberately. A malformed value refuses the boot rather than
+# quietly removing the bound it was meant to set.
+code_intel_enabled =
+  case gateway_value.("OUROBOROS_CODE_INTEL") do
+    nil -> true
+    value when value in ["1", "true"] -> true
+    value when value in ["0", "false"] -> false
+    other -> raise "OUROBOROS_CODE_INTEL must be 1, 0, true, or false, got: #{other}"
+  end
+
+code_intel_memory_budget =
+  case gateway_value.("OUROBOROS_CODE_INTEL_MEMORY_BUDGET_MB") do
+    nil ->
+      nil
+
+    value ->
+      case Integer.parse(value) do
+        {megabytes, ""} when megabytes > 0 -> megabytes * 1024 * 1024
+        _other -> raise "OUROBOROS_CODE_INTEL_MEMORY_BUDGET_MB must be a positive integer"
+      end
+  end
+
+config :ouroboros, :code_intel, enabled: code_intel_enabled
+
+if code_intel_memory_budget do
+  config :ouroboros, :code_intel, memory_budget_bytes: code_intel_memory_budget
+end
+
 if System.get_env("OUROBOROS_GATEWAY") == "1" do
   gateway_port =
     case Integer.parse(gateway_value.("OUROBOROS_GATEWAY_PORT") || "0") do

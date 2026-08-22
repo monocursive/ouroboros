@@ -468,6 +468,80 @@ before acknowledging success. Tests use real tar archives and a deterministic ad
 they do not execute a live embedded-release upgrade or reboot. Only that externally
 rehearsed lane can prove restart persistence or an ERTS change.
 
+### Code intelligence
+
+`Ouroboros.CodeIntel` owns language servers on behalf of the node, never on behalf of a
+session. One pool per host, keyed by `{workspace root, server id}`: sessions acquire a
+ref-counted handle, the pool monitors the owner, and a session that crashes releases its
+claim without anyone calling `release`. Two sessions editing one repository share one
+server, one document stream, and one diagnostics cache. Servers must run where the files
+are, so a fleet has one pool per host and a session on machine B uses machine B's pool;
+every status entry names its `node()` for that reason.
+
+The subtree lives in the `:core` tree's operator-surface tail, downstream of cluster
+formation and of every plane and immediately above the Codex account boundary and the
+gateway. It owns no durable state and nothing rebuilds from it, so no session can be
+restarted by a language server dying — every plane starts above it. It is unconditional
+because it is lazy: no language server exists until a caller asks for one. The cost of
+that position is that a crash of the subtree itself also restarts the account boundary
+and the gateway, which is why it carries a deliberately generous restart intensity —
+language-server failures are states inside the pool, never crashes of it.
+
+**Lifecycle.** A server is spawned on the first `acquire`, through the same
+`priv/provider-exec` wrapper every provider CLI crosses, so it runs as the user with
+umask 022 and cwd at the project root, with no interpolated command string. `initialize`
+carries `clientInfo` and only the capabilities the pool consumes, bounded at 45 s because
+ElixirLS, jdtls and Metals compile or index on first launch; ordinary requests are
+bounded at 10 s. Idle servers stop after 600 s with no owner. A death is restarted with
+doubling backoff up to `max_restarts`; the death past that marks the key `:broken` for an
+hour, and every call against it then answers `{:error, :broken}` rather than respawning
+something that has already failed. `shutdown`/`exit` get a bounded grace and then
+`SIGKILL`, because closing a port closes pipes without reaping a child.
+
+**Roots and discovery.** The project root is the nearest directory holding one of the
+language's marker files, walking up from the file and stopping at — and including — the
+workspace root, canonicalised and contained by `Ouroboros.Workspace.Path`. A file outside
+every admitted root is refused before any directory is read, and a file with no marker
+above it gets no server at all rather than one rooted at the workspace, because that
+fallback is how monorepo false-positive diagnostics happen. Discovery reads the project's
+own binary directories and then the user's `PATH`, and stops: **nothing is ever
+installed**. An absent server answers `{:error, {:server_unavailable, id, hint}}` and the
+hint text is the whole of this runtime's involvement.
+
+**Budgets.** Per server, a soft RSS limit: exceeding it stops and restarts the server
+once, and a second breach marks the key broken. Per host, a budget: while the measured
+total is at or above it, nothing new is spawned — a healthy server is never killed to
+make room, because the caller that would lose it did nothing wrong. RSS is read
+off-process on a timer through an injectable reader; a reading that cannot be taken is
+`:unknown`, and unknown is never treated as a breach.
+
+**Documents and freshness.** `touch/3` takes a path and an action, never content: the
+pool reads the file itself in the same message that assigns the next version, so two
+writers cannot interleave into a state where the server holds older text under a newer
+version. `diagnostics/2` answers only when the cached version equals the document's
+current version, and `{:pending, version}` otherwise after waiting up to 5 s — a push
+that arrived before the last edit describes text that no longer exists. A push carrying
+an older version than one already cached is dropped, so the cache cannot roll backwards;
+a server that reports no version has its push attributed to the current one and labelled
+`:inferred`, because a weaker guarantee that says so is worth more than a strong-sounding
+one that is not true. Pushes are deduped, debounced 150 ms, and capped per document.
+Documents survive a server restart by being re-opened from disk, tracked by a per-key
+generation.
+
+**Ephemeral by design.** The pool checkpoints nothing and is not meant to. On restart
+every server is gone, every document is closed, and the next acquire spawns fresh; the
+only durable truth is the files on disk.
+
+What is **not** done in this slice: diagnostics are never fed back into a session — no
+edit result carries them, no transcript shows them, and no `PostToolUse` bridge exists
+(E2). The nine navigation operations are reachable from Elixir but are not exposed to any
+model as a tool, natively or over MCP (E3). There is no gateway method; `status/0` is
+shaped so `runtime.lsp.status` can be a one-line wrapper when the method surface is
+free. There is no installer — `ouro lsp install` is a later slice, and until it exists an
+absent server is an install hint and nothing more. There is no rename, no code actions,
+no formatting, and no tree-sitter fallback for languages without a server. Language-server
+stderr is inherited by the runtime process rather than captured per server.
+
 ## Failure model
 
 | Failure | Current behavior | Required next behavior |
@@ -499,6 +573,14 @@ rehearsed lane can prove restart persistence or an ERTS change.
 | Effect outruns its deadline | The work is killed at `:effect_timeout` and settles as a failure; the agent's process was never blocked | Done |
 | Grant checkpoint write fails | The grant is refused and never applied; a failed revocation leaves the grant standing and reports the error | Operator retry tooling |
 | Effect authority is unreachable | Every attempt is refused; there is no path that fails open | Replicated policy authority |
+| Language server is absent from PATH | `{:server_unavailable, id, hint}` with the install command; nothing is installed | `ouro lsp install` (E1 follow-on) |
+| Language server crashes | Restarted with backoff up to `max_restarts`, then the key is `:broken` for an hour and every call answers `{:error, :broken}` | Done |
+| Language server exceeds its memory limit | Stopped and restarted once; a second breach marks the key broken | Done |
+| Host language-server memory budget is exhausted | New spawns are refused; running servers are never killed to make room | Per-workspace budgets |
+| Language server is slow or never answers | Every request has its own deadline and answers `{:error, :timeout}`; the server stays usable | Done |
+| Diagnostics describe a version that is no longer current | Never served; `{:pending, version}` after a bounded wait, and an older push never overwrites a newer cache entry | Done |
+| Language server reports diagnostics with no version | Attributed to the current version and labelled `:inferred` so the weaker guarantee is visible | Done |
+| Code-intelligence pool crashes | Nothing else restarts; servers and documents are gone and the next acquire spawns fresh | Done; ephemeral by design |
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |

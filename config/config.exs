@@ -119,7 +119,19 @@ config :ouroboros,
     if(config_env() == :test,
       do: Ouroboros.Test.CodexAccountAdapter,
       else: Ouroboros.Provider.CodexAppServer
-    )
+    ),
+  # Language servers, owned by this node rather than by any session. Everything here is a
+  # bound; `Ouroboros.CodeIntel.Config` documents each one and refuses a value that would
+  # remove it. Nothing is installed by this runtime — a server absent from the user's PATH
+  # and from the project's own bin directories resolves to an error carrying an install
+  # hint, and that is the end of it.
+  code_intel: [
+    enabled: true,
+    # Operator additions and overrides, merged over the built-in registry by language:
+    #   [%{language: :elixir, extensions: [".ex"], root_markers: ["mix.exs"],
+    #      candidates: [%{server_id: "expert", command: "expert", args: []}]}]
+    servers: []
+  ]
 
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its
