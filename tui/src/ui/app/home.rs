@@ -89,7 +89,10 @@ impl App {
             return;
         }
 
-        match self.home_draft.handle_key(key, &self.completion_catalog) {
+        match self
+            .home_draft
+            .handle_key_with(key, &self.completion_catalog, &self.keymap)
+        {
             EditorAction::Submit => self.submit_home(),
             // There is no session to steer yet, so the home composer keeps `Alt+Enter` as
             // the newline it was before B3 gave the key a second meaning on a session.

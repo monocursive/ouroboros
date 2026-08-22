@@ -1,22 +1,6 @@
 use super::*;
 
-/// Chords after `Ctrl+X`. Drawn by the which-key overlay while the leader is pending.
-pub const LEADER_KEYS: &[(&str, &str)] = &[
-    ("n", "new session"),
-    ("N", "session options"),
-    ("l", "switch session"),
-    ("e", "external editor"),
-    ("y", "copy last message"),
-    ("[", "transcript to scrollback"),
-    ("v", "transcript in $EDITOR"),
-    ("s", "steer"),
-    ("a", "approval"),
-    ("w", "writable session"),
-    ("x", "end or remove session"),
-    ("d", "event details"),
-    ("q", "quit"),
-    ("?", "keyboard help"),
-];
+use crate::keymap::Scope;
 
 impl App {
     // ----- keys ----------------------------------------------------------------------
@@ -37,7 +21,10 @@ impl App {
             return;
         }
 
-        if ctrl && matches!(key.code, KeyCode::Char('p')) {
+        // B8. Every chord below is looked up in the resolved keymap rather than matched
+        // against a literal, which is what makes `[keys]` real and what makes the `?`
+        // panel, the footer, and the palette able to *state* the effective binding (D14).
+        if self.keymap.hits(Action::Palette, key) {
             if matches!(self.overlay, Some(Overlay::Commands(_))) {
                 self.overlay = None;
             } else if self.overlay.is_none() {
@@ -46,17 +33,17 @@ impl App {
             return;
         }
 
-        if ctrl && matches!(key.code, KeyCode::Char('q')) {
+        if self.keymap.hits(Action::Quit, key) {
             self.open_quit();
             return;
         }
 
-        if ctrl && matches!(key.code, KeyCode::Char('x')) && self.overlay.is_none() {
+        if self.keymap.hits(Action::Leader, key) && self.overlay.is_none() {
             self.leader_until = Some(self.ticks + LEADER_TICKS);
             return;
         }
 
-        if ctrl && matches!(key.code, KeyCode::Char('g')) && self.overlay.is_none() {
+        if self.keymap.hits(Action::Editor, key) && self.overlay.is_none() {
             self.request_external_editor();
             return;
         }
@@ -64,24 +51,23 @@ impl App {
         // Ctrl+O is the field's "show more": it expands the conversation's own cells
         // rather than swapping in a different view. The normalized ledger keeps its own
         // verbs (`/details`, `ctrl+x d`). Ctrl+E stays readline end-of-line in the editor.
-        if ctrl && matches!(key.code, KeyCode::Char('o')) && self.overlay.is_none() {
+        if self.keymap.hits(Action::Verbose, key) && self.overlay.is_none() {
             self.toggle_verbose_transcript();
             return;
         }
 
         // Ctrl+T is the plan/tasks panel, as in Claude Code and Gemini.
-        if ctrl && matches!(key.code, KeyCode::Char('t')) && self.overlay.is_none() {
+        if self.keymap.hits(Action::PlanPanel, key) && self.overlay.is_none() {
             self.toggle_plan_panel();
             return;
         }
 
-        if ctrl && matches!(key.code, KeyCode::Char('c')) {
+        if self.keymap.hits(Action::Cancel, key) {
             self.ctrl_c();
             return;
         }
 
-        if ctrl
-            && matches!(key.code, KeyCode::Char('d'))
+        if self.keymap.hits(Action::QuitEmpty, key)
             && self.overlay.is_none()
             && self.focused_prompt_empty()
         {
@@ -110,12 +96,12 @@ impl App {
             return;
         }
 
-        if matches!(key.code, KeyCode::Char('?')) && !shift && self.focused_prompt_empty() {
+        if self.keymap.hits(Action::Help, key) && !shift && self.focused_prompt_empty() {
             self.open_help();
             return;
         }
 
-        if matches!(key.code, KeyCode::Char(',')) && self.focused_prompt_empty() {
+        if self.keymap.hits(Action::Settings, key) && self.focused_prompt_empty() {
             self.open_settings();
             return;
         }
@@ -186,79 +172,129 @@ impl App {
 
     /// Handles the backtrack chord, returning whether it consumed the key.
     ///
-    /// Rebindable from `config.toml` on day one (`[keys] backtrack`). Claude Code #43717 is
-    /// what happens otherwise: a hardcoded double-Escape that "cannot be rebound or
-    /// disabled" and breaks zsh vi-mode for everyone who uses it.
+    /// Rebindable from `config.toml` on day one (`[keys] backtrack`), and since B8 through
+    /// the same grammar as every other chord. Claude Code #43717 is what happens otherwise:
+    /// a hardcoded double-Escape that "cannot be rebound or disabled" and breaks zsh
+    /// vi-mode for everyone who uses it.
+    ///
+    /// A two-key binding arms on its first chord and **does not consume it**. That is what
+    /// keeps `Esc` an interrupt while `Esc Esc` is also a chord — Claude Code #16905 is the
+    /// interrupt being disabled by other state — and it is the honest reading for any other
+    /// pair an operator writes: the first key keeps its own job.
     fn backtrack_chord(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(first) = self.keymap.first(Action::Backtrack) else {
+            return false;
+        };
 
-        match self.config.keys.backtrack() {
-            Backtrack::Off => false,
-            Backtrack::AltUp => {
-                if key.code == KeyCode::Up && key.modifiers == KeyModifiers::ALT {
-                    self.open_backtrack(None);
+        let Some(second) = self.keymap.rest(Action::Backtrack) else {
+            if first.hit(key) {
+                self.open_backtrack(None);
+                return true;
+            }
+
+            return false;
+        };
+
+        // Within the window: this is the second key. The session named by the arm is the
+        // one to go back through — the first key may have *left* it, and reopening the
+        // thing the operator was just looking at is the only reading of the chord that is
+        // not a surprise.
+        if second.hit(key) {
+            if let Some((until, open)) = self.backtrack_arm.take() {
+                if self.ticks < until {
+                    self.open_backtrack(Some(open));
                     return true;
                 }
-
-                false
             }
-            Backtrack::EscEsc => {
-                if key.code != KeyCode::Esc {
-                    return false;
+        }
+
+        if first.hit(key) {
+            if let Some(open) = self.sessions.open.clone() {
+                self.backtrack_arm = Some((self.ticks + BACKTRACK_TICKS, open));
+            }
+        }
+
+        false
+    }
+
+    fn leader_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        self.leader_until = None;
+
+        // Escape always abandons the leader, whatever it is bound to. A which-key overlay
+        // you cannot back out of is a modal that did not say it was one.
+        if key.code == KeyCode::Esc {
+            return;
+        }
+
+        match self.keymap.leader_verb(key) {
+            Some(Action::LeaderNew) => self.new_home(),
+            Some(Action::LeaderNewOptions) => self.open_new_session(),
+            Some(Action::LeaderSessions) => self.activate_command(Command::SwitchSession),
+            Some(Action::LeaderWritable) => self.start_writable_session(),
+            Some(Action::LeaderEditor) => self.request_external_editor(),
+            Some(Action::LeaderCopy) => self.copy_last_agent(),
+            Some(Action::LeaderScrollback) => self.dump_to_scrollback(),
+            Some(Action::LeaderEditorView) => self.view_transcript(),
+            Some(Action::LeaderSteer) => self.compose(ComposerVerb::Steer),
+            Some(Action::LeaderApproval) => self.reopen_approval(),
+            Some(Action::LeaderEnd) => self.open_close_confirm(),
+            Some(Action::LeaderDetails) => self.toggle_session_details(),
+            Some(Action::LeaderQuit) => self.open_quit(),
+            Some(Action::LeaderHelp) => self.open_help(),
+            _unbound => {
+                // The `,` of the global map still reaches settings from under the leader,
+                // which is where it was before the verbs became data and is cheaper to
+                // keep than to explain.
+                if self.keymap.hits(Action::Settings, key) {
+                    self.open_settings();
+                    return;
                 }
 
-                match self.backtrack_arm.take() {
-                    // Within the window: this is the second Escape. The session named by
-                    // the arm is the one to go back through — the first Escape may have
-                    // left it, and reopening the thing the operator was just looking at is
-                    // the only reading of a double-Escape that is not a surprise.
-                    Some((until, key)) if self.ticks < until => {
-                        self.open_backtrack(Some(key));
-                        true
+                // Two aliases that predate the map and were never drawn in the which-key
+                // overlay: `g` beside `e` for the editor, `o` beside `d` for details.
+                // Kept because removing a working key without telling anyone is the
+                // failure R1 §2.5 names, and *not* made actions because an alias is not a
+                // binding — `/keys` would then show two rows for one verb.
+                match key.code {
+                    KeyCode::Char('g') if self.bound(Action::LeaderEditor) => {
+                        self.request_external_editor()
                     }
-                    _first_or_expired => {
-                        if let Some(open) = self.sessions.open.clone() {
-                            self.backtrack_arm = Some((self.ticks + BACKTRACK_TICKS, open));
-                        }
-
-                        false
+                    KeyCode::Char('o') if self.bound(Action::LeaderDetails) => {
+                        self.toggle_session_details()
+                    }
+                    _nothing => {
+                        let hint = self.leader_hint_text();
+                        self.inform(hint, NoticeKind::Info);
                     }
                 }
             }
         }
     }
 
-    fn leader_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
+    /// The which-key line the leader prints when a key under it is not a verb.
+    ///
+    /// Built from the map rather than typed out, so a rebound leader verb is named by the
+    /// key that actually reaches it (D14). Bounded to the first eight so a notice row
+    /// cannot become a page.
+    pub(super) fn leader_hint_text(&self) -> String {
+        let verbs = self
+            .keymap
+            .live(Scope::Leader)
+            .into_iter()
+            .take(8)
+            .map(|action| {
+                format!(
+                    "{} {}",
+                    self.keymap.spec(action),
+                    super::super::tree::truncate(action.describe(), 22)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
 
-        self.leader_until = None;
-
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
-        match key.code {
-            KeyCode::Esc => {}
-            KeyCode::Char('n') if shift => self.open_new_session(),
-            KeyCode::Char('N') => self.open_new_session(),
-            KeyCode::Char('n') => self.new_home(),
-            KeyCode::Char('l') => self.activate_command(Command::SwitchSession),
-            KeyCode::Char('e') | KeyCode::Char('g') => self.request_external_editor(),
-            KeyCode::Char('y') => self.copy_last_agent(),
-            KeyCode::Char('[') => self.dump_to_scrollback(),
-            KeyCode::Char('v') => self.view_transcript(),
-            KeyCode::Char('s') => self.compose(ComposerVerb::Steer),
-            KeyCode::Char('a') => self.reopen_approval(),
-            KeyCode::Char('w') => self.start_writable_session(),
-            KeyCode::Char('x') => self.open_close_confirm(),
-            KeyCode::Char('o') | KeyCode::Char('d') => self.toggle_session_details(),
-            KeyCode::Char('q') => self.open_quit(),
-            KeyCode::Char('?') => self.open_help(),
-            KeyCode::Char(',') => self.open_settings(),
-            _ => self.inform(
-                "ctrl+x n new · w write · l sessions · e editor · y copy · [ scrollback · \
-                 v transcript · s steer · x end · q quit",
-                NoticeKind::Info,
-            ),
-        }
+        format!("{} {verbs}", self.keymap.label(Action::Leader))
     }
 
     pub(super) fn select_tab(&mut self, tab: Tab) {

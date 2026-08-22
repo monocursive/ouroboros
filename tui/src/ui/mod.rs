@@ -60,6 +60,7 @@ pub mod logo;
 pub mod logs;
 pub mod markdown;
 pub mod notify;
+pub mod panels;
 pub mod sessions;
 pub mod statusline;
 pub mod theme;

@@ -933,6 +933,7 @@ fn the_backtrack_chord_is_rebindable_and_can_be_disabled() {
         vec![user_turn(1, "first thing")],
     );
     off.config.keys.backtrack = Some("off".into());
+    off.reload_keymap();
     compose(&mut off);
     off.apply(key(KeyCode::Esc));
     off.apply(key(KeyCode::Esc));
@@ -944,6 +945,7 @@ fn the_backtrack_chord_is_rebindable_and_can_be_disabled() {
         vec![user_turn(1, "first thing")],
     );
     alt.config.keys.backtrack = Some("alt+up".into());
+    alt.reload_keymap();
     compose(&mut alt);
     alt.apply(key(KeyCode::Esc));
     alt.apply(key(KeyCode::Esc));

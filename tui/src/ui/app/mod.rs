@@ -31,9 +31,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::TryRngCore;
 use serde_json::{json, Value};
 
-use crate::config::{Backtrack, Config, Defaults, ONBOARDING_PROMPTS};
+use crate::config::{Config, Defaults, ONBOARDING_PROMPTS};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
+use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
     Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
@@ -70,7 +71,6 @@ use session::{
 };
 
 pub use footer::{SessionFacts, TranscriptFacts};
-pub use keys::LEADER_KEYS;
 pub use machines::{
     AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,
     MachineCandidate, MachineChoice, MachineForm, MachineReport, MachineSecurity, MachineSummary,
@@ -740,6 +740,14 @@ pub struct App {
     /// This client's preferences, as the file said them plus whatever the settings overlay
     /// has changed since. Never a runtime fact, and labelled as such wherever it is drawn.
     pub config: Config,
+    /// Every chord this client binds, resolved once from [`config`](Self::config) (B8).
+    ///
+    /// Resolved rather than consulted per keystroke because the answer is a fact about a
+    /// file that is read once, and because the surfaces that *draw* a key — the `?` panel,
+    /// the footer, the which-key overlay, the palette — must all be reading the same map
+    /// as the handler that acts on it (D14). A caller that changes `config.keys` calls
+    /// [`App::reload_keymap`]; nothing else in this type may go behind it.
+    pub keymap: Keymap,
     /// Where [`config`](Self::config) is read from and written to. `None` only when there
     /// is nowhere to keep preferences at all, which the settings overlay says out loud.
     pub config_path: Option<PathBuf>,
@@ -869,6 +877,11 @@ pub struct App {
     /// Whether "this machine has no clipboard tool" has been said. Once per run: the
     /// thing it explains does not change between keystrokes.
     clipboard_tool_reported: bool,
+    /// Sessions whose reported cost has already crossed `[budget] max_cost_usd` (I2).
+    ///
+    /// A set rather than a flag: two open sessions crossing the same limit are two facts,
+    /// and the warning belongs to the session, not to the run.
+    budget_warned: HashSet<String>,
 }
 
 /// How many notifications one frame may emit. A session that produced fifty terminal
@@ -934,6 +947,7 @@ impl App {
             cursors: Cursors::default(),
             launch_dir: None,
             config: Config::default(),
+            keymap: Keymap::builtin(),
             config_path: None,
             data_dir: None,
             fleet_profile: None,
@@ -981,7 +995,23 @@ impl App {
             statusline: StatusLine::default(),
             clipboard_pending: None,
             clipboard_tool_reported: false,
+            budget_warned: HashSet::new(),
         }
+    }
+
+    /// Re-resolves [`keymap`](Self::keymap) from the current `[keys]` table.
+    ///
+    /// Called by the launcher once the preference file has been read, and by any test that
+    /// sets `config.keys` directly. The keymap's own problems are *not* drained here: they
+    /// belong to the map, `/keys` lists them, and the launcher says them once at startup.
+    pub fn reload_keymap(&mut self) {
+        self.keymap = Keymap::resolve(&self.config.keys.overrides());
+    }
+
+    /// Whether `action` still has a key on it, for the surfaces that must not advertise a
+    /// chord an operator turned off.
+    pub fn bound(&self, action: Action) -> bool {
+        !self.keymap.spec(action).is_off()
     }
 
     /// The row the `[statusline] command` produced, for the renderer.
@@ -1068,12 +1098,52 @@ impl App {
     ///
     /// On the tick rather than on every message: both read the open session's transcript,
     /// and a burst of a hundred streamed deltas must cost one pass, not a hundred.
+    /// I2. Says once, per session, that the reported cost has passed `[budget]
+    /// max_cost_usd`.
+    ///
+    /// Once because the condition does not un-happen: a limit crossed at $5.01 is still
+    /// crossed at $5.02, and a notice on every tick would own the one row a refusal has to
+    /// fit on. Per session because two sessions crossing the same limit are two facts.
+    ///
+    /// The wording is deliberate. This client **warns**; it does not stop, cannot stop, and
+    /// says so — the runtime's own budgets are a later slice, and a client that implied it
+    /// had halted anything would be claiming an authority it does not have.
+    fn warn_over_budget(&mut self, facts: Option<&SessionFacts>) {
+        let Some(limit) = self.config.budget.max_cost_usd() else {
+            return;
+        };
+
+        let Some(facts) = facts else {
+            return;
+        };
+
+        let Some(spent) = facts.usage.as_ref().and_then(|usage| usage.cost_usd) else {
+            return;
+        };
+
+        if spent < limit || !self.budget_warned.insert(facts.id.clone()) {
+            return;
+        }
+
+        self.inform(
+            format!(
+                "{} has reported {} of the {} in [budget] max_cost_usd \u{b7} this client \
+                 warns and does not stop anything",
+                facts.id,
+                super::view::money(spent),
+                super::view::money(limit)
+            ),
+            NoticeKind::Warn,
+        );
+    }
+
     fn refresh_chrome(&mut self) {
         self.refresh_offered_commands();
 
         // Read once. Gathering them walks the retained event window, and the title, the
         // debounce key, and the payload all want the same answer.
         let facts = self.session_facts();
+        self.warn_over_budget(facts.as_ref());
         let title = notify::title(
             self.activity_of(facts.as_ref()),
             self.title_workspace_of(facts.as_ref()).as_deref(),

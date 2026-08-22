@@ -16,11 +16,12 @@ use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
     ApprovalRule, CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport,
     MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice,
-    SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
+    SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::editor::COMMANDS;
 use super::theme;
 use super::transcript::ApprovalDetail;
+use crate::keymap::{Action, Scope};
 use crate::model::{Plane, ProviderEntry};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -595,10 +596,25 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         }
 
         if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
+            // I2. `[budget] max_cost_usd` is a soft limit: past it the cell turns WARN and
+            // a notice is said once. Nothing is stopped — a client cannot refuse a turn the
+            // runtime runs, and colouring a number is the whole of what it can honestly do.
+            // Ranked up with it, so the row that carries the warning is the last to drop
+            // the cell it is about.
+            let over = app
+                .config
+                .budget
+                .max_cost_usd()
+                .is_some_and(|limit| cost >= limit);
+
             segments.push(Segment::new(
                 money(cost),
-                Style::default().fg(theme::muted()),
-                2,
+                if over {
+                    Style::default().fg(theme::warn())
+                } else {
+                    Style::default().fg(theme::muted())
+                },
+                if over { 11 } else { 2 },
             ));
         }
     }
@@ -612,48 +628,65 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
 /// declared an interrupt — a footer that offers a key the open session cannot honour is
 /// the exact failure D14 names.
 fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
+    // B8/D14: the chord comes out of the resolved keymap, so a rebound key is the one the
+    // footer offers. A key an operator set to `off` produces no hint at all, for the same
+    // reason a transport that cannot steer gets no steer hint — advertising a key that
+    // does nothing is how an operator learns a chord by being ignored by it.
+    let hint = |action: Action, verb: &str| -> Option<String> {
+        app.bound(action)
+            .then(|| format!("{} {verb}", app.keymap.label(action)))
+    };
+
     if app.tab != Tab::Sessions {
-        return vec![
-            Segment::key("ctrl+p commands"),
-            Segment::key("Esc returns to coding"),
-            Segment::key("r refresh"),
-        ];
+        let mut keys = Vec::new();
+
+        if let Some(text) = hint(Action::Palette, "commands") {
+            keys.push(Segment::key(text));
+        }
+
+        keys.push(Segment::key("Esc returns to coding"));
+        keys.push(Segment::key("r refresh"));
+        return keys;
     }
 
     let mut keys = Vec::new();
 
     if app.interrupt_offered_for(facts) {
-        keys.push(Segment::new(
-            "esc interrupt",
-            Style::default().fg(theme::action_colour()),
-            10,
-        ));
+        if let Some(text) = hint(Action::Interrupt, "interrupt") {
+            keys.push(Segment::new(
+                text,
+                Style::default().fg(theme::action_colour()),
+                10,
+            ));
+        }
     }
 
-    keys.push(Segment::key("ctrl+p commands"));
+    if let Some(text) = hint(Action::Palette, "commands") {
+        keys.push(Segment::key(text));
+    }
 
     // B9. Until three prompts have been sent, the row points at the page that explains
     // the rest of it. Ranked lowest of everything so it is the first thing a narrow
     // terminal drops: a hint is worth having and never worth a fact.
     if app.onboarding() {
-        keys.push(Segment::new(
-            "? new here",
-            Style::default().fg(theme::accent()),
-            1,
-        ));
+        if let Some(text) = hint(Action::Help, "new here") {
+            keys.push(Segment::new(text, Style::default().fg(theme::accent()), 1));
+        }
     }
 
-    // Discoverable through `ctrl+p` and `?`; the first to yield when the row is tight.
-    keys.push(Segment::new(
-        "ctrl+x leader",
-        Style::default().fg(theme::muted()),
-        0,
-    ));
-    keys.push(Segment::new(
-        "ctrl+q quit",
-        Style::default().fg(theme::muted()),
-        0,
-    ));
+    // Discoverable through the palette and `?`; the first to yield when the row is tight.
+    for action in [Action::Leader, Action::Quit] {
+        let verb = if action == Action::Leader {
+            "leader"
+        } else {
+            "quit"
+        };
+
+        if let Some(text) = hint(action, verb) {
+            keys.push(Segment::new(text, Style::default().fg(theme::muted()), 0));
+        }
+    }
+
     keys
 }
 
@@ -691,7 +724,7 @@ fn duration(milliseconds: u64) -> String {
 
 /// Token counts, short enough for a footer and never rounded up to a wrong order of
 /// magnitude.
-fn tokens(total: u64) -> String {
+pub fn tokens(total: u64) -> String {
     match total {
         0..=999 => total.to_string(),
         1_000..=999_999 => format!("{:.1}k", total as f64 / 1_000.0),
@@ -701,7 +734,7 @@ fn tokens(total: u64) -> String {
 
 /// Cost, to the cent, with a spend too small to show said as too small rather than as
 /// zero.
-fn money(cost: f64) -> String {
+pub fn money(cost: f64) -> String {
     if cost < 0.005 {
         return "<$0.01".to_string();
     }
@@ -726,6 +759,10 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         Overlay::Account(dialog) => account_dialog(frame, area, app, dialog),
         Overlay::SessionPicker { selected } => session_picker(frame, area, app, selected.as_ref()),
         Overlay::Help => help(frame, area, app),
+        // B8/I2. Both draw in [`super::panels`]: this file is where parallel work
+        // collides, and neither page needs anything from it but `centered`.
+        Overlay::Keys { scroll } => super::panels::keymap(frame, area, app, *scroll),
+        Overlay::Cost { scroll } => super::panels::cost(frame, area, app, *scroll),
         Overlay::Quit { options, choice } => chooser(
             frame,
             area,
@@ -1018,20 +1055,18 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
         }
         let prefix = if selected { "  › " } else { "    " };
         let start = format!("{prefix}{}", command.label());
-        let gap = content_width
-            .saturating_sub(start.chars().count() + command.shortcut().chars().count());
-        let row = format!(
-            "{start}{}{shortcut}",
-            " ".repeat(gap),
-            shortcut = command.shortcut()
-        );
+        // B8/D14: the keymap, never a literal. A command whose chord the operator rebound
+        // shows the chord they rebound it to.
+        let shortcut = app.command_shortcut(*command);
+        let gap = content_width.saturating_sub(start.chars().count() + shortcut.chars().count());
+        let row = format!("{start}{}{shortcut}", " ".repeat(gap));
 
         lines.push(if selected {
             Line::styled(row, theme::selected())
         } else {
             Line::from(vec![
-                Span::raw(row[..row.len().saturating_sub(command.shortcut().len())].to_string()),
-                Span::styled(command.shortcut(), Style::default().fg(theme::muted())),
+                Span::raw(row[..row.len().saturating_sub(shortcut.len())].to_string()),
+                Span::styled(shortcut, Style::default().fg(theme::muted())),
             ])
         });
     }
@@ -1243,6 +1278,17 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
                     theme::session_status(&session.status),
                 ));
             }
+
+            // I2. `tokens · cost`, where the runtime reported one. `interactive.list` does
+            // not carry `usage` on every gateway and never will on `coding.list`; a row
+            // without it shows nothing rather than a zero that reads as a free session.
+            if let Some(cell) = super::panels::usage_cell(session.usage.as_ref()) {
+                spans.push(Span::styled(
+                    format!("  {cell}"),
+                    Style::default().fg(theme::muted()),
+                ));
+            }
+
             ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
@@ -2940,131 +2986,140 @@ fn backtrack(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The key map the `?` panel is generated from, grouped by the question someone is asking
+/// The rows the `?` panel is generated from, grouped by the question someone is asking
 /// when they open it (B9).
 ///
 /// Four groups, in the order a session is lived: what you are typing into, what you do
 /// while the agent is working, what you do to the session, and what belongs to the runtime
-/// around it. A flat list of twenty-five chords is a list nobody reads twice.
-const KEYS: &[(&str, &str, &str)] = &[
-    (
+/// around it. A flat list of forty chords is a list nobody reads twice.
+///
+/// Every row that *is* a chord reads its key out of the resolved keymap, so the panel
+/// states the effective binding and not a literal this file happened to carry (D14, B8).
+/// The rows that are not chords — `@ path`, the tab digits, the wheel, the `/` verbs — are
+/// spelled here because they are not rebindable, and the "keys are data" row below says so
+/// rather than leaving a reader to infer it.
+fn help_keys(app: &App) -> Vec<(&'static str, String, &'static str)> {
+    let keymap = &app.keymap;
+    let mut rows: Vec<(&'static str, String, &'static str)> = Vec::new();
+
+    // A free helper rather than a closure over `rows`: the interleaved literal rows below
+    // need the vector too, and a closure holding it would lock them out.
+    fn row(keymap: &crate::keymap::Keymap, action: Action) -> (&'static str, String, &'static str) {
+        (action.group(), keymap.label(action), action.describe())
+    }
+
+    rows.push(row(keymap, Action::Send));
+    rows.push(row(keymap, Action::Steer));
+    rows.push(row(keymap, Action::Newline));
+    rows.push((
         "composing",
-        "enter",
-        "send, or queue a follow-up while the agent is busy",
-    ),
-    (
-        "composing",
-        "alt+enter",
-        "steer the running turn, where the transport can be steered",
-    ),
-    (
-        "composing",
-        "ctrl+j",
-        "newline (shift+enter where the terminal reports it)",
-    ),
-    (
-        "composing",
-        "@ path",
+        "@ path".to_string(),
         "completes a workspace file, and attaches it to the turn",
-    ),
-    (
+    ));
+    rows.push(row(keymap, Action::PasteImage));
+    rows.push((
         "composing",
-        "ctrl+v",
-        "pastes a clipboard image as an attachment; text pastes as text",
-    ),
-    (
-        "composing",
-        "backspace",
+        "backspace".to_string(),
         "on an empty draft, removes the newest attachment",
-    ),
-    (
+    ));
+    rows.push(row(keymap, Action::QueueRetract));
+    rows.push((
         "composing",
-        "\u{2191} / \u{2193}",
-        "takes a queued draft back, then walks prompt history",
-    ),
-    (
-        "composing",
-        "ctrl+w/k/u",
+        format!(
+            "{} / {} / {}",
+            keymap.label(Action::EditorKillWordBack),
+            keymap.label(Action::EditorKillLine),
+            keymap.label(Action::EditorKillToStart)
+        ),
         "kill word, to line end, to line start",
-    ),
-    ("composing", "alt+b / alt+f", "move by word"),
-    (
+    ));
+    rows.push((
         "composing",
-        "ctrl+g",
-        "edit the prompt in $VISUAL or $EDITOR",
-    ),
-    (
-        "while the agent works",
-        "esc",
-        "interrupt the turn; the queue is kept",
-    ),
-    (
-        "while the agent works",
-        "esc esc",
-        "go back to an earlier message ([keys] backtrack rebinds it)",
-    ),
-    (
-        "while the agent works",
-        "ctrl+c",
-        "clear the prompt; empty + running interrupts; twice quits",
-    ),
-    (
-        "while the agent works",
-        "ctrl+o",
-        "expand, and collapse again, every cell in the conversation",
-    ),
-    (
-        "while the agent works",
-        "ctrl+t",
-        "plan and tasks panel, while a provider publishes one",
-    ),
-    (
+        format!(
+            "{} / {}",
+            keymap.label(Action::EditorWordBack),
+            keymap.label(Action::EditorWordForward)
+        ),
+        "move by word",
+    ));
+    rows.push(row(keymap, Action::Editor));
+
+    rows.push(row(keymap, Action::Interrupt));
+    rows.push(row(keymap, Action::Backtrack));
+    rows.push(row(keymap, Action::Cancel));
+    rows.push(row(keymap, Action::Verbose));
+    rows.push(row(keymap, Action::PlanPanel));
+
+    rows.push((
         "session",
-        "/model /effort",
+        "/model /effort".to_string(),
         "the model, and reasoning effort for the next turn only",
-    ),
-    (
+    ));
+    rows.push((
         "session",
-        "/fork",
+        "/fork".to_string(),
         "branch this session, where the runtime serves it",
-    ),
-    (
+    ));
+    rows.push((
         "session",
-        "ctrl+x [ / v",
+        format!(
+            "{} / {}",
+            keymap.label(Action::LeaderScrollback),
+            keymap.spec(Action::LeaderEditorView)
+        ),
         "this transcript into native scrollback / into $EDITOR",
-    ),
-    (
+    ));
+    rows.push((
         "session",
-        "ctrl+x",
-        "leader: n new \u{b7} l sessions \u{b7} d details \u{b7} x end \u{b7} y copy \u{b7} q quit",
-    ),
-    (
-        "session",
-        "1-7 / Tab",
+        "1-7 / Tab".to_string(),
         "runtime tabs when the prompt is not focused",
-    ),
-    ("runtime", "ctrl+p", "command palette"),
-    ("runtime", "ctrl+q", "quit dialog"),
-    (
+    ));
+
+    rows.push(row(keymap, Action::Leader));
+    rows.push(row(keymap, Action::Palette));
+    rows.push(row(keymap, Action::Quit));
+    rows.push((
         "runtime",
-        "? / ,",
+        format!(
+            "{} / {}",
+            keymap.label(Action::Help),
+            keymap.label(Action::Settings)
+        ),
         "this page / settings, when the prompt is empty",
-    ),
-    (
+    ));
+    rows.push((
         "runtime",
-        "wheel",
+        "wheel".to_string(),
         "scrolls; shift/ctrl+\u{2191}\u{2193}, pageup/down; config mouse = false frees it",
-    ),
-];
+    ));
+    rows.push((
+        "runtime",
+        "/keys".to_string(),
+        "every action, its key, and which came from config.toml",
+    ));
+    rows.push((
+        "runtime",
+        "/cost".to_string(),
+        "what this session has spent, as the provider reported it",
+    ));
+
+    rows
+}
 
 fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     // A chord the open session cannot honour is not drawn (D14). `steer` is
     // `{:error, :unsupported}` on every transport but `pi`'s, and offering it in a
     // which-key overlay is how an operator learns a key by being refused by it.
-    let chords = LEADER_KEYS
-        .iter()
-        .filter(|(key, _)| *key != "s" || app.steer_offered())
-        .filter(|(key, _)| *key != "a" || app.approvals_offered())
+    //
+    // The list itself is the keymap's, not a table beside it: a rebound verb is drawn on
+    // the key that reaches it, and a verb turned `off` is not drawn at all.
+    let chords = app
+        .keymap
+        .live(Scope::Leader)
+        .into_iter()
+        .filter(|action| *action != Action::LeaderSteer || app.steer_offered())
+        .filter(|action| *action != Action::LeaderApproval || app.approvals_offered())
+        .map(|action| (app.keymap.spec(action).to_string(), action.describe()))
         .collect::<Vec<_>>();
 
     let height = (chords.len() as u16).saturating_add(2).min(area.height);
@@ -3078,9 +3133,12 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .borders(access::borders(Borders::ALL))
+        .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::accent()))
-        .title(Span::styled(" ctrl+x ", theme::heading()));
+        .title(Span::styled(
+            format!(" {} ", app.keymap.label(Action::Leader)),
+            theme::heading(),
+        ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -3152,8 +3210,8 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let mut rows: Vec<Line> = Vec::new();
     let mut group = "";
 
-    for (heading, key, description) in KEYS {
-        if *heading != group {
+    for (heading, key, description) in help_keys(app) {
+        if heading != group {
             group = heading;
             rows.push(Line::from(Span::styled(
                 heading.to_uppercase(),
@@ -3163,7 +3221,7 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
 
         rows.push(Line::from(vec![
             Span::styled(format!("{key:<15}"), Style::default().fg(theme::accent())),
-            Span::raw(*description),
+            Span::raw(description),
         ]));
     }
 
@@ -3202,6 +3260,22 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     if !app.hello.operates() {
         limits.push(Line::from(Span::styled(
             "this listener runs at scope `read`: every mutating verb is refused with -32003",
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    // The honesty invariant for this panel specifically: what it shows is the *effective*
+    // map, and a line of `[keys]` this build could not act on is named rather than left to
+    // be discovered by pressing the key it did not bind.
+    let problems = app.keymap.problems().len();
+
+    if problems > 0 {
+        limits.push(Line::from(Span::styled(
+            format!(
+                "{problems} line{} of [keys] could not be used; /keys names {}",
+                if problems == 1 { "" } else { "s" },
+                if problems == 1 { "it" } else { "them" }
+            ),
             Style::default().fg(theme::warn()),
         )));
     }

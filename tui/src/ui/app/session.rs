@@ -753,7 +753,7 @@ impl App {
             return;
         }
 
-        use crossterm::event::{KeyCode, KeyModifiers};
+        use crossterm::event::KeyCode;
 
         // B3. `↑` on an empty draft takes the newest queued draft back before the editor
         // can read it as prompt history. Claimed here rather than in the editor because
@@ -766,7 +766,7 @@ impl App {
         // B4. `Ctrl+V` and Backspace-at-the-chip are about the *attachments*, which the
         // editor knows nothing about, so both are claimed before it sees them. Backspace
         // with text in the draft is still Backspace.
-        if key.code == KeyCode::Char('v') && key.modifiers == KeyModifiers::CONTROL {
+        if self.keymap.hits(Action::PasteImage, key) {
             self.request_clipboard_paste();
             return;
         }
@@ -781,7 +781,10 @@ impl App {
             .as_mut()
             .map(|composer| {
                 let before = composer.editor.text().to_string();
-                let action = composer.editor.handle_key(key, &self.completion_catalog);
+                let action =
+                    composer
+                        .editor
+                        .handle_key_with(key, &self.completion_catalog, &self.keymap);
                 if composer.editor.text() != before {
                     composer.user_changed_draft();
                 }
@@ -1363,10 +1366,7 @@ impl App {
 
     /// Whether this keystroke is the bare `↑` that retracts, on an empty draft.
     fn retract_key(&self, key: crossterm::event::KeyEvent) -> bool {
-        use crossterm::event::KeyCode;
-
-        key.code == KeyCode::Up
-            && key.modifiers.is_empty()
+        self.keymap.hits(Action::QueueRetract, key)
             && self
                 .sessions
                 .composer
@@ -1913,6 +1913,8 @@ impl App {
             "/machines" | "/fleet" => Some(Command::Machines),
             "/settings" => Some(Command::Settings),
             "/help" | "/hotkeys" => Some(Command::Help),
+            "/keys" | "/keymap" => Some(Command::Keys),
+            "/cost" | "/usage" => Some(Command::Cost),
             "/quit" => {
                 self.open_quit();
                 return true;
@@ -1968,8 +1970,16 @@ impl App {
         }
 
         self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
+        let (cancel, interrupt, quit) = (
+            self.keymap.label(Action::Cancel),
+            self.keymap.label(Action::Interrupt),
+            self.keymap.label(Action::Quit),
+        );
         self.inform(
-            "press ctrl+c again to quit · esc aborts a running turn · ctrl+q opens the quit dialog",
+            format!(
+                "press {cancel} again to quit · {interrupt} aborts a running turn · \
+                 {quit} opens the quit dialog"
+            ),
             NoticeKind::Info,
         );
     }
@@ -2000,7 +2010,12 @@ impl App {
     pub(super) fn interrupt_turn(&mut self) {
         let Some((plane, id)) = self.sessions.open.clone() else {
             self.inform(
-                "esc or ctrl+c interrupts a running turn; ctrl+q opens the quit dialog",
+                format!(
+                    "{} or {} interrupts a running turn; {} opens the quit dialog",
+                    self.keymap.label(Action::Interrupt),
+                    self.keymap.label(Action::Cancel),
+                    self.keymap.label(Action::Quit)
+                ),
                 NoticeKind::Info,
             );
             return;
