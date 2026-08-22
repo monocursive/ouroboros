@@ -37,10 +37,15 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
              "the account boundary starts before #{inspect(plane)}, so its crash restarts it"
     end
 
-    # The gateway is its only caller, so the gateway — and nothing else — may start after
-    # it. Anything else appearing here would be a durable owner placed downstream of a
-    # child whose crash it now depends on.
-    assert start_order |> Enum.drop(codex + 1) |> Enum.all?(&(&1 == Ouroboros.Gateway))
+    # The gateway is its only caller, so the gateway may start after it. The only other
+    # child allowed downstream is the code-intelligence pool: it owns nothing durable —
+    # language servers are respawned lazily — so a crash of the account boundary or the
+    # gateway costs it nothing it cannot rebuild, and its own crash restarts nothing.
+    # Anything else appearing here would be a durable owner placed downstream of a child
+    # whose crash it now depends on.
+    assert start_order
+           |> Enum.drop(codex + 1)
+           |> Enum.all?(&(&1 in [Ouroboros.Gateway, Ouroboros.CodeIntel.Supervisor]))
   end
 
   test "initializes once, reads the account, and follows a managed device-code login" do

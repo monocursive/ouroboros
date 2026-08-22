@@ -172,16 +172,15 @@ defmodule Ouroboros.Application do
     # every plane starts above it. It is unconditional for the reason the Codex account
     # boundary is: it is lazy, and no language server exists until a caller asks for one.
     #
-    # It starts immediately before the account boundary rather than after the gateway so
-    # the tail keeps its shape: the gateway is the last child and the only one a stranger
-    # can reach, and nothing may be placed downstream of it.
-    # The cost is that a crash of this subtree also restarts the account boundary and the
-    # gateway, which is why `CodeIntel.Supervisor` carries a deliberately generous restart
-    # intensity: language-server failures are states inside the pool, never crashes of it,
-    # and the subtree should absorb a great deal before it propagates anything.
+    # It starts last, after the gateway: under `rest_for_one` a crash of this subtree then
+    # restarts nothing, and a crash of the account boundary or the gateway restarts only a
+    # pool that rebuilds itself on the next request. The gateway stays the only child a
+    # stranger can reach; what follows it owns nothing durable. `CodeIntel.Supervisor`
+    # still carries a generous restart intensity, because language-server failures are
+    # states inside the pool, never crashes of it.
     children ++
-      [Ouroboros.Cluster, Ouroboros.CodeIntel.Supervisor, Ouroboros.Provider.CodexAppServer] ++
-      gateway_children()
+      [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++
+      gateway_children() ++ [Ouroboros.CodeIntel.Supervisor]
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data
