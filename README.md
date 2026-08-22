@@ -1761,6 +1761,15 @@ instead of making a departed machine disappear.
   becomes `:lost` unless the provider process still exists.
 - Workspace admission is node-local and does not provision worktrees or an OS
   sandbox. Shared filesystems need one routed authority or consensus.
+- Language servers are owned by the node, not by a session, and nothing about them
+  reaches a model yet. `Ouroboros.CodeIntel` pools servers per `{workspace root,
+  server}`, versions documents, gates diagnostics on freshness, and answers the nine
+  navigation operations — but no edit result carries diagnostics, no tool exposes
+  navigation, and there is no gateway method. Nothing is ever installed: a server absent
+  from the project's binaries and the user's `PATH` is an install hint and nothing more.
+  Per-server and per-host memory budgets, a restart cap, and a broken-key window exist
+  because language servers are a liability as much as an asset; a language-server failure
+  is always an error tuple and never blocks a write.
 - Autonomous evaluation is implemented with bounded revisions and step count, but
   aggregate token/cost/time budgets, independent policy approval, and behavioral
   regression scoring remain.
