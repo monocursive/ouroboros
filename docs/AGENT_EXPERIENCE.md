@@ -1,7 +1,8 @@
 # Ouroboros Agent Experience: the 2026 bar, the map, and the plan
 
-Status: research and plan, written 2026-08-22 on branch `review-fixes`. Nothing in this
-document is implemented unless it links to code that exists today; every scorecard
+Status: research and plan written 2026-08-22 on branch `review-fixes`, with a dated status
+section (§0a) recording what the implementation waves delivered. Below §0a nothing is
+implemented unless it links to code that exists today; every scorecard
 claim about the field cites a report in [research/agent-ux-2026/](research/agent-ux-2026/)
 and every claim about this codebase was re-read in the source. Companion to
 [ARCHITECTURE.md](ARCHITECTURE.md), [TUI.md](TUI.md), and [FLEET.md](FLEET.md).
@@ -45,6 +46,163 @@ view triage by need; make the effect ledger the feature; ship `ouro run --json` 
 `ouro acp`; and distribute signed releases with channels. Projected scorecard: 34 after
 Phase 1, 46 after Phase 2, 56 after Phase 3, 61–65 after Phase 4 — with 3s on the rows
 nobody holds.
+
+## 0a. Status as of 2026-08-23
+
+Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
+was. This section records what the implementation waves of 2026-08-22/23 delivered on
+`review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
+full Elixir suite at **1543 passed, 0 failed**; the Rust suites at **932 / 940 passed,
+0 failed** (one epmd-binding test in `tui/src/fleet.rs` is load-flaky when a stray
+`epmd -daemon` is running and passes in isolation every time). Every slice was built by a
+babysat Opus agent in an isolated worktree, diff-verified against its own final report,
+and merged with the CI-identical gates run on the merged tree; integration defects that
+only the merged tree could reveal are listed under each track.
+
+**Live-verified on the merged tree:** a real Claude Code 2.1.238 session started at
+`approval_mode: :prompt` through `ouro run --provider claude` emitted `approval_requested`
+(external, `kind: permissions`, the `Write` call with its cwd), the headless runner
+answered it, `approval_resolved` followed, `hello.txt` contained `hi`, and the result
+object reported `completed` with usage and `approvals: {requested: 1, answered: 1}` —
+the silent denial §3.1 row 6 described is over for Claude at both `:prompt` and
+`:default`. Also live-verified: `ouro run --resume` printing only the new turn's events;
+Codex app-server `thread/resume` refusing a thread with no rollout (fail-closed to
+`:lost`); the LSP pool's freshness gate against Apple clangd 21; `[` dumping a transcript
+into tmux 3.7's native scrollback.
+
+### Fix-first (§6)
+
+| # | Status |
+|---|---|
+| X1 | landed — `unsupported_approval_mode` typed refusal for `:prompt` on transports without an approvals channel (claude/gemini/grok/zai/codex-exec); lifted for Claude by the bridge below |
+| X2 | landed — `options.capabilities` declares `steer`; chrome offers it only where truthy (today `pi`; Codex app-server after C3's `turn/steer`) |
+| X3 | landed — docs name `Ctrl-O` |
+| X4 | landed — `[terminal] mouse`, one-time selection hint |
+| X5 | landed — DEC 2026 bracket around every frame, cursor escapes inside |
+| X6 | landed — `_excerpt`/`_bytes` leaf caps (128 KiB leaf, 512 KiB event, 4 MiB detail) + `interactive/coding.event_detail` |
+| X7 | landed — Codex app-server `multimodal: :native`, `localImage` input items (schema from `codex app-server generate-json-schema`, 0.147.0) |
+| X8 | landed — ACP diff content blocks → `file_change` with Myers unified diffs; commands/modes as `provider_event` kinds (`:status` is not a Harness type) |
+| X9 | landed — `resume_or_lose/2` at all three `:not_found` sites; `State.request/1` now carries `provider_session_id`; `sequence_offset` keeps sequences monotonic |
+| X10 | landed — turn-end dividers with elapsed time, queue badge |
+| X11 | landed — the modal shows kind, command+cwd, the diff, provider options, reason, and a fifth "don't ask again for `<rule>`" answer |
+| X12 | landed — plan cell + `Ctrl+T` panel |
+
+### Tracks (§7)
+
+| Slice | Status | Note |
+|---|---|---|
+| A0 | landed | `app.rs` → ten modules, no behaviour change |
+| A1 | landed | sync output, `ctrl+x [` scrollback dump, `ctrl+x v` editor view, mouse honesty, `/raw` (copy mode) |
+| A2 | landed | exhaustive `PresentationEvent` match — a new kind is a compile error; three-state thinking |
+| A3 | landed | per-dialect summarisers, exploration groups, head/tail 6+6 with `… +N lines · ctrl+o` |
+| A4 | landed | `ui/diff.rs`: gutters, word emphasis, counts from the parse, diffstat, `/diff` review overlay |
+| A5 | landed | plan cell + `Ctrl+T` |
+| A6 | landed | `pulldown-cmark` 0.13, Goose's hold-out rule for streaming tails, memo per (text, width, budget); no OSC 8 (ratatui has no cell attribute) |
+| A7 | landed | ranked footer cells, `[statusline] command` (JSON stdin, 300 ms), `[notifications]`, OSC 0 title |
+| A8 | landed | approval modal v2, snack bar (`ctrl+x a`) |
+| A9 | landed | details as a tree over `Event::raw` with `event_detail` fetch, `/export [--json]`, `/copy raw` |
+| A10 | landed | six palettes + `auto` (OSC 11) + `NO_COLOR`; screen-reader mode with Claude Code's label taxonomy and OSC 133; 392 colour sites routed through tokens |
+| A11 | pending | inline images |
+| A12 | landed | 5,000-entry gate: 2.6 ms debug / 0.6–1.3 ms release; found `Watch::entries` O(ledger) and the markdown memo thrashing |
+| B0 | landed | capabilities + usage in `State.public/1`; tri-state chrome (only an explicit `false` hides) |
+| B1 | landed | `interactive.configure` with `applies: :now | :next_turn` (`:now` only for `pi`); ACP refused by declaration (agent-invented mode ids) |
+| B2 | pending | plan mode |
+| B3 | landed | visible local+durable queue, `↑` retract, `Alt+Enter` steer where declared, Esc keeps the queue |
+| B4 | landed | `@` chips → the object envelope; image paste into `<workspace>/.ouroboros/images` (self-ignoring); `/effort`; `/model` |
+| B5 | landed | `Esc Esc` backtrack (fork where served, else edit-and-resend), `[keys] backtrack` |
+| B6 | landed | `rename` + auto-title, `fork` via each transport's own verb (`fork` capability), picker/rail columns |
+| B7 | landed (runtime) / client in flight | `workspace.exec` with `:operator_shell` ledger entry before run, envelope carries the last three |
+| B8 | landed | `keymap.rs`: 40 actions, `[keys]` grammar, every surface reads the map, `/keys` |
+| B9 | landed | grouped `?`, first-run tips, `? new here` |
+| C1 | landed | `Control.Permissions`: Claude Code's Bash semantics, four scopes, deny→ask→allow, protected paths, durable rules, every decision in the ledger, `permissions.{list,add,remove}` |
+| C2 | landed | `ouro mcp-serve` + `--permission-prompt-tool` + `interactive.request_approval`; `ClaudeAdapter` bridges `:prompt` and `:default`; **live-verified** |
+| C3 | partial | X7 landed; `turn/steer`, `acceptWithExecpolicyAmendment`, `acceptForSession` pending |
+| C4 | partial | X8 landed; `fs/*`, `terminal/*` service and `session/set_mode` pending |
+| C5 | pending | OS sandbox for the native agent |
+| C6 | pending | classifier |
+| D1 | landed | `Ouroboros.Provider.Native` on ReqLLM (not `Jido.AI.Agent` — its runtime executes tools itself); approvals at the tool boundary; native steer; checkpoint before the terminal event; **no live model run yet** |
+| D2 | landed | grep/glob/ls/`web_fetch`/`ask_user`/V4A `apply_patch`/skills/`todo` |
+| D3 | landed | AGENTS.md hierarchy with lazy `paths:` rules, cache-stable prefix + fingerprint, meter → `usage.context_window`, compaction that refuses rather than lose its archive, handoff |
+| D4 | pending | MCP client for the native agent |
+| D5 | landed | hooks (seven events wired; `SessionStart/End`, `PreCompact` declared, not wired) |
+| D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire) |
+| D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
+| D8 | in flight | Terminal-Bench adapter + local corpus |
+| E1 | landed | per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops; placed after the gateway |
+| E2 | landed (native) / vendor path in flight | diagnostics after edit in the native loop; Claude `PostToolUse` bridge in flight |
+| E3 | landed (native) / wire in flight | `code_intel` tool (eleven ops, rename gated); `code_intel.*` verbs in flight |
+| E4 | pending | `@symbol`, jump-to-definition |
+| E5 | pending | structural index |
+| F1 | landed | resume after restart |
+| F2 | pending | `ouro --continue` |
+| F3 | landed | usage accounting, `runtime.models` from `llm_db` |
+| F4 | landed | titles, list filters |
+| F5 | landed | `/export`; compaction archives |
+| G1 | landed (runtime) / client in flight | `interactive.delegate/delegations`, parent/children rows |
+| G2 | in flight | fleet triage |
+| G3 | pending | native subagent tool |
+| G4 | pending | visible agent-to-agent messaging |
+| G5 | pending | orchestration UI |
+| H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified** |
+| H2 | pending | `ouro acp` |
+| H3 | pending | `docs/PROTOCOL.md` |
+| H4 | pending | HTTP/SSE |
+| I1 | partial | `:permission` and `:operator_shell` kinds in the ledger; native tool calls as ledger entries pending |
+| I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
+| I3 | in flight | fleet-wide `ledger.list` + chain, `ouro ledger` |
+| J1–J5 | pending | distribution |
+
+### Scorecard now
+
+Same rubric as §3.1; the 2026-08-22 column is the baseline, the 2026-08-23 column is
+what a user of `ouro` on `review-fixes` gets today.
+
+| # | Capability | 08-22 | 08-23 |
+|---|---|---|---|
+| 1 | Edit reliability & self-verification | 1 | 2 (native: read-before-edit, modified-since-read, diagnostics after edit, `[checks]`) |
+| 2 | Benchmark standing | 0 | 0 (adapter in flight; no number) |
+| 3 | Token efficiency & cost | 0 | 2 (usage + cost everywhere; cache-stable prefix; soft budget) |
+| 4 | Responsiveness | 1 | 1 (managed transports still re-exec per turn) |
+| 5 | Steering mid-turn | 1 | 2 (visible queue; native steer; vendor steer only where declared) |
+| 6 | Plan / approval flow | 0 | 2 (approvals real on Claude/Codex/ACP/native with rules and "don't ask again"; no plan mode yet) |
+| 7 | Input ergonomics | 1 | 2 (chips, image paste, `/effort`, `/model`, rebindable keys; no vim) |
+| 8 | TUI rendering correctness | 1 | 2 (sync output, escape hatches, themes, a11y) |
+| 9 | Work visibility | 1 | 2 (every kind rendered, plan panel, diff review, details tree; delegation rows in flight) |
+| 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
+| 11 | Sandboxing / isolation | 1 | 2 (worktrees on both planes; no OS sandbox) |
+| 12 | MCP & tool ecosystem | 0 | 1 (Ouroboros *serves* MCP to Claude; no native MCP client; hooks and skills landed) |
+| 13 | LSP / semantic navigation | 0 | 2 (pool + native tool; vendor path in flight) |
+| 14 | Git-native flow | 0 | 1 (worktrees) |
+| 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway) |
+| 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
+| 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
+| 18 | In-session parallelism | 1 | 1→2 (delegation on the wire; client in flight) |
+| 19 | Background handoff + remote attach | 2 | 2 |
+| 20 | Cross-machine / fleet coordination | 2 | 2→3 (fleet ledger queries and triage in flight) |
+| 21 | Programmability | 1 | 2 (hooks, skills, `ouro run --json`, MCP server; no ACP agent mode yet) |
+| 22 | Install / update / auth | 1 | 1 |
+| 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
+| 24 | Audit & governance | 2 | 2→3 (permission and operator-shell effects ledgered; fleet queries in flight) |
+| 25 | Vendor honesty & stability | 1 | 1 |
+| | **Total / 75** | **23** | **≈45, ≈49 once the in-flight slices land** |
+
+### Honest limits added this wave
+
+- The native agent has never been run against a real model in this environment (no key;
+  the `:live_native` test is defined and skipped). `Model.ReqLLM`'s chunk normalisation is
+  the highest-risk untested code on the branch.
+- `claude` sessions at `:auto_edit`/`:auto_approve` are unchanged — they never asked and
+  still do not. Gemini, Grok, and Z.ai are still refused at `:prompt` (no bridge).
+- The Claude bridge re-performs the pinned adapter's private argv assembly; if the pinned
+  Harness changes how Claude is started, the bridged path must follow.
+- A delegation is a coding task with a parent, not a sub-conversation (G3/G4 pending).
+- `workspace.exec` is one command, one process; a detached grandchild outlives its timeout.
+- The LSP pool inherits language-server stderr; ElixirLS/Expert cold starts are unmeasured
+  against the 45 s initialize ceiling.
+- Worktrees scope containment; `bash` still runs with the operator's privileges and the
+  worktree shares the repository's object store.
+- Test peers in `cluster_test.exs` never receive this repo's provider overrides.
+
 
 ## 1. Method and sources
 
