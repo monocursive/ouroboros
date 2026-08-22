@@ -106,6 +106,46 @@ defmodule Ouroboros.Provider.Native.Session do
   @impl Jido.Harness.SessionAdapter
   def close(handle), do: SessionAdapter.call(handle, :close)
 
+  @doc """
+  Rewinds this session to the end of `to_turn` — D10's `/rewind`, and its honesty.
+
+  `what` is `:files`, `:conversation`, or `:both`. `to_turn` is a turn id from a
+  `provider_event` of kind `checkpoint`, or `0`/`:start` for "before anything this
+  session did".
+
+      {:ok, %{restored: [%{path: …, action: "restored" | "deleted"}],
+              unrestorable: [%{path: … | nil, turn_id: …, reason: …}],
+              turns: [turn ids], messages: n}}
+
+  **`unrestorable` is the point of the return value.** Claude Code's rewind silently
+  under-delivered (issue #18516) and §2.5 of the plan names that as a mistake with
+  receipts, so this answers with both lists and a caller is expected to show the second
+  one *before* the operator commits. Anything a `bash` command changed is in it, by turn,
+  because a shell's effects are not checkpointed and never can be by a runtime that does
+  not inspect the programs it runs.
+
+  Both halves emit: one `file_change` carrying every restored path, and a `status`-kind
+  `provider_event` naming the rewind. A rewind that left no trace in the transcript would
+  be a change to the workspace that the transcript denies.
+
+  Refused while a turn is running: rewinding underneath a loop that is mid-edit would
+  race its own writes.
+  """
+  @spec rewind(pid(), String.t() | non_neg_integer() | :start, :files | :conversation | :both) ::
+          {:ok, map()} | {:error, term()}
+  def rewind(handle, to_turn, what \\ :both) when what in [:files, :conversation, :both],
+    do: SessionAdapter.call(handle, {:rewind, to_turn, what}, 60_000)
+
+  @doc """
+  The turns this session can be rewound to, oldest first.
+
+  The rewind menu, in the shape a client renders: turn id, when, how many files, which
+  paths, and how many shell commands ran in it — the last being what tells an operator
+  that a turn is only partly undoable before they choose it.
+  """
+  @spec rewind_points(pid()) :: {:ok, [map()]} | {:error, term()}
+  def rewind_points(handle), do: SessionAdapter.call(handle, :rewind_points)
+
   @doc false
   def start_link({request, context}), do: GenServer.start_link(__MODULE__, {request, context})
 
@@ -231,6 +271,31 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call({:checkpoint, _stale_turn_id, _snapshot}, _from, state),
     do: {:reply, :ok, state}
+
+  def handle_call(:rewind_points, _from, state) do
+    case Checkpoint.turns(state.session_dir) do
+      {:ok, turns} -> {:reply, {:ok, Enum.map(turns, &Checkpoint.summary/1)}, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:rewind, _to_turn, _what}, _from, %{loop: loop} = state)
+      when not is_nil(loop),
+      do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:rewind, to_turn, what}, _from, state) do
+    case rewind_files(state, to_turn, what) do
+      {:ok, outcome} ->
+        {state, truncated} = rewind_conversation(state, to_turn, what)
+        outcome = Map.put(outcome, :messages, truncated)
+
+        announce(state, to_turn, what, outcome)
+        {:reply, {:ok, outcome}, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
 
   @impl GenServer
   def handle_info({:native_event, turn_id, event}, %{loop: %{turn_id: turn_id}} = state) do
@@ -410,6 +475,76 @@ defmodule Ouroboros.Provider.Native.Session do
       {:error, reason} -> {:error, {:checkpoint_unusable, reason}}
     end
   end
+
+  # ---------------------------------------------------------------- rewind
+
+  defp rewind_files(_state, _to_turn, :conversation),
+    do: {:ok, %{restored: [], unrestorable: [], turns: []}}
+
+  defp rewind_files(state, to_turn, _files_or_both),
+    do: Checkpoint.restore_files(state.session_dir, to_turn)
+
+  defp rewind_conversation(state, _to_turn, :files), do: {state, length(state.messages)}
+
+  defp rewind_conversation(state, to_turn, _conversation_or_both) do
+    case Checkpoint.message_count_at(state.session_dir, to_turn) do
+      {:ok, count} when count <= length(state.messages) ->
+        state = %{state | messages: Enum.take(state.messages, count)}
+        _ = checkpoint(state)
+        {state, count}
+
+      # A count this session cannot honour — a turn id it never recorded, or a
+      # conversation already shorter than the mark — leaves the transcript alone. A
+      # rewind that truncated to a number it could not justify would lose messages the
+      # manifest never claimed to cover.
+      _unusable ->
+        {state, length(state.messages)}
+    end
+  end
+
+  defp announce(state, to_turn, what, outcome) do
+    if outcome.restored != [] do
+      emit(state, %{
+        type: :file_change,
+        payload: %{
+          "changes" =>
+            Enum.map(outcome.restored, fn entry ->
+              %{
+                "path" => entry.path,
+                "relative_path" => Path.relative_to(entry.path, state.scope.root),
+                "kind" => if(entry.action == "deleted", do: "delete", else: "modify"),
+                "diff" => "",
+                "reason" => "rewind"
+              }
+            end),
+          "status" => "completed"
+        },
+        turn_id: nil,
+        request_id: nil
+      })
+    end
+
+    emit(state, %{
+      type: :provider_event,
+      payload: %{
+        "kind" => "status",
+        "event" => "rewind",
+        "to_turn" => to_string(to_turn),
+        "what" => Atom.to_string(what),
+        "restored" => length(outcome.restored),
+        "unrestorable" => Enum.map(outcome.unrestorable, &describe_unrestorable/1),
+        "messages" => outcome.messages
+      },
+      turn_id: nil,
+      request_id: nil
+    })
+  end
+
+  defp describe_unrestorable(%{path: nil, turn_id: turn_id, reason: reason}),
+    do: %{"turn_id" => turn_id, "reason" => reason}
+
+  defp describe_unrestorable(%{path: path} = entry),
+    do: %{"path" => path, "reason" => Map.get(entry, :reason) || "could not be restored"}
 
   defp checkpoint(state) do
     case Checkpoint.write(state.checkpoint_path, state.messages,

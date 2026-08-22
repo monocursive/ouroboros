@@ -117,6 +117,9 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                :output_text_delta,
                :output_text_final,
                :usage,
+               # D6: the turn's file-checkpoint summary, emitted before the terminal
+               # event so a client can offer a rewind menu row for this turn.
+               :provider_event,
                :turn_completed
              ]
 

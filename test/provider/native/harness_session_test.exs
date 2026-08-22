@@ -172,8 +172,13 @@ defmodule Ouroboros.Provider.Native.HarnessSessionTest do
   end
 
   test "steer is accepted because the transport declares it, and reaches the model", context do
+    # The command sleeps so the tool is demonstrably still running when the steer is
+    # sent. `await_replay` polls every 20 ms and the journal adds its own latency, so a
+    # tool that finished in microseconds turned "delivered at the next tool boundary"
+    # into a race against the poll — the property under test is *where* the steer lands,
+    # not how fast the runtime is.
     script = [
-      [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+      [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "sleep 0.4; echo one"}}}],
       [{:text, "acknowledged"}, {:finish, :stop}]
     ]
 
@@ -216,8 +221,12 @@ defmodule Ouroboros.Provider.Native.HarnessSessionTest do
   end
 
   test "interrupt is reported by the worker as soon as the transport accepts it", context do
+    # The first command sleeps so the turn is demonstrably still running when the
+    # interrupt arrives. `await_replay` polls every 20 ms and the journal adds its own
+    # latency; a tool that finished in microseconds made "the turn stops after the
+    # current tool" a race against the poll rather than a property.
     script = [
-      [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+      [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "sleep 0.4; echo one"}}}],
       [{:tool_call, %{id: "c2", name: "bash", input: %{"command" => "echo two"}}}],
       [{:text, "never"}, {:finish, :stop}]
     ]
