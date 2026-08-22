@@ -538,6 +538,19 @@ if System.get_env("OUROBOROS_GATEWAY") == "1" do
       _other -> raise "OUROBOROS_GATEWAY_QUEUE_LIMIT must be a positive integer"
     end
 
+  # The queue limit counts frames; these three bound how large one of them gets. A
+  # multi-megabyte diff inside an event payload is excerpted to `event_leaf_bytes` with a
+  # marker naming its true size, one event's payload strings to `event_payload_bytes`
+  # between them, and `interactive.event_detail` re-fetches the same event under the
+  # larger `detail_leaf_bytes`. 1024 is the floor on all three, the same floor
+  # `Ouroboros.Gateway.Config` enforces: below it an excerpt names nothing.
+  gateway_bytes = fn name, default ->
+    case Integer.parse(gateway_value.(name) || default) do
+      {value, ""} when value >= 1_024 -> value
+      _other -> raise "#{name} must be an integer of at least 1024 bytes"
+    end
+  end
+
   config :ouroboros, :gateway,
     enabled: true,
     port: gateway_port,
@@ -548,7 +561,10 @@ if System.get_env("OUROBOROS_GATEWAY") == "1" do
     scope: gateway_scope,
     allow_shutdown: System.get_env("OUROBOROS_GATEWAY_ALLOW_SHUTDOWN") == "1",
     max_frame: gateway_max_frame,
-    queue_limit: gateway_queue_limit
+    queue_limit: gateway_queue_limit,
+    event_leaf_bytes: gateway_bytes.("OUROBOROS_GATEWAY_EVENT_LEAF_BYTES", "131072"),
+    event_payload_bytes: gateway_bytes.("OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES", "524288"),
+    detail_leaf_bytes: gateway_bytes.("OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES", "8388608")
 
   # A client that spawns this node as a child process owns its stdout. stderr is the
   # foreground default; the managed-file block below replaces it for a detached/service

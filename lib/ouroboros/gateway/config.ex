@@ -47,6 +47,23 @@ defmodule Ouroboros.Gateway.Config do
   client to replay, the inbound one refuses requests — and a single variable governing
   both would be a number an operator could not reason about in either direction.
 
+  ## Three byte caps, and what each one bounds
+
+  `:queue_limit` counts *frames*. It says nothing about how large one of them is, which is
+  why a single multi-megabyte diff used to cross the socket whole on every notification
+  and on every replay. The three byte caps bound the frame itself:
+
+    * `:event_leaf_bytes` (`OUROBOROS_GATEWAY_EVENT_LEAF_BYTES`, 128 KiB) — the most one
+      string inside an event `payload` may put on the wire.
+    * `:event_payload_bytes` (`OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES`, 512 KiB) — the most
+      *all* of one event's payload strings may put on the wire together.
+    * `:detail_leaf_bytes` (`OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES`, 8 MiB) — the same
+      per-string cap, raised, for `interactive.event_detail` / `coding.event_detail`,
+      which exist so a client can ask for the one event an excerpt came from.
+
+  All three are read by `Ouroboros.Gateway.Wire` through `event_limits/0` rather than off
+  this struct; that function's docstring says why.
+
   ## Honest limits
 
   The token authenticates a transport. It is not a sandbox and this struct does not
@@ -61,7 +78,18 @@ defmodule Ouroboros.Gateway.Config do
   the life of the node.
   """
 
-  @enforce_keys [:bind, :port, :token, :scope, :max_frame, :queue_limit, :data_dir]
+  @enforce_keys [
+    :bind,
+    :port,
+    :token,
+    :scope,
+    :max_frame,
+    :queue_limit,
+    :event_leaf_bytes,
+    :event_payload_bytes,
+    :detail_leaf_bytes,
+    :data_dir
+  ]
   defstruct @enforce_keys ++
               [token_file: nil, token_generate: false, allow_remote: false, allow_shutdown: false]
 
@@ -76,6 +104,9 @@ defmodule Ouroboros.Gateway.Config do
           scope: scope(),
           max_frame: pos_integer(),
           queue_limit: pos_integer(),
+          event_leaf_bytes: pos_integer(),
+          event_payload_bytes: pos_integer(),
+          detail_leaf_bytes: pos_integer(),
           data_dir: Path.t(),
           allow_remote: boolean(),
           allow_shutdown: boolean()
@@ -97,10 +128,18 @@ defmodule Ouroboros.Gateway.Config do
   # with an oversized-frame error that names the wrong cause.
   @min_max_frame 1_024
 
+  # An excerpt shorter than this names nothing a person could read, and a cap below it
+  # would turn every event payload into a wall of markers. It is the floor for all three
+  # byte caps below.
+  @min_leaf_bytes 1_024
+
   @default_port 0
   @default_bind {127, 0, 0, 1}
   @default_max_frame 1_048_576
   @default_queue_limit 1_000
+  @default_event_leaf_bytes 131_072
+  @default_event_payload_bytes 524_288
+  @default_detail_leaf_bytes 8_388_608
 
   defimpl Inspect do
     import Inspect.Algebra
@@ -148,7 +187,8 @@ defmodule Ouroboros.Gateway.Config do
   Validates one gateway configuration.
 
   Recognized keys: `:port`, `:bind`, `:token`, `:token_file`, `:token_generate`,
-  `:allow_remote`, `:scope`, `:allow_shutdown`, `:max_frame`, `:queue_limit`, `:data_dir`.
+  `:allow_remote`, `:scope`, `:allow_shutdown`, `:max_frame`, `:queue_limit`,
+  `:event_leaf_bytes`, `:event_payload_bytes`, `:detail_leaf_bytes`, `:data_dir`.
   Unknown keys are ignored so a later slice can add one without this raising on an older
   node.
   """
@@ -168,10 +208,66 @@ defmodule Ouroboros.Gateway.Config do
       scope: scope!(opts),
       max_frame: max_frame!(opts),
       queue_limit: queue_limit!(opts),
+      event_leaf_bytes:
+        bytes!(
+          opts,
+          :event_leaf_bytes,
+          @default_event_leaf_bytes,
+          "OUROBOROS_GATEWAY_EVENT_LEAF_BYTES"
+        ),
+      event_payload_bytes:
+        bytes!(
+          opts,
+          :event_payload_bytes,
+          @default_event_payload_bytes,
+          "OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES"
+        ),
+      detail_leaf_bytes:
+        bytes!(
+          opts,
+          :detail_leaf_bytes,
+          @default_detail_leaf_bytes,
+          "OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES"
+        ),
       data_dir: data_dir!(opts),
       allow_remote: allow_remote?(opts),
       allow_shutdown: Keyword.get(opts, :allow_shutdown, false) == true
     }
+  end
+
+  @doc """
+  The byte caps `Ouroboros.Gateway.Wire` applies to an outbound event payload.
+
+  Read straight from application environment rather than from a `%__MODULE__{}` because
+  the encoder is reached from three directions — a notification fan-out, a `replay`
+  result, and a `subscribe` backlog — and only one of them has a connection's config in
+  hand. Threading the struct to the other two would be three call sites that can drift;
+  one resolver is the thing that cannot.
+
+  This is the lenient half of the same predicate `new!/1` raises on: by the time a frame
+  is being encoded the listener has already started, so the refusal has happened, and a
+  cap that is somehow still unusable falls back to its default rather than killing the
+  connection mid-write.
+  """
+  @spec event_limits(keyword()) :: %{
+          event_leaf_bytes: pos_integer(),
+          event_payload_bytes: pos_integer(),
+          detail_leaf_bytes: pos_integer()
+        }
+  def event_limits(opts \\ Application.get_env(:ouroboros, :gateway, [])) do
+    %{
+      event_leaf_bytes: bytes_or_default(opts, :event_leaf_bytes, @default_event_leaf_bytes),
+      event_payload_bytes:
+        bytes_or_default(opts, :event_payload_bytes, @default_event_payload_bytes),
+      detail_leaf_bytes: bytes_or_default(opts, :detail_leaf_bytes, @default_detail_leaf_bytes)
+    }
+  end
+
+  defp bytes_or_default(opts, key, default) do
+    case usable_bytes(Keyword.get(opts, key, default)) do
+      {:ok, bytes} -> bytes
+      :error -> default
+    end
   end
 
   @doc "Renders a bind address the way an operator wrote it."
@@ -370,6 +466,28 @@ defmodule Ouroboros.Gateway.Config do
                 inspect(other)
     end
   end
+
+  # The three byte caps that bound an outbound event payload. One predicate decides what
+  # a usable value is; `new!/1` raises on anything else because a listener that starts
+  # with a cap an operator fat-fingered is a listener that silently un-bounds the wire,
+  # and `event_limits/0` falls back to the default because the encoder must never raise
+  # inside a frame it is halfway through writing.
+  defp bytes!(opts, key, default, variable) do
+    value = Keyword.get(opts, key, default)
+
+    case usable_bytes(value) do
+      {:ok, bytes} ->
+        bytes
+
+      :error ->
+        raise ArgumentError,
+              "#{variable} must be an integer of at least #{@min_leaf_bytes} bytes, got: " <>
+                inspect(value)
+    end
+  end
+
+  defp usable_bytes(value) when is_integer(value) and value >= @min_leaf_bytes, do: {:ok, value}
+  defp usable_bytes(_value), do: :error
 
   defp data_dir!(opts) do
     case Keyword.get(opts, :data_dir) do

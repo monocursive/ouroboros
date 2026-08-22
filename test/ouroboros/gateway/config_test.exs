@@ -74,6 +74,20 @@ defmodule Ouroboros.Gateway.ConfigTest do
       assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_QUEUE_LIMIT/, fn ->
         Config.new!(valid(queue_limit: 0))
       end
+
+      # A byte cap below the floor makes every event payload a wall of markers naming
+      # sizes and showing nothing. The listener refuses rather than starting like that.
+      assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_EVENT_LEAF_BYTES/, fn ->
+        Config.new!(valid(event_leaf_bytes: 64))
+      end
+
+      assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES/, fn ->
+        Config.new!(valid(event_payload_bytes: "512k"))
+      end
+
+      assert_raise ArgumentError, ~r/OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES/, fn ->
+        Config.new!(valid(detail_leaf_bytes: 0))
+      end
     end
 
     test "an unreadable token file is refused by path" do
@@ -172,6 +186,28 @@ defmodule Ouroboros.Gateway.ConfigTest do
       assert config.token_generate == false
       assert config.max_frame == 1_048_576
       assert config.queue_limit == 1_000
+      assert config.event_leaf_bytes == 131_072
+      assert config.event_payload_bytes == 524_288
+      assert config.detail_leaf_bytes == 8_388_608
+    end
+
+    test "the encoder reads the same caps this struct validates" do
+      # `Wire` cannot reach a connection's struct from a replay task, so it resolves the
+      # caps itself. What it resolves has to be what an operator configured, and what it
+      # falls back to has to be what `new!/1` would have handed a listener.
+      assert Config.event_limits() == %{
+               event_leaf_bytes: 131_072,
+               event_payload_bytes: 524_288,
+               detail_leaf_bytes: 8_388_608
+             }
+
+      assert Config.event_limits(event_leaf_bytes: 4_096).event_leaf_bytes == 4_096
+
+      # The refusal already happened at boot: `new!/1` above rejects the same value. So a
+      # cap that is somehow still unusable when a frame is halfway written falls back
+      # rather than killing the connection that was writing it.
+      assert Config.event_limits(event_leaf_bytes: 8).event_leaf_bytes == 131_072
+      assert Config.event_limits(detail_leaf_bytes: nil).detail_leaf_bytes == 8_388_608
     end
 
     test "a token file wins over the environment token and is trimmed" do
