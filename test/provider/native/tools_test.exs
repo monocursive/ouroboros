@@ -38,9 +38,24 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   end
 
   describe "the tool set" do
-    test "is Pi's four plus plan, and every one has a JSON Schema the model can read" do
+    test "is D2's full set, and every one has a JSON Schema the model can read" do
       names = Enum.map(Tools.specs(nil, nil), & &1.name)
-      assert names == ["read", "write", "edit", "bash", "plan"]
+
+      assert names == [
+               "read",
+               "write",
+               "edit",
+               "apply_patch",
+               "bash",
+               "grep",
+               "glob",
+               "ls",
+               "web_fetch",
+               "code_intel",
+               "ask_user",
+               "skill",
+               "plan"
+             ]
 
       for spec <- Tools.specs(nil, nil) do
         assert is_binary(spec.description) and spec.description != ""
@@ -52,14 +67,42 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
     test "allowed_tools narrows the set and disallowed_tools always wins" do
       assert Enum.map(Tools.specs(["read", "bash"], nil), & &1.name) == ["read", "bash"]
       assert Enum.map(Tools.specs(["read", "bash"], ["bash"]), & &1.name) == ["read"]
-      assert Enum.map(Tools.specs(nil, ["bash", "write", "edit"]), & &1.name) == ["read", "plan"]
+
+      assert Enum.map(Tools.specs(nil, ["bash", "write", "edit"]), & &1.name) == [
+               "read",
+               "apply_patch",
+               "grep",
+               "glob",
+               "ls",
+               "web_fetch",
+               "code_intel",
+               "ask_user",
+               "skill",
+               "plan"
+             ]
     end
 
     test "a filtered tool is unknown, exactly like one that does not exist" do
       assert {:error, :unknown_tool} = Tools.lookup("bash", ["read"], nil)
       assert {:error, :unknown_tool} = Tools.lookup("bash", nil, ["bash"])
-      assert {:error, :unknown_tool} = Tools.lookup("grep", nil, nil)
+      assert {:error, :unknown_tool} = Tools.lookup("Grep", nil, nil)
+      assert {:error, :unknown_tool} = Tools.lookup("websearch", nil, nil)
       assert {:ok, Ouroboros.Provider.Native.Tools.Bash} = Tools.lookup("bash", nil, nil)
+      assert {:ok, Ouroboros.Provider.Native.Tools.Grep} = Tools.lookup("grep", nil, nil)
+    end
+
+    test "`todo` is an alias of `plan`, is not a second schema, and honours the filters" do
+      refute "todo" in Enum.map(Tools.specs(nil, nil), & &1.name)
+
+      assert {:ok, Ouroboros.Provider.Native.Tools.Plan} = Tools.lookup("todo", nil, nil)
+      assert {:ok, Ouroboros.Provider.Native.Tools.Plan} = Tools.lookup("todowrite", nil, nil)
+      assert Tools.canonical("todo") == "plan"
+      assert Tools.canonical("bash") == "bash"
+
+      # A filter that an alias walks around is not a filter.
+      assert {:error, :unknown_tool} = Tools.lookup("todo", nil, ["plan"])
+      assert {:error, :unknown_tool} = Tools.lookup("todo", nil, ["todo"])
+      assert {:ok, Ouroboros.Provider.Native.Tools.Plan} = Tools.lookup("todo", ["plan"], nil)
     end
   end
 
