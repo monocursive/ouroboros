@@ -157,11 +157,17 @@ config :ouroboros,
 # journal deliberately discards raw provider records. Claude gains the one flag its
 # managed transport needs to have a human in the loop at all — `--permission-prompt-tool`
 # pointed at `ouro mcp-serve` — and is otherwise the pinned adapter.
+#
+# `native` is not an override of an upstream adapter: it is a tenth provider, and the
+# only one whose tool loop runs in this VM. It registers through the same map for the
+# same reason the three overrides do — `Jido.Harness.Registry` merges this map over its
+# built-ins, so nothing else in the runtime needs a list of providers to keep in sync.
 config :jido_harness,
   providers: %{
     claude: Ouroboros.Provider.ClaudeAdapter,
     codex: Ouroboros.Provider.CodexAdapter,
     kimi: Ouroboros.Provider.KimiAdapter,
-    opencode: Ouroboros.Provider.OpenCodeAdapter
+    opencode: Ouroboros.Provider.OpenCodeAdapter,
+    native: Ouroboros.Provider.Native
   },
   process_driver: Ouroboros.Provider.ProcessDriver

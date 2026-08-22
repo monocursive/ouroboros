@@ -184,6 +184,48 @@ The coordinator scans live Harness metadata before starting a missing run. That
 closes the crash window between `Run.start/2` and saving the returned run ID, where an
 unconditional retry could otherwise launch duplicate billable work.
 
+#### The native provider
+
+`Ouroboros.Provider.Native` is the one exception to "Ouroboros does not wrap those CLIs
+in a second tool loop": it *is* the loop. It registers through `:jido_harness, :providers`
+beside the three adapters this runtime already overrides, declares one session transport
+whose adapter is a supervised GenServer in this VM, and emits the same normalized events
+into the same journals, gateway stream, and cells as every vendor provider. Nothing about
+a vendor session changes because it exists.
+
+Because the loop is here, three things are possible that are structurally impossible for
+a managed transport: a tool call can be blocked on a human approval before it runs, a
+steered message can be delivered between two tool calls of a running turn, and an
+interrupt can stop the turn after the current tool rather than by killing a process. It
+is therefore where LSP, MCP, hooks, permission rules, compaction, and file checkpoints
+attach natively — none of which exist yet.
+
+- `Ouroboros.Provider.Native.Loop` drives one turn. It runs in a task so the session
+  process stays answerable, emits through a function, and takes control on its mailbox.
+  Models are reached through `Ouroboros.Provider.Native.Model`, a single-callback
+  behaviour whose ReqLLM implementation opens every provider ReqLLM ships. `jido_ai` is
+  used only for `ToolAdapter`, which turns a `Jido.Action` schema into the model's JSON
+  Schema.
+- `Ouroboros.Provider.Native.Tools` is `read`, `write`, `edit`, `bash`, and `plan`. Every
+  path goes through `Ouroboros.Provider.Native.Paths`, which builds on
+  `Ouroboros.Workspace.Path` and adds the case a tool loop needs: a file that does not
+  exist yet, resolved through the deepest ancestor that does, so a write through a
+  symlinked parent is judged by where that parent really points.
+- `Ouroboros.Provider.Native.Session` is the transport. It writes the conversation to
+  `Ouroboros.Provider.Native.Checkpoint` — content-addressed, `0600`, atomic — *before*
+  the terminal turn event reaches the owner, the same checkpoint-before-broadcast rule
+  the interactive coordinator follows. That file is what makes `provider_session_id`
+  resumable for the one provider that is itself holding the transcript.
+- `Ouroboros.Provider.Native.Permissions` is a thin bridge to `Ouroboros.Control.Permissions`,
+  reached by `Code.ensure_loaded?/1`. With no engine present every gated tool answers
+  `{:ask, :no_engine}` and reaches a human; a missing rule engine never becomes a silent
+  allow.
+
+There is no OS sandbox. `sandbox_mode: :workspace_write` is those path checks and nothing
+more, `:read_only` refuses `write`, `edit`, and every `bash` command, and `:unrestricted`
+is not declared at all — a sandbox mode this runtime cannot enforce would be a promise no
+code keeps. The README states the same limits where an operator will read them.
+
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.
 
