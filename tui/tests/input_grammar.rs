@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use ouro::model::{Attachment, AttachmentKind, Plane};
 use ouro::proto::{ErrorCode, Hello, RpcError};
 use ouro::transport::ClientError;
-use ouro::ui::app::{App, Call, ClipboardOutcome, ComposerVerb, Msg, Tag};
+use ouro::ui::app::{App, Call, ClipboardOutcome, ComposerVerb, Msg, Overlay, Tag};
 
 use support::{app, full_hello, render, Screen};
 
@@ -842,4 +842,276 @@ fn a_queued_draft_carries_its_attachments_all_the_way_to_the_wire() {
     let released = turn_calls(&app.drain());
     assert_eq!(released[0].0, "interactive.follow_up");
     assert_eq!(released[0].1["input"]["attachments"], json!(["src/lib.rs"]));
+}
+
+// ---------------------------------------------------------------------------------------
+// (c) B5 — Esc, Esc Esc, and going back
+// ---------------------------------------------------------------------------------------
+
+/// An `input_accepted` event, which is the durable record the backtrack menu reads.
+fn user_turn(sequence: u64, text: &str) -> Value {
+    event(sequence, "input_accepted", json!({ "text": text }))
+}
+
+fn overlay_is_backtrack(app: &App) -> bool {
+    matches!(app.overlay, Some(Overlay::Backtrack { .. }))
+}
+
+fn backtrack_entries(app: &App) -> Vec<String> {
+    match &app.overlay {
+        Some(Overlay::Backtrack { entries, .. }) => entries
+            .iter()
+            .map(|(_sequence, text)| text.clone())
+            .collect(),
+        _other => Vec::new(),
+    }
+}
+
+/// Two Escapes inside the window open the menu; the first still does its ordinary job.
+#[test]
+fn esc_esc_within_the_window_opens_the_backtrack_menu() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing"), user_turn(2, "second thing")],
+    );
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+    assert_eq!(
+        backtrack_entries(&app),
+        vec!["first thing".to_string(), "second thing".to_string()]
+    );
+}
+
+/// Outside the window they are two Escapes, which is what an operator who paused meant.
+#[test]
+fn two_escapes_outside_the_window_are_two_escapes() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+
+    for _ in 0..(ouro::ui::app::BACKTRACK_TICKS + 1) {
+        app.apply(Msg::Tick);
+    }
+
+    app.apply(key(KeyCode::Esc));
+    assert!(!overlay_is_backtrack(&app), "{:?}", app.overlay);
+}
+
+/// Claude Code #43717: the chord must be rebindable, and it must be possible to turn off.
+#[test]
+fn the_backtrack_chord_is_rebindable_and_can_be_disabled() {
+    let mut off = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+    off.config.keys.backtrack = Some("off".into());
+    compose(&mut off);
+    off.apply(key(KeyCode::Esc));
+    off.apply(key(KeyCode::Esc));
+    assert!(!overlay_is_backtrack(&off), "esc esc is off");
+
+    let mut alt = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+    alt.config.keys.backtrack = Some("alt+up".into());
+    compose(&mut alt);
+    alt.apply(key(KeyCode::Esc));
+    alt.apply(key(KeyCode::Esc));
+    assert!(!overlay_is_backtrack(&alt), "esc esc is not the chord now");
+
+    alt.apply(modified(KeyCode::Up, KeyModifiers::ALT));
+    assert!(overlay_is_backtrack(&alt), "alt+up is");
+}
+
+/// A chord this build cannot read is reported and treated as unset, never as "off".
+#[test]
+fn an_unreadable_backtrack_chord_falls_back_to_the_default() {
+    let config: ouro::config::Config =
+        toml::from_str("[keys]\nbacktrack = \"ctrl+shift+meta+z\"\n").expect("parseable");
+    assert_eq!(
+        config.keys.backtrack(),
+        ouro::config::Backtrack::EscEsc,
+        "an unreadable chord is unset, and unset is the default"
+    );
+}
+
+/// Esc interrupts a running turn, and the second Esc of the chord does not stop it doing
+/// so — Claude Code #16905 is exactly the interrupt being disabled by other state.
+#[test]
+fn the_first_esc_of_the_chord_still_interrupts() {
+    let mut app = opened(
+        "running",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+
+    let interrupts = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.interrupt")
+        .count();
+    assert_eq!(interrupts, 1);
+
+    app.apply(key(KeyCode::Esc));
+    assert!(overlay_is_backtrack(&app), "and the chord still completed");
+}
+
+/// Where `interactive.fork` is not served, Enter is "edit and resend" and the menu says so.
+#[test]
+fn enter_edits_and_resends_where_the_gateway_cannot_fork() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing"), user_turn(2, "second thing")],
+    );
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+
+    let text = screen(&mut app).text();
+    assert!(
+        text.contains("enter edits and resends as a new turn"),
+        "{text}"
+    );
+    assert!(!text.contains("enter forks"), "{text}");
+
+    app.apply(key(KeyCode::Up));
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.overlay.is_none());
+    assert_eq!(draft(&app), "first thing");
+    assert!(
+        app.drain()
+            .iter()
+            .all(|call| call.method != "interactive.fork"),
+        "nothing was forked"
+    );
+}
+
+/// Where it is served, Enter forks — and the menu never promises where the branch starts,
+/// because `interactive.fork` takes a session and no message.
+#[test]
+fn enter_forks_where_the_gateway_serves_it_without_promising_where_the_branch_starts() {
+    let mut app = opened_serving("idle", steering_capabilities(), &["interactive.fork"]);
+    app.apply(Msg::Notification(ouro::proto::Notification {
+        method: "interactive.event".into(),
+        params: json!({ "id": "session-b3", "event": user_turn(1, "first thing") }),
+    }));
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+
+    let text = screen(&mut app).text();
+    assert!(text.contains("enter forks"), "{text}");
+    assert!(
+        text.contains("where the branch starts is the transport's decision"),
+        "the menu never promises more than the runtime declares: {text}"
+    );
+
+    app.apply(key(KeyCode::Enter));
+
+    let fork = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.fork")
+        .expect("the fork is issued");
+    assert_eq!(fork.params["id"], "session-b3");
+}
+
+/// D14: a transport the runtime declared cannot fork is not offered the verb, even on a
+/// gateway that serves the method.
+#[test]
+fn a_transport_declared_unable_to_fork_is_not_offered_it() {
+    let mut capabilities = steering_capabilities();
+    capabilities["fork"] = json!(false);
+
+    let mut app = opened_serving("idle", capabilities, &["interactive.fork"]);
+    app.apply(Msg::Notification(ouro::proto::Notification {
+        method: "interactive.event".into(),
+        params: json!({ "id": "session-b3", "event": user_turn(1, "first thing") }),
+    }));
+
+    assert!(!app.fork_offered());
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+
+    let text = screen(&mut app).text();
+    assert!(!text.contains("enter forks"), "{text}");
+}
+
+/// The menu lists at most ten, newest last, and never a steer.
+#[test]
+fn the_menu_lists_the_last_ten_user_turns_and_no_steer() {
+    let mut events: Vec<Value> = (1..=14)
+        .map(|index| user_turn(index, &format!("turn {index}")))
+        .collect();
+    events.push(event(
+        15,
+        "input_accepted",
+        json!({ "text": "a steer", "kind": "steer" }),
+    ));
+
+    let mut app = opened("idle", steering_capabilities(), events);
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+
+    let entries = backtrack_entries(&app);
+    assert_eq!(entries.len(), 10);
+    assert_eq!(entries.first().map(String::as_str), Some("turn 5"));
+    assert_eq!(entries.last().map(String::as_str), Some("turn 14"));
+    assert!(!entries.iter().any(|entry| entry == "a steer"));
+}
+
+/// `Esc` on an idle session with an empty prompt still leaves the session, and the second
+/// `Esc` brings it back with the menu open rather than punishing the operator for being
+/// idle when they pressed the chord.
+#[test]
+fn the_chord_survives_the_first_esc_leaving_the_session() {
+    // The agent answered: a turn still waiting for its first words is a *busy* session,
+    // and Escape interrupts one of those rather than leaving it.
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![
+            user_turn(1, "first thing"),
+            event(2, "output_text_final", json!({ "text": "done" })),
+        ],
+    );
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+    assert!(
+        app.sessions.open.is_none(),
+        "the first esc left the session"
+    );
+
+    app.apply(key(KeyCode::Esc));
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+    assert_eq!(
+        app.sessions.open,
+        Some((Plane::Interactive, "session-b3".to_string()))
+    );
 }

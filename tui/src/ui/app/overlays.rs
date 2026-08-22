@@ -109,10 +109,17 @@ pub enum Command {
     Machines,
     Settings,
     Help,
+    /// B5: the backtrack menu, for anyone who never learns the chord.
+    Backtrack,
+    /// B5: `interactive.fork`, where it is served.
+    Fork,
+    /// B4: `/model` and `/effort`, taught by prefilling the composer with the verb.
+    Model,
+    Effort,
 }
 
 impl Command {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 30] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -139,6 +146,10 @@ impl Command {
         Self::ListCapabilities,
         Self::PreviewCapability,
         Self::AdmitCapability,
+        Self::Backtrack,
+        Self::Fork,
+        Self::Model,
+        Self::Effort,
     ];
 
     pub fn group(self) -> &'static str {
@@ -156,6 +167,10 @@ impl Command {
             | Self::ExternalEditor
             | Self::CloseSession
             | Self::ConnectChatGpt
+            | Self::Backtrack
+            | Self::Fork
+            | Self::Model
+            | Self::Effort
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -189,6 +204,10 @@ impl Command {
             Self::Machines => "Machines",
             Self::Settings => "Settings",
             Self::Help => "Keyboard shortcuts",
+            Self::Backtrack => "Go back to an earlier message",
+            Self::Fork => "Fork this session",
+            Self::Model => "Change the model",
+            Self::Effort => "Reasoning effort for the next turn",
         }
     }
 
@@ -220,6 +239,10 @@ impl Command {
             Self::Machines => "/machines",
             Self::Settings => "/settings",
             Self::Help => "?",
+            Self::Backtrack => "esc esc",
+            Self::Fork => "/fork",
+            Self::Model => "/model",
+            Self::Effort => "/effort",
         }
     }
 
@@ -264,6 +287,8 @@ impl App {
             .filter(|command| match command {
                 Command::Steer => self.steer_offered(),
                 Command::Interrupt => self.open_capabilities().interrupt.offered(),
+                Command::Fork => self.fork_offered(),
+                Command::Model => self.hello.serves("interactive.configure"),
                 _always => true,
             })
             .collect::<Vec<_>>();
@@ -341,6 +366,19 @@ pub enum Overlay {
         buffer: String,
     },
     New(Box<NewSession>),
+    /// B5. The last ten user turns of the open session, and the two things that can be
+    /// done with one. Opened by `Esc Esc` (rebindable), `/backtrack`, or the palette.
+    Backtrack {
+        plane: Plane,
+        id: String,
+        /// `(sequence, text)`, oldest first, from `input_accepted`.
+        entries: Vec<(u64, String)>,
+        choice: usize,
+        /// Whether `interactive.fork` is served *and* the transport has not been declared
+        /// unable to fork. Both halves, because the method gate and the capability gate
+        /// are different questions and this menu must not offer a verb that fails either.
+        fork_offered: bool,
+    },
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
@@ -546,6 +584,29 @@ impl App {
                 KeyCode::Enter => self.submit_approval(),
                 _ => {}
             },
+            // B5. Two verbs, and the menu says which one Enter is before it is pressed:
+            // an "Enter forks" that quietly edited instead would be exactly the rewind
+            // that silently under-delivers (Claude Code #18516).
+            Overlay::Backtrack {
+                entries,
+                choice,
+                fork_offered,
+                ..
+            } => {
+                let last = entries.len().saturating_sub(1);
+                let forkable = *fork_offered;
+
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    KeyCode::Char('e') => self.backtrack_edit(),
+                    KeyCode::Char('f') if forkable => self.backtrack_fork(),
+                    KeyCode::Enter if forkable => self.backtrack_fork(),
+                    KeyCode::Enter => self.backtrack_edit(),
+                    _ => {}
+                }
+            }
             Overlay::Prompt { buffer, .. } => match key.code {
                 KeyCode::Esc => self.resume_approval_choice(),
                 KeyCode::Backspace => {
@@ -656,6 +717,26 @@ impl App {
             Command::Steer => {
                 self.overlay = None;
                 self.compose(ComposerVerb::Steer);
+            }
+            Command::Backtrack => {
+                self.overlay = None;
+                self.open_backtrack(None);
+            }
+            Command::Fork => {
+                let key = self.sessions.open.clone();
+                self.overlay = None;
+                self.open_backtrack(key);
+            }
+            // The palette teaches the verb rather than replacing it: both take an argument
+            // the operator has to type anyway, and a second surface for choosing a model
+            // would be a second place for it to disagree with the runtime.
+            Command::Model => {
+                self.overlay = None;
+                self.prefill_composer("/model ");
+            }
+            Command::Effort => {
+                self.overlay = None;
+                self.prefill_composer("/effort ");
             }
             Command::ExternalEditor => {
                 self.overlay = None;

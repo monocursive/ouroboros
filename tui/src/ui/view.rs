@@ -758,6 +758,12 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
+        Overlay::Backtrack {
+            entries,
+            choice,
+            fork_offered,
+            ..
+        } => backtrack(frame, area, entries, *choice, *fork_offered),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
         Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
     }
@@ -2271,6 +2277,81 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
     );
 }
 
+/// B5. The last user turns, and the two honest things that can be done with one.
+///
+/// The header states what each verb *is*, before it is pressed, because this is the menu
+/// R1 §4d(4) is about: a rewind that silently under-delivers (Claude Code #18516) is worse
+/// than no rewind. Neither of these removes anything — "edit and resend" adds a turn, and
+/// the fork is the runtime's, which is why the row for it does not promise where the
+/// branch starts.
+fn backtrack(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[(u64, String)],
+    choice: usize,
+    fork_offered: bool,
+) {
+    let mut lines = vec![Line::from(Span::styled(
+        if fork_offered {
+            "enter forks · e edits and resends as a new turn · esc closes"
+        } else {
+            "enter edits and resends as a new turn · esc closes"
+        },
+        Style::default().fg(theme::MUTED),
+    ))];
+
+    if fork_offered {
+        lines.push(Line::from(Span::styled(
+            "the fork is the runtime's: where the branch starts is the transport's decision",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "nothing here removes an earlier turn; both verbs only add one",
+        Style::default().fg(theme::MUTED),
+    )));
+    lines.push(Line::from(""));
+
+    let width = inner_width(area, 72).saturating_sub(6);
+
+    for (index, (sequence, text)) in entries.iter().enumerate() {
+        let selected = index == choice;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { " \u{25b8} " } else { "   " },
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(
+                format!("#{sequence:<5} "),
+                Style::default().fg(theme::MUTED),
+            ),
+            Span::styled(
+                super::tree::truncate(&text.replace('\n', " "), width),
+                if selected {
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ]));
+    }
+
+    let popup = centered(area, 72, (lines.len() as u16 + 2).min(area.height));
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::styled(" go back to a message ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 const KEYS: &[(&str, &str)] = &[
     (
         "enter",
@@ -2393,7 +2474,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
     // The verb list is derived, never restated: the editor's completion table is the
     // single source of truth, so help cannot advertise what completion does not offer.
     let commands: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
-    for (index, chunk) in commands.chunks(6).enumerate() {
+    for (index, chunk) in commands.chunks(8).enumerate() {
         let label = if index == 0 { "/ commands" } else { "" };
         lines.push(Line::from(vec![
             Span::styled(format!("{:<14}", label), Style::default().fg(theme::ACCENT)),

@@ -97,6 +97,60 @@ pub struct Config {
     pub statusline: StatusLineConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub keys: KeysConfig,
+}
+
+/// Chords this operator has rebound.
+///
+/// One entry today, and it is the one the field got wrong: Claude Code #43717 is
+/// "double-Esc cannot be rebound or disabled", which breaks zsh vi-mode for everyone who
+/// uses it. Making a chord rebindable *from day one* is R1 §4d(1), so the chord and its
+/// setting land together rather than the chord landing first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysConfig {
+    /// `"esc esc"` (the default), `"alt+up"`, or `"off"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backtrack: Option<String>,
+}
+
+/// What opens the backtrack menu.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Backtrack {
+    /// Two Escapes inside [`crate::ui::app::BACKTRACK_WINDOW_MS`].
+    #[default]
+    EscEsc,
+    /// One chord, for a terminal or a shell mode where a doubled Escape is someone else's.
+    AltUp,
+    /// Nothing opens it by key. `/backtrack` and the palette still do.
+    Off,
+}
+
+impl Backtrack {
+    pub const ALL: [Backtrack; 3] = [Self::EscEsc, Self::AltUp, Self::Off];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EscEsc => "esc esc",
+            Self::AltUp => "alt+up",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        Self::ALL.into_iter().find(|chord| chord.as_str() == name)
+    }
+}
+
+impl KeysConfig {
+    pub fn backtrack(&self) -> Backtrack {
+        self.backtrack
+            .as_deref()
+            .and_then(Backtrack::parse)
+            .unwrap_or_default()
+    }
 }
 
 /// An operator-supplied command whose first line of output becomes a row above the
@@ -408,6 +462,23 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.statusline.command);
     blank_to_none(&mut config.notifications.mode);
     blank_to_none(&mut config.notifications.when);
+    blank_to_none(&mut config.keys.backtrack);
+
+    if let Some(chord) = config.keys.backtrack.clone() {
+        if Backtrack::parse(&chord).is_none() {
+            problems.push(format!(
+                "{}: keys.backtrack is {chord:?}, which is not one of {}; treating it as unset                  (esc esc)",
+                path.display(),
+                Backtrack::ALL
+                    .iter()
+                    .map(|chord| chord.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            config.keys.backtrack = None;
+        }
+    }
 
     if let Some(mode) = config.notifications.mode.clone() {
         if NotifyMode::parse(&mode).is_none() {

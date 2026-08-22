@@ -521,6 +521,11 @@ pub struct Capabilities {
     pub approvals: Capability,
     pub steer: Capability,
     pub multimodal: Capability,
+    /// Whether this transport can branch a session (Codex `thread/fork`, Claude
+    /// `--fork-session`). A key the runtime has not spoken about is *unknown*, not "no",
+    /// so the backtrack menu offers the fork wherever `interactive.fork` is served and the
+    /// runtime has not said the transport cannot.
+    pub fork: Capability,
     pub dynamic_model: Capability,
     pub dynamic_configuration: Capability,
     /// Whether a map was present at all. `false` means an older gateway, and is the
@@ -552,6 +557,7 @@ impl Capabilities {
             approvals: at("approvals"),
             steer: at("steer"),
             multimodal: at("multimodal"),
+            fork: at("fork"),
             dynamic_model: at("dynamic_model"),
             dynamic_configuration: at("dynamic_configuration"),
             declared: true,

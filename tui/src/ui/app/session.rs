@@ -760,6 +760,181 @@ impl App {
         }
     }
 
+    /// Opens the composer with `text` already in it, leaving the caret at the end.
+    ///
+    /// How the palette teaches a verb that takes an argument: the row is discoverable, and
+    /// what it produces is the same `/` command that would have been typed, so there is
+    /// one spelling of it rather than two.
+    pub(super) fn prefill_composer(&mut self, text: &str) {
+        if self.sessions.open.is_none() {
+            self.inform(
+                "open a session before setting anything on its next turn",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        self.compose(ComposerVerb::Message);
+
+        let catalog = self.completion_catalog.clone();
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.editor.clear_text();
+            composer.editor.paste(text, &catalog);
+            composer.user_changed_draft();
+        }
+    }
+
+    // ----- B5: Esc, Esc Esc, and going back ------------------------------------------
+
+    /// Whether the backtrack menu may offer a fork.
+    ///
+    /// Two gates, both of them real: `hello.methods` decides whether this gateway serves
+    /// the verb at all, and `capabilities.fork` decides whether the transport this session
+    /// selected can honour it. An unknown capability is not "no" — hiding the verb on a
+    /// runtime that never spoke about forking would be this client inventing a ceiling —
+    /// but an absent *method* is, because the call would come back `-32601`.
+    pub fn fork_offered(&self) -> bool {
+        self.hello.serves("interactive.fork") && self.open_capabilities().fork.offered()
+    }
+
+    /// How many user turns the backtrack menu lists. Ten, as Claude Code's rewind does.
+    pub(super) const BACKTRACK_ENTRIES: usize = 10;
+
+    /// Opens the backtrack menu for the open session, reopening it if the first Esc of an
+    /// `Esc Esc` had already left it.
+    pub(super) fn open_backtrack(&mut self, key: Option<(Plane, String)>) {
+        let Some((plane, id)) = key.or_else(|| self.sessions.open.clone()) else {
+            self.inform(
+                "open a session before going back through it",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        if plane != Plane::Interactive {
+            self.inform(
+                format!("{id} is a coding task: it has one objective and no earlier messages"),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        if self.sessions.open.as_ref() != Some(&(plane, id.clone())) {
+            self.open_session(plane, id.clone());
+        }
+
+        let entries = self
+            .sessions
+            .watches
+            .get(&(plane, id.clone()))
+            .map(|watch| watch.recent_user_turns(Self::BACKTRACK_ENTRIES))
+            .unwrap_or_default();
+
+        if entries.is_empty() {
+            self.inform(
+                format!("{id} has no earlier message this client has replayed"),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let choice = entries.len().saturating_sub(1);
+        let fork_offered = self.fork_offered();
+
+        self.overlay = Some(Overlay::Backtrack {
+            plane,
+            id,
+            entries,
+            choice,
+            fork_offered,
+        });
+    }
+
+    /// "Edit and resend as a new turn": the chosen message's text goes into the composer.
+    ///
+    /// Deliberately not called a rewind. Nothing about this removes what came after it —
+    /// the transcript is unchanged and the provider's context is unchanged — and a menu
+    /// that implied otherwise would be the rewind that silently under-delivers.
+    pub(super) fn backtrack_edit(&mut self) {
+        let Some(Overlay::Backtrack {
+            plane,
+            id,
+            entries,
+            choice,
+            ..
+        }) = self.overlay.take()
+        else {
+            return;
+        };
+
+        let Some((_sequence, text)) = entries.get(choice).cloned() else {
+            return;
+        };
+
+        if self.sessions.open.as_ref() != Some(&(plane, id.clone())) {
+            self.open_session(plane, id.clone());
+        }
+
+        self.compose(ComposerVerb::Message);
+
+        let catalog = self.completion_catalog.clone();
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.editor.clear_text();
+            composer.editor.paste(&text, &catalog);
+            composer.user_changed_draft();
+        }
+
+        self.remember_composer_history();
+        self.inform(
+            "that message is in the composer as a new turn; nothing earlier was removed",
+            NoticeKind::Info,
+        );
+    }
+
+    /// `interactive.fork`, where the gateway serves it and the transport can take it.
+    ///
+    /// **What the fork carries is the runtime's to say, and this client does not say more.**
+    /// The verb takes a session and a routing node and no message, so a branch that started
+    /// exactly at the highlighted row is not something this client can promise: Codex can
+    /// fork a thread from a message, Claude's `--fork-session` branches at the tail, and
+    /// which of those a session gets is decided on the other side of the wire. The menu
+    /// says that, and the notice says it again.
+    pub(super) fn backtrack_fork(&mut self) {
+        let Some(Overlay::Backtrack { plane, id, .. }) = self.overlay.take() else {
+            return;
+        };
+
+        let method = "interactive.fork";
+
+        if !self.hello.serves(method) {
+            self.inform(
+                format!("this gateway does not serve {method}"),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let params = self.routed_session_params(plane, &id, json!({ "id": id }));
+
+        self.issue(Call::new(
+            Tag::Action {
+                label: "fork",
+                plane,
+                id: id.clone(),
+            },
+            method,
+            params,
+        ));
+
+        self.inform(
+            format!(
+                "asking the runtime to fork {id}; where the branch starts is the transport's \
+                 decision, not this client's"
+            ),
+            NoticeKind::Info,
+        );
+    }
+
     // ----- B4: structured input ------------------------------------------------------
 
     /// Lifts every `@path` the editor just completed into an attachment chip.
@@ -1622,6 +1797,8 @@ impl App {
             "/copy" => Some(Command::CopyLast),
             "/interrupt" => Some(Command::Interrupt),
             "/steer" => Some(Command::Steer),
+            "/backtrack" => Some(Command::Backtrack),
+            "/fork" => Some(Command::Fork),
             "/editor" => Some(Command::ExternalEditor),
             "/close" => Some(Command::CloseSession),
             "/options" => Some(Command::NewSessionOptions),

@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::TryRngCore;
 use serde_json::{json, Value};
 
-use crate::config::{Config, Defaults};
+use crate::config::{Backtrack, Config, Defaults};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
@@ -87,6 +87,9 @@ pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
 /// cadences below are counted in these frames so wall-clock meaning stays put.
 pub const TICK: Duration = Duration::from_millis(80);
 
+/// [`TICK`] in milliseconds, for the chord windows that are specified in wall-clock time.
+pub const TICK_MS: u64 = 80;
+
 const STATUS_TICKS: u64 = 38; // ~3s
 const LIST_TICKS: u64 = 38; // ~3s
 const UPGRADE_TICKS: u64 = 63; // ~5s
@@ -97,6 +100,17 @@ const ACCOUNT_LOGIN_TICKS: u64 = 13;
 const NOTICE_TICKS: u64 = 63;
 /// OpenCode waits two seconds after the leader key; this is the same window in ticks.
 const LEADER_TICKS: u64 = 25;
+
+/// How long the first Escape of an `Esc Esc` stays armed, in milliseconds.
+///
+/// Long enough to be a chord and short enough that an Escape pressed twice a second apart
+/// is two Escapes. Named in milliseconds because that is what the doc states and what an
+/// operator would measure; [`BACKTRACK_TICKS`] is the same number in this client's clock.
+pub const BACKTRACK_WINDOW_MS: u64 = 400;
+
+/// [`BACKTRACK_WINDOW_MS`] in ticks, rounded up so the window is never *shorter* than
+/// advertised.
+pub const BACKTRACK_TICKS: u64 = BACKTRACK_WINDOW_MS.div_ceil(TICK_MS);
 /// Pi's double Ctrl+C quit: the second press has to arrive inside this window.
 const CTRL_C_QUIT_TICKS: u64 = 13;
 static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -754,6 +768,13 @@ pub struct App {
     open_url_pending: Option<String>,
     /// Tick at which a pending Ctrl+X leader chord expires.
     pub leader_until: Option<u64>,
+    /// The armed first half of an `Esc Esc`, and the session it was pressed in.
+    ///
+    /// The session travels with the arm because the first Escape may have *left* it: on an
+    /// idle session with an empty prompt that is what Escape has always done, and a
+    /// double-Escape that then had nothing to show would be a chord that punished you for
+    /// being idle.
+    pub(super) backtrack_arm: Option<(u64, (Plane, String))>,
     /// Tick at which a second Ctrl+C will open the quit dialog.
     ctrl_c_until: Option<u64>,
     /// Last agent message the I/O driver should copy to the clipboard.
@@ -893,6 +914,7 @@ impl App {
             pending_background_start: None,
             open_url_pending: None,
             leader_until: None,
+            backtrack_arm: None,
             ctrl_c_until: None,
             copy_pending: None,
             external_editor_pending: None,
@@ -1058,6 +1080,13 @@ impl App {
         // session's model, so the completion does not offer to.
         if !self.hello.serves("interactive.configure") {
             hidden.push("/model");
+        }
+
+        // B5. Forking needs the method *and* a transport the runtime has not declared
+        // unable to branch; the backtrack menu itself is always reachable, because "edit
+        // and resend" works everywhere.
+        if !self.fork_offered() {
+            hidden.push("/fork");
         }
 
         self.completion_catalog.hide_commands(hidden);
