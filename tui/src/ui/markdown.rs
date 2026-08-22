@@ -38,7 +38,7 @@
 //! printable cells by the wrapper, the buffer diff, and the scroll arithmetic alike. This
 //! is the same call [`super::statusline`] already makes for the same reason.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -152,11 +152,11 @@ pub fn plain(rendered: &Rendered) -> String {
 /// window's worth of prose or it evicts on the way round and hits nothing. Sixteen was a
 /// screenful and measured a 0% hit rate at five thousand entries; this is the window, with
 /// [`MEMO_BYTES`] still the real ceiling.
-const MEMO_ENTRIES: usize = 192;
+pub const MEMO_ENTRIES: usize = 192;
 
 /// …and how much source text those entries may hold between them. A cap in bytes as well
 /// as in entries, because the cost of remembering a message is the message.
-const MEMO_BYTES: usize = 4 * 1024 * 1024;
+pub const MEMO_BYTES: usize = 4 * 1024 * 1024;
 
 /// What a memo is filed under. The rows are a function of exactly these five things.
 ///
@@ -183,6 +183,60 @@ struct Memo {
 
 thread_local! {
     static MEMOS: RefCell<Vec<Memo>> = const { RefCell::new(Vec::new()) };
+    static COUNTS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// What the memo has been asked for and what it managed to answer.
+///
+/// A cache with no hit rate is a cache nobody can tell is working: at five thousand
+/// entries the previous ceiling of sixteen memos was evicting a whole conversation window
+/// on every frame and answering *none* of them, and the only visible symptom was that
+/// scrolling felt slow. `tests/perf.rs` asserts the rate; these are the numbers it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemoStats {
+    pub hits: u64,
+    pub misses: u64,
+    /// How many rendered messages are resident.
+    pub entries: usize,
+    /// How much source text they hold between them.
+    pub bytes: usize,
+}
+
+impl MemoStats {
+    /// Hits as a fraction of lookups, or `None` before anything has been asked.
+    pub fn hit_rate(self) -> Option<f64> {
+        let asked = self.hits + self.misses;
+        (asked > 0).then(|| self.hits as f64 / asked as f64)
+    }
+}
+
+pub fn memo_stats() -> MemoStats {
+    let (hits, misses) = COUNTS.with(Cell::get);
+    let (entries, bytes) = MEMOS.with(|memos| {
+        let memos = memos.borrow();
+        (
+            memos.len(),
+            memos.iter().map(|memo| memo.text.len()).sum::<usize>(),
+        )
+    });
+
+    MemoStats {
+        hits,
+        misses,
+        entries,
+        bytes,
+    }
+}
+
+/// Forgets the counters, so a measurement is of the frames it meant to measure.
+pub fn reset_memo_stats() {
+    COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+/// Empties the memo. Only a test that is measuring a cold cache has any use for this.
+pub fn clear_memo() {
+    MEMOS.with(|memos| memos.borrow_mut().clear());
+    reset_memo_stats();
 }
 
 /// [`render_limited`], remembered.
@@ -213,6 +267,14 @@ pub fn render_cached(text: &str, width: usize, max_lines: usize, streaming: bool
         let rendered = Rc::clone(&memo.rendered);
         memos.insert(0, memo);
         Some(rendered)
+    });
+
+    COUNTS.with(|counts| {
+        let (hits, misses) = counts.get();
+        match hit.is_some() {
+            true => counts.set((hits + 1, misses)),
+            false => counts.set((hits, misses + 1)),
+        }
     });
 
     if let Some(rendered) = hit {

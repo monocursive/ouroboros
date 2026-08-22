@@ -47,6 +47,18 @@ const TOOL_TAIL_LINES: usize = 6;
 const TOOL_OUTPUT_LINES: usize = TOOL_HEAD_LINES + TOOL_TAIL_LINES;
 /// The live tail window for streaming command output (Kiro, Cursor): the newest rows, not
 /// the oldest, because a command that is still running is watched at its end.
+/// How many ledger entries the conversation pane projects.
+///
+/// A redraw budget, not a retention policy: the projection is rebuilt on every frame, so
+/// the surface is bounded to a useful recent suffix and the pane says how much it is not
+/// drawing. The complete retained ledger stays available through `/details`.
+///
+/// It lives here rather than in the pane because two other things are sized against it —
+/// [`super::markdown::MEMO_ENTRIES`], which has to be able to hold a whole window of prose
+/// or it evicts on the way round, and [`super::transcript::Watch::recent_entries`], which
+/// walks exactly this many.
+pub const CHAT_ENTRY_WINDOW: usize = 128;
+
 const COMMAND_OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = super::diff::COMPACT_LINES;
 /// How many calls one grouped exploration cell lists before it starts counting instead.

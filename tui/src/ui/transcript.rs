@@ -71,6 +71,19 @@ impl Note {
     }
 }
 
+/// The tail of a transcript, and how much of the ledger it does not reach.
+///
+/// Two values rather than one because the pane needs both: the entries it draws, and the
+/// sentence it draws above them saying what it is not showing. A window that reported only
+/// the first would be a transcript that silently starts in the middle.
+#[derive(Debug)]
+pub struct Recent<'a> {
+    pub entries: Vec<Entry<'a>>,
+    /// Events held below this window. See [`Watch::recent_entries`] for why events and not
+    /// entries.
+    pub omitted: usize,
+}
+
 /// One approval the session is waiting on.
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
@@ -819,16 +832,105 @@ impl Watch {
     }
 
     /// The transcript in order, with the dividers interleaved where they belong.
+    ///
+    /// Walks the whole retained ledger. The conversation pane does not use this — see
+    /// [`Self::recent_entries`] — but `/export`, `/details`, and the footer's turn scan do,
+    /// because each of them is answering a question about the whole session rather than
+    /// drawing one frame of it.
     pub fn entries(&self) -> Vec<Entry<'_>> {
-        let mut entries = Vec::with_capacity(self.events.len() + self.notes.len() + 2);
+        self.entries_from(None)
+    }
+
+    /// The last `limit` entries, and how many events sit below them.
+    ///
+    /// ## Why this exists
+    ///
+    /// The pane projects a bounded suffix of the ledger and always has
+    /// ([`crate::ui::transcript_cells::CHAT_ENTRY_WINDOW`]). It used to get there by
+    /// building the whole list — five thousand `Entry` values, on every frame, twelve
+    /// times a second — and throwing away all but the last hundred and twenty-eight. That
+    /// is the O(entries) shape A12 exists to catch: measured at roughly half a millisecond
+    /// of a three-millisecond debug frame, small today and unbounded in principle.
+    ///
+    /// This walks the last `limit` *events* — `BTreeMap` iterates backwards in the same
+    /// time it iterates forwards — and then runs exactly the same interleaving from there,
+    /// so what comes out is the tail of [`Self::entries`] and `tests/perf.rs` asserts that
+    /// it is.
+    ///
+    /// ## What `omitted` counts
+    ///
+    /// Events, not entries. The number of *entries* below a window cannot be had without
+    /// walking to it — gaps are only knowable by looking — and a count that cost the walk
+    /// it exists to avoid would be a strange thing to compute. Events are exact, `O(1)`
+    /// against the map's own length, and the more useful number anyway: it is how much of
+    /// the ledger the pane is not drawing.
+    pub fn recent_entries(&self, limit: usize) -> Recent<'_> {
+        // `nth` from the back rather than `take(…).last()`: the point of this walk is that
+        // it does not touch the events below the window.
+        let first = self
+            .events
+            .keys()
+            .rev()
+            .nth(limit.max(1) - 1)
+            .or_else(|| self.events.keys().next())
+            .copied();
+
+        let mut entries = match first {
+            // Fewer events than the window: the bounded walk and the whole one are the
+            // same walk, and starting it early would only re-derive the same answer.
+            Some(_) if self.events.len() <= limit => self.entries_from(None),
+            first => self.entries_from(first),
+        };
+
+        // The forward walk from a bounded start can produce more than `limit` entries — a
+        // gap and the notes around it are entries too — so the tail is taken here.
+        if entries.len() > limit {
+            entries = entries.split_off(entries.len() - limit);
+        }
+
+        Recent {
+            omitted: self
+                .events
+                .len()
+                .saturating_sub(self.events.range(first.unwrap_or(0)..).take(limit).count()),
+            entries,
+        }
+    }
+
+    /// [`Self::entries`], optionally starting at an event rather than at the beginning.
+    ///
+    /// One function for both so the interleaving rules — where a floor marker sits, when a
+    /// gap is drawn, which notes belong before which event — exist once. A second copy of
+    /// them is a second thing to keep true, and the pane and the export would diverge on
+    /// the frame nobody looked at.
+    fn entries_from(&self, first: Option<u64>) -> Vec<Entry<'_>> {
+        let bounded = first.is_some();
+        let start = first.unwrap_or(0);
+
+        let mut entries = Vec::with_capacity(match bounded {
+            true => self.notes.len() + 2,
+            false => self.events.len() + self.notes.len() + 2,
+        });
 
         // The floor sits where the hole is, not at the top: a client that held events
-        // before a prune still holds them, and they are still history.
-        let mut floor_emitted = self.floor == 0;
-        let mut previous: Option<u64> = None;
-        let mut notes_from = 0u64;
+        // before a prune still holds them, and they are still history. A bounded walk that
+        // begins above the floor has begun above the marker too — the whole walk drew it
+        // before an event this one is not reaching — but a window wide enough to reach
+        // below it still has to draw it, which is the case a `bounded` test alone gets
+        // wrong.
+        let mut floor_emitted = self.floor == 0 || (bounded && start > self.floor);
 
-        for (sequence, event) in &self.events {
+        // The event just below the window, so a hole across the boundary is drawn exactly
+        // where the unbounded walk draws it.
+        let mut previous: Option<u64> = match bounded {
+            true => self.events.range(..start).next_back().map(|(at, _)| *at),
+            false => None,
+        };
+        // Where the whole walk's `notes_from` would stand at this point: just past the
+        // event below the window, or at the very beginning when there is no event below it.
+        let mut notes_from = previous.map_or(0, |previous| previous + 1);
+
+        for (sequence, event) in self.events.range(start..) {
             if !floor_emitted && *sequence > self.floor {
                 if notes_from <= self.floor {
                     for (_at, note) in self.notes.range(notes_from..=self.floor) {
@@ -870,7 +972,7 @@ impl Watch {
                 }
             }
 
-            notes_from = self.floor + 1;
+            notes_from = notes_from.max(self.floor + 1);
             entries.push(Entry::Floor(self.floor));
         }
 
@@ -1278,6 +1380,72 @@ mod tests {
             .entries()
             .iter()
             .any(|entry| matches!(entry, Entry::Note(Note::Lagged { .. }))));
+    }
+
+    /// The bounded walk's whole contract: whatever the ledger holds, and whatever markers
+    /// are interleaved through it, `recent_entries(n)` is the last `n` of `entries()`.
+    ///
+    /// Driven over a ledger with all four of them — a raised floor, a hole, notes, and a
+    /// terminal status — because the interleaving rules are exactly where a second walk
+    /// would drift from the first.
+    #[test]
+    fn the_bounded_walk_is_the_tail_of_the_whole_one() {
+        let mut watch = watch();
+
+        watch.absorb((1..=40).map(event).collect());
+        // A hole in the middle, so a gap marker sits between two events.
+        watch.absorb((60..=120).map(event).collect());
+        watch.note(Note::Lagged { dropped: 19 }, 41);
+        watch.note(Note::Reconnected, 100);
+        watch.raise_floor(5);
+        watch.end("completed".into());
+
+        let whole = watch.entries();
+        assert!(
+            whole.iter().any(|entry| matches!(entry, Entry::Gap { .. })),
+            "the fixture has no hole to walk across"
+        );
+
+        for limit in [1, 2, 7, 40, 61, 100, whole.len(), whole.len() + 50] {
+            let recent = watch.recent_entries(limit);
+
+            assert!(
+                recent.entries.len() <= limit,
+                "asked for {limit}, got {}",
+                recent.entries.len()
+            );
+
+            let tail = &whole[whole.len().saturating_sub(recent.entries.len())..];
+            assert_eq!(
+                format!("{:?}", recent.entries),
+                format!("{tail:?}"),
+                "the bounded walk at {limit} is not the tail of the whole one"
+            );
+        }
+
+        // Nothing left out when the window reaches past the ledger.
+        assert_eq!(watch.recent_entries(whole.len() + 50).omitted, 0);
+        // …and what is left out is counted in events.
+        let recent = watch.recent_entries(10);
+        assert_eq!(recent.omitted, watch.len() - 10);
+    }
+
+    #[test]
+    fn a_bounded_walk_over_a_short_ledger_is_the_whole_ledger() {
+        let mut watch = watch();
+        watch.absorb((1..=3).map(event).collect());
+
+        let recent = watch.recent_entries(128);
+        assert_eq!(recent.omitted, 0);
+        assert_eq!(
+            format!("{:?}", recent.entries),
+            format!("{:?}", watch.entries())
+        );
+
+        // An empty ledger walks to nothing rather than to a panic.
+        let empty = Watch::new(Plane::Interactive, "empty".into());
+        assert!(empty.recent_entries(128).entries.is_empty());
+        assert_eq!(empty.recent_entries(128).omitted, 0);
     }
 
     #[test]

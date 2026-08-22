@@ -22,12 +22,14 @@ use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
-use super::transcript::{Entry, Watch};
+use super::transcript::{Recent, Watch};
 use super::transcript_cells::{self, Verbosity};
 
-// Projection is rebuilt on every draw, so bound the default conversation surface to a
+// Projection is rebuilt on every draw, so the default conversation surface is bounded to a
 // useful recent suffix. The complete retained ledger remains available through /details.
-pub const CHAT_ENTRY_WINDOW: usize = 128;
+// The constant lives beside the projection it bounds, because the memo that makes the
+// redraw affordable has to be sized against the same number.
+pub use super::transcript_cells::CHAT_ENTRY_WINDOW;
 
 /// Rows the plan panel may occupy above the composer, borders included. Past this it
 /// scrolls to its own tail rather than eating the conversation.
@@ -1045,8 +1047,11 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let width = inner.width.max(8) as usize;
     let resyncing = watch.resyncing;
-    let entries = watch.entries();
-    let mut lines = chat_lines(entries, width, ticks, verbosity);
+    // The tail, walked as the tail (A12): the pane draws a bounded suffix and always did,
+    // and building five thousand entries per frame to throw away all but the last hundred
+    // and twenty-eight was the O(ledger) shape the gate exists to catch.
+    let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
+    let mut lines = chat_lines(recent, width, ticks, verbosity);
 
     {
         let empty = lines.is_empty();
@@ -1451,18 +1456,13 @@ fn push_stream_state(spans: &mut Vec<Span<'static>>, watch: &Watch, tick: u64, t
 }
 
 fn chat_lines(
-    mut entries: Vec<Entry<'_>>,
+    recent: Recent<'_>,
     width: usize,
     tick: u64,
     verbosity: Verbosity,
 ) -> Vec<Line<'static>> {
-    let omitted = entries.len().saturating_sub(CHAT_ENTRY_WINDOW);
-    let visible = if omitted == 0 {
-        entries
-    } else {
-        entries.split_off(omitted)
-    };
-    let mut lines = transcript_cells::render_at(visible, width, tick, verbosity);
+    let Recent { entries, omitted } = recent;
+    let mut lines = transcript_cells::render_at(entries, width, tick, verbosity);
 
     if omitted == 0 {
         return lines;
@@ -1470,9 +1470,7 @@ fn chat_lines(
 
     let mut bounded = vec![
         divider(
-            &format!(
-                "{omitted} earlier chat entries omitted here — /details shows all retained events"
-            ),
+            &format!("{omitted} earlier events omitted here — /details shows all retained events"),
             width,
             theme::warn(),
         ),
@@ -2099,18 +2097,35 @@ mod tests {
 
     use crate::model::Event;
 
+    fn message(sequence: u64) -> Event {
+        Event::decode(&serde_json::json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": "output_text_final",
+            "timestamp": "2026-01-01T00:00:00.000000Z",
+            "turn_id": format!("turn-{sequence}"),
+            "payload": { "text": format!("message-{sequence}") }
+        }))
+        .expect("an event")
+    }
+
+    fn watch_of(events: u64) -> Watch {
+        let mut watch = Watch::new(crate::model::Plane::Interactive, "s1".into());
+        watch.absorb((1..=events).map(message).collect());
+        watch
+    }
+
     #[test]
     fn chat_projection_names_the_ledger_when_older_entries_are_bounded() {
-        let entries = (0..=CHAT_ENTRY_WINDOW)
-            .map(|_| Entry::Ended("closed"))
-            .collect();
+        let watch = watch_of(CHAT_ENTRY_WINDOW as u64 + 1);
+        let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
 
-        let lines = chat_lines(entries, 160, 0, Verbosity::Compact);
+        let lines = chat_lines(recent, 160, 0, Verbosity::Compact);
 
         assert!(
             lines[0]
                 .to_string()
-                .contains("1 earlier chat entries omitted here"),
+                .contains("1 earlier events omitted here"),
             "{}",
             lines[0]
         );
@@ -2121,29 +2136,17 @@ mod tests {
     /// and the divider says how much this pane is not drawing.
     #[test]
     fn the_chat_window_still_bounds_the_newest_entries_it_projects() {
-        let events: Vec<Event> = (1..=(CHAT_ENTRY_WINDOW as u64 + 72))
-            .map(|sequence| {
-                Event::decode(&serde_json::json!({
-                    "id": format!("evt-{sequence}"),
-                    "sequence": sequence,
-                    "type": "output_text_final",
-                    "timestamp": "2026-01-01T00:00:00.000000Z",
-                    "turn_id": format!("turn-{sequence}"),
-                    "payload": { "text": format!("message-{sequence}") }
-                }))
-                .expect("an event")
-            })
-            .collect();
-        let entries: Vec<Entry<'_>> = events.iter().map(Entry::Event).collect();
+        let watch = watch_of(CHAT_ENTRY_WINDOW as u64 + 72);
+        let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
 
-        let rendered = chat_lines(entries, 120, 0, Verbosity::Compact)
+        let rendered = chat_lines(recent, 120, 0, Verbosity::Compact)
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
 
         assert!(
-            rendered.contains("72 earlier chat entries omitted here"),
+            rendered.contains("72 earlier events omitted here"),
             "{rendered}"
         );
         assert!(!rendered.contains("message-72 "), "{rendered}");
