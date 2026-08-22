@@ -22,6 +22,25 @@ defmodule Ouroboros.Interactive.Task do
   @default_unresolved_turn_deadline_ms 10 * 60 * 1_000
   @default_readiness_deadline_ms 10 * 60 * 1_000
   @max_pending_steers 32
+
+  # C2 — external approvals. One session may hold at most this many unanswered questions
+  # at once; the next is denied rather than queued, because a provider that can ask nine
+  # times without being answered is a provider nobody is reading, and an unbounded table
+  # of waiting callers is an unbounded table.
+  @max_external_approvals 8
+
+  # The coordinator's own wait, when the session states none. Layered deliberately below
+  # `Ouroboros.InteractiveSession`'s transport wait and the gateway's method ceiling, so
+  # the answer a caller gets is this module's honest denial rather than a killed task.
+  @external_approval_default_timeout_ms 10 * 60 * 1_000
+  @external_approval_min_timeout_ms 1_000
+  @external_approval_ceiling_ms 13 * 60 * 1_000
+
+  # Consulted through `Code.ensure_loaded?/1` on purpose: C1 lands separately, and a
+  # runtime without it must still ask a human rather than fail or invent a verdict. The
+  # name is read from application environment rather than hard-called so that this module
+  # compiles, and behaves, on a node where the engine does not exist yet.
+  @default_permissions_engine Ouroboros.Control.Permissions
   def child_spec(id) do
     %{
       id: {__MODULE__, id},
@@ -79,8 +98,14 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   @impl true
-  def handle_continue(:attach, %{session: session} = runtime) do
-    if State.terminal?(session) do
+  def handle_continue(:attach, runtime) do
+    # An external approval outstanding when this coordinator died was never answered, and
+    # the call waiting on it died with the gateway task that held it. Closing those rows
+    # as denials before anything else keeps the journal from claiming a question that
+    # nobody is going to answer, and keeps the deny-by-default posture across a restart.
+    runtime = deny_orphaned_external_approvals(runtime)
+
+    if State.terminal?(runtime.session) do
       {:noreply, runtime |> reply_ready_waiters() |> schedule_retire()}
     else
       {:noreply, attach_or_start(runtime)}
@@ -176,6 +201,61 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # C2. An approval this runtime was asked for by something that is not the Harness — the
+  # `ouro mcp-serve` bridge answering Claude's `--permission-prompt-tool`, today the only
+  # caller. The coordinator mints the request id, so the same `respond_approval` verb, the
+  # same modal, and the same durable `approval_requested`/`approval_resolved` pair serve a
+  # managed transport that has no approvals channel of its own.
+  #
+  # Every path here ends in an answer, and none of them allows by omission: a full table,
+  # a terminal session, a refused checkpoint, and a deadline all deny, and each says why.
+  def handle_call({:request_approval, request_ref, request}, from, runtime)
+      when is_reference(request_ref) and is_map(request) do
+    cond do
+      State.terminal?(runtime.session) ->
+        {:reply,
+         {:ok,
+          external_answer(
+            nil,
+            :deny,
+            :session_terminal,
+            "session #{runtime.session.id} is #{runtime.session.status}"
+          )}, runtime}
+
+      map_size(runtime.external_approvals) >= @max_external_approvals ->
+        {:reply,
+         {:ok,
+          external_answer(
+            nil,
+            :deny,
+            :capacity,
+            "session #{runtime.session.id} already has #{@max_external_approvals} " <>
+              "unanswered approval requests outstanding"
+          )}, runtime}
+
+      true ->
+        open_external_approval(runtime, request_ref, request, from)
+    end
+  end
+
+  # Routed ahead of the Harness clause, and only for an id this coordinator minted. A
+  # request id the Harness owns is not in this map and falls through to the clause below
+  # untouched, which is what keeps the existing modal working for Codex and ACP.
+  def handle_call({:respond_approval, request_id, response}, _from, runtime)
+      when is_map_key(runtime.external_approvals, request_id) do
+    decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
+
+    reason =
+      case Map.get(response, :reason) do
+        text when is_binary(text) and text != "" -> text
+        _absent -> nil
+      end
+
+    scope = Map.get(response, :scope, :once)
+
+    {:reply, :ok, close_external_approval(runtime, request_id, decision, :human, reason, scope)}
+  end
+
   def handle_call({:respond_approval, request_id, response}, _from, runtime) do
     reply = with_harness_session(runtime, &Session.respond_approval(&1, request_id, response))
     {:reply, reply, schedule_poll(runtime, 0)}
@@ -226,6 +306,30 @@ defmodule Ouroboros.Interactive.Task do
     {:noreply, drop_turn_waiter(runtime, request_ref)}
   end
 
+  # The waiting side gave up first — its own transport ceiling fired, or the gateway task
+  # was killed at the method ceiling. The row is closed as a denial rather than dropped,
+  # so the journal records that the question was asked and never answered by a human, and
+  # the slot returns to the eight.
+  def handle_cast({:cancel_approval, request_ref}, runtime) do
+    case Enum.find(runtime.external_approvals, fn {_id, pending} ->
+           pending.request_ref == request_ref
+         end) do
+      {request_id, _pending} ->
+        {:noreply,
+         close_external_approval(
+           runtime,
+           request_id,
+           :deny,
+           :caller_gone,
+           "the caller stopped waiting for this approval",
+           :once
+         )}
+
+      nil ->
+        {:noreply, runtime}
+    end
+  end
+
   @impl true
   def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
 
@@ -259,6 +363,27 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # The coordinator's own ceiling on an unanswered external approval. It fires below the
+  # transport wait and well below the gateway's method ceiling on purpose: a denial that
+  # names the deadline is a better answer than a killed task, and the tool must never run
+  # because nobody got round to saying no.
+  def handle_info({:external_approval_timeout, request_id}, runtime)
+      when is_map_key(runtime.external_approvals, request_id) do
+    ms = runtime.external_approvals[request_id].timeout_ms
+
+    {:noreply,
+     close_external_approval(
+       runtime,
+       request_id,
+       :deny,
+       :timeout,
+       "no answer within #{ms}ms",
+       :once
+     )}
+  end
+
+  def handle_info({:external_approval_timeout, _request_id}, runtime), do: {:noreply, runtime}
+
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, runtime) do
     {:noreply,
      runtime
@@ -288,7 +413,8 @@ defmodule Ouroboros.Interactive.Task do
       retry: no_retry(),
       terminal_observed_at: nil,
       pending_steers: [],
-      resume_settled: false
+      resume_settled: false,
+      external_approvals: %{}
     }
   end
 
@@ -1529,6 +1655,308 @@ defmodule Ouroboros.Interactive.Task do
 
     %{session | events: events, event_floor: floor}
   end
+
+  # ---------------------------------------------------------------------------
+  # C2 — the external-approval path
+  #
+  # A managed transport (`claude`, `amp`, `zai`, `codex exec`) runs one process per turn
+  # and declares no approvals channel, so nothing inside the Harness can ask before a tool
+  # runs. What Claude Code *does* offer is `--permission-prompt-tool`: an MCP tool it calls
+  # instead of prompting. `ouro mcp-serve` is that tool's server, and this is where its
+  # call lands. The runtime relays; it does not decide, except where C1's rule engine has
+  # already decided and where a bound has been reached.
+  # ---------------------------------------------------------------------------
+
+  defp open_external_approval(runtime, request_ref, request, from) do
+    request_id = "ouro-approval-" <> Jido.Signal.ID.generate!()
+    verdict = evaluate_permission(runtime, request)
+
+    case emit_runtime_event(
+           runtime,
+           :approval_requested,
+           external_request_payload(runtime, request_id, request, verdict),
+           request_id: request_id,
+           provider: runtime.session.provider,
+           harness_session_id: runtime.session.harness_session_id,
+           provider_session_id: runtime.session.provider_session_id
+         ) do
+      # Checkpoint before broadcast, and before the tool. A request that could not be
+      # recorded is a request no replaying client will ever see, so it is denied here
+      # rather than allowed against a journal that does not mention it.
+      {:error, runtime} ->
+        {:reply,
+         {:ok,
+          external_answer(
+            request_id,
+            :deny,
+            :checkpoint_failed,
+            "the approval request could not be recorded durably"
+          )}, runtime}
+
+      {:ok, runtime} ->
+        settle_external_verdict(runtime, request_id, request_ref, request, from, verdict)
+    end
+  end
+
+  defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:allow, rule}) do
+    record_permission(runtime, request, request_id, :allow, :engine, rule)
+
+    runtime =
+      resolve_external_event(runtime, request_id, :allow, :engine, rule_reason(rule), :once)
+
+    {:reply, {:ok, external_answer(request_id, :allow, :engine, rule_reason(rule))}, runtime}
+  end
+
+  defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:deny, rule}) do
+    record_permission(runtime, request, request_id, :deny, :engine, rule)
+
+    runtime =
+      resolve_external_event(runtime, request_id, :deny, :engine, rule_reason(rule), :once)
+
+    {:reply, {:ok, external_answer(request_id, :deny, :engine, rule_reason(rule))}, runtime}
+  end
+
+  defp settle_external_verdict(runtime, request_id, request_ref, request, from, {:ask, _reason}) do
+    timeout_ms = external_approval_timeout_ms(runtime.session)
+    timer = Process.send_after(self(), {:external_approval_timeout, request_id}, timeout_ms)
+
+    pending = %{
+      from: from,
+      request_ref: request_ref,
+      request: request,
+      timer: timer,
+      timeout_ms: timeout_ms
+    }
+
+    {:noreply,
+     %{runtime | external_approvals: Map.put(runtime.external_approvals, request_id, pending)}}
+  end
+
+  defp close_external_approval(runtime, request_id, decision, source, reason, scope) do
+    {pending, table} = Map.pop(runtime.external_approvals, request_id)
+    runtime = %{runtime | external_approvals: table}
+
+    if pending do
+      _ = Process.cancel_timer(pending.timer)
+      record_permission(runtime, pending.request, request_id, decision, source, nil)
+      runtime = resolve_external_event(runtime, request_id, decision, source, reason, scope)
+      GenServer.reply(pending.from, {:ok, external_answer(request_id, decision, source, reason)})
+      runtime
+    else
+      runtime
+    end
+  end
+
+  defp resolve_external_event(runtime, request_id, decision, source, reason, scope) do
+    payload =
+      %{
+        "decision" => if(decision == :allow, do: "approve", else: "deny"),
+        "scope" => Atom.to_string(scope),
+        "source" => Atom.to_string(source),
+        "origin" => "external",
+        "request_id" => request_id
+      }
+      |> put_present("reason", reason)
+
+    case emit_runtime_event(runtime, :approval_resolved, payload,
+           request_id: request_id,
+           provider: runtime.session.provider,
+           harness_session_id: runtime.session.harness_session_id,
+           provider_session_id: runtime.session.provider_session_id
+         ) do
+      {:ok, runtime} ->
+        runtime
+
+      # The answer still goes back to the caller: a resolution that could not be recorded
+      # is a gap in the journal, not a reason to strand the tool call or to allow it.
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} could not checkpoint the " <>
+            "resolution of external approval #{request_id}"
+        )
+
+        runtime
+    end
+  end
+
+  # The shape the Codex and ACP dialects already emit, so the modal that reads
+  # `tool_call` and `request_id` needs no new case. `input` rather than `command`,
+  # because a `--permission-prompt-tool` call carries the tool's arguments object.
+  defp external_request_payload(runtime, request_id, request, verdict) do
+    tool_call =
+      %{"name" => Map.get(request, :tool_name)}
+      |> put_present("input", Map.get(request, :input))
+      |> put_present("cwd", Map.get(request, :cwd))
+
+    %{
+      "tool_call" => tool_call,
+      "kind" => "permissions",
+      "request_id" => request_id,
+      "origin" => "external"
+    }
+    |> put_present("tool_use_id", Map.get(request, :tool_use_id))
+    |> put_present(
+      "suggested_rule",
+      suggested_rule(permission_subject(runtime, request), verdict)
+    )
+  end
+
+  # `evaluate/1` is C1's contract: `{:allow, rule} | {:deny, rule} | {:ask, reason}`. With
+  # no engine on the node every request is `:ask`, which is the honest default — the
+  # runtime has no rules, so it has no basis to skip the human.
+  defp evaluate_permission(runtime, request) do
+    case permissions_engine(:evaluate, 1) do
+      nil ->
+        {:ask, :no_permission_engine}
+
+      engine ->
+        case apply(engine, :evaluate, [permission_subject(runtime, request)]) do
+          {:allow, rule} -> {:allow, rule}
+          {:deny, rule} -> {:deny, rule}
+          {:ask, reason} -> {:ask, reason}
+          _unrecognised -> {:ask, :engine_answer_unrecognised}
+        end
+    end
+  rescue
+    exception -> {:ask, {:engine_failed, Exception.message(exception)}}
+  catch
+    :exit, _reason -> {:ask, :engine_unavailable}
+  end
+
+  defp record_permission(runtime, request, request_id, decision, source, rule) do
+    case permissions_engine(:record, 2) do
+      nil ->
+        :ok
+
+      engine ->
+        _ =
+          apply(engine, :record, [
+            permission_subject(runtime, request),
+            %{request_id: request_id, decision: decision, source: source, rule: rule}
+          ])
+
+        :ok
+    end
+  rescue
+    _exception -> :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  # The "don't ask again" line a modal can offer. It is the engine's to phrase — this
+  # module has no rule language — so the key is present only when C1 is loaded and
+  # answered with one, and absent rather than invented when it is not.
+  defp suggested_rule(subject, verdict) do
+    case permissions_engine(:suggest, 2) do
+      nil ->
+        nil
+
+      engine ->
+        case apply(engine, :suggest, [subject, verdict]) do
+          rule when is_binary(rule) and rule != "" -> rule
+          _nothing_to_suggest -> nil
+        end
+    end
+  rescue
+    _exception -> nil
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp permission_subject(runtime, request) do
+    session = runtime.session
+
+    %{
+      session_id: session.id,
+      provider: session.provider,
+      workspace: session.workspace,
+      transport: Map.get(session.options, :transport),
+      tool_name: Map.get(request, :tool_name),
+      input: Map.get(request, :input),
+      cwd: Map.get(request, :cwd) || session.workspace,
+      tool_use_id: Map.get(request, :tool_use_id),
+      origin: :external
+    }
+  end
+
+  defp permissions_engine(function, arity) do
+    engine =
+      Application.get_env(:ouroboros, :permissions_engine, @default_permissions_engine)
+
+    if is_atom(engine) and not is_nil(engine) and Code.ensure_loaded?(engine) and
+         function_exported?(engine, function, arity),
+       do: engine
+  end
+
+  # A runtime-native event on the session's own log. `sequence_offset` moves with the
+  # cursor because it *is* the distance between the two number spaces: an event no Harness
+  # log contains widens that distance by exactly one, and `harness_cursor/1` has to go on
+  # pointing at the same Harness row or the next poll would skip one.
+  defp emit_runtime_event(runtime, type, payload, fields) do
+    session = runtime.session
+    sequence = session.cursor + 1
+    event = Event.from_runtime(session.id, sequence, type, payload, fields)
+
+    session =
+      session
+      |> Map.put(:cursor, sequence)
+      |> Map.put(:sequence_offset, State.sequence_offset(session) + 1)
+      |> append_event(event)
+      |> State.touch()
+
+    persist(runtime, session, [event])
+  end
+
+  # Best effort by construction: the pending table is memory, so the durable trace of an
+  # unanswered question is an `approval_requested` this runtime minted with no matching
+  # `approval_resolved` after it. A journal trimmed to `event_limit` can have lost the
+  # pair, and then there is nothing to close — which is the same honest silence as a
+  # session whose events aged out.
+  defp deny_orphaned_external_approvals(runtime) do
+    resolved =
+      runtime.session.events
+      |> Enum.filter(&(&1.type == :approval_resolved and is_binary(&1.request_id)))
+      |> MapSet.new(& &1.request_id)
+
+    runtime.session.events
+    |> Enum.filter(fn event ->
+      event.type == :approval_requested and is_binary(event.request_id) and
+        Map.get(event.payload, "origin") == "external" and
+        not MapSet.member?(resolved, event.request_id)
+    end)
+    |> Enum.reduce(runtime, fn event, runtime ->
+      resolve_external_event(
+        runtime,
+        event.request_id,
+        :deny,
+        :coordinator_restart,
+        "the session coordinator restarted before this was answered",
+        :once
+      )
+    end)
+  end
+
+  defp external_answer(request_id, decision, source, reason) do
+    %{request_id: request_id, decision: decision, source: source, reason: reason}
+  end
+
+  defp external_approval_timeout_ms(%State{} = session) do
+    case Map.get(session.options, :approval_timeout_ms) do
+      ms when is_integer(ms) and ms > 0 ->
+        ms |> max(@external_approval_min_timeout_ms) |> min(@external_approval_ceiling_ms)
+
+      _unset_or_infinity ->
+        @external_approval_default_timeout_ms
+    end
+  end
+
+  defp rule_reason(rule) when is_binary(rule), do: rule
+  defp rule_reason(nil), do: nil
+  defp rule_reason(rule), do: inspect(rule)
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, _key, ""), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp maybe_provider_session(session, nil), do: session
   defp maybe_provider_session(session, id), do: %{session | provider_session_id: id}

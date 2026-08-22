@@ -21,6 +21,11 @@ defmodule Ouroboros.InteractiveSession do
   @default_call_timeout 30_000
   @remote_margin_ms 5_000
 
+  # A human approval is the one control-plane call whose latency is a person's. The three
+  # ceilings are layered so that the innermost one answers: the coordinator denies at 13
+  # minutes, this transport stops waiting at 14, and the gateway kills the task at 15.
+  @approval_request_timeout 14 * 60 * 1_000
+
   @doc "Starts or adopts a caller-independent interactive coding session."
   @spec start(keyword()) :: {:ok, Ref.t()} | {:error, term()}
   def start(opts \\ [])
@@ -202,6 +207,61 @@ defmodule Ouroboros.InteractiveSession do
     if is_binary(request_id) and String.trim(request_id) != "",
       do: call(session, {:respond_approval, request_id, response}),
       else: {:error, :invalid_request_id}
+  end
+
+  @doc """
+  Asks this session's owner for a human decision on a tool call the provider cannot ask
+  about itself.
+
+  The one caller today is `ouro mcp-serve`, the stdio MCP server Claude Code is given as
+  its `--permission-prompt-tool`. The coordinator mints the request id, records the
+  question durably, consults the permission engine, and blocks until
+  `respond_approval/3` names that id or its own deadline passes.
+
+  Waits under a ceiling of its own — one minute above the coordinator's, one minute below
+  the gateway's — so the answer a caller receives is the runtime's denial rather than a
+  transport that stopped listening. A caller that gives up first tells the coordinator so,
+  exactly as `await/3` does, and the row is closed as a denial rather than left open.
+  """
+  @spec request_approval(session(), map()) :: {:ok, map()} | {:error, term()}
+  def request_approval(session, request) when is_map(request) do
+    with {:ok, id, owner} <- session_identity(session) do
+      request_ref = make_ref()
+
+      if owner == node() do
+        local_request_approval(id, request_ref, request, @approval_request_timeout)
+      else
+        route(
+          owner,
+          __MODULE__,
+          :local_request_approval,
+          [id, request_ref, request, @approval_request_timeout],
+          transport_timeout(@approval_request_timeout)
+        )
+      end
+    end
+  end
+
+  def request_approval(_session, _request), do: {:error, :invalid_approval_request}
+
+  @doc false
+  def local_request_approval(id, request_ref, request, timeout) do
+    with :ok <- validate_id(id),
+         true <- is_reference(request_ref) || {:error, :invalid_request_reference},
+         true <- is_map(request) || {:error, :invalid_approval_request},
+         :ok <- validate_timeout(timeout),
+         {:ok, pid} <- ensure_coordinator(id) do
+      try do
+        GenServer.call(pid, {:request_approval, request_ref, request}, timeout)
+      catch
+        :exit, {:timeout, _call} ->
+          GenServer.cast(pid, {:cancel_approval, request_ref})
+          {:error, :timeout}
+
+        :exit, reason ->
+          {:error, {:session_call_failed, reason}}
+      end
+    end
   end
 
   @doc "Interrupts an active turn without closing the provider session."

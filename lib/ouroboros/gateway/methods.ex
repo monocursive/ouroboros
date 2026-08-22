@@ -117,6 +117,11 @@ defmodule Ouroboros.Gateway.Methods do
   # this is the one ceiling measured in provider time rather than in control-plane time.
   @start_timeout 120_000
 
+  # `interactive.request_approval` waits for a person. Fifteen minutes is the stated
+  # ceiling: long enough that stepping away from the terminal is not a denial, short
+  # enough that a forgotten prompt does not hold a gateway task open for a shift.
+  @approval_prompt_timeout 15 * 60 * 1_000
+
   # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
   # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
   @forge_timeout 120_000
@@ -210,6 +215,13 @@ defmodule Ouroboros.Gateway.Methods do
       outcome: :unknown
     },
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
+    # C2. The one method whose latency is a person's: it asks the session's owner for a
+    # decision and holds the request open until a human answers, the permission engine
+    # answers for them, or the coordinator's own deadline passes. Fifteen minutes is the
+    # documented ceiling and the outermost of three — the coordinator denies at thirteen
+    # and the plane's transport stops waiting at fourteen — so a client that reaches this
+    # number has learned that its own runtime stopped answering, not that the tool ran.
+    "interactive.request_approval" => %{scope: :operate, timeout: @approval_prompt_timeout},
     "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
     "interactive.close" => %{scope: :operate, timeout: @default_timeout},
@@ -631,6 +643,25 @@ defmodule Ouroboros.Gateway.Methods do
         # the text itself — the coordinator remembers the prompt and enriches the
         # projected `input_accepted(kind=steer)` event, so replay quotes it.
         reply(InteractiveSession.steer(session, input))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # C2. The bridge's own verb. `ouro mcp-serve` calls it once per tool Claude Code would
+  # otherwise have prompted about, and the answer it gets is the decision to relay back as
+  # the permission-prompt tool's `allow`/`deny` object. Owner-routed like every other
+  # session verb; the coordinator, not this module, decides.
+  def invoke("interactive.request_approval", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "request", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, request} <- approval_request(params) do
+        case InteractiveSession.request_approval(session, request) do
+          {:ok, answer} -> {:ok, approval_answer(answer)}
+          other -> reply(other)
+        end
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -1352,6 +1383,90 @@ defmodule Ouroboros.Gateway.Methods do
       _refused -> {:invalid, approval_message()}
     end
   end
+
+  # What a permission-prompt tool actually carries. `tool_name` is the only required
+  # field: Claude Code's call names the tool, hands over its arguments object, and
+  # correlates with a `tool_use_id`. `cwd` is the bridge's own addition — the directory
+  # the tool would run in, which is the fact a person needs and the payload the Codex
+  # dialect already carries. Nothing else is accepted, because an approval request is a
+  # question, not a place to hand the runtime extra instructions.
+  defp approval_request(params) do
+    case Map.get(params, "request") do
+      request when is_map(request) ->
+        with [] <- Map.keys(request) -- ["tool_name", "input", "tool_use_id", "cwd"],
+             {:ok, tool_name} <- fetch_request_string(request, "tool_name"),
+             {:ok, tool_use_id} <- fetch_optional_request_string(request, "tool_use_id"),
+             {:ok, cwd} <- fetch_optional_request_string(request, "cwd"),
+             {:ok, input} <- fetch_optional_object(request, "input") do
+          {:ok,
+           %{
+             tool_name: tool_name,
+             input: input,
+             tool_use_id: tool_use_id,
+             cwd: cwd
+           }}
+        else
+          {:invalid, message} -> {:invalid, message}
+          _refused -> {:invalid, approval_request_message()}
+        end
+
+      _absent ->
+        {:invalid, approval_request_message()}
+    end
+  end
+
+  defp fetch_request_string(request, key) do
+    case Map.get(request, key) do
+      value when is_binary(value) ->
+        if String.trim(value) == "",
+          do: {:invalid, "params.request.#{key} must be a nonempty string"},
+          else: {:ok, value}
+
+      _absent_or_wrong ->
+        {:invalid, "params.request.#{key} must be a nonempty string"}
+    end
+  end
+
+  defp fetch_optional_request_string(request, key) do
+    case Map.get(request, key) do
+      nil -> {:ok, nil}
+      _present -> fetch_request_string(request, key)
+    end
+  end
+
+  defp fetch_optional_object(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      value when is_map(value) -> {:ok, value}
+      _other -> {:invalid, "params.request.#{key} must be an object"}
+    end
+  end
+
+  defp approval_request_message do
+    ~s(params.request must be an object {"tool_name": "...", "input": {...}, ) <>
+      ~s("tool_use_id": "...", "cwd": "..."} with a non-empty tool_name)
+  end
+
+  # Atoms the coordinator chose, rendered as the literal strings this module contains. A
+  # decision is never `to_string`d out of whatever the plane happened to answer.
+  defp approval_answer(answer) do
+    %{
+      "decision" => if(answer.decision == :allow, do: "allow", else: "deny"),
+      "request_id" => answer.request_id,
+      "source" => approval_source(answer.source),
+      "reason" => answer.reason
+    }
+  end
+
+  defp approval_source(:engine), do: "engine"
+  defp approval_source(:human), do: "human"
+  defp approval_source(:timeout), do: "timeout"
+  defp approval_source(:capacity), do: "capacity"
+  defp approval_source(:session_terminal), do: "session_terminal"
+  defp approval_source(:checkpoint_failed), do: "checkpoint_failed"
+  defp approval_source(:caller_gone), do: "caller_gone"
+  defp approval_source(:coordinator_restart), do: "coordinator_restart"
+  defp approval_source(_other), do: "runtime"
 
   defp approval_message do
     ~s(params.response must be "approve", "deny", or an object ) <>
