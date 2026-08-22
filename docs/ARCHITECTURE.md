@@ -219,21 +219,26 @@ Because the loop is here, three things are possible that are structurally imposs
 a managed transport: a tool call can be blocked on a human approval before it runs, a
 steered message can be delivered between two tool calls of a running turn, and an
 interrupt can stop the turn after the current tool rather than by killing a process. It
-is therefore where LSP, MCP, hooks, permission rules, compaction, and file checkpoints
-attach natively. Compaction and context management have landed; LSP, MCP and hooks
-have not.
+is therefore where LSP, hooks, permission rules, compaction, and file checkpoints attach
+natively — all of which have landed. MCP attaches at the same seam and does not exist yet.
 
 - `Ouroboros.Provider.Native.Loop` drives one turn. It runs in a task so the session
   process stays answerable, emits through a function, and takes control on its mailbox.
   Models are reached through `Ouroboros.Provider.Native.Model`, a single-callback
   behaviour whose ReqLLM implementation opens every provider ReqLLM ships. `jido_ai` is
   used only for `ToolAdapter`, which turns a `Jido.Action` schema into the model's JSON
-  Schema.
-- `Ouroboros.Provider.Native.Tools` is `read`, `write`, `edit`, `bash`, and `plan`. Every
-  path goes through `Ouroboros.Provider.Native.Paths`, which builds on
-  `Ouroboros.Workspace.Path` and adds the case a tool loop needs: a file that does not
-  exist yet, resolved through the deepest ancestor that does, so a write through a
-  symlinked parent is judged by where that parent really points.
+  Schema. The tool schemas are built once per turn and held in the loop's state: a tool
+  list that could change between two calls of one turn is a changed cached prefix.
+- `Ouroboros.Provider.Native.Tools` is the thirteen-tool set and the classification the
+  permission engine is asked about — the tool, its mode (`:read`/`:write`/`:execute`/
+  `:network`), the paths it touches, the subset it would *change*, the domains it would
+  reach, and the command when there is one. Every path goes through
+  `Ouroboros.Provider.Native.Paths`, which builds on `Ouroboros.Workspace.Path` and adds
+  the case a tool loop needs: a file that does not exist yet, resolved through the deepest
+  ancestor that does, so a write through a symlinked parent is judged by where that parent
+  really points. `Ouroboros.Provider.Native.Exec` is the bounded child-process runner
+  every non-shell tool shares: argv with no shell for `grep`, and `/bin/sh -c` with stdin
+  and a separated stderr for hooks and `[checks]`.
 - `Ouroboros.Provider.Native.Session` is the transport. It writes the conversation to
   `Ouroboros.Provider.Native.Checkpoint` — content-addressed, `0600`, atomic — *before*
   the terminal turn event reaches the owner, the same checkpoint-before-broadcast rule
@@ -271,10 +276,60 @@ have not.
     files with their hashes as of now, open plan, operator instruction — which is Amp's
     answer to summary-on-summary rather than a third compaction.
 
+##### Hooks, and where they sit in the order
+
+`Ouroboros.Provider.Native.Hooks` reads `ouroboros.toml` in the workspace and
+`~/.config/ouroboros/hooks.toml` for the user, and speaks the JSON contract Claude Code,
+Codex, Gemini and Factory converged on. Project hooks and `[checks]` require workspace
+trust — `config :ouroboros, :trusted_workspaces` or a `.ouroboros/trusted` marker — because
+a repository that ships hooks is a repository that runs commands on every machine that
+clones it. `.ouroboros` is in `Ouroboros.Control.Permissions.Rules`' protected-segment
+list, so the agent's own tools cannot create that marker.
+
+`PreToolUse` hooks run **after** the permission engine and only when it did not deny. A
+hook therefore cannot allow what a rule denied — not by convention but by construction,
+because on a denial no hook is invoked at all. It may deny what a rule allowed, may
+resolve a rule's `ask`, and its `ask` outranks `approval_mode` so `auto_approve` cannot
+swallow it. `updatedInput` is re-evaluated by the engine before the rewritten call runs.
+A hook that times out, crashes, or prints nonsense is logged and ignored; only `deny`
+stops anything.
+
+##### Checkpoints, and what rewind will not claim
+
+The conversation checkpoint gained a file checkpoint beside it. Before every `write`,
+`edit`, `apply_patch` and language-server rename the loop snapshots the file's prior
+bytes into `blobs/<sha256>` under the session directory, and records a per-turn manifest
+of `{path, before, after}` plus the message count at that turn's end. Content addressing
+keeps it affordable; a per-session byte budget (256 MiB) bounds it, and turns dropped to
+stay inside the budget are *recorded as dropped* rather than forgotten, so a rewind that
+reaches into one reports those files by name.
+
+`Session.rewind/3` restores files, truncates the conversation, or both, and answers with
+`restored` and `unrestorable`. The second list is the design: Claude Code's rewind
+silently under-delivered, and anything a `bash` command changed is beyond a runtime that
+does not inspect the programs it runs. That is said before the operator commits, by turn,
+with the command fingerprints.
+
+##### Code intelligence at the write path
+
+`Ouroboros.Provider.Native.CodeIntel` is the loop's whole relationship with the LSP pool:
+a baseline before a write, a bounded report after one, and `rename`. The policy is R4's —
+edited files only, new against the baseline, version-gated, five seconds, errors always
+and warnings only when there are at most three, capped at twenty, and the literal line
+`Edit applied.` first so the model does not read a finding as a failed edit. A server that
+did not answer says `(no LSP data for this file)`; a language with no registered server
+says nothing. Nothing in this path can fail a write, because the write has already
+happened when any of it runs. `[checks]` — a project-declared typecheck or lint — runs at
+the end of a turn that changed a file and injects the tail of what failed for the next
+model step, which is the universal fallback for languages with no good server.
+
 There is no OS sandbox. `sandbox_mode: :workspace_write` is those path checks and nothing
-more, `:read_only` refuses `write`, `edit`, and every `bash` command, and `:unrestricted`
-is not declared at all — a sandbox mode this runtime cannot enforce would be a promise no
-code keeps. The README states the same limits where an operator will read them.
+more, `:read_only` refuses `write`, `edit`, `apply_patch`, and every `bash` command, and
+`:unrestricted` is not declared at all — a sandbox mode this runtime cannot enforce would
+be a promise no code keeps. `web_fetch` reaches the network and is bounded by the
+permission engine's `WebFetch(domain:)` rules rather than by a proxy; it refuses to follow
+a redirect off the host that was evaluated. The README states the same limits where an
+operator will read them.
 
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.

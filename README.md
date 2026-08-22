@@ -321,12 +321,99 @@ Ouroboros.provider_status(:native)    # which key variables are set — names, n
   )
 ```
 
-It has five tools: `read`, `write`, `edit`, `bash`, and `plan`. `edit` is exact-string
-replacement with read-before-edit, modified-since-read, and uniqueness guards, plus a
-whitespace-tolerant fallback whose use is stated in the result — an edit that only
-matched because whitespace was ignored says so. `bash` runs with a 120-second default
-timeout (600 maximum) and returns 30 KiB of output inline, spilling the rest to a file
-under the session's data directory and returning that path.
+#### Tools
+
+Thirteen, in the order the model sees them:
+
+| Tool | What it does, and where it stops |
+|---|---|
+| `read` | Line-numbered slice of a file, 64 KiB per call. Records a fingerprint every edit is checked against. |
+| `write` | Creates or replaces a file whole. |
+| `edit` | Exact-string replacement with read-before-edit, modified-since-read, and uniqueness guards, plus a whitespace-tolerant fallback whose use is stated in the result — an edit that only matched because whitespace was ignored says so. On failure it names the closest lines in the file. |
+| `apply_patch` | Codex's V4A format (`*** Begin Patch` … `*** End Patch`, `Add`/`Delete`/`Update File`, `*** Move to:`, `@@` hunks with no line numbers, `*** End of File`). Parsed strictly, applied with the same guards as `edit`, and **atomic across the patch**: nothing is written unless every section resolves. One `file_change` per file. |
+| `bash` | 120-second default timeout (600 maximum), 30 KiB of output inline, the rest spilled to a file under the session's data directory whose path is returned. |
+| `grep` | ripgrep where the host has it, a bounded built-in walker where it does not; the result says which answered. 200 matches, 300 bytes per line. |
+| `glob` | 2,000 results, newest-modified first. |
+| `ls` | One level by default, three at most, 1,000 entries; `.git`, `_build`, `node_modules` and friends are listed but not descended into. |
+| `web_fetch` | GET, `http`/`https` only, 1 MiB, 15 seconds, HTML converted to text. **A redirect to another host is reported and not followed** — the new host was never put to the permission engine. |
+| `code_intel` | The nine LSP navigation operations plus `diagnostics` and a preview-then-apply `rename`. See below. |
+| `ask_user` | Asks the operator a question mid-turn and blocks for the answer, on the same channel as an approval, so any client that renders an approval modal can carry it. |
+| `skill` | Agent Skills: `SKILL.md` under `<workspace>/.agents/skills/*/` and `~/.config/ouroboros/skills/*/`. Names and descriptions go into the tool's own description, bounded to the smaller of 2% of the context window and 8,000 characters; bodies load on call. |
+| `plan` | Replaces the whole plan and emits `plan_updated`. `todo` is an alias, not a second tool. |
+
+#### Hooks
+
+`ouroboros.toml` in the workspace and `~/.config/ouroboros/hooks.toml` for the user,
+on the JSON contract Claude Code, Codex, Gemini and Factory all already speak — so a
+hook script written for one of them works here unchanged:
+
+```toml
+[[hooks]]
+event = "PreToolUse"          # SessionStart/End, UserPromptSubmit, PreToolUse,
+matcher = "bash|edit|write"   # PostToolUse, PostToolUseFailure, Stop, PreCompact,
+command = "./scripts/vet.sh"  # Notification, FileChanged
+timeout_ms = 10000
+
+[checks]
+typecheck = "mix compile --warnings-as-errors"
+lint = "mix credo --strict"
+```
+
+One JSON object on stdin (`session_id`, `tool_name`, `tool_input`, …). On the way back:
+`exit 2` blocks with stderr as the reason; JSON on stdout carrying
+`hookSpecificOutput.permissionDecision` of `allow`/`deny`/`ask`, `updatedInput` to
+rewrite the tool's arguments, and `additionalContext` appended to the tool result or the
+next prompt. Anything else is ignored — **a broken hook never fails a tool; only one
+that says `deny` stops anything.** Default timeout 60 s, output capped.
+
+`PreToolUse` hooks run **after** the permission engine, and only when it did not deny,
+so *a hook can never allow what a rule denied*. It can deny what a rule allowed, and it
+can resolve a rule's `ask` either way; a hook's `ask` outranks `approval_mode`, so
+`auto_approve` cannot swallow it. `updatedInput` is put back through the engine before
+it is used.
+
+`[checks]` runs at the end of a turn that changed a file, bounded, and the tail of
+whatever failed becomes context for the next model step — the CLI typecheck/lint
+fallback OpenCode recommends over an LSP integration.
+
+#### Checkpoints and rewind
+
+Every `write`, `edit`, `apply_patch` and language-server rename snapshots the file's
+prior bytes first, into a content-addressed store (`blobs/<sha256>`, mode `0600`) under
+the session's data directory, with a per-turn manifest of `{path, before, after}` and
+the message count at that turn's end. Each turn's summary is emitted as an event so a
+client can draw the menu.
+
+```elixir
+Ouroboros.Provider.Native.Session.rewind_points(handle)
+# => [%{"turn_id" => "t1", "files" => 2, "commands" => 1, "at" => "…"}, …]
+
+Ouroboros.Provider.Native.Session.rewind(handle, "t1", :both)   # :files | :conversation | :both
+# => {:ok, %{restored: [%{path: …, action: "restored"}],
+#            unrestorable: [%{turn_id: "t2", reason: "2 shell commands ran in this turn …"}],
+#            turns: ["t2", "t3"], messages: 8}}
+```
+
+Files come back byte-exact, including a file that did not exist before — which is
+restored by deleting it again. `unrestorable` is the point of the return value: it is
+answered *before* anything is committed, and it names what cannot come back.
+
+#### Code intelligence
+
+After a successful write the edited file's diagnostics are appended to the tool result,
+under the policy R4 settles on: edited files only, **new against a pre-edit baseline**,
+version-gated so a diagnostic describing the old content is never served, a 5-second
+budget, errors always and warnings only when there are at most three, capped at 20 then
+`+N more`, and the literal line `Edit applied.` before any of it so the model does not
+read a warning as a failed edit. A server that did not answer says
+`(no LSP data for this file)`; a language with no server registered says nothing at all.
+A language server can never fail a write — the write has already happened.
+
+The `code_intel` tool answers `definition`, `references`, `hover`, `document_symbols`,
+`workspace_symbols`, `implementation`, `prepare_call_hierarchy`, `incoming_calls`,
+`outgoing_calls`, `diagnostics`, and `rename` (preview) / `rename_apply`. `rename_apply`
+is classified as a write over every file the language server would touch, so it goes
+through the permission engine, the approval, and the checkpoint like any other edit.
 
 **What is enforced.** Every tool path is canonicalised through every symlink and refused
 outside the session workspace or its declared `add_dirs`; a `..` segment is refused
@@ -389,18 +476,38 @@ you can open by id. The parent records `handed_off_to` and keeps running.
   is not offered at all, because there is no sandbox to relax. macOS Seatbelt and Linux
   bubblewrap are a later slice.
 - **A command that detaches from its process group can outlive its timeout.** The
-  timeout terminates the shell this runtime started.
-- **No LSP, MCP, or hooks yet.** No diagnostics after an edit, no MCP servers, no
-  `PreToolUse` hooks.
+  timeout terminates the shell this runtime started. The same limit applies to a hook
+  and to a `[checks]` command.
+- **A repository's hooks and checks need trust, and trust is the operator's to give.**
+  `ouroboros.toml` is read only when the workspace is named in
+  `config :ouroboros, :trusted_workspaces` or carries a `.ouroboros/trusted` file. The
+  agent cannot write that file: `.ouroboros` is in the permission engine's protected-path
+  list, so the write is denied by a node-scope rule before any human is asked. On a node
+  with no permission engine configured that denial is an approval prompt instead — which
+  is to say, on such a node the marker is only as safe as the person answering the modal.
+- **A skill is instructions, and instructions from a repository are a repository's
+  words.** `skill` loads a `SKILL.md` into the turn as a tool result. It grants nothing
+  and runs nothing, but a model reads it, exactly as it reads any other file in the tree.
+- **Diagnostics are best-effort and never blocking.** They are appended after the write
+  has already happened. A missing, starting, broken, or slow language server produces
+  `(no LSP data for this file)` and nothing else; a language with no registered server
+  produces silence. Nothing here installs a language server.
+- **`web_fetch` does not follow a redirect to another host.** It reports the new URL
+  instead, so the new host is put to the permission engine on the next call rather than
+  being reached on the strength of the first one's rule.
+- **A `bash` command's effects are not checkpointed and cannot be rewound.** Rewind says
+  so, by turn, before it acts.
+- **No MCP yet.** No MCP servers; the native agent's tools are its own and the
+  permission engine's.
 - **The context meter is native-only for now.** Vendor providers report `usage` but
   nothing maps their window yet, so their footer shows tokens without a percentage.
 - **Compaction summaries cost a model call.** One per compaction, on the session's own
   model, with no tools. When that call fails the summary falls back to a thin structural
   one built from the transcript, and says so in its own text rather than pretending to
   be a written summary.
-- **No permission rules yet.** Until `Ouroboros.Control.Permissions` lands, every tool
-  with an effect asks; a `session`-scope approval is remembered in the session process
-  and is not durable.
+- **Permission rules are the engine's.** `Ouroboros.Control.Permissions` decides first;
+  where it has no rule, every tool with an effect asks. A `session`-scope approval is
+  remembered in the session process and is not durable — the durable form is a rule.
 - **Resume needs a data directory.** The conversation is checkpointed to a private
   `0600` file under the runtime's data directory, written before the turn's terminal
   event is broadcast, and a session restored by `provider_session_id` replays it. With

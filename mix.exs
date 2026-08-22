@@ -37,7 +37,10 @@ defmodule Ouroboros.MixProject do
   def application do
     [
       mod: {Ouroboros.Application, []},
-      extra_applications: [:logger, :crypto, :sasl]
+      # `:inets`/`:ssl` are the native agent's `web_fetch`: `:httpc` is OTP's own client,
+      # it takes `autoredirect: false`, and it adds no dependency to a runtime that
+      # otherwise makes no outbound HTTP request of its own.
+      extra_applications: [:logger, :crypto, :sasl, :inets, :ssl]
     ]
   end
 
@@ -46,6 +49,11 @@ defmodule Ouroboros.MixProject do
     [
       {:jido, "~> 2.3"},
       {:jido_ai, "~> 2.3"},
+      # `ouroboros.toml` — the native agent's hooks and `[checks]` — is TOML because
+      # every other agent's project configuration is. The library is already in the tree
+      # as `llm_db`'s dependency; it is declared here so the runtime reads a dependency
+      # it named rather than one it inherited.
+      {:toml, "~> 0.7"},
       # Cluster formation. The runtime's distribution semantics never depended on how
       # nodes found each other; this is the discovery half, and it stays off unless
       # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.

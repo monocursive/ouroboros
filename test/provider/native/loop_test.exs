@@ -117,6 +117,9 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                :output_text_delta,
                :output_text_final,
                :usage,
+               # D6: the turn's file-checkpoint summary, emitted before the terminal
+               # event so a client can offer a rewind menu row for this turn.
+               :provider_event,
                :turn_completed
              ]
 
@@ -165,7 +168,23 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       [request] = NativeModelScript.requests(agent)
       assert request.system == "system"
-      assert Enum.map(request.tools, & &1.name) == ["read", "write", "edit", "bash", "plan"]
+
+      assert Enum.map(request.tools, & &1.name) == [
+               "read",
+               "write",
+               "edit",
+               "apply_patch",
+               "bash",
+               "grep",
+               "glob",
+               "ls",
+               "web_fetch",
+               "code_intel",
+               "ask_user",
+               "skill",
+               "plan"
+             ]
+
       assert [%{role: :user, content: "do the thing"}] = request.messages
     end
 
@@ -247,7 +266,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
     test "an unknown tool answers in-band with the tools that do exist", context do
       script = [
-        [{:tool_call, %{id: "c1", name: "grep", input: %{"pattern" => "x"}}}],
+        [{:tool_call, %{id: "c1", name: "websearch", input: %{"query" => "x"}}}],
         [{:text, "ok"}, {:finish, :stop}]
       ]
 
@@ -258,7 +277,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "not a tool in this session"
-      assert result.payload["output"] =~ "read, write, edit, bash, plan"
+      assert result.payload["output"] =~ "read, write, edit, apply_patch, bash, grep"
     end
   end
 

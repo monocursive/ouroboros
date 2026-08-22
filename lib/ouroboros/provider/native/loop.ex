@@ -42,15 +42,19 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Instructions
   alias Ouroboros.Provider.Native.Context.Window
+  alias Ouroboros.Provider.Native.CodeIntel
   alias Ouroboros.Provider.Native.Cost
+  alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
   alias Ouroboros.Provider.Native.Tools
+  alias Ouroboros.Provider.Native.Tools.AskUser
 
   @default_max_iterations 50
   @default_tool_timeout_ms 120_000
   @doom_loop_repeats 3
+  @max_injected_context_bytes 8 * 1024
 
   defstruct [
     :emit,
@@ -70,7 +74,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     # so the prefix the fingerprint describes is the prefix the model is sent. `nil`
     # falls back to deriving them here, which is what the coding plane and the older
     # tests do.
-    :tool_specs,
     # The model's context window, for the meter merged into every `usage` event. `nil`
     # means this node could not resolve one, and the meter says so by omitting the key
     # rather than by inventing a denominator.
@@ -86,12 +89,30 @@ defmodule Ouroboros.Provider.Native.Loop do
     # than aspirational: the emit that follows cannot outrun a write that already
     # returned. The coding plane passes a no-op — a finite run has nothing to resume.
     checkpoint: nil,
+    # `Ouroboros.Provider.Native.Hooks` configuration, loaded once at the start of the
+    # turn. Loading it per tool call would read and parse `ouroboros.toml` on every
+    # dispatch, and would let a hook edit its own configuration mid-turn.
+    hooks: nil,
+    # The tool schemas, built once at the start of the turn. Two reasons, and the second
+    # is the important one: building thirteen JSON Schemas per model call is measurable,
+    # and a tool list that could change between two calls of one turn is a changed cached
+    # prefix — the documented cause of slow, expensive turns (R3 §8d). `skill`'s
+    # description reads the workspace, so without this a file appearing under
+    # `.agents/skills/` mid-turn would silently invalidate the cache.
+    tool_specs: nil,
     messages: [],
     reads: %{},
     session_grants: MapSet.new(),
     signatures: %{},
     interrupted?: false,
     steer: [],
+    # The turn's file checkpoint, accumulated as tools run: `path => %{before:, after:}`
+    # with `turn_paths` preserving the order they were first touched. Written to the
+    # manifest at the terminal, so a crash mid-turn loses the manifest entry and not the
+    # blobs — the direction that costs a rewind menu row rather than a file.
+    turn_files: %{},
+    turn_paths: [],
+    turn_commands: [],
     usage: %{input: 0, output: 0, cost: 0.0},
     max_iterations: @default_max_iterations,
     tool_timeout_ms: @default_tool_timeout_ms,
@@ -108,16 +129,51 @@ defmodule Ouroboros.Provider.Native.Loop do
   """
   @spec run_turn(t(), String.t()) :: {:ok, t()}
   def run_turn(%__MODULE__{} = state, prompt) do
+    state = %{
+      state
+      | hooks: state.hooks || Hooks.load(state.scope.root),
+        tool_specs: build_tool_specs(state),
+        turn_files: %{},
+        turn_paths: [],
+        turn_commands: []
+    }
+
+    prompt = prompt <> injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))
     state = %{state | messages: state.messages ++ [%{role: :user, content: prompt}]}
 
     emit(state, :turn_started, %{
       "model" => state.model_spec,
       "tools" => Enum.map(tool_specs(state), & &1.name),
       "approval_mode" => Atom.to_string(state.approval_mode),
-      "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode)
+      "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
+      "hooks" => length(state.hooks.hooks),
+      "workspace_trusted" => state.hooks.trusted?
     })
 
+    _ = report_hook_errors(state)
+
     iterate(state, 1)
+  end
+
+  # A repository whose `ouroboros.toml` does not parse, or one whose hooks were declined
+  # for want of trust, says so once per turn. Silence there would be the worst of both:
+  # the operator believes their hooks ran and nothing did.
+  defp report_hook_errors(%{hooks: %{errors: [], declined: 0}}), do: :ok
+
+  defp report_hook_errors(state) do
+    declined =
+      if state.hooks.declined > 0,
+        do: [
+          "#{state.hooks.declined} hook(s)/check(s) in #{Path.join(state.scope.root, "ouroboros.toml")} " <>
+            "were not loaded: this workspace is not trusted. An operator can trust it with " <>
+            "`config :ouroboros, :trusted_workspaces` or a `.ouroboros/trusted` file."
+        ],
+        else: []
+
+    emit(state, :provider_event, %{
+      "kind" => "status",
+      "message" => Enum.join(declined ++ state.hooks.errors, "\n")
+    })
   end
 
   defp iterate(state, iteration) when iteration > state.max_iterations do
@@ -289,8 +345,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       {:ok, module} ->
         case gate(state, call) do
-          {:allow, state} ->
-            execute(state, call, module)
+          {:allow, state, call, classified, hook_context} ->
+            # `ask_user` is answered on the approval channel rather than in the tool
+            # task: it has to block on a human, and the approval path is the only thing
+            # in this provider that can. See `Native.Tools.AskUser`.
+            if Tools.interactive?(module),
+              do: ask_question(state, call, hook_context),
+              else: execute(state, call, module, classified, hook_context)
 
           {:deny, state, message} ->
             {:continue, tool_result(state, call, %{output: message, is_error: true})}
@@ -301,20 +362,44 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  defp execute(state, call, module) do
+  defp execute(state, call, module, classified, hook_context) do
     context = %{
       scope: state.scope,
       session_dir: state.session_dir,
       reads: state.reads
     }
 
+    # Checkpoint before write, always, and before the language server is asked anything:
+    # the baseline is a convenience and the snapshot is the thing a rewind depends on.
+    state = snapshot_before(state, classified.write_paths)
+    baselines = CodeIntel.baseline(classified.write_paths)
+
     result = Tools.execute(module, call.input, context, state.tool_timeout_ms)
     state = %{state | reads: Map.merge(state.reads, Map.get(result, :reads, %{}))}
+
+    changes = Map.get(result, :changes, [])
+    changed = Enum.flat_map(changes, fn change -> List.wrap(change["path"]) end)
+    state = snapshot_after(state, changed)
+    state = record_command(state, classified)
+
+    result = append_diagnostics(result, changed, baselines)
+
+    result =
+      append_context(
+        result,
+        Hooks.post_tool_use(
+          state.hooks,
+          classified.tool,
+          call.input,
+          %{"output" => result.output, "is_error" => result.is_error},
+          hook_base(state)
+        ) ++ hook_context
+      )
 
     # `tool_result` first so it sits directly under its `tool_call` — the pairing every
     # consumer keys on — and the operator-facing diff or plan follows it.
     state = tool_result(state, call, result)
-    state = emit_changes(state, Map.get(result, :changes, []))
+    state = emit_changes(state, changes)
     state = emit_plan(state, Map.get(result, :plan))
     state = inject_rules(state, Map.get(result, :reads, %{}))
 
@@ -357,13 +442,90 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp inject_rules(state, _reads), do: state
+  # The diagnostics report is appended only to a successful write. A failed edit has no
+  # new state to describe, and appending anything after a failure is how a model comes to
+  # read diagnostics as the failure itself (OpenCode #9102).
+  defp append_diagnostics(%{is_error: true} = result, _changed, _baselines), do: result
+  defp append_diagnostics(result, [], _baselines), do: result
+
+  defp append_diagnostics(result, changed, baselines) do
+    case CodeIntel.feedback(changed, baselines) do
+      "" -> result
+      feedback -> %{result | output: result.output <> "\n" <> feedback}
+    end
+  end
+
+  defp append_context(result, []), do: result
+
+  defp append_context(result, lines) do
+    %{result | output: result.output <> injected(lines)}
+  end
 
   defp emit_changes(state, []), do: state
 
   defp emit_changes(state, changes) do
     emit(state, :file_change, %{"changes" => changes, "status" => "completed"})
+
+    _ =
+      Hooks.notify(
+        state.hooks,
+        :file_changed,
+        Map.put(hook_base(state), "paths", Enum.flat_map(changes, &List.wrap(&1["path"])))
+      )
+
     state
   end
+
+  # ---------------------------------------------------------------- checkpoint
+
+  defp snapshot_before(state, []), do: state
+
+  defp snapshot_before(state, paths) do
+    Enum.reduce(paths, state, fn path, state ->
+      if Map.has_key?(state.turn_files, path) do
+        state
+      else
+        {:ok, before} = Checkpoint.snapshot(state.session_dir, path)
+
+        %{
+          state
+          | turn_files: Map.put(state.turn_files, path, %{before: before, after: nil}),
+            turn_paths: state.turn_paths ++ [path]
+        }
+      end
+    end)
+  end
+
+  # A path a tool changed but never declared — the second file of a rename the classifier
+  # could not preview, say — is snapshotted after the fact. Its `before` is then the file
+  # as it stands, which is *not* restorable, so it is recorded as unsnapshotted rather
+  # than as a checkpoint that would restore the wrong bytes.
+  defp snapshot_after(state, changed) do
+    Enum.reduce(changed, state, fn path, state ->
+      {:ok, digest} = Checkpoint.snapshot(state.session_dir, path)
+
+      case Map.fetch(state.turn_files, path) do
+        {:ok, entry} ->
+          %{state | turn_files: Map.put(state.turn_files, path, %{entry | after: digest})}
+
+        :error ->
+          %{
+            state
+            | turn_files:
+                Map.put(state.turn_files, path, %{
+                  before: {:unsnapshotted, :not_declared_before_the_write},
+                  after: digest
+                }),
+              turn_paths: state.turn_paths ++ [path]
+          }
+      end
+    end)
+  end
+
+  defp record_command(state, %{command: command}) when is_binary(command),
+    do: %{state | turn_commands: Enum.take(state.turn_commands ++ [command], 50)}
+
+  defp record_command(state, _classified), do: state
 
   defp emit_plan(state, nil), do: state
 
@@ -408,49 +570,128 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- approvals
 
   # Every tool is put to the engine, including `read`. The order is engine, then the
-  # session's own grants, then the mode, then a human. A rule that says deny is never
-  # softened by `auto_approve`: a mode decides what happens when no rule decided, it is
-  # not a way past one.
+  # `PreToolUse` hooks, then the session's own grants, then the mode, then a human. A
+  # rule that says deny is never softened by `auto_approve`: a mode decides what happens
+  # when no rule decided, it is not a way past one.
+  #
+  # Hooks run **after** the engine and only when the engine did not deny, which is what
+  # makes "a hook may deny what a rule allowed, never allow what a rule denied" true by
+  # construction rather than by convention: on a denial no hook is invoked at all.
+  # `updatedInput` is put back through the engine before it is used, so a hook cannot
+  # launder a denied command through a rewrite.
   defp gate(state, call) do
     classified = Tools.classify(call.name, call.input, state.scope)
 
     case Permissions.evaluate(permission_request(state, classified)) do
       {:allow, rule} ->
         record(state, :approve, :once, :rule, rule)
-        {:allow, state}
+        hooked(state, call, classified, :allow, nil)
 
       {:deny, rule} ->
         record(state, :deny, :once, :rule, rule)
         {:deny, state, Permissions.deny_message(call.name, rule)}
 
       {:ask, reason} ->
-        decide(state, call, classified, reason)
+        hooked(state, call, classified, :ask, reason)
     end
   end
+
+  defp hooked(state, call, classified, verdict, reason) do
+    if Hooks.any?(state.hooks, :pre_tool_use, classified.tool) do
+      case Hooks.pre_tool_use(state.hooks, classified.tool, call.input, hook_base(state)) do
+        {:deny, hook_reason} ->
+          record(state, :deny, :once, :rule, {:hook, :pre_tool_use})
+
+          {:deny, state,
+           "Refused: a PreToolUse hook denied this #{classified.tool} call: " <> hook_reason}
+
+        # A hook's `ask` outranks the *mode*, not just the rule: `auto_approve` swallowing
+        # it would make the decision meaningless in the mode people actually run.
+        {:ask, hook_reason, input, context} ->
+          revise(state, call, classified, input, :ask_human, hook_reason, context)
+
+        # A hook that said `allow` resolves an engine `ask`. It can, because it is either
+        # the operator's own user-scope hook or a repository hook the operator trusted —
+        # the same two authorities a rule answers to. It can never resolve a `deny`,
+        # because on a denial no hook was invoked at all.
+        {:allow, input, context} ->
+          revise(state, call, classified, input, :allow, reason, context)
+
+        # Silence is not consent. A hook that only annotated or rewrote leaves the
+        # engine's verdict exactly where it was.
+        {:none, input, context} ->
+          revise(state, call, classified, input, verdict, reason, context)
+      end
+    else
+      proceed(state, call, classified, verdict, reason, [])
+    end
+  end
+
+  # A hook that rewrote the input hands back a different call, so the engine sees the
+  # call that will actually run and not the one the model proposed.
+  defp revise(state, call, classified, input, verdict, reason, context) do
+    if input == call.input do
+      # Unchanged arguments keep the classification already computed: re-deriving it
+      # would run `code_intel`'s rename preview a second time for nothing.
+      proceed(state, call, classified, verdict, reason, context)
+    else
+      call = %{call | input: input}
+      classified = Tools.classify(call.name, input, state.scope)
+
+      case Permissions.evaluate(permission_request(state, classified)) do
+        {:deny, rule} ->
+          record(state, :deny, :once, :rule, rule)
+
+          {:deny, state,
+           "Refused: a PreToolUse hook rewrote this call's arguments and " <>
+             Permissions.deny_message(call.name, rule)}
+
+        {:allow, _rule} ->
+          proceed(state, call, classified, verdict, reason, context)
+
+        {:ask, engine_reason} ->
+          proceed(state, call, classified, narrow(verdict), reason || engine_reason, context)
+      end
+    end
+  end
+
+  # A re-evaluated call that the engine now only allows conditionally cannot keep a
+  # verdict of `allow` it earned before the rewrite.
+  defp narrow(:ask_human), do: :ask_human
+  defp narrow(_allow_or_ask), do: :ask
+
+  defp proceed(state, call, classified, :allow, _reason, context),
+    do: {:allow, state, call, classified, context}
+
+  defp proceed(state, call, classified, :ask_human, reason, context),
+    do: ask(state, call, classified, reason || :no_engine, context)
+
+  defp proceed(state, call, classified, :ask, reason, context),
+    do: decide(state, call, classified, reason || :no_engine, context)
 
   # What `:ask` means before a rule engine exists. A tool with no effect outside this
   # process — `read`, `plan` — runs; anything that writes a file or executes a command
   # asks. Fail-closed is about effects, and prompting for every file read would make the
   # provider unusable without making it safer: the model already has the transcript.
-  defp decide(state, call, classified, reason) do
+  defp decide(state, call, classified, reason, context) do
     cond do
       classified.mode == :read ->
-        {:allow, state}
+        {:allow, state, call, classified, context}
 
       MapSet.member?(state.session_grants, grant_key(classified)) ->
         record(state, :approve, :session, :human, {:session_grant, classified.tool})
-        {:allow, state}
+        {:allow, state, call, classified, context}
 
       state.approval_mode == :auto_approve ->
         record(state, :approve, :once, :rule, {:mode, :auto_approve})
-        {:allow, state}
+        {:allow, state, call, classified, context}
 
       state.approval_mode == :auto_edit and auto_editable?(state, classified) ->
         record(state, :approve, :once, :rule, {:mode, :auto_edit})
-        {:allow, state}
+        {:allow, state, call, classified, context}
 
       true ->
-        ask(state, call, classified, reason)
+        ask(state, call, classified, reason, context)
     end
   end
 
@@ -465,14 +706,14 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp inside_workspace?(path, root),
     do: Ouroboros.Workspace.Path.within?(path, root)
 
-  defp ask(state, call, classified, reason) do
-    request_id = "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+  defp ask(state, call, classified, reason, context) do
+    request_id = new_request_id()
 
     emit(
       state,
       :approval_requested,
       %{
-        "kind" => approval_kind(call.name),
+        "kind" => approval_kind(classified.tool),
         "tool_call" =>
           %{
             "name" => call.name,
@@ -483,22 +724,36 @@ defmodule Ouroboros.Provider.Native.Loop do
         "paths" => classified.paths,
         "reason" => reason_text(reason),
         "suggested_rule" =>
-          Permissions.suggested_rule(call.name, classified.command, classified.paths)
+          Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
       },
       request_id
     )
 
-    wait_for_approval(state, request_id, classified, deadline(state.approval_timeout_ms))
+    _ =
+      Hooks.notify(
+        state.hooks,
+        :notification,
+        Map.put(hook_base(state), "tool_name", classified.tool)
+      )
+
+    wait_for_approval(
+      state,
+      call,
+      request_id,
+      classified,
+      context,
+      deadline(state.approval_timeout_ms)
+    )
   end
 
-  defp wait_for_approval(state, request_id, classified, deadline) do
+  defp wait_for_approval(state, call, request_id, classified, context, deadline) do
     remaining = remaining(deadline)
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = grant(state, classified, response.scope)
         record(state, :approve, response.scope, :human, nil)
-        {:allow, state}
+        {:allow, state, call, classified, context}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         record(state, :deny, response.scope, :human, nil)
@@ -508,14 +763,14 @@ defmodule Ouroboros.Provider.Native.Loop do
            reason_suffix(response.reason) <> "."}
 
       {:native_approval, _other_id, _response} ->
-        wait_for_approval(state, request_id, classified, deadline)
+        wait_for_approval(state, call, request_id, classified, context, deadline)
 
       :native_interrupt ->
         {:interrupted, %{state | interrupted?: true}}
 
       {:native_steer, text} ->
         state = %{state | steer: state.steer ++ [text]}
-        wait_for_approval(state, request_id, classified, deadline)
+        wait_for_approval(state, call, request_id, classified, context, deadline)
     after
       remaining ->
         record(state, :deny, :once, :rule, {:timeout, state.approval_timeout_ms})
@@ -525,6 +780,74 @@ defmodule Ouroboros.Provider.Native.Loop do
            "#{state.approval_timeout_ms} ms, so it was denied."}
     end
   end
+
+  # ---------------------------------------------------------------- questions
+
+  # `ask_user` rides the approval channel: the same `approval_requested` event, the same
+  # `respond_approval` verb, the same wait, with `kind: "question"` so a client that has
+  # learned about questions can render a picker and one that has not still shows a modal
+  # whose approve-with-a-reason is the answer.
+  defp ask_question(state, call, hook_context) do
+    case AskUser.question(call.input) do
+      {:error, :empty_question} ->
+        {:continue,
+         tool_result(state, call, %{
+           output: "ask_user needs a `question`. Nothing was asked.",
+           is_error: true
+         })}
+
+      {:ok, payload} ->
+        request_id = new_request_id()
+        emit(state, :approval_requested, payload, request_id)
+
+        _ =
+          Hooks.notify(
+            state.hooks,
+            :notification,
+            Map.put(hook_base(state), "tool_name", "ask_user")
+          )
+
+        wait_for_answer(
+          state,
+          call,
+          request_id,
+          payload,
+          hook_context,
+          deadline(state.approval_timeout_ms)
+        )
+    end
+  end
+
+  defp wait_for_answer(state, call, request_id, payload, hook_context, deadline) do
+    remaining = remaining(deadline)
+
+    receive do
+      {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
+        result = payload |> AskUser.answer(response) |> Tools.normalize_result_of()
+        {:continue, tool_result(state, call, append_context(result, hook_context))}
+
+      {:native_approval, _other_id, _response} ->
+        wait_for_answer(state, call, request_id, payload, hook_context, deadline)
+
+      :native_interrupt ->
+        {:interrupted, %{state | interrupted?: true}}
+
+      {:native_steer, text} ->
+        state = %{state | steer: state.steer ++ [text]}
+        wait_for_answer(state, call, request_id, payload, hook_context, deadline)
+    after
+      remaining ->
+        result =
+          payload
+          |> AskUser.unanswered(state.approval_timeout_ms)
+          |> Tools.normalize_result_of()
+
+        {:continue, tool_result(state, call, append_context(result, hook_context))}
+    end
+  end
+
+  defp new_request_id,
+    do: "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
   defp grant(state, classified, :session),
     do: %{state | session_grants: MapSet.put(state.session_grants, grant_key(classified))}
@@ -564,7 +887,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       command: classified.command,
       paths: classified.paths,
       mode: classified.mode,
-      domains: [],
+      domains: Map.get(classified, :domains, []),
       context: %{
         approval_mode: state.approval_mode,
         sandbox_mode: state.scope.sandbox_mode,
@@ -575,7 +898,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp approval_kind("bash"), do: "command"
-  defp approval_kind(name) when name in ["write", "edit"], do: "file_change"
+  defp approval_kind(name) when name in ["write", "edit", "apply_patch"], do: "file_change"
   defp approval_kind(_name), do: "tool"
 
   defp reason_text(:no_engine),
@@ -616,7 +939,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- terminals
 
   defp complete(state, iterations) do
-    persist(state)
+    state = state |> run_checks() |> settle()
 
     emit(state, :turn_completed, %{
       "status" => "completed",
@@ -630,16 +953,105 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp interrupted(state) do
-    state = %{state | interrupted?: true}
-    persist(state)
+    state = %{state | interrupted?: true} |> settle()
     emit(state, :turn_interrupted, %{"reason" => "interrupted"})
     {:ok, state}
   end
 
   defp fail(state, message, reason) do
-    persist(state)
+    state = settle(state)
     emit(state, :turn_failed, %{"error" => message, "reason" => reason})
     {:ok, state}
+  end
+
+  # Everything that has to be true before the terminal event reaches a subscriber: the
+  # file manifest written, the `Stop` hooks run, the conversation checkpointed. The
+  # conversation goes last, because a `Stop` hook's `additionalContext` becomes part of
+  # it and a checkpoint written before that would resume without it.
+  defp settle(state) do
+    state = record_turn_files(state)
+    state = inject(state, Hooks.notify(state.hooks, :stop, hook_base(state)))
+    persist(state)
+    state
+  end
+
+  # `[checks]` — a project-declared typecheck or lint — runs once per turn, and only when
+  # the turn actually changed a file. Its failing tail becomes an ordinary user message,
+  # so the *next* model step reads it: R4's universal fallback, the thing OpenCode now
+  # recommends over an LSP integration, and the one bound that matters is that it never
+  # blocks and never extends the turn.
+  defp run_checks(%{turn_paths: []} = state), do: state
+
+  defp run_checks(state) do
+    case Hooks.run_checks(state.hooks) do
+      [] ->
+        state
+
+      failures ->
+        inject(state, [
+          "Project checks failed after this turn's file changes:\n" <> Enum.join(failures, "\n")
+        ])
+    end
+  end
+
+  defp record_turn_files(%{turn_paths: [], turn_commands: []} = state), do: state
+
+  defp record_turn_files(state) do
+    entries =
+      Enum.map(state.turn_paths, fn path ->
+        entry = Map.fetch!(state.turn_files, path)
+        %{path: path, before: entry.before, after: entry.after}
+      end)
+
+    case Checkpoint.record_turn(state.session_dir, state.turn_id, entries,
+           message_count: length(state.messages),
+           commands: state.turn_commands
+         ) do
+      {:ok, summary} ->
+        emit(state, :provider_event, %{"kind" => "checkpoint", "turn" => summary})
+
+      {:error, reason} ->
+        emit(state, :provider_event, %{
+          "kind" => "status",
+          "message" =>
+            "this turn's file checkpoint could not be written (#{inspect(reason)}), " <>
+              "so it cannot be rewound"
+        })
+    end
+
+    state
+  end
+
+  defp inject(state, []), do: state
+
+  defp inject(state, lines) do
+    %{state | messages: state.messages ++ [%{role: :user, content: injected_body(lines)}]}
+  end
+
+  defp injected([]), do: ""
+  defp injected(lines), do: "\n" <> injected_body(lines)
+
+  defp injected_body(lines) do
+    lines
+    |> Enum.join("\n")
+    |> then(fn text ->
+      if byte_size(text) <= @max_injected_context_bytes,
+        do: text,
+        else: binary_part(text, 0, @max_injected_context_bytes) <> "\n… (truncated)"
+    end)
+  end
+
+  # The content-minimised payload every hook receives. It carries identifiers and the
+  # workspace, never the prompt and never a file's contents: a hook is an external
+  # process, and what crosses that boundary is the same thing the ledger records.
+  defp hook_base(state) do
+    %{
+      "session_id" => state.session_id,
+      "provider_session_id" => state.provider_session_id,
+      "turn_id" => state.turn_id,
+      "cwd" => state.scope.root,
+      "workspace_trusted" => state.hooks && state.hooks.trusted?
+    }
   end
 
   defp persist(%{checkpoint: nil}), do: :ok
@@ -658,7 +1070,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- helpers
 
   defp tool_specs(%{tool_specs: specs}) when is_list(specs), do: specs
-  defp tool_specs(state), do: Tools.specs(state.allowed_tools, state.disallowed_tools)
+  defp tool_specs(state), do: build_tool_specs(state)
+
+  # The workspace reaches the specs so `skill` can put its catalogue in its description.
+  # Everything else's description is static.
+  defp build_tool_specs(state),
+    do: Tools.specs(state.allowed_tools, state.disallowed_tools, workspace: state.scope.root)
 
   defp signature(call), do: {call.name, call.input}
 

@@ -16,12 +16,52 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   Bounded by `event_limit` (default 400 messages, newest kept). The trim never splits an
   assistant message from the tool results that answer it: a tool result whose call is
   gone is a message most providers reject outright.
+
+  ## The file checkpoint, beside the conversation
+
+  D10: rewind is Ouroboros's, and its limits are stated up front. Every `write`, `edit`,
+  `apply_patch` and language-server rename snapshots the file's prior bytes into a
+  content-addressed store under the same session directory before it changes anything:
+
+      <session dir>/blobs/<sha256>     one file's content, once, mode 0600
+      <session dir>/manifest.json      one record per turn, mode 0600
+
+  A turn's record is a list of `{path, before, after}` where `before` is a blob digest
+  or `:absent` for a file that did not exist, plus the message count at the end of that
+  turn — which is what makes `rewind(:conversation)` able to cut the transcript at a turn
+  boundary without the message list carrying turn ids.
+
+  Content addressing is what keeps this affordable: a file edited twenty times in a turn
+  stores twenty digests and as many blobs as it had distinct contents, and two turns that
+  both start from the same file share one blob.
+
+  The store is bounded by a per-session byte budget, #{256} MiB by default. Past it the
+  **oldest turns are dropped, and dropped is a recorded state** — the record keeps the
+  paths and loses the digests, so a rewind that reaches into a dropped turn reports those
+  files as unrestorable by name instead of silently restoring fewer files than it said it
+  would. Claude Code issue #18516 is rewind that silently under-delivers; §2.5 of the plan
+  names it, and this is the shape that avoids it.
+
+  Commands are recorded as fingerprints, never as effects. `bash` can write anything
+  anywhere through a program this runtime does not inspect, so a turn that ran one is
+  reported as unrestorable in full. That is the honest warning, and it is given *before*
+  the operator commits rather than after.
   """
+
+  require Logger
 
   alias Ouroboros.Provider.Native.Paths
 
   @version 1
   @default_limit 400
+
+  @manifest_version 1
+  @default_budget_bytes 256 * 1024 * 1024
+  @max_manifest_turns 2_000
+  # A file larger than this is not snapshotted; it is named as unsnapshotted so a rewind
+  # says so rather than quietly skipping it. A repository's generated bundle must not be
+  # able to spend the whole budget on one turn.
+  @max_blob_bytes 32 * 1024 * 1024
 
   @doc "Where one session's checkpoint lives, and whether that location survives a reboot."
   @spec locate(String.t()) :: {:ok, String.t(), boolean()} | {:error, term()}
@@ -206,4 +246,465 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     do: %{role: :system, content: Map.get(message, "content", "")}
 
   defp decode(message), do: %{role: :user, content: Map.get(message, "content", "")}
+
+  # ================================================================ file store
+
+  @doc "Where a session's blob store lives."
+  @spec blob_dir(String.t()) :: String.t()
+  def blob_dir(session_dir), do: Path.join(session_dir, "blobs")
+
+  @doc "Where a session's turn manifest lives."
+  @spec manifest_path(String.t()) :: String.t()
+  def manifest_path(session_dir), do: Path.join(session_dir, "manifest.json")
+
+  @doc """
+  Snapshots one file's current bytes and returns how to name them later.
+
+  `{:ok, digest}` for a file that exists, `{:ok, :absent}` for one that does not — which
+  is a real state a rewind restores by deleting the file again — and
+  `{:ok, {:unsnapshotted, reason}}` for a file too large or unreadable, which a rewind
+  reports rather than pretending to restore.
+
+  Never returns an error: a snapshot that fails must not be able to fail the write it
+  precedes. What it does instead is record that it failed.
+  """
+  @spec snapshot(String.t(), String.t()) :: {:ok, String.t() | :absent | {:unsnapshotted, term()}}
+  def snapshot(session_dir, path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_blob_bytes ->
+        case File.read(path) do
+          {:ok, content} -> {:ok, put_blob(session_dir, content)}
+          {:error, reason} -> {:ok, {:unsnapshotted, reason}}
+        end
+
+      {:ok, %File.Stat{type: :regular, size: size}} ->
+        {:ok, {:unsnapshotted, {:too_large, size}}}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:ok, {:unsnapshotted, {:not_a_regular_file, type}}}
+
+      {:error, :enoent} ->
+        {:ok, :absent}
+
+      {:error, reason} ->
+        {:ok, {:unsnapshotted, reason}}
+    end
+  end
+
+  @doc "Writes content into the blob store and returns its digest, or why it could not."
+  @spec put_blob(String.t(), binary()) :: String.t() | {:unsnapshotted, term()}
+  def put_blob(session_dir, content) do
+    digest = :sha256 |> :crypto.hash(content) |> Base.encode16(case: :lower)
+    directory = blob_dir(session_dir)
+    path = Path.join(directory, digest)
+
+    cond do
+      File.regular?(path) ->
+        digest
+
+      true ->
+        temporary =
+          path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+        with :ok <- File.mkdir_p(directory),
+             _ <- File.chmod(directory, 0o700),
+             :ok <- File.write(temporary, content, [:binary]),
+             :ok <- File.chmod(temporary, 0o600),
+             :ok <- File.rename(temporary, path) do
+          digest
+        else
+          {:error, reason} ->
+            _ = File.rm(temporary)
+            {:unsnapshotted, reason}
+        end
+    end
+  end
+
+  @doc "Reads one blob back, byte-exact."
+  @spec get_blob(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
+  def get_blob(session_dir, digest) when is_binary(digest) do
+    path = Path.join(blob_dir(session_dir), digest)
+
+    case File.read(path) do
+      {:ok, content} ->
+        # The store is content-addressed, so verifying is one hash and it turns a
+        # corrupted blob into a named unrestorable file instead of a silently wrong one.
+        if :sha256 |> :crypto.hash(content) |> Base.encode16(case: :lower) == digest,
+          do: {:ok, content},
+          else: {:error, :blob_digest_mismatch}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def get_blob(_session_dir, digest), do: {:error, {:invalid_digest, digest}}
+
+  @doc """
+  Appends one turn's record to the manifest and prunes the store to its budget.
+
+  `entries` is a list of `%{path:, before:, after:}`; `opts` takes `message_count:`,
+  `commands:` (a list of command fingerprints) and `budget_bytes:`.
+
+  Returns the summary a client uses to offer a rewind menu, or `{:error, reason}` when
+  the manifest itself cannot be written — which the caller logs and carries on from,
+  because losing the ability to rewind a turn is not a reason to fail it.
+  """
+  @spec record_turn(String.t(), String.t(), [map()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def record_turn(session_dir, turn_id, entries, opts \\ []) do
+    with {:ok, manifest} <- read_manifest(session_dir) do
+      record = %{
+        "turn_id" => turn_id,
+        "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "message_count" => Keyword.get(opts, :message_count, 0),
+        "commands" =>
+          opts |> Keyword.get(:commands, []) |> Enum.map(&to_string/1) |> Enum.take(50),
+        "dropped" => false,
+        "files" => Enum.map(entries, &encode_entry/1)
+      }
+
+      turns = (manifest["turns"] ++ [record]) |> Enum.take(-@max_manifest_turns)
+      budget = budget_bytes(opts)
+      {turns, dropped} = prune(session_dir, turns, budget)
+
+      manifest = %{manifest | "turns" => turns}
+
+      case write_manifest(session_dir, manifest) do
+        :ok -> {:ok, summary(record, dropped)}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  @doc "Every turn record this session has, oldest first."
+  @spec turns(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def turns(session_dir) do
+    with {:ok, manifest} <- read_manifest(session_dir), do: {:ok, manifest["turns"]}
+  end
+
+  @doc """
+  The message count the conversation had at the end of a turn.
+
+  `:error` for a turn this session never recorded, which is what stops a rewind to a
+  turn id from another session truncating this one's transcript.
+  """
+  @spec message_count_at(String.t(), String.t() | non_neg_integer()) ::
+          {:ok, non_neg_integer()} | :error
+  def message_count_at(session_dir, to_turn) do
+    with {:ok, all} <- turns(session_dir),
+         {:ok, index} <- locate_turn(all, to_turn) do
+      case index do
+        -1 -> {:ok, 0}
+        _found -> {:ok, Map.get(Enum.at(all, index), "message_count", 0)}
+      end
+    else
+      _unknown -> :error
+    end
+  end
+
+  @doc """
+  Restores every file changed after `to_turn`, byte-exact, and says what it could not.
+
+  `to_turn` is a turn id, or `0` / `:start` for "before anything in this session".
+
+  `{:ok, %{restored: [...], unrestorable: [...], turns: [turn ids]}}`. Each `restored`
+  entry names the path and whether it was rewritten or deleted; each `unrestorable`
+  entry names the path — or the turn — and why. The two lists together account for every
+  file the manifest says was touched, which is the property that makes the answer usable
+  as a warning *before* the operator commits.
+  """
+  @spec restore_files(String.t(), String.t() | non_neg_integer() | :start) ::
+          {:ok, map()} | {:error, term()}
+  def restore_files(session_dir, to_turn) do
+    with {:ok, all} <- turns(session_dir),
+         {:ok, index} <- locate_turn(all, to_turn) do
+      after_turn = Enum.drop(all, index + 1)
+
+      # Newest first, assigning as we go: the oldest `before` for a path is written last
+      # and therefore wins, which is what "restore to the state at the end of `to_turn`"
+      # means for a file changed in three of the turns being undone.
+      {targets, unrestorable} =
+        after_turn
+        |> Enum.reverse()
+        |> Enum.reduce({%{}, []}, fn turn, {targets, unrestorable} ->
+          unrestorable = unrestorable ++ command_warnings(turn)
+
+          Enum.reduce(turn["files"], {targets, unrestorable}, fn entry, {targets, unrestorable} ->
+            cond do
+              # A file that did not exist before the turn is restored by deleting it
+              # again. That state carries no blob, so it is a flag rather than a digest,
+              # and it is checked first for exactly that reason.
+              entry["before_absent"] == true and turn["dropped"] != true ->
+                {Map.put(targets, entry["path"], :absent), unrestorable}
+
+              is_binary(entry["before"]) ->
+                {Map.put(targets, entry["path"], entry["before"]), unrestorable}
+
+              true ->
+                {targets,
+                 unrestorable ++ [%{path: entry["path"], reason: reason_for(turn, entry)}]}
+            end
+          end)
+        end)
+
+      {restored, failed} = write_back(session_dir, targets)
+
+      {:ok,
+       %{
+         restored: restored,
+         unrestorable: Enum.uniq(unrestorable ++ failed),
+         turns: Enum.map(after_turn, & &1["turn_id"])
+       }}
+    else
+      :error -> {:error, {:unknown_turn, to_turn}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "The rewind menu entry for one turn record."
+  @spec summary(map(), non_neg_integer()) :: map()
+  def summary(record, dropped \\ 0) do
+    files = record["files"] || []
+
+    %{
+      "turn_id" => record["turn_id"],
+      "at" => record["at"],
+      "files" => length(files),
+      "paths" => files |> Enum.map(& &1["path"]) |> Enum.take(20),
+      "commands" => length(record["commands"] || []),
+      "restorable" => Enum.count(files, &(&1["before"] != nil or &1["before_absent"] == true)),
+      "dropped_turns" => dropped
+    }
+  end
+
+  # ---------------------------------------------------------------- internals
+
+  defp encode_entry(entry) do
+    %{
+      "path" => entry.path,
+      "before" => digest_or_nil(entry[:before]),
+      "before_absent" => entry[:before] == :absent,
+      "after" => digest_or_nil(entry[:after]),
+      "note" => note_of(entry[:before])
+    }
+  end
+
+  # `:absent` is a restorable state and carries no blob, so it is a flag rather than a
+  # digest. Anything else that is not a digest is a failure to snapshot, and it keeps its
+  # reason so the rewind can say what happened rather than "could not".
+  defp digest_or_nil(value) when is_binary(value), do: value
+  defp digest_or_nil(_other), do: nil
+
+  defp note_of({:unsnapshotted, reason}), do: "not snapshotted: #{inspect(reason)}"
+  defp note_of(_other), do: nil
+
+  defp reason_for(%{"dropped" => true}, _entry),
+    do: "its checkpoint was dropped to stay inside the session's storage budget"
+
+  defp reason_for(_turn, %{"note" => note}) when is_binary(note), do: note
+  defp reason_for(_turn, _entry), do: "no prior content was recorded for it"
+
+  defp command_warnings(%{"commands" => [_first | _rest] = commands, "turn_id" => turn_id}) do
+    [
+      %{
+        path: nil,
+        turn_id: turn_id,
+        reason:
+          "#{length(commands)} shell #{if length(commands) == 1, do: "command", else: "commands"} " <>
+            "ran in this turn (#{Enum.join(Enum.take(commands, 3), "; ")}). " <>
+            "Whatever they changed is not checkpointed and cannot be restored."
+      }
+    ]
+  end
+
+  defp command_warnings(_turn), do: []
+
+  defp write_back(session_dir, targets) do
+    Enum.reduce(targets, {[], []}, fn {path, before}, {restored, failed} ->
+      case before do
+        # `before_absent` was recorded as a `true` flag with a nil digest; the map here
+        # only ever holds digests, so this arm is the flag round-tripped by `restore/2`.
+        :absent ->
+          case File.rm(path) do
+            :ok -> {restored ++ [%{path: path, action: "deleted"}], failed}
+            {:error, :enoent} -> {restored ++ [%{path: path, action: "already absent"}], failed}
+            {:error, reason} -> {restored, failed ++ [%{path: path, reason: inspect(reason)}]}
+          end
+
+        digest when is_binary(digest) ->
+          with {:ok, content} <- get_blob(session_dir, digest),
+               :ok <- File.mkdir_p(Path.dirname(path)),
+               :ok <- File.write(path, content, [:binary]) do
+            {restored ++ [%{path: path, action: "restored"}], failed}
+          else
+            {:error, reason} ->
+              {restored, failed ++ [%{path: path, reason: inspect(reason)}]}
+          end
+      end
+    end)
+  end
+
+  defp locate_turn(_turns, to_turn) when to_turn in [0, :start], do: {:ok, -1}
+
+  defp locate_turn(turns, to_turn) when is_binary(to_turn) do
+    case Enum.find_index(turns, &(&1["turn_id"] == to_turn)) do
+      nil -> :error
+      index -> {:ok, index}
+    end
+  end
+
+  defp locate_turn(turns, to_turn) when is_integer(to_turn) and to_turn > 0 do
+    if to_turn <= length(turns), do: {:ok, to_turn - 1}, else: :error
+  end
+
+  defp locate_turn(_turns, _to_turn), do: :error
+
+  defp budget_bytes(opts) do
+    configured =
+      Keyword.get(opts, :budget_bytes) ||
+        Application.get_env(:ouroboros, :native_checkpoint_budget_bytes)
+
+    case configured do
+      value when is_integer(value) and value > 0 -> value
+      _unset -> @default_budget_bytes
+    end
+  end
+
+  # Oldest first, and never the newest: a budget that could drop the turn just recorded
+  # would make a fresh checkpoint unrestorable the moment it was written.
+  defp prune(session_dir, turns, budget) do
+    {turns, dropped} = drop_until(session_dir, turns, budget, 0)
+    _ = collect_garbage(session_dir, turns)
+    {turns, dropped}
+  end
+
+  defp drop_until(session_dir, turns, budget, dropped) do
+    if used_bytes(session_dir) <= budget or length(turns) <= 1 do
+      {turns, dropped}
+    else
+      [oldest | rest] = turns
+
+      case oldest["dropped"] do
+        true ->
+          {kept, more} = drop_until(session_dir, rest, budget, dropped)
+          {[oldest | kept], more}
+
+        _live ->
+          emptied = %{
+            oldest
+            | "dropped" => true,
+              "files" =>
+                Enum.map(oldest["files"], &Map.merge(&1, %{"before" => nil, "after" => nil}))
+          }
+
+          _ = collect_garbage(session_dir, [emptied | rest])
+          drop_until(session_dir, [emptied | rest], budget, dropped + 1)
+      end
+    end
+  end
+
+  defp collect_garbage(session_dir, turns) do
+    referenced =
+      turns
+      |> Enum.flat_map(fn turn -> turn["files"] || [] end)
+      |> Enum.flat_map(fn entry ->
+        Enum.filter([entry["before"], entry["after"]], &is_binary/1)
+      end)
+      |> MapSet.new()
+
+    case File.ls(blob_dir(session_dir)) do
+      {:ok, entries} ->
+        Enum.each(entries, fn entry ->
+          unless MapSet.member?(referenced, entry) do
+            _ = File.rm(Path.join(blob_dir(session_dir), entry))
+          end
+        end)
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp used_bytes(session_dir) do
+    case File.ls(blob_dir(session_dir)) do
+      {:ok, entries} ->
+        Enum.reduce(entries, 0, fn entry, total ->
+          case File.stat(Path.join(blob_dir(session_dir), entry)) do
+            {:ok, %File.Stat{size: size}} -> total + size
+            _gone -> total
+          end
+        end)
+
+      {:error, _reason} ->
+        0
+    end
+  end
+
+  defp read_manifest(session_dir) do
+    path = manifest_path(session_dir)
+
+    case File.read(path) do
+      {:ok, json} ->
+        case decode_manifest(json) do
+          {:ok, manifest} ->
+            {:ok, manifest}
+
+          :error ->
+            # A corrupt manifest is replaced rather than refused: unlike the conversation,
+            # losing it costs the ability to rewind, and refusing to start the session
+            # over it would cost the session.
+            Logger.warning(
+              "native file checkpoint manifest was unreadable and was reset: #{path}"
+            )
+
+            {:ok, empty_manifest()}
+        end
+
+      {:error, :enoent} ->
+        {:ok, empty_manifest()}
+
+      {:error, reason} ->
+        {:error, {:manifest_unreadable, reason}}
+    end
+  end
+
+  defp decode_manifest(json) do
+    case JSON.decode!(json) do
+      %{"version" => @manifest_version, "turns" => turns} = manifest when is_list(turns) ->
+        {:ok, manifest}
+
+      _other ->
+        :error
+    end
+  rescue
+    _error -> :error
+  end
+
+  defp empty_manifest, do: %{"version" => @manifest_version, "turns" => []}
+
+  defp write_manifest(session_dir, manifest) do
+    path = manifest_path(session_dir)
+
+    temporary =
+      path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+    with {:ok, json} <- encode_manifest(manifest),
+         :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(temporary, json, [:binary, :sync]),
+         :ok <- File.chmod(temporary, 0o600),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(temporary)
+        {:error, {:manifest_write_failed, reason}}
+    end
+  end
+
+  defp encode_manifest(manifest) do
+    {:ok, JSON.encode!(manifest)}
+  rescue
+    error -> {:error, {:manifest_unencodable, Exception.message(error)}}
+  end
 end
