@@ -54,18 +54,14 @@ defmodule Ouroboros.CodeIntel.Config do
     rss_reader: {Ouroboros.CodeIntel.Memory, :rss_bytes, []}
   ]
 
-  @spec all() :: keyword()
-  def all do
-    configured = Application.get_env(:ouroboros, :code_intel, [])
-    configured = if Keyword.keyword?(configured), do: configured, else: []
-    Keyword.merge(@defaults, configured)
-  end
-
   @doc "Returns one setting, falling back to the shipped default when it is unusable."
   @spec get(atom()) :: term()
   def get(key) when is_atom(key) do
     default = Keyword.fetch!(@defaults, key)
-    value = Keyword.get(all(), key, default)
+    configured = Application.get_env(:ouroboros, :code_intel, [])
+
+    value =
+      if Keyword.keyword?(configured), do: Keyword.get(configured, key, default), else: default
 
     if valid?(default, value), do: value, else: default
   end

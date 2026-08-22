@@ -24,10 +24,6 @@ defmodule Ouroboros.CodeIntel.Handle do
           owner: pid()
         }
 
-  @doc "The pool key a handle refers to."
-  @spec key(t()) :: {String.t(), String.t()}
-  def key(%__MODULE__{root: root, server_id: server_id}), do: {root, server_id}
-
   @doc "The cluster-visible identity of one server on one host."
   @spec id(node(), String.t(), String.t()) :: String.t()
   def id(node, root, server_id), do: "#{node}:#{server_id}:#{root}"

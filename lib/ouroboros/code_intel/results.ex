@@ -129,11 +129,8 @@ defmodule Ouroboros.CodeIntel.Results do
   def symbol_kind(kind) when is_integer(kind), do: Map.get(@symbol_kinds, kind)
   def symbol_kind(_kind), do: nil
 
-  @doc """
-  A path relative to `root` when it is inside it, absolute when it is not.
-  """
-  @spec relative(String.t(), String.t()) :: {String.t(), boolean()}
-  def relative(path, root) do
+  # A path relative to `root` when it is inside it, absolute when it is not.
+  defp relative(path, root) do
     cond do
       path == root ->
         {".", false}
