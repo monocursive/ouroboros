@@ -1,0 +1,17 @@
+{
+  "instruction": "Corpus task 10: find every TODO marker in the workspace and list where they are.",
+  "responses": [
+    [
+      {"type": "text", "text": "Searching."},
+      {"type": "tool_call", "id": "c1", "name": "grep", "input": {
+        "pattern": "TODO",
+        "glob": "*.ex"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Two markers, in lib/parser.ex and lib/writer.ex."},
+      {"type": "usage", "input_tokens": 175, "output_tokens": 24},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

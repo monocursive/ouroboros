@@ -1,0 +1,17 @@
+{
+  "instruction": "Corpus task 03: create lib/intruder.ex with an Intruder module.",
+  "responses": [
+    [
+      {"type": "text", "text": "Writing the module."},
+      {"type": "tool_call", "id": "c1", "name": "write", "input": {
+        "path": "lib/intruder.ex",
+        "content": "defmodule Intruder do\nend\n"
+      }}
+    ],
+    [
+      {"type": "text", "text": "The write was refused, so nothing changed."},
+      {"type": "usage", "input_tokens": 150, "output_tokens": 22},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

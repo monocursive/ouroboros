@@ -1,0 +1,8 @@
+{
+  "title": "auto_edit writes without asking but still asks before a command",
+  "exercises": ["write", "bash", "approval"],
+  "instruction": "Corpus task 17: add a build stamp file, then run a command to show it.",
+  "approval_mode": "auto_edit",
+  "approve_all": true,
+  "timeout_secs": 60
+}

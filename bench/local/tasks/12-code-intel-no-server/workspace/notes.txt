@@ -1,0 +1,2 @@
+Plain prose, in a file extension no language server in the registry claims.
+That is what makes this task's outcome the same on every machine.

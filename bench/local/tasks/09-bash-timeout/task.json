@@ -1,0 +1,8 @@
+{
+  "title": "a shell command that overruns its budget is killed, not waited on",
+  "exercises": ["bash", "bounded output"],
+  "instruction": "Corpus task 09: run a command that sleeps far longer than its budget allows.",
+  "approval_mode": "auto_approve",
+  "approve_all": false,
+  "timeout_secs": 90
+}

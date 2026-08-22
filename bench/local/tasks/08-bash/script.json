@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 08: count the lines in data/rows.txt with a shell command and save the count.",
+  "responses": [
+    [
+      {"type": "text", "text": "Counting."},
+      {"type": "tool_call", "id": "c1", "name": "bash", "input": {
+        "command": "wc -l < data/rows.txt | tr -d ' ' > data/count.txt; cat data/count.txt",
+        "timeout_ms": 15000,
+        "description": "count the rows"
+      }}
+    ],
+    [
+      {"type": "text", "text": "There are 4 rows; the count is in data/count.txt."},
+      {"type": "usage", "input_tokens": 200, "output_tokens": 30},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

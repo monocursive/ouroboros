@@ -1,0 +1,21 @@
+{
+  "instruction": "Corpus task 12: ask the language server for the symbols in notes.txt.",
+  "responses": [
+    [
+      {"type": "text", "text": "Asking the language server."},
+      {"type": "tool_call", "id": "c1", "name": "code_intel", "input": {
+        "operation": "document_symbols",
+        "path": "notes.txt"
+      }}
+    ],
+    [
+      {"type": "text", "text": "No language server covers that file type, so I read it instead."},
+      {"type": "tool_call", "id": "c2", "name": "read", "input": {"path": "notes.txt"}}
+    ],
+    [
+      {"type": "text", "text": "It is prose, not code."},
+      {"type": "usage", "input_tokens": 260, "output_tokens": 36},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

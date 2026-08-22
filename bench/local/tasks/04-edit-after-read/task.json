@@ -1,0 +1,8 @@
+{
+  "title": "read then edit changes exactly one line",
+  "exercises": ["read", "edit"],
+  "instruction": "Corpus task 04: in lib/version.ex change the version from 1.0.0 to 2.0.0.",
+  "approval_mode": "auto_edit",
+  "approve_all": false,
+  "timeout_secs": 60
+}

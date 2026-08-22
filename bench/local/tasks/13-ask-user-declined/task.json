@@ -1,0 +1,8 @@
+{
+  "title": "a question nobody can answer is declined, and the turn goes on",
+  "exercises": ["ask_user", "approval"],
+  "instruction": "Corpus task 13: ask which serialisation format to use, then pick one and note it.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

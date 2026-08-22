@@ -1,0 +1,20 @@
+{
+  "instruction": "Corpus task 06: rename the sum function in lib/math.ex to total, with a patch.",
+  "responses": [
+    [
+      {"type": "text", "text": "Reading the file the patch updates."},
+      {"type": "tool_call", "id": "c1", "name": "read", "input": {"path": "lib/math.ex"}}
+    ],
+    [
+      {"type": "text", "text": "Applying the patch."},
+      {"type": "tool_call", "id": "c2", "name": "apply_patch", "input": {
+        "patch": "*** Begin Patch\n*** Update File: lib/math.ex\n@@\n-  def sum(list), do: Enum.sum(list)\n+  def total(list), do: Enum.sum(list)\n*** End Patch\n"
+      }}
+    ],
+    [
+      {"type": "text", "text": "sum/1 is now total/1."},
+      {"type": "usage", "input_tokens": 240, "output_tokens": 55},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

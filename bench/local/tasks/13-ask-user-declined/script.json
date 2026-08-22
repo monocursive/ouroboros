@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 13: ask which serialisation format to use, then pick one and note it.",
+  "responses": [
+    [
+      {"type": "text", "text": "This changes the design, so I will ask."},
+      {"type": "tool_call", "id": "c1", "name": "ask_user", "input": {
+        "question": "Should the export be JSON or CSV?",
+        "options": ["JSON", "CSV"],
+        "header": "Export format"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Nobody answered, so I will say which way I went: JSON."},
+      {"type": "usage", "input_tokens": 210, "output_tokens": 27},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

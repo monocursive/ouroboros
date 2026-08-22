@@ -1,0 +1,25 @@
+{
+  "instruction": "Corpus task 17: add a build stamp file, then run a command to show it.",
+  "responses": [
+    [
+      {"type": "text", "text": "Writing the stamp."},
+      {"type": "tool_call", "id": "c1", "name": "write", "input": {
+        "path": "STAMP",
+        "content": "build-42\n"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Showing it."},
+      {"type": "tool_call", "id": "c2", "name": "bash", "input": {
+        "command": "cat STAMP",
+        "timeout_ms": 10000,
+        "description": "show the stamp"
+      }}
+    ],
+    [
+      {"type": "text", "text": "The stamp is build-42."},
+      {"type": "usage", "input_tokens": 245, "output_tokens": 38},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

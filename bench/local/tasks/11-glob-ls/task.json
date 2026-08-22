@@ -1,0 +1,8 @@
+{
+  "title": "glob and ls describe the workspace",
+  "exercises": ["glob", "ls"],
+  "instruction": "Corpus task 11: list the Elixir sources and then show the top of the tree.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

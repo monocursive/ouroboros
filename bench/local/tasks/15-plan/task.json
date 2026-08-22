@@ -1,0 +1,8 @@
+{
+  "title": "the plan tool publishes a plan_updated event",
+  "exercises": ["plan"],
+  "instruction": "Corpus task 15: write down a three-step plan for splitting the parser, then stop.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

@@ -1,0 +1,8 @@
+{
+  "title": "a denied write never reaches the disk",
+  "exercises": ["write", "approval"],
+  "instruction": "Corpus task 03: create lib/intruder.ex with an Intruder module.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

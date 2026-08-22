@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 14: ask whether to keep the legacy endpoint, then proceed either way.",
+  "responses": [
+    [
+      {"type": "text", "text": "Checking before I remove anything."},
+      {"type": "tool_call", "id": "c1", "name": "ask_user", "input": {
+        "question": "Keep the legacy /v1 endpoint?",
+        "options": ["keep", "remove"],
+        "header": "Legacy endpoint"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Acknowledged with no preference, so I kept it."},
+      {"type": "usage", "input_tokens": 215, "output_tokens": 25},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

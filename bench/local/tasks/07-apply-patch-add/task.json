@@ -1,0 +1,8 @@
+{
+  "title": "a V4A patch adds a file",
+  "exercises": ["apply_patch", "approval"],
+  "instruction": "Corpus task 07: add lib/logger.ex with a Logger module, using a patch.",
+  "approval_mode": "prompt",
+  "approve_all": true,
+  "timeout_secs": 60
+}

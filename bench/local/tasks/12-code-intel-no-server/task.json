@@ -1,0 +1,10 @@
+{
+  "title": "code_intel that cannot answer fails in band, and the agent routes around it",
+  "exercises": [
+    "code_intel"
+  ],
+  "instruction": "Corpus task 12: ask the language server for the symbols in notes.txt.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

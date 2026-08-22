@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 09: run a command that sleeps far longer than its budget allows.",
+  "responses": [
+    [
+      {"type": "text", "text": "Running it with a short budget."},
+      {"type": "tool_call", "id": "c1", "name": "bash", "input": {
+        "command": "echo starting; sleep 45; echo 'this line must never be reached' > overran.txt",
+        "timeout_ms": 2000,
+        "description": "sleep past the budget"
+      }}
+    ],
+    [
+      {"type": "text", "text": "It was terminated at the budget, as it should be."},
+      {"type": "usage", "input_tokens": 190, "output_tokens": 28},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}
