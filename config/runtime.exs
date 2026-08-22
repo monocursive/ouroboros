@@ -564,7 +564,7 @@ if System.get_env("OUROBOROS_GATEWAY") == "1" do
     queue_limit: gateway_queue_limit,
     event_leaf_bytes: gateway_bytes.("OUROBOROS_GATEWAY_EVENT_LEAF_BYTES", "131072"),
     event_payload_bytes: gateway_bytes.("OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES", "524288"),
-    detail_leaf_bytes: gateway_bytes.("OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES", "8388608")
+    detail_leaf_bytes: gateway_bytes.("OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES", "4194304")
 
   # A client that spawns this node as a child process owns its stdout. stderr is the
   # foreground default; the managed-file block below replaces it for a detached/service

@@ -57,7 +57,7 @@ defmodule Ouroboros.Gateway.Config do
       string inside an event `payload` may put on the wire.
     * `:event_payload_bytes` (`OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES`, 512 KiB) — the most
       *all* of one event's payload strings may put on the wire together.
-    * `:detail_leaf_bytes` (`OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES`, 8 MiB) — the same
+    * `:detail_leaf_bytes` (`OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES`, 4 MiB) — the same
       per-string cap, raised, for `interactive.event_detail` / `coding.event_detail`,
       which exist so a client can ask for the one event an excerpt came from.
 
@@ -139,7 +139,7 @@ defmodule Ouroboros.Gateway.Config do
   @default_queue_limit 1_000
   @default_event_leaf_bytes 131_072
   @default_event_payload_bytes 524_288
-  @default_detail_leaf_bytes 8_388_608
+  @default_detail_leaf_bytes 4_194_304
 
   defimpl Inspect do
     import Inspect.Algebra

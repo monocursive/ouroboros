@@ -518,10 +518,10 @@ and `interactive_event_detail_result.json` / `coding_event_detail_result.json` p
 the 128 KiB default so the contract file stays a diff a person can read; the arithmetic
 is asserted in `Ouroboros.Gateway.WireTest`.
 
-**Honest limit on `detail_leaf_bytes`.** Its 8 MiB default is the client's *entire*
+**Honest limit on `detail_leaf_bytes`.** Its 4 MiB default sits under the client's 8 MiB
 inbound line ceiling (`DEFAULT_MAX_LINE`, [tui/src/transport.rs:54](../tui/src/transport.rs)),
-so an event whose payload actually approaches the cap produces a frame the current client
-cannot read — the envelope and JSON escaping push it past 8 MiB and the line is truncated
+so a full-size detail frame still decodes, while a cap raised past about 7 MiB produces a
+frame the current client cannot read — the envelope and JSON escaping push it past 8 MiB and the line is truncated
 rather than decoded. The cap bounds the server's memory and the socket honestly; it does
 not promise the client can take delivery of the largest thing it permits. Raising one
 without the other buys nothing.

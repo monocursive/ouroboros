@@ -376,7 +376,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
   describe "a payload too large to frame whole" do
     # The shape the review named: one `file_change` diff of five megabytes, which used to
     # cross the socket whole on the notification and again on every replay of the session.
-    @diff String.duplicate("d", 5_000_000)
+    @diff String.duplicate("d", 3_000_000)
 
     test "the notification and the replay carry the same marker, not the same megabytes",
          %{client: client} do
@@ -394,7 +394,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       frame = await_event(client, "interactive.event", "file_change")
       event = frame["params"]["event"]
 
-      assert event["payload"]["diff"]["_bytes"] == 5_000_000
+      assert event["payload"]["diff"]["_bytes"] == byte_size(@diff)
       assert byte_size(event["payload"]["diff"]["_excerpt"]) == 131_072
       assert String.starts_with?(@diff, event["payload"]["diff"]["_excerpt"])
 
@@ -514,7 +514,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       event = await_event(client, "coding.event", "file_change")["params"]["event"]
 
-      assert event["payload"]["diff"]["_bytes"] == 5_000_000
+      assert event["payload"]["diff"]["_bytes"] == byte_size(@diff)
       assert byte_size(event["payload"]["diff"]["_excerpt"]) == 131_072
       assert event["task_id"] == id
       assert event["_struct"] == "Ouroboros.Coding.Event"

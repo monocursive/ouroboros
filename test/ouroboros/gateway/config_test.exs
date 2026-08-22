@@ -188,7 +188,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
       assert config.queue_limit == 1_000
       assert config.event_leaf_bytes == 131_072
       assert config.event_payload_bytes == 524_288
-      assert config.detail_leaf_bytes == 8_388_608
+      assert config.detail_leaf_bytes == 4_194_304
     end
 
     test "the encoder reads the same caps this struct validates" do
@@ -198,7 +198,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
       assert Config.event_limits() == %{
                event_leaf_bytes: 131_072,
                event_payload_bytes: 524_288,
-               detail_leaf_bytes: 8_388_608
+               detail_leaf_bytes: 4_194_304
              }
 
       assert Config.event_limits(event_leaf_bytes: 4_096).event_leaf_bytes == 4_096
@@ -207,7 +207,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
       # cap that is somehow still unusable when a frame is halfway written falls back
       # rather than killing the connection that was writing it.
       assert Config.event_limits(event_leaf_bytes: 8).event_leaf_bytes == 131_072
-      assert Config.event_limits(detail_leaf_bytes: nil).detail_leaf_bytes == 8_388_608
+      assert Config.event_limits(detail_leaf_bytes: nil).detail_leaf_bytes == 4_194_304
     end
 
     test "a token file wins over the environment token and is trimmed" do
