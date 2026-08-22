@@ -670,13 +670,75 @@ impl App {
             request.request_id.clone()
         };
 
+        let subject = request.subject();
+        let detail = request.detail();
+        let (rule, rule_absent) = self.approval_rule(plane, &id, detail.suggested_rule.as_deref());
+
+        // The reason prompt reopens this modal, and the fifth row may not exist the second
+        // time — a rule can stop being offerable between the two, and a cursor left past
+        // the last row would answer something the reader never selected.
+        let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+
         self.overlay = Some(Overlay::Approval {
             plane,
             id,
             request_id,
-            subject: request.subject(),
-            choice,
+            subject,
+            choice: choice.min(rows - 1),
             reason,
+            detail: Box::new(detail),
+            rule,
+            rule_absent,
+            expanded: false,
         });
+    }
+
+    /// The rule the modal's fifth answer would write, or the reason there is no fifth
+    /// answer.
+    ///
+    /// Three things have to be true at once, and each failure is named rather than
+    /// swallowed: the runtime must have suggested a pattern (only `Control.Permissions`
+    /// knows the rule language, and this client never invents one), this gateway must
+    /// serve `permissions.add` (an older one does not, and the answer is then absent
+    /// rather than broken), and the session must name the workspace the rule is scoped to
+    /// — `permissions.add` refuses a `workspace` rule without one, and picking `user`
+    /// scope instead would quietly write a broader rule than the operator was shown.
+    fn approval_rule(
+        &self,
+        plane: Plane,
+        id: &str,
+        suggested: Option<&str>,
+    ) -> (Option<ApprovalRule>, Option<&'static str>) {
+        let Some(pattern) = suggested else {
+            return (None, None);
+        };
+
+        if !self.hello.serves("permissions.add") {
+            return (
+                None,
+                Some("this runtime does not serve permissions.add, so the rule cannot be saved"),
+            );
+        }
+
+        let workspace = self
+            .sessions
+            .session(plane, id)
+            .and_then(|session| session.workspace.clone())
+            .map(|workspace| workspace.trim().to_string())
+            .filter(|workspace| !workspace.is_empty());
+
+        match workspace {
+            Some(workspace) => (
+                Some(ApprovalRule {
+                    pattern: pattern.to_string(),
+                    workspace,
+                }),
+                None,
+            ),
+            None => (
+                None,
+                Some("this session names no workspace, so there is no scope to save the rule in"),
+            ),
+        }
     }
 }

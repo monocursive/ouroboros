@@ -77,6 +77,72 @@ pub fn transcript(watch: &Watch, width: usize) -> String {
     out
 }
 
+/// The same session's events as NDJSON: one `interactive.event` object per line.
+///
+/// The objects are exactly the ones the gateway framed — [`crate::model::Event::raw`],
+/// envelope and `Gateway.Wire` markers included — in sequence order, with nothing added
+/// and nothing summarised. That is the whole contract: an export that reshaped the events
+/// would be a third projection of them, and the point of this one is to be the events.
+///
+/// Two consequences, both deliberate:
+///
+/// * **The `Wire` markers travel.** A payload leaf the gateway excerpted is written as
+///   `{"_excerpt": …, "_bytes": n}`, because that is what this client was sent. Rewriting
+///   it as the prefix alone would produce a file that looked whole and was not; the reader
+///   who wants the leaf fetches it in `/details`.
+/// * **No header, no footer, no trailing summary line.** Whether history was pruned is a
+///   fact about the file, not a record in it, so it is said in the notice that names the
+///   path rather than written into a stream something else has to parse.
+///
+/// Deterministic: `serde_json::Map` is a `BTreeMap` here, so the same events produce the
+/// same bytes on every run and on every machine.
+pub fn events_ndjson(watch: &Watch) -> String {
+    let mut out = String::new();
+
+    for entry in watch.entries() {
+        let Entry::Event(event) = entry else {
+            continue;
+        };
+
+        match serde_json::to_string(&event.raw) {
+            Ok(line) => {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            // Unreachable for a tree that was decoded from JSON, and skipping it silently
+            // would still be a hole. The line names the sequence it stands for.
+            Err(error) => out.push_str(&format!(
+                "{{\"_unencodable\":{},\"_reason\":{}}}\n",
+                event.sequence,
+                serde_json::Value::String(error.to_string())
+            )),
+        }
+    }
+
+    out
+}
+
+/// How many events an export holds, the sequence range they cover, and whether anything
+/// was dropped below the floor — the sentence the notice says when it names the path.
+pub fn extent(watch: &Watch) -> String {
+    let held = watch.len();
+    let range = match (watch.floor(), watch.newest()) {
+        (_, 0) => String::new(),
+        (floor, newest) => format!(", sequences {}–{newest}", floor + 1),
+    };
+    let bound = if watch.floor() > 0 {
+        format!(
+            "; everything at or below {} was dropped before this client saw it and is not \
+             in the file",
+            watch.floor()
+        )
+    } else {
+        String::new()
+    };
+
+    format!("{held} event(s){range}{bound}")
+}
+
 /// The timestamp of every user message, in the order the projection will emit them.
 ///
 /// [`transcript_cells::project`] pushes exactly one `Message { speaker: You }` per

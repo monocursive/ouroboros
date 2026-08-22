@@ -135,6 +135,13 @@ impl App {
             }
         }
 
+        // A9: while the normalized ledger is the pane being drawn, its tree navigation
+        // claims the keys the composer would otherwise type — but only while the draft is
+        // empty, exactly as `?` and `,` do above.
+        if self.details_key(key) {
+            return;
+        }
+
         if self.sessions.composer.is_some() && self.tab == Tab::Sessions {
             self.composer_key(key);
             return;

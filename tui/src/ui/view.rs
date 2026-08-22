@@ -13,12 +13,13 @@ use ratatui::Frame;
 
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
-    CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport, MachineSecurity,
-    Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, SessionFacts,
-    Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
+    ApprovalRule, CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport,
+    MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice,
+    SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
 };
 use super::editor::COMMANDS;
 use super::theme;
+use super::transcript::ApprovalDetail;
 use crate::model::{Plane, ProviderEntry};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -756,17 +757,24 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             request_id,
             subject,
             choice,
+            detail,
+            rule,
+            rule_absent,
+            expanded,
             ..
-        } => chooser(
+        } => approval(
             frame,
             area,
-            &format!("approval requested — {id}"),
-            &format!("request {request_id}\n{subject}\nr — attach a reason before answering"),
-            &APPROVAL_CHOICES
-                .iter()
-                .map(|(decision, scope)| format!("{} ({})", decision.as_str(), scope.as_str()))
-                .collect::<Vec<_>>(),
-            *choice,
+            ApprovalModal {
+                id,
+                request_id,
+                subject,
+                detail,
+                rule: rule.as_ref(),
+                rule_absent: *rule_absent,
+                choice: *choice,
+                expanded: *expanded,
+            },
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
@@ -2346,6 +2354,429 @@ fn quit_detail(app: &App) -> String {
         Mode::Attached => "this client did not start the runtime; quitting only closes the \
              connection."
             .into(),
+    }
+}
+
+/// Everything one approval modal draws, gathered so the signature stays readable.
+struct ApprovalModal<'a> {
+    id: &'a str,
+    request_id: &'a str,
+    /// The one-line summary the transcript cell and the snack bar also use.
+    subject: &'a str,
+    detail: &'a ApprovalDetail,
+    rule: Option<&'a ApprovalRule>,
+    rule_absent: Option<&'static str>,
+    choice: usize,
+    expanded: bool,
+}
+
+/// How many rows the command may take before it is cut. Two, and it says how much it cut.
+const APPROVAL_COMMAND_ROWS: usize = 2;
+
+/// How many rows the reason may take.
+const APPROVAL_REASON_ROWS: usize = 3;
+
+/// The fewest diff rows worth drawing at all. Below this the modal says the diff is there
+/// and how long it is rather than showing a two-line sliver of it.
+const APPROVAL_DIFF_FLOOR: usize = 4;
+
+/// The diff ceiling under `ctrl+o`. Still bounded: a modal is not a pager, and a patch
+/// longer than this is read in the transcript or in `/details`.
+const APPROVAL_DIFF_EXPANDED: usize = 400;
+
+/// X11's modal: the kind, the exact command and its cwd, the diff while the approval is
+/// pending, the provider's own option labels, the reason it gave, and the rule a
+/// "don't ask again" would write — each drawn only where the payload actually carries it.
+///
+/// The honesty rules this obeys, in one place:
+///
+/// * A request with no diff says so. A modal that quietly showed nothing where a diff
+///   would go is X11 itself.
+/// * A diff the gateway had already excerpted is labelled an excerpt, so its `+`/`-`
+///   counts are never read as a diffstat of the whole patch.
+/// * The fifth answer names the exact pattern and the exact scope it will write, before
+///   it is chosen. Where there is a suggestion this client cannot act on, it says which
+///   of the two reasons applies rather than dropping the row.
+/// * A provider option whose `kind` this build does not recognize is listed with the
+///   provider's own words and mapped onto nothing.
+///
+/// Warp's rule for the diff — expanded while the approval is pending — is the default
+/// here, bounded by the rows the popup can spare; `ctrl+o` raises the ceiling in place.
+fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+    let detail = modal.detail;
+    let answers = approval_answers(&modal);
+    let width_percent = if area.width < 100 { 100 } else { 78 };
+    let inner = inner_width(area, width_percent).max(20);
+
+    let mut body: Vec<Line<'static>> = Vec::new();
+
+    body.push(Line::from(vec![
+        Span::styled("request ", theme::quiet()),
+        Span::raw(super::tree::truncate(
+            modal.request_id,
+            inner.saturating_sub(10),
+        )),
+    ]));
+    body.push(Line::from(Span::styled(
+        super::tree::truncate(modal.id, inner),
+        theme::quiet(),
+    )));
+
+    if let Some(title) = &detail.title {
+        body.push(Line::from(Span::raw(super::tree::truncate(title, inner))));
+    }
+
+    match &detail.command {
+        Some(command) => {
+            let rows = wrap_rows(command, inner.saturating_sub(2), APPROVAL_COMMAND_ROWS);
+            for (index, row) in rows.shown.iter().enumerate() {
+                body.push(Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "$ " } else { "  " },
+                        Style::default().fg(theme::ACCENT),
+                    ),
+                    Span::styled(row.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                ]));
+            }
+            if rows.omitted > 0 {
+                body.push(Line::from(Span::styled(
+                    format!("  … {} more line(s) of command · /details", rows.omitted),
+                    theme::quiet(),
+                )));
+            }
+        }
+        // Not every approval is about a command: an ACP permission request can carry only
+        // a tool title. Saying which is the honest half.
+        None => body.push(Line::from(Span::styled(
+            super::tree::truncate(modal.subject, inner),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+    }
+
+    if let Some(cwd) = &detail.cwd {
+        body.push(Line::from(vec![
+            Span::styled("cwd ", theme::quiet()),
+            Span::styled(
+                super::tree::truncate(cwd, inner.saturating_sub(4)),
+                theme::quiet(),
+            ),
+        ]));
+    }
+
+    for path in &detail.locations {
+        body.push(Line::from(vec![
+            Span::styled("path ", theme::quiet()),
+            Span::styled(
+                super::tree::truncate(path, inner.saturating_sub(5)),
+                theme::quiet(),
+            ),
+        ]));
+    }
+
+    if let Some(reason) = &detail.reason {
+        let rows = wrap_rows(reason, inner.saturating_sub(2), APPROVAL_REASON_ROWS);
+        for (index, row) in rows.shown.iter().enumerate() {
+            body.push(Line::from(vec![
+                Span::styled(if index == 0 { "· " } else { "  " }, theme::quiet()),
+                Span::styled(row.clone(), Style::default().fg(theme::WARN)),
+            ]));
+        }
+        if rows.omitted > 0 {
+            body.push(Line::from(Span::styled(
+                format!("  … {} more line(s) of reason", rows.omitted),
+                theme::quiet(),
+            )));
+        }
+    }
+
+    // Everything above is chrome the popup must keep; whatever height is left after it and
+    // the answer rows is the diff's budget.
+    let fixed = body.len() + answers.len() + approval_notes(&modal).len() + 5;
+    let budget = if modal.expanded {
+        APPROVAL_DIFF_EXPANDED
+    } else {
+        (area.height as usize).saturating_sub(fixed)
+    };
+
+    approval_diff_rows(&mut body, detail, inner, budget);
+
+    for note in approval_notes(&modal) {
+        body.push(note);
+    }
+
+    body.push(Line::from(Span::styled(
+        if modal.expanded {
+            "enter answers · tab or r attach a reason · ctrl+o collapses the diff · esc closes"
+        } else {
+            "enter answers · tab or r attach a reason · ctrl+o expands the diff · esc closes"
+        },
+        theme::quiet(),
+    )));
+
+    let heading = match &detail.kind {
+        Some(kind) => format!(" approval requested — {kind} "),
+        None => " approval requested ".to_string(),
+    };
+
+    let height = (body.len() + answers.len() + 2).min(area.height as usize) as u16;
+    let popup = centered(area, width_percent, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::WARN))
+        .title(Span::styled(heading, theme::heading()));
+    let inner_area = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(answers.len() as u16)])
+        .split(inner_area);
+
+    frame.render_widget(Paragraph::new(body), rows[0]);
+
+    let items: Vec<ListItem> = answers
+        .into_iter()
+        .map(|label| ListItem::new(Line::from(label)))
+        .collect();
+    let mut state = ListState::default().with_selected(Some(modal.choice));
+
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme::selected()),
+        rows[1],
+        &mut state,
+    );
+}
+
+/// The answer rows: the four the gateway accepts, carrying the provider's own wording
+/// where its `options` named one, plus the durable fifth where there is one.
+fn approval_answers(modal: &ApprovalModal<'_>) -> Vec<String> {
+    let mut answers: Vec<String> = APPROVAL_CHOICES
+        .iter()
+        .map(|(decision, scope)| {
+            let label = format!("{} ({})", decision.as_str(), scope.as_str());
+
+            // The provider's own words for the same answer, where it offered them. Shown
+            // beside the wire spelling rather than instead of it: the row still has to say
+            // what will be sent.
+            match modal
+                .detail
+                .options
+                .iter()
+                .find(|option| option.decision() == Some((*decision, *scope)))
+            {
+                Some(option) => format!("{label} — {}", option.name),
+                None => label,
+            }
+        })
+        .collect();
+
+    if let Some(rule) = modal.rule {
+        answers.push(format!(
+            "approve, and don't ask again for {} (workspace rule)",
+            rule.pattern
+        ));
+    }
+
+    answers
+}
+
+/// The lines under the diff: what a "don't ask again" would write, or why it is not
+/// offered, and any provider option this build could not map onto an answer.
+fn approval_notes(modal: &ApprovalModal<'_>) -> Vec<Line<'static>> {
+    let mut notes = Vec::new();
+
+    if let Some(rule) = modal.rule {
+        notes.push(Line::from(vec![
+            Span::styled("don't ask again writes ", theme::quiet()),
+            Span::styled(
+                rule.pattern.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" as a workspace allow rule in ", theme::quiet()),
+            Span::styled(rule.workspace.clone(), theme::quiet()),
+        ]));
+    } else if let Some(absent) = modal.rule_absent {
+        notes.push(Line::from(Span::styled(absent.to_string(), theme::quiet())));
+    }
+
+    let unmapped: Vec<&str> = modal
+        .detail
+        .options
+        .iter()
+        .filter(|option| option.decision().is_none())
+        .map(|option| option.name.as_str())
+        .collect();
+
+    if !unmapped.is_empty() {
+        notes.push(Line::from(Span::styled(
+            format!(
+                "the provider also offered {}, which this build cannot map onto an answer it \
+                 may send",
+                unmapped.join(", ")
+            ),
+            theme::quiet(),
+        )));
+    }
+
+    notes
+}
+
+/// The diff, or the sentence saying there is not one.
+fn approval_diff_rows(
+    body: &mut Vec<Line<'static>>,
+    detail: &ApprovalDetail,
+    inner: usize,
+    budget: usize,
+) {
+    let Some(diff) = &detail.diff else {
+        if detail.edits.is_empty() {
+            body.push(Line::from(Span::styled(
+                "this request carries no diff".to_string(),
+                theme::quiet(),
+            )));
+            return;
+        }
+
+        for edit in &detail.edits {
+            body.push(Line::from(vec![
+                Span::styled("edit ", theme::quiet()),
+                Span::styled(
+                    super::tree::truncate(&edit.path, inner.saturating_sub(30)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        " · {} · {} → {} bytes",
+                        edit.kind, edit.old_bytes, edit.new_bytes
+                    ),
+                    theme::quiet(),
+                ),
+            ]));
+        }
+
+        body.push(Line::from(Span::styled(
+            "this request carries the whole before and after text, not a patch; the unified \
+             diff appears in the file change when the edit is applied"
+                .to_string(),
+            theme::quiet(),
+        )));
+        return;
+    };
+
+    let total = diff.text.lines().count();
+    let mut heading = vec![
+        Span::styled("diff ", theme::quiet()),
+        Span::styled(
+            diff.path.clone().unwrap_or_else(|| "changes".into()),
+            theme::quiet(),
+        ),
+        Span::styled(
+            format!("  +{}", diff.additions),
+            Style::default().fg(theme::GOOD),
+        ),
+        Span::styled(
+            format!(" -{}", diff.deletions),
+            Style::default().fg(theme::BAD),
+        ),
+    ];
+
+    if diff.truncated || detail.diff_excerpted {
+        heading.push(Span::styled(
+            "  in excerpt — the counts describe the prefix",
+            theme::quiet(),
+        ));
+    }
+
+    body.push(Line::from(heading));
+
+    // Below the floor there is no room for a diff worth reading, so say what is there
+    // instead of showing two lines of it.
+    if budget < APPROVAL_DIFF_FLOOR {
+        body.push(Line::from(Span::styled(
+            format!("{total} line(s) · ctrl+o expands, or read it in /details"),
+            theme::quiet(),
+        )));
+        return;
+    }
+
+    let shown = budget.min(total);
+
+    for line in diff.text.lines().take(shown) {
+        let style = if line.starts_with('+') && !line.starts_with("+++") {
+            Style::default().fg(theme::GOOD)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            Style::default().fg(theme::BAD)
+        } else if line.starts_with("@@") {
+            Style::default().fg(theme::ACCENT)
+        } else {
+            theme::quiet()
+        };
+
+        body.push(Line::from(Span::styled(
+            super::tree::truncate(line, inner),
+            style,
+        )));
+    }
+
+    if total > shown {
+        body.push(Line::from(Span::styled(
+            format!("… +{} lines · ctrl+o", total - shown),
+            theme::quiet(),
+        )));
+    }
+}
+
+/// What fits, and how many source lines did not.
+struct WrappedRows {
+    shown: Vec<String>,
+    omitted: usize,
+}
+
+/// `text` wrapped to `width` cells, cut to `rows` rows.
+///
+/// Its own function rather than `Paragraph`'s wrap because the caller has to know how much
+/// it dropped: "+N lines" is the difference between a bounded command and a lie about one.
+fn wrap_rows(text: &str, width: usize, rows: usize) -> WrappedRows {
+    let width = width.max(8);
+    let mut all: Vec<String> = Vec::new();
+
+    for source in text.lines() {
+        let mut current = String::new();
+
+        for word in source.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                all.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+
+            while current.chars().count() > width {
+                let split = current
+                    .char_indices()
+                    .nth(width)
+                    .map(|(index, _)| index)
+                    .unwrap_or(current.len());
+                let tail = current.split_off(split);
+                all.push(std::mem::replace(&mut current, tail));
+            }
+        }
+
+        all.push(current);
+    }
+
+    let omitted = all.len().saturating_sub(rows);
+    all.truncate(rows);
+
+    WrappedRows {
+        shown: all,
+        omitted,
     }
 }
 

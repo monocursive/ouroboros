@@ -43,13 +43,15 @@ use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
 use crate::transport::ClientError;
 
+use super::details::DetailsView;
 use super::editor::{CompletionCatalog, Editor, EditorAction};
 use super::notify::{self, Terminal as TerminalIdentity};
-use super::transcript::{Note, Watch};
+use super::transcript::{ApprovalDetail, Note, Watch};
 use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod details;
 mod footer;
 mod home;
 mod keys;
@@ -76,8 +78,8 @@ pub use machines::{
 };
 pub use overlays::{
     approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
-    AccountDialog, AccountFlow, Command, CommandPalette, Overlay, PromptKind, APPROVAL_CHOICES,
-    APPROVAL_ROWS, SANDBOX_ROWS,
+    AccountDialog, AccountFlow, ApprovalRule, Command, CommandPalette, Overlay, PromptKind,
+    APPROVAL_CHOICES, APPROVAL_REMEMBER, APPROVAL_ROWS, SANDBOX_ROWS,
 };
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsField};
@@ -288,6 +290,22 @@ pub enum Tag {
         reconciling: bool,
         submission_sequence: u64,
     },
+    /// `interactive.event_detail` / `coding.event_detail` for one excerpted event, asked
+    /// for by the `/details` ledger. The sequence is on the tag because the answer is a
+    /// bare event and two drill-ins can be outstanding at once.
+    EventDetail {
+        plane: Plane,
+        id: String,
+        sequence: u64,
+    },
+    /// `permissions.add` for the rule the approval modal's fifth answer names.
+    ///
+    /// Separate from [`Tag::Action`] because it is not a session verb: it fails or succeeds
+    /// on its own, after the approval it accompanies has already been answered, and the
+    /// notice has to be able to say which of the two happened.
+    PermissionRule {
+        pattern: String,
+    },
     /// One approval response, keyed by the runtime request id so parallel prompts cannot
     /// collapse into one in-flight action.
     Approval {
@@ -309,6 +327,23 @@ pub enum Tag {
         input: String,
         submission_sequence: u64,
     },
+}
+
+/// One `/export` the driver has to write.
+///
+/// The App stays a pure state machine: it renders the bytes, names the file it wants, and
+/// says what the file will contain. Resolving a default directory and touching the disk is
+/// the driver's, because both read an environment this type does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRequest {
+    /// The path the operator named, or `None` for the default under the data directory.
+    pub path: Option<String>,
+    /// The filename the default resolves to, inside whichever directory the driver picks.
+    pub filename: String,
+    pub contents: String,
+    /// What the notice says before the path: how much of the session is in the file, and
+    /// whether anything was dropped before it.
+    pub extent: String,
 }
 
 #[derive(Debug)]
@@ -781,6 +816,9 @@ pub struct App {
     /// Tick at which a second Ctrl+C will open the quit dialog.
     ctrl_c_until: Option<u64>,
     /// Last agent message the I/O driver should copy to the clipboard.
+    /// The `/details` ledger's expansion, cursor, filter, and drill-in answers.
+    pub details: DetailsView,
+    export_pending: Option<ExportRequest>,
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
@@ -920,6 +958,8 @@ impl App {
             help_scroll: 0,
             backtrack_arm: None,
             ctrl_c_until: None,
+            details: DetailsView::default(),
+            export_pending: None,
             copy_pending: None,
             external_editor_pending: None,
             scrollback_dump_pending: None,
@@ -1172,6 +1212,10 @@ impl App {
     /// The clipboard read the driver should perform, if the composer asked for one.
     pub fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
         self.clipboard_pending.take()
+    }
+
+    pub fn take_export(&mut self) -> Option<ExportRequest> {
+        self.export_pending.take()
     }
 
     pub fn take_external_editor(&mut self) -> Option<String> {

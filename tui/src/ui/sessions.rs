@@ -14,9 +14,10 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{AttachmentKind, Event, EventType, Plane, SessionInfo, SessionStatus};
+use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
 
 use super::app::{App, Composer, ComposerVerb, Connection};
+use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
@@ -591,12 +592,14 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
 
     let plan_height = plan_panel_height(app, area);
     let queue_height = queue_panel_height(app, area, plan_height);
+    let snack = (composer_height > 0).then(|| approval_snack(app)).flatten();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(plan_height),
             Constraint::Length(queue_height),
+            Constraint::Length(u16::from(snack.is_some())),
             Constraint::Length(composer_height),
         ])
         .split(area);
@@ -611,8 +614,12 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         queue_panel(frame, rows[2], app);
     }
 
+    if let Some(snack) = snack {
+        render_approval_snack(frame, rows[3], &snack);
+    }
+
     if composer_height > 0 {
-        composer(frame, rows[3], app, inline_context);
+        composer(frame, rows[4], app, inline_context);
     }
 }
 
@@ -723,6 +730,51 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Kiro's snack bar: one row, above the composer, that a pending approval cannot scroll
+/// away from.
+///
+/// The transcript's own approval cell scrolls with the conversation, so an agent that kept
+/// working after asking would carry the question off the top of the pane and the operator
+/// would be looking at a session that had simply stopped. This row does not move.
+///
+/// It names `ctrl+x a` rather than `a` deliberately: the composer holds the keyboard while
+/// a session is open, so a bare `a` types the letter. A bar that named a key which typed
+/// into the draft instead of answering would be the same lie in a smaller font.
+fn approval_snack(app: &App) -> Option<String> {
+    let request = app.sessions.open_watch().and_then(Watch::next_approval)?;
+
+    Some(
+        request
+            .detail()
+            .command
+            .unwrap_or_else(|| request.subject()),
+    )
+}
+
+fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str) {
+    let width = area.width as usize;
+    let label = "⏸ approval needed · ";
+    let hint = " · ctrl+x a to answer";
+    let room = width.saturating_sub(label.width() + hint.width()).max(8);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(theme::WARN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                super::tree::truncate(subject, room),
+                Style::default().fg(theme::WARN),
+            ),
+            Span::styled(hint, Style::default().fg(theme::MUTED)),
+        ])),
+        area,
+    );
 }
 
 /// How many rows the `Ctrl+T` plan panel wants, or zero when it is closed or has nothing.
@@ -953,6 +1005,28 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(1)]).split(area);
     let inner = rows[1];
 
+    // The ledger is a tree, not a wrapped paragraph, so it draws itself and returns before
+    // the chat projection's scroll bookkeeping — which measures rows the tree does not have.
+    if show_event_details {
+        details_pane(
+            frame,
+            rows[0],
+            inner,
+            app,
+            DetailsPane {
+                plane,
+                id: &id,
+                title: &conversation_title,
+                provider: &conversation_provider,
+                header_height,
+                ticks,
+                verbosity,
+            },
+        );
+
+        return;
+    }
+
     let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
@@ -960,13 +1034,9 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = inner.width.max(8) as usize;
     let resyncing = watch.resyncing;
     let entries = watch.entries();
-    let mut lines = if show_event_details {
-        event_lines(entries, width)
-    } else {
-        chat_lines(entries, width, ticks, verbosity)
-    };
+    let mut lines = chat_lines(entries, width, ticks, verbosity);
 
-    if !show_event_details {
+    {
         let empty = lines.is_empty();
         if waiting_for_reply {
             push_working_indicator(&mut lines, ticks, theme::working_verb(ticks));
@@ -1057,6 +1127,120 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);
 }
 
+struct DetailsPane<'a> {
+    plane: Plane,
+    id: &'a str,
+    title: &'a str,
+    provider: &'a str,
+    header_height: u16,
+    ticks: u64,
+    verbosity: Verbosity,
+}
+
+/// `/details` and `ctrl+x d`: the normalized event ledger as one collapsible tree per
+/// event (A9).
+///
+/// Drawn from an immutable borrow of the watch so the mutable one the cursor needs is
+/// taken afterwards and separately — the chat pane's `measured` bookkeeping counts wrapped
+/// paragraph rows, which a tree does not produce.
+fn details_pane(
+    frame: &mut Frame,
+    header_area: Rect,
+    inner: Rect,
+    app: &mut App,
+    pane: DetailsPane<'_>,
+) {
+    let key = (pane.plane, pane.id.to_string());
+
+    let Some(watch) = app.sessions.watches.get(&key) else {
+        return;
+    };
+
+    if pane.header_height == 1 {
+        frame.render_widget(
+            Paragraph::new(header(
+                watch,
+                pane.id,
+                pane.plane,
+                pane.ticks,
+                true,
+                pane.verbosity,
+            )),
+            header_area,
+        );
+    } else {
+        render_conversation_header(
+            frame,
+            header_area,
+            watch,
+            ConversationHeader {
+                id: pane.id,
+                plane: pane.plane,
+                title: pane.title,
+                provider: pane.provider,
+                show_event_details: true,
+                verbosity: pane.verbosity,
+            },
+        );
+    }
+
+    app.details.focus(pane.plane, pane.id);
+
+    let Some(watch) = app.sessions.watches.get(&key) else {
+        return;
+    };
+    let rows = app.details.rows(watch);
+
+    // The filter line is the only chrome the ledger adds, and only while it is set: a row
+    // reserved for an empty filter would be a row taken from the ledger for nothing.
+    let filtering = app.details.filtering || !app.details.filter.is_empty();
+    let split = Layout::vertical([Constraint::Length(u16::from(filtering)), Constraint::Min(1)])
+        .split(inner);
+
+    if filtering {
+        let mut spans = vec![
+            Span::styled("filter ", Style::default().fg(theme::MUTED)),
+            Span::raw(app.details.filter.clone()),
+        ];
+
+        if app.details.filtering {
+            spans.push(Span::styled(
+                "_",
+                Style::default().add_modifier(Modifier::SLOW_BLINK),
+            ));
+            spans.push(Span::styled(
+                "  enter keeps it · esc clears it",
+                Style::default().fg(theme::MUTED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("  {} row(s) · esc clears it", rows.len()),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), split[0]);
+    }
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                if app.details.filter.is_empty() {
+                    "No events retained for this session."
+                } else {
+                    "No retained event matches that filter."
+                },
+                Style::default().fg(theme::MUTED),
+            )),
+            split[1],
+        );
+
+        return;
+    }
+
+    details::render(frame, split[1], &mut app.details, &rows);
+}
+
 struct ConversationHeader<'a> {
     id: &'a str,
     plane: Plane,
@@ -1109,7 +1293,7 @@ fn render_conversation_header(
             Span::styled(stream, stream_style.add_modifier(Modifier::BOLD)),
             Span::styled(
                 if header.show_event_details {
-                    "  ^O VERBOSE"
+                    "  ^X D CHAT"
                 } else if header.verbosity.verbose() {
                     "  ^O COMPACT"
                 } else {
@@ -1188,7 +1372,9 @@ fn header(
 
     let mut spans = vec![
         Span::styled(" Event details ", theme::heading()),
-        Span::styled("/details chat  ", Style::default().fg(theme::MUTED)),
+        // Not `/details`: inside the ledger `/` is the filter, so the chord is the way
+        // back and naming the slash command here would name a key that does not work.
+        Span::styled("ctrl+x d chat  ", Style::default().fg(theme::MUTED)),
         Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
         Span::raw(format!("{id} ")),
         Span::styled(
@@ -1252,41 +1438,6 @@ fn push_stream_state(spans: &mut Vec<Span<'static>>, watch: &Watch, tick: u64, t
     }
 }
 
-fn event_lines(entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    for entry in entries {
-        push_event_entry(&mut lines, entry, width);
-    }
-
-    lines
-}
-
-fn push_event_entry(lines: &mut Vec<Line<'static>>, entry: Entry<'_>, width: usize) {
-    match entry {
-        Entry::Floor(floor) => lines.push(divider(
-            &format!("history truncated below {floor} — the runtime no longer retains it"),
-            width,
-            theme::WARN,
-        )),
-        Entry::Gap { from, to } => lines.push(divider(
-            &format!(
-                "{} events missing ({from}..{to}) — replaying",
-                to - from + 1
-            ),
-            width,
-            theme::WARN,
-        )),
-        Entry::Note(note) => lines.push(divider(&note.text(), width, theme::WARN)),
-        Entry::Ended(status) => lines.push(divider(
-            &format!("stream ended ({status}) — no further events"),
-            width,
-            theme::MUTED,
-        )),
-        Entry::Event(event) => push_event(lines, event, width),
-    }
-}
-
 fn chat_lines(
     mut entries: Vec<Entry<'_>>,
     width: usize,
@@ -1335,55 +1486,6 @@ fn separate(lines: &mut Vec<Line<'static>>) {
     }
 }
 
-fn push_event(lines: &mut Vec<Line<'static>>, event: &Event, width: usize) {
-    let prefix = format!("{:>6}  ", event.sequence);
-    let kind = event.kind.as_str().to_string();
-    let indent = " ".repeat(prefix.len());
-    let body_width = width.saturating_sub(prefix.len()).max(8);
-
-    let mut head = vec![
-        Span::styled(prefix, Style::default().fg(theme::MUTED)),
-        Span::styled(format!("{kind}  "), event_style(&event.kind)),
-    ];
-
-    let summary = event.summary();
-    let mut wrapped = wrap(&summary, body_width.saturating_sub(kind.len() + 2).max(8));
-
-    if let Some(first) = wrapped.first() {
-        head.push(Span::raw(first.clone()));
-    }
-
-    lines.push(Line::from(head));
-
-    if wrapped.len() > 1 {
-        for rest in wrapped.drain(1..) {
-            lines.push(Line::from(vec![Span::raw(indent.clone()), Span::raw(rest)]));
-        }
-    }
-}
-
-fn event_style(kind: &EventType) -> Style {
-    match kind {
-        EventType::ApprovalRequested => Style::default()
-            .fg(theme::WARN)
-            .add_modifier(Modifier::BOLD),
-        EventType::RunFailed
-        | EventType::SessionFailed
-        | EventType::TurnFailed
-        | EventType::RunCancelled
-        | EventType::SessionCancelled
-        | EventType::TurnInterrupted => Style::default().fg(theme::BAD),
-        EventType::OutputTextFinal | EventType::OutputTextDelta => Style::default(),
-        EventType::ThinkingDelta | EventType::Usage | EventType::QueueChanged => {
-            Style::default().fg(theme::MUTED)
-        }
-        EventType::ToolCall | EventType::ToolResult | EventType::FileChange => {
-            Style::default().fg(theme::ACCENT)
-        }
-        _ => Style::default().fg(theme::MUTED),
-    }
-}
-
 fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
     let text = super::tree::truncate(text, width.saturating_sub(8));
     let rule = width.saturating_sub(text.width() + 6);
@@ -1396,64 +1498,6 @@ fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'sta
             Style::default().fg(colour),
         ),
     ])
-}
-
-/// Wrapping done here rather than by `Paragraph` so the scroll offset counts the same
-/// lines the reader sees. A transcript whose scroll position is a guess is a transcript
-/// that jumps.
-///
-/// Measured in terminal cells, like everything else this client lays out by hand: a line
-/// of CJK counted by character is twice as wide as the pane it was measured for.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-
-    for source in text.split('\n') {
-        let mut current = String::new();
-
-        for word in source.split(' ') {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.width() + 1 + word.width() <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
-
-            // A single word wider than the pane is cut rather than allowed to overflow.
-            while current.width() > width {
-                let split = cell_split(&current, width);
-                let tail = current.split_off(split);
-                lines.push(std::mem::replace(&mut current, tail));
-            }
-        }
-
-        lines.push(current);
-    }
-
-    lines
-}
-
-/// The byte offset at which `text` has occupied as many cells as will fit in `width`.
-fn cell_split(text: &str, width: usize) -> usize {
-    let mut used = 0;
-
-    for (at, character) in text.char_indices() {
-        let cells = character.width().unwrap_or(0);
-
-        if used + cells > width {
-            return at;
-        }
-
-        used += cells;
-    }
-
-    text.len()
 }
 
 fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
@@ -2030,6 +2074,8 @@ fn editor_window(text: &str, cursor: usize, width: usize, height: usize) -> Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::model::Event;
 
     #[test]
     fn chat_projection_names_the_ledger_when_older_entries_are_bounded() {

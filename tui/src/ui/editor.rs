@@ -19,12 +19,16 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 32] = [
+pub(crate) const COMMANDS: [(&str, &str); 33] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
     ("/sessions", "switch sessions"),
     ("/details", "toggle normalized event details"),
+    (
+        "/export",
+        "write the transcript to a file ([--json] [path])",
+    ),
     ("/copy", "copy the last agent message"),
     ("/interrupt", "abort the running turn"),
     ("/steer", "steer the running turn"),

@@ -89,6 +89,8 @@ pub enum Command {
     SwitchSession,
     SessionDetails,
     CopyLast,
+    CopyRawLast,
+    Export,
     DumpScrollback,
     ViewTranscript,
     Interrupt,
@@ -124,13 +126,15 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 34] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
         Self::ShowDiff,
         Self::RawMode,
         Self::CopyLast,
+        Self::CopyRawLast,
+        Self::Export,
         Self::DumpScrollback,
         Self::ViewTranscript,
         Self::Interrupt,
@@ -167,6 +171,8 @@ impl Command {
             | Self::SwitchSession
             | Self::SessionDetails
             | Self::CopyLast
+            | Self::CopyRawLast
+            | Self::Export
             | Self::DumpScrollback
             | Self::ViewTranscript
             | Self::Interrupt
@@ -193,6 +199,8 @@ impl Command {
             Self::SwitchSession => "Switch session",
             Self::SessionDetails => "Toggle event details",
             Self::CopyLast => "Copy last agent message",
+            Self::CopyRawLast => "Copy last agent message as source Markdown",
+            Self::Export => "Export the transcript to a file",
             Self::DumpScrollback => "Print transcript into terminal scrollback",
             Self::ViewTranscript => "Open transcript in $EDITOR",
             Self::Interrupt => "Interrupt the running turn",
@@ -230,6 +238,8 @@ impl Command {
             Self::SwitchSession => "ctrl+x l",
             Self::SessionDetails => "ctrl+x d",
             Self::CopyLast => "ctrl+x y",
+            Self::CopyRawLast => "/copy raw",
+            Self::Export => "/export",
             Self::DumpScrollback => "ctrl+x [",
             Self::ViewTranscript => "ctrl+x v",
             Self::Interrupt => "esc",
@@ -363,8 +373,22 @@ pub enum Overlay {
         request_id: String,
         subject: String,
         choice: usize,
-        /// Optional operator reason attached through the `r` prompt.
         reason: Option<String>,
+        /// Everything the `approval_requested` payload carries, read once when the modal
+        /// opened rather than re-derived on every frame.
+        detail: Box<ApprovalDetail>,
+        /// The fifth answer, present only when the payload suggested a rule *and* this
+        /// gateway serves `permissions.add` *and* the session names a workspace to scope
+        /// it to. Absent rather than broken: an offer this client could not honour would
+        /// be worse than no offer.
+        rule: Option<ApprovalRule>,
+        /// Why the fifth answer is missing although the payload suggested a rule. Shown,
+        /// because "this runtime cannot remember that" and "nothing was suggested" are
+        /// different facts.
+        rule_absent: Option<&'static str>,
+        /// `ctrl+o` inside the modal: draw the diff at its full retained length instead of
+        /// the pane-height budget.
+        expanded: bool,
     },
     Confirm {
         title: String,
@@ -409,6 +433,49 @@ pub const APPROVAL_CHOICES: [(ApprovalDecision, ApprovalScope); 4] = [
     (ApprovalDecision::Deny, ApprovalScope::Once),
     (ApprovalDecision::Deny, ApprovalScope::Session),
 ];
+
+/// The index of the durable "don't ask again" answer, which is the fifth row when there is
+/// one. It is not in [`APPROVAL_CHOICES`] because it is not one call: `respond_approval`
+/// has no `scope: "always"` — the pinned `ApprovalResponse` schema admits only `once` and
+/// `session` — so the durable form is a session-scoped approval *plus* a `permissions.add`
+/// rule, and the modal says exactly that before it is chosen.
+pub const APPROVAL_REMEMBER: usize = APPROVAL_CHOICES.len();
+
+/// A session id reduced to something safe to put in a filename.
+///
+/// Ids are generated here and are already `[a-z0-9-]`, but an operator may supply their
+/// own with `interactive.start {id}` and this builds a *path* out of it. Anything outside
+/// the allowlist becomes `-`, so no id can walk out of the directory the export was meant
+/// for, and the result is bounded so no id can produce a name the filesystem refuses.
+fn file_stem(id: &str) -> String {
+    let stem: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect();
+
+    if stem.is_empty() {
+        "session".to_string()
+    } else {
+        stem
+    }
+}
+
+/// The rule the fifth answer would write, named in full before it is written.
+///
+/// `pattern` is the runtime's own `suggested_rule` — this client never invents one, which
+/// is the point of computing it server-side in `Control.Permissions.Seam`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRule {
+    pub pattern: String,
+    pub workspace: String,
+}
 
 impl App {
     /// `control.submit` from the Plans tab. The objective is the only field the plane
@@ -498,7 +565,7 @@ impl App {
     }
 
     pub(super) fn overlay_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         if matches!(self.overlay, Some(Overlay::Commands(_))) {
             self.command_palette_key(key);
@@ -599,32 +666,44 @@ impl App {
                 request_id,
                 choice,
                 reason,
+                rule,
+                expanded,
                 ..
-            } => match key.code {
-                KeyCode::Esc => self.overlay = None,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    *choice = (*choice + 1).min(APPROVAL_CHOICES.len() - 1)
+            } => {
+                let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(rows - 1),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    // Claude Code's `Ctrl+O`, inside the modal: the diff at full retained
+                    // length instead of the rows the popup could spare for it.
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *expanded = !*expanded;
+                    }
+                    // Claude Code offers the comment field on `Tab` from the answer row;
+                    // this client has always offered it on `r`. Both, because `r` is what
+                    // the modal's own hint says and `Tab` is what a reader arrives with.
+                    KeyCode::Char('r') | KeyCode::Tab => {
+                        let kind = PromptKind::ApprovalReason {
+                            plane: *plane,
+                            id: id.clone(),
+                            request_id: request_id.clone(),
+                            choice: *choice,
+                            reason: reason.clone(),
+                        };
+                        let buffer = reason.clone().unwrap_or_default();
+                        self.overlay = Some(Overlay::Prompt {
+                            kind,
+                            label: "approval reason — enter attaches it, an empty line keeps none"
+                                .to_string(),
+                            buffer,
+                        });
+                    }
+                    KeyCode::Enter => self.submit_approval(),
+                    _ => {}
                 }
-                KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
-                KeyCode::Char('r') => {
-                    let kind = PromptKind::ApprovalReason {
-                        plane: *plane,
-                        id: id.clone(),
-                        request_id: request_id.clone(),
-                        choice: *choice,
-                        reason: reason.clone(),
-                    };
-                    let buffer = reason.clone().unwrap_or_default();
-                    self.overlay = Some(Overlay::Prompt {
-                        kind,
-                        label: "approval reason — enter attaches it, an empty line keeps none"
-                            .to_string(),
-                        buffer,
-                    });
-                }
-                KeyCode::Enter => self.submit_approval(),
-                _ => {}
-            },
+            }
             // B5. Two verbs, and the menu says which one Enter is before it is pressed:
             // an "Enter forks" that quietly edited instead would be exactly the rewind
             // that silently under-delivers (Claude Code #18516).
@@ -744,6 +823,14 @@ impl App {
             Command::SessionDetails => {
                 self.overlay = None;
                 self.toggle_session_details();
+            }
+            Command::CopyRawLast => {
+                self.overlay = None;
+                self.copy_last_agent_source();
+            }
+            Command::Export => {
+                self.overlay = None;
+                self.export_transcript("");
             }
             Command::CopyLast => {
                 self.overlay = None;
@@ -968,6 +1055,7 @@ impl App {
             request_id,
             choice,
             reason,
+            rule,
             ..
         }) = self.overlay.take()
         else {
@@ -978,7 +1066,15 @@ impl App {
             return;
         }
 
-        let (decision, scope) = APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)];
+        // The fifth row answers `approve` for the rest of the session and then writes the
+        // durable rule. The other four are exactly themselves.
+        let remembering = choice == APPROVAL_REMEMBER;
+        let rule = remembering.then_some(rule).flatten();
+        let (decision, scope) = if remembering {
+            (ApprovalDecision::Approve, ApprovalScope::Session)
+        } else {
+            APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)]
+        };
 
         let marked = self
             .sessions
@@ -1010,6 +1106,18 @@ impl App {
             plane.method("respond_approval"),
             params,
         ));
+
+        // Second, and only second: the provider is waiting on the answer above, and a rule
+        // written before it was sent would be a rule that outlived a refused approval.
+        if let Some(rule) = rule {
+            self.issue(Call::new(
+                Tag::PermissionRule {
+                    pattern: rule.pattern.clone(),
+                },
+                "permissions.add",
+                model::permission_add_params(&rule.pattern, &rule.workspace),
+            ));
+        }
     }
 
     fn submit_prompt(&mut self) {
@@ -1193,6 +1301,101 @@ impl App {
             }
             None => self.inform("no agent message to copy yet", NoticeKind::Info),
         }
+    }
+
+    /// `/copy raw`: the last agent message exactly as the provider wrote it.
+    ///
+    /// Honest limit, stated because it will stop being true: nothing in this build renders
+    /// Markdown, so the bytes this copies and the bytes `ctrl+x y` copies are the same
+    /// bytes today. The two verbs are separate because the *questions* are separate — "give
+    /// me what I am reading" and "give me what the model sent" — and the second one has to
+    /// keep answering the source once a renderer stands between them.
+    pub(super) fn copy_last_agent_source(&mut self) {
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform("open a session before copying a message", NoticeKind::Info);
+            return;
+        };
+
+        match transcript_cells::last_agent_message(watch.entries()) {
+            Some(text) => {
+                let bytes = text.len();
+                self.copy_pending = Some(text);
+                self.inform(
+                    format!("copied the last agent message's source, {bytes} bytes as sent"),
+                    NoticeKind::Info,
+                );
+            }
+            None => self.inform("no agent message to copy yet", NoticeKind::Info),
+        }
+    }
+
+    /// `/export [--json] [path]`.
+    ///
+    /// The text form is [`crate::ui::export::transcript`] — the same projection the pane
+    /// draws, with the render-time caps and the gutters removed — and `--json` is
+    /// [`crate::ui::export::events_ndjson`], the events themselves. Both are bounded by
+    /// what this client still holds, and both say so: the text export's last line names the
+    /// floor, and the notice that names the path says it for either.
+    pub(super) fn export_transcript(&mut self, argument: &str) {
+        let mut json = false;
+        let mut path: Option<String> = None;
+
+        for word in argument.split_whitespace() {
+            match word {
+                "--json" | "-j" => json = true,
+                "--text" => json = false,
+                _path if path.is_none() => path = Some(word.to_string()),
+                _extra => {
+                    self.inform(
+                        "usage: /export [--json] [path] — one path, and it is the last word",
+                        NoticeKind::Error,
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Zero before the first frame, and a width of zero would wrap every word onto its
+        // own line. Eighty is what a terminal that has not said otherwise is.
+        let width = match self.terminal_width {
+            0 => 80,
+            width => usize::from(width),
+        };
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        let contents = if json {
+            crate::ui::export::events_ndjson(watch)
+        } else {
+            crate::ui::export::transcript(watch, width)
+        };
+        let extent = crate::ui::export::extent(watch);
+        let extension = if json { "ndjson" } else { "txt" };
+
+        self.overlay = None;
+        self.export_pending = Some(ExportRequest {
+            path,
+            filename: format!("ouro-{}-{}.{extension}", plane.as_str(), file_stem(&id)),
+            contents,
+            extent: format!(
+                "exported {} of {id}",
+                if json { "the events" } else { "the transcript" }
+            ) + &format!(" ({extent})"),
+        });
     }
 
     pub(super) fn request_external_editor(&mut self) {

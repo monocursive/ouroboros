@@ -598,7 +598,27 @@ Three are the input grammar:
   backtrack = "esc esc"   # or "alt+up", or "off"
   ```
 
-All of them are also in the command palette (`ctrl+p`).
+
+All of them are also in the command palette (`ctrl+p`), along with `/export [--json] [path]`,
+which writes the same conversation to a file — plain text, or the raw events as one JSON
+object per line — `0600`, refusing to overwrite, under this runtime's data directory — or your temp
+directory when this client did not start that runtime and so does not know it — unless you
+name a path. The notice says how many events went in and whether anything had already
+been dropped, because an export that looked complete and was not would be worse than none.
+
+**Approvals.** When a provider asks permission, the modal shows what is being approved: the
+kind, the exact command with its working directory, the diff — expanded while the answer is
+pending — the reason the provider gave, and the provider's own wording for each option
+beside the answer it maps onto. A request with no diff says it carries no diff. Four answers
+are the keyboard path (approve or deny, once or for this session); a fifth appears where the
+runtime suggested a rule and this one can save it, and it names the exact rule and scope it
+would write before you choose it. `Tab` or `r` attaches a reason, and `ctrl+o` opens a long
+diff in place. While an answer is outstanding, a bar above the composer says so and does not
+scroll away.
+
+`/details` (or `ctrl+x d`) is the normalized event ledger: one collapsible tree per event
+over the whole object the runtime sent, `/` to filter, and `Enter` on a leaf the gateway had
+to truncate fetches that one event whole.
 
 `ouro` captures the mouse so the wheel scrolls the transcript, which means selecting
 text needs a modifier — Shift on most terminals, Option on iTerm2, Fn on Terminal.app.
@@ -1474,6 +1494,13 @@ Four scopes, highest authority first:
 | `:user` | the node's data directory | `permissions.add` |
 | `:workspace` | the data directory, keyed by canonical root | `permissions.add` |
 | `:session` | the same store, keyed by session id | answering an approval with `scope: "session"` |
+
+The TUI's approval modal offers a fifth answer, *approve, and don't ask again for
+`<pattern>`*, wherever the runtime suggested a pattern for the request: it answers the
+provider with `scope: "session"` and then writes that exact pattern as a `:workspace`
+`allow` rule through `permissions.add`. The pattern and the workspace are named on screen
+before the answer can be chosen, and the pattern is the runtime's own — the client has no
+rule language of its own to invent one with.
 
 Workspace rules are stored **outside the repository** on purpose. A repository that
 shipped its own allow rules would grant itself permissions on every machine that cloned
