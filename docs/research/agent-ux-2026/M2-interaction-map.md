@@ -10,7 +10,7 @@ Scope: what a user can actually *drive* today, and through which gateway call.
 ### 1.1 Entry points
 
 `ouro` with no subcommand attaches (or spawns) and lands on the **coding home** —
-`App::open_home` (`tui/src/ui/app.rs:5319`) selects `Tab::Sessions`, fires
+`App::open_home` (`tui/src/ui/app/:5319`) selects `Tab::Sessions`, fires
 `account.read`, `interactive.list`, `coding.list`, and leaves a typeable composer while
 those are in flight. There is no provider picker and no modal in the way (app.rs:5313-5318 doc).
 
@@ -338,7 +338,7 @@ Tabs: Dashboard, Sessions, Agents, Teams, Plans/Control, Upgrade, Logs (`Tab` ap
   `explorer_activate` (app.rs:5219-5241) only expands/collapses nodes. The tabs poll
   `agents.list`, `teams.list`, `teams.state` (app.rs:3078-3140).
 - **`teams.delegate`, `teams.add_worker`, `teams.cancel`, `teams.close`, `agents.stop` have
-  zero call sites in the TUI** (verified by grep over `tui/src/ui/app.rs`). They are gateway
+  zero call sites in the TUI** (verified by grep over `tui/src/ui/app/`). They are gateway
   methods with no UI.
 - **Plans/Control is the only tab with operate actions**: `s` → `control.submit` behind an
   objective prompt (`open_control_submit` app.rs:6668, `PromptKind::ControlObjective` app.rs:857,

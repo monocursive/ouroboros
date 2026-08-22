@@ -199,7 +199,7 @@ What did not exist in that pre-implementation snapshot (not current claims):
 - No host field in `gateway.json`; every client dials `127.0.0.1`
   (`tui/src/main.rs:962-964`).
 - No fleet registry in `ouro`; one transport, one cursor table, one `(Plane, id)`
-  keyspace (`tui/src/ui/app.rs:419-439,1298-1333`).
+  keyspace (`tui/src/ui/app/:419-439,1298-1333`).
 - No workspace advertisement or logical naming; no grant replication; no per-arch
   builder selection; no reconciliation between the N per-node rollout registries.
 
@@ -856,7 +856,7 @@ stated in the tests), registry v2→v3 widen-on-read.
   lookup (`conn.ex:680-697`) and subscription keys to become node-aware, and node
   fields on every stream notification; until then, attach switching covers it.
 - **True multi-connection `ouro`** — N live gateways, `(node, plane, id)` keyspaces
-  throughout (`tui/src/ui/app.rs:419-439,1298-1333`).
+  throughout (`tui/src/ui/app/:419-439,1298-1333`).
 - **Grant replication / fleet-visible grants**, and any per-principal budget that
   spans nodes.
 - **Rollout-registry reconciliation** across driving nodes; operator exit from
