@@ -308,16 +308,14 @@ defmodule Bench.Runner do
   defp non_empty(_tasks), do: :ok
 
   # The client this repository builds, not one on PATH: a corpus that silently graded a
-  # different binary than the checkout would be worse than no corpus.
+  # different binary than the checkout would be worse than no corpus. Between the release
+  # and debug builds the NEWEST wins, not the release one: a stale `cargo build --release`
+  # from before a verb existed once graded every task as "unrecognized subcommand".
   defp resolve_ouro(repo, explicit) do
     candidates =
       case explicit do
         nil ->
-          [
-            System.get_env("OURO_BIN"),
-            Path.join(repo, "tui/target/release/ouro"),
-            Path.join(repo, "tui/target/debug/ouro")
-          ]
+          [System.get_env("OURO_BIN") | newest_first(repo)]
 
         path ->
           [path]
@@ -332,6 +330,14 @@ defmodule Bench.Runner do
       path ->
         {:ok, Path.expand(path)}
     end
+  end
+
+  # Release and debug builds, most recently built first; a missing build is simply absent.
+  defp newest_first(repo) do
+    ["tui/target/release/ouro", "tui/target/debug/ouro"]
+    |> Enum.map(&Path.join(repo, &1))
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.sort_by(&File.stat!(&1, time: :posix).mtime, :desc)
   end
 
   defp scratch_dir do

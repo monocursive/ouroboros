@@ -58,26 +58,28 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
   Cheap and total: paths with no server contribute an error entry that
   `feedback/3` reads as "there was never anything to compare against".
   """
-  @spec baseline([String.t()]) :: baseline()
-  def baseline(paths) when is_list(paths) do
+  @spec baseline([String.t()], keyword()) :: baseline()
+  def baseline(paths, opts \\ [])
+
+  def baseline(paths, opts) when is_list(paths) do
     if Config.enabled?() do
       paths
       |> Enum.uniq()
-      |> Map.new(fn path -> {path, baseline_for(path)} end)
+      |> Map.new(fn path -> {path, baseline_for(path, pool_opts(opts))} end)
     else
       %{}
     end
   end
 
-  def baseline(_paths), do: %{}
+  def baseline(_paths, _opts), do: %{}
 
   # A file that does not exist yet has no diagnostics, so its baseline is empty rather
   # than missing. The distinction matters: `:no_baseline` suppresses the report entirely,
   # and suppressing it for every newly created file would mean the one case where *every*
   # finding is genuinely new is the one case nothing is said.
-  defp baseline_for(path) do
+  defp baseline_for(path, pool_opts) do
     if File.exists?(path),
-      do: safely(fn -> CodeIntel.baseline(path) end),
+      do: safely(fn -> CodeIntel.baseline(path, pool_opts) end),
       else: {:ok, %{items: [], version: 0, absent: true}}
   end
 
@@ -110,6 +112,17 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
     end
   end
 
+  # The pool admits a file only under a root it was told about. A session's workspace was
+  # admitted by the lease that started it, so the native agent names it on every call —
+  # without this, a node that configured no `:workspace_allowed_roots` (the default) would
+  # answer `{:outside_workspace, _}` for every path and no diagnostic would ever appear.
+  defp pool_opts(opts) do
+    case Keyword.get(opts, :root) do
+      root when is_binary(root) and root != "" -> [workspace_root: root]
+      _unset -> []
+    end
+  end
+
   @doc "The literal line every diagnostics report follows. Public so tests can name it."
   @spec applied_line() :: String.t()
   def applied_line, do: @applied_line
@@ -121,7 +134,7 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
   # ---------------------------------------------------------------- one file
 
   defp report(path, baseline_entry, opts) do
-    case safely(fn -> CodeIntel.touch(path, :changed) end) do
+    case safely(fn -> CodeIntel.touch(path, :changed, pool_opts(opts)) end) do
       {:ok, _version} ->
         diagnose(path, baseline_entry, opts)
 
@@ -133,7 +146,7 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
   defp diagnose(path, baseline_entry, opts) do
     wait = Keyword.get(opts, :wait_ms, @wait_ms)
 
-    case safely(fn -> CodeIntel.diagnostics(path, wait_ms: wait) end) do
+    case safely(fn -> CodeIntel.diagnostics(path, [wait_ms: wait] ++ pool_opts(opts)) end) do
       {:ok, %{items: items}} ->
         render(path, new_items(items, baseline_entry))
 

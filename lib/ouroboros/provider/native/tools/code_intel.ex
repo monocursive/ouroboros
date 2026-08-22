@@ -138,8 +138,8 @@ defmodule Ouroboros.Provider.Native.Tools.CodeIntel do
   # ---------------------------------------------------------------- dispatch
 
   defp dispatch("diagnostics", path, _params, context) do
-    with {:ok, _version} <- CodeIntel.touch(path, :open) do
-      case CodeIntel.diagnostics(path) do
+    with {:ok, _version} <- CodeIntel.touch(path, :open, workspace_root: context.scope.root) do
+      case CodeIntel.diagnostics(path, workspace_root: context.scope.root) do
         {:ok, %{items: items, counts: counts}} ->
           {:ok, %{output: render_diagnostics(path, items, counts, context), is_error: false}}
 
@@ -191,7 +191,10 @@ defmodule Ouroboros.Provider.Native.Tools.CodeIntel do
 
   defp dispatch(operation, path, params, context) do
     location = %{path: path, line: params.line, character: params.character}
-    opts = if params.query == "", do: [], else: [query: params.query]
+
+    opts =
+      [workspace_root: context.scope.root] ++
+        if(params.query == "", do: [], else: [query: params.query])
 
     case CodeIntel.request(String.to_existing_atom(operation), location, opts) do
       {:ok, %{items: items, truncated: truncated}} ->

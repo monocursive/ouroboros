@@ -372,7 +372,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     # Checkpoint before write, always, and before the language server is asked anything:
     # the baseline is a convenience and the snapshot is the thing a rewind depends on.
     state = snapshot_before(state, classified.write_paths)
-    baselines = CodeIntel.baseline(classified.write_paths)
+    baselines = CodeIntel.baseline(classified.write_paths, root: state.scope.root)
 
     result = Tools.execute(module, call.input, context, state.tool_timeout_ms)
     state = %{state | reads: Map.merge(state.reads, Map.get(result, :reads, %{}))}
@@ -382,7 +382,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = snapshot_after(state, changed)
     state = record_command(state, classified)
 
-    result = append_diagnostics(result, changed, baselines)
+    result = append_diagnostics(result, changed, baselines, root: state.scope.root)
 
     result =
       append_context(
@@ -445,11 +445,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   # The diagnostics report is appended only to a successful write. A failed edit has no
   # new state to describe, and appending anything after a failure is how a model comes to
   # read diagnostics as the failure itself (OpenCode #9102).
-  defp append_diagnostics(%{is_error: true} = result, _changed, _baselines), do: result
-  defp append_diagnostics(result, [], _baselines), do: result
+  defp append_diagnostics(%{is_error: true} = result, _changed, _baselines, _opts), do: result
+  defp append_diagnostics(result, [], _baselines, _opts), do: result
 
-  defp append_diagnostics(result, changed, baselines) do
-    case CodeIntel.feedback(changed, baselines) do
+  defp append_diagnostics(result, changed, baselines, opts) do
+    case CodeIntel.feedback(changed, baselines, opts) do
       "" -> result
       feedback -> %{result | output: result.output <> "\n" <> feedback}
     end

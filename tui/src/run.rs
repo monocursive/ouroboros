@@ -1716,11 +1716,26 @@ fn collect_paths(value: &Value, paths: &mut Vec<String>, depth: u32) {
 fn push_path(path: &str, paths: &mut Vec<String>) {
     let path = path.trim();
 
-    if path.is_empty() || paths.len() >= MAX_FILES || paths.iter().any(|held| held == path) {
+    if path.is_empty() || paths.len() >= MAX_FILES || paths.iter().any(|held| same_file(held, path))
+    {
         return;
     }
 
     paths.push(path.to_string());
+}
+
+/// A `file_change` names its file absolutely and the diff header inside it names the same
+/// file relative to the workspace; a result that listed both would count one change as
+/// two. Two paths are one file when one is the other, or one ends with the other as a
+/// whole path suffix.
+fn same_file(held: &str, path: &str) -> bool {
+    held == path
+        || held
+            .strip_suffix(path)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+        || path
+            .strip_suffix(held)
+            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 /// Appends under a ceiling, saying so once rather than growing on a provider's say-so.
@@ -1803,6 +1818,21 @@ pub fn start_plan(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_named_absolutely_and_relatively_is_one_changed_file() {
+        let mut paths = Vec::new();
+        super::push_path("/w/ws/lib/a.ex", &mut paths);
+        super::push_path("lib/a.ex", &mut paths);
+        super::push_path("/w/ws/lib/b.ex", &mut paths);
+        // Without the workspace, a bare basename that ends an absolute path held already is
+        // taken as that file: diff headers name workspace-relative paths, so the only
+        // ambiguity is a root file shadowing a nested one of the same name, and a count is
+        // all `files_changed` carries.
+        super::push_path("b.ex", &mut paths);
+        super::push_path("lib/c.ex", &mut paths);
+        assert_eq!(paths, vec!["/w/ws/lib/a.ex", "/w/ws/lib/b.ex", "lib/c.ex"]);
+    }
+
     use super::*;
 
     fn report() -> Report {
