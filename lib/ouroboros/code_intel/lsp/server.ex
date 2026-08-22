@@ -586,5 +586,19 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
 
   def uri(path), do: "file://" <> path
 
+  @doc false
+  @spec path_from_uri(term()) :: {:ok, String.t()} | :error
+  def path_from_uri("file://" <> rest) when is_binary(rest) do
+    # `file:///a/b` (empty authority) is the form every server emits; a named authority
+    # would be a remote file this node does not own, and guessing a local path for it is
+    # how a diagnostic lands on the wrong file.
+    case rest do
+      "/" <> _absolute -> {:ok, URI.decode(rest)}
+      _authority -> :error
+    end
+  end
+
+  def path_from_uri(_uri), do: :error
+
   defp encode_segment(segment), do: URI.encode(segment, &URI.char_unreserved?/1)
 end

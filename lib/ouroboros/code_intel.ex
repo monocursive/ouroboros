@@ -45,6 +45,82 @@ defmodule Ouroboros.CodeIntel do
   def release(%Handle{} = handle, opts \\ []), do: LspPool.release(pool(opts), handle)
 
   @doc """
+  Tells the language server that a file was opened, changed on disk, or closed.
+
+  Only a path and an action: the content is read from disk by the pool, in the same
+  message that assigns the new version. Nothing accepts document text from a caller, so
+  no file content crosses a process or node boundary to get here, and two writers cannot
+  interleave into a state where the server holds older text under a newer version.
+
+  Answers `{:ok, version}` — the version every later `diagnostics/2` is gated against.
+  """
+  @spec touch(String.t(), :open | :changed | :closed, keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def touch(path, action, opts \\ [])
+      when is_binary(path) and action in [:open, :changed, :closed] do
+    with :ok <- enabled(),
+         {:ok, spec} <- Registry.resolve(path, opts) do
+      LspPool.touch(pool(opts), spec, action)
+    end
+  end
+
+  @doc """
+  Diagnostics for a file, but only the ones that describe its current content.
+
+  `{:ok, %{version: v, items: items, counts: counts}}` when the cache matches the
+  document's current version; `{:pending, version}` when it does not, after waiting up to
+  `wait_ms` (default 5 s) for the push that would close the gap. `{:pending, _}` is an
+  ordinary answer meaning "no LSP data yet" — it is what a caller gets when a server is
+  still indexing, and it must never be treated as a failure of whatever produced the
+  edit.
+
+  The document has to have been opened with `touch/3` first; this call does not open one
+  behind the caller's back, because opening a document is a decision about what a
+  language server spends memory on.
+  """
+  @spec diagnostics(String.t(), keyword()) ::
+          {:ok, map()} | {:pending, non_neg_integer()} | {:error, term()}
+  def diagnostics(path, opts \\ []) when is_binary(path) do
+    with :ok <- enabled(),
+         {:ok, spec} <- Registry.resolve(path, opts) do
+      LspPool.diagnostics(pool(opts), spec, opts)
+    end
+  end
+
+  @doc """
+  The current diagnostics snapshot for a file, without waiting.
+
+  This is the pre-edit baseline: capture it, write, `touch/3`, then `diagnostics/2`, and
+  report only what the second call has that this one did not. `fresh?` says whether the
+  snapshot describes the document as it stands; a caller diffing against a stale or empty
+  baseline over-reports, and should say "no LSP data" instead.
+  """
+  @spec baseline(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def baseline(path, opts \\ []) when is_binary(path) do
+    with :ok <- enabled(),
+         {:ok, spec} <- Registry.resolve(path, opts) do
+      LspPool.baseline(pool(opts), spec)
+    end
+  end
+
+  @doc """
+  Subscribes a process to `{:code_intel, :diagnostics_changed, payload}`.
+
+  The payload is `%{node, root, server_id, path, version, source, counts}` — counts, not
+  items, so a file with thousands of findings costs every subscriber a small map. A
+  subscriber that wants the items calls `diagnostics/2` for the path it was told about.
+  """
+  @spec subscribe(pid(), keyword()) :: :ok | {:error, term()}
+  def subscribe(subscriber \\ self(), opts \\ []) when is_pid(subscriber) do
+    with :ok <- enabled(), do: LspPool.subscribe(pool(opts), subscriber)
+  end
+
+  @spec unsubscribe(pid(), keyword()) :: :ok | {:error, term()}
+  def unsubscribe(subscriber \\ self(), opts \\ []) when is_pid(subscriber) do
+    with :ok <- enabled(), do: LspPool.unsubscribe(pool(opts), subscriber)
+  end
+
+  @doc """
   Describes every language server this node owns.
 
   Shaped for a client: no pids as terms, no atoms a wire format cannot carry back, and

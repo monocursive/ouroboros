@@ -33,6 +33,7 @@ defmodule Ouroboros.CodeIntel.LspPool do
   require Logger
 
   alias Ouroboros.CodeIntel.Config
+  alias Ouroboros.CodeIntel.Diagnostics
   alias Ouroboros.CodeIntel.Handle
   alias Ouroboros.CodeIntel.Lsp.Server
 
@@ -118,6 +119,67 @@ defmodule Ouroboros.CodeIntel.LspPool do
     end
   end
 
+  @doc """
+  Opens, re-synchronises, or closes one document, serialised through the pool.
+
+  The pool reads the file itself. No caller hands it content: the read and the version
+  assignment happen in the same message, so two callers touching one file cannot
+  interleave into a state where the server holds older text under a newer version. That
+  costs a bounded file read inside the pool process, which is the price of the guarantee.
+
+  A document touched while its server is restarting is still recorded; it is re-opened
+  from disk when the replacement reports ready.
+  """
+  @spec touch(GenServer.server(), spec(), :open | :changed | :closed) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def touch(pool, spec, action) when action in [:open, :changed, :closed],
+    do: call(pool, {:touch, spec, action})
+
+  @doc """
+  Returns the diagnostics for a document, but only when they describe its current
+  content.
+
+  This is the freshness gate R4 §2 describes and the reason Claude Code shipped v2.1.107:
+  a diagnostics push that arrived before the last edit describes text that no longer
+  exists, and serving it makes a model re-read a file it just wrote. So the answer is
+  `{:ok, %{version: v, items: items}}` only when the cached version equals the document's
+  current version, and `{:pending, version}` otherwise — after waiting up to `wait_ms`
+  for the push that would close the gap. `{:pending, _}` is a normal answer, not a
+  failure; the caller says "no LSP data" and moves on.
+  """
+  @spec diagnostics(GenServer.server(), spec(), keyword()) ::
+          {:ok, map()} | {:pending, non_neg_integer()} | {:error, term()}
+  def diagnostics(pool, spec, opts \\ []) do
+    wait_ms = Keyword.get(opts, :wait_ms, Config.get(:diagnostics_wait_ms))
+    call(pool, {:diagnostics, spec, wait_ms}, wait_ms + @call_timeout)
+  end
+
+  @doc """
+  Returns whatever is cached for a document right now, without waiting for anything.
+
+  This is the pre-edit baseline E2 will diff against, so it answers with what is known
+  and says how much to trust it: `fresh?` is true only when the snapshot describes the
+  document's current version. A caller that diffs against a stale or absent baseline
+  over-reports new diagnostics, and it should know that it is doing so.
+  """
+  @spec baseline(GenServer.server(), spec()) :: {:ok, map()} | {:error, term()}
+  def baseline(pool, spec), do: call(pool, {:baseline, spec})
+
+  @doc """
+  Subscribes a process to `{:code_intel, :diagnostics_changed, payload}` messages.
+
+  Subscribers are monitored and dropped when they die, so nothing accumulates. The
+  payload carries counts rather than items: a fan-out that copied every diagnostic to
+  every subscriber is how the UI stall in Claude Code v2.1.216 would be reproduced here.
+  """
+  @spec subscribe(GenServer.server(), pid()) :: :ok | {:error, term()}
+  def subscribe(pool, subscriber \\ self()) when is_pid(subscriber),
+    do: call(pool, {:subscribe, subscriber})
+
+  @spec unsubscribe(GenServer.server(), pid()) :: :ok | {:error, term()}
+  def unsubscribe(pool, subscriber \\ self()) when is_pid(subscriber),
+    do: call(pool, {:unsubscribe, subscriber})
+
   @doc false
   @spec stop_server(GenServer.server(), {String.t(), String.t()}) :: :ok | {:error, term()}
   def stop_server(pool, key), do: call(pool, {:stop_server, key})
@@ -149,6 +211,8 @@ defmodule Ouroboros.CodeIntel.LspPool do
       servers: %{},
       owners: %{},
       monitors: %{},
+      subscribers: %{},
+      subscriber_monitors: %{},
       measuring: nil
     }
 
@@ -222,6 +286,65 @@ defmodule Ouroboros.CodeIntel.LspPool do
      }, state}
   end
 
+  def handle_call({:touch, spec, action}, _from, state) do
+    case ensure_server(state, spec) do
+      {:ok, state, server} ->
+        {reply, server} = apply_touch(state, server, spec, action)
+        {:reply, reply, %{state | servers: Map.put(state.servers, server.key, server)}}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:diagnostics, spec, wait_ms}, from, state) do
+    with {:ok, state, server} <- ensure_server(state, spec),
+         {:ok, path} <- document_path(server, spec) do
+      %{version: version} = Map.fetch!(server.documents, path)
+
+      case Map.get(server.diagnostics, path) do
+        %{version: ^version} = snapshot ->
+          {:reply, {:ok, snapshot_reply(snapshot)}, state}
+
+        _stale_or_absent ->
+          {:noreply, add_waiter(state, server, path, version, from, wait_ms)}
+      end
+    else
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:baseline, spec}, _from, state) do
+    with {:ok, state, server} <- ensure_server(state, spec),
+         {:ok, path} <- document_path(server, spec) do
+      %{version: version} = Map.fetch!(server.documents, path)
+      snapshot = Map.get(server.diagnostics, path)
+
+      {:reply,
+       {:ok,
+        %{
+          root: server.root,
+          path: path,
+          version: snapshot && snapshot.version,
+          document_version: version,
+          fresh?: snapshot != nil and snapshot.version == version,
+          items: (snapshot && snapshot.items) || [],
+          truncated: (snapshot && snapshot.truncated) || 0,
+          source: snapshot && snapshot.source
+        }}, state}
+    else
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:subscribe, subscriber}, _from, state),
+    do: {:reply, :ok, put_subscriber(state, subscriber)}
+
+  def handle_call({:unsubscribe, subscriber}, _from, state),
+    do: {:reply, :ok, drop_subscriber(state, subscriber)}
+
   def handle_call({:stop_server, key}, _from, state) do
     case Map.fetch(state.servers, key) do
       {:ok, server} -> {:reply, :ok, begin_stop(state, server)}
@@ -262,10 +385,17 @@ defmodule Ouroboros.CodeIntel.LspPool do
     end
   end
 
+  def handle_info({:diagnostics_debounce, key, path}, state),
+    do: {:noreply, commit_diagnostics(state, key, path)}
+
+  def handle_info({:diagnostics_timeout, key, path, ref}, state),
+    do: {:noreply, expire_waiter(state, key, path, ref)}
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
       Map.has_key?(state.monitors, ref) -> {:noreply, server_down(state, ref, reason)}
       Map.has_key?(state.owners, ref) -> {:noreply, drop_owner(state, ref)}
+      Map.has_key?(state.subscriber_monitors, ref) -> {:noreply, drop_subscriber_by(state, ref)}
       state.measuring == ref -> {:noreply, %{state | measuring: nil}}
       true -> {:noreply, state}
     end
@@ -325,8 +455,13 @@ defmodule Ouroboros.CodeIntel.LspPool do
         broken_until: nil,
         broken_reason: nil,
         restart_after_stop: false,
+        generation: 0,
         owners: %{},
-        documents: %{}
+        documents: %{},
+        diagnostics: %{},
+        pending_diagnostics: %{},
+        debounce: %{},
+        waiters: %{}
       }
 
       state = spawn_server(state, server)
@@ -376,7 +511,7 @@ defmodule Ouroboros.CodeIntel.LspPool do
           | pid: pid,
             monitor: monitor,
             state: :starting,
-            documents: %{},
+            generation: server.generation + 1,
             last_used_at: now_ms()
         }
 
@@ -429,8 +564,7 @@ defmodule Ouroboros.CodeIntel.LspPool do
               os_pid: nil,
               rss_bytes: nil,
               state: :restarting,
-              restarts: restarts,
-              documents: %{}
+              restarts: restarts
           }
 
           %{state | servers: Map.put(state.servers, key, server)}
@@ -439,6 +573,8 @@ defmodule Ouroboros.CodeIntel.LspPool do
   end
 
   defp mark_broken(state, server, reason) do
+    server = fail_waiters(server)
+
     Logger.warning(fn ->
       "code_intel marked #{server.server_id} for #{server.root} broken: #{inspect(reason)}"
     end)
@@ -464,7 +600,10 @@ defmodule Ouroboros.CodeIntel.LspPool do
         state: :broken,
         broken_until: now_ms() + setting(state, :broken_ms),
         broken_reason: reason,
-        documents: %{}
+        documents: %{},
+        diagnostics: %{},
+        pending_diagnostics: %{},
+        debounce: %{}
     }
 
     %{state | servers: Map.put(state.servers, server.key, server)}
@@ -478,6 +617,7 @@ defmodule Ouroboros.CodeIntel.LspPool do
   defp begin_stop(state, server), do: release_owners(state, server)
 
   defp release_owners(state, server) do
+    server = fail_waiters(server)
     owners = Map.drop(state.owners, Map.keys(server.owners))
     Enum.each(Map.keys(server.owners), &Process.demonitor(&1, [:flush]))
 
@@ -514,12 +654,412 @@ defmodule Ouroboros.CodeIntel.LspPool do
   end
 
   defp from_server(state, key, {:ready, server_info}) do
-    update_server(state, key, fn server ->
-      %{server | state: :ready, server_info: server_info}
+    case Map.fetch(state.servers, key) do
+      :error ->
+        state
+
+      {:ok, server} ->
+        server = %{server | state: :ready, server_info: server_info}
+
+        stale =
+          for {path, %{generation: generation}} <- server.documents,
+              generation != server.generation,
+              do: path
+
+        server = Enum.reduce(stale, server, &reopen(state, &2, &1))
+        %{state | servers: Map.put(state.servers, key, server)}
+    end
+  end
+
+  defp from_server(state, key, {:diagnostics, params}), do: publish(state, key, params)
+
+  defp from_server(state, _key, _message), do: state
+
+  ## Documents
+
+  defp apply_touch(_state, server, spec, :closed) do
+    path = Map.get(spec, :path)
+
+    case Map.pop(server.documents, path) do
+      {nil, _documents} ->
+        {{:ok, 0}, server}
+
+      {%{version: version, uri: uri}, documents} ->
+        notify(server, "textDocument/didClose", %{"textDocument" => %{"uri" => uri}})
+
+        server = %{
+          server
+          | documents: documents,
+            diagnostics: Map.delete(server.diagnostics, path),
+            pending_diagnostics: Map.delete(server.pending_diagnostics, path)
+        }
+
+        {{:ok, version}, cancel_debounce(fail_waiters_for(server, path), path)}
+    end
+  end
+
+  defp apply_touch(state, server, spec, action) when action in [:open, :changed] do
+    path = Map.get(spec, :path)
+    known = Map.get(server.documents, path)
+
+    cond do
+      is_nil(known) and map_size(server.documents) >= setting(state, :max_documents) ->
+        {{:error, :too_many_documents}, server}
+
+      true ->
+        case read_document(state, path) do
+          {:ok, text} ->
+            version = (known && known.version + 1) || 1
+            uri = (known && known.uri) || Server.uri(path)
+            language_id = Map.get(spec, :language_id) || "plaintext"
+
+            send_sync(server, known, uri, language_id, version, text)
+
+            documents =
+              Map.put(server.documents, path, %{
+                version: version,
+                uri: uri,
+                language_id: language_id,
+                generation: if(is_pid(server.pid), do: server.generation, else: nil)
+              })
+
+            {{:ok, version}, %{server | documents: documents}}
+
+          {:error, reason} ->
+            {{:error, reason}, server}
+        end
+    end
+  end
+
+  defp send_sync(server, nil, uri, language_id, version, text) do
+    notify(server, "textDocument/didOpen", %{
+      "textDocument" => %{
+        "uri" => uri,
+        "languageId" => language_id,
+        "version" => version,
+        "text" => text
+      }
+    })
+  end
+
+  defp send_sync(server, _known, uri, _language_id, version, text) do
+    notify(server, "textDocument/didChange", %{
+      "textDocument" => %{"uri" => uri, "version" => version},
+      "contentChanges" => [%{"text" => text}]
+    })
+  end
+
+  # A file that vanished, is unreadable, or is larger than the cap is not synchronised.
+  # The cap is a memory bound on this process, and a language server handed a 200 MB
+  # generated file is a memory problem of its own.
+  defp read_document(state, path) do
+    limit = setting(state, :max_document_bytes)
+
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, size: size}} when size <= limit ->
+        case File.read(path) do
+          {:ok, text} -> {:ok, text}
+          {:error, reason} -> {:error, {:document_unreadable, path, reason}}
+        end
+
+      {:ok, %File.Stat{type: :regular, size: size}} ->
+        {:error, {:document_too_large, size, limit}}
+
+      {:ok, %File.Stat{}} ->
+        {:error, {:not_a_regular_file, path}}
+
+      {:error, reason} ->
+        {:error, {:document_unreadable, path, reason}}
+    end
+  end
+
+  defp reopen(state, server, path) do
+    document = Map.fetch!(server.documents, path)
+
+    case read_document(state, path) do
+      {:ok, text} ->
+        version = document.version + 1
+
+        send_sync(server, nil, document.uri, document.language_id, version, text)
+
+        document = %{document | version: version, generation: server.generation}
+
+        %{
+          server
+          | documents: Map.put(server.documents, path, document),
+            diagnostics: Map.delete(server.diagnostics, path),
+            pending_diagnostics: Map.delete(server.pending_diagnostics, path)
+        }
+
+      {:error, _reason} ->
+        # The file went away while the server was down. Forget it rather than claim an
+        # open document the server has never seen.
+        server = fail_waiters_for(server, path)
+
+        %{
+          server
+          | documents: Map.delete(server.documents, path),
+            diagnostics: Map.delete(server.diagnostics, path),
+            pending_diagnostics: Map.delete(server.pending_diagnostics, path)
+        }
+    end
+  end
+
+  defp document_path(server, spec) do
+    path = Map.get(spec, :path)
+
+    if is_binary(path) and Map.has_key?(server.documents, path),
+      do: {:ok, path},
+      else: {:error, :document_not_open}
+  end
+
+  defp notify(%{pid: pid}, method, params) when is_pid(pid),
+    do: Server.notify(pid, method, params)
+
+  # No live server: the document table is still updated, and the notification is
+  # regenerated from disk when the replacement reports ready.
+  defp notify(_server, _method, _params), do: :ok
+
+  ## Diagnostics
+
+  defp publish(state, key, params) do
+    with {:ok, server} <- Map.fetch(state.servers, key),
+         uri when is_binary(uri) <- Map.get(params, "uri"),
+         {:ok, path} <- Server.path_from_uri(uri),
+         {:ok, document} <- Map.fetch(server.documents, path) do
+      {items, truncated} =
+        Diagnostics.normalize(
+          Map.get(params, "diagnostics", []),
+          setting(state, :max_diagnostics_per_document)
+        )
+
+      {version, source} =
+        case Map.get(params, "version") do
+          reported when is_integer(reported) -> {reported, :reported}
+          _absent -> {document.version, :inferred}
+        end
+
+      snapshot = %{
+        version: version,
+        items: items,
+        truncated: truncated,
+        source: source,
+        at: now_ms()
+      }
+
+      if superseded?(server, path, snapshot) do
+        state
+      else
+        server = %{
+          server
+          | pending_diagnostics: Map.put(server.pending_diagnostics, path, snapshot)
+        }
+
+        server = restart_debounce(state, server, key, path)
+        %{state | servers: Map.put(state.servers, key, server)}
+      end
+    else
+      _ignored -> state
+    end
+  end
+
+  # A push carrying a version older than one already committed or queued describes text
+  # that has been replaced. Dropping it is the whole freshness gate: a cache that let an
+  # older push overwrite a newer one would serve pre-edit diagnostics forever.
+  defp superseded?(server, path, %{version: version}) do
+    committed = Map.get(server.diagnostics, path)
+    queued = Map.get(server.pending_diagnostics, path)
+
+    Enum.any?([committed, queued], fn
+      %{version: existing} -> existing > version
+      nil -> false
     end)
   end
 
-  defp from_server(state, _key, _message), do: state
+  defp restart_debounce(state, server, key, path) do
+    case Map.get(server.debounce, path) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _absent -> :ok
+    end
+
+    timer =
+      Process.send_after(
+        self(),
+        {:diagnostics_debounce, key, path},
+        setting(state, :diagnostics_debounce_ms)
+      )
+
+    %{server | debounce: Map.put(server.debounce, path, timer)}
+  end
+
+  defp cancel_debounce(server, path) do
+    case Map.pop(server.debounce, path) do
+      {timer, debounce} when is_reference(timer) ->
+        Process.cancel_timer(timer)
+        %{server | debounce: debounce}
+
+      {_absent, debounce} ->
+        %{server | debounce: debounce}
+    end
+  end
+
+  defp commit_diagnostics(state, key, path) do
+    with {:ok, server} <- Map.fetch(state.servers, key),
+         {:ok, snapshot} <- Map.fetch(server.pending_diagnostics, path) do
+      server = %{
+        server
+        | diagnostics: Map.put(server.diagnostics, path, snapshot),
+          pending_diagnostics: Map.delete(server.pending_diagnostics, path),
+          debounce: Map.delete(server.debounce, path)
+      }
+
+      server = answer_waiters(server, path, snapshot)
+      announce(state, server, path, snapshot)
+      %{state | servers: Map.put(state.servers, key, server)}
+    else
+      _absent -> state
+    end
+  end
+
+  defp announce(state, server, path, snapshot) do
+    payload = %{
+      node: node(),
+      root: server.root,
+      server_id: server.server_id,
+      path: path,
+      version: snapshot.version,
+      source: snapshot.source,
+      counts: Diagnostics.counts(snapshot.items)
+    }
+
+    Enum.each(state.subscribers, fn {subscriber, _monitor} ->
+      send(subscriber, {:code_intel, :diagnostics_changed, payload})
+    end)
+  end
+
+  defp add_waiter(state, server, path, version, from, wait_ms) do
+    waiting = Map.get(server.waiters, path, [])
+
+    if length(waiting) >= setting(state, :max_pending_requests) do
+      GenServer.reply(from, {:pending, version})
+      state
+    else
+      ref = make_ref()
+      timer = Process.send_after(self(), {:diagnostics_timeout, server.key, path, ref}, wait_ms)
+      waiter = %{ref: ref, from: from, timer: timer, version: version}
+
+      server = %{server | waiters: Map.put(server.waiters, path, [waiter | waiting])}
+      %{state | servers: Map.put(state.servers, server.key, server)}
+    end
+  end
+
+  defp answer_waiters(server, path, snapshot) do
+    {matched, still_waiting} =
+      server.waiters
+      |> Map.get(path, [])
+      |> Enum.split_with(&(&1.version == snapshot.version))
+
+    Enum.each(matched, fn waiter ->
+      Process.cancel_timer(waiter.timer)
+      GenServer.reply(waiter.from, {:ok, snapshot_reply(snapshot)})
+    end)
+
+    %{server | waiters: Map.put(server.waiters, path, still_waiting)}
+  end
+
+  defp expire_waiter(state, key, path, ref) do
+    with {:ok, server} <- Map.fetch(state.servers, key) do
+      {expired, still_waiting} =
+        server.waiters
+        |> Map.get(path, [])
+        |> Enum.split_with(&(&1.ref == ref))
+
+      Enum.each(expired, &GenServer.reply(&1.from, {:pending, &1.version}))
+
+      server = %{server | waiters: Map.put(server.waiters, path, still_waiting)}
+      %{state | servers: Map.put(state.servers, key, server)}
+    else
+      _absent -> state
+    end
+  end
+
+  # A server that died or broke owes every waiter an answer. `{:pending, version}` is the
+  # honest one: nothing is known about that version, and the caller's fallback is the
+  # same either way.
+  defp fail_waiters(server) do
+    Enum.each(server.waiters, fn {_path, waiters} ->
+      Enum.each(waiters, fn waiter ->
+        Process.cancel_timer(waiter.timer)
+        GenServer.reply(waiter.from, {:pending, waiter.version})
+      end)
+    end)
+
+    %{server | waiters: %{}}
+  end
+
+  defp fail_waiters_for(server, path) do
+    {waiters, remaining} = Map.pop(server.waiters, path, [])
+
+    Enum.each(waiters, fn waiter ->
+      Process.cancel_timer(waiter.timer)
+      GenServer.reply(waiter.from, {:pending, waiter.version})
+    end)
+
+    %{server | waiters: remaining}
+  end
+
+  defp snapshot_reply(snapshot) do
+    %{
+      version: snapshot.version,
+      items: snapshot.items,
+      truncated: snapshot.truncated,
+      source: snapshot.source,
+      counts: Diagnostics.counts(snapshot.items)
+    }
+  end
+
+  ## Subscribers
+
+  defp put_subscriber(state, subscriber) do
+    state = drop_subscriber(state, subscriber)
+    monitor = Process.monitor(subscriber)
+
+    %{
+      state
+      | subscribers: Map.put(state.subscribers, subscriber, monitor),
+        subscriber_monitors: Map.put(state.subscriber_monitors, monitor, subscriber)
+    }
+  end
+
+  defp drop_subscriber(state, subscriber) do
+    case Map.pop(state.subscribers, subscriber) do
+      {nil, _subscribers} ->
+        state
+
+      {monitor, subscribers} ->
+        Process.demonitor(monitor, [:flush])
+
+        %{
+          state
+          | subscribers: subscribers,
+            subscriber_monitors: Map.delete(state.subscriber_monitors, monitor)
+        }
+    end
+  end
+
+  defp drop_subscriber_by(state, monitor) do
+    case Map.pop(state.subscriber_monitors, monitor) do
+      {nil, _monitors} ->
+        state
+
+      {subscriber, monitors} ->
+        %{
+          state
+          | subscribers: Map.delete(state.subscribers, subscriber),
+            subscriber_monitors: monitors
+        }
+    end
+  end
 
   defp update_server(state, key, fun) do
     case Map.fetch(state.servers, key) do
@@ -692,7 +1232,12 @@ defmodule Ouroboros.CodeIntel.LspPool do
       owners: map_size(server.owners),
       broken_until_ms: server.broken_until && max(server.broken_until - now, 0),
       server_info: server.server_info,
-      documents: server.documents |> Map.keys() |> Enum.sort()
+      documents:
+        server.documents
+        |> Enum.map(fn {path, document} ->
+          %{path: path, version: document.version, language_id: document.language_id}
+        end)
+        |> Enum.sort_by(& &1.path)
     }
   end
 

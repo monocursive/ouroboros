@@ -44,6 +44,9 @@ defmodule Ouroboros.CodeIntel.Config do
     # Diagnostic items retained per document. Past this the cache keeps the first N and
     # counts the rest, so a server emitting thousands does not become this node's memory.
     max_diagnostics_per_document: 500,
+    # The largest file the pool will read and hand to a language server. A generated
+    # bundle past this is not synchronised: it is a memory problem for both processes.
+    max_document_bytes: 2 * 1024 * 1024,
     # Operator-supplied server definitions, merged over the built-in registry.
     servers: [],
     # Reads a resident-set size in bytes for an OS pid. Replaced in tests; in production
