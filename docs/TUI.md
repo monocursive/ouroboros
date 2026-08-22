@@ -856,12 +856,21 @@ Only an explicit `false` takes a control off the screen. An older gateway that s
 map at all changes nothing, because hiding a key on a gateway's silence would be this
 client inventing a ceiling it was never told about.
 
-What that gates today: the Steer verb, `s`, `ctrl+x s`, `/steer`, and the palette's Steer
-entry exist only where `steer` is truthy — which is `pi` alone (X2); `a`, `ctrl+x a`, and
-the palette's approval entry only where `approvals` is truthy, and where it is `false` the
-key says *why* nothing will ever open that modal rather than "not waiting on one" (X1);
-`esc interrupt` in the footer only where `interrupt` is truthy **and** a turn is running.
-`multimodal` has a predicate and no affordance yet — B4 is the slice that builds one.
+What that gates today, in all four places a verb is advertised — the footer, the command
+palette, the `ctrl+x` which-key overlay, and `/` completion in the composer:
+
+- the Steer verb, `s`, `ctrl+x s`, `/steer`, and the palette's Steer entry exist only
+  where `steer` is truthy, which is `pi` alone (X2). Where it is `false` the key answers
+  with the transport's name and points at the durable follow-up queue instead;
+- `a`, `ctrl+x a`, and the palette's approval entry only where `approvals` is truthy, and
+  where it is `false` the key says *why* nothing will ever open that modal rather than
+  "not waiting on one" (X1);
+- `esc interrupt` in the footer, the palette's Interrupt entry, and `/interrupt` only
+  where `interrupt` is truthy — and the footer adds the second condition that a turn is
+  actually running;
+- `multimodal` has a predicate and no affordance yet. B4 is the slice that builds one; the
+  predicate is here so the capability and its consumer arrive together rather than the
+  affordance arriving first.
 
 The `n` dialog reads the other half of the same story out of `runtime.providers`, whose
 `normalized_options`, `normalized_values`, and `session_transports` the client already

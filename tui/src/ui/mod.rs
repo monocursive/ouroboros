@@ -641,6 +641,11 @@ pub async fn run(
     // from `Enter` is settled, and the footers can say which binding actually exists here.
     app.keyboard_enhanced = keyboard_enhanced();
 
+    // What this terminal says it is, for resolving `[notifications] mode = "auto"`. Read
+    // here rather than in the App so that resolution stays a pure function of state a
+    // test can set, rather than of the process environment.
+    app.terminal = notify::Terminal::from_env();
+
     // The boot renderer and the harness share one alternate screen, but they do not share
     // one frame layout. Clear the physical terminal at the handoff so sparse areas of the
     // first transcript frame cannot retain boot copy that Ratatui's fresh buffer already
