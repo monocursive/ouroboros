@@ -165,6 +165,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         teams: :available,
         orchestration: :available,
         control: :disabled,
+        effect_ledger: :available,
         workspace: :disabled,
         hot_upgrade: :available,
         release: :available
@@ -208,6 +209,14 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       ],
       orchestration_plans: [],
       control: %{runs: []},
+      effect_ledger: %{
+        durability: :synced_checkpoint,
+        retained: 3,
+        in_flight: 1,
+        ambiguous: 0,
+        retention_limit: 1_000,
+        next_sequence: 5
+      },
       upgrade: %{
         node: :ouroboros@golden,
         mode: :ready,

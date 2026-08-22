@@ -1437,6 +1437,7 @@ defmodule Ouroboros.ClusterTest do
       # compiler on it, not a fleet's teams, sessions, journals, or control plane.
       for name <- [
             Ouroboros.Jido,
+            Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
             Ouroboros.Coding.Store,
             Ouroboros.Interactive.Store,

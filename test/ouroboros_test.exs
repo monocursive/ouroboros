@@ -40,11 +40,15 @@ defmodule OuroborosTest do
     assert status.availability.interactive == :available
     assert status.availability.teams == :available
     assert status.availability.orchestration == :available
+    assert status.availability.effect_ledger == :available
     assert status.availability.hot_upgrade == :available
     assert status.availability.release == :available
     assert status.availability.control == :disabled
     assert is_list(status.coding_tasks)
     assert is_list(status.control.runs)
+    assert status.effect_ledger.durability == :ephemeral_checkpoint
+    assert is_integer(status.effect_ledger.retained)
+    assert is_integer(status.effect_ledger.in_flight)
     refute Map.has_key?(status.control, :enabled)
     assert status.forge.signer in [:deny, :local, :remote, :other, :unknown]
     assert is_boolean(status.forge.admit_possible?)

@@ -29,6 +29,10 @@ config :ouroboros,
   orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
   control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
+  effect_ledger_storage: {Jido.Storage.ETS, table: :ouroboros_effect_ledger},
+  # Terminal entries retained per node. In-flight entries are never evicted, and every
+  # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
+  effect_ledger_limit: 1_000,
   upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
   release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},

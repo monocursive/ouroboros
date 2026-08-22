@@ -96,6 +96,11 @@ defmodule Ouroboros.Control.Grants do
 
   @type server :: GenServer.server()
   @type attempt :: %{optional(atom()) => term()}
+  @type decision :: %{
+          granted?: boolean(),
+          grant: Grant.t() | nil,
+          reason: :granted | :not_granted | :outside_constraints | :authority_unavailable
+        }
 
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -149,6 +154,27 @@ defmodule Ouroboros.Control.Grants do
   end
 
   def granted?(_principal, _effect, _attempt, _server), do: false
+
+  @doc """
+  Returns the authority decision and the exact grant snapshot used to make it.
+
+  This is the inspectable counterpart to `granted?/4`. It remains fail-closed, but a
+  caller that must durably explain an action can distinguish a missing grant from an
+  attempt outside an existing grant's constraints. An unavailable authority returns a
+  content-free `:authority_unavailable` reason rather than persisting an exit term.
+  """
+  @spec decision(String.t(), atom(), attempt(), server()) :: decision()
+  def decision(principal, effect, attempt, server \\ __MODULE__)
+
+  def decision(principal, effect, attempt, server)
+      when is_binary(principal) and principal != "" and is_atom(effect) and is_map(attempt) do
+    GenServer.call(server, {:decision, principal, effect, attempt})
+  catch
+    _kind, _reason -> denied_decision(:authority_unavailable)
+  end
+
+  def decision(_principal, _effect, _attempt, _server),
+    do: denied_decision(:not_granted)
 
   @doc "Returns every grant held by one principal, ordered by effect."
   @spec list(String.t(), server()) :: [Grant.t()]
@@ -226,6 +252,23 @@ defmodule Ouroboros.Control.Grants do
     {:reply, permitted?, state}
   end
 
+  def handle_call({:decision, principal, effect, attempt}, _from, state) do
+    decision =
+      case Map.fetch(state.grants, {principal, effect}) do
+        {:ok, grant} ->
+          if permits?(grant, attempt) do
+            %{granted?: true, grant: grant, reason: :granted}
+          else
+            %{granted?: false, grant: grant, reason: :outside_constraints}
+          end
+
+        :error ->
+          denied_decision(:not_granted)
+      end
+
+    {:reply, decision, state}
+  end
+
   def handle_call({:list, principal}, _from, state) do
     grants =
       state.grants
@@ -273,6 +316,8 @@ defmodule Ouroboros.Control.Grants do
       _other -> false
     end
   end
+
+  defp denied_decision(reason), do: %{granted?: false, grant: nil, reason: reason}
 
   defp validate_principal(principal) when is_binary(principal) and principal != "",
     do: {:ok, principal}

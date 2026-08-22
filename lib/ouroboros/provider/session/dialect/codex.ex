@@ -401,8 +401,12 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   defp turn_model(runtime, _turn), do: runtime.request.model
 
-  defp put_approval(params, :prompt), do: Map.put(params, "approvalPolicy", "onRequest")
-  defp put_approval(params, :auto_edit), do: Map.put(params, "approvalPolicy", "onFailure")
+  # AskForApproval and SandboxMode serialize with serde kebab-case. The tagged
+  # sandboxPolicy object is camelCase (`type: workspaceWrite`). Mixing those is a
+  # -32600, not a silent drop: `onFailure` / `workspaceWrite` refuse the handshake.
+  # `on-failure` is gone from current Codex; auto_edit therefore asks on-request.
+  defp put_approval(params, :prompt), do: Map.put(params, "approvalPolicy", "on-request")
+  defp put_approval(params, :auto_edit), do: Map.put(params, "approvalPolicy", "on-request")
   defp put_approval(params, :auto_approve), do: Map.put(params, "approvalPolicy", "never")
   defp put_approval(params, _mode), do: params
 
@@ -414,16 +418,16 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   defp sandbox_field(request) do
     case request.sandbox_mode do
       :read_only ->
-        {"sandbox", "readOnly"}
+        {"sandbox", "read-only"}
 
       :unrestricted ->
-        {"sandbox", "dangerFullAccess"}
+        {"sandbox", "danger-full-access"}
 
       mode when mode in [:workspace_write, :default, nil] ->
         workspace_write_field(request)
 
       _other ->
-        {"sandbox", "workspaceWrite"}
+        {"sandbox", "workspace-write"}
     end
   end
 
@@ -432,7 +436,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     network = option(request.provider_options, :network_access_enabled)
 
     if dirs == [] and not is_boolean(network) do
-      {"sandbox", "workspaceWrite"}
+      {"sandbox", "workspace-write"}
     else
       policy = %{"type" => "workspaceWrite"}
       policy = if dirs == [], do: policy, else: Map.put(policy, "writableRoots", dirs)

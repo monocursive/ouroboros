@@ -18,13 +18,14 @@ defmodule Ouroboros.Agent.Effects do
       `Ouroboros.Control.Grants`, which is deny-by-default;
     * a permitted effect runs in a supervised task bounded by
       `config :ouroboros, :effect_timeout`, never on the agent's own process;
-    * the outcome settles back into `last_effects`, a bounded ring, alongside the
-      refusals.
+    * intent is checkpointed in `Ouroboros.Agent.EffectLedger` before execution; the
+      durable outcome then settles back into `last_effects`, a bounded local projection,
+      alongside refusals.
 
   A refusal is returned as `{:error, {:effect_denied, effect, reason}}` — an ordinary
   action error, so Jido records an error directive and the agent keeps running. A
   failure *after* the effect started is returned to nobody, because the request already
-  succeeded in starting it; it settles into the trail as
+  succeeded in starting it; it settles into the durable ledger and local trail as
   `{:effect_failed, effect, reason}`, timeouts included. The trail, not the reply, is
   where an effect's outcome lives.
 
@@ -355,6 +356,8 @@ defmodule Ouroboros.Agent.Effects do
         principal: [type: :any, default: nil],
         claimed_from: [type: :any, default: nil],
         attempt: [type: :map, default: %{}],
+        authority: [type: :map, default: %{}],
+        cause: [type: :map, default: %{}],
         result: [type: :any, default: nil],
         error: [type: :any, default: nil]
       ]

@@ -61,6 +61,32 @@ defmodule Ouroboros.Control.GrantsTest do
       refute Grants.granted?("agent", :send_message, %{agent: "other"}, grants)
     end
 
+    test "inspectable decisions identify the exact grant snapshot or denial reason" do
+      grants = start_grants!()
+
+      assert %{granted?: false, grant: nil, reason: :not_granted} =
+               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+
+      assert {:ok, grant} =
+               Grants.grant(
+                 "agent",
+                 :start_agent,
+                 [modules: [Ouroboros.Agent.Worker]],
+                 grants
+               )
+
+      assert %{granted?: true, grant: ^grant, reason: :granted} =
+               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+
+      assert %{granted?: false, grant: ^grant, reason: :outside_constraints} =
+               Grants.decision("agent", :start_agent, %{module: Kernel}, grants)
+
+      stop_supervised!(grants)
+
+      assert %{granted?: false, grant: nil, reason: :authority_unavailable} =
+               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+    end
+
     test "a grant belongs to exactly one principal" do
       grants = start_grants!()
       assert {:ok, _grant} = Grants.grant("privileged", :forge, [modules: :any], grants)

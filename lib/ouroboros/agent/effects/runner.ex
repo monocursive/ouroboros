@@ -23,11 +23,12 @@ defmodule Ouroboros.Agent.Effects.Runner do
      boots a build peer, compiles, and runs a capability's tests takes far longer than
      the agent server should ever sit still, and far longer than Jido's own action
      deadline. A closure that outlives its budget is killed and recorded as a timeout.
-  4. **Record what happened.** The requesting action returns immediately with a
-     `:started` entry in `last_effects` and an in-flight registration. When the runner
-     finishes it sends `Ouroboros.Signals.EffectSettled` back, and `RecordEffect` folds
-     the outcome into the same entry. Refusals never start a runner, so they arrive as a
-     record of their own.
+  4. **Record what happened.** The admitted attempt is checkpointed in
+     `Ouroboros.Agent.EffectLedger` before the runner starts. The requesting action also
+     returns a `:started` projection in `last_effects`. When the runner finishes it
+     durably settles the ledger first, then sends `Ouroboros.Signals.EffectSettled` back
+     so `RecordEffect` folds the outcome into the agent-local projection. Refusals are
+     durable terminal entries before they are returned.
 
   ## What a settle signal can and cannot do
 
@@ -40,6 +41,7 @@ defmodule Ouroboros.Agent.Effects.Runner do
   the authority decision happened before the effect ran.
   """
 
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Grants
   alias Ouroboros.Mesh
   alias Ouroboros.Signals.EffectSettled
@@ -67,10 +69,12 @@ defmodule Ouroboros.Agent.Effects.Runner do
          {:ok, state} <- effect_state(context, effect) do
       server = server(principal, state)
 
-      if Grants.granted?(principal, effect, attempt) do
-        accept(effect, attempt, run, principal, params, state, server)
+      decision = Grants.decision(principal, effect, attempt)
+
+      if decision.granted? do
+        accept(effect, attempt, run, principal, params, context, decision, state, server)
       else
-        refuse(effect, attempt, principal, params, context, server)
+        refuse(effect, attempt, principal, params, context, decision, server)
       end
     end
   end
@@ -147,47 +151,83 @@ defmodule Ouroboros.Agent.Effects.Runner do
       Mesh.whereis(principal)
   end
 
-  defp accept(effect, attempt, run, principal, params, state, server) do
-    effect_id = Jido.Signal.ID.generate!()
-    entry = started_entry(effect_id, effect, attempt, principal, params)
+  defp accept(effect, attempt, run, principal, params, context, decision, state, server) do
+    effect_id = effect_id(context, principal)
+    entry = started_entry(effect_id, effect, attempt, principal, params, context, decision)
 
-    case start_runner(effect_id, effect, fn -> run.(principal) end, server) do
-      {:ok, _pid} ->
-        {:ok,
-         %{
-           effects_in_flight: Enum.take([entry | state.effects_in_flight], @trail_limit),
-           last_effects: push(state.last_effects, entry)
-         }}
+    case EffectLedger.record_started(entry) do
+      {:ok, _durable, :created} ->
+        case start_runner(effect_id, effect, fn -> run.(principal) end, server) do
+          {:ok, pid} ->
+            case EffectLedger.watch_runner(effect_id, pid) do
+              :ok ->
+                send(pid, {:execute_effect, effect_id})
+
+                {:ok,
+                 %{
+                   effects_in_flight: Enum.take([entry | state.effects_in_flight], @trail_limit),
+                   last_effects: push(state.last_effects, entry)
+                 }}
+
+              {:error, reason} ->
+                Process.exit(pid, :kill)
+                failure = {:effect_failed, effect, {:runner_audit_unavailable, reason}}
+                _ = EffectLedger.settle(effect_id, %{status: :failed, error: failure})
+                {:error, failure}
+            end
+
+          {:error, reason} ->
+            failure = {:effect_failed, effect, {:runner_unavailable, reason}}
+            _ = EffectLedger.settle(effect_id, %{status: :failed, error: failure})
+            {:error, failure}
+        end
+
+      {:ok, durable, :existing} ->
+        project_existing(durable, state)
 
       {:error, reason} ->
-        {:error, {:effect_failed, effect, {:runner_unavailable, reason}}}
+        {:error, {:effect_failed, effect, {:audit_unavailable, reason}}}
     end
   end
 
-  defp refuse(effect, attempt, principal, params, context, server) do
+  defp refuse(effect, attempt, principal, params, context, decision, server) do
     reason = {:not_granted, attempt}
 
-    # This runs *inside* the agent's in-flight signal call, so the refusal record is cast
-    # rather than called: a nested call would queue behind the very call it is inside.
-    # Nothing about a refusal depends on ordering — it settles no in-flight entry.
-    cast(server, %{
-      effect_id: refusal_id(context),
+    attrs = %{
+      id: effect_id(context, principal),
       effect: effect,
       status: :denied,
       principal: principal,
       claimed_from: claimed_from(params),
       attempt: attempt,
+      authority: authority(decision),
+      cause: cause(context),
       error: {:effect_denied, effect, reason}
-    })
+    }
 
-    {:error, {:effect_denied, effect, reason}}
+    # A refusal cannot cause an external effect, but recording it synchronously keeps
+    # "not authorized" distinct from "nobody asked" across an agent or VM restart.
+    {attrs, reply} =
+      case EffectLedger.record_denied(attrs) do
+        {:ok, _entry, _disposition} ->
+          {attrs, attrs.error}
+
+        {:error, audit_reason} ->
+          error = {:effect_denied, effect, {reason, {:audit_unavailable, audit_reason}}}
+          {%{attrs | error: error}, error}
+      end
+
+    # This runs *inside* the agent's in-flight signal call, so the refusal record is cast
+    # rather than called: a nested call would queue behind the very call it is inside.
+    # Nothing about a refusal depends on ordering — it settles no in-flight entry.
+    cast(server, Map.put(attrs, :effect_id, attrs.id) |> Map.delete(:id))
+
+    {:error, reply}
   end
 
-  # Jido retries an action that returns an error, so a refusal is identified by the
-  # signal it refused. One refused request leaves one line, however many times the
-  # runtime asks the same question.
-  defp refusal_id(%{signal: %{id: id}}) when is_binary(id) and id != "", do: "refused-" <> id
-  defp refusal_id(_context), do: Jido.Signal.ID.generate!()
+  # Jido can retry an action, so both admitted and denied attempts use the acting
+  # principal plus signal ID as their stable identity. One request can never run twice,
+  # even if authority changes between deliveries.
 
   # Two processes, on purpose. The outer one owns the deadline and the settlement and
   # cannot be taken down by the effect; the inner one does the work and is killed if it
@@ -197,8 +237,24 @@ defmodule Ouroboros.Agent.Effects.Runner do
     supervisor = Ouroboros.Jido.task_supervisor_name()
 
     Task.Supervisor.start_child(supervisor, fn ->
-      outcome = bounded(supervisor, run, timeout())
-      deliver(server, settlement(effect_id, effect, outcome))
+      receive do
+        {:execute_effect, ^effect_id} ->
+          outcome = bounded(supervisor, run, timeout())
+          attrs = settlement(effect_id, effect, outcome)
+          persist_settlement(effect_id, attrs)
+          deliver(server, attrs)
+      after
+        @settle_timeout ->
+          attrs =
+            settlement(
+              effect_id,
+              effect,
+              {:error, {:effect_runner_not_released, @settle_timeout}}
+            )
+
+          persist_settlement(effect_id, attrs)
+          deliver(server, attrs)
+      end
     end)
   catch
     kind, reason -> {:error, {kind, reason}}
@@ -231,6 +287,23 @@ defmodule Ouroboros.Agent.Effects.Runner do
       status: :failed,
       error: {:effect_failed, effect, reason}
     }
+  end
+
+  # The ledger leads Jido in the rest-for-one tree, so an application-level ledger
+  # failure normally takes this runner down. The retry is for the narrower race where a
+  # named test ledger or a process-only restart is already coming back.
+  defp persist_settlement(effect_id, attrs, attempts \\ @settle_retries) do
+    case EffectLedger.settle(effect_id, Map.take(attrs, [:status, :result, :error])) do
+      {:ok, _entry, _disposition} ->
+        :ok
+
+      {:error, _reason} when attempts > 0 ->
+        Process.sleep(@settle_retry_ms)
+        persist_settlement(effect_id, attrs, attempts - 1)
+
+      {:error, _reason} ->
+        :ok
+    end
   end
 
   # An outcome could otherwise beat the record it settles: the in-flight registration is
@@ -285,13 +358,15 @@ defmodule Ouroboros.Agent.Effects.Runner do
 
   defp cast(_server, _attrs), do: :ok
 
-  defp started_entry(effect_id, effect, attempt, principal, params) do
+  defp started_entry(effect_id, effect, attempt, principal, params, context, decision) do
     %{
       id: effect_id,
       effect: effect,
       principal: principal,
       claimed_from: claimed_from(params),
       attempt: attempt,
+      authority: authority(decision),
+      cause: cause(context),
       status: :started,
       result: nil,
       error: nil,
@@ -307,6 +382,8 @@ defmodule Ouroboros.Agent.Effects.Runner do
       principal: params.principal,
       claimed_from: params.claimed_from,
       attempt: params.attempt,
+      authority: params.authority,
+      cause: params.cause,
       status: :denied,
       result: nil,
       error: params.error,
@@ -360,6 +437,77 @@ defmodule Ouroboros.Agent.Effects.Runner do
   end
 
   defp claimed_from(params), do: Map.get(params, :from)
+
+  defp effect_id(%{signal: %{id: id}}, principal) when is_binary(id) and id != "" do
+    digest =
+      :crypto.hash(:sha256, :erlang.term_to_binary({principal, id}))
+      |> Base.url_encode64(padding: false)
+
+    "effect-" <> digest
+  end
+
+  defp effect_id(_context, _principal), do: Jido.Signal.ID.generate!()
+
+  defp authority(%{granted?: granted?, grant: grant, reason: reason}) do
+    base = %{decision: if(granted?, do: :granted, else: :denied), reason: reason}
+
+    case grant do
+      %{constraints: constraints, granted_at: granted_at} ->
+        Map.merge(base, %{constraints: constraints, granted_at: granted_at})
+
+      _none ->
+        base
+    end
+  end
+
+  defp cause(%{signal: signal}) when is_map(signal) do
+    %{
+      signal_id: Map.get(signal, :id),
+      signal_type: Map.get(signal, :type)
+    }
+  end
+
+  defp cause(_context), do: %{}
+
+  defp project_existing(durable, state) do
+    entry =
+      durable
+      |> Map.from_struct()
+      |> Map.take([
+        :id,
+        :effect,
+        :principal,
+        :claimed_from,
+        :attempt,
+        :authority,
+        :cause,
+        :status,
+        :result,
+        :error,
+        :started_at,
+        :settled_at
+      ])
+
+    effects_in_flight =
+      if entry.status == :started do
+        Enum.take(
+          [entry | Enum.reject(state.effects_in_flight, &(&1.id == entry.id))],
+          @trail_limit
+        )
+      else
+        Enum.reject(state.effects_in_flight, &(&1.id == entry.id))
+      end
+
+    {:ok,
+     %{
+       effects_in_flight: effects_in_flight,
+       last_effects: replace_or_push(state.last_effects, entry)
+     }}
+  end
+
+  defp replace_or_push(trail, entry) do
+    if Enum.any?(trail, &(&1.id == entry.id)), do: replace(trail, entry), else: push(trail, entry)
+  end
 
   defp now, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end

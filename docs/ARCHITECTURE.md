@@ -639,9 +639,12 @@ Implemented:
 - an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
   durable deny-by-default authority (`Control.Grants`) that is checked against the
   concrete attempt, identifies the actor from server-side state rather than the signal,
-  bounds every effect, and records each one. An agent driven only by signals can forge a
-  capability, deploy it, start it, and message it — and can be refused at any of those
-  steps without dying;
+  bounds every effect, and records each one. `Agent.EffectLedger` checkpoints a
+  content-minimized intent and exact grant snapshot before execution, durably settles
+  outcomes and refusals, exposes bounded cursor queries, and recovers unfinished work as
+  ambiguous without retaining prompts, message bodies, source, provider output, or BEAM
+  binaries. An agent driven only by signals can forge a capability, deploy it, start it,
+  and message it — and can be refused at any of those steps without dying;
 - least-privileged builder and signer nodes (`Ouroboros.Cluster`): one release, one
   runtime, three roles. A `:builder`/`:signer` node boots cluster formation and nothing
   else — no teams, sessions, stores, scheduler, or control plane — and
@@ -658,9 +661,10 @@ Implemented:
 Still external:
 
 - **authority that is not node-local.** `Control.Grants` is one process per node over
-  that node's own checkpoint. There is no replicated policy service, no per-principal
-  rate or cost budget, and no durable effect log: the audit trail is a bounded ring in
-  the acting agent's state and dies with it.
+  that node's own checkpoint, and `Agent.EffectLedger` is another node-local aggregate.
+  There is no replicated policy/audit service or per-principal rate or cost budget. The
+  effect ledger is durable in production and survives the acting agent, but it is
+  bounded and checkpoint-based rather than an append-only external ledger.
 
 - **signing custody outside the distribution trust domain.** The service now exists and
   is real: the key lives on a `:signer` node, in one process, read from a file that node

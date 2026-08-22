@@ -10,7 +10,8 @@ defmodule Ouroboros.Agent.Worker do
   `Ouroboros.Agent.Effects` are not: they start and stop mesh agents, delegate through
   teams, and drive the forge. Every one of them is deny-by-default and gated by
   `Ouroboros.Control.Grants` against this agent's own server-side identity, and every
-  outcome — refusals included — lands in `last_effects`.
+  outcome — refusals included — lands in the durable `Agent.EffectLedger` and the
+  agent-local `last_effects` projection.
   """
 
   alias Ouroboros.Agent.Effects

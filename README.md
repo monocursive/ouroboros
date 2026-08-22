@@ -19,6 +19,9 @@ product. It currently proves:
   tokens, failure/cancellation propagation, and a real Team execution adapter;
 - an opt-in durable control plane that turns an objective into a validated DAG,
   evaluates terminal evidence, revises within a fixed budget, and cancels durably;
+- a content-minimized, queryable effect ledger that checkpoints authority and intent
+  before an agent action runs, records refusals and outcomes, and recovers unfinished
+  attempts as explicitly ambiguous;
 - optional symlink-safe workspace admission with read-sharing/write exclusion;
 - a bounded, signed BEAM hot-patch lane with a durable node journal, cluster health
   gates, rollback, promotion, restart reconciliation, and explicit quarantine;
@@ -1128,10 +1131,19 @@ What each effect run does, in order:
    supervised task bounded by `config :ouroboros, :effect_timeout` (120s). A forge takes
    longer than an agent server should ever sit still, so the signal returns immediately
    and the outcome arrives later.
-4. **Records it.** Every attempt — permitted, refused, failed, or timed out — lands in
-   the agent's `last_effects` ring alongside the principal, the attempt, and the
-   outcome. Artifacts a forge produced are kept in `state.forged`, which is what a
-   later `:deploy` resolves; a deploy cannot ship bytes that arrived any other way.
+4. **Records it before execution.** `Agent.EffectLedger` checkpoints the admitted
+   attempt, exact grant snapshot, and signal identity before the runner starts. It
+   durably settles the outcome, while message bodies, objectives, provider output,
+   capability source, and BEAM binaries stay out of the ledger. Refusals are terminal
+   entries too. `last_effects` remains a 20-entry agent-local projection; forged
+   artifacts stay in `state.forged`, which is what a later `:deploy` resolves.
+   If refusal journaling itself is unavailable, the action remains denied and its error
+   names the missing audit rather than pretending a durable entry exists.
+
+Inspect the local node's bounded history through `Ouroboros.effects/1`, filter it by
+principal, effect, status, or sequence cursor, and resolve one stable ID with
+`Ouroboros.effect/1`. An effect-ledger restart marks unfinished attempts `:ambiguous`
+rather than claiming they failed or silently starting them again.
 
 Grants are also why `Ouroboros.Control.Grants` lives where it does. The fast patch lane
 refuses to load an artifact naming any `Ouroboros.Control.*` module, so a capability an
@@ -1154,9 +1166,12 @@ agent forged cannot patch the authority that decided it could forge.
 - **A failed revocation leaves the grant standing** and says so. An authority that
   forgot a grant it could not durably forget would hand it back at the next restart, so
   an unacknowledged revocation has not happened.
-- **The trail is a ring, not a ledger.** `last_effects` keeps the most recent 20
-  entries and `state.forged` the most recent 5 artifacts; both die with the agent.
-  Durable effect audit belongs in a store, and is not implemented.
+- **The durable ledger is node-local and bounded.** Production uses a synced checkpoint;
+  development/test uses ETS. Terminal history is capped by
+  `:ouroboros, :effect_ledger_limit` (1,000 by default), while in-flight attempts are
+  never evicted. This is not a replicated audit service, and the atomic checkpoint is
+  not an append-only external log. `last_effects` and `state.forged` remain short-lived
+  agent-local projections; the ledger deliberately cannot restore a forged BEAM.
 
 ## Durable OTP releases
 
@@ -1721,9 +1736,9 @@ instead of making a departed machine disappear.
 ## Current limits
 
 - The default domain stores are ETS in development/test and one atomic file-backed
-  aggregate in production. Release and fast-patch mutation journals add file and
-  directory sync before acknowledging a checkpoint. All remain single-node ownership,
-  not transactional HA databases.
+  aggregate in production. Release, fast-patch, grants, signing, and effect-ledger
+  mutation journals add file and directory sync before acknowledging a checkpoint. All
+  remain single-node ownership, not transactional HA databases.
 - Terminal coding tasks and interactive sessions are the only durable state that is
   ever retired. Their recovery loops sweep entries older than
   `:ouroboros, :terminal_retention_ms` (seven days by default, `nil` disables the
@@ -1738,8 +1753,9 @@ instead of making a departed machine disappear.
   inference call.
 - `jido_harness` 2.0 is pinned from Git because it is not currently published on Hex.
 - Team, orchestration, interactive-session, control, upgrade, and release state is
-  restart-persistent in production's configured stores. Only the two mutation journals
-  use the stronger synced adapter; none of these single-node aggregates is HA consensus.
+  restart-persistent in production's configured stores. Security-sensitive mutation
+  journals (including grants, signing, and agent effects) use the stronger synced
+  adapter; none of these single-node aggregates is HA consensus.
 - Interactive Harness processes, like detached runs, do not survive a full BEAM or
   host restart. Durable Ouroboros intent remains inspectable, but the local session
   becomes `:lost` unless the provider process still exists.
@@ -1774,11 +1790,12 @@ instead of making a departed machine disappear.
   run a canary cohort, or say anything statistically meaningful about wall-clock over a
   handful of probes. `:capability_eval_regression_budget` defaults to 1.2× for that
   reason, and a report is evidence about the declared spec and nothing else.
-- Agent effect grants are node-local, deny-by-default, and durable per node. They
-  constrain the agent action layer and nothing below it: loaded code reaches the same
-  public APIs directly. The effect audit trail is a bounded in-memory ring on the acting
-  agent, so it does not survive that agent. Per-principal rate and cost budgets, a
-  replicated policy authority, and a durable effect log are not implemented.
+- Agent effect grants and the effect ledger are node-local, deny-by-default, and durable
+  per production node. They constrain and explain the agent action layer and nothing
+  below it: loaded code reaches the same public APIs directly. The ledger survives the
+  acting agent and records restarted in-flight work as ambiguous, but it is a bounded
+  aggregate checkpoint, not a replicated or append-only audit service. Per-principal
+  rate and cost budgets and replicated policy authority are not implemented.
 - Release metadata construction, archive inspection, authorization, and journaling are
   implemented; full tar assembly and a real `HandlerAdapter.OTP` reboot rehearsal are
   deployment gates.

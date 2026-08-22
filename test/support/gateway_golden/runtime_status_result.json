@@ -16,6 +16,7 @@
       "cluster": "available",
       "coding": "available",
       "control": "disabled",
+      "effect_ledger": "available",
       "hot_upgrade": "available",
       "interactive": "available",
       "mesh": "available",
@@ -60,6 +61,14 @@
     "connected_nodes": [],
     "control": {
       "runs": []
+    },
+    "effect_ledger": {
+      "ambiguous": 0,
+      "durability": "synced_checkpoint",
+      "in_flight": 1,
+      "next_sequence": 5,
+      "retained": 3,
+      "retention_limit": 1000
     },
     "forge": {
       "admit_possible?": false,

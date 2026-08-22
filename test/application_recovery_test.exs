@@ -12,6 +12,37 @@ defmodule Ouroboros.ApplicationRecoveryTest do
 
   @provider :ouroboros_test
 
+  test "the effect ledger owns the execution subtree beneath its durable boundary" do
+    ledger = Process.whereis(Ouroboros.Agent.EffectLedger)
+    jido = Process.whereis(Ouroboros.Jido)
+    grants = Process.whereis(Ouroboros.Control.Grants)
+
+    assert is_pid(ledger)
+    assert is_pid(jido)
+    assert is_pid(grants)
+
+    ledger_monitor = Process.monitor(ledger)
+    jido_monitor = Process.monitor(jido)
+    grants_monitor = Process.monitor(grants)
+    Process.exit(ledger, :kill)
+
+    assert_receive {:DOWN, ^ledger_monitor, :process, ^ledger, :killed}, 1_000
+    assert_receive {:DOWN, ^jido_monitor, :process, ^jido, _reason}, 2_000
+    assert_receive {:DOWN, ^grants_monitor, :process, ^grants, _reason}, 2_000
+
+    replacement_ledger =
+      assert_eventually(fn -> replacement(Ouroboros.Agent.EffectLedger, ledger) end)
+
+    replacement_jido = assert_eventually(fn -> replacement(Ouroboros.Jido, jido) end)
+
+    replacement_grants =
+      assert_eventually(fn -> replacement(Ouroboros.Control.Grants, grants) end)
+
+    assert Process.alive?(replacement_ledger)
+    assert Process.alive?(replacement_jido)
+    assert Process.alive?(replacement_grants)
+  end
+
   defmodule RefusingStorage do
     @moduledoc """
     A coding-task store that starts accepting writes and then refuses live ones.

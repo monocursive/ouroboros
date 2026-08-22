@@ -2,6 +2,7 @@ defmodule Ouroboros.AgentEffectsTest do
   use ExUnit.Case, async: false
 
   alias Jido.Harness.{Run, RunInfo, RunRequest}
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Grants
   alias Ouroboros.Mesh
 
@@ -96,6 +97,11 @@ defmodule Ouroboros.AgentEffectsTest do
       assert entry.principal == spoofer
       assert entry.claimed_from == privileged
       assert Mesh.whereis(target) == nil
+
+      assert {:ok, durable} = EffectLedger.get(entry.id)
+      assert durable.principal == spoofer
+      assert durable.claimed_from == privileged
+      assert durable.authority == %{decision: :denied, reason: :not_granted}
     end
   end
 
@@ -149,6 +155,13 @@ defmodule Ouroboros.AgentEffectsTest do
       assert entry.status == :ok
       assert entry.result == %{to: peer, from: actor, messages_received: 1}
       assert entry.claimed_from == "somebody-else"
+
+      assert {:ok, durable} = EffectLedger.get(entry.id)
+      assert durable.status == :ok
+      assert durable.authority.decision == :granted
+      assert durable.authority.constraints == %{agents: [peer]}
+      assert durable.result == %{to: peer, from: actor, messages_received: 1}
+      refute inspect(durable) =~ "inspect mix.exs"
 
       peer_state = local_state(peer)
       assert peer_state.messages_received == 1
@@ -215,6 +228,13 @@ defmodule Ouroboros.AgentEffectsTest do
     assert entry.result.status == :completed
     assert entry.result.delivery == :delivered
     assert entry.result.result.text == "reviewed"
+
+    assert {:ok, durable} = EffectLedger.get(entry.id)
+    assert durable.result.status == :completed
+    assert Map.has_key?(durable.result, :result_fingerprint)
+    refute Map.has_key?(durable.result, :result)
+    refute inspect(durable) =~ objective
+    refute inspect(durable) =~ "reviewed"
 
     # A team the agent was not granted is refused before the team is even looked up.
     signal!(pid, EffectDelegateTask, %{

@@ -99,6 +99,11 @@ defmodule Ouroboros.Application do
     children =
       runtime_boundary_children([Ouroboros.Provider.RuntimeCache]) ++
         [
+          # The effect ledger leads every process that can originate an effect. If its
+          # durable authority restarts, rest_for_one stops Jido's runners and agent
+          # servers too; unfinished acknowledged attempts then recover as ambiguous
+          # instead of continuing beside a replacement empty ledger.
+          Ouroboros.Agent.EffectLedger,
           Ouroboros.Jido,
           %{
             id: Ouroboros.Mesh.Scope,

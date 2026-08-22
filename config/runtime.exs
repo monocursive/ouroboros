@@ -322,6 +322,11 @@ if config_env() == :prod do
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.
     grants_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "grants")},
+    # An admitted effect is not started until this synced checkpoint records it. Outcomes
+    # and refusals use the same boundary, so a runtime restart can distinguish an
+    # unfinished acknowledged attempt from one that was never requested.
+    effect_ledger_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "effect-ledger")},
     upgrade_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")},
     release_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "release-journal")},

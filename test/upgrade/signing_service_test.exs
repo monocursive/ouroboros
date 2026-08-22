@@ -471,6 +471,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
 
       for name <- [
             Ouroboros.Jido,
+            Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
             Ouroboros.Coding.Store,
             Ouroboros.Team.Store,

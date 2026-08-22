@@ -146,6 +146,8 @@ defmodule Ouroboros.Signals.EffectSettled do
       principal: [type: :any, default: nil],
       claimed_from: [type: :any, default: nil],
       attempt: [type: :map, default: %{}],
+      authority: [type: :map, default: %{}],
+      cause: [type: :map, default: %{}],
       result: [type: :any, default: nil],
       error: [type: :any, default: nil]
     ]

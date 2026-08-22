@@ -132,10 +132,39 @@ defmodule Ouroboros.Provider.CodexSessionTest do
 
     assert initialize["id"] == 1
     assert thread["id"] == 2
-    assert thread["params"]["approvalPolicy"] == "onRequest"
-    assert thread["params"]["sandbox"] == "workspaceWrite"
+    assert thread["params"]["approvalPolicy"] == "on-request"
+    assert thread["params"]["sandbox"] == "workspace-write"
     assert turn["id"] == 3
     assert hd(turn["params"]["input"])["text"] == "say hello"
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "auto_edit asks on-request; extra writable roots keep camelCase sandboxPolicy" do
+    executable = fake_app_server(@transcript_cases)
+
+    handle =
+      open_session!(executable,
+        approval_mode: :auto_edit,
+        add_dirs: ["/tmp/extra"],
+        provider_options: %{cli_path: executable, network_access_enabled: true}
+      )
+
+    drain_ready()
+
+    thread =
+      executable
+      |> logged()
+      |> Enum.find(&(&1["method"] == "thread/start"))
+
+    assert thread["params"]["approvalPolicy"] == "on-request"
+    refute Map.has_key?(thread["params"], "sandbox")
+
+    assert thread["params"]["sandboxPolicy"] == %{
+             "networkAccess" => true,
+             "type" => "workspaceWrite",
+             "writableRoots" => ["/tmp/extra"]
+           }
 
     assert :ok = CodexSession.close(handle)
   end
@@ -238,13 +267,18 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert :ok = CodexSession.close(handle)
   end
 
-  defp open_session!(executable) do
+  defp open_session!(executable, overrides \\ []) do
     request =
       SessionRequest.new!(
-        cwd: File.cwd!(),
-        approval_mode: :prompt,
-        sandbox_mode: :workspace_write,
-        provider_options: %{cli_path: executable}
+        Keyword.merge(
+          [
+            cwd: File.cwd!(),
+            approval_mode: :prompt,
+            sandbox_mode: :workspace_write,
+            provider_options: %{cli_path: executable}
+          ],
+          overrides
+        )
       )
 
     context = %{

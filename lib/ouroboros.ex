@@ -65,6 +65,18 @@ defmodule Ouroboros do
             []
         end,
       control: control_status(),
+      effect_ledger:
+        safe_value(
+          &Ouroboros.Agent.EffectLedger.status/0,
+          %{
+            durability: :unavailable,
+            retained: 0,
+            in_flight: 0,
+            ambiguous: 0,
+            retention_limit: nil,
+            next_sequence: nil
+          }
+        ),
       upgrade: safe_value(&Ouroboros.Upgrade.NodeExecutor.status/0, %{mode: :unavailable}),
       release: safe_value(&Ouroboros.Release.Runtime.status/0, %{mode: :unavailable}),
       forge:
@@ -82,6 +94,16 @@ defmodule Ouroboros do
   @doc "Probes one coding provider's installation and compatibility."
   @spec provider_status(atom()) :: {:ok, Jido.Harness.ProviderStatus.t()} | {:error, term()}
   def provider_status(provider), do: Jido.Harness.status(provider)
+
+  @doc "Returns bounded, content-minimized agent-effect history from this node."
+  @spec effects(keyword() | map()) ::
+          {:ok, [Ouroboros.Agent.EffectLedger.Entry.t()]} | {:error, term()}
+  def effects(filters \\ []), do: Ouroboros.Agent.EffectLedger.list(filters)
+
+  @doc "Returns one retained agent effect by its stable effect ID."
+  @spec effect(String.t()) ::
+          {:ok, Ouroboros.Agent.EffectLedger.Entry.t()} | :not_found | {:error, term()}
+  def effect(effect_id), do: Ouroboros.Agent.EffectLedger.get(effect_id)
 
   defp control_status do
     runs =
@@ -144,6 +166,7 @@ defmodule Ouroboros do
           do: process_group_state([Ouroboros.Control.Store, Ouroboros.Control.Server]),
           else: :disabled
         ),
+      effect_ledger: process_group_state([Ouroboros.Agent.EffectLedger]),
       workspace:
         if(Application.get_env(:ouroboros, :workspace_allowed_roots, []) == [],
           do: :disabled,
