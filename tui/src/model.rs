@@ -2418,6 +2418,7 @@ mod tests {
         assert_eq!(
             found,
             vec![
+                "code_intel_diagnostics_result",
                 "coding_event_detail_result",
                 "coding_event_notification",
                 "error_cursor_pruned",
@@ -2431,11 +2432,54 @@ mod tests {
                 "interactive_event_detail_result",
                 "interactive_event_excerpt_notification",
                 "interactive_event_notification",
+                "ledger_export_result",
+                "ledger_list_result",
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
             ]
         );
+    }
+
+    /// The three fixtures this slice added, decoded for the fields a client branches on.
+    /// Named here rather than only listed above, because "accounted for" has to mean
+    /// something was read out of the bytes.
+    #[test]
+    fn the_code_intelligence_and_ledger_fixtures_carry_what_a_client_reads() {
+        let diagnostics = &fixture("code_intel_diagnostics_result")["result"];
+
+        // The discriminator first: `pending` is a different answer from an empty list.
+        assert_eq!(diagnostics["status"], "ok");
+        assert_eq!(diagnostics["counts"]["error"], 1);
+
+        let item = &diagnostics["items"][0];
+        assert_eq!(item["severity"], "error");
+        // 0-based, as the protocol reports them.
+        assert_eq!(item["range"]["start"]["line"], 11);
+        // The identity that makes the new-only rule possible outside the runtime.
+        assert_eq!(
+            item["signature"].as_str().expect("a signature").len(),
+            16,
+            "{item}"
+        );
+
+        let list = &fixture("ledger_list_result")["result"];
+        assert_eq!(list["entries"][0]["origin_node"], "ouroboros@golden");
+        assert_eq!(list["entries"][0]["effect"], "permission");
+        // A machine that did not answer is a row, never a shorter list.
+        assert_eq!(list["nodes"][1]["status"], "unavailable");
+
+        let export = &fixture("ledger_export_result")["result"];
+        assert_eq!(export["algorithm"], "sha256");
+        assert_eq!(export["seed"].as_str().expect("a seed").len(), 64);
+
+        let line = &export["lines"][0];
+        assert_eq!(line["previous"], export["seed"]);
+        assert_eq!(line["hash"], export["head"]);
+        // The hashed text is a decodable record, and it is the record it names.
+        let decoded: Value =
+            serde_json::from_str(line["line"].as_str().expect("a line")).expect("a JSON object");
+        assert_eq!(decoded["id"], line["id"]);
     }
 
     #[test]
