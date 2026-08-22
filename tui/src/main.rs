@@ -32,8 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    Cli, Command, FleetCommand, InviteCommand, RunArgs, ServiceCommand, SessionsCommand,
-    SyncCommand,
+    Cli, Command, FleetCommand, HookCommand, InviteCommand, RunArgs, ServiceCommand,
+    SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -75,6 +75,15 @@ async fn run(cli: Cli) -> Result<()> {
     // data directory, parses a config file, or decides what to do with a terminal.
     if matches!(cli.command, Some(Command::McpServe)) {
         return ouro::mcp_serve::serve().await;
+    }
+
+    // A hook is answered here for the same reason and one more: it runs inside somebody
+    // else's turn, on a five-second budget, and a data directory it cannot discover must
+    // not turn into a failure the vendor reads as a refused edit.
+    if let Some(Command::Hook { command }) = &cli.command {
+        return match command {
+            HookCommand::PostToolUse => ouro::hook::post_tool_use().await,
+        };
     }
 
     let paths = Paths::discover(cli.dev)?;
@@ -154,8 +163,11 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
-        // this process is concerned. The arm keeps the match total.
+        // this process is concerned. The arms keep the match total.
         Some(Command::McpServe) => ouro::mcp_serve::serve().await,
+        Some(Command::Hook {
+            command: HookCommand::PostToolUse,
+        }) => ouro::hook::post_tool_use().await,
         Some(Command::ProcessBirth { pid }) => {
             let birth = runtime::process_birth(pid)?
                 .ok_or_else(|| anyhow!("process pid {pid} is not alive"))?;

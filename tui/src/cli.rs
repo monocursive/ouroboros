@@ -145,6 +145,20 @@ pub enum Command {
     #[command(hide = true)]
     McpServe,
 
+    /// Answer a vendor agent's own hook event.
+    ///
+    /// Never run by hand either. `Ouroboros.Provider.ClaudeAdapter` composes the hook into
+    /// the `--settings` JSON a bridged Claude session is launched with, and Claude Code
+    /// runs it with the same four `OUROBOROS_*` variables the MCP bridge gets. Every
+    /// subcommand here reads one JSON object on stdin, writes one on stdout, and exits 0
+    /// whatever happened: a hook that refuses is a hook that can send a model back to redo
+    /// an edit that already succeeded.
+    #[command(hide = true)]
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
+
     /// Print the exact kernel incarnation of one process for the BEAM ownership protocol.
     #[command(hide = true)]
     ProcessBirth {
@@ -161,6 +175,14 @@ pub enum Command {
 
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+}
+
+/// The vendor hook events this build answers. One so far.
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    /// Claude Code's `PostToolUse`: announce the edit to the runtime's language server,
+    /// wait up to five seconds, and print the new diagnostics as `additionalContext`.
+    PostToolUse,
 }
 
 /// `ouro run`'s flags, in one struct so the dispatch stays one line.

@@ -399,7 +399,7 @@ impl Server {
             self.announce(&bridge, &workspace, &path, "open").await?;
             let answer = self.read_diagnostics(&bridge, &workspace, &path).await?;
 
-            return Ok(render_diagnostics(&path, &answer, None));
+            return Ok(render_diagnostics(&path, &answer));
         }
 
         let mut params = Map::new();
@@ -437,14 +437,34 @@ impl Server {
     async fn diagnostics(&mut self, arguments: Value) -> Result<String, String> {
         let request = object(&arguments, DIAGNOSTICS_TOOL)?;
         let path = string_argument(request, "path")?;
+
+        match self.post_edit_diagnostics(&path).await? {
+            PostEdit::NoData => Ok(format!("(no LSP data for {path})")),
+            PostEdit::Fresh(items) if items.is_empty() => {
+                Ok(format!("No new diagnostics in {path}."))
+            }
+            PostEdit::Fresh(items) => Ok(render_found(&path, &items, "new ")),
+        }
+    }
+
+    /// The whole post-edit round trip, without any wording attached to it.
+    ///
+    /// Public because `ouro hook post-tool-use` performs exactly this sequence and must
+    /// perform it the same way — but prints something else, because the hook's text is a
+    /// contract with Claude Code while the tool's is a message to a model.
+    pub async fn post_edit_diagnostics(&mut self, path: &str) -> Result<PostEdit, String> {
         let bridge = self.configured()?;
         let workspace = self.workspace(&bridge).await?;
 
-        let touched = self.announce(&bridge, &workspace, &path, "changed").await?;
+        let touched = self.announce(&bridge, &workspace, path, "changed").await?;
         let baseline = baseline_signatures(&touched);
-        let answer = self.read_diagnostics(&bridge, &workspace, &path).await?;
+        let answer = self.read_diagnostics(&bridge, &workspace, path).await?;
 
-        Ok(render_diagnostics(&path, &answer, Some(&baseline)))
+        if diagnostics_ready(&answer) {
+            Ok(PostEdit::Fresh(new_diagnostics(&baseline, &answer)))
+        } else {
+            Ok(PostEdit::NoData)
+        }
     }
 
     /// Announce an edit made outside the harness's own edit tools.
@@ -865,34 +885,47 @@ fn plural(count: usize) -> &'static str {
     }
 }
 
-/// One diagnostics answer as the model reads it. `baseline` present means "report only
-/// what is new"; absent means "report what is there".
-fn render_diagnostics(path: &str, answer: &Value, baseline: Option<&[String]>) -> String {
-    if !diagnostics_ready(answer) {
-        return format!("(no LSP data for {path})");
-    }
+/// What one post-edit read produced: either an answer that describes the file as it now
+/// stands, or no answer at all inside the budget. The two are never the same thing, and a
+/// caller that rendered them the same way would tell a model a file is clean when what
+/// happened is that nobody looked.
+#[derive(Debug, Clone)]
+pub enum PostEdit {
+    Fresh(Vec<Value>),
+    NoData,
+}
 
-    let (found, adjective) = match baseline {
-        Some(baseline) => (new_diagnostics(baseline, answer), "new "),
-        None => (items(answer), ""),
-    };
-
-    if found.is_empty() {
-        return format!("No {adjective}diagnostics in {path}.");
-    }
-
+/// Everything the model reads about a set of diagnostics: the count, then the bounded
+/// lines. `adjective` is `"new "` where the set was diffed against a baseline and empty
+/// where it was not, so the sentence never claims a diff that did not happen.
+pub fn render_found(path: &str, found: &[Value], adjective: &str) -> String {
     let count = found.len();
     let mut text = format!(
         "Found {count} {adjective}diagnostic issue{} in {path}:",
         plural(count)
     );
 
-    for line in diagnostic_lines(&found) {
+    for line in diagnostic_lines(found) {
         text.push('\n');
         text.push_str(&line);
     }
 
     text
+}
+
+/// One on-demand diagnostics answer: what the server says is wrong with the file now.
+fn render_diagnostics(path: &str, answer: &Value) -> String {
+    if !diagnostics_ready(answer) {
+        return format!("(no LSP data for {path})");
+    }
+
+    let found = items(answer);
+
+    if found.is_empty() {
+        return format!("No diagnostics in {path}.");
+    }
+
+    render_found(path, &found, "")
 }
 
 /// One navigation answer. Each item is a place plus whatever the operation names it: a
