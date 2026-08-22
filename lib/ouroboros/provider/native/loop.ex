@@ -812,6 +812,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         system: prefix.system,
         tool_specs: prefix.tools,
         context_window: prefix.context_window,
+        rules: Context.rules(prefix),
         scope: scope,
         session_dir: session_dir,
         session_id: context.run_id,

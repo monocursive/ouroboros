@@ -345,8 +345,10 @@ forge an `<ouroboros-runtime>` block fails the session by name rather than being
 size of the last request as the provider counted it — and `context_window` from
 `llm_db`'s entry for the model, or from `config :ouroboros, :native_context_window` when
 `llm_db` does not know it. When neither answers, the window is **absent from the payload
-rather than guessed**, and the footer states tokens without a percentage. At 85 % of the
-window (`compact_at`), and on `/compact [focus]`, the session compacts in two steps:
+rather than guessed**, and the footer states tokens without a percentage. When the last
+request crossed 85 % of the window (`compact_at`) the session compacts *before* the next
+turn — never mid-turn — and `/compact [focus]` does the same on demand. Either way it is
+two steps:
 older tool results are elided first, each replaced by `[tool result elided: N bytes]` so
 the model knows it can re-run the tool; only if that is not enough is the conversation
 summarised into a fixed **Goal / Constraints / Progress / Decisions / Next steps**, with
