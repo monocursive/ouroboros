@@ -100,6 +100,25 @@ defmodule Ouroboros.ProviderCapabilityTest do
                network_access_enabled: false
              }
     end
+
+    test "interactive Codex public state advertises approvals the exec fallback cannot" do
+      assert {:ok, session} = State.new("capability-interactive-codex", provider: :codex)
+      public = State.public(session)
+      assert public.options.provider_execution.interactive_approvals
+      assert public.options.provider_execution.escalation_behavior == :prompt
+
+      assert {:ok, exec} =
+               State.new("capability-exec-codex",
+                 provider: :codex,
+                 transport: :exec_jsonl_resume
+               )
+
+      exec_public = State.public(exec)
+      refute exec_public.options.provider_execution.interactive_approvals
+
+      assert exec_public.options.provider_execution.escalation_behavior ==
+               :deny_when_provider_cannot_prompt
+    end
   end
 
   describe "coding plane defaults" do
@@ -178,6 +197,11 @@ defmodule Ouroboros.ProviderCapabilityTest do
       public = TaskState.public(task)
       assert public.options.provider_execution.network_access_enabled
       refute public.options.provider_execution.git_repository_required
+      refute public.options.provider_execution.interactive_approvals
+
+      assert public.options.provider_execution.escalation_behavior ==
+               :deny_when_provider_cannot_prompt
+
       refute Map.has_key?(public.options, :provider_options)
       assert TaskState.public(public) == public
     end

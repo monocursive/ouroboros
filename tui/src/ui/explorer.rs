@@ -90,7 +90,11 @@ fn plans(frame: &mut Frame, area: Rect, app: &mut App) {
         frame,
         rows[1],
         ticks,
-        "control runs",
+        if on_control {
+            "control runs · s submit · c cancel"
+        } else {
+            "control runs"
+        },
         "run",
         on_control,
         &mut app.control,

@@ -655,6 +655,47 @@ defmodule Ouroboros.ClusterTest do
       refute MapSet.member?(cleared, Atom.to_string(node()))
     end
 
+    test "local session-owner evidence follows a late distribution identity" do
+      # The full suite starts the application without distribution and individual
+      # distributed tests start net_kernel later. Simulate that transition directly so
+      # this regression does not itself depend on which test seed starts distribution.
+      ensure_distributed!()
+      _ = Cluster.fleet_status()
+      current = node()
+      former = :nonode@nohost
+
+      on_exit(fn ->
+        reset_session_owner_evidence!()
+        _ = Cluster.fleet_status()
+      end)
+
+      :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+        local = Map.fetch!(state.machines, current)
+
+        machines =
+          state.machines
+          |> Map.delete(current)
+          |> Map.put(former, %{local | node: former, state: :local})
+
+        owners =
+          state.session_owners
+          |> Map.put(:interactive, MapSet.new([Atom.to_string(former)]))
+
+        %{state | machines: machines, session_owners: owners}
+      end)
+
+      _ = Cluster.fleet_status()
+
+      assert {:ok, owners} = Cluster.session_owners(:interactive)
+      assert MapSet.member?(owners, Atom.to_string(current))
+      refute MapSet.member?(owners, Atom.to_string(former))
+
+      assert Enum.any?(Cluster.fleet_status().machines, &(&1.node == current))
+      refute Enum.any?(Cluster.fleet_status().machines, &(&1.node == former))
+
+      assert :ok = Cluster.record_session_snapshot(:interactive, [{current, []}])
+    end
+
     test "session-owner evidence accepts fleets beyond the former 256-machine ceiling" do
       reset_session_owner_evidence!()
       on_exit(fn -> reset_session_owner_evidence!() end)

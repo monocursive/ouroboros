@@ -750,6 +750,7 @@ static MACHINES_SCAN_INFLIGHT: AtomicBool = AtomicBool::new(false);
 
 fn spawn_machine_scan(sender: mpsc::UnboundedSender<Msg>) {
     if MACHINES_SCAN_INFLIGHT.swap(true, Ordering::SeqCst) {
+        let _ = sender.send(Msg::MachineScanPending);
         return;
     }
     struct ClearOnExit;

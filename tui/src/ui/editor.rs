@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 const HISTORY_LIMIT: usize = 100;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-const COMMANDS: [(&str, &str); 26] = [
+pub(crate) const COMMANDS: [(&str, &str); 28] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -45,6 +45,8 @@ const COMMANDS: [(&str, &str); 26] = [
         "/options",
         "new session with provider and workspace options",
     ),
+    ("/machines", "open the fleet machines menu"),
+    ("/fleet", "open the fleet machines menu"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -906,6 +908,33 @@ mod tests {
         editor.paste("inspect @ui/app", &catalog);
         editor.handle_key(key(KeyCode::Tab), &catalog);
         assert_eq!(editor.text(), "inspect @src/ui/app.rs ");
+    }
+
+    /// Every listed command completes from its own prefix, and the two fleet verbs the
+    /// dispatcher serves are among them: help advertises them, so completion must too.
+    #[test]
+    fn every_command_completes_from_its_own_prefix() {
+        let catalog = CompletionCatalog::default();
+        let mut editor = Editor::default();
+
+        for (name, _) in COMMANDS {
+            editor.clear_text();
+            editor.paste(name, &catalog);
+            let offered = editor
+                .completion()
+                .expect("command completions")
+                .items
+                .iter()
+                .any(|item| item.value == *name);
+            assert!(offered, "{name} must complete from its own prefix");
+        }
+
+        editor.clear_text();
+        editor.paste("/mach", &catalog);
+        assert_eq!(
+            editor.completion().unwrap().selected().unwrap().value,
+            "/machines"
+        );
     }
 
     #[test]

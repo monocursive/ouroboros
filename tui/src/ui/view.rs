@@ -11,15 +11,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::model::{Plane, ProviderEntry};
-
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
     CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport, MachineSecurity,
     Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, Settings,
     SettingsField, Tab, APPROVAL_CHOICES, LEADER_KEYS,
 };
+use super::editor::COMMANDS;
 use super::theme;
+use crate::model::{Plane, ProviderEntry};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::default()
@@ -107,20 +107,6 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("◌ ", theme::action()),
         Span::styled("OUROBOROS", Style::default().add_modifier(Modifier::BOLD)),
     ]);
-    let subtitle = Line::from(vec![
-        Span::styled("COMMAND WORKSPACE / LOCAL", theme::label()),
-        Span::styled("  ·  ", Style::default().fg(theme::MUTED)),
-        Span::styled(
-            context,
-            if app.sessions.open.is_some() {
-                theme::heading()
-            } else {
-                theme::action()
-            },
-        ),
-        Span::styled("  ·  ", Style::default().fg(theme::MUTED)),
-        Span::styled(workspace, Style::default().fg(theme::MUTED)),
-    ]);
 
     let visible_provider = if app.sessions.open.is_some() {
         app.sessions
@@ -206,14 +192,17 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("]", theme::label()),
     ]);
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
-
     if inner.width >= 96 {
         let top = Layout::horizontal([Constraint::Min(30), Constraint::Length(46)]).split(rows[0]);
         frame.render_widget(Paragraph::new(brand), top[0]);
         frame.render_widget(Paragraph::new(badges).alignment(Alignment::Right), top[1]);
 
+        // The account chip is measured, not fixed-width: a guessed pane length is what
+        // let the workspace path run into "ChatGPT Pro" with no seam between them.
+        let right = (account.width() as u16).saturating_add(2).min(inner.width);
         let bottom =
-            Layout::horizontal([Constraint::Min(48), Constraint::Length(34)]).split(rows[1]);
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right)]).split(rows[1]);
+        let subtitle = shell_subtitle(&context, &workspace, bottom[0].width as usize, app);
         frame.render_widget(Paragraph::new(subtitle), bottom[0]);
         frame.render_widget(
             Paragraph::new(account).alignment(Alignment::Right),
@@ -221,8 +210,46 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         );
     } else {
         frame.render_widget(Paragraph::new(brand), rows[0]);
+        let subtitle = shell_subtitle(&context, &workspace, rows[1].width as usize, app);
         frame.render_widget(Paragraph::new(subtitle), rows[1]);
     }
+}
+
+/// The header's left half, fitted to the space it actually has.
+///
+/// The workspace segment is the flexible part: it ellipsizes while there is room to say
+/// something useful and yields its place entirely when there is not, so this line never
+/// relies on the renderer clipping it mid-path right beside the account chip.
+fn shell_subtitle(context: &str, workspace: &str, budget: usize, app: &App) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+
+    let lead = "COMMAND WORKSPACE / LOCAL";
+    let separator = "  ·  ";
+    let context_style = if app.sessions.open.is_some() {
+        theme::heading()
+    } else {
+        theme::action()
+    };
+    let mut spans = vec![
+        Span::styled(lead.to_string(), theme::label()),
+        Span::styled(separator.to_string(), Style::default().fg(theme::MUTED)),
+        Span::styled(context.to_string(), context_style),
+    ];
+
+    let used = lead.width() + separator.width() + context.width();
+    let room = budget.saturating_sub(used + separator.width());
+    if !workspace.is_empty() && room >= 12 {
+        spans.push(Span::styled(
+            separator.to_string(),
+            Style::default().fg(theme::MUTED),
+        ));
+        spans.push(Span::styled(
+            super::tree::truncate(workspace, room),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn status_line(frame: &mut Frame, area: Rect, app: &App) {
@@ -375,7 +402,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             frame,
             area,
             &format!("approval requested — {id}"),
-            &format!("request {request_id}\n{subject}"),
+            &format!("request {request_id}\n{subject}\nr — attach a reason before answering"),
             &APPROVAL_CHOICES
                 .iter()
                 .map(|(decision, scope)| format!("{} ({})", decision.as_str(), scope.as_str()))
@@ -412,10 +439,10 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::MUTED))
-        .title(Span::styled(
-            " ctrl+p commands ",
-            Style::default().fg(theme::MUTED),
-        ));
+        .title(Line::from(vec![
+            Span::styled(" ctrl+p commands", Style::default().fg(theme::MUTED)),
+            Span::styled(format!(" · {} ", commands.len()), theme::quiet()),
+        ]));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -493,6 +520,13 @@ fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
                 Span::styled(command.shortcut(), Style::default().fg(theme::MUTED)),
             ])
         });
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("no command matches \"{}\"", palette.query.trim()),
+            Style::default().fg(theme::MUTED),
+        )));
     }
 
     let height = rows[2].height as usize;
@@ -1873,6 +1907,7 @@ const KEYS: &[(&str, &str)] = &[
     ("ctrl+o", "toggle agent chat and complete event details"),
     ("ctrl+q", "quit dialog"),
     ("?", "this page, when the prompt is empty"),
+    (",", "settings, when the prompt is empty"),
     (
         "wheel",
         "scroll the transcript; shift/ctrl+↑↓ and pageup/down too",
@@ -1882,7 +1917,7 @@ const KEYS: &[(&str, &str)] = &[
     ("alt+b / alt+f", "move by word"),
     (
         "/ commands",
-        "new, write, switch, close, preview, admit, capabilities, help, quit",
+        "type / for completions — every verb the editor offers",
     ),
     ("1-7 / Tab", "runtime tabs when the prompt is not focused"),
 ];
@@ -1921,7 +1956,11 @@ fn leader_hint(frame: &mut Frame, area: Rect) {
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered(area, 84, (KEYS.len() + 8) as u16);
+    let lines = help_lines(app);
+
+    // Sized from the built rows, because the derived command block grows with the
+    // editor's verb table and a fixed budget would push the honest limits off-screen.
+    let popup = centered(area, 84, (lines.len() as u16 + 2).min(area.height));
 
     frame.render_widget(Clear, popup);
 
@@ -1932,6 +1971,11 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Every row of the help overlay, honest limits included.
+fn help_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = KEYS
         .iter()
         .map(|(key, description)| {
@@ -1942,6 +1986,17 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
+    // The verb list is derived, never restated: the editor's completion table is the
+    // single source of truth, so help cannot advertise what completion does not offer.
+    let commands: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
+    for (index, chunk) in commands.chunks(6).enumerate() {
+        let label = if index == 0 { "/ commands" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<14}", label), Style::default().fg(theme::ACCENT)),
+            Span::raw(chunk.join("  ")),
+        ]));
+    }
+
     lines.push(Line::from(""));
 
     // The honest limits, in the place someone looks when they are confused. Two short
@@ -1951,9 +2006,9 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         format!(
             "one gateway view of the fleet through {}",
             if app.hello.node.is_empty() {
-                "this runtime"
+                "this runtime".to_string()
             } else {
-                &app.hello.node
+                app.hello.node.clone()
             }
         ),
         Style::default().fg(theme::MUTED),
@@ -1971,9 +2026,8 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    lines
 }
-
 /// A popup of `width` percent and an explicit height, clamped to the frame.
 pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     let horizontal = Layout::horizontal([Constraint::Percentage(width_percent)])

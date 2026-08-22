@@ -239,12 +239,21 @@ installs a clear Codex-only refusal launcher; the core and every other provider 
 start. A workspace-only mismatch exits 78 before Codex receives the provider argv. Fix
 the named Codex policy or node-level executable and retry or restart as instructed.
 
-Codex currently uses Harness's managed `exec --json` transport, which cannot carry an
-approval question back into Ouroboros. Public `provider_execution` therefore reports
-`interactive_approvals: false`: workspace-safe actions run under the selected sandbox,
-while an action that still needs provider escalation is denied rather than presenting a
-button that cannot answer it. `approval_mode: :prompt` configures Codex's policy, but it
-must not be read as proof that this transport can complete an interactive approval.
+Interactive Codex sessions use app-server, so a sandbox escalation — `git commit` writing
+`.git`, extra writable directories, network — arrives as the existing approve/deny modal.
+Public `provider_execution` reports `interactive_approvals: true` and
+`escalation_behavior: :prompt` for those sessions. Deny-for-session is still `decline`:
+Codex has no persistent deny-for-session, and Ouroboros does not invent one.
+
+Coding turns still use Harness's managed `exec --json` transport, which cannot carry an
+approval question back into Ouroboros. Coding public state, and interactive sessions that
+opt into `transport: :exec_jsonl_resume`, therefore report `interactive_approvals: false`
+and `escalation_behavior: :deny_when_provider_cannot_prompt`: an action that still needs
+provider escalation is denied rather than presenting a button that cannot answer it.
+`approval_mode: :prompt` configures Codex's policy; on app-server it is also a prompt this
+runtime can complete. Approving once or for the session leaves the sandbox for that
+command. Operators who want git without prompts still choose `unrestricted` or
+`auto_approve` on purpose.
 
 To enforce workspace admission, configure existing roots before application start:
 

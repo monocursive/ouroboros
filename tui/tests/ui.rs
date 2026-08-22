@@ -2809,7 +2809,11 @@ fn the_approval_modal_renders_and_produces_the_right_respond_approval_params() {
 
     assert!(screen.contains("approval requested"), "{}", screen.text());
     assert!(screen.contains("req-17"));
-    assert!(screen.contains("bash"));
+    assert!(
+        screen.contains("git status"),
+        "the modal should name the command, not the raw tool_call blob:\n{}",
+        screen.text()
+    );
 
     // Exactly the four answers `Jido.Harness.ApprovalResponse` declares, and no others.
     for choice in [
@@ -2877,6 +2881,74 @@ fn the_approval_modal_renders_and_produces_the_right_respond_approval_params() {
             .next_approval()
             .map(|request| request.request_id.as_str()),
         Some("req-17")
+    );
+}
+
+#[test]
+fn an_attached_reason_rides_the_answer_and_esc_returns_without_losing_the_choice() {
+    let mut app = with_open_session();
+
+    notify(
+        &mut app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "interactive.event",
+            "params": {
+                "id": "session-0000000000000000000001",
+                "event": {
+                    "_struct": "Ouroboros.Interactive.Event",
+                    "id": "evt-9",
+                    "session_id": "session-0000000000000000000001",
+                    "sequence": 9,
+                    "type": "approval_requested",
+                    "timestamp": "2026-01-01T00:00:00.000000Z",
+                    "request_id": "req-17",
+                    "turn_id": "turn-1",
+                    "payload": { "tool_call": { "name": "bash", "command": "git status" },
+                                 "options": [] }
+                }
+            }
+        }),
+    );
+
+    // The chooser advertises the reason path where the choices are.
+    let screen = render(&mut app, 120, 24);
+    assert!(screen.contains("attach a reason"), "{}", screen.text());
+
+    app.apply(key(KeyCode::Char('r')));
+    let screen = render(&mut app, 120, 24);
+    assert!(screen.contains("approval reason"), "{}", screen.text());
+
+    for character in "only with user consent".chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+
+    // Esc abandons the edit and returns to the chooser, choice intact.
+    app.apply(key(KeyCode::Esc));
+    let screen = render(&mut app, 120, 24);
+    assert!(screen.contains("approval requested"), "{}", screen.text());
+
+    // r again, this time attach; two downs land on deny (once).
+    app.apply(key(KeyCode::Char('r')));
+    for character in "only with user consent".chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("an approval answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
+    assert_eq!(call.params["response"]["scope"], "once");
+    assert_eq!(
+        call.params["response"]["reason"], "only with user consent",
+        "the attached reason rides the response verbatim"
     );
 }
 

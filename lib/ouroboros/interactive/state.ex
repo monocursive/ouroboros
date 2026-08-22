@@ -221,7 +221,9 @@ defmodule Ouroboros.Interactive.State do
             :provider_execution,
             Ouroboros.Provider.public_execution_policy(
               state.provider,
-              Map.get(state.options, :provider_options)
+              Map.get(state.options, :provider_options),
+              surface: :interactive,
+              transport: Map.get(state.options, :transport)
             )
           )
       }

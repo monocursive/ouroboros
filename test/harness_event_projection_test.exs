@@ -147,7 +147,14 @@ defmodule Ouroboros.HarnessEventProjectionTest do
     on_exit(fn -> File.rm_rf(journal_dir) end)
 
     assert {:ok, CodexAdapter} = Jido.Harness.Registry.lookup(:codex)
-    assert CodexAdapter.spec() == Jido.Harness.Adapters.Codex.spec()
+
+    run_spec = Jido.Harness.Adapters.Codex.spec()
+    spec = CodexAdapter.spec()
+    assert spec.normalized_options == run_spec.normalized_options
+    assert spec.default_session_transport == :app_server
+    assert Enum.map(spec.session_transports, & &1.name) == [:app_server, :exec_jsonl_resume]
+    assert hd(spec.session_transports).adapter == Ouroboros.Provider.CodexSession
+    assert hd(spec.session_transports).capabilities.approvals == :native
 
     run_request =
       RunRequest.new!(

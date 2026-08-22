@@ -121,5 +121,9 @@ config :ouroboros,
 # command-start event the pinned Harness currently leaves provider-specific before its
 # journal deliberately discards raw provider records.
 config :jido_harness,
-  providers: %{codex: Ouroboros.Provider.CodexAdapter},
+  providers: %{
+    codex: Ouroboros.Provider.CodexAdapter,
+    kimi: Ouroboros.Provider.KimiAdapter,
+    opencode: Ouroboros.Provider.OpenCodeAdapter
+  },
   process_driver: Ouroboros.Provider.ProcessDriver

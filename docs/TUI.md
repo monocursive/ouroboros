@@ -842,8 +842,11 @@ rediscovered:
   interrupt — cancelling is what it offers, and cancelling is destructive enough to go
   through the confirmation instead.
 - **The approval modal offers exactly four answers** — `approve`/`deny` × `once`/`session`
-  — because that is `Jido.Harness.ApprovalResponse`'s two enums crossed. It does **not**
-  offer the optional `reason` the gateway accepts; that is a gap, not an omission.
+  — because that is `Jido.Harness.ApprovalResponse`'s two enums crossed. `r` on that
+  chooser attaches the optional `reason` the gateway accepts. Interactive Codex sandbox
+  escalations (`git commit` writing `.git`, extra writable dirs, network) use this same
+  modal over app-server. Deny-for-session is still `decline` — Codex has no persistent
+  deny-for-session. Coding `exec --json` never opens it.
 - **Session creation states its choices rather than defaulting them.** `n` on the
   Sessions tab opens a form carrying plane, provider, workspace and approval mode;
   `ouro new` is the same request from a shell. Both build their parameters through one

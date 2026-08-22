@@ -229,13 +229,73 @@ defmodule Ouroboros.Cluster.Monitor do
   defp observe_local(state, now) do
     # A library/test VM may start this application before `net_kernel` and acquire its
     # distributed name later. `:nonode@nohost` was never a separate machine, so replace
-    # that stale local identity instead of presenting two locals forever.
+    # that stale local identity instead of presenting two locals forever. Session-owner
+    # evidence names nodes too: migrate it in the same transition, otherwise a list made
+    # before distribution can leave a phantom offline owner that makes every later list
+    # fail closed depending on which test or caller happened to start `net_kernel` first.
+    stale_locals =
+      state.machines
+      |> Enum.filter(fn {target, machine} -> target != node() and machine.state == :local end)
+      |> Enum.map(fn {target, _machine} -> Atom.to_string(target) end)
+      |> MapSet.new()
+      |> then(fn stale ->
+        if node() == :nonode@nohost,
+          do: stale,
+          else: MapSet.put(stale, "nonode@nohost")
+      end)
+
+    state = migrate_local_session_owners(state, stale_locals)
+
     machines =
       Map.reject(state.machines, fn {target, machine} ->
         target != node() and machine.state == :local
       end)
 
     observe_up(%{state | machines: machines}, node(), now)
+  end
+
+  defp migrate_local_session_owners(state, stale_locals) do
+    current = session_owners(state)
+    replacement = Atom.to_string(node())
+
+    updated =
+      Map.new(current, fn {plane, owners} ->
+        if MapSet.disjoint?(owners, stale_locals) do
+          {plane, owners}
+        else
+          {plane,
+           owners
+           |> MapSet.difference(stale_locals)
+           |> MapSet.put(replacement)}
+        end
+      end)
+
+    cond do
+      Map.get(state, :session_owner_evidence, :reliable) != :reliable ->
+        state
+
+      updated == current ->
+        state
+
+      true ->
+        case persist_session_owners(updated) do
+          :ok ->
+            %{state | session_owners: updated, session_owner_evidence: :reliable}
+
+          {:error, reason} ->
+            Logger.error(
+              "cluster local session-owner migration could not be checkpointed; " <>
+                "fleet lists will fail closed: " <>
+                inspect(reason, limit: 10, printable_limit: 200)
+            )
+
+            %{
+              state
+              | session_owners: updated,
+                session_owner_evidence: {:unreliable, reason}
+            }
+        end
+    end
   end
 
   defp observe_leave(state, left, reason) do

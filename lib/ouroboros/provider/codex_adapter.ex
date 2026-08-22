@@ -4,11 +4,39 @@ defmodule Ouroboros.Provider.CodexAdapter do
   @behaviour Jido.Harness.Adapter
 
   alias Jido.Harness.Adapters.{Codex, Helpers}
+  alias Jido.Harness.SessionTransportSpec
   alias Jido.Harness.Redaction
   alias Ouroboros.HarnessEventProjection
+  alias Ouroboros.Provider.CodexSession
 
   @impl true
-  defdelegate spec(), to: Codex
+  def spec do
+    # Coding `run/2` stays on `codex exec --json`. Interactive sessions default to
+    # app-server so a sandbox escalation can complete `respond_approval` instead of
+    # being denied inside a one-way JSONL stream. The exec transport remains a named
+    # fallback (`transport: :exec_jsonl_resume`), not the default.
+    base = Codex.spec()
+    exec_jsonl = Enum.filter(base.session_transports, &(&1.name == :exec_jsonl_resume))
+
+    %{
+      base
+      | default_session_transport: :app_server,
+        session_transports: [app_server_transport() | exec_jsonl]
+    }
+  end
+
+  defp app_server_transport do
+    SessionTransportSpec.new!(
+      name: :app_server,
+      adapter: CodexSession,
+      capabilities: Ouroboros.Provider.Session.Dialect.Codex.capabilities(),
+      session_options: :adapter,
+      session_provider_options: :adapter,
+      turn_options: :adapter,
+      turn_provider_options: :adapter,
+      configuration_options: [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
+    )
+  end
 
   @impl true
   defdelegate status(config), to: Codex

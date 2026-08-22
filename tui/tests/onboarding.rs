@@ -12,7 +12,7 @@ use serde_json::json;
 use ouro::model::Plane;
 use ouro::proto::{ErrorCode, RpcError};
 use ouro::transport::ClientError;
-use ouro::ui::app::{App, Mode, Msg, Overlay, Tab, Tag};
+use ouro::ui::app::{App, Mode, Msg, Overlay, PromptKind, Tab, Tag};
 
 use support::{app, full_hello, render};
 
@@ -876,11 +876,41 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     type_text(&mut app, "dist");
     let screen = render(&mut app, 120, 34);
     assert!(screen.contains("Runtime & distribution"));
-    assert!(screen.contains("New session"));
+    assert!(
+        !screen.contains("New session"),
+        "a query must filter the list, not only move the selection: {}",
+        screen.text()
+    );
 
     app.apply(key(KeyCode::Enter));
     assert_eq!(app.tab, Tab::Dashboard);
     assert!(app.overlay.is_none());
+}
+
+#[test]
+fn palette_search_filters_to_matching_commands_and_says_when_none_do() {
+    let mut app = harness(true);
+    app.apply(ctrl('p'));
+
+    type_text(&mut app, "settings");
+    let screen = render(&mut app, 120, 34);
+    assert!(screen.contains("Settings"), "{}", screen.text());
+    assert!(
+        !screen.contains("Copy last agent message"),
+        "non-matching rows must leave the list: {}",
+        screen.text()
+    );
+
+    type_text(&mut app, "zzzz");
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("no command matches"),
+        "an empty result must be said out loud: {}",
+        screen.text()
+    );
+
+    app.apply(key(KeyCode::Enter));
+    assert!(app.overlay.is_some(), "a matchless Enter must not act");
 }
 
 #[test]
@@ -1001,5 +1031,81 @@ fn a_successful_cli_first_message_makes_the_next_input_a_queued_follow_up() {
     assert_eq!(
         follow_up.params["input"],
         "keep going with the implementation"
+    );
+}
+
+#[test]
+fn plans_tab_submits_a_control_run_and_cancels_one_behind_confirmation() {
+    let mut app = harness(false);
+    app.tab = Tab::Plans;
+    app.plans_on_control = true;
+    let _ = app.drain();
+    answer(
+        &mut app,
+        Tag::ControlRuns,
+        json!([{
+            "id": "run-1",
+            "revision": 0,
+            "status": "executing",
+            "objective": "repair the failing tests"
+        }]),
+    );
+
+    app.apply(key(KeyCode::Char('s')));
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::Prompt {
+            kind: PromptKind::ControlObjective,
+            ..
+        })
+    ));
+    type_text(&mut app, "repair the failing tests");
+    app.apply(key(KeyCode::Enter));
+
+    let submit = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "control.submit")
+        .expect("the submit call");
+    assert_eq!(submit.params["objective"], "repair the failing tests");
+
+    app.apply(key(KeyCode::Char('c')));
+    let title = match &app.overlay {
+        Some(Overlay::Confirm { title, .. }) => title.clone(),
+        other => panic!("expected a cancel confirmation, got {other:?}"),
+    };
+    assert!(title.contains("cancel control run run-1"), "{title}");
+
+    app.apply(key(KeyCode::Enter));
+    let cancel = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "control.cancel")
+        .expect("the confirmed cancel call");
+    assert_eq!(cancel.params["id"], "run-1");
+}
+
+#[test]
+fn a_terminal_control_run_refuses_cancellation_with_a_said_so_notice() {
+    let mut app = harness(false);
+    app.tab = Tab::Plans;
+    app.plans_on_control = true;
+    let _ = app.drain();
+    answer(
+        &mut app,
+        Tag::ControlRuns,
+        json!([{ "id": "run-9", "revision": 2, "status": "completed" }]),
+    );
+
+    app.apply(key(KeyCode::Char('c')));
+    assert!(app.overlay.is_none(), "no confirmation for a finished run");
+
+    let notice = app.notice.as_ref().map(|notice| notice.text.clone());
+    let Some(text) = &notice else {
+        panic!("the refusal was said, not silent: {notice:?}");
+    };
+    assert!(
+        text.contains("run-9") && text.contains("completed"),
+        "the refusal names the run and its state: {text}"
     );
 }

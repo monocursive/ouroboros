@@ -1598,7 +1598,7 @@ impl StartedRef {
     }
 }
 
-/// The exact `params` for one approval answer.
+/// The exact `params` for one approval answer without a reason.
 ///
 /// Built here rather than at the call site so the allowlist the gateway enforces —
 /// `decision` in `approve|deny`, `scope` in `once|session`, and nothing else, because
@@ -1610,10 +1610,32 @@ pub fn respond_approval_params(
     decision: ApprovalDecision,
     scope: ApprovalScope,
 ) -> Value {
+    respond_approval_params_with_reason(session_id, request_id, decision, scope, None)
+}
+
+/// The same answer with the operator's optional `reason`.
+///
+/// The gateway's closed envelope accepts `{decision, scope?, reason?}`; an absent reason
+/// omits the key entirely rather than sending a null, so a gateway that never heard of
+/// reasons sees byte-identical params to [`respond_approval_params`].
+pub fn respond_approval_params_with_reason(
+    session_id: &str,
+    request_id: &str,
+    decision: ApprovalDecision,
+    scope: ApprovalScope,
+    reason: Option<&str>,
+) -> Value {
+    let mut response = serde_json::json!({
+        "decision": decision.as_str(),
+        "scope": scope.as_str(),
+    });
+    if let Some(reason) = reason {
+        response["reason"] = Value::String(reason.to_string());
+    }
     serde_json::json!({
         "id": session_id,
         "request_id": request_id,
-        "response": { "decision": decision.as_str(), "scope": scope.as_str() },
+        "response": response,
     })
 }
 
@@ -1960,6 +1982,41 @@ mod tests {
             params["response"].as_object().expect("an object").len(),
             2,
             "provider_options is deliberately not accepted by the gateway"
+        );
+    }
+
+    #[test]
+    fn an_approval_reason_is_carried_verbatim_and_omitted_when_absent() {
+        let reasoned = respond_approval_params_with_reason(
+            "session-1",
+            "req-9",
+            ApprovalDecision::Approve,
+            ApprovalScope::Once,
+            Some("matches the documented migration"),
+        );
+
+        assert_eq!(reasoned["response"]["decision"], "approve");
+        assert_eq!(reasoned["response"]["scope"], "once");
+        assert_eq!(
+            reasoned["response"]["reason"],
+            "matches the documented migration"
+        );
+
+        let bare = respond_approval_params_with_reason(
+            "session-1",
+            "req-9",
+            ApprovalDecision::Approve,
+            ApprovalScope::Once,
+            None,
+        );
+
+        assert!(
+            bare["response"]
+                .as_object()
+                .expect("an object")
+                .get("reason")
+                .is_none(),
+            "an absent reason omits the key instead of sending null"
         );
     }
 

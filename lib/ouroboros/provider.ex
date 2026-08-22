@@ -106,10 +106,22 @@ defmodule Ouroboros.Provider do
 
   def execution_options(_provider, options), do: options
 
-  @doc "Returns the non-secret execution policy safe to show in public session state."
+  @doc """
+  Returns the non-secret execution policy safe to show in public session state.
+
+  `opts` may include `:surface` (`:interactive` | `:coding`) and `:transport`. Interactive
+  Codex on app-server can complete an approval; coding `exec --json` and the named exec
+  session fallback cannot, and must not advertise a button that cannot answer.
+  """
   @spec public_execution_policy(atom(), map() | nil) :: map()
-  def public_execution_policy(:codex, options) when is_map(options) do
+  @spec public_execution_policy(atom(), map() | nil, keyword()) :: map()
+  def public_execution_policy(provider, options, opts \\ [])
+
+  def public_execution_policy(:codex, nil, opts), do: public_execution_policy(:codex, %{}, opts)
+
+  def public_execution_policy(:codex, options, opts) when is_map(options) do
     {runtime_ready, runtime_error} = codex_runtime_readiness()
+    {interactive_approvals, escalation} = codex_approval_surface(opts)
 
     %{
       runtime_ready: runtime_ready,
@@ -124,12 +136,26 @@ defmodule Ouroboros.Provider do
         rebar_cache: managed_cache?(:managed_rebar_cache),
         rebar_config: managed_cache?(:managed_rebar_config)
       },
-      interactive_approvals: false,
-      escalation_behavior: :deny_when_provider_cannot_prompt
+      interactive_approvals: interactive_approvals,
+      escalation_behavior: escalation
     }
   end
 
-  def public_execution_policy(_provider, _options), do: %{}
+  def public_execution_policy(_provider, _options, _opts), do: %{}
+
+  defp codex_approval_surface(opts) do
+    if Keyword.get(opts, :surface) == :interactive and
+         app_server_transport?(Keyword.get(opts, :transport)) do
+      {true, :prompt}
+    else
+      {false, :deny_when_provider_cannot_prompt}
+    end
+  end
+
+  defp app_server_transport?(nil), do: true
+  defp app_server_transport?(:app_server), do: true
+  defp app_server_transport?("app_server"), do: true
+  defp app_server_transport?(_other), do: false
 
   defp codex_runtime_readiness do
     case Application.get_env(:ouroboros, @codex_readiness_key) do

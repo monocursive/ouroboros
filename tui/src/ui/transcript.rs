@@ -81,19 +81,79 @@ pub struct ApprovalRequest {
 
 impl ApprovalRequest {
     /// The tool call the provider is asking permission for, as one line.
+    ///
+    /// A sandbox escalation should read as `git commit … — writes to .git`, not as the
+    /// raw JSON blob of `tool_call`.
     pub fn subject(&self) -> String {
-        for key in ["tool_call", "tool", "command", "text"] {
-            if let Some(value) = self.payload.get(key) {
-                let rendered = crate::model::compact(value);
+        let command = approval_command(&self.payload);
+        let reason = json_nonempty_str(&self.payload, "reason");
 
-                if !rendered.is_empty() && rendered != "null" {
-                    return rendered;
-                }
+        match (command.as_deref(), reason.as_deref()) {
+            (Some(command), Some(reason)) => format!("{command} — {reason}"),
+            (Some(command), None) => command.to_string(),
+            (None, _) => fallback_subject(&self.payload),
+        }
+    }
+}
+
+fn approval_command(payload: &Value) -> Option<String> {
+    payload
+        .pointer("/tool_call/command")
+        .or_else(|| payload.pointer("/tool/command"))
+        .or_else(|| payload.get("command"))
+        .and_then(render_command)
+}
+
+fn render_command(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => nonempty_trimmed(text),
+        Value::Array(parts) => {
+            let joined = parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            nonempty_trimmed(&joined)
+        }
+        other => nonempty_rendered(other),
+    }
+}
+
+fn json_nonempty_str(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(nonempty_trimmed)
+}
+
+fn nonempty_trimmed(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn nonempty_rendered(value: &Value) -> Option<String> {
+    let rendered = crate::model::compact(value);
+    if rendered.is_empty() || rendered == "null" {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
+fn fallback_subject(payload: &Value) -> String {
+    for key in ["tool_call", "tool", "command", "text"] {
+        if let Some(value) = payload.get(key) {
+            if let Some(rendered) = nonempty_rendered(value) {
+                return rendered;
             }
         }
-
-        crate::model::compact(&self.payload)
     }
+
+    crate::model::compact(payload)
 }
 
 /// What a transcript renders, in order.
@@ -751,6 +811,25 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_subject_prefers_the_command_and_reason() {
+        let request = ApprovalRequest {
+            request_id: "req-git".into(),
+            sequence: 1,
+            turn_id: Some("turn-1".into()),
+            payload: json!({
+                "tool_call": {
+                    "name": "exec_command",
+                    "command": "git commit -am wip"
+                },
+                "reason": "writes to .git",
+                "kind": "sandbox_escalation"
+            }),
+        };
+
+        assert_eq!(request.subject(), "git commit -am wip — writes to .git");
+    }
+
+    #[test]
     fn an_approval_request_is_held_until_it_resolves() {
         let mut watch = watch();
 
@@ -759,7 +838,7 @@ mod tests {
         let pending = watch.next_approval().expect("a pending approval");
         assert_eq!(pending.request_id, "req-a");
         assert_eq!(pending.turn_id.as_deref(), Some("turn-1"));
-        assert!(pending.subject().contains("bash"));
+        assert_eq!(pending.subject(), "rm -rf /");
 
         watch.absorb(vec![Event::decode(&json!({
             "id": "evt-3",

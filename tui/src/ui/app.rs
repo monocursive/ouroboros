@@ -199,6 +199,10 @@ pub enum Tag {
     History(String),
     Signing,
     Grants(String),
+    /// `control.submit`. The answer carries the id of a run that did not exist before.
+    ControlSubmit,
+    /// `control.cancel {id}`.
+    ControlCancel(String),
     /// The single resync path: `subscribe` after a reconnect or a first open, `replay`
     /// after a lag or a pruned cursor.
     ///
@@ -290,6 +294,8 @@ pub enum Msg {
         log: Vec<String>,
         result: Result<String, String>,
     },
+    /// The driver declined a second machine discovery scan; one is still running.
+    MachineScanPending,
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -842,12 +848,23 @@ impl UpgradeTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
     HistoryModule,
     GrantsPrincipal,
     PreviewCapability,
     AdmitCapability,
+    ControlObjective,
+    /// Editing the optional reason for an approval already on screen. Carries the
+    /// chooser state and the pre-edit reason so submitting or abandoning the prompt
+    /// returns to the same chooser instead of dropping the answer.
+    ApprovalReason {
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: usize,
+        reason: Option<String>,
+    },
 }
 
 /// How many rows an approval-mode cycler has: the four the schema declares, plus the
@@ -1932,11 +1949,15 @@ pub struct CommandPalette {
 
 impl CommandPalette {
     pub fn visible(&self) -> Vec<Command> {
-        Command::ALL.to_vec()
+        Command::ALL
+            .iter()
+            .copied()
+            .filter(|command| command.matches(&self.query))
+            .collect()
     }
 
     fn first_match(&self) -> usize {
-        Command::ALL
+        self.visible()
             .iter()
             .position(|command| command.matches(&self.query))
             .unwrap_or(0)
@@ -1996,6 +2017,8 @@ pub enum Overlay {
         request_id: String,
         subject: String,
         choice: usize,
+        /// Optional operator reason attached through the `r` prompt.
+        reason: Option<String>,
     },
     Confirm {
         title: String,
@@ -2924,6 +2947,9 @@ impl App {
             }
             Msg::NotificationsDropped(total) => self.client_dropped(total),
             Msg::ExternalEditor(text) => self.apply_external_editor(text),
+            Msg::MachineScanPending => {
+                self.inform("machine discovery is already running", NoticeKind::Info);
+            }
             Msg::MachineCandidates {
                 candidates,
                 local_machine,
@@ -3663,6 +3689,46 @@ impl App {
                     self.action_failed(label, plane, &id, error);
                     self.resume_picker_if_requested();
                 }
+            },
+            Tag::ControlSubmit => match result {
+                Ok(value) => {
+                    let id = value
+                        .get("id")
+                        .map(model::compact)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    self.inform(format!("control run {id} submitted"), NoticeKind::Info);
+                    self.control.rows.invalidate();
+                    self.control.detail.invalidate();
+                }
+                Err(ClientError::Rpc(rpc)) => self.inform(
+                    format!("control submit was refused: {}", model::refusal(&rpc)),
+                    NoticeKind::Error,
+                ),
+                Err(error) => self.inform(
+                    format!("control submit was refused: {error}"),
+                    NoticeKind::Error,
+                ),
+            },
+            Tag::ControlCancel(id) => match result {
+                Ok(_) => {
+                    self.inform(
+                        format!("cancel accepted for control run {id}"),
+                        NoticeKind::Info,
+                    );
+                    self.control.rows.invalidate();
+                    self.control.detail.invalidate();
+                }
+                Err(ClientError::Rpc(rpc)) => self.inform(
+                    format!(
+                        "cancel of control run {id} was refused: {}",
+                        model::refusal(&rpc)
+                    ),
+                    NoticeKind::Error,
+                ),
+                Err(error) => self.inform(
+                    format!("cancel of control run {id} was refused: {error}"),
+                    NoticeKind::Error,
+                ),
             },
             Tag::Approval {
                 plane,
@@ -4679,6 +4745,20 @@ impl App {
             return;
         }
 
+        self.open_approval_with(plane, id, String::new(), 0, None);
+    }
+
+    /// Opens (or reopens after a reason prompt) the chooser for the watch's pending
+    /// approval. The request is peeked afresh so the subject is always the live one;
+    /// `request_id` must still be pending, or nothing opens.
+    fn open_approval_with(
+        &mut self,
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: usize,
+        reason: Option<String>,
+    ) {
         let Some(watch) = self.sessions.watches.get(&(plane, id.clone())) else {
             return;
         };
@@ -4687,12 +4767,19 @@ impl App {
             return;
         };
 
+        let request_id = if request.request_id == request_id {
+            request_id
+        } else {
+            request.request_id.clone()
+        };
+
         self.overlay = Some(Overlay::Approval {
             plane,
             id,
-            request_id: request.request_id.clone(),
+            request_id,
             subject: request.subject(),
-            choice: 0,
+            choice,
+            reason,
         });
     }
 
@@ -4727,7 +4814,6 @@ impl App {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
         if self.leader_until.is_some() {
             self.leader_key(key);
             return;
@@ -4793,6 +4879,26 @@ impl App {
         if matches!(key.code, KeyCode::Char('?')) && !shift && self.focused_prompt_empty() {
             self.overlay = Some(Overlay::Help);
             return;
+        }
+
+        if matches!(key.code, KeyCode::Char(',')) && self.focused_prompt_empty() {
+            self.open_settings();
+            return;
+        }
+
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        if self.tab == Tab::Plans && !ctrl && !alt {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.open_control_submit();
+                    return;
+                }
+                KeyCode::Char('c') => {
+                    self.open_control_cancel();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if self.sessions.composer.is_some() && self.tab == Tab::Sessions {
@@ -6555,6 +6661,53 @@ impl App {
         })));
 
         self.place_default_provider();
+    }
+
+    /// `control.submit` from the Plans tab. The objective is the only field the plane
+    /// lets a model-invisible caller choose; revision policy stays runtime configuration.
+    fn open_control_submit(&mut self) {
+        if !self.hello.serves("control.submit") {
+            return;
+        }
+        self.overlay = Some(Overlay::Prompt {
+            kind: PromptKind::ControlObjective,
+            label: "objective for the control run".into(),
+            buffer: String::new(),
+        });
+    }
+
+    /// `control.cancel` for the selected run, behind the same confirmation every
+    /// destructive session verb uses.
+    fn open_control_cancel(&mut self) {
+        if !self.hello.serves("control.cancel") {
+            return;
+        }
+        let Some(row) = self.control.current() else {
+            return;
+        };
+        let status = row.status.as_deref().unwrap_or_default();
+        if matches!(status, "completed" | "failed" | "cancelled") {
+            self.inform(
+                format!("run {} is already {status}", row.id),
+                NoticeKind::Info,
+            );
+            return;
+        }
+        let id = row.id.clone();
+        let call = Call::new(
+            Tag::ControlCancel(id.clone()),
+            "control.cancel",
+            json!({ "id": id }),
+        );
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("cancel control run {id}?"),
+            detail: "the run stops durably; steps already dispatched may still finish".to_string(),
+            options: vec![
+                ("cancel it".to_string(), Some(call)),
+                ("leave it running".to_string(), None),
+            ],
+            choice: 0,
+        });
     }
 
     fn settings_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -8458,17 +8611,40 @@ impl App {
                 }
                 _ => {}
             },
-            Overlay::Approval { choice, .. } => match key.code {
+            Overlay::Approval {
+                plane,
+                id,
+                request_id,
+                choice,
+                reason,
+                ..
+            } => match key.code {
                 KeyCode::Esc => self.overlay = None,
                 KeyCode::Char('j') | KeyCode::Down => {
                     *choice = (*choice + 1).min(APPROVAL_CHOICES.len() - 1)
                 }
                 KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                KeyCode::Char('r') => {
+                    let kind = PromptKind::ApprovalReason {
+                        plane: *plane,
+                        id: id.clone(),
+                        request_id: request_id.clone(),
+                        choice: *choice,
+                        reason: reason.clone(),
+                    };
+                    let buffer = reason.clone().unwrap_or_default();
+                    self.overlay = Some(Overlay::Prompt {
+                        kind,
+                        label: "approval reason — enter attaches it, an empty line keeps none"
+                            .to_string(),
+                        buffer,
+                    });
+                }
                 KeyCode::Enter => self.submit_approval(),
                 _ => {}
             },
             Overlay::Prompt { buffer, .. } => match key.code {
-                KeyCode::Esc => self.overlay = None,
+                KeyCode::Esc => self.resume_approval_choice(),
                 KeyCode::Backspace => {
                     buffer.pop();
                 }
@@ -8737,6 +8913,7 @@ impl App {
             id,
             request_id,
             choice,
+            reason,
             ..
         }) = self.overlay.take()
         else {
@@ -8762,7 +8939,13 @@ impl App {
         let params = self.routed_session_params(
             plane,
             &id,
-            model::respond_approval_params(&id, &request_id, decision, scope),
+            model::respond_approval_params_with_reason(
+                &id,
+                &request_id,
+                decision,
+                scope,
+                reason.as_deref(),
+            ),
         );
         self.issue(Call::new(
             Tag::Approval {
@@ -8791,8 +8974,32 @@ impl App {
                 self.confirm_admit_capability(&value);
                 return;
             }
+            PromptKind::ControlObjective if value.trim().is_empty() => {
+                return;
+            }
             PromptKind::HistoryModule | PromptKind::GrantsPrincipal if value.is_empty() => {
                 return;
+            }
+            PromptKind::ApprovalReason {
+                plane,
+                id,
+                request_id,
+                choice,
+                reason,
+            } => {
+                let attached = if value.is_empty() { None } else { Some(value) };
+                self.open_approval_with(plane, id, request_id, choice, attached.or(reason));
+                return;
+            }
+            PromptKind::ControlObjective => {
+                let objective = value.trim().to_string();
+                self.issue(Call::new(
+                    Tag::ControlSubmit,
+                    "control.submit",
+                    json!({ "objective": objective }),
+                ));
+                self.control.rows.invalidate();
+                self.inform("control run submitted", NoticeKind::Info);
             }
             PromptKind::HistoryModule => {
                 self.upgrade.history_module = Some(value);
@@ -8807,6 +9014,25 @@ impl App {
         }
 
         self.poll_upgrade_section();
+    }
+
+    /// Return to an approval chooser after its reason prompt: the same pending request
+    /// is peeked afresh from the watch, with the operator's choice and reason intact.
+    fn resume_approval_choice(&mut self) {
+        match self.overlay.take() {
+            Some(Overlay::Prompt {
+                kind:
+                    PromptKind::ApprovalReason {
+                        plane,
+                        id,
+                        request_id,
+                        choice,
+                        reason,
+                    },
+                ..
+            }) => self.open_approval_with(plane, id, request_id, choice, reason),
+            _ => self.overlay = None,
+        }
     }
 
     fn expire_chords(&mut self) {
