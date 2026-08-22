@@ -374,12 +374,34 @@ thrash rather than looping; after that the automatic path stays off for the sess
 `/compact` still works because the operator asked.
 
 **Handoff.** Rather than compacting a compacted conversation, a session can hand off:
-`Ouroboros.Provider.Native.Session.handoff/2` starts a fresh session in the same
+`Ouroboros.Provider.Native.Session.handoff/3` starts a fresh session in the same
 workspace whose first message is a curated packet — the five-heading summary, every file
 the session touched with its hash *as of now*, the open plan, and the operator's own
 instruction — and returns its id. The packet is written into the new session's checkpoint
 before that session starts, so a handoff whose child failed to start is still a handoff
 you can open by id. The parent records `handed_off_to` and keeps running.
+
+**The three verbs, on the wire.** All of this is reachable from a client, and only on a
+`native` session:
+
+```elixir
+Ouroboros.InteractiveSession.compact(session, "the migration plan")
+Ouroboros.InteractiveSession.handoff(session, "carry on from the failing test")
+Ouroboros.InteractiveSession.context(session)
+```
+
+`interactive.compact` folds now and answers with the same report the automatic path
+produces. `interactive.handoff` writes the packet, names the child, and starts it as a
+*session* — with its own coordinator, its own harness worker, and `handed_off_from`
+pointing back — rather than as a transport process hanging off the parent. `interactive.context`
+is the one of the three that answers for every provider, and it says which kind of answer
+it is giving: `source: "native"` carries the prefix fingerprint, the window, what the last
+request used, every compaction, the retained archives' ids, and the instruction files
+loaded and dropped; `source: "usage"` carries only what a vendor's own `usage` events
+reported, which for most providers today is nothing at all. Elsewhere `compact` and
+`handoff` are refused by capability — `["unsupported_on_transport", {transport, verb, …}]`
+— because Ouroboros never held those conversations, and a summary it invented for a
+transcript it never had would be a claim with nothing behind it.
 
 **What is not enforced, and will not be until it is.**
 
@@ -1058,6 +1080,45 @@ deterministically namespaced by team and delegation and bound to a private rando
 origin digest, so a matching foreign task cannot be adopted or cancelled. Coordinator
 ownership is claimed inside the Jido agent, monitored, and reverified before signals
 or cleanup.
+
+### Delegating from a conversation
+
+A conversation can hand work to a team without the operator assembling one:
+
+```elixir
+{:ok, delegation} =
+  Ouroboros.InteractiveSession.delegate(session, "Port the auth module to the new API")
+
+{:ok, rows} = Ouroboros.InteractiveSession.delegations(session)
+```
+
+The team is the workspace's **default** one — one per canonical workspace root per
+machine, created lazily on the first delegation, durable through the same checkpoint every
+other team uses, and listed by `teams.list` like any other. Its id embeds `node()`, because
+a team id becomes a coordinator id in the cluster-wide mesh namespace and a digest naming
+only the directory would collide with the same directory on another machine. One worker per
+conversation, which is what makes a second delegation from the same session queue behind
+the first rather than fan out.
+
+**A delegation is a coding task with a parent, not a sub-conversation.** The child runs on
+the coding plane with its own id, its own transcript, and its own durable record; what
+makes it this session's is `parent: %{plane: :interactive, id: …}` on that record, which is
+immutable and part of the coding plane's idempotency fingerprint — a task adopted under an
+id that already belongs to a different conversation is a different request, not the same
+one retried. The parent's transcript gains a `delegation` event when the child starts and
+another carrying the terminal status and a bounded result digest when it ends; the parent's
+row gains `children` (ids), and the child's row gains `parent`. There is no shared context,
+no message passing between the two, and no way to talk to the child from the parent's
+composer — messaging a running delegation means opening it on the coding plane. G3's native
+subagent tool and G4's visible agent-to-agent messaging are where that changes; neither is
+in this build.
+
+The parent's copy of a delegation's status is a hint that follows the team's own record. A
+terminal note is delivered fire-and-forget, because the team's obligation is delivering the
+result to its own worker and a parent that is closed or on an unreachable node must never
+hold that up — so a conversation that was not running when its child finished has a stale
+copy, and `delegations/1` reads the team and says `source: "team"` when it could and
+`source: "session"` when it could not.
 
 Recovery never compensates a run it merely failed to resubscribe to: a pruned cursor
 or unreachable owner degrades that delegation to polling the durable coding
@@ -1812,6 +1873,52 @@ scope, actor, rule id, and a **digest** of the command line and paths, never the
 Ouroboros.effects(effect: :permission, limit: 5)
 ```
 
+### The operator's own shell
+
+`workspace.exec` is the third place this engine decides something, and the only one where
+the thing being decided is a person's own act rather than a provider's. It runs one
+command through `/bin/sh -c` in a session's admitted workspace, on that session's owner
+node:
+
+```elixir
+Ouroboros.InteractiveSession.exec(session, "mix test --stale")
+```
+
+It is not a tool. No model asks for it, no provider is told about it, and it runs only
+where one of two things is already true: the session's effective `approval_mode` is
+`:auto_approve` — the operator having already said "stop asking me" — or a rule allows
+that exact command under this session's principal. Everything else, an unreadable rule
+store included, is refused with the pattern that would have worked:
+
+```elixir
+{:error, {:shell_refused, %{reason: :no_rule, suggested_rule: "Bash(mix test *)", …}}}
+```
+
+**What it records.** An `:operator_shell` entry is written to the effect ledger *before*
+the command runs, carrying a digest of the command line, the working directory, the
+session, the node, and the rule that permitted it — never the command text. It is settled
+afterwards with the exit status, the elapsed time, the output size, and whether the output
+was spilled. A ledger that cannot record refuses the command outright, because the whole
+claim this verb makes is that a command run through the runtime is accountable afterwards.
+
+**What the agent sees.** The command lands on the session's own transcript as a
+`provider_event` with `kind: "operator_shell"` carrying the digest, the exit status, and a
+bounded excerpt of the output; and the next turn's `<ouroboros-runtime>` envelope carries
+the last **three** commands' excerpts, 512 bytes each, redacted and stripped of control
+characters. This is the only place a durable runtime capture is deliberately re-taken —
+everywhere else it is frozen at admission so retries and recovery cannot silently observe
+a different runtime, and here the runtime genuinely changed, because a person ran
+something in the workspace the agent is working in.
+
+**What it will not do.** It does not become a shell session: one command, one process, no
+state carried between calls, so `cd` does not persist and neither does an exported
+variable. Output is bounded at 30 KiB inline with the rest spilled to a `0600` file under
+the session's data directory and the path returned. The command is stopped at ten minutes,
+and a process that detaches from its own group can outlive that — the timeout terminates
+the shell this runtime started, not a daemon it forked. And nothing here is a sandbox: a
+permitted command runs with your privileges, exactly as the section below says of
+everything else this engine decides.
+
 ### Honest limits
 
 - **This is not a sandbox, and it is not an OS boundary.** It decides what the runtime
@@ -1828,6 +1935,13 @@ Ouroboros.effects(effect: :permission, limit: 5)
   this engine, never a replacement for rules.
 - **Tools outside these two seams are still the vendor's.** Ouroboros runs no tool loop,
   so it cannot veto a call it never sees.
+- **`workspace.exec` is decided by this engine and bounded by nothing else.** The rule
+  language is prefix matching, and the paragraph above about command substitution, `eval`,
+  and `sh -c "…"` applies to an operator's own command line exactly as it applies to a
+  provider's. An `allow` rule broad enough to be convenient is an `allow` rule broad
+  enough to be routed around; `:auto_approve` is the honest way to say "I am running my
+  own commands here", and a narrow `Bash(<tool> <subcommand> *)` is the honest way to say
+  anything less than that.
 - **The store is node-local and bounded** (`:ouroboros, :permissions_limit`, 500 by
   default). A machine's rules do not replicate. The bound refuses a new rule rather than
   evicting an old one, because evicting a `deny` to make room for an `allow` would be a
