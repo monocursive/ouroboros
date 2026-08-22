@@ -1137,10 +1137,11 @@ fn render_agent_message(
     ]));
 
     // Agent prose is Markdown. Everything about how it becomes styled rows — the block
-    // vocabulary, the streaming rule, the row budget — lives in one place.
-    let rendered = markdown::render_limited(text, width, message_lines, streaming);
+    // vocabulary, the streaming rule, the row budget, the per-(text, width) memo that
+    // keeps a settled turn from being re-parsed twelve times a second — lives in one place.
+    let rendered = markdown::render_cached(text, width, message_lines, streaming);
 
-    lines.extend(rendered.lines);
+    lines.extend(rendered.lines.iter().cloned());
 
     if !rendered.complete {
         lines.push(Line::from(Span::styled(

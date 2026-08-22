@@ -38,6 +38,11 @@
 //! printable cells by the wrapper, the buffer diff, and the scroll arithmetic alike. This
 //! is the same call [`super::statusline`] already makes for the same reason.
 
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -138,6 +143,99 @@ pub fn plain(rendered: &Rendered) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// How many rendered messages one thread keeps.
+///
+/// Enough for a screenful of agent turns, so scrolling does not evict what is on it.
+const MEMO_ENTRIES: usize = 16;
+
+/// …and how much source text those entries may hold between them. A cap in bytes as well
+/// as in entries, because the cost of remembering a message is the message.
+const MEMO_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a memo is filed under. The rows are a function of exactly these four things.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Key {
+    hash: u64,
+    width: usize,
+    max_lines: usize,
+    streaming: bool,
+}
+
+struct Memo {
+    key: Key,
+    /// Kept so a hit is confirmed against the text and not against a hash of it. A memo
+    /// that answered a collision with the wrong message would be a transcript that lies.
+    text: String,
+    rendered: Rc<Rendered>,
+}
+
+thread_local! {
+    static MEMOS: RefCell<Vec<Memo>> = const { RefCell::new(Vec::new()) };
+}
+
+/// [`render_limited`], remembered.
+///
+/// The transcript re-renders every visible cell on every frame, and the text of a settled
+/// message never changes — so the parse, the fold and the table arithmetic behind one
+/// agent turn are paid once per width rather than twelve times a second. A streaming
+/// message misses on every delta, which is correct: its text really did change.
+///
+/// Bounded by [`MEMO_ENTRIES`] and [`MEMO_BYTES`], most-recently-used first, per thread.
+pub fn render_cached(text: &str, width: usize, max_lines: usize, streaming: bool) -> Rc<Rendered> {
+    let key = Key {
+        hash: hash_of(text),
+        width,
+        max_lines,
+        streaming,
+    };
+
+    let hit = MEMOS.with(|memos| {
+        let mut memos = memos.borrow_mut();
+        let found = memos
+            .iter()
+            .position(|memo| memo.key == key && memo.text == text)?;
+
+        // Most recent first, so the turns actually on screen stay resident.
+        let memo = memos.remove(found);
+        let rendered = Rc::clone(&memo.rendered);
+        memos.insert(0, memo);
+        Some(rendered)
+    });
+
+    if let Some(rendered) = hit {
+        return rendered;
+    }
+
+    let rendered = Rc::new(render_limited(text, width, max_lines, streaming));
+
+    MEMOS.with(|memos| {
+        let mut memos = memos.borrow_mut();
+        memos.insert(
+            0,
+            Memo {
+                key,
+                text: text.to_string(),
+                rendered: Rc::clone(&rendered),
+            },
+        );
+
+        let mut bytes: usize = memos.iter().map(|memo| memo.text.len()).sum();
+        while memos.len() > 1 && (memos.len() > MEMO_ENTRIES || bytes > MEMO_BYTES) {
+            if let Some(dropped) = memos.pop() {
+                bytes -= dropped.text.len();
+            }
+        }
+    });
+
+    rendered
+}
+
+fn hash_of(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// One prose segment: complete blocks as Markdown, plus the fragment still being typed.
@@ -1299,6 +1397,141 @@ Done.";
                 line.width()
             );
         }
+    }
+
+    /// A message the size of the transcript's own per-message cap, in the shape agents
+    /// actually write: headings, prose, lists, tables, fences.
+    fn big_message() -> String {
+        let mut text = String::new();
+        let mut block = 0;
+
+        while text.len() < 128 * 1024 {
+            block += 1;
+            text.push_str(&format!("## Section {block}\n\n"));
+            text.push_str(
+                "Some **bold** and `inline()` prose about the change, long enough that it \
+                 folds across more than one row of any pane a person actually uses.\n\n",
+            );
+            text.push_str("- first item\n- second item\n  - nested item\n\n");
+            text.push_str("| Name | Count |\n|---|---|\n| alpha | 1 |\n| beta | 2 |\n\n");
+            text.push_str("```rust\nfn step() -> usize { 1 }\n```\n\n");
+            text.push_str("> a quoted aside\n\n");
+        }
+
+        text
+    }
+
+    #[test]
+    fn a_message_the_size_of_the_cap_renders_inside_a_frame() {
+        let text = big_message();
+        assert!(text.len() >= 128 * 1024, "{}", text.len());
+
+        // Warm the code paths so the measurement is of rendering, not of first touch.
+        let _ = render_limited(&text, 100, MEMO_ENTRIES, false);
+
+        let started = std::time::Instant::now();
+        let rendered = render_limited(&text, 100, 256, false);
+        let elapsed = started.elapsed();
+
+        assert_eq!(rendered.lines.len(), 256);
+        assert!(!rendered.complete);
+        // The slice budget is 16 ms. Unoptimised, under the test harness, this measures
+        // about 2 ms on the machine it was written on; the assert is ten frames wide
+        // because CI shares its cores. A regression that matters blows past it anyway.
+        assert!(
+            elapsed < std::time::Duration::from_millis(160),
+            "128 KiB took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_cost_of_a_message_follows_the_rows_drawn_rather_than_the_bytes_arrived() {
+        let small = big_message();
+        let large = small.repeat(8);
+
+        let time = |text: &str| {
+            let started = std::time::Instant::now();
+            let rendered = render_limited(text, 100, 256, false);
+            assert_eq!(rendered.lines.len(), 256);
+            started.elapsed()
+        };
+
+        let _ = time(&small);
+        let _ = time(&large);
+
+        // Eight times the input for the same 256 rows. Linear-in-input work would show up
+        // as roughly eight times the time; the budget check means it does not.
+        assert!(
+            time(&large) < time(&small) * 4 + std::time::Duration::from_millis(8),
+            "budget did not bound the work"
+        );
+    }
+
+    #[test]
+    fn a_settled_message_is_rendered_once_per_width() {
+        let text = "# Title\n\nA paragraph with `code` in it.\n";
+
+        let first = render_cached(text, 80, 256, false);
+        let again = render_cached(text, 80, 256, false);
+        assert!(Rc::ptr_eq(&first, &again), "the same request re-rendered");
+
+        // Every part of the key is part of the key.
+        assert!(!Rc::ptr_eq(&first, &render_cached(text, 100, 256, false)));
+        assert!(!Rc::ptr_eq(&first, &render_cached(text, 80, 32, false)));
+        assert!(!Rc::ptr_eq(&first, &render_cached(text, 80, 256, true)));
+        assert!(!Rc::ptr_eq(
+            &first,
+            &render_cached("# Other\n", 80, 256, false)
+        ));
+
+        // A hit answers with the same rows a fresh render would have produced.
+        assert_eq!(*render_cached(text, 80, 256, false), *first);
+        assert_eq!(*first, render_limited(text, 80, 256, false));
+    }
+
+    #[test]
+    fn the_memo_is_bounded_and_keeps_what_is_on_screen() {
+        let recent = "# Recent\n";
+        let _ = render_cached(recent, 80, 256, false);
+
+        for index in 0..(MEMO_ENTRIES * 2) {
+            let _ = render_cached(&format!("# Filler {index}\n"), 80, 256, false);
+            // Touching the newest turn is what a redraw does.
+            let _ = render_cached(recent, 80, 256, false);
+        }
+
+        let (entries, bytes) = MEMOS.with(|memos| {
+            let memos = memos.borrow();
+            (
+                memos.len(),
+                memos.iter().map(|memo| memo.text.len()).sum::<usize>(),
+            )
+        });
+
+        assert!(entries <= MEMO_ENTRIES, "{entries} memos");
+        assert!(bytes <= MEMO_BYTES, "{bytes} bytes");
+
+        let kept = render_cached(recent, 80, 256, false);
+        assert!(Rc::ptr_eq(&kept, &render_cached(recent, 80, 256, false)));
+    }
+
+    #[test]
+    fn one_oversized_message_cannot_hold_the_memo_open() {
+        let huge = "word ".repeat(MEMO_BYTES / 4);
+        assert!(huge.len() > MEMO_BYTES);
+
+        let _ = render_cached(&huge, 80, 32, false);
+        let _ = render_cached("# After\n", 80, 32, false);
+
+        let bytes = MEMOS.with(|memos| {
+            memos
+                .borrow()
+                .iter()
+                .map(|memo| memo.text.len())
+                .sum::<usize>()
+        });
+
+        assert!(bytes <= MEMO_BYTES, "{bytes} bytes still held");
     }
 
     /// Renders `text` cut at three points inside its last construct, the way a delta
