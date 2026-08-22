@@ -280,6 +280,74 @@ Nonterminal durable tasks reserve their roots while a coordinator, registry, or 
 workspace manager is being rebuilt, and only the exact registered recovery owner can
 claim a reservation. These leases are node-local admission, not distributed consensus.
 
+### `native`: the provider whose loop Ouroboros owns
+
+Nine of the ten providers are vendor CLIs. Ouroboros hands each one a request and reads
+its events; the tools run inside that child process, which is why Ouroboros cannot ask
+before a command runs there, append a diagnostic to an edit, or veto anything. `native`
+is the tenth, and the exception: the model call, the tool dispatch, and the file writes
+all happen inside this runtime.
+
+It takes an API key for any provider `ReqLLM` ships — `anthropic`, `openai`,
+`openai_codex`, `google`, `openrouter`, `ollama`, and the rest — and reads each one from
+that provider's own environment variable. Name the model with `OUROBOROS_NATIVE_MODEL`,
+or per session with `model:`:
+
+```sh
+export OUROBOROS_NATIVE_MODEL=anthropic:claude-sonnet-5
+export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY, GEMINI_API_KEY, …
+```
+
+```elixir
+Ouroboros.provider_status(:native)    # which key variables are set — names, never values
+
+{:ok, session} =
+  Ouroboros.InteractiveSession.start(
+    id: "native-session",
+    provider: :native,
+    workspace: File.cwd!(),
+    approval_mode: :prompt
+  )
+```
+
+It has five tools: `read`, `write`, `edit`, `bash`, and `plan`. `edit` is exact-string
+replacement with read-before-edit, modified-since-read, and uniqueness guards, plus a
+whitespace-tolerant fallback whose use is stated in the result — an edit that only
+matched because whitespace was ignored says so. `bash` runs with a 120-second default
+timeout (600 maximum) and returns 30 KiB of output inline, spilling the rest to a file
+under the session's data directory and returning that path.
+
+**What is enforced.** Every tool path is canonicalised through every symlink and refused
+outside the session workspace or its declared `add_dirs`; a `..` segment is refused
+outright. `sandbox_mode: :read_only` refuses `write`, `edit`, and — read this part —
+**every `bash` command**. Approvals are real: `approval_mode: :prompt` asks before a
+write or a command and blocks until a human answers or the timeout denies;
+`:auto_edit` auto-approves writes inside the workspace only, and still asks for
+commands; `:auto_approve` asks for nothing. `steer` delivers a message at the next tool
+boundary of a running turn, which no other provider here supports. A turn stops after
+the current tool on interrupt, at `max_iterations` (50 by default), and on the third
+identical tool call.
+
+**What is not enforced, and will not be until it is.**
+
+- **There is no OS sandbox.** `workspace_write` is those path checks and nothing else.
+  A `bash` command runs with your privileges, can reach the network, and can write
+  outside the workspace through a program this runtime does not inspect. `:unrestricted`
+  is not offered at all, because there is no sandbox to relax. macOS Seatbelt and Linux
+  bubblewrap are a later slice.
+- **A command that detaches from its process group can outlive its timeout.** The
+  timeout terminates the shell this runtime started.
+- **No LSP, MCP, hooks, or compaction yet.** No diagnostics after an edit, no MCP
+  servers, no `PreToolUse` hooks, no context compaction.
+- **No permission rules yet.** Until `Ouroboros.Control.Permissions` lands, every tool
+  with an effect asks; a `session`-scope approval is remembered in the session process
+  and is not durable.
+- **Resume needs a data directory.** The conversation is checkpointed to a private
+  `0600` file under the runtime's data directory, written before the turn's terminal
+  event is broadcast, and a session restored by `provider_session_id` replays it. With
+  no data directory configured the checkpoint goes to a temp directory and does not
+  survive a reboot.
+
 ## Terminal UI
 
 `ouro` is the terminal client, in `tui/`. It does two different jobs and the difference

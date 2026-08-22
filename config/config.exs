@@ -124,10 +124,16 @@ config :ouroboros,
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its
 # journal deliberately discards raw provider records.
+#
+# `native` is not an override of an upstream adapter: it is a tenth provider, and the
+# only one whose tool loop runs in this VM. It registers through the same map for the
+# same reason the three overrides do — `Jido.Harness.Registry` merges this map over its
+# built-ins, so nothing else in the runtime needs a list of providers to keep in sync.
 config :jido_harness,
   providers: %{
     codex: Ouroboros.Provider.CodexAdapter,
     kimi: Ouroboros.Provider.KimiAdapter,
-    opencode: Ouroboros.Provider.OpenCodeAdapter
+    opencode: Ouroboros.Provider.OpenCodeAdapter,
+    native: Ouroboros.Provider.Native
   },
   process_driver: Ouroboros.Provider.ProcessDriver
