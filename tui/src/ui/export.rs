@@ -175,35 +175,37 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
             );
             paragraph(out, text, width);
         }
-        Cell::Tool(tool) => {
-            let state = match tool.state {
-                ToolState::Running => "running",
-                ToolState::Completed => "completed",
-                ToolState::Failed => "failed",
-            };
-            match &tool.call_id {
-                Some(call_id) => label(out, &format!("tool {} · {state} · {call_id}", tool.name)),
-                None => label(out, &format!("tool {} · {state}", tool.name)),
-            }
-
-            if !tool.input.is_null() {
-                line(out, "input:");
-                verbatim(out, &value_text(&tool.input));
-            }
-
-            match &tool.output {
-                Some(output) if !output.is_null() => {
-                    line(out, "output:");
-                    verbatim(out, &value_text(output));
-                }
-                // Said rather than left blank: a tool row with no output line reads as a
-                // tool that returned nothing, which is a different claim from "not yet".
-                _ if tool.state == ToolState::Running => line(out, "output: not yet"),
-                _ => line(out, "output: none recorded"),
-            }
-
+        Cell::Exploration(group) => {
+            // Grouping is a *display* decision. The export writes every grouped call out in
+            // full, exactly as if it had never been folded: a reader who asked for the file
+            // asked for the calls, not for the count the pane showed instead of them.
+            label(
+                out,
+                &format!(
+                    "exploration · {} call(s){}",
+                    group.total(),
+                    if group.done { "" } else { " · still running" }
+                ),
+            );
             out.push('\n');
+
+            for call in &group.calls {
+                tool_block(out, call);
+            }
+
+            if group.overflow > 0 {
+                line(
+                    out,
+                    &format!(
+                        "{} further call(s) were counted by this cell rather than kept; \
+                         their events are in the ledger",
+                        group.overflow
+                    ),
+                );
+                out.push('\n');
+            }
         }
+        Cell::Tool(tool) => tool_block(out, tool),
         Cell::Thinking { text, lines, .. } => {
             // The export is the whole transcript: reasoning is printed in full here even
             // though the pane collapses it, because a reader who asked for the file asked
@@ -259,22 +261,67 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
             }
             out.push('\n');
         }
-        Cell::Diff(diff) => {
-            let path = diff.path.as_deref().unwrap_or("(path not reported)");
+        Cell::Diff(cell) => {
+            // The counts are the parse's, exactly as on screen. `Diff::additions` — the
+            // provider's own claim — is reported beside them only when the two disagree,
+            // because that disagreement is itself a fact worth exporting.
+            let excerpt = if cell.parsed.truncated || cell.diff.truncated {
+                " · truncated before it reached this client"
+            } else {
+                ""
+            };
+
+            if cell.parsed.is_empty() {
+                let path = cell.diff.path.as_deref().unwrap_or("(path not reported)");
+                label(
+                    out,
+                    &format!("diff {path} · no hunks this client could read{excerpt}"),
+                );
+            } else {
+                for file in &cell.parsed.files {
+                    label(
+                        out,
+                        &format!(
+                            "diff {} · {} · +{} −{}{excerpt}",
+                            file.path,
+                            file.status.label(),
+                            file.additions,
+                            file.deletions
+                        ),
+                    );
+                }
+
+                let (counted, claimed) = (
+                    (cell.parsed.additions(), cell.parsed.deletions()),
+                    (cell.diff.additions, cell.diff.deletions),
+                );
+                if counted != claimed {
+                    line(
+                        out,
+                        &format!(
+                            "the provider reported +{} −{}; the text above is +{} −{}",
+                            claimed.0, claimed.1, counted.0, counted.1
+                        ),
+                    );
+                }
+            }
+
+            verbatim(out, &cell.diff.text);
+            out.push('\n');
+        }
+        Cell::DiffStat {
+            files,
+            additions,
+            deletions,
+            in_excerpt,
+        } => {
             label(
                 out,
                 &format!(
-                    "diff {path} · +{} −{}{}",
-                    diff.additions,
-                    diff.deletions,
-                    if diff.truncated {
-                        " · truncated before it reached this client"
-                    } else {
-                        ""
-                    }
+                    "turn diffstat · {}",
+                    super::diff::diffstat(*files, *additions, *deletions, *in_excerpt)
                 ),
             );
-            verbatim(out, &diff.text);
             out.push('\n');
         }
         Cell::Status {
@@ -292,6 +339,52 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
             paragraph(out, &format!("── {text} ──"), width);
         }
     }
+}
+
+/// One tool call, whole: its heading, its input, and its output with no caps applied.
+fn tool_block(out: &mut String, tool: &transcript_cells::ToolCell) {
+    label(out, &tool_line(tool));
+
+    if !tool.input.is_null() {
+        line(out, "input:");
+        verbatim(out, &value_text(&tool.input));
+    }
+
+    match &tool.output {
+        Some(output) if !output.is_null() => {
+            line(out, "output:");
+            verbatim(out, &value_text(output));
+        }
+        // Said rather than left blank: a tool row with no output line reads as a tool that
+        // returned nothing, which is a different claim from "not yet".
+        _ if tool.state == ToolState::Running => line(out, "output: not yet"),
+        _ => line(out, "output: none recorded"),
+    }
+
+    out.push('\n');
+}
+
+/// One tool call's heading: the same summary the pane shows, plus the identifiers and the
+/// elapsed time an export is the right place to carry.
+fn tool_line(tool: &transcript_cells::ToolCell) -> String {
+    let state = match tool.state {
+        ToolState::Running => "running",
+        ToolState::Completed => "completed",
+        ToolState::Failed => "failed",
+    };
+    let mut parts = vec![
+        format!("tool {}", transcript_cells::summarise(tool).line()),
+        state.to_string(),
+    ];
+
+    if let Some(elapsed) = tool.elapsed() {
+        parts.push(transcript_cells::duration(elapsed));
+    }
+    if let Some(call_id) = &tool.call_id {
+        parts.push(call_id.clone());
+    }
+
+    parts.join(" · ")
 }
 
 /// A block heading. Bare text on its own line: a gutter is exactly what this export exists
@@ -526,7 +619,10 @@ mod tests {
                 "interactive · 7 events held · sequences 1–7",
                 "you · 2026-08-14T09:01:00Z",
                 "agent",
-                "tool read · completed · c1",
+                // The pane groups a lone read into an exploration cell; the export still
+                // names the call, its summary, and its correlation id.
+                "exploration · 1 call(s)",
+                "tool Read src/lex.rs → 5 lines · completed",
                 "command output",
                 "file src/lex.rs · modified",
                 "diff src/lex.rs",

@@ -231,7 +231,7 @@ fn coding_workspace_progressively_discloses_context_without_sacrificing_the_comp
         "HERMETIC CORE",
         "YOU",
         "AGENT",
-        "✓ command",
+        "✓ Bash",
         "Ask a follow-up or request edits",
     ] {
         assert!(
@@ -242,7 +242,7 @@ fn coding_workspace_progressively_discloses_context_without_sacrificing_the_comp
     }
     assert_eq!(wide.colour_of("▌ YOU", "YOU"), Color::Yellow);
     assert_eq!(wide.colour_of("◆ AGENT", "AGENT"), Color::Cyan);
-    assert_eq!(wide.colour_of("✓ command", "✓"), Color::Green);
+    assert_eq!(wide.colour_of("✓ Bash", "✓"), Color::Green);
 
     let laptop = render(&mut app, 116, 58);
     if std::env::var_os("OUROBOROS_DUMP_VIEWPORTS").is_some() {

@@ -267,15 +267,25 @@ impl PlanStatus {
 pub struct ToolCall {
     pub call_id: Option<String>,
     pub name: String,
+    /// ACP's `kind` (`read | edit | delete | move | search | execute | think | fetch |
+    /// other`), kept beside the name rather than folded into it. An ACP agent that sends a
+    /// prose `title` would otherwise bury the one field that says what the call *is*, and
+    /// the per-tool summarisers key on both.
+    pub kind: Option<String>,
     pub input: Value,
+    /// `Event::timestamp` in epoch milliseconds, so a cell can state elapsed time from
+    /// two instants the ledger actually holds rather than from a clock read at draw time.
+    pub at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolResult {
     pub call_id: Option<String>,
     pub name: Option<String>,
+    pub kind: Option<String>,
     pub output: Value,
     pub is_error: bool,
+    pub at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,12 +350,14 @@ impl PresentationEvent {
                     &["name", "tool_name", "toolName", "tool", "title", "kind"],
                 )
                 .unwrap_or_else(|| "tool".to_string()),
+                kind: text(&event.payload, &["kind", "tool_kind", "toolKind"]),
                 input: first_value(
                     &event.payload,
                     &["input", "arguments", "parameters", "rawInput", "raw_input"],
                 )
                 .map(bounded_value)
                 .unwrap_or_else(empty_object),
+                at: epoch_millis(&event.timestamp),
             }),
             EventType::ToolResult => Self::ToolResult(ToolResult {
                 call_id: text(
@@ -356,6 +368,7 @@ impl PresentationEvent {
                     &event.payload,
                     &["name", "tool_name", "toolName", "tool", "title", "kind"],
                 ),
+                kind: text(&event.payload, &["kind", "tool_kind", "toolKind"]),
                 output: first_value(
                     &event.payload,
                     &["output", "result", "content", "rawOutput", "raw_output"],
@@ -363,6 +376,7 @@ impl PresentationEvent {
                 .map(bounded_value)
                 .unwrap_or(Value::Null),
                 is_error: error_result(&event.payload),
+                at: epoch_millis(&event.timestamp),
             }),
             EventType::CommandOutputDelta => raw_text(&event.payload, &["text", "output"])
                 .map(Self::CommandOutput)
@@ -1153,6 +1167,11 @@ mod tests {
 
     use super::*;
 
+    /// The instant every fixture event in this module carries.
+    fn fixture_at() -> Option<i64> {
+        epoch_millis("2026-08-14T00:00:00Z")
+    }
+
     fn event(kind: &str, payload: Value) -> Event {
         Event::decode(&json!({
             "id": "evt-1",
@@ -1189,7 +1208,9 @@ mod tests {
             PresentationEvent::ToolCall(ToolCall {
                 call_id: Some("call-7".into()),
                 name: "read".into(),
+                kind: None,
                 input: json!({"path": "lib/ouroboros.ex"}),
+                at: fixture_at(),
             })
         );
         assert_eq!(
@@ -1197,8 +1218,10 @@ mod tests {
             PresentationEvent::ToolResult(ToolResult {
                 call_id: Some("call-7".into()),
                 name: None,
+                kind: None,
                 output: json!({"text": "defmodule Ouroboros"}),
                 is_error: false,
+                at: fixture_at(),
             })
         );
     }
@@ -1229,7 +1252,9 @@ mod tests {
             PresentationEvent::ToolCall(ToolCall {
                 call_id: Some("tool-7".into()),
                 name: "Read workspace file".into(),
+                kind: None,
                 input: json!({"path": "README.md"}),
+                at: fixture_at(),
             })
         );
         assert_eq!(
@@ -1237,8 +1262,10 @@ mod tests {
             PresentationEvent::ToolResult(ToolResult {
                 call_id: Some("tool-7".into()),
                 name: None,
+                kind: None,
                 output: json!({"text": "project docs"}),
                 is_error: false,
+                at: fixture_at(),
             })
         );
     }

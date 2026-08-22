@@ -230,6 +230,39 @@ pub fn detect(info: Option<&str>) -> Language {
     }
 }
 
+/// Maps a file path to a language by its extension, for callers that hold a filename
+/// instead of a fence: a unified diff's `+++ b/lib/app.ex`, a file cell, a pager.
+///
+/// The extension is fed through [`detect`] rather than a second table, so `ex` means what
+/// ```` ```ex ```` means and the two can never drift apart.
+pub fn detect_path(path: &str) -> Language {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(|c: char| c.is_whitespace());
+
+    match name.rsplit_once('.') {
+        // A dotfile — `.gitignore` — is a name, not an extension.
+        Some((stem, extension)) if !stem.is_empty() => detect(Some(extension)),
+        _ => Language::Plain,
+    }
+}
+
+/// One source line's spans, with no wrapping and no carried block state.
+///
+/// Line-oriented callers need exactly this. A unified diff never holds the whole file, so
+/// there is no honest way to know whether a hunk opened inside a string or a block comment
+/// that began above it; the carry is reset per line and a construct that spans lines is
+/// therefore highlighted as if it did not. That is a visible, bounded imprecision inside a
+/// hunk, which is a better trade than pretending to a context the diff does not contain.
+pub fn highlight_source_line(source: &str, lang: Language) -> Vec<Span<'static>> {
+    let grammar = grammar(lang);
+    let mut carry = Carry::Normal;
+
+    highlight_line(source, &grammar, &mut carry)
+}
+
 /// Token classes, mapped to colours once in [`token_style`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Token {

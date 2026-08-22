@@ -786,7 +786,11 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let ticks = app.ticks;
     let show_event_details = app.sessions.show_event_details;
-    let verbosity = if app.sessions.verbose_transcript {
+    // Raw outranks verbose: it is a copying view, and a copying view that still drew
+    // frames would not be one.
+    let verbosity = if app.sessions.raw_mode {
+        Verbosity::Raw
+    } else if app.sessions.verbose_transcript {
         Verbosity::Verbose
     } else {
         Verbosity::Compact

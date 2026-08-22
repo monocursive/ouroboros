@@ -760,7 +760,147 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
         Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
+        Overlay::Diff(state) => changed_files(frame, area, state),
     }
+}
+
+/// Claude Code's `/diff`, scoped to what a client that never reads the filesystem holds.
+///
+/// `←`/`→` moves between "this session" and one scope per turn that changed a file, `↑`/`↓`
+/// picks a file, `Enter` opens it in a pager inside the overlay, `Esc` steps back out. The
+/// footer states the scope's own totals and, when the window dropped history, says the list
+/// is partial — a file list that looked like the session and was not would be worse than no
+/// list at all.
+fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay) {
+    let popup = centered(area, if area.width < 100 { 96 } else { 78 }, area.height);
+    frame.render_widget(Clear, popup);
+
+    let rows = state.rows();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Line::from(vec![
+            Span::styled(" /diff ", theme::heading()),
+            Span::styled(state.scope_label(), Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                format!(
+                    "  +{} −{} ",
+                    rows.iter().map(|row| row.file.additions).sum::<usize>(),
+                    rows.iter().map(|row| row.file.deletions).sum::<usize>()
+                ),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let panes = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let width = panes[0].width.max(8) as usize;
+    let height = panes[0].height.max(1) as usize;
+
+    let mut body: Vec<Line<'static>> = Vec::new();
+
+    if rows.is_empty() {
+        body.push(Line::from(Span::styled(
+            "No file changes reached this client in this scope.",
+            Style::default().fg(theme::MUTED),
+        )));
+    } else if let Some(offset) = state.pager {
+        let Some(open) = state.current() else {
+            return;
+        };
+        body.push(Line::from(vec![
+            Span::styled(
+                format!("{} {} ", open.file.status.mark(), open.file.path),
+                Style::default().fg(open.file.status.colour()),
+            ),
+            Span::styled(
+                format!("+{} −{}", open.file.additions, open.file.deletions),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]));
+        body.push(Line::from(""));
+
+        // The whole file is laid out and then windowed, so `↓` moves one row rather than
+        // one hunk and the pager cannot run off the end of a file it has not measured.
+        let mut file_lines = Vec::new();
+        super::diff::render_file(
+            &mut file_lines,
+            &open.file,
+            super::diff::Layout::new(width, super::diff::MAX_OVERLAY_ROWS),
+        );
+        let last = file_lines.len().saturating_sub(1);
+        let start = offset.min(last);
+        body.extend(file_lines.into_iter().skip(start).take(height));
+    } else {
+        let numbers = rows
+            .iter()
+            .map(|row| format!("+{} −{}", row.file.additions, row.file.deletions).len())
+            .max()
+            .unwrap_or(0);
+
+        for (index, row) in rows.iter().enumerate() {
+            let selected = index == state.selected;
+            let stats = format!(
+                "{:>numbers$}",
+                format!("+{} −{}", row.file.additions, row.file.deletions)
+            );
+            body.push(Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(theme::ACCENT),
+                ),
+                Span::styled(
+                    format!("{} ", row.file.status.mark()),
+                    Style::default().fg(row.file.status.colour()),
+                ),
+                Span::styled(
+                    super::tree::truncate(&row.file.path, width.saturating_sub(numbers + 8)),
+                    if selected {
+                        theme::selected()
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw("  "),
+                Span::styled(stats, Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    if row.in_excerpt { "  in excerpt" } else { "" },
+                    Style::default().fg(theme::WARN),
+                ),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(body), panes[0]);
+
+    let keys = if state.pager.is_some() {
+        "↑/↓ scroll · pgup/pgdn page · esc back to the list"
+    } else {
+        "↑/↓ file · ←/→ scope · enter opens · esc closes"
+    };
+    let scope = format!(
+        "{} of {} · {}",
+        state.scope + 1,
+        state.scopes(),
+        if state.pruned > 0 {
+            format!(
+                "only what this client holds — everything at or below sequence {} was dropped",
+                state.pruned
+            )
+        } else {
+            "every change this client has seen in this session".to_string()
+        }
+    );
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(keys, Style::default().fg(theme::MUTED))),
+            Line::from(Span::styled(scope, Style::default().fg(theme::MUTED))),
+        ]),
+        panes[1],
+    );
 }
 
 fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPalette) {

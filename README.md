@@ -380,6 +380,21 @@ this build does not model — one dim line naming the kind, so no event reaches 
 disappears. `Ctrl-O` redraws the same conversation with every collapsed cell expanded in
 place; `Ctrl-T` opens the plan panel, which stays visible while the agent is idle; and the
 complete normalized event ledger is `/details` (also `ctrl+x d`), which discards nothing.
+
+Tool activity reads as what the tool did rather than as what the vendor called it — `Read
+src/lex.rs:12-51`, `Bash $ cargo test` with its exit status and elapsed time, `Grep
+"needle" in lib → 3 matches`, `MCP linear.create_issue` — from one summariser that knows
+Claude's tool names, ACP's `kind`, and Codex's item types alike. Consecutive reads and
+searches collapse into a single `Explored 7 files` row that expands under `Ctrl-O`, and a
+long result shows its first and last six lines with `… +N lines · ctrl+o` between them, so
+the exit status at the end of a build log is on screen rather than behind a keystroke.
+Diffs are parsed, not tinted: per-file grouping, a two-column line-number gutter, syntax
+colour, the changed *words* picked out inside a changed line, `+N −M` this client counted
+itself, and a `3 files · +120 −18` diffstat at each turn's end. A diff waiting on an
+approval stays expanded and says so. `/diff` opens a review of every file the session
+changed, grouped by turn, with `Enter` into a pager — scoped to what this client holds, and
+it says so. `/raw` drops every frame, gutter, and glyph so a terminal selection copies
+logical lines.
 The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` where the
 terminal reports the kitty keyboard protocol, and the footer only advertises it there),
 normalizes bracketed paste, keeps bounded in-session history, completes local slash
