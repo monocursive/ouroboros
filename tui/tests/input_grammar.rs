@@ -12,8 +12,10 @@ mod support;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::{json, Value};
 
-use ouro::model::Plane;
-use ouro::ui::app::{App, Call, ComposerVerb, Msg, Tag};
+use ouro::model::{Attachment, AttachmentKind, Plane};
+use ouro::proto::{ErrorCode, Hello, RpcError};
+use ouro::transport::ClientError;
+use ouro::ui::app::{App, Call, ClipboardOutcome, ComposerVerb, Msg, Tag};
 
 use support::{app, full_hello, render, Screen};
 
@@ -118,7 +120,22 @@ fn event(sequence: u64, kind: &str, payload: Value) -> Value {
 
 /// An App with one open interactive session, subscribed, holding `events`.
 fn opened(status: &str, capabilities: Value, events: Vec<Value>) -> App {
-    let mut app = app(full_hello());
+    opened_with(full_hello(), status, capabilities, events)
+}
+
+/// The same, on a gateway that also serves `extra` — for the verbs another slice is adding
+/// to the runtime right now and which this client gates on `hello.methods`.
+fn opened_serving(status: &str, capabilities: Value, extra: &[&str]) -> App {
+    let mut hello = full_hello();
+    for method in extra {
+        hello.methods.push((*method).to_string());
+    }
+
+    opened_with(hello, status, capabilities, Vec::new())
+}
+
+fn opened_with(hello: Hello, status: &str, capabilities: Value, events: Vec<Value>) -> App {
+    let mut app = app(hello);
     answer(
         &mut app,
         Tag::Account,
@@ -214,7 +231,7 @@ fn enter_while_a_send_is_unacknowledged_queues_the_draft_instead_of_refusing_it(
         app.sessions
             .open_queued_drafts()
             .iter()
-            .map(|queued| queued.input.as_str())
+            .map(|queued| queued.input.prompt())
             .collect::<Vec<_>>(),
         vec!["then update the docs"]
     );
@@ -279,7 +296,7 @@ fn up_on_an_empty_draft_takes_the_newest_queued_draft_back() {
         app.sessions
             .open_queued_drafts()
             .iter()
-            .map(|queued| queued.input.as_str())
+            .map(|queued| queued.input.prompt())
             .collect::<Vec<_>>(),
         vec!["then update the docs"]
     );
@@ -456,4 +473,373 @@ fn the_composer_says_enter_queues_once_the_session_is_no_longer_idle() {
 
     let text = screen(&mut app).text();
     assert!(text.contains("Enter queues"), "{text}");
+}
+
+// ---------------------------------------------------------------------------------------
+// (b) B4 — structured input
+// ---------------------------------------------------------------------------------------
+
+/// Fills the workspace index so `@` completes against something.
+fn with_files(app: &mut App, files: &[&str]) {
+    app.apply(Msg::WorkspaceFiles(
+        files.iter().map(|path| (*path).to_string()).collect(),
+    ));
+}
+
+/// Completes `@<query>` with Tab.
+fn mention(app: &mut App, query: &str) {
+    compose(app);
+    type_text(app, &format!("@{query}"));
+    app.apply(key(KeyCode::Tab));
+}
+
+fn chips(app: &App) -> Vec<Attachment> {
+    app.sessions
+        .composer
+        .as_ref()
+        .map(|composer| composer.attachments.clone())
+        .unwrap_or_default()
+}
+
+/// An `@path` is text *and* a structured attachment. Before B4 it was only text.
+#[test]
+fn an_at_mention_becomes_an_attachment_chip_as_well_as_text() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["src/ui/app/session.rs", "docs/TUI.md"]);
+
+    mention(&mut app, "session.rs");
+
+    assert_eq!(chips(&app).len(), 1, "one chip for one completed path");
+    assert_eq!(chips(&app)[0].path, "src/ui/app/session.rs");
+    assert!(
+        draft(&app).contains("@src/ui/app/session.rs"),
+        "the sentence the operator wrote still reads the way they wrote it: {}",
+        draft(&app)
+    );
+    assert!(
+        screen(&mut app).text().contains("@session.rs"),
+        "the chip is drawn above the composer"
+    );
+}
+
+/// The wire test: the gateway's object form, exactly as `structured_turn_input` accepts it.
+#[test]
+fn a_turn_with_an_attachment_is_sent_as_the_gateways_object_form() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["src/ui/app/session.rs"]);
+
+    mention(&mut app, "session.rs");
+    type_text(&mut app, "please read this");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = turn_calls(&app.drain());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "interactive.send_message");
+
+    let input = &calls[0].1["input"];
+    assert!(
+        input.is_object(),
+        "the object form, not a bare string: {input}"
+    );
+    assert_eq!(
+        input["prompt"], "@src/ui/app/session.rs please read this",
+        "{input}"
+    );
+    assert_eq!(input["attachments"], json!(["src/ui/app/session.rs"]));
+    assert!(
+        input.get("reasoning_effort").is_none(),
+        "an absent effort is an absent key, never a null: {input}"
+    );
+}
+
+/// And the other half of the same rule: a plain prompt is still a bare string, byte for
+/// byte what this client sent before B4 existed.
+#[test]
+fn a_plain_prompt_is_still_a_bare_string_on_the_wire() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    let calls = turn_calls(&send(&mut app, "just words"));
+    assert_eq!(calls[0].1["input"], json!("just words"));
+}
+
+/// `/effort` is per turn, and it puts `reasoning_effort` in the same object.
+#[test]
+fn effort_is_carried_on_the_next_turn_only() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/effort high");
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        turn_calls(&app.drain()).is_empty(),
+        "a slash command is not a turn"
+    );
+
+    type_text(&mut app, "think hard about this");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = turn_calls(&app.drain());
+    assert_eq!(calls[0].1["input"]["prompt"], "think hard about this");
+    assert_eq!(calls[0].1["input"]["reasoning_effort"], "high");
+
+    assert!(
+        app.sessions
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.reasoning_effort)
+            .is_none(),
+        "the dial is cleared after the send: it is per turn, not a mode"
+    );
+}
+
+/// A value the gateway's enum does not contain is refused here rather than as a `-32602`.
+#[test]
+fn an_effort_the_gateway_does_not_take_is_refused_by_name() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/effort xhigh");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app
+        .sessions
+        .composer
+        .as_ref()
+        .and_then(|composer| composer.reasoning_effort)
+        .is_none());
+    let text = screen(&mut app).text();
+    assert!(text.contains("low, medium, and high"), "{text}");
+}
+
+/// Backspace at the chip — on an empty draft the caret sits immediately after it.
+#[test]
+fn backspace_on_an_empty_draft_removes_the_newest_chip() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["a.rs", "b.rs"]);
+
+    mention(&mut app, "a.rs");
+    mention(&mut app, "b.rs");
+    assert_eq!(chips(&app).len(), 2);
+
+    // With text in the draft, Backspace is still Backspace.
+    app.apply(key(KeyCode::Backspace));
+    assert_eq!(chips(&app).len(), 2, "the draft was not empty");
+
+    if let Some(composer) = app.sessions.composer.as_mut() {
+        composer.editor.clear_text();
+    }
+
+    app.apply(key(KeyCode::Backspace));
+    assert_eq!(
+        chips(&app).len(),
+        1,
+        "the newest came off, the older stayed"
+    );
+    assert_eq!(chips(&app)[0].path, "a.rs");
+}
+
+/// D14: a transport whose `multimodal` is false gets the text substitution it always had,
+/// and is told why there is no chip.
+#[test]
+fn a_transport_that_takes_no_attachments_keeps_the_text_and_says_so() {
+    let mut app = opened("idle", managed_capabilities(), Vec::new());
+    with_files(&mut app, &["src/main.rs"]);
+
+    mention(&mut app, "main.rs");
+
+    assert!(
+        chips(&app).is_empty(),
+        "no chip on a transport that declared multimodal: false"
+    );
+    assert!(draft(&app).contains("@src/main.rs"), "{}", draft(&app));
+
+    let text = screen(&mut app).text();
+    assert!(text.contains("takes no attachments"), "{text}");
+
+    type_text(&mut app, "look at it");
+    app.apply(key(KeyCode::Enter));
+    let calls = turn_calls(&app.drain());
+    assert!(
+        calls[0].1["input"].is_string(),
+        "and the wire stays a bare string: {}",
+        calls[0].1["input"]
+    );
+}
+
+/// The runtime canonicalises attachments against the session workspace and refuses an
+/// outsider. That refusal belongs beside the chips that caused it.
+#[test]
+fn an_attachment_refused_by_the_runtime_is_rendered_on_the_composer() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["../outside.rs"]);
+
+    mention(&mut app, "outside.rs");
+    type_text(&mut app, "read it");
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("a dispatched turn");
+
+    app.apply(Msg::Answer {
+        tag: call.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "attachment_outside_workspace: ../outside.rs".into(),
+            data: None,
+        })),
+    });
+
+    assert!(
+        app.sessions
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.attachment_refusal.clone())
+            .is_some_and(|refusal| refusal.contains("attachment_outside_workspace")),
+        "the refusal is kept on the composer"
+    );
+    assert!(screen(&mut app)
+        .text()
+        .contains("attachment_outside_workspace"));
+}
+
+/// `Ctrl+V` asks the driver for the clipboard, naming the session's workspace — because an
+/// attachment has to live inside it for `authorize_turn_attachments` to accept the turn.
+#[test]
+fn ctrl_v_asks_the_driver_to_read_the_clipboard_into_the_session_workspace() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+
+    app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+    let request = app
+        .take_clipboard_request()
+        .expect("ctrl+v asks for a clipboard read");
+    assert_eq!(request.workspace, "/Users/operator/code/ouroboros");
+    assert!(!request.id.is_empty(), "the file is named by this client");
+}
+
+/// A written image becomes a chip; a clipboard holding text falls through to a paste.
+#[test]
+fn a_pasted_image_becomes_a_chip_and_text_falls_through_to_an_ordinary_paste() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+
+    app.apply(Msg::Clipboard(ClipboardOutcome::Image(
+        ".ouroboros/images/image-01ARZ3.png".into(),
+    )));
+
+    assert_eq!(chips(&app).len(), 1);
+    assert_eq!(chips(&app)[0].path, ".ouroboros/images/image-01ARZ3.png");
+    assert_eq!(chips(&app)[0].kind, AttachmentKind::Image);
+
+    app.apply(Msg::Clipboard(ClipboardOutcome::Text(
+        "pasted words".into(),
+    )));
+    assert_eq!(
+        draft(&app),
+        "pasted words",
+        "a clipboard with no image is an ordinary paste"
+    );
+}
+
+/// A machine with no clipboard tool is told once, not on every keystroke.
+#[test]
+fn a_machine_with_no_clipboard_tool_is_told_once() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+
+    app.apply(Msg::Clipboard(ClipboardOutcome::NoTool));
+    assert!(screen(&mut app).text().contains("no clipboard tool"));
+
+    app.notice = None;
+    app.apply(Msg::Clipboard(ClipboardOutcome::NoTool));
+    assert!(!screen(&mut app).text().contains("no clipboard tool"));
+}
+
+/// D14 again: `Ctrl+V` on a transport that takes no images says so instead of writing a
+/// file the runtime would refuse.
+#[test]
+fn ctrl_v_is_refused_by_transport_name_where_multimodal_is_false() {
+    let mut app = opened("idle", managed_capabilities(), Vec::new());
+    compose(&mut app);
+
+    app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+    assert!(app.take_clipboard_request().is_none());
+    let text = screen(&mut app).text();
+    assert!(text.contains("managed takes no images"), "{text}");
+}
+
+/// `/model` is `interactive.configure`, gated on `hello.methods` like every other verb.
+#[test]
+fn model_answers_locally_when_the_gateway_does_not_serve_interactive_configure() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/model gpt-5-codex-high");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        app.drain()
+            .iter()
+            .all(|call| call.method != "interactive.configure"),
+        "nothing is sent to a gateway that does not serve it"
+    );
+    let text = screen(&mut app).text();
+    assert!(
+        text.contains("does not serve interactive.configure"),
+        "the refusal names the method that is missing: {text}"
+    );
+}
+
+/// And where it is served, the call goes out with the model the operator named.
+#[test]
+fn model_calls_interactive_configure_where_the_gateway_serves_it() {
+    let mut app = opened_serving("idle", steering_capabilities(), &["interactive.configure"]);
+
+    compose(&mut app);
+    type_text(&mut app, "/model gpt-5-codex-high");
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.configure")
+        .expect("configure is issued");
+    assert_eq!(call.params["id"], "session-b3");
+    assert_eq!(call.params["model"], "gpt-5-codex-high");
+}
+
+/// A queued draft keeps its chips: a same-id replay that dropped them would present a
+/// different fingerprint and come back `:turn_id_conflict`.
+#[test]
+fn a_queued_draft_carries_its_attachments_all_the_way_to_the_wire() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["src/lib.rs"]);
+
+    let first = send(&mut app, "the first turn");
+    let tag = first
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the first turn")
+        .tag;
+
+    mention(&mut app, "lib.rs");
+    type_text(&mut app, "and this file");
+    app.apply(key(KeyCode::Enter));
+
+    assert_eq!(app.sessions.open_queued_drafts().len(), 1);
+    assert_eq!(
+        app.sessions.open_queued_drafts()[0].input.attachments.len(),
+        1
+    );
+
+    answer(&mut app, tag, json!({ "status": "accepted" }));
+
+    let released = turn_calls(&app.drain());
+    assert_eq!(released[0].0, "interactive.follow_up");
+    assert_eq!(released[0].1["input"]["attachments"], json!(["src/lib.rs"]));
 }

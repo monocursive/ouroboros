@@ -8,6 +8,7 @@
 //! does not move them.
 
 pub mod cli;
+pub mod clipboard;
 pub mod config;
 pub mod fleet;
 pub mod fleet_add;

@@ -35,9 +35,9 @@ use crate::config::{Config, Defaults};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
-    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
-    Capabilities, CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode,
-    SessionInfo, StartRequest, StartedRef,
+    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
+    Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
+    SandboxMode, SessionInfo, StartRequest, StartedRef, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -260,13 +260,17 @@ pub enum Tag {
     /// A composer mutation retains the exact draft and, for dispatched turns, its logical
     /// id until the answer. Steer has no durable request id; retaining a pretend one would
     /// make a lost acknowledgement look safely replayable when it is not.
+    ///
+    /// `input` is the whole turn envelope rather than the prompt alone (B4): a same-id
+    /// reconciliation that replayed the prompt without its attachments would present a
+    /// different fingerprint and come back `:turn_id_conflict`.
     ComposerAction {
         label: &'static str,
         verb: ComposerVerb,
         plane: Plane,
         id: String,
         turn_id: Option<String>,
-        input: String,
+        input: TurnInput,
         reconciling: bool,
         submission_sequence: u64,
     },
@@ -338,6 +342,40 @@ pub enum Msg {
     Focus(bool),
     /// What a `[statusline] command` printed, or why it did not.
     StatusLine(Result<String, String>),
+    /// What the driver found on the clipboard after a `Ctrl+V` (B4).
+    Clipboard(ClipboardOutcome),
+}
+
+/// A `Ctrl+V` the driver should service.
+///
+/// The App does no I/O, and this is I/O twice over: it shells out to whichever clipboard
+/// tool the machine has, and it writes a file. Both happen on the driver's blocking pool,
+/// exactly as `$EDITOR` and `pbcopy` already do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    /// The **session's** workspace, as the runtime reported it. An attachment has to live
+    /// inside it or `authorize_turn_attachments` refuses the turn, so this is where the
+    /// image goes — and a fleet session's workspace is a path on another machine, which
+    /// the driver discovers by failing to find the directory and says so.
+    pub workspace: String,
+    /// The id the file is named after, minted here so the state machine stays the thing
+    /// that decides names.
+    pub id: String,
+}
+
+/// What came back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardOutcome {
+    /// A PNG was written; the path is relative to the session workspace.
+    Image(String),
+    /// No image. This is the ordinary text paste, performed unchanged.
+    Text(String),
+    /// Tools exist and the clipboard held nothing either of them could read.
+    Empty,
+    /// This machine has no clipboard tool at all. Said once.
+    NoTool,
+    /// A tool ran and something went wrong, named.
+    Failed(String),
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -760,6 +798,11 @@ pub struct App {
     /// storm of events cannot become a storm of bells.
     notify_pending: Vec<notify::Signal>,
     statusline: StatusLine,
+    /// A `Ctrl+V` the driver should service (B4).
+    clipboard_pending: Option<ClipboardRequest>,
+    /// Whether "this machine has no clipboard tool" has been said. Once per run: the
+    /// thing it explains does not change between keystrokes.
+    clipboard_tool_reported: bool,
 }
 
 /// How many notifications one frame may emit. A session that produced fifty terminal
@@ -865,6 +908,8 @@ impl App {
             title_pending: None,
             notify_pending: Vec::new(),
             statusline: StatusLine::default(),
+            clipboard_pending: None,
+            clipboard_tool_reported: false,
         }
     }
 
@@ -1008,6 +1053,13 @@ impl App {
             hidden.push("/interrupt");
         }
 
+        // B4/B1. `/model` is `interactive.configure`, and `hello.methods` is the feature
+        // gate for every verb. A gateway that does not serve it cannot change a running
+        // session's model, so the completion does not offer to.
+        if !self.hello.serves("interactive.configure") {
+            hidden.push("/model");
+        }
+
         self.completion_catalog.hide_commands(hidden);
     }
 
@@ -1063,6 +1115,11 @@ impl App {
 
     pub fn take_copy(&mut self) -> Option<String> {
         self.copy_pending.take()
+    }
+
+    /// The clipboard read the driver should perform, if the composer asked for one.
+    pub fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
+        self.clipboard_pending.take()
     }
 
     pub fn take_external_editor(&mut self) -> Option<String> {
@@ -1529,6 +1586,7 @@ impl App {
                     }
                 }
             }
+            Msg::Clipboard(outcome) => self.clipboard_read(outcome),
             Msg::Answer { tag, result } => {
                 self.answer(tag, result);
                 // The acknowledgement that was blocking the queue may have just landed.

@@ -2012,7 +2012,7 @@ fn same_session_follow_ups_are_issued_in_submission_order() {
         app.sessions
             .open_queued_drafts()
             .iter()
-            .map(|queued| queued.input.as_str())
+            .map(|queued| queued.input.prompt())
             .collect::<Vec<_>>(),
         vec!["second queued instruction"],
         "B is held in the visible queue rather than refused"

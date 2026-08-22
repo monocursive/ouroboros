@@ -1966,6 +1966,164 @@ pub fn respond_approval_params_with_reason(
     })
 }
 
+/// One `@`-mention, carried to the gateway as a path rather than as substituted text.
+///
+/// **The path is never resolved here.** `interactive.send_message`/`follow_up`
+/// canonicalise every attachment against the *session's* workspace and refuse an outsider
+/// (`interactive/task.ex`, `authorize_turn_attachments`) — and that workspace may be on
+/// another machine entirely, where this client cannot stat anything. What is sent is what
+/// the operator picked; what comes back when it is outside the workspace is a refusal this
+/// client renders on the composer that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Attachment {
+    pub path: String,
+    pub kind: AttachmentKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttachmentKind {
+    /// Completed from the workspace index with `@`.
+    Path,
+    /// Written by this client from the clipboard, under the session workspace.
+    Image,
+}
+
+impl Attachment {
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: AttachmentKind::Path,
+        }
+    }
+
+    pub fn image(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            kind: AttachmentKind::Image,
+        }
+    }
+
+    /// What the chip says: the tail of the path, because a chip row has no width for a
+    /// repository-root prefix that is the same on every chip.
+    pub fn label(&self) -> &str {
+        self.path
+            .rsplit_once('/')
+            .map(|(_head, tail)| tail)
+            .unwrap_or(&self.path)
+    }
+}
+
+/// Per-turn reasoning effort, exactly the three values `@reasoning_efforts` declares in
+/// `gateway/methods.ex`. A fourth would be a `-32602` naming the parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    pub const ALL: [Effort; 3] = [Self::Low, Self::Medium, Self::High];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|effort| effort.as_str() == name)
+    }
+}
+
+/// What goes in `params.input` of a turn.
+///
+/// The gateway takes **either** a nonempty string **or** the object
+/// `{prompt, attachments[≤32], reasoning_effort}` (`structured_turn_input`,
+/// `gateway/methods.ex`). Both are sent, and which one is a fact about the turn rather
+/// than a client preference: a plain prompt stays a plain string so the bytes on the wire
+/// for the overwhelmingly common turn are exactly what they were before B4, and the object
+/// appears only where there is something in it a string could not carry.
+///
+/// This is also the unit a reconciliation replays. A same-id retry that dropped the
+/// attachments would change the turn's fingerprint and come back `:turn_id_conflict`, so
+/// the whole envelope travels with the tag rather than the prompt alone.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct TurnInput {
+    pub prompt: String,
+    pub attachments: Vec<Attachment>,
+    pub reasoning_effort: Option<Effort>,
+}
+
+impl TurnInput {
+    /// The gateway's own ceiling, restated so the composer can refuse the 33rd chip with a
+    /// sentence instead of letting the runtime refuse the whole turn.
+    pub const ATTACHMENT_LIMIT: usize = 32;
+
+    pub fn plain(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            attachments: Vec::new(),
+            reasoning_effort: None,
+        }
+    }
+
+    /// The text half — what goes back into the editor when a turn is restored.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// Whether this turn needs the object form at all.
+    pub fn structured(&self) -> bool {
+        !self.attachments.is_empty() || self.reasoning_effort.is_some()
+    }
+
+    /// `params.input`, in whichever of the two shapes this turn actually needs.
+    pub fn to_value(&self) -> Value {
+        if !self.structured() {
+            return Value::String(self.prompt.clone());
+        }
+
+        let mut input = serde_json::Map::new();
+        input.insert("prompt".into(), Value::String(self.prompt.clone()));
+
+        if !self.attachments.is_empty() {
+            input.insert(
+                "attachments".into(),
+                Value::Array(
+                    self.attachments
+                        .iter()
+                        .map(|attachment| Value::String(attachment.path.clone()))
+                        .collect(),
+                ),
+            );
+        }
+
+        if let Some(effort) = self.reasoning_effort {
+            input.insert(
+                "reasoning_effort".into(),
+                Value::String(effort.as_str().to_string()),
+            );
+        }
+
+        Value::Object(input)
+    }
+}
+
+/// Whether a refusal is the runtime rejecting an *attachment* rather than the turn.
+///
+/// The runtime answers `{:attachment_outside_workspace, path}`,
+/// `{:invalid_attachment, path, reason}`, and `{:invalid_attachment_workspace, reason}`
+/// (`interactive/task.ex`); all three reach the wire as text naming the attachment. Matched
+/// on that rather than on a code, because the code is the generic refusal code every other
+/// turn failure also carries.
+pub fn attachment_refusal(diagnostic: &str) -> bool {
+    diagnostic.to_ascii_lowercase().contains("attachment")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

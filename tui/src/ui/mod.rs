@@ -90,13 +90,14 @@ use ratatui::Terminal;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use crate::clipboard;
 use crate::fleet::{self, Ports};
 use crate::fleet_add::{self, CandidateSource};
 use crate::proto::{Hello, Notification};
 use crate::runtime::Daemon;
 use crate::transport::{Client, HookFuture, ReconnectHook};
 
-pub use app::{App, Call, Cursors, Mode, Msg, Quit, Tag, TICK};
+pub use app::{App, Call, ClipboardOutcome, Cursors, Mode, Msg, Quit, Tag, TICK};
 
 /// The App's inbox, plus the cursor table the reconnect hook reads.
 pub struct UiChannel {
@@ -422,6 +423,43 @@ fn statusline_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
     tokio::spawn(async move {
         let result = statusline::run(&command, &payload).await;
         let _ = sender.send(Msg::StatusLine(result));
+    });
+}
+
+/// Services a `Ctrl+V`: reads the clipboard and, where it holds an image, writes it.
+///
+/// On the blocking pool because every step of it blocks — probing with `command -v`,
+/// running the platform tool, and writing the file — exactly like `$EDITOR` and `pbcopy`.
+/// The App is told what happened either way, because a `Ctrl+V` that produced nothing and
+/// said nothing is a key the operator has to guess about.
+fn clipboard_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
+    let Some(request) = app.take_clipboard_request() else {
+        return;
+    };
+
+    let sender = sender.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let scratch = clipboard::scratch_path(&request.id);
+        let clip = clipboard::read(
+            &clipboard::image_readers(),
+            &clipboard::text_readers(),
+            &scratch,
+        );
+
+        let outcome = match clip {
+            clipboard::Clip::Image(bytes) => {
+                match clipboard::write_image(Path::new(&request.workspace), &request.id, &bytes) {
+                    Ok(relative) => ClipboardOutcome::Image(relative),
+                    Err(error) => ClipboardOutcome::Failed(format!("{error:#}")),
+                }
+            }
+            clipboard::Clip::Text(text) => ClipboardOutcome::Text(text),
+            clipboard::Clip::Empty => ClipboardOutcome::Empty,
+            clipboard::Clip::NoTool => ClipboardOutcome::NoTool,
+        };
+
+        let _ = sender.send(Msg::Clipboard(outcome));
     });
 }
 
@@ -923,6 +961,7 @@ pub async fn run(
         persist(&mut app);
         open_pending_url(&mut app);
         copy_pending(&mut app);
+        clipboard_pending(&mut app, &sender);
         chrome_pending(&mut app);
         statusline_pending(&mut app, &sender);
         if app.take_scan_machines() {

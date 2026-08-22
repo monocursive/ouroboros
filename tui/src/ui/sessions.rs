@@ -14,9 +14,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Event, EventType, Plane, SessionInfo, SessionStatus};
+use crate::model::{AttachmentKind, Event, EventType, Plane, SessionInfo, SessionStatus};
 
-use super::app::{App, ComposerVerb, Connection};
+use super::app::{App, Composer, ComposerVerb, Connection};
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
@@ -584,13 +584,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        composer_block_height(
-            app.sessions
-                .composer
-                .as_ref()
-                .map(|composer| &composer.editor),
-            area.width,
-        )
+        composer_block_height(app.sessions.composer.as_ref(), area.width)
     } else {
         0
     };
@@ -703,12 +697,21 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
     let preview = width.saturating_sub(14);
 
     for (index, draft) in local.iter().take(QUEUE_ROWS as usize).enumerate() {
+        let carried = draft.input.attachments.len();
         lines.push(Line::from(vec![
             Span::styled(format!("  {}. local  ", index + 1), theme::label()),
             Span::raw(super::tree::truncate(
-                &draft.input.replace('\n', " "),
+                &draft.input.prompt().replace('\n', " "),
                 preview,
             )),
+            Span::styled(
+                if carried == 0 {
+                    String::new()
+                } else {
+                    format!("  +{carried} attached")
+                },
+                Style::default().fg(theme::MUTED),
+            ),
         ]));
     }
 
@@ -769,7 +772,10 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    let composer_height = composer_block_height(Some(&app.home_draft), area.width);
+    // The home composer has no session and therefore no chips: its height is the editor's.
+    let composer_height = COMPOSER_CHROME
+        + editor_rows(Some(&app.home_draft), area.width)
+        + completion_rows(Some(&app.home_draft));
     let rows =
         Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
     let ready = app.home_ready();
@@ -1463,11 +1469,18 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     frame.render_widget(block, area);
 
     let rows = Layout::vertical([
+        Constraint::Length(chip_rows(active)),
         Constraint::Min(2),
         Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
+
+    if let Some(composer) = active {
+        render_chips(frame, rows[0], composer);
+    }
+
+    let rows = &rows[1..];
 
     if let Some(composer) = active {
         render_editor(
@@ -1683,8 +1696,84 @@ const COMPOSER_EDITOR_MIN: u16 = 2;
 const COMPOSER_EDITOR_MAX: u16 = 6;
 const COMPOSER_CHROME: u16 = 3;
 
-fn composer_block_height(editor: Option<&Editor>, width: u16) -> u16 {
-    COMPOSER_CHROME + editor_rows(editor, width) + completion_rows(editor)
+fn composer_block_height(composer: Option<&Composer>, width: u16) -> u16 {
+    let editor = composer.map(|composer| &composer.editor);
+
+    COMPOSER_CHROME + chip_rows(composer) + editor_rows(editor, width) + completion_rows(editor)
+}
+
+/// How many rows the attachment chips and their refusal want, above the editor.
+///
+/// Zero for the ordinary turn, which is most of them: a composer with nothing attached
+/// draws exactly what it drew before B4.
+fn chip_rows(composer: Option<&Composer>) -> u16 {
+    let Some(composer) = composer else {
+        return 0;
+    };
+
+    let chips = u16::from(!composer.attachments.is_empty() || composer.reasoning_effort.is_some());
+
+    chips + u16::from(composer.attachment_refusal.is_some())
+}
+
+/// The chips: what this turn will carry as `params.input.attachments`, and the per-turn
+/// effort beside them.
+///
+/// Chips rather than the substituted text alone because they are the only place the
+/// structured half of the turn is visible. The text still says `@src/app.rs`; the chip is
+/// what says that path is *also* travelling as an attachment the runtime will canonicalise.
+fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
+    if chip_rows(Some(composer)) == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+
+    if !composer.attachments.is_empty() || composer.reasoning_effort.is_some() {
+        let mut spans = Vec::new();
+
+        for attachment in &composer.attachments {
+            spans.push(Span::styled(
+                format!(
+                    " {}{} ",
+                    if attachment.kind == AttachmentKind::Image {
+                        "▣ "
+                    } else {
+                        "@"
+                    },
+                    attachment.label()
+                ),
+                theme::label(),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        if let Some(effort) = composer.reasoning_effort {
+            spans.push(Span::styled(
+                format!(" effort {} ", effort.as_str()),
+                Style::default().fg(theme::ACCENT),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        if !composer.attachments.is_empty() {
+            spans.push(Span::styled(
+                "backspace on an empty draft removes the last",
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(refusal) = composer.attachment_refusal.as_deref() {
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(refusal, area.width.max(20) as usize),
+            Style::default().fg(theme::WARN),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn editor_rows(editor: Option<&Editor>, width: u16) -> u16 {
