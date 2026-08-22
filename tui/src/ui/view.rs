@@ -1903,6 +1903,10 @@ const KEYS: &[(&str, &str)] = &[
         "ctrl+x",
         "leader: n new · l sessions · d details · x end · e editor · y copy · q quit",
     ),
+    (
+        "ctrl+x [ / v",
+        "this transcript into native scrollback / into $EDITOR",
+    ),
     ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
     (
         "ctrl+o",
@@ -1913,11 +1917,10 @@ const KEYS: &[(&str, &str)] = &[
         "plan and tasks panel, while a provider publishes one",
     ),
     ("ctrl+q", "quit dialog"),
-    ("?", "this page, when the prompt is empty"),
-    (",", "settings, when the prompt is empty"),
+    ("? / ,", "this page / settings, when the prompt is empty"),
     (
         "wheel",
-        "scroll the transcript; shift/ctrl+↑↓ and pageup/down too",
+        "scrolls; shift/ctrl+↑↓, pageup/down; config mouse = false frees it",
     ),
     ("↑ / ↓", "prompt history (or a line in a multiline draft)"),
     ("ctrl+w/k/u", "kill word, to line end, to line start"),

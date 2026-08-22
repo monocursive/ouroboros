@@ -79,6 +79,11 @@ async fn run(cli: Cli) -> Result<()> {
     // started.
     let config = config::load_default();
 
+    // Stated before anything takes over a terminal. The boot screen enters the alternate
+    // screen ahead of the App, and a mouse captured there and released a second later would
+    // already have cost the operator the selection this setting exists to keep.
+    ui::set_mouse_capture(config.config.terminal.mouse);
+
     match cli.command {
         None => attach_local(&paths, cli.dev, config).await,
         Some(Command::New {

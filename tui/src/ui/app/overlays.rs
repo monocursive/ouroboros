@@ -89,6 +89,8 @@ pub enum Command {
     SwitchSession,
     SessionDetails,
     CopyLast,
+    DumpScrollback,
+    ViewTranscript,
     Interrupt,
     Steer,
     ExternalEditor,
@@ -110,11 +112,13 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
         Self::CopyLast,
+        Self::DumpScrollback,
+        Self::ViewTranscript,
         Self::Interrupt,
         Self::Steer,
         Self::ExternalEditor,
@@ -145,6 +149,8 @@ impl Command {
             | Self::SwitchSession
             | Self::SessionDetails
             | Self::CopyLast
+            | Self::DumpScrollback
+            | Self::ViewTranscript
             | Self::Interrupt
             | Self::Steer
             | Self::ExternalEditor
@@ -163,6 +169,8 @@ impl Command {
             Self::SwitchSession => "Switch session",
             Self::SessionDetails => "Toggle event details",
             Self::CopyLast => "Copy last agent message",
+            Self::DumpScrollback => "Print transcript into terminal scrollback",
+            Self::ViewTranscript => "Open transcript in $EDITOR",
             Self::Interrupt => "Interrupt the running turn",
             Self::Steer => "Steer the running turn",
             Self::ExternalEditor => "Edit prompt in $EDITOR",
@@ -192,6 +200,8 @@ impl Command {
             Self::SwitchSession => "ctrl+x l",
             Self::SessionDetails => "ctrl+x d",
             Self::CopyLast => "ctrl+x y",
+            Self::DumpScrollback => "ctrl+x [",
+            Self::ViewTranscript => "ctrl+x v",
             Self::Interrupt => "esc",
             Self::Steer => "ctrl+x s",
             Self::ExternalEditor => "ctrl+g",
@@ -613,6 +623,8 @@ impl App {
                 self.overlay = None;
                 self.copy_last_agent();
             }
+            Command::DumpScrollback => self.dump_to_scrollback(),
+            Command::ViewTranscript => self.view_transcript(),
             Command::Interrupt => {
                 self.overlay = None;
                 self.interrupt_turn();

@@ -20,6 +20,31 @@
 //! spawn into it and then hands the same live terminal to [`run`]. So the alternate screen
 //! is entered exactly once per process, and there is no window between the boot screen and
 //! the first frame in which a panic would land on a terminal nobody owns.
+//!
+//! ## Every frame is one atomic update
+//!
+//! [`draw_synchronized`] brackets each `terminal.draw` in DEC mode 2026
+//! (`BeginSynchronizedUpdate` … `EndSynchronizedUpdate`), so a terminal that supports it
+//! presents the whole frame at once instead of painting it in pieces — the difference
+//! between a readable transcript and a torn one under tmux and VS Code. Terminals that do
+//! not know the mode ignore both sequences, which is why they are always emitted rather
+//! than probed for.
+//!
+//! Ratatui hides and shows the cursor *inside* `draw`, and that is exactly where those
+//! escapes belong: Codex's visible cursor flicker in WezTerm was cursor hide/show leaking
+//! outside the synchronized frame ([R2 §8](../../../docs/research/agent-ux-2026/R2-display-rendering.md)).
+//! Nothing in this module may move them out.
+//!
+//! ## The alternate screen has two doors back out
+//!
+//! An app that owns the screen owns `Cmd+F`, tmux copy mode, and drag-to-select — which is
+//! the single most-punished rendering decision of 2026 when it is done without an escape
+//! hatch. So there are two, both driven from here and both rendering the same
+//! [`export::transcript`]: `ctrl+x [` leaves the alternate screen, writes the whole
+//! retained transcript into the normal buffer where the terminal's own scrollback keeps
+//! it, and comes back; `ctrl+x v` writes it to a private file under the data directory and
+//! opens it in `$VISUAL`/`$EDITOR` through the same suspend/resume the composer's `ctrl+g`
+//! uses.
 
 pub mod app;
 pub mod boot;
@@ -27,6 +52,7 @@ pub mod code;
 pub mod dashboard;
 pub mod editor;
 pub mod explorer;
+pub mod export;
 pub mod logo;
 pub mod logs;
 pub mod sessions;
@@ -53,8 +79,8 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, Clear, ClearType,
-    EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, BeginSynchronizedUpdate,
+    Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
@@ -167,6 +193,15 @@ pub struct Screen {
 /// panic hook, which has no handle on anything.
 static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
 
+/// Whether this process should capture the mouse. `[terminal] mouse` in `config.toml`.
+///
+/// Process-wide for the same reason [`ENHANCED_KEYBOARD`] is: [`restore`] runs from the
+/// panic hook with no handle on anything, and the boot screen enters the alternate screen
+/// before there is an [`App`] to ask. Default `true`, which is what it was before the key
+/// existed — a setting that changed behaviour by appearing would be the silent screen-model
+/// change this client refuses to make.
+static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(true);
+
 /// Whether this terminal can tell `Shift+Enter` from `Enter`.
 ///
 /// Without the kitty protocol the two are the same bytes — Terminal.app, iTerm2's default
@@ -174,6 +209,50 @@ static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
 /// advertised `Shift+Enter` there would be telling someone to press send.
 pub fn keyboard_enhanced() -> bool {
     ENHANCED_KEYBOARD.load(Ordering::SeqCst)
+}
+
+/// States the operator's `[terminal] mouse` answer before any screen is taken over.
+///
+/// Called once, from `main`, on the config it already read. It has to happen before
+/// [`boot::Boot::begin`]: a capture enabled for the boot screen and disabled a second later
+/// would already have eaten the first selection the setting exists to protect.
+pub fn set_mouse_capture(enabled: bool) {
+    MOUSE_CAPTURE.store(enabled, Ordering::SeqCst);
+}
+
+/// Whether the mouse is being captured, and therefore whether native selection needs a
+/// modifier. The hint is only true when this is.
+pub fn mouse_captured() -> bool {
+    MOUSE_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// What to tell someone whose mouse this client just took, or `None` when it did not.
+///
+/// The modifier is named only where it is known to be right. `TERM_PROGRAM` identifies
+/// iTerm2 (Option) and Terminal.app (Fn) exactly; the terminals that report themselves as
+/// something else in that variable follow the xterm convention and take Shift. An
+/// unidentified terminal gets all three, because a hint that named the wrong key would be
+/// worse than one that named several — the honesty invariant applies to hints too.
+pub fn mouse_hint() -> Option<String> {
+    mouse_captured().then(|| selection_hint(env::var("TERM_PROGRAM").ok().as_deref()))
+}
+
+/// [`mouse_hint`]'s sentence, as a pure function of the terminal's own name.
+fn selection_hint(term_program: Option<&str>) -> String {
+    let modifier = match term_program.map(str::trim) {
+        Some("iTerm.app") => Some("hold Option to select text"),
+        Some("Apple_Terminal") => Some("hold Fn to select text"),
+        // The xterm convention, and what every one of these actually does.
+        Some("WezTerm" | "ghostty" | "kitty" | "vscode" | "Hyper" | "rio" | "alacritty") => {
+            Some("hold Shift to select text")
+        }
+        _ => None,
+    };
+
+    format!(
+        "mouse captured for scrolling · {} · `mouse = false` in config.toml disables",
+        modifier.unwrap_or("hold Shift to select text (Option on iTerm2, Fn on Terminal.app)")
+    )
 }
 
 impl Screen {
@@ -209,9 +288,17 @@ impl Screen {
             .execute(EnterAlternateScreen)
             .context("entering the alternate screen")?
             .execute(EnableBracketedPaste)
-            .context("enabling bracketed paste")?
-            .execute(EnableMouseCapture)
-            .context("enabling mouse capture")?;
+            .context("enabling bracketed paste")?;
+
+        // Only where the operator left it on. A captured mouse buys the wheel and costs
+        // drag-to-copy; `[terminal] mouse = false` says the trade is not worth it here, and
+        // then nothing is captured at all — selection and the terminal's own scrolling work
+        // exactly as they do in a shell.
+        if mouse_captured() {
+            io::stdout()
+                .execute(EnableMouseCapture)
+                .context("enabling mouse capture")?;
+        }
 
         // Asked rather than assumed, and only claimed where the terminal answered yes: the
         // composer advertises `Shift+Enter` for a newline, and in a terminal without this
@@ -251,9 +338,13 @@ impl Screen {
             .execute(EnterAlternateScreen)
             .context("re-entering the alternate screen")?
             .execute(EnableBracketedPaste)
-            .context("re-enabling bracketed paste")?
-            .execute(EnableMouseCapture)
-            .context("re-enabling mouse capture")?;
+            .context("re-enabling bracketed paste")?;
+
+        if mouse_captured() {
+            io::stdout()
+                .execute(EnableMouseCapture)
+                .context("re-enabling mouse capture")?;
+        }
 
         if matches!(supports_keyboard_enhancement(), Ok(true))
             && io::stdout()
@@ -289,6 +380,45 @@ fn restore() {
         .execute(DisableMouseCapture)
         .and_then(|stdout| stdout.execute(DisableBracketedPaste))
         .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
+}
+
+/// Draws one frame as a single atomic terminal update.
+///
+/// `BeginSynchronizedUpdate` (`ESC [ ? 2026 h`) tells the terminal to stop presenting until
+/// `EndSynchronizedUpdate` (`ESC [ ? 2026 l`), so a frame is never seen half-painted. Both
+/// go through the backend's own writer rather than a second handle on stdout, which is what
+/// guarantees they bracket the frame's bytes rather than racing them.
+///
+/// **The cursor escapes belong inside.** Ratatui hides or shows the cursor at the end of
+/// `draw`, after the buffer diff and before its flush, so calling `draw` between the two
+/// sequences puts them inside the atomic update by construction. Moving them out is the
+/// exact shape of Codex's WezTerm cursor flicker.
+///
+/// Neither sequence is conditional on support. A terminal that does not know mode 2026
+/// ignores both — it is a private mode set and reset, not a query — so probing would buy a
+/// round trip and a wrong answer on every terminal that lies about `DECRQM`.
+pub fn draw_synchronized<W, F>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    render: F,
+) -> Result<()>
+where
+    W: Write,
+    F: FnOnce(&mut ratatui::Frame),
+{
+    // Best-effort on the way in: a terminal that refused the sequence is still a terminal
+    // this client owes a frame to.
+    let _ = terminal.backend_mut().execute(BeginSynchronizedUpdate);
+
+    // The `CompletedFrame` borrows the terminal, and this needs it back to close the
+    // bracket. Nothing here reads the frame, so the borrow ends on the same line.
+    let drawn = terminal.draw(render).map(|_frame| ());
+
+    // Closed on the way out whatever happened above. Leaving mode 2026 set would freeze
+    // the operator's terminal on the last frame it managed to present.
+    let _ = terminal.backend_mut().execute(EndSynchronizedUpdate);
+
+    drawn.context("drawing the terminal")?;
+    Ok(())
 }
 
 fn copy_pending(app: &mut App) {
@@ -367,6 +497,94 @@ fn run_external_editor(draft: &str) -> Result<String> {
 
 fn draft_path() -> PathBuf {
     env::temp_dir().join(format!("ouro-prompt-{}.md", std::process::id()))
+}
+
+/// Opens a file in `$VISUAL`/`$EDITOR` and waits, without reading anything back.
+///
+/// The same invocation [`run_external_editor`] uses — one `sh -c` so `EDITOR="code -w"` and
+/// the rest of the strings people put in that variable work — and deliberately not the same
+/// function: this one is a *viewer*. Whatever the operator typed into the transcript is
+/// theirs to discard, and a composer draft must not change because someone opened the
+/// history beside it.
+fn view_in_editor(path: &Path) -> Result<()> {
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("ouro-editor")
+        .arg(path)
+        .status()
+        .with_context(|| format!("running {editor}"))?;
+
+    if !status.success() {
+        bail!("{editor} exited with {status}");
+    }
+
+    Ok(())
+}
+
+/// Where `ctrl+x v` puts the transcript it is about to open.
+///
+/// Under the data directory rather than `/tmp`: a conversation is the most sensitive thing
+/// this client holds, and the data directory is already this operator's own. Named by
+/// process id so two `ouro`s cannot collide, and written 0600 through the same
+/// create-exclusive, never-follow-a-symlink path as the composer's draft.
+fn transcript_path(data_dir: Option<&str>) -> PathBuf {
+    let dir = data_dir.map(PathBuf::from).unwrap_or_else(env::temp_dir);
+    dir.join(format!("ouro-transcript-{}.txt", std::process::id()))
+}
+
+/// Writes `text` where [`view_in_editor`] can open it, replacing whatever a previous run of
+/// this same process left behind.
+///
+/// `remove_file` first, because the name is predictable and `write_private_draft` refuses
+/// to overwrite. Removing unlinks the name — including a symlink planted at it, which is
+/// unlinked rather than followed — and the create that follows is exclusive and
+/// `O_NOFOLLOW`, so nothing can be preplanted into the window between them.
+fn write_transcript_file(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let _ = fs::remove_file(path);
+    write_private_draft(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes the transcript into the *normal* screen buffer, where the terminal's own
+/// scrollback keeps it, and comes back to the alternate one.
+///
+/// Leaving the alternate screen restores the normal buffer exactly as it was — that is what
+/// the alternate screen is for — so everything printed here lands in the operator's real
+/// scrollback and stays there after `ouro` exits, searchable with `Cmd+F` and selectable
+/// with the mouse. Verified in Ghostty and tmux; see [TUI.md §3.4](../../../docs/TUI.md)
+/// for the terminals where it is known to behave differently.
+///
+/// Raw mode is off between the suspend and the resume, so the terminal turns `\n` back into
+/// a carriage return and a line feed on its own and the text does not need to be rewritten.
+fn dump_to_scrollback(screen: &mut Screen, text: &str) -> Result<()> {
+    screen.suspend();
+
+    let printed = (|| {
+        let mut out = io::stdout();
+        out.write_all(text.as_bytes())?;
+        out.write_all(b"\n")?;
+        out.flush()
+    })();
+
+    screen.resume()?;
+
+    // The alternate screen came back holding the frame it had before, but Ratatui's previous
+    // buffer is the only thing that decides what gets redrawn. Clear both so the next frame
+    // is painted whole rather than diffed against a screen this detour may have changed.
+    screen
+        .terminal
+        .clear()
+        .context("repainting after the scrollback dump")?;
+
+    printed.context("writing the transcript into the terminal's scrollback")
 }
 
 /// Creates the draft exclusively, privately, and never through a symlink that got there
@@ -478,6 +696,11 @@ pub fn persist(app: &mut App) {
         return;
     };
 
+    // Drained beside the config, because the answer belongs to this one write. A marker
+    // the App wrote in order to say something else must not put the filename over the
+    // sentence it was written for.
+    let announce = app.take_config_save_announcement();
+
     let Some(path) = app.config_path.clone() else {
         app.inform(
             "there is nowhere to keep preferences: neither XDG_CONFIG_HOME nor a home \
@@ -489,9 +712,14 @@ pub fn persist(app: &mut App) {
     };
 
     match config.save(&path) {
-        Ok(()) => app.inform(format!("saved {}", path.display()), app::NoticeKind::Info),
+        Ok(()) if announce => {
+            app.inform(format!("saved {}", path.display()), app::NoticeKind::Info)
+        }
+        Ok(()) => {}
         // The App keeps the change in memory either way: it is what the operator chose in
-        // this session. What it must not do is claim the file has it.
+        // this session. What it must not do is claim the file has it. Said whether or not
+        // the write was announced — a file this client could not write is worth a line
+        // however it came to be written.
         Err(error) => app.inform(
             format!("{} could not be written: {error:#}", path.display()),
             app::NoticeKind::Error,
@@ -587,6 +815,10 @@ pub async fn run(
     // from `Enter` is settled, and the footers can say which binding actually exists here.
     app.keyboard_enhanced = keyboard_enhanced();
 
+    // And so is whether the mouse was captured, which is the only condition under which the
+    // selection hint is true. `None` means nothing was taken and there is nothing to say.
+    app.mouse_hint = mouse_hint();
+
     // The boot renderer and the harness share one alternate screen, but they do not share
     // one frame layout. Clear the physical terminal at the handoff so sparse areas of the
     // first transcript frame cannot retain boot copy that Ratatui's fresh buffer already
@@ -677,6 +909,69 @@ pub async fn run(
             }
         }
 
+        if let Some(text) = app.take_scrollback_dump() {
+            if let Err(error) = dump_to_scrollback(&mut screen, &text) {
+                app.inform(
+                    format!("the transcript could not be written out: {error:#}"),
+                    app::NoticeKind::Error,
+                );
+            } else {
+                app.inform(
+                    "the transcript is in this terminal's scrollback",
+                    app::NoticeKind::Info,
+                );
+            }
+        }
+
+        if let Some(text) = app.take_transcript_view() {
+            let path = transcript_path(app.data_dir.as_deref());
+
+            match write_transcript_file(&path, &text) {
+                Ok(()) => {
+                    screen.suspend();
+
+                    let opened = {
+                        let path = path.clone();
+                        tokio::task::spawn_blocking(move || view_in_editor(&path))
+                            .await
+                            .unwrap_or_else(|join_error| {
+                                Err(anyhow::anyhow!("the editor task failed: {join_error}"))
+                            })
+                    };
+
+                    // The file is this client's, not the operator's copy of anything: it is
+                    // regenerated on demand and removed here so a conversation is not left
+                    // sitting in the data directory after the editor closes.
+                    let _ = fs::remove_file(&path);
+
+                    // Re-entering the alternate screen leaves it blank, and this detour
+                    // changed no App state at all — so without a clear, Ratatui's diff
+                    // would find nothing to repaint and the operator would come back from
+                    // their editor to an empty screen.
+                    let result = screen
+                        .resume()
+                        .and_then(|()| {
+                            screen
+                                .terminal
+                                .clear()
+                                .context("repainting after the transcript viewer")
+                        })
+                        .and(opened);
+
+                    if let Err(error) = result {
+                        app.inform(
+                            format!("the transcript viewer failed: {error:#}"),
+                            app::NoticeKind::Error,
+                        );
+                    }
+                }
+                Err(error) => app.inform(
+                    format!("the transcript could not be written: {error:#}"),
+                    app::NoticeKind::Error,
+                ),
+            }
+        }
+
         if let Some(draft) = app.take_external_editor() {
             screen.suspend();
 
@@ -701,10 +996,12 @@ pub async fn run(
             }
         }
 
-        screen
-            .terminal
-            .draw(|frame| view::draw(frame, &mut app))
-            .context("drawing the terminal")?;
+        draw_synchronized(&mut screen.terminal, |frame| {
+            // The measure the export wraps to, taken where it is authoritative rather than
+            // asked of the OS once a frame.
+            app.terminal_width = frame.area().width;
+            view::draw(frame, &mut app);
+        })?;
 
         if let Some(quit) = app.quit {
             return Ok(quit);
@@ -996,4 +1293,206 @@ fn spawn_call(client: Client, call: Call, sender: mpsc::UnboundedSender<Msg>) {
             result,
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Paragraph;
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::*;
+
+    const BEGIN: &str = "\x1b[?2026h";
+    const END: &str = "\x1b[?2026l";
+    const HIDE: &str = "\x1b[?25l";
+    const SHOW: &str = "\x1b[?25h";
+
+    /// Every byte the backend wrote, in order, readable while the terminal still owns it.
+    #[derive(Clone, Default)]
+    struct Recorder(Rc<RefCell<Vec<u8>>>);
+
+    impl Recorder {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.borrow()).into_owned()
+        }
+    }
+
+    impl Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal writing into a [`Recorder`] rather than a tty.
+    ///
+    /// `Viewport::Fixed` because `Fullscreen` asks the backend for the real terminal's size,
+    /// which is a question a buffer cannot answer and CI has no tty to answer either.
+    fn buffered() -> (Terminal<CrosstermBackend<Recorder>>, Recorder) {
+        let recorder = Recorder::default();
+        let terminal = Terminal::with_options(
+            CrosstermBackend::new(recorder.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 20, 3)),
+            },
+        )
+        .expect("a terminal over a buffer");
+
+        (terminal, recorder)
+    }
+
+    #[test]
+    fn every_frame_is_bracketed_by_the_synchronized_update_mode() {
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("hello"), frame.area());
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("the frame opened mode 2026");
+        let end = bytes.find(END).expect("the frame closed mode 2026");
+
+        assert!(begin < end, "the bracket was written inside out: {bytes:?}");
+        assert!(
+            bytes[begin + BEGIN.len()..end].contains("hello"),
+            "the frame's own bytes fell outside the bracket: {bytes:?}"
+        );
+
+        // And exactly one of each: a second open inside the first would nest a mode that
+        // does not nest.
+        assert_eq!(bytes.matches(BEGIN).count(), 1, "{bytes:?}");
+        assert_eq!(bytes.matches(END).count(), 1, "{bytes:?}");
+    }
+
+    #[test]
+    fn the_cursor_is_hidden_and_shown_inside_the_bracket_not_around_it() {
+        // A frame that sets no cursor: Ratatui hides it.
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("quiet"), frame.area());
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("an opened bracket");
+        let end = bytes.find(END).expect("a closed bracket");
+        let hide = bytes.find(HIDE).expect("the cursor was hidden");
+
+        assert!(
+            begin < hide && hide < end,
+            "the cursor hide leaked outside the synchronized frame — this is Codex's \
+             WezTerm flicker: {bytes:?}"
+        );
+
+        // And a frame that does set one: Ratatui shows it and moves it.
+        let (mut terminal, recorder) = buffered();
+
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("typing"), frame.area());
+            frame.set_cursor_position((3, 0));
+        })
+        .expect("a drawn frame");
+
+        let bytes = recorder.text();
+        let begin = bytes.find(BEGIN).expect("an opened bracket");
+        let end = bytes.find(END).expect("a closed bracket");
+        let show = bytes.find(SHOW).expect("the cursor was shown");
+
+        assert!(
+            begin < show && show < end,
+            "the cursor show leaked outside the synchronized frame: {bytes:?}"
+        );
+    }
+
+    #[test]
+    fn the_selection_hint_names_a_modifier_only_where_it_is_known_to_be_right() {
+        assert!(selection_hint(Some("iTerm.app")).contains("hold Option to select text"));
+        assert!(selection_hint(Some("Apple_Terminal")).contains("hold Fn to select text"));
+        assert!(selection_hint(Some("ghostty")).contains("hold Shift to select text"));
+
+        // An unidentified terminal is told all three rather than the wrong one.
+        for unknown in [None, Some(""), Some("SomeTerminalNobodyHasHeardOf")] {
+            let hint = selection_hint(unknown);
+
+            assert!(
+                hint.contains("hold Shift to select text (Option on iTerm2, Fn on Terminal.app)"),
+                "{unknown:?} was told something this build cannot know: {hint}"
+            );
+        }
+
+        // Every version of it says the same two other things: what was taken, and how to
+        // take it back.
+        for term in [None, Some("iTerm.app"), Some("Apple_Terminal")] {
+            let hint = selection_hint(term);
+            assert!(
+                hint.starts_with("mouse captured for scrolling · "),
+                "{hint}"
+            );
+            assert!(
+                hint.ends_with("`mouse = false` in config.toml disables"),
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_transcript_file_lands_in_the_data_directory_when_there_is_one() {
+        let path = transcript_path(Some("/home/operator/.local/share/ouroboros"));
+
+        assert_eq!(
+            path.parent().map(Path::to_path_buf),
+            Some(PathBuf::from("/home/operator/.local/share/ouroboros"))
+        );
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ouro-transcript-")),
+            "{path:?}"
+        );
+
+        // And falls back to the temp directory rather than refusing when there is none.
+        assert_eq!(
+            transcript_path(None).parent().map(Path::to_path_buf),
+            Some(env::temp_dir())
+        );
+    }
+
+    #[test]
+    fn a_transcript_file_is_private_and_replaces_whatever_was_there() {
+        let dir = env::temp_dir().join(format!("ouro-export-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("transcript.txt");
+
+        write_transcript_file(&path, "first").expect("a written transcript");
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "first");
+
+        // A second view in the same process must not fail on the name the first one left.
+        write_transcript_file(&path, "second").expect("a rewritten transcript");
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "second");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a conversation was left world-readable"
+            );
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

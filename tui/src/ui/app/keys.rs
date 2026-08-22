@@ -7,6 +7,8 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("l", "switch session"),
     ("e", "external editor"),
     ("y", "copy last message"),
+    ("[", "transcript to scrollback"),
+    ("v", "transcript in $EDITOR"),
     ("s", "steer"),
     ("a", "approval"),
     ("w", "writable session"),
@@ -180,6 +182,8 @@ impl App {
             KeyCode::Char('l') => self.activate_command(Command::SwitchSession),
             KeyCode::Char('e') | KeyCode::Char('g') => self.request_external_editor(),
             KeyCode::Char('y') => self.copy_last_agent(),
+            KeyCode::Char('[') => self.dump_to_scrollback(),
+            KeyCode::Char('v') => self.view_transcript(),
             KeyCode::Char('s') => self.compose(ComposerVerb::Steer),
             KeyCode::Char('a') => self.reopen_approval(),
             KeyCode::Char('w') => self.start_writable_session(),
@@ -189,7 +193,8 @@ impl App {
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             KeyCode::Char(',') => self.open_settings(),
             _ => self.inform(
-                "ctrl+x n new · w write · l sessions · e editor · y copy · s steer · x end · q quit",
+                "ctrl+x n new · w write · l sessions · e editor · y copy · [ scrollback · \
+                 v transcript · s steer · x end · q quit",
                 NoticeKind::Info,
             ),
         }

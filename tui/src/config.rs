@@ -22,6 +22,12 @@
 //! gone: unknown keys are ignored on read, so a file that still names it loads unchanged
 //! and the next save simply omits it.
 //!
+//! `[terminal]` is the one table here that is not a form default. `mouse` decides whether
+//! this client captures the mouse at all, and that is a statement about the operator's
+//! terminal rather than about their agents: a captured mouse gives `ouro` the wheel and
+//! takes native selection away, so the person who would rather keep drag-to-copy and let
+//! the terminal scroll needs a way to say so before the screen is taken over.
+//!
 //! ## Reading is total; writing is atomic
 //!
 //! [`load`] never fails. A missing file is the ordinary case, and a file that does not
@@ -85,6 +91,8 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub onboarding: Onboarding,
+    #[serde(default)]
+    pub terminal: Terminal,
 }
 
 /// The answers the `n` dialog and `ouro new` prefill from.
@@ -142,6 +150,41 @@ pub struct Onboarding {
     /// answer expires.
     #[serde(default)]
     pub welcomed: bool,
+    /// Whether the "the mouse is captured, here is how to select text anyway" line has
+    /// been shown.
+    ///
+    /// Once per operator rather than once per session: a hint that reappears every launch
+    /// is a hint nobody reads, and the thing it explains does not change between runs.
+    #[serde(default)]
+    pub mouse_hint_shown: bool,
+}
+
+/// How this client treats the terminal it was started in.
+///
+/// Not a form default: nothing prefills from this and no dialog edits it. It is the
+/// operator's answer to a question only they can answer — whether they want `ouro` to own
+/// the mouse — and it is read once, before the screen is taken over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Terminal {
+    /// Whether to capture the mouse.
+    ///
+    /// `true` (the default) gives `ouro` the wheel, and the terminal's own selection then
+    /// needs a modifier — Shift on most terminals, Option on iTerm2, Fn on Terminal.app.
+    /// `false` captures nothing: drag-to-copy and the terminal's own scrollback keys work
+    /// exactly as they do in a shell, and `ouro` scrolls by keyboard only.
+    #[serde(default = "yes")]
+    pub mouse: bool,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self { mouse: true }
+    }
+}
+
+/// serde needs a function for a non-`false` default on a `bool` field.
+fn yes() -> bool {
+    true
 }
 
 /// A config file as it was found: what it said, where it is, and what was wrong with it.
@@ -475,7 +518,11 @@ mod tests {
                 approval_mode: Some("auto_edit".into()),
                 sandbox_mode: Some("read_only".into()),
             },
-            onboarding: Onboarding { welcomed: true },
+            onboarding: Onboarding {
+                welcomed: true,
+                mouse_hint_shown: true,
+            },
+            terminal: Terminal { mouse: false },
         };
 
         config.save(&path).expect("a written config");
@@ -577,6 +624,33 @@ mod tests {
         let text = fs::read_to_string(&path).expect("the rewritten config");
         assert!(!text.contains("quick_start"), "{text}");
         assert!(load(path).config.onboarding.welcomed);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_mouse_is_captured_unless_the_file_says_otherwise() {
+        let dir = scratch("mouse");
+
+        // No file at all is the ordinary first run, and the wheel works there.
+        assert!(load(dir.join(CONFIG_FILE)).config.terminal.mouse);
+
+        // A file with no `[terminal]` table is a file from before this key existed.
+        let path = dir.join(CONFIG_FILE);
+        fs::write(&path, "[defaults]\nprovider = \"codex\"\n").expect("an older config");
+        let loaded = load(path.clone());
+        assert!(loaded.config.terminal.mouse);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+
+        // And the one value that changes anything.
+        fs::write(&path, "[terminal]\nmouse = false\n").expect("a config that opts out");
+        let loaded = load(path.clone());
+        assert!(!loaded.config.terminal.mouse);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+
+        // A save carries the answer back, rather than quietly restoring the default.
+        loaded.config.save(&path).expect("a rewrite");
+        assert!(!load(path).config.terminal.mouse);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -689,6 +763,7 @@ mod tests {
                 ..Defaults::default()
             },
             onboarding: Onboarding::default(),
+            terminal: Terminal::default(),
         };
 
         first.save(&path).expect("a first write");
@@ -698,7 +773,11 @@ mod tests {
                 workspace: Some("/srv/work".into()),
                 ..Defaults::default()
             },
-            onboarding: Onboarding { welcomed: true },
+            onboarding: Onboarding {
+                welcomed: true,
+                mouse_hint_shown: false,
+            },
+            terminal: Terminal::default(),
         };
 
         second.save(&path).expect("a second write");

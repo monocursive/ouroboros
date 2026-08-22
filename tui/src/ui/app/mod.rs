@@ -688,6 +688,13 @@ pub struct App {
     /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
     /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
     save_pending: bool,
+    /// Whether the write [`save_pending`](Self::save_pending) asks for is a marker rather
+    /// than an answer, and so should be made without a word about it.
+    ///
+    /// A settings save is the operator's own action and naming the file is the receipt for
+    /// it. An onboarding marker is not: it is written *because* something else is being
+    /// said, and there is one notice row.
+    save_quiet: bool,
     /// The coding home's first prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<PendingFirstMessage>,
@@ -705,6 +712,19 @@ pub struct App {
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
+    /// The transcript the I/O driver should print into the terminal's native scrollback.
+    scrollback_dump_pending: Option<String>,
+    /// The transcript the I/O driver should open in `$VISUAL`/`$EDITOR`, read-only.
+    transcript_view_pending: Option<String>,
+    /// What to tell this operator about the mouse this client captured, or `None` when it
+    /// captured nothing. Set by the driver once the terminal is taken over, because whether
+    /// the capture actually happened is a fact about the terminal and not about this state
+    /// machine — see [`super::mouse_hint`].
+    pub mouse_hint: Option<String>,
+    /// Columns the last frame was laid out against. Written by the driver on every draw;
+    /// the export wraps to it, because the terminal it is about to be printed into is the
+    /// same one that just drew the frame. Zero until the first frame.
+    pub terminal_width: u16,
     /// Monotonic issue order for composer mutations. Outcome-unknown answers may arrive
     /// out of order; reconciliation is sorted by this sequence, never by error arrival.
     next_composer_submission_sequence: u64,
@@ -760,6 +780,7 @@ impl App {
             in_flight: HashSet::new(),
             dropped_seen: 0,
             save_pending: false,
+            save_quiet: false,
             first_message: None,
             pending_background_start: None,
             open_url_pending: None,
@@ -767,6 +788,10 @@ impl App {
             ctrl_c_until: None,
             copy_pending: None,
             external_editor_pending: None,
+            scrollback_dump_pending: None,
+            transcript_view_pending: None,
+            mouse_hint: None,
+            terminal_width: 0,
             next_composer_submission_sequence: 0,
             resume_session_picker: false,
         }
@@ -782,6 +807,77 @@ impl App {
 
     pub fn take_external_editor(&mut self) -> Option<String> {
         self.external_editor_pending.take()
+    }
+
+    pub fn take_scrollback_dump(&mut self) -> Option<String> {
+        self.scrollback_dump_pending.take()
+    }
+
+    pub fn take_transcript_view(&mut self) -> Option<String> {
+        self.transcript_view_pending.take()
+    }
+
+    /// The open session as plain text, at the measure the transcript is being read at.
+    ///
+    /// `None` — with the sentence already shown — when there is nothing open: both escape
+    /// hatches are about *this* conversation, and a dump of no conversation would leave the
+    /// operator looking at their own shell wondering what happened.
+    fn transcript_export(&mut self) -> Option<String> {
+        // Zero before the first frame, and a width of zero would wrap every word onto its
+        // own line. Eighty is what a terminal that has not said otherwise is.
+        let width = match self.terminal_width {
+            0 => 80,
+            width => usize::from(width),
+        };
+
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return None;
+        };
+
+        Some(super::export::transcript(watch, width))
+    }
+
+    /// Claude Code's `[`: the whole conversation, handed back to the terminal that owns the
+    /// scrollback, so `Cmd+F` and drag-to-copy work on it again.
+    pub(super) fn dump_to_scrollback(&mut self) {
+        self.overlay = None;
+        self.scrollback_dump_pending = self.transcript_export();
+    }
+
+    /// Claude Code's `v`: the same text, in the operator's own editor, where searching and
+    /// saving a piece of it are the editor's problem rather than this client's.
+    pub(super) fn view_transcript(&mut self) {
+        self.overlay = None;
+        self.transcript_view_pending = self.transcript_export();
+    }
+
+    /// Says once, and only where it is true, that this client took the mouse.
+    ///
+    /// Once per operator rather than once per session (`onboarding.mouse_hint_shown`): the
+    /// thing it explains does not change between runs, and a line that reappears every
+    /// launch is a line nobody reads. Silent capture is the complaint this answers —
+    /// Claude Code #72681 — so it is shown on the first frame rather than waiting for the
+    /// wheel event that proves the operator already found the problem.
+    pub(super) fn hint_mouse_capture(&mut self) {
+        if self.config.onboarding.mouse_hint_shown {
+            return;
+        }
+
+        let Some(hint) = self.mouse_hint.clone() else {
+            return;
+        };
+
+        self.config.onboarding.mouse_hint_shown = true;
+        self.save_pending = true;
+        // The marker is written on the same frame the hint is said, and the driver
+        // persists before it draws. Announcing that write would spend the one notice row
+        // on a file the operator never asked for and take the hint with it.
+        self.save_quiet = true;
+        self.inform(hint, NoticeKind::Info);
     }
 
     pub fn take_scan_machines(&mut self) -> bool {
@@ -927,6 +1023,16 @@ impl App {
         }
 
         Some(self.config.clone())
+    }
+
+    /// Whether the write [`take_config_save`](Self::take_config_save) just handed over is
+    /// worth a line on the notice row.
+    ///
+    /// Drained, because the answer belongs to that one write: a quiet marker must not
+    /// silence the settings save after it. A *failed* write is announced either way — a
+    /// file this client could not write is worth saying however it came to be written.
+    pub fn take_config_save_announcement(&mut self) -> bool {
+        !std::mem::take(&mut self.save_quiet)
     }
 
     /// Everything the driver should send, in order. Draining is the only way a request
@@ -1111,10 +1217,17 @@ impl App {
                 self.ticks += 1;
                 self.expire_notice();
                 self.expire_chords();
+                self.hint_mouse_capture();
                 self.poll();
             }
             Msg::Redraw => {}
-            Msg::Scroll(delta) => self.scroll_view(delta),
+            Msg::Scroll(delta) => {
+                // The first wheel event is the second chance: whoever reaches for the mouse
+                // is exactly the person the hint is for, and a notice that had already
+                // expired unread would leave them none the wiser.
+                self.hint_mouse_capture();
+                self.scroll_view(delta);
+            }
             Msg::Notification(notification) => self.notification(notification),
             Msg::Answer { tag, result } => self.answer(tag, result),
             Msg::Reconnected(hello) => {
