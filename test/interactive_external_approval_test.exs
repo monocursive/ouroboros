@@ -8,8 +8,8 @@ defmodule Ouroboros.Test.AllowEverythingPermissions do
   that an `:allow` never reaches a person.
   """
 
-  def evaluate(%{tool_name: "Read"}), do: {:allow, "Read(**)"}
-  def evaluate(%{tool_name: "Bash", input: %{"command" => "rm -rf /"}}), do: {:deny, "Bash(rm *)"}
+  def evaluate(%{tool: "read"}), do: {:allow, "Read(**)"}
+  def evaluate(%{tool: "bash", command: "rm -rf /"}), do: {:deny, "Bash(rm *)"}
   def evaluate(_subject), do: {:ask, :no_rule}
 
   def record(subject, verdict) do
@@ -21,8 +21,10 @@ defmodule Ouroboros.Test.AllowEverythingPermissions do
     :ok
   end
 
-  def suggest(%{tool_name: name}, _verdict) when is_binary(name), do: "#{name}(*)"
-  def suggest(_subject, _verdict), do: nil
+  def suggest(%{context: %{tool_name: name}}) when is_binary(name) and name != "",
+    do: "#{name}(*)"
+
+  def suggest(_subject), do: nil
 end
 
 defmodule Ouroboros.InteractiveExternalApprovalTest do
@@ -252,7 +254,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     assert allowed.decision == :allow
     assert allowed.source == :engine
     assert allowed.reason == "Read(**)"
-    assert_receive {:permission_recorded, %{tool_name: "Read"}, %{decision: :allow}}, 500
+    assert_receive {:permission_recorded, %{tool: "read"}, %{decision: :allow}}, 500
 
     assert {:ok, denied} =
              InteractiveSession.request_approval(ref, %{
@@ -279,6 +281,39 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     assert bash_resolved.payload["decision"] == "deny"
 
     Process.unregister(:external_approval_engine_probe)
+    retire_session(id)
+  end
+
+  test "the durable engine allows a bridged command a session-scope rule names", %{id: id} do
+    Application.delete_env(:ouroboros, :permissions_engine)
+    ref = start_session(id)
+    {:ok, info} = InteractiveSession.info(ref)
+
+    principal = %{
+      session_id: id,
+      provider: info.provider,
+      node: node(),
+      workspace: info.workspace
+    }
+
+    assert {:ok, _rule} =
+             Ouroboros.Control.Permissions.remember(principal, "Bash(git *)", :allow, :session)
+
+    assert {:ok, allowed} =
+             InteractiveSession.request_approval(ref, %{
+               tool_name: "Bash",
+               input: %{"command" => "git status --short"},
+               tool_use_id: "toolu_rule",
+               cwd: info.workspace
+             })
+
+    assert allowed.decision == :allow
+    assert allowed.source == :engine
+
+    [request] = events_of(ref, :approval_requested)
+    assert is_binary(request.payload["suggested_rule"])
+    assert request.payload["tool_call"]["name"] == "Bash"
+
     retire_session(id)
   end
 

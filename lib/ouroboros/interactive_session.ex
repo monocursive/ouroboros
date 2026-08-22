@@ -588,6 +588,19 @@ defmodule Ouroboros.InteractiveSession do
   @spec context(session()) :: {:ok, map()} | {:error, term()}
   def context(session), do: call(session, :context)
 
+  @doc "D6. Rewind a native session to `to_turn`; `what` is `:files`, `:conversation`, or `:both`."
+  def rewind(session, to_turn, what \\ :both)
+
+  def rewind(session, to_turn, what)
+      when is_integer(to_turn) and to_turn >= 0 and what in [:files, :conversation, :both],
+      do: call(session, {:rewind, to_turn, what})
+
+  def rewind(_session, to_turn, what),
+    do: {:error, {:invalid_rewind, %{to_turn: to_turn, what: what}}}
+
+  @doc "D6. The turns a native session can be rewound to, newest first."
+  def rewind_points(session), do: call(session, :rewind_points)
+
   @doc """
   Hands this session's work to a fresh one seeded with a curated packet.
 

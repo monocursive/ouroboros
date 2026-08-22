@@ -50,6 +50,8 @@
       "interactive.replay",
       "interactive.request_approval",
       "interactive.respond_approval",
+      "interactive.rewind",
+      "interactive.rewind_points",
       "interactive.send_message",
       "interactive.start",
       "interactive.steer",

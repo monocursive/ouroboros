@@ -292,6 +292,40 @@ defmodule Ouroboros.Interactive.Task do
   # conversation to fold. A vendor CLI's own compaction is surfaced as an event when it
   # reports one; imitating it here would be a summary Ouroboros invented for a transcript
   # it never had.
+  def handle_call({:rewind, to_turn, what}, _from, runtime) do
+    case native_transport(runtime.session, :rewind) do
+      {:ok, pid} ->
+        result =
+          case safe_session_call(fn -> NativeSession.rewind(pid, to_turn, what) end) do
+            {:ok, report} when is_map(report) -> {:ok, durable(report)}
+            {:error, reason} -> {:error, {:rewind_refused, durable(reason)}}
+            other -> {:error, {:rewind_refused, durable(other)}}
+          end
+
+        {:reply, result, runtime}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  def handle_call(:rewind_points, _from, runtime) do
+    case native_transport(runtime.session, :rewind_points) do
+      {:ok, pid} ->
+        result =
+          case safe_session_call(fn -> NativeSession.rewind_points(pid) end) do
+            {:ok, points} -> {:ok, durable(points)}
+            {:error, reason} -> {:error, {:rewind_refused, durable(reason)}}
+            other -> {:error, {:rewind_refused, durable(other)}}
+          end
+
+        {:reply, result, runtime}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
+    end
+  end
+
   def handle_call({:compact, focus}, _from, runtime) do
     case native_transport(runtime.session, :compact) do
       {:ok, pid} ->
@@ -2901,13 +2935,13 @@ defmodule Ouroboros.Interactive.Task do
   # The "don't ask again" line a modal can offer. It is the engine's to phrase — this
   # module has no rule language — so the key is present only when C1 is loaded and
   # answered with one, and absent rather than invented when it is not.
-  defp suggested_rule(subject, verdict) do
-    case permissions_engine(:suggest, 2) do
+  defp suggested_rule(subject, _verdict) do
+    case permissions_engine(:suggest, 1) do
       nil ->
         nil
 
       engine ->
-        case apply(engine, :suggest, [subject, verdict]) do
+        case apply(engine, :suggest, [subject]) do
           rule when is_binary(rule) and rule != "" -> rule
           _nothing_to_suggest -> nil
         end
@@ -2918,20 +2952,91 @@ defmodule Ouroboros.Interactive.Task do
     :exit, _reason -> nil
   end
 
+  # The engine's own request shape — the same one `shell_request/2` and the native agent
+  # build — so a bridged Claude approval is judged by the rules an operator wrote, not
+  # normalised to an unknown tool that no rule can match. Claude's prompt-tool input names
+  # the tool in its own vocabulary (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`,
+  # `WebFetch`, `mcp__server__tool`); what each one reads or writes is taken from its
+  # input, and anything unrecognised is classified as an execution so it asks.
   defp permission_subject(runtime, request) do
     session = runtime.session
+    tool_name = to_string(Map.get(request, :tool_name) || "")
+    input = if(is_map(Map.get(request, :input)), do: Map.get(request, :input), else: %{})
+    cwd = Map.get(request, :cwd) || session.workspace
+    tool = permission_tool(tool_name)
 
     %{
-      session_id: session.id,
-      provider: session.provider,
-      workspace: session.workspace,
-      transport: Map.get(session.options, :transport),
-      tool_name: Map.get(request, :tool_name),
-      input: Map.get(request, :input),
-      cwd: Map.get(request, :cwd) || session.workspace,
-      tool_use_id: Map.get(request, :tool_use_id),
-      origin: :external
+      principal: %{session_id: session.id, provider: session.provider, node: node()},
+      tool: tool,
+      command: if(tool == "bash", do: string_field(input, ["command"]), else: nil),
+      paths: permission_paths(input, cwd),
+      mode: permission_mode(tool),
+      domains: permission_domains(input),
+      context: %{
+        workspace: session.workspace,
+        cwd: cwd,
+        tool_name: tool_name,
+        tool_use_id: Map.get(request, :tool_use_id),
+        transport: Map.get(session.options, :transport),
+        origin: :external
+      }
     }
+  end
+
+  defp permission_tool(name) do
+    case String.downcase(name) do
+      "bash" -> "bash"
+      "powershell" -> "bash"
+      "write" -> "write"
+      "edit" -> "edit"
+      "multiedit" -> "edit"
+      "notebookedit" -> "edit"
+      "read" -> "read"
+      "glob" -> "glob"
+      "grep" -> "grep"
+      "ls" -> "ls"
+      "webfetch" -> "web_fetch"
+      "websearch" -> "web_search"
+      "mcp__" <> _rest = mcp -> mcp
+      other when other != "" -> other
+      _blank -> "unknown"
+    end
+  end
+
+  defp permission_mode("bash"), do: :execute
+  defp permission_mode(tool) when tool in ["write", "edit"], do: :write
+  defp permission_mode(tool) when tool in ["read", "glob", "grep", "ls"], do: :read
+  defp permission_mode(tool) when tool in ["web_fetch", "web_search"], do: :network
+  defp permission_mode(_tool), do: :execute
+
+  defp permission_paths(input, cwd) do
+    ["file_path", "path", "notebook_path"]
+    |> Enum.map(&string_field(input, [&1]))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&Path.expand(&1, cwd))
+    |> Enum.uniq()
+  end
+
+  defp permission_domains(input) do
+    case string_field(input, ["url"]) do
+      nil ->
+        []
+
+      url ->
+        case URI.parse(url) do
+          %URI{host: host} when is_binary(host) and host != "" -> [host]
+          _other -> []
+        end
+    end
+  end
+
+  defp string_field(input, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(input, key) || Map.get(input, String.to_atom(key)) do
+        value when is_binary(value) and value != "" -> value
+        _other -> nil
+      end
+    end)
   end
 
   defp permissions_engine(function, arity) do

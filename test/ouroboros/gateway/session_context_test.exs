@@ -138,6 +138,43 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   end
 
   describe "refusal by capability" do
+    test "rewind is operate, rewind_points is read, and both are advertised" do
+      table = Methods.table()
+      assert table["interactive.rewind"].scope == :operate
+      assert "interactive.rewind" in Methods.names()
+      refute Methods.permits?(:read, table["interactive.rewind"])
+      assert table["interactive.rewind_points"].scope == :read
+      assert "interactive.rewind_points" in Methods.names()
+      assert Methods.permits?(:read, table["interactive.rewind_points"])
+    end
+
+    test "rewind on a non-native transport is refused by transport, as wire data", %{id: id} do
+      start_session(id)
+
+      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0})
+
+      assert details["verb"] == "rewind"
+
+      assert {:error, -32_006, _message, ["unsupported_on_transport", points]} =
+               Methods.invoke("interactive.rewind_points", %{"id" => id})
+
+      assert points["verb"] == "rewind_points"
+      retire_session(id)
+    end
+
+    test "rewind refuses a target that is neither a turn id nor an ordinal", %{id: id} do
+      start_session(id)
+
+      assert {:error, -32_602, _message} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => -1})
+
+      assert {:error, -32_602, _message} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0, "what" => "all"})
+
+      retire_session(id)
+    end
+
     test "compact on a non-native transport travels as wire data naming the transport",
          %{id: id} do
       start_session(id)

@@ -264,6 +264,10 @@ defmodule Ouroboros.Gateway.Methods do
     # starts nothing, so it sits with the other reads. `handoff` starts a session, so it
     # inherits `interactive.start`'s ceiling and its outcome admission.
     "interactive.compact" => %{scope: :operate, timeout: @compaction_timeout},
+    # D6. Rewind restores files byte-exact from the native session's own checkpoints and
+    # truncates its conversation; it is the native transport's verb and refused elsewhere.
+    "interactive.rewind" => %{scope: :operate, timeout: @compaction_timeout},
+    "interactive.rewind_points" => %{scope: :read, timeout: @default_timeout},
     # B7. The operator's own shell, in the session's admitted workspace, on its owner
     # node. `:operate` and nothing less: it runs a command. The ceiling is the runner's
     # own — ten minutes — because the gateway killing the task would leave a ledger entry
@@ -867,6 +871,38 @@ defmodule Ouroboros.Gateway.Methods do
   # D9. Compaction is the one verb here whose refusal is a capability answer rather than a
   # parameter one: `unsupported_on_transport` names the transport that cannot do it, so a
   # client greys the key out instead of offering an action that will always fail.
+  # D6. `to_turn` names the turn to return to; `what` is `files`, `conversation`, or
+  # `both` (the default). The answer says which files were restored and which could not
+  # be, because a bash command's effects are nobody's checkpoint.
+  def invoke("interactive.rewind", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "to_turn", "what", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, to_turn} <- fetch_rewind_target(params, "to_turn"),
+           {:ok, what} <-
+             fetch_optional_enum(params, "what", %{
+               "files" => :files,
+               "conversation" => :conversation,
+               "both" => :both
+             }) do
+        reply(InteractiveSession.rewind(session, to_turn, what || :both))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  def invoke("interactive.rewind_points", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "node"]),
+           {:ok, session} <- session_target(:interactive, params) do
+        reply(InteractiveSession.rewind_points(session))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   def invoke("interactive.compact", params) do
     safe(fn ->
       with :ok <- only_keys(params, ["id", "focus", "node"]),
@@ -1972,6 +2008,16 @@ defmodule Ouroboros.Gateway.Methods do
 
       _other ->
         {:invalid, "params.input.#{key} must be a list of at most #{limit} nonempty strings"}
+    end
+  end
+
+  # A rewind target is a turn id or a non-negative turn ordinal, exactly what the native
+  # session's `rewind_points` hands back.
+  defp fetch_rewind_target(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a turn id or a non-negative turn number"}
     end
   end
 
