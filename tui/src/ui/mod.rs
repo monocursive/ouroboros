@@ -46,6 +46,7 @@
 //! opens it in `$VISUAL`/`$EDITOR` through the same suspend/resume the composer's `ctrl+g`
 //! uses.
 
+pub mod access;
 pub mod app;
 pub mod boot;
 pub mod code;
@@ -72,7 +73,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -208,6 +209,229 @@ static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
 /// change this client refuses to make.
 static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(true);
 
+/// The theme name the operator asked for, as a [`theme::ThemeName`] discriminant.
+///
+/// Kept apart from the *resolved* palette because the two are different facts and both are
+/// needed: the palette is what draws, and the name is what has to be reported when the
+/// environment overrode it or the terminal declined to answer. Process-wide for the same
+/// reason [`MOUSE_CAPTURE`] is — [`Screen::enter`] is where the terminal can be asked, and
+/// it runs before there is an `App`.
+static THEME_REQUEST: AtomicU8 = AtomicU8::new(0);
+
+/// Whether `NO_COLOR` was set in the environment this process started in.
+static THEME_NO_COLOR: AtomicBool = AtomicBool::new(false);
+
+/// What the terminal answered: 0 not asked or no answer, 1 dark, 2 light.
+static THEME_BACKGROUND: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the terminal was actually asked.
+///
+/// The difference between "asked and got nothing" and "never asked" is the difference
+/// between a sentence the operator needs and a sentence about a question nobody put. A
+/// `--print` run, a piped `ouro run`, and every test process are all the second case.
+static THEME_PROBED: AtomicBool = AtomicBool::new(false);
+
+fn theme_request() -> theme::ThemeName {
+    let at = THEME_REQUEST.load(Ordering::SeqCst) as usize;
+    theme::ThemeName::ALL
+        .get(at)
+        .copied()
+        .unwrap_or(theme::ThemeName::Auto)
+}
+
+fn theme_background() -> Option<theme::Background> {
+    match THEME_BACKGROUND.load(Ordering::SeqCst) {
+        1 => Some(theme::Background::Dark),
+        2 => Some(theme::Background::Light),
+        _ => None,
+    }
+}
+
+/// States the operator's theme answer and installs the palette it resolves to *without*
+/// asking the terminal anything.
+///
+/// Called once, from `main`, on the config it already read. The terminal cannot be
+/// questioned yet — there is no raw mode and the reply would be line-buffered somewhere
+/// nobody is reading — so `auto` resolves to dark here and is revisited by
+/// [`probe_theme`] the moment a screen is taken over. That ordering is deliberate: every
+/// surface that draws before then draws in a palette rather than in whatever the last
+/// process left behind.
+pub fn set_theme(name: theme::ThemeName, no_color: bool) {
+    let at = theme::ThemeName::ALL
+        .iter()
+        .position(|candidate| *candidate == name)
+        .unwrap_or(0);
+
+    THEME_REQUEST.store(at as u8, Ordering::SeqCst);
+    THEME_NO_COLOR.store(no_color, Ordering::SeqCst);
+    theme::install(theme::resolve(name, no_color, None));
+}
+
+/// Asks the terminal for its background and re-resolves, when and only when `auto` was
+/// what the operator asked for.
+///
+/// Skipped for a named theme because there would be nothing to do with the answer, and
+/// skipped under `NO_COLOR` because the answer cannot change the outcome. A probe with no
+/// consequence is a hundred milliseconds spent on nothing and a window in which a
+/// keystroke can be swallowed.
+fn probe_theme() {
+    if theme_request() != theme::ThemeName::Auto || THEME_NO_COLOR.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let background = probe_background();
+    THEME_BACKGROUND.store(
+        match background {
+            Some(theme::Background::Dark) => 1,
+            Some(theme::Background::Light) => 2,
+            None => 0,
+        },
+        Ordering::SeqCst,
+    );
+    THEME_PROBED.store(true, Ordering::SeqCst);
+
+    theme::install(theme::resolve(
+        theme::ThemeName::Auto,
+        THEME_NO_COLOR.load(Ordering::SeqCst),
+        background,
+    ));
+}
+
+/// The sentence to show when what is drawing is not what was asked for, or `None` when it
+/// is. The honesty invariant, for palettes.
+///
+/// Silent until the terminal has been asked. "This terminal did not answer" is a
+/// complaint about a question that was put; before [`probe_theme`] runs there is no
+/// question and therefore nothing to report, which is the state a `--print` run, a piped
+/// `ouro run`, and every test process stay in.
+pub fn theme_note() -> Option<String> {
+    let name = theme_request();
+    if name == theme::ThemeName::Auto && !THEME_PROBED.load(Ordering::SeqCst) {
+        // …except under `NO_COLOR`, which is knowable without asking anyone.
+        return match THEME_NO_COLOR.load(Ordering::SeqCst) {
+            true => theme::resolution_note(name, true, None),
+            false => None,
+        };
+    }
+
+    theme::resolution_note(
+        name,
+        THEME_NO_COLOR.load(Ordering::SeqCst),
+        theme_background(),
+    )
+}
+
+/// Switches the palette and remembers the name, for `/theme`.
+///
+/// The request is updated too, so a later [`theme_note`] does not go on explaining an
+/// `auto` the operator has since overridden by hand.
+pub fn switch_theme(name: theme::ThemeName) {
+    let at = theme::ThemeName::ALL
+        .iter()
+        .position(|candidate| *candidate == name)
+        .unwrap_or(0);
+
+    THEME_REQUEST.store(at as u8, Ordering::SeqCst);
+    theme::install(theme::resolve(
+        name,
+        THEME_NO_COLOR.load(Ordering::SeqCst),
+        theme_background(),
+    ));
+}
+
+/// How long the OSC 11 background query waits for an answer.
+///
+/// A terminal that implements the sequence answers immediately; one that does not answers
+/// never, and the difference has to be a timeout because there is no capability to ask
+/// about first. A tenth of a second is long enough for a reply over ssh and short enough
+/// that nobody attributes it to this client being slow to start.
+const BACKGROUND_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Asks the terminal what colour its background is, for `[theme] name = "auto"`.
+///
+/// ## Why it happens here
+///
+/// This is the same shape as the kitty-keyboard question a few lines below: write a query,
+/// read what comes back, believe the answer and only the answer. Both run inside
+/// [`Screen::enter`], after raw mode and before the event loop owns stdin — which is the
+/// only window in which reading a reply off the terminal is not racing the reader thread
+/// for the operator's keystrokes.
+///
+/// ## What it costs when the terminal does not answer
+///
+/// Up to [`BACKGROUND_QUERY_TIMEOUT`], once, at startup. Nothing is retried and nothing is
+/// assumed: `None` means "this terminal did not say", and
+/// [`theme::resolve`](crate::ui::theme::resolve) turns that into the dark palette *and*
+/// into a sentence saying why, rather than into a guess.
+///
+/// ## The honest limit
+///
+/// Bytes that arrive in the window and are not an OSC 11 reply are read and dropped. In
+/// practice the window is the first hundred milliseconds after the alternate screen was
+/// entered and nothing else is talking, but a keystroke typed into that window on a
+/// terminal that never answers can be lost. That is the trade the query makes, and it is
+/// why it is only made when the operator asked for `auto`.
+fn probe_background() -> Option<theme::Background> {
+    use std::os::unix::io::AsRawFd;
+
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+
+    // `?` asks; the reply comes back as `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` and a terminator.
+    if write!(io::stdout(), "\x1b]11;?\x07")
+        .and_then(|()| io::stdout().flush())
+        .is_err()
+    {
+        return None;
+    }
+
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    let deadline = std::time::Instant::now() + BACKGROUND_QUERY_TIMEOUT;
+    let mut collected = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        // SAFETY: one initialised `pollfd` describing a descriptor this process owns.
+        let ready = unsafe { libc::poll(&mut poll, 1, remaining.as_millis() as libc::c_int) };
+        if ready <= 0 {
+            return None;
+        }
+
+        let mut buffer = [0u8; 64];
+        // SAFETY: reading at most `buffer.len()` bytes into `buffer`.
+        let read =
+            unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+
+        if read <= 0 {
+            return None;
+        }
+
+        collected.extend_from_slice(&buffer[..read as usize]);
+
+        if let Some(background) = theme::parse_osc11(&collected) {
+            return Some(background);
+        }
+
+        // A cap as well as a deadline: a terminal streaming something that is not a reply
+        // must not turn a bounded probe into an unbounded read.
+        if collected.len() > 512 {
+            return None;
+        }
+    }
+}
+
 /// Whether this terminal can tell `Shift+Enter` from `Enter`.
 ///
 /// Without the kitty protocol the two are the same bytes — Terminal.app, iTerm2's default
@@ -290,6 +514,12 @@ impl Screen {
         }));
 
         enable_raw_mode().context("putting the terminal into raw mode")?;
+
+        // Before the alternate screen and before the event loop: this is the only moment
+        // in the process when the terminal can be asked a question and nobody else is
+        // reading the answer. `auto` only.
+        probe_theme();
+
         io::stdout()
             .execute(EnterAlternateScreen)
             .context("entering the alternate screen")?
@@ -493,9 +723,29 @@ where
     // this client owes a frame to.
     let _ = terminal.backend_mut().execute(BeginSynchronizedUpdate);
 
+    // OSC 133, and only in screen-reader mode. The markers bracket the frame rather than
+    // the composer's own row: this is a full-screen application, so the "prompt" a
+    // semantic-prompt terminal can jump to is the screen whose caret ratatui parks in the
+    // composer at the end of `draw`. Inside the synchronized bracket for the same reason
+    // the cursor is — an escape that leaks between frames is the WezTerm flicker in R2 §8.
+    // Emitted always-off by default because a terminal that implements OSC 133 and is
+    // *not* driving a screen reader would start recording one prompt per frame.
+    let marked = access::screen_reader();
+    if marked {
+        let _ = terminal
+            .backend_mut()
+            .write_all(access::PROMPT_START.as_bytes());
+    }
+
     // The `CompletedFrame` borrows the terminal, and this needs it back to close the
     // bracket. Nothing here reads the frame, so the borrow ends on the same line.
     let drawn = terminal.draw(render).map(|_frame| ());
+
+    if marked {
+        let _ = terminal
+            .backend_mut()
+            .write_all(access::PROMPT_END.as_bytes());
+    }
 
     // Closed on the way out whatever happened above. Leaving mode 2026 set would freeze
     // the operator's terminal on the last frame it managed to present.

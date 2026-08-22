@@ -43,6 +43,7 @@ use ratatui::Frame;
 
 use crate::runtime::{LogRing, Stream};
 
+use super::access;
 use super::theme;
 use super::Screen;
 
@@ -485,14 +486,16 @@ pub fn draw(frame: &mut Frame, progress: &BootProgress, ticks: u64) {
 }
 
 fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        if progress.failure().is_some() {
-            " ouroboros — this runtime did not start "
-        } else {
-            " ouroboros "
-        },
-        theme::heading(),
-    ));
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .title(Span::styled(
+            if progress.failure().is_some() {
+                " ouroboros — this runtime did not start "
+            } else {
+                " ouroboros "
+            },
+            theme::heading(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -503,10 +506,10 @@ fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
         let (marker, style) = match step.state {
             StepState::Doing => (
                 theme::spinner(ticks).to_string(),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
-            StepState::Done => ("✓".to_string(), Style::default().fg(theme::GOOD)),
-            StepState::Failed => ("✗".to_string(), Style::default().fg(theme::BAD)),
+            StepState::Done => ("✓".to_string(), Style::default().fg(theme::good())),
+            StepState::Failed => ("✗".to_string(), Style::default().fg(theme::bad())),
         };
 
         lines.push(Line::from(vec![
@@ -514,8 +517,8 @@ fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
             Span::styled(
                 step.label.clone(),
                 match step.state {
-                    StepState::Done => Style::default().fg(theme::MUTED),
-                    StepState::Failed => Style::default().fg(theme::BAD),
+                    StepState::Done => Style::default().fg(theme::muted()),
+                    StepState::Failed => Style::default().fg(theme::bad()),
                     StepState::Doing => Style::default(),
                 },
             ),
@@ -525,7 +528,7 @@ fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
     for warning in progress.warnings() {
         lines.push(Line::from(Span::styled(
             format!("!  {warning}"),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     }
 
@@ -534,16 +537,18 @@ fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 error.to_string(),
-                Style::default().fg(theme::BAD).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::bad())
+                    .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(Span::styled(
                 "press any key — this is also printed to stderr on the way out",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         None => lines.push(Line::from(Span::styled(
             "the runtime is starting; nothing is being asked of you",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
     }
 
@@ -558,8 +563,8 @@ fn output(frame: &mut Frame, area: Rect, progress: &BootProgress) {
     }
 
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::MUTED))
+        .borders(access::borders(Borders::ALL))
+        .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(" runtime output ", theme::heading()));
 
     let inner = block.inner(area);
@@ -569,7 +574,7 @@ fn output(frame: &mut Frame, area: Rect, progress: &BootProgress) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "nothing has been started yet",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             inner,
         );
@@ -585,7 +590,7 @@ fn output(frame: &mut Frame, area: Rect, progress: &BootProgress) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "the runtime has printed nothing yet",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             inner,
         );
@@ -603,7 +608,7 @@ fn output(frame: &mut Frame, area: Rect, progress: &BootProgress) {
                     // stderr here is ordinary runtime logging rather than a fault.
                     Style::default()
                 } else {
-                    Style::default().fg(theme::MUTED)
+                    Style::default().fg(theme::muted())
                 },
             ))
         })

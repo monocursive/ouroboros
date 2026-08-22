@@ -1874,6 +1874,19 @@ impl App {
             return true;
         }
 
+        // A10. Bare `/theme` cycles; `/theme <name>` goes straight to one. Both take effect
+        // on the next frame, which is the preview: there is nothing to preview a palette
+        // *in* but the screen already showing the conversation.
+        if trimmed == "/theme" {
+            self.cycle_theme();
+            return true;
+        }
+
+        if let Some(name) = slash_arg(trimmed, "/theme") {
+            self.choose_theme(name);
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),

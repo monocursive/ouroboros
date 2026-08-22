@@ -1789,6 +1789,132 @@ rediscovered:
   spawner, which is a truthful pane rather than a hidden tab; the gateway streams no logs
   (§6 defers it).
 
+### Themes (A10)
+
+`[theme] name = "auto" | "dark" | "light" | "ansi" | "dark-daltonized" | "light-daltonized"`,
+default `auto`. `/theme` cycles the five named ones live and writes down whichever the
+operator stops on; `/theme <name>` goes straight to one. A name this build does not have is
+refused *by name* — the alternatives are listed and nothing changes — rather than quietly
+becoming the default. It is a typed command with a `/` completion entry and, for now, no
+row in the `Ctrl+P` palette; the palette's catalogue is being edited alongside this and a
+second entry in it would have been a merge conflict rather than a feature.
+
+The palette is a [`Theme`](../tui/src/ui/theme.rs) value resolved once at startup, held as
+an index in an atomic rather than behind a lock: colour accessors run thousands of times a
+frame and the value changes when somebody presses a key. Nothing outside `theme.rs` names a
+`Color`. The one exception is `statusline.rs`, whose job is to *decode* the SGR escapes an
+operator's own script emitted — a literal there is the escape's meaning, not a palette
+bypass.
+
+| palette | ground | built from |
+|---|---|---|
+| `dark` | dark | the sixteen ANSI names — exactly what this client drew before themes existed |
+| `light` | white | RGB |
+| `ansi` | the terminal's own | the sixteen ANSI names only (Kiro's "safe" theme) |
+| `dark-daltonized` | dark | RGB, diffs on the blue/orange axis |
+| `light-daltonized` | white | RGB, same axis |
+| `no-color` | the terminal's own | nothing; modifiers carry what colour was carrying |
+
+The light and daltonized palettes are RGB and that is a deliberate exception to the
+"terminal's own colours" rule rather than a drift: measured against white on the reference
+xterm palette, ANSI green is 2.16:1, cyan 1.98:1 and yellow 1.70:1, so a light theme built
+from names is a light theme nobody can read. Where this client picks the hue it owns the
+contrast, and a test walks every token of every palette against its declared ground — 4.5:1
+(WCAG AA body text) for the RGB palettes, 3.0:1 for the named ones, where the reference RGB
+is only a stand-in for whatever the operator's terminal actually draws. That check is what
+moved code-block calls and keys off `Color::Blue`, which measures 2.23:1 on black.
+
+`auto` asks the terminal what colour its background is with an OSC 11 query
+(`ESC ] 11 ; ? BEL`) and a 100 ms budget, in `Screen::enter` — after raw mode, before the
+event loop owns stdin, beside the kitty-keyboard probe for the same reason. The reply is
+read at whatever hex width the terminal answered in (one to four digits per channel) and
+turned into dark or light by relative luminance, so a saturated blue background is dark. A
+terminal that does not answer gets the dark palette **and a sentence saying the question
+went unanswered** — the asymmetry is deliberate: a light palette on a dark ground is
+unreadable, a dark palette on a light ground is merely low-contrast.
+
+`NO_COLOR` (<https://no-color.org>) wins over everything, including a named theme, and says
+so: presence is the signal, an empty value is the documented way to say nothing. Every
+token becomes `Color::Reset` and the three places where colour *was* the whole message pick
+up a modifier instead — `theme::availability`, `theme::session_status`, and the diff line
+styles, which is why those are functions in `theme.rs` rather than colours at their call
+sites.
+
+### Accessibility (A10)
+
+`[accessibility] screen_reader = true`, `ouro --ax-screen-reader`, or
+`OURO_SCREEN_READER=1` — any of the three turns it on, because an unreadable screen is a
+much worse failure than a plainer one. It implies `reduced_motion`, one way.
+`[accessibility] reduced_motion = true`, `OURO_REDUCED_MOTION`, and `PREFERS_REDUCED_MOTION`
+set that half on its own. `0`, `false`, and `no` still mean no.
+
+Screen-reader mode is Claude Code's `--ax-screen-reader` (R2 §7):
+
+- **Labelled lines, no box drawing.** The canonical taxonomy — `you:`, `agent:`,
+  `thinking:`, `tool:`, `tool error:`, `error:`, `warning:`, `approval needed:` — one prefix
+  per block. Not a third renderer: `/raw` was already a plain, labelled one, so it grew a
+  `Vocabulary`. Raw is for a *selection* (one row per logical line, nothing folded, this
+  client's own shorthand); screen-reader is for a *voice* (the colon, a 32-row budget per
+  block, ` · ` said as a comma, and `… +12 lines · ctrl+o` said as
+  "12 more lines not shown here; press ctrl+o to show all").
+- **Static spinners.** The working indicator is the word `working:` rather than a braille
+  glyph that changes ten times a second.
+- **Numbered menus.** Overlay rows are `1.` through `9.` and the digit selects. Only in this
+  mode: those are ordinary characters everywhere else.
+- **A bell on attention**, whether or not the terminal has focus — `when = "unfocused"` is
+  built on the assumption that someone looking at the screen has already seen what happened,
+  and that is the assumption this mode drops. `mode = "auto"` picks the bell over OSC 9 here
+  because a desktop notification is a thing on a screen; an explicit `osc9` or `off` is
+  still the operator's answer.
+- **OSC 133 prompt markers**, `ESC ] 133 ; A BEL` … `ESC ] 133 ; B BEL`, bracketing each
+  frame inside the synchronized update where the cursor escapes already are. This is a
+  full-screen application rather than a shell, so what the markers bracket is the screen
+  whose caret ratatui parks in the composer — stated rather than implied.
+
+`reduced_motion` holds the spinner on one frame, stops its verb rotating, and leaves the
+streaming caret lit instead of blinking.
+
+**Honest limits.** The `/details` tree still draws its `├──` connectors, and the logo on
+the coding home is still ASCII art; both are outside the transcript renderer this slice
+replaced. Nothing detects a screen reader — there is no such probe — so all three switches
+are things a person states.
+
+### Performance (A12)
+
+`tui/tests/perf.rs` builds a synthetic 5,000-event session in the proportions a real one
+arrives in and measures one 120×40 frame through `Watch::recent_entries` →
+`transcript_cells::project` → `render_cells_at`. 5,000 because that is the number the field
+publishes (Amp Neo's 5,000-message thread, R2 §8) and because it is `transcript::WINDOW`.
+
+Measured on Apple Silicon, worst of eight warm frames over three runs:
+
+| build | cold frame | worst warm frame |
+|---|---|---|
+| `--release` | 1.2–2.0 ms | **0.63–1.30 ms** |
+| debug | 4.5–4.9 ms | **2.63–2.68 ms** |
+
+The release number is the one A12 budgets and it is more than twelve times under the 16 ms
+frame. The asserted ceiling is the debug one at 40 ms, deliberately generous: an
+unoptimised build on a loaded CI box is not what the budget is about, and a gate that fails
+on a busy machine is a gate people delete. What it catches is the shape.
+
+Two things it caught:
+
+- **`Watch::entries` was O(ledger) per frame.** It built five thousand `Entry` values so the
+  pane could keep the last 128. `Watch::recent_entries(limit)` walks the tail — the same
+  interleaving code entered at a bounded start, with a test asserting it is exactly the tail
+  of the whole walk over a ledger carrying a raised floor, a hole, notes, and a terminal
+  status. 3.16 ms → 2.76 ms in debug, and a 500-entry session now costs what a 5,000-entry
+  one does. The pane's divider counts *events* rather than entries, because the number of
+  entries below a window cannot be had without the walk it replaces.
+- **The Markdown memo was too small for its own window.** Sixteen renders against a
+  128-entry projection window. On an agentic session that happened to be enough; on a
+  prose-heavy one, where the window holds sixty-four agent messages, it measured **0 hits in
+  640 lookups** — each frame evicting exactly what the next one wanted. The ceiling is
+  `CHAT_ENTRY_WINDOW` now and the same measurement is 640 of 640. The memo also keys on the
+  theme generation, so a `/theme` switch misses rather than answering with rows the previous
+  palette styled.
+
 ### 3.5 Rust tests
 
 Codec framing (split/joined/oversized lines); golden-fixture decode (the

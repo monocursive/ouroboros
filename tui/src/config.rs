@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{ApprovalMode, SandboxMode};
 use crate::runtime::xdg_root;
+use crate::ui::theme::ThemeName;
 
 /// The directory this client keeps its preferences in, under the XDG config root.
 pub const CONFIG_DIR: &str = "ouroboros";
@@ -99,6 +100,64 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub keys: KeysConfig,
+    #[serde(default)]
+    pub theme: ThemeConfig,
+    #[serde(default)]
+    pub accessibility: AccessibilityConfig,
+}
+
+/// Which palette this client draws in. `[theme]` in `config.toml`.
+///
+/// One key, because a theme is a name and not a set of overrides: custom palettes are a
+/// file format, a hot-reload story, and a validation surface, and none of those are what
+/// A10 is. The names are [`crate::ui::theme::ThemeName`], and an unreadable one is
+/// reported by [`normalise`] rather than silently swapped — an operator who wrote
+/// `solarized` should be told this build does not have it, not left looking at dark and
+/// wondering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeConfig {
+    /// `auto` (the default), `dark`, `light`, `ansi`, `dark-daltonized`,
+    /// `light-daltonized`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ThemeConfig {
+    pub fn name(&self) -> ThemeName {
+        self.name
+            .as_deref()
+            .and_then(ThemeName::parse)
+            .unwrap_or_default()
+    }
+}
+
+/// `[accessibility]`: the two settings that change what is drawn rather than what colour
+/// it is drawn in.
+///
+/// Neither is a form default and neither is guessed. A screen reader is a fact about the
+/// person at the keyboard, and this client has no way to detect one — which is why the
+/// answer is a file, a flag, and an environment variable rather than a probe.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityConfig {
+    /// Labelled lines, no box drawing, static spinners, numbered menus, a bell on
+    /// attention. Claude Code's `--ax-screen-reader`.
+    #[serde(default)]
+    pub screen_reader: bool,
+    /// Stops the spinner and the streaming caret. Implied by `screen_reader`, and settable
+    /// on its own by anyone who finds a moving terminal unpleasant without needing the
+    /// rest of the mode.
+    #[serde(default)]
+    pub reduced_motion: bool,
+}
+
+impl crate::ui::access::Accessibility for &AccessibilityConfig {
+    fn screen_reader(self) -> bool {
+        self.screen_reader
+    }
+
+    fn reduced_motion(self) -> bool {
+        self.reduced_motion
+    }
 }
 
 /// Chords this operator has rebound.
@@ -478,6 +537,24 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.notifications.mode);
     blank_to_none(&mut config.notifications.when);
     blank_to_none(&mut config.keys.backtrack);
+    blank_to_none(&mut config.theme.name);
+
+    if let Some(name) = config.theme.name.clone() {
+        if ThemeName::parse(&name).is_none() {
+            problems.push(format!(
+                "{}: theme.name is {name:?}, which is not one of {}; treating it as unset \
+                 (auto)",
+                path.display(),
+                ThemeName::ALL
+                    .iter()
+                    .map(|theme| theme.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            config.theme.name = None;
+        }
+    }
 
     if let Some(chord) = config.keys.backtrack.clone() {
         if Backtrack::parse(&chord).is_none() {

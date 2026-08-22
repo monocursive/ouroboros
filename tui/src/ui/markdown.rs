@@ -38,7 +38,7 @@
 //! printable cells by the wrapper, the buffer diff, and the scroll arithmetic alike. This
 //! is the same call [`super::statusline`] already makes for the same reason.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -147,20 +147,30 @@ pub fn plain(rendered: &Rendered) -> String {
 
 /// How many rendered messages one thread keeps.
 ///
-/// Enough for a screenful of agent turns, so scrolling does not evict what is on it.
-const MEMO_ENTRIES: usize = 16;
+/// The conversation pane projects [`crate::ui::sessions::CHAT_ENTRY_WINDOW`] entries and
+/// re-renders every one of them on every frame, so the memo has to be able to hold a whole
+/// window's worth of prose or it evicts on the way round and hits nothing. Sixteen was a
+/// screenful and measured a 0% hit rate at five thousand entries; this is the window, with
+/// [`MEMO_BYTES`] still the real ceiling.
+pub const MEMO_ENTRIES: usize = 192;
 
 /// …and how much source text those entries may hold between them. A cap in bytes as well
 /// as in entries, because the cost of remembering a message is the message.
-const MEMO_BYTES: usize = 4 * 1024 * 1024;
+pub const MEMO_BYTES: usize = 4 * 1024 * 1024;
 
-/// What a memo is filed under. The rows are a function of exactly these four things.
+/// What a memo is filed under. The rows are a function of exactly these five things.
+///
+/// `theme` is the palette generation: every span these rows carry was styled with the
+/// palette that was active when they were built, so a `/theme` switch has to miss. It is a
+/// counter rather than the palette itself because "which theme" is the theme module's
+/// business and "did it change" is all this needs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
     hash: u64,
     width: usize,
     max_lines: usize,
     streaming: bool,
+    theme: u64,
 }
 
 struct Memo {
@@ -173,6 +183,60 @@ struct Memo {
 
 thread_local! {
     static MEMOS: RefCell<Vec<Memo>> = const { RefCell::new(Vec::new()) };
+    static COUNTS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// What the memo has been asked for and what it managed to answer.
+///
+/// A cache with no hit rate is a cache nobody can tell is working: at five thousand
+/// entries the previous ceiling of sixteen memos was evicting a whole conversation window
+/// on every frame and answering *none* of them, and the only visible symptom was that
+/// scrolling felt slow. `tests/perf.rs` asserts the rate; these are the numbers it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemoStats {
+    pub hits: u64,
+    pub misses: u64,
+    /// How many rendered messages are resident.
+    pub entries: usize,
+    /// How much source text they hold between them.
+    pub bytes: usize,
+}
+
+impl MemoStats {
+    /// Hits as a fraction of lookups, or `None` before anything has been asked.
+    pub fn hit_rate(self) -> Option<f64> {
+        let asked = self.hits + self.misses;
+        (asked > 0).then(|| self.hits as f64 / asked as f64)
+    }
+}
+
+pub fn memo_stats() -> MemoStats {
+    let (hits, misses) = COUNTS.with(Cell::get);
+    let (entries, bytes) = MEMOS.with(|memos| {
+        let memos = memos.borrow();
+        (
+            memos.len(),
+            memos.iter().map(|memo| memo.text.len()).sum::<usize>(),
+        )
+    });
+
+    MemoStats {
+        hits,
+        misses,
+        entries,
+        bytes,
+    }
+}
+
+/// Forgets the counters, so a measurement is of the frames it meant to measure.
+pub fn reset_memo_stats() {
+    COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+/// Empties the memo. Only a test that is measuring a cold cache has any use for this.
+pub fn clear_memo() {
+    MEMOS.with(|memos| memos.borrow_mut().clear());
+    reset_memo_stats();
 }
 
 /// [`render_limited`], remembered.
@@ -189,6 +253,7 @@ pub fn render_cached(text: &str, width: usize, max_lines: usize, streaming: bool
         width,
         max_lines,
         streaming,
+        theme: theme::generation(),
     };
 
     let hit = MEMOS.with(|memos| {
@@ -202,6 +267,14 @@ pub fn render_cached(text: &str, width: usize, max_lines: usize, streaming: bool
         let rendered = Rc::clone(&memo.rendered);
         memos.insert(0, memo);
         Some(rendered)
+    });
+
+    COUNTS.with(|counts| {
+        let (hits, misses) = counts.get();
+        match hit.is_some() {
+            true => counts.set((hits + 1, misses)),
+            false => counts.set((hits, misses + 1)),
+        }
     });
 
     if let Some(rendered) = hit {
@@ -1791,13 +1864,13 @@ Done.";
             .style
             .add_modifier
             .contains(Modifier::BOLD));
-        assert_eq!(find(&spans, "One").style.fg, Some(theme::SYSTEM));
+        assert_eq!(find(&spans, "One").style.fg, Some(theme::system()));
         assert!(find(&spans, "One")
             .style
             .add_modifier
             .contains(Modifier::UNDERLINED));
 
-        assert_eq!(find(&spans, "Two").style.fg, Some(theme::SYSTEM));
+        assert_eq!(find(&spans, "Two").style.fg, Some(theme::system()));
         assert!(!find(&spans, "Two")
             .style
             .add_modifier
@@ -1809,7 +1882,7 @@ Done.";
             .add_modifier
             .contains(Modifier::BOLD));
 
-        assert_eq!(find(&spans, "Five").style.fg, Some(theme::MUTED));
+        assert_eq!(find(&spans, "Five").style.fg, Some(theme::muted()));
 
         // Never a banner: one source line of heading is one rendered row.
         assert_eq!(
@@ -1843,7 +1916,7 @@ Done.";
 
         let code = find(&spans, "mix test");
         assert_eq!(code.content.as_ref(), "`mix test`");
-        assert_eq!(code.style.fg, Some(theme::SYSTEM));
+        assert_eq!(code.style.fg, Some(theme::system()));
     }
 
     #[test]
@@ -1853,7 +1926,7 @@ Done.";
         for needle in ["`one`", "`two`", "`three`"] {
             assert_eq!(
                 find(&spans, needle).style.fg,
-                Some(theme::SYSTEM),
+                Some(theme::system()),
                 "{needle} lost its channel"
             );
         }
@@ -1866,7 +1939,7 @@ Done.";
         for needle in ["`alpha", "delta`"] {
             assert_eq!(
                 find(&spans, needle).style.fg,
-                Some(theme::SYSTEM),
+                Some(theme::system()),
                 "{needle}"
             );
         }
@@ -1903,8 +1976,8 @@ Done.";
     fn a_task_list_draws_a_box_the_terminal_can_measure() {
         let spans = spans_of("- [ ] open\n- [x] shut\n", 40);
 
-        assert_eq!(find(&spans, "[ ] ").style.fg, Some(theme::MUTED));
-        assert_eq!(find(&spans, "[x] ").style.fg, Some(theme::GOOD));
+        assert_eq!(find(&spans, "[ ] ").style.fg, Some(theme::muted()));
+        assert_eq!(find(&spans, "[x] ").style.fg, Some(theme::good()));
     }
 
     #[test]
@@ -2019,7 +2092,7 @@ Done.";
         );
         assert_eq!(
             find(&spans, "(https://example.com/d)").style.fg,
-            Some(theme::MUTED)
+            Some(theme::muted())
         );
 
         let once = shown("See <https://example.com/d>.", 60);
@@ -2132,15 +2205,23 @@ Done.";
         assert!(rows.iter().any(|row| row == "After."), "{rows:?}");
     }
 
+    /// Every colour this renderer emits is one the active [`theme`] declared.
+    ///
+    /// Named through the tokens rather than as literals: the point of the check is that
+    /// nothing here invented a hue, and a list of `Color::Cyan` and friends would only be
+    /// true of the palette that happens to be installed.
     #[test]
     fn colour_stays_inside_the_palette_the_client_owns() {
+        let declared: Vec<Color> = theme::current()
+            .tokens()
+            .iter()
+            .map(|(_name, colour)| *colour)
+            .collect();
+
         for span in spans_of(SAMPLER, 100) {
             if let Some(colour) = span.style.fg {
                 assert!(
-                    matches!(
-                        colour,
-                        Color::Cyan | Color::DarkGray | Color::Green | Color::Yellow
-                    ),
+                    declared.contains(&colour),
                     "{colour:?} is outside the transcript's palette"
                 );
             }

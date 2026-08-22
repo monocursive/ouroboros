@@ -47,6 +47,18 @@ const TOOL_TAIL_LINES: usize = 6;
 const TOOL_OUTPUT_LINES: usize = TOOL_HEAD_LINES + TOOL_TAIL_LINES;
 /// The live tail window for streaming command output (Kiro, Cursor): the newest rows, not
 /// the oldest, because a command that is still running is watched at its end.
+/// How many ledger entries the conversation pane projects.
+///
+/// A redraw budget, not a retention policy: the projection is rebuilt on every frame, so
+/// the surface is bounded to a useful recent suffix and the pane says how much it is not
+/// drawing. The complete retained ledger stays available through `/details`.
+///
+/// It lives here rather than in the pane because two other things are sized against it —
+/// [`super::markdown::MEMO_ENTRIES`], which has to be able to hold a whole window of prose
+/// or it evicts on the way round, and [`super::transcript::Watch::recent_entries`], which
+/// walks exactly this many.
+pub const CHAT_ENTRY_WINDOW: usize = 128;
+
 const COMMAND_OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = super::diff::COMPACT_LINES;
 /// How many calls one grouped exploration cell lists before it starts counting instead.
@@ -58,6 +70,14 @@ const STATUS_DETAIL_LINES: usize = 32;
 /// two thousand rows is more than any terminal shows at once while still bounding the wrap
 /// work one frame can be asked to do.
 const VERBOSE_LINES: usize = 2_000;
+/// How many rows one block of the plain renderer keeps in screen-reader mode.
+///
+/// Between the pane's compact ceilings and `/raw`'s absence of one. A screen reader plays a
+/// block from its first line, so the cost of drawing too much is not a screenful of
+/// scrolling — it is minutes of speech before the next label. Thirty-two lines is a long
+/// paragraph or a short stack trace, and what is left out is said in a sentence with the
+/// key that shows it.
+const PLAIN_SPOKEN_LINES: usize = 32;
 /// Crush's middle state: the last N lines of a long block, with what came before named.
 const THINKING_TAIL_LINES: usize = 200;
 const AGENT_OUTPUT_BYTES: usize = 128 * 1024;
@@ -106,15 +126,24 @@ impl Verbosity {
         }
     }
 
+    /// The key that shows the rest, in the view the reader is in.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Compact => "ctrl+o",
+            Self::Verbose | Self::Raw => "/details",
+        }
+    }
+
     /// Where the rest of a cut cell lives, phrased for the view the reader is in.
     ///
     /// Kept short on purpose: this row is drawn inside tool frames as narrow as twenty
     /// cells, and a provenance note that is itself truncated has stopped being provenance.
+    ///
+    /// Screen-reader mode has no branch here, and deliberately: it does not use this
+    /// renderer at all. [`render_plain`] draws every cell in that mode and spells its own
+    /// markers out, so a branch here would be a sentence nothing ever says.
     fn provenance(self, what: &str) -> String {
-        match self {
-            Self::Compact => format!("full {what} · ctrl+o"),
-            Self::Verbose | Self::Raw => format!("full {what} · /details"),
-        }
+        format!("full {what} · {}", self.key())
     }
 }
 
@@ -122,15 +151,13 @@ impl Verbosity {
 ///
 /// Phrased as `… +N lines · ctrl+o` rather than as a bare ellipsis because a collapsed cell
 /// that does not say *how much* it hid is a cell the reader has to expand to find out it
-/// hid nothing worth reading.
+/// hid nothing worth reading. The spoken form of the same fact is
+/// [`super::access::omitted`], which is what [`render_plain`] writes instead.
 fn more_lines(omitted: usize, verbosity: Verbosity) -> String {
     format!(
         "… +{omitted} line{} · {}",
         if omitted == 1 { "" } else { "s" },
-        match verbosity {
-            Verbosity::Compact => "ctrl+o",
-            Verbosity::Verbose | Verbosity::Raw => "/details",
-        }
+        verbosity.key()
     )
 }
 
@@ -869,9 +896,14 @@ pub fn render_cells_at(
     // `/raw` is a different renderer, not a flag threaded through this one. Codex's raw
     // mode exists so a terminal selection yields logical lines, and every `if raw` sprinkled
     // through a decorating renderer is another place a gutter survives the toggle.
-    if verbosity.raw() {
+    //
+    // Screen-reader mode wants the same renderer and a different vocabulary: no boxes, no
+    // gutters, no glyph column — and labels that are words with colons rather than the
+    // shorthand a sighted reader scans past. So it is one plain renderer and two
+    // [`Vocabulary`] values, not a third renderer to keep true.
+    if let Some(vocabulary) = Vocabulary::plain(verbosity) {
         for cell in cells {
-            render_raw(&mut lines, cell);
+            render_plain(&mut lines, cell, vocabulary);
         }
         return lines;
     }
@@ -922,23 +954,98 @@ pub fn render_cells_at(
     lines
 }
 
-/// Codex's `/raw`: the same projection with nothing drawn around it.
+/// Which plain rendering is being asked for, and therefore which words label a block.
 ///
-/// No frames, no gutters, no glyph columns, no app-side wrapping — one output row per
-/// logical line, so a native selection (`Shift`/`Option`-drag) yields the text back with no
-/// rule characters or padding in it. Colour stays: it is not part of a copy.
-fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
-    fn label(lines: &mut Vec<Line<'static>>, text: String) {
+/// Both drop the frames, the gutters, the glyph columns, and the app-side wrapping. What
+/// separates them is who is reading: `/raw` is for a *selection* — one output row per
+/// logical line so a `Shift`-drag yields the text back — and screen-reader mode is for a
+/// *voice*, so every label is a word with a colon and every truncation marker is a
+/// sentence instead of `… +12 · ctrl+o`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vocabulary {
+    Raw,
+    ScreenReader,
+}
+
+impl Vocabulary {
+    /// Which plain rendering applies, or `None` for the ordinary decorated one.
+    ///
+    /// Screen-reader mode wins over `/raw`: someone who turned it on is not going to want
+    /// their next `/raw` to take the labels away again.
+    fn plain(verbosity: Verbosity) -> Option<Self> {
+        if super::access::screen_reader() {
+            return Some(Self::ScreenReader);
+        }
+
+        verbosity.raw().then_some(Self::Raw)
+    }
+
+    fn screen_reader(self) -> bool {
+        self == Self::ScreenReader
+    }
+
+    /// One of the eight canonical labels, or the raw mode's bare word.
+    fn label(self, label: super::access::Label, raw: &str) -> String {
+        match self.screen_reader() {
+            true => label.as_str().to_string(),
+            false => raw.to_string(),
+        }
+    }
+
+    /// A label with a detail after it: `tool: Bash · completed` against `Bash · completed`.
+    fn detailed(self, label: super::access::Label, raw: &str, detail: &str) -> String {
+        match self.screen_reader() {
+            true => format!("{} {detail}", label.as_str()),
+            false => match raw.is_empty() {
+                true => detail.to_string(),
+                false => format!("{raw} · {detail}"),
+            },
+        }
+    }
+}
+
+fn render_plain(lines: &mut Vec<Line<'static>>, cell: &Cell, vocabulary: Vocabulary) {
+    use super::access::Label;
+
+    let spoken = vocabulary.screen_reader();
+
+    let label = move |lines: &mut Vec<Line<'static>>, text: String| {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
+
+        // The separators are this client's own punctuation, so they are this client's to
+        // spell differently for a reader that has to say them out loud.
+        let text = match spoken {
+            true => super::access::speakable(&text),
+            false => text,
+        };
+
         lines.push(Line::from(Span::styled(text, theme::label())));
-    }
-    fn body(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
-        for line in text.lines() {
-            lines.push(Line::from(Span::styled(line.to_string(), style)));
+    };
+
+    // `/raw` writes everything: it exists so a selection yields the whole thing back, and
+    // a copying view that folded half the transcript away would be a worse answer than the
+    // one it replaced. Screen-reader mode is the opposite case — a ten-thousand-line tool
+    // result read aloud in full is the thing the mode exists to prevent — so it keeps the
+    // pane's own budget and says, in a sentence, what it left out.
+    let budget = spoken.then_some(PLAIN_SPOKEN_LINES);
+
+    let body = move |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
+        let all: Vec<&str> = text.lines().collect();
+        let shown = budget.map_or(all.len(), |budget| all.len().min(budget));
+
+        for line in all.iter().take(shown) {
+            lines.push(Line::from(Span::styled((*line).to_string(), style)));
         }
-    }
+
+        if let Some(omitted) = all.len().checked_sub(shown).filter(|left| *left > 0) {
+            lines.push(Line::from(Span::styled(
+                super::access::omitted(omitted, "line", "ctrl+o"),
+                theme::quiet(),
+            )));
+        }
+    };
 
     match cell {
         Cell::Message {
@@ -946,21 +1053,31 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
             text,
             streaming,
         } => {
+            let still = match streaming {
+                true => " still writing",
+                false => "",
+            };
+
             label(
                 lines,
-                match (speaker, streaming) {
-                    (Speaker::You, _) => "you",
-                    (Speaker::Agent, false) => "agent",
-                    (Speaker::Agent, true) => "agent · still writing",
-                }
-                .to_string(),
+                match (speaker, vocabulary.screen_reader()) {
+                    (Speaker::You, _) => vocabulary.label(Label::You, "you"),
+                    (Speaker::Agent, true) => format!("{}{still}", Label::Agent.as_str()),
+                    (Speaker::Agent, false) => match streaming {
+                        true => "agent · still writing".to_string(),
+                        false => "agent".to_string(),
+                    },
+                },
             );
             body(lines, text, Style::default());
         }
         Cell::Thinking {
             text, lines: rows, ..
         } => {
-            label(lines, format!("thinking · {rows} lines"));
+            label(
+                lines,
+                vocabulary.detailed(Label::Thinking, "thinking", &format!("{rows} lines")),
+            );
             body(lines, text, theme::quiet());
         }
         Cell::Plan(plan) => {
@@ -982,25 +1099,41 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
         }
         Cell::Usage(usage) => label(lines, usage_note(usage)),
         Cell::Tool(tool) => {
-            label(lines, raw_tool_label(tool));
+            // `tool error:` is a label of its own in the taxonomy because "this call
+            // failed" is the one thing about a tool row that a reader must not have to
+            // infer from a word buried at the end of it.
+            let kind = match tool.state {
+                ToolState::Failed => Label::ToolError,
+                _ => Label::Tool,
+            };
+            label(lines, vocabulary.detailed(kind, "", &raw_tool_label(tool)));
             if let Some(output) = &tool.output {
                 body(lines, &value_text(output), theme::quiet());
             }
         }
         Cell::Exploration(group) => {
-            label(lines, exploration_heading(group));
+            label(
+                lines,
+                vocabulary.detailed(Label::Tool, "", &exploration_heading(group)),
+            );
             for call in &group.calls {
                 lines.push(Line::from(Span::raw(raw_tool_label(call))));
             }
             if group.overflow > 0 {
                 lines.push(Line::from(Span::styled(
-                    format!("+{} more calls · /details", group.overflow),
+                    match vocabulary.screen_reader() {
+                        true => super::access::omitted(group.overflow, "call", "slash details"),
+                        false => format!("+{} more calls · /details", group.overflow),
+                    },
                     theme::quiet(),
                 )));
             }
         }
         Cell::CommandOutput(text) => {
-            label(lines, "command output".to_string());
+            label(
+                lines,
+                vocabulary.detailed(Label::Tool, "", "command output"),
+            );
             body(lines, text, theme::quiet());
         }
         Cell::File(file) => label(
@@ -1020,7 +1153,7 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
                 for hunk in &file.hunks {
                     lines.push(Line::from(Span::styled(
                         super::diff::hunk_label(hunk),
-                        Style::default().fg(theme::ACCENT),
+                        Style::default().fg(theme::accent()),
                     )));
                     for line in &hunk.lines {
                         lines.push(Line::from(Span::styled(
@@ -1047,15 +1180,79 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
         Cell::Status {
             label: heading,
             detail,
-            ..
+            tone,
         } => {
-            label(lines, heading.to_ascii_lowercase());
+            let heading = heading.to_ascii_lowercase();
+            label(
+                lines,
+                match vocabulary.screen_reader() {
+                    true => attention(*tone, &heading),
+                    false => heading,
+                },
+            );
             body(lines, detail, Style::default());
         }
         Cell::ChatNote { text } => label(lines, text.clone()),
         // ASCII, not a box rule: a boundary is still content, and a copied line should not
         // arrive somewhere else carrying U+2500.
-        Cell::Divider { text, .. } => label(lines, format!("-- {text}")),
+        Cell::Divider { text, tone, .. } => label(
+            lines,
+            match vocabulary.screen_reader() {
+                true => attention(*tone, text),
+                false => format!("-- {text}"),
+            },
+        ),
+    }
+}
+
+/// A heading with its attention label in front, said once.
+///
+/// A heading that already carries the label's own words — the projection's
+/// "Approval needed" — becomes the label and nothing else, because "approval needed:
+/// approval needed" is what a taxonomy bolted onto text that already had one sounds like.
+fn attention(tone: Tone, heading: &str) -> String {
+    let Some(named) = tone_label(tone, heading) else {
+        return heading.to_string();
+    };
+
+    let words = named.as_str().trim_end_matches(':');
+    let rest = heading
+        .trim()
+        .strip_prefix(words)
+        .or_else(|| {
+            heading
+                .to_ascii_lowercase()
+                .starts_with(words)
+                .then(|| &heading.trim()[words.len()..])
+        })
+        .map(str::trim)
+        .unwrap_or(heading.trim());
+
+    match rest.is_empty() {
+        true => named.as_str().to_string(),
+        false => format!("{} {rest}", named.as_str()),
+    }
+}
+
+/// Which of the three attention labels a tone and its heading amount to.
+///
+/// A status row is the only cell whose *kind* is carried by a colour, so screen-reader
+/// mode is the one rendering that has to turn it back into a word. "Approval needed" is
+/// picked out of the warning tone by what the heading says rather than by a fourth tone,
+/// because the projection already distinguishes them in the only place that matters — the
+/// text — and inventing a tone for it would put the same fact in two places.
+fn tone_label(tone: Tone, heading: &str) -> Option<super::access::Label> {
+    use super::access::Label;
+
+    let heading = heading.to_ascii_lowercase();
+    if heading.contains("approval needed") {
+        return Some(Label::ApprovalNeeded);
+    }
+
+    match tone {
+        Tone::Error => Some(Label::Error),
+        Tone::Warning => Some(Label::Warning),
+        Tone::Muted | Tone::Success => None,
     }
 }
 
@@ -1070,8 +1267,8 @@ fn raw_sign(kind: super::diff::LineKind) -> &'static str {
 
 fn raw_diff_style(kind: super::diff::LineKind) -> Style {
     match kind {
-        super::diff::LineKind::Added => Style::default().fg(theme::GOOD),
-        super::diff::LineKind::Removed => Style::default().fg(theme::BAD),
+        super::diff::LineKind::Added => theme::diff_added(),
+        super::diff::LineKind::Removed => theme::diff_removed(),
         _ => Style::default(),
     }
 }
@@ -1146,10 +1343,12 @@ pub fn render_plan(lines: &mut Vec<Line<'static>>, plan: &PlanUpdate, width: usi
 
     for step in &plan.steps {
         let style = match step.status {
-            PlanStatus::Done => Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
-            PlanStatus::InProgress => Style::default().fg(theme::ACCENT),
+            PlanStatus::Done => Style::default()
+                .fg(theme::good())
+                .add_modifier(Modifier::DIM),
+            PlanStatus::InProgress => Style::default().fg(theme::accent()),
             PlanStatus::Pending => theme::quiet(),
-            PlanStatus::Other(_) => Style::default().fg(theme::WARN),
+            PlanStatus::Other(_) => Style::default().fg(theme::warn()),
         };
         let suffix = match &step.status {
             PlanStatus::Other(status) => format!("  ({status})"),
@@ -1207,7 +1406,7 @@ fn render_thinking(
                 ThinkingState::Collapsed => "  ctrl+o expands",
                 _ => "",
             },
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
     ]));
 
@@ -1689,7 +1888,7 @@ fn render_user_message(
         return;
     }
 
-    let border = Style::default().fg(theme::MUTED);
+    let border = Style::default().fg(theme::muted());
     let heading_width = "┌─ ▌ YOU ".width();
     lines.push(Line::from(vec![
         Span::styled("┌─ ", border),
@@ -1745,14 +1944,14 @@ fn render_agent_message(
 ) {
     let message_lines = verbosity.lines(MESSAGE_LINES);
     lines.push(Line::from(vec![
-        Span::styled("◆ ", Style::default().fg(theme::SYSTEM)),
+        Span::styled("◆ ", Style::default().fg(theme::system())),
         Span::styled(
             "AGENT",
             Style::default()
-                .fg(theme::SYSTEM)
+                .fg(theme::system())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" / RESPONSE", Style::default().fg(theme::SYSTEM)),
+        Span::styled(" / RESPONSE", Style::default().fg(theme::system())),
     ]));
 
     // Agent prose is Markdown. Everything about how it becomes styled rows — the block
@@ -1770,7 +1969,13 @@ fn render_agent_message(
     }
 
     if streaming {
-        let caret = if tick % 8 < 5 { "▌" } else { " " };
+        // A caret that blinks is a cell that changes eight times a second forever. Reduced
+        // motion keeps the mark — it is still true that this message is not finished — and
+        // stops it moving.
+        let caret = match super::access::reduced_motion() || tick % 8 < 5 {
+            true => "▌",
+            false => " ",
+        };
         // A caret on a closed frame's floor reads as damage; only live content earns one.
         let on_live_content = lines
             .last()
@@ -1781,7 +1986,7 @@ fn render_agent_message(
             if let Some(last_line) = lines.last_mut() {
                 last_line
                     .spans
-                    .push(Span::styled(caret, Style::default().fg(theme::ACCENT)));
+                    .push(Span::styled(caret, Style::default().fg(theme::accent())));
             }
         }
     }
@@ -1793,13 +1998,13 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
     let (mark, mark_style) = match tool.state {
         ToolState::Running => (
             theme::spinner(tick).to_string(),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
-        ToolState::Completed => ("✓".to_string(), Style::default().fg(theme::GOOD)),
-        ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::BAD)),
+        ToolState::Completed => ("✓".to_string(), Style::default().fg(theme::good())),
+        ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::bad())),
     };
     let name_style = match tool.state {
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Failed => Style::default().fg(theme::bad()),
         _ => Style::default(),
     };
     let summary = summarise(tool);
@@ -1844,7 +2049,7 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
         head.push(Span::styled(
             outcome,
             match tool.state {
-                ToolState::Failed => Style::default().fg(theme::BAD),
+                ToolState::Failed => Style::default().fg(theme::bad()),
                 _ => theme::quiet(),
             },
         ));
@@ -1853,7 +2058,7 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
         head.push(Span::styled(
             state_suffix,
             match tool.state {
-                ToolState::Failed => Style::default().fg(theme::BAD),
+                ToolState::Failed => Style::default().fg(theme::bad()),
                 _ => theme::quiet(),
             },
         ));
@@ -1888,7 +2093,7 @@ fn render_tool(
                     verbosity.lines(TOOL_OUTPUT_LINES),
                     &verbosity.provenance("result"),
                     if tool.state == ToolState::Failed {
-                        Style::default().fg(theme::BAD)
+                        Style::default().fg(theme::bad())
                     } else {
                         theme::quiet()
                     },
@@ -1899,9 +2104,9 @@ fn render_tool(
     }
 
     let border = match tool.state {
-        ToolState::Running => Style::default().fg(theme::SYSTEM),
-        ToolState::Completed => Style::default().fg(theme::GOOD),
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Running => Style::default().fg(theme::system()),
+        ToolState::Completed => Style::default().fg(theme::good()),
+        ToolState::Failed => Style::default().fg(theme::bad()),
     };
     lines.push(Line::from(Span::styled(
         format!("┌{}┐", "─".repeat(width.saturating_sub(2))),
@@ -1937,7 +2142,7 @@ fn render_tool_body(
     }
 
     let body = match tool.state {
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Failed => Style::default().fg(theme::bad()),
         _ => theme::quiet(),
     };
     let content_width = width.saturating_sub(4).max(8);
@@ -2070,7 +2275,7 @@ fn render_exploration(
     let (mark, mark_style) = if running {
         (
             theme::spinner(tick).to_string(),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         )
     } else {
         ("•".to_string(), theme::quiet())
@@ -2081,7 +2286,7 @@ fn render_exploration(
         Span::styled(
             super::tree::truncate(&exploration_heading(group), width.saturating_sub(4).max(8)),
             if failed > 0 {
-                Style::default().fg(theme::WARN)
+                Style::default().fg(theme::warn())
             } else {
                 theme::quiet()
             },
@@ -2111,9 +2316,9 @@ fn render_exploration(
             Span::styled(
                 format!("{mark} "),
                 match call.state {
-                    ToolState::Failed => Style::default().fg(theme::BAD),
-                    ToolState::Completed => Style::default().fg(theme::GOOD),
-                    ToolState::Running => Style::default().fg(theme::ACCENT),
+                    ToolState::Failed => Style::default().fg(theme::bad()),
+                    ToolState::Completed => Style::default().fg(theme::good()),
+                    ToolState::Running => Style::default().fg(theme::accent()),
                 },
             ),
             Span::styled(
@@ -2307,7 +2512,7 @@ fn render_diff(
                 heading,
                 Style::default()
                     .fg(if cell.pending_approval {
-                        theme::WARN
+                        theme::warn()
                     } else {
                         file.status.colour()
                     })
@@ -2380,7 +2585,7 @@ fn render_diffstat(
         Span::styled("  ± ", theme::quiet()),
         Span::styled(
             super::diff::diffstat(files, additions, deletions, in_excerpt),
-            Style::default().fg(theme::SYSTEM),
+            Style::default().fg(theme::system()),
         ),
     ]));
 }
@@ -2441,7 +2646,7 @@ fn render_indented_text(
     if wrapped.len() > shown {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("… {omitted}"), Style::default().fg(theme::MUTED)),
+            Span::styled(format!("… {omitted}"), Style::default().fg(theme::muted())),
         ]));
     }
 }
@@ -3010,22 +3215,22 @@ fn file_mark(kind: Option<&str>) -> (&'static str, Color) {
     let kind = kind.unwrap_or("modified").to_ascii_lowercase();
 
     if kind.contains("add") || kind.contains("creat") {
-        ("A", theme::GOOD)
+        ("A", theme::good())
     } else if kind.contains("delet") || kind.contains("remov") {
-        ("D", theme::BAD)
+        ("D", theme::bad())
     } else if kind.contains("renam") || kind.contains("mov") {
-        ("R", theme::ACCENT)
+        ("R", theme::accent())
     } else {
-        ("M", theme::WARN)
+        ("M", theme::warn())
     }
 }
 
 fn colour(tone: Tone) -> Color {
     match tone {
-        Tone::Muted => theme::MUTED,
-        Tone::Success => theme::GOOD,
-        Tone::Warning => theme::WARN,
-        Tone::Error => theme::BAD,
+        Tone::Muted => theme::muted(),
+        Tone::Success => theme::good(),
+        Tone::Warning => theme::warn(),
+        Tone::Error => theme::bad(),
     }
 }
 
@@ -3930,7 +4135,7 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .find(|span| span.content == "fn")
             .expect("the fn keyword");
-        assert_eq!(keyword.style.fg, Some(ratatui::style::Color::Magenta));
+        assert_eq!(keyword.style.fg, Some(theme::code_keyword()));
     }
 
     #[test]
@@ -3949,7 +4154,7 @@ mod tests {
             .expect("the inline code");
 
         assert_eq!(code.content.as_ref(), "`mix test`");
-        assert_eq!(code.style.fg, Some(theme::SYSTEM));
+        assert_eq!(code.style.fg, Some(theme::system()));
     }
 
     #[test]

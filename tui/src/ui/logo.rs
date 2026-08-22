@@ -89,16 +89,16 @@ fn occupied(y: usize, x: usize) -> bool {
 fn style(treatment: Treatment) -> Style {
     match treatment {
         Treatment::Static => Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::BOLD),
         Treatment::Alive { tick } => {
             // A slow pulse on the home mark so an idle coding surface still feels live.
             if (tick / 8) % 2 == 0 {
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(theme::accent())
             }
         }
     }

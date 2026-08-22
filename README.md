@@ -508,8 +508,8 @@ interrupt` only while a turn is running on a transport that declared an interrup
 reported is left out rather than guessed, which is why a context percentage does not
 appear yet: no runtime reports a model's window.
 
-Two optional tables tune the chrome. Neither is on by default, and unknown values are
-reported and treated as unset rather than refused:
+Four optional tables tune the chrome. None of them is on by default, and unknown values
+are reported and treated as unset rather than refused:
 
 ```toml
 [statusline]
@@ -522,7 +522,37 @@ command = "jq -r '\"\\(.session.provider) · \\(.modes.approval_mode // \"—\")
 mode = "auto"        # auto | bell | osc9 | off — auto is OSC 9 on iTerm2, WezTerm,
                      # Ghostty, and kitty, and the bell everywhere else
 when = "unfocused"   # unfocused | always
+
+[theme]
+name = "auto"        # auto | dark | light | ansi | dark-daltonized | light-daltonized
+
+[accessibility]
+screen_reader = false   # labelled lines, no boxes, static spinners, numbered menus
+reduced_motion = false  # implied by screen_reader; stops the spinner and the caret
 ```
+
+`auto` asks the terminal what colour its background is (OSC 11, 100 ms) and picks `dark`
+or `light` from the answer; a terminal that does not answer gets `dark` **and a line
+saying the question went unanswered**, because a light palette on a dark ground is
+unreadable while the reverse is merely low-contrast. `ansi` is the safe theme — named
+ANSI colours only, so a remapped terminal palette is the one that renders. The daltonized
+pair puts diff additions and removals on the blue/orange axis instead of green/red.
+`/theme` cycles them live and writes down the one you stop on; `/theme <name>` goes
+straight to one, and a name this build does not have is refused by name.
+
+`NO_COLOR=1` ([no-color.org](https://no-color.org)) overrides all of it, including a named
+theme, and says that it did: every colour becomes the terminal's own foreground and the
+distinctions that were carried by colour — plane availability, session status, diff
+add/remove — are carried by weight instead.
+
+`ouro --ax-screen-reader` (or `OURO_SCREEN_READER=1`, or the config key) draws for a screen
+reader: labelled lines instead of boxes — `you:`, `agent:`, `thinking:`, `tool:`,
+`tool error:`, `error:`, `warning:`, `approval needed:` — the word `working:` instead of a
+spinning glyph, truncation markers spelled out as sentences, overlay rows numbered `1.`
+through `9.` and selectable by digit, a bell on approval-requested and turn-complete
+whether or not the terminal has focus, and OSC 133 prompt markers around each frame.
+`OURO_REDUCED_MOTION=1` or `PREFERS_REDUCED_MOTION=1` takes the smaller half on its own:
+the spinner holds one frame and the streaming caret stops blinking.
 
 The status-line command runs on the machine the *client* is on, which is not necessarily
 the machine a fleet session is on. It is fed

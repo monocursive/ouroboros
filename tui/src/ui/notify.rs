@@ -113,18 +113,33 @@ impl Terminal {
 }
 
 /// Which channel a configured mode resolves to on this terminal, or `None` for off.
+///
+/// `auto` resolves to the bell in screen-reader mode even on a terminal that renders
+/// OSC 9. A desktop notification is a thing on a screen; the bell is the one channel that
+/// reaches a person who is listening rather than looking, and A10's rule is a bell.
+/// An operator who wrote `mode = "osc9"` still gets OSC 9, and `off` is still off — a mode
+/// that overrode an explicit answer would be this client deciding for them.
 pub fn channel(mode: NotifyMode, terminal: &Terminal) -> Option<Channel> {
     match mode {
         NotifyMode::Off => None,
         NotifyMode::Bell => Some(Channel::Bell),
         NotifyMode::Osc9 => Some(Channel::Osc9),
+        NotifyMode::Auto if super::access::screen_reader() => Some(Channel::Bell),
         NotifyMode::Auto if terminal.renders_osc9() => Some(Channel::Osc9),
         NotifyMode::Auto => Some(Channel::Bell),
     }
 }
 
 /// Whether the configured condition allows a notification right now.
+///
+/// Screen-reader mode rings whether or not this terminal has focus. "Unfocused" is a
+/// default built on the assumption that a person looking at the screen has already seen
+/// what happened, and that assumption is exactly the one the mode exists to drop.
 pub fn permitted(when: NotifyWhen, focused: bool) -> bool {
+    if super::access::screen_reader() {
+        return true;
+    }
+
     match when {
         NotifyWhen::Always => true,
         NotifyWhen::Unfocused => !focused,

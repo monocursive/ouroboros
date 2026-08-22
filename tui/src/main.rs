@@ -84,12 +84,37 @@ async fn run(cli: Cli) -> Result<()> {
     // depend on a preference file being well-formed. `--dev` reads the same one: which
     // provider a person prefers is a fact about the person, not about which runtime they
     // started.
-    let config = config::load_default();
+    let mut config = config::load_default();
 
     // Stated before anything takes over a terminal. The boot screen enters the alternate
     // screen ahead of the App, and a mouse captured there and released a second later would
     // already have cost the operator the selection this setting exists to keep.
     ui::set_mouse_capture(config.config.terminal.mouse);
+
+    // Same rule, for the same reason: the boot screen draws before there is an `App`, and a
+    // client that spent its first two seconds in the wrong palette and then switched would
+    // be doing the silent screen-model change this client refuses to make.
+    //
+    // `NO_COLOR` is read here rather than inside the theme module so that resolution stays
+    // a pure function of its arguments. Presence is the signal, per <https://no-color.org>;
+    // an empty value is the documented way to say nothing.
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    ui::set_theme(config.config.theme.name(), no_color);
+
+    let accessibility = ouro::ui::access::resolve(
+        &config.config.accessibility,
+        cli.ax_screen_reader,
+        &ouro::ui::access::Env::from_env(),
+    );
+    ouro::ui::access::install(accessibility);
+
+    // A palette that is not the one the file asked for is a fact the operator is owed. The
+    // terminal-background half of this is only known after a screen exists, so it is said
+    // again from `App` on the first tick; this half is knowable now and reaches a `--print`
+    // run and a piped `ouro run`, which never get a notice row at all.
+    if let Some(note) = ui::theme_note() {
+        config.problems.push(note);
+    }
 
     match cli.command {
         None => attach_local(&paths, cli.dev, config).await,
