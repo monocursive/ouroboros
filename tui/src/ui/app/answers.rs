@@ -640,6 +640,9 @@ impl App {
             other => format!("{label} on {id} failed: {other}"),
         };
 
+        // B4. A refusal that named an attachment belongs beside the chips that caused it,
+        // not only in a notice row that scrolls away in eight seconds.
+        self.note_attachment_refusal(&text);
         self.inform(text, NoticeKind::Error);
     }
 

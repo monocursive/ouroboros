@@ -94,6 +94,16 @@ impl App {
             return;
         }
 
+        // B5. The backtrack chord, claimed before the composer and the transcript keys and
+        // *after* the overlays, so an Escape that is closing something still closes it.
+        //
+        // The first Escape of an `Esc Esc` does its ordinary job as well as arming the
+        // chord — Esc always interrupts, which is Claude Code #16905 — so this returns only
+        // for the second one.
+        if self.backtrack_chord(key) {
+            return;
+        }
+
         // The composer is always focused, so these have to be claimed before Up/Down
         // become prompt history. The wheel is handled as Msg::Scroll, not as keys.
         if self.transcript_scroll_key(key) {
@@ -101,7 +111,7 @@ impl App {
         }
 
         if matches!(key.code, KeyCode::Char('?')) && !shift && self.focused_prompt_empty() {
-            self.overlay = Some(Overlay::Help);
+            self.open_help();
             return;
         }
 
@@ -147,7 +157,7 @@ impl App {
                 self.select_tab(Tab::ALL[index]);
             }
             KeyCode::Char('q') => self.open_quit(),
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
@@ -164,6 +174,50 @@ impl App {
             KeyCode::Char('x') => self.open_close_confirm(),
             KeyCode::Char(',') => self.open_settings(),
             _ => {}
+        }
+    }
+
+    /// Handles the backtrack chord, returning whether it consumed the key.
+    ///
+    /// Rebindable from `config.toml` on day one (`[keys] backtrack`). Claude Code #43717 is
+    /// what happens otherwise: a hardcoded double-Escape that "cannot be rebound or
+    /// disabled" and breaks zsh vi-mode for everyone who uses it.
+    fn backtrack_chord(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        match self.config.keys.backtrack() {
+            Backtrack::Off => false,
+            Backtrack::AltUp => {
+                if key.code == KeyCode::Up && key.modifiers == KeyModifiers::ALT {
+                    self.open_backtrack(None);
+                    return true;
+                }
+
+                false
+            }
+            Backtrack::EscEsc => {
+                if key.code != KeyCode::Esc {
+                    return false;
+                }
+
+                match self.backtrack_arm.take() {
+                    // Within the window: this is the second Escape. The session named by
+                    // the arm is the one to go back through — the first Escape may have
+                    // left it, and reopening the thing the operator was just looking at is
+                    // the only reading of a double-Escape that is not a surprise.
+                    Some((until, key)) if self.ticks < until => {
+                        self.open_backtrack(Some(key));
+                        true
+                    }
+                    _first_or_expired => {
+                        if let Some(open) = self.sessions.open.clone() {
+                            self.backtrack_arm = Some((self.ticks + BACKTRACK_TICKS, open));
+                        }
+
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -190,7 +244,7 @@ impl App {
             KeyCode::Char('x') => self.open_close_confirm(),
             KeyCode::Char('o') | KeyCode::Char('d') => self.toggle_session_details(),
             KeyCode::Char('q') => self.open_quit(),
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.open_help(),
             KeyCode::Char(',') => self.open_settings(),
             _ => self.inform(
                 "ctrl+x n new · w write · l sessions · e editor · y copy · [ scrollback · \

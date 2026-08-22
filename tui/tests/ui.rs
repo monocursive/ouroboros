@@ -1978,6 +1978,12 @@ fn an_identical_newer_draft_is_not_cleared_by_an_older_reconciliation() {
     assert_ne!(second.params["turn_id"], first_id);
 }
 
+/// B3 changed what a second Enter *does*, and left untouched what it must never do.
+///
+/// Before the visible queue, B was refused and left in the editor for the operator to
+/// press Enter on again. Now B is accepted into the queue — but the invariant this test
+/// exists for is unchanged: B does not cross the gateway until A has been classified, and
+/// it carries its own turn id when it does.
 #[test]
 fn same_session_follow_ups_are_issued_in_submission_order() {
     let mut app = with_open_session();
@@ -2004,12 +2010,12 @@ fn same_session_follow_ups_are_issued_in_submission_order() {
     );
     assert_eq!(
         app.sessions
-            .composer
-            .as_ref()
-            .expect("B remains visibly editable")
-            .editor
-            .text(),
-        "second queued instruction"
+            .open_queued_drafts()
+            .iter()
+            .map(|queued| queued.input.prompt())
+            .collect::<Vec<_>>(),
+        vec!["second queued instruction"],
+        "B is held in the visible queue rather than refused"
     );
 
     answer(
@@ -2017,20 +2023,14 @@ fn same_session_follow_ups_are_issued_in_submission_order() {
         first.tag,
         json!({ "id": first_id, "status": "running" }),
     );
-    assert!(
-        app.drain()
-            .into_iter()
-            .all(|call| call.method != "interactive.follow_up"),
-        "classification never submits a visible draft without another Enter"
-    );
-    app.apply(key(KeyCode::Enter));
     let second = app
         .drain()
         .into_iter()
         .find(|call| call.method == "interactive.follow_up")
-        .expect("B is issued after A is accepted and the operator confirms it");
+        .expect("B is issued as soon as A is classified");
     assert_eq!(second.params["input"], "second queued instruction");
     assert_ne!(second.params["turn_id"], first_id);
+    assert!(app.sessions.open_queued_drafts().is_empty());
 }
 
 #[test]
@@ -2062,6 +2062,17 @@ fn an_unknown_first_submission_reconciles_before_a_visible_second_draft() {
         tag: first.tag,
         result: Err(ClientError::ConnectionClosed),
     });
+
+    // B3: a queued draft never overtakes an outcome-unknown turn. The queue stays held
+    // while the reconciliation is outstanding, exactly as the visible draft used to be.
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.follow_up"),
+        "the queue does not release B while A is unreconciled"
+    );
+    assert_eq!(app.sessions.open_queued_drafts().len(), 1);
+
     app.apply(key(KeyCode::Enter));
     let first_retry = app
         .drain()
@@ -2076,18 +2087,11 @@ fn an_unknown_first_submission_reconciles_before_a_visible_second_draft() {
         first_retry.tag,
         json!({ "id": first_id, "status": "running" }),
     );
-    assert!(
-        app.drain()
-            .into_iter()
-            .all(|call| call.method != "interactive.follow_up"),
-        "reconciliation leaves B visible rather than auto-submitting it"
-    );
-    app.apply(key(KeyCode::Enter));
     let second = app
         .drain()
         .into_iter()
         .find(|call| call.method == "interactive.follow_up")
-        .expect("B is sent only after A reconciles and Enter is pressed again");
+        .expect("B is released once A has reconciled");
     assert_eq!(second.params["input"], "second locally queued instruction");
     assert_ne!(second.params["turn_id"], first_id);
 }
@@ -2647,10 +2651,12 @@ fn scrolling_back_stops_at_the_top_instead_of_counting_past_it() {
 fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     let mut app = with_open_session();
 
+    // The session is running, so Enter reaches Harness's durable queueing verb and the
+    // chrome says "queues" rather than "sends" (B3: blurring the two is R1 §4d(2)).
     app.keyboard_enhanced = false;
     let plain = render(&mut app, 120, 30);
     assert!(
-        plain.contains("Ctrl+J newline · Enter sends"),
+        plain.contains("Ctrl+J newline · Enter queues"),
         "{}",
         plain.text()
     );
@@ -2659,7 +2665,7 @@ fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     app.keyboard_enhanced = true;
     let enhanced = render(&mut app, 120, 30);
     assert!(
-        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter sends"),
+        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter queues"),
         "{}",
         enhanced.text()
     );

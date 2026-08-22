@@ -13,9 +13,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const HISTORY_LIMIT: usize = 100;
+/// How many un-collected `@` completions the editor will hold. Four more than the
+/// gateway's attachment ceiling, so a full composer still records the one it will refuse
+/// and can say why.
+const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 28] = [
+pub(crate) const COMMANDS: [(&str, &str); 32] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -24,6 +28,10 @@ pub(crate) const COMMANDS: [(&str, &str); 28] = [
     ("/copy", "copy the last agent message"),
     ("/interrupt", "abort the running turn"),
     ("/steer", "steer the running turn"),
+    ("/effort", "reasoning effort for the next turn only"),
+    ("/backtrack", "go back to an earlier message"),
+    ("/fork", "fork this session"),
+    ("/model", "change the model on this session"),
     ("/editor", "edit this prompt in $EDITOR"),
     ("/connect", "connect or inspect ChatGPT"),
     ("/runtime", "open runtime and distribution"),
@@ -107,6 +115,11 @@ impl CompletionCatalog {
 pub enum EditorAction {
     None,
     Submit,
+    /// The second send key (`Alt+Enter`). What it *means* is the caller's to decide: the
+    /// editor does not know whether the open session can be steered, and B3's whole point
+    /// is that queue and steer are two explicit keys rather than one key whose meaning
+    /// depends on timing (R1 §4d(2); Codex #13595, #17285).
+    SubmitAlternate,
     Cancel,
     Scroll(isize),
 }
@@ -116,6 +129,8 @@ pub enum EditorAction {
 pub struct Editor {
     text: String,
     cursor: usize,
+    /// Paths applied from `@` completion and not yet lifted into attachment chips.
+    completed_paths: Vec<String>,
     preferred_column: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -125,6 +140,14 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// The `@path` completions applied since this was last called.
+    ///
+    /// Drained rather than read: the composer lifts each one into a chip exactly once, and
+    /// a buffer that kept them would re-attach the same file on every keystroke.
+    pub fn take_completed_paths(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.completed_paths)
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -217,11 +240,15 @@ impl Editor {
                     EditorAction::Cancel
                 }
             }
+            // The second send key. Only reachable where the terminal reports the modifier
+            // at all — without the kitty keyboard protocol `Alt+Enter` arrives as a bare
+            // `Enter` — and the composer chrome advertises it on exactly that condition.
+            KeyCode::Enter if alt => EditorAction::SubmitAlternate,
             // Only reachable where the terminal reports the modifier at all: without the
             // kitty keyboard protocol, `Shift+Enter` arrives as a bare `Enter` and submits.
             // The footers advertise it on exactly that condition; `Ctrl+J` below is the
             // newline every terminal can send.
-            KeyCode::Enter if shift || alt => {
+            KeyCode::Enter if shift => {
                 self.insert("\n");
                 EditorAction::None
             }
@@ -636,6 +663,19 @@ impl Editor {
         if item.kind == CompletionKind::File {
             self.text.insert(self.cursor, ' ');
             self.cursor += 1;
+
+            // B4. The `@path` stays in the prompt — a sentence that reads "fix @src/app.rs"
+            // is the sentence the operator wrote — and the path *also* leaves here as a
+            // structured attachment, which is the half the gateway has accepted since
+            // `structured_turn_input` landed and no client ever sent.
+            //
+            // Bounded, and by more than the composer's own ceiling: this buffer is drained
+            // on the next keystroke, so anything left in it is a completion nobody
+            // collected.
+            if self.completed_paths.len() < COMPLETED_PATH_LIMIT {
+                self.completed_paths
+                    .push(item.value.trim_start_matches('@').to_string());
+            }
         }
 
         self.preferred_column = None;

@@ -625,6 +625,9 @@ impl App {
                     method,
                     params,
                 ));
+                // The first prompt of a session is a prompt: it is the one that teaches
+                // the most, and it is the one the coding home's tips were beside.
+                self.count_prompt();
             } else {
                 if let Some(composer) = self.sessions.composer.as_mut() {
                     composer.editor.clear_text();
@@ -692,8 +695,10 @@ impl App {
             .or_default();
         if !pending.iter().any(|pending| pending.turn_id == turn_id) {
             pending.push_back(PendingComposerReconciliation {
+                // A first message is typed on the coding home, which has no chips: the
+                // envelope it replays is the prompt and nothing else.
                 kind: PendingReconciliationKind::FirstMessage,
-                input: input.clone(),
+                input: TurnInput::plain(input.clone()),
                 turn_id: turn_id.clone(),
                 submission_sequence,
             });
@@ -745,6 +750,8 @@ impl App {
                         input,
                         generation: 1,
                         reconciliation_owner: None,
+                        attachments: Vec::new(),
+                        reasoning_effort: None,
                     });
                 }
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -758,7 +765,7 @@ impl App {
         &mut self,
         plane: Plane,
         id: &str,
-        input: String,
+        input: TurnInput,
         retry_turn_id: Option<String>,
         verb: ComposerVerb,
         submission_sequence: u64,
@@ -797,11 +804,21 @@ impl App {
             if let Some(composer) = self.sessions.composer.as_mut() {
                 if composer.editor.is_empty() {
                     if let Some(turn_id) = reconciliation_turn_id.as_deref() {
-                        composer.restore_reconciliation(&input, turn_id, &self.completion_catalog);
+                        composer.restore_reconciliation(
+                            input.prompt(),
+                            turn_id,
+                            &self.completion_catalog,
+                        );
                     } else {
-                        composer.editor.paste(&input, &self.completion_catalog);
+                        composer
+                            .editor
+                            .paste(input.prompt(), &self.completion_catalog);
                         composer.user_changed_draft();
                     }
+                    // The chips come back with the text: a restored draft that had lost
+                    // them would send a different turn from the one that was refused.
+                    composer.attachments = input.attachments.clone();
+                    composer.reasoning_effort = input.reasoning_effort;
                     composer.verb = verb;
                     self.remember_composer_history();
                     return ComposerRestoreDisposition::Restored;
@@ -822,9 +839,11 @@ impl App {
             return match self.sessions.composer_drafts.entry(key) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(SavedComposerDraft {
-                        input,
+                        input: input.prompt.clone(),
                         generation: 1,
                         reconciliation_owner: None,
+                        attachments: input.attachments.clone(),
+                        reasoning_effort: input.reasoning_effort,
                     });
                     ComposerRestoreDisposition::SavedForReopen
                 }

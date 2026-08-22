@@ -31,13 +31,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::TryRngCore;
 use serde_json::{json, Value};
 
-use crate::config::{Config, Defaults};
+use crate::config::{Backtrack, Config, Defaults, ONBOARDING_PROMPTS};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
-    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
-    Capabilities, CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode,
-    SessionInfo, StartRequest, StartedRef,
+    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
+    Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
+    SandboxMode, SessionInfo, StartRequest, StartedRef, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -79,13 +79,16 @@ pub use overlays::{
     AccountDialog, AccountFlow, Command, CommandPalette, Overlay, PromptKind, APPROVAL_CHOICES,
     APPROVAL_ROWS, SANDBOX_ROWS,
 };
-pub use session::{Composer, ComposerVerb, SessionsTab};
+pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsField};
 pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
 /// cadences below are counted in these frames so wall-clock meaning stays put.
 pub const TICK: Duration = Duration::from_millis(80);
+
+/// [`TICK`] in milliseconds, for the chord windows that are specified in wall-clock time.
+pub const TICK_MS: u64 = 80;
 
 const STATUS_TICKS: u64 = 38; // ~3s
 const LIST_TICKS: u64 = 38; // ~3s
@@ -97,6 +100,17 @@ const ACCOUNT_LOGIN_TICKS: u64 = 13;
 const NOTICE_TICKS: u64 = 63;
 /// OpenCode waits two seconds after the leader key; this is the same window in ticks.
 const LEADER_TICKS: u64 = 25;
+
+/// How long the first Escape of an `Esc Esc` stays armed, in milliseconds.
+///
+/// Long enough to be a chord and short enough that an Escape pressed twice a second apart
+/// is two Escapes. Named in milliseconds because that is what the doc states and what an
+/// operator would measure; [`BACKTRACK_TICKS`] is the same number in this client's clock.
+pub const BACKTRACK_WINDOW_MS: u64 = 400;
+
+/// [`BACKTRACK_WINDOW_MS`] in ticks, rounded up so the window is never *shorter* than
+/// advertised.
+pub const BACKTRACK_TICKS: u64 = BACKTRACK_WINDOW_MS.div_ceil(TICK_MS);
 /// Pi's double Ctrl+C quit: the second press has to arrive inside this window.
 const CTRL_C_QUIT_TICKS: u64 = 13;
 static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -260,13 +274,17 @@ pub enum Tag {
     /// A composer mutation retains the exact draft and, for dispatched turns, its logical
     /// id until the answer. Steer has no durable request id; retaining a pretend one would
     /// make a lost acknowledgement look safely replayable when it is not.
+    ///
+    /// `input` is the whole turn envelope rather than the prompt alone (B4): a same-id
+    /// reconciliation that replayed the prompt without its attachments would present a
+    /// different fingerprint and come back `:turn_id_conflict`.
     ComposerAction {
         label: &'static str,
         verb: ComposerVerb,
         plane: Plane,
         id: String,
         turn_id: Option<String>,
-        input: String,
+        input: TurnInput,
         reconciling: bool,
         submission_sequence: u64,
     },
@@ -338,6 +356,40 @@ pub enum Msg {
     Focus(bool),
     /// What a `[statusline] command` printed, or why it did not.
     StatusLine(Result<String, String>),
+    /// What the driver found on the clipboard after a `Ctrl+V` (B4).
+    Clipboard(ClipboardOutcome),
+}
+
+/// A `Ctrl+V` the driver should service.
+///
+/// The App does no I/O, and this is I/O twice over: it shells out to whichever clipboard
+/// tool the machine has, and it writes a file. Both happen on the driver's blocking pool,
+/// exactly as `$EDITOR` and `pbcopy` already do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    /// The **session's** workspace, as the runtime reported it. An attachment has to live
+    /// inside it or `authorize_turn_attachments` refuses the turn, so this is where the
+    /// image goes — and a fleet session's workspace is a path on another machine, which
+    /// the driver discovers by failing to find the directory and says so.
+    pub workspace: String,
+    /// The id the file is named after, minted here so the state machine stays the thing
+    /// that decides names.
+    pub id: String,
+}
+
+/// What came back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardOutcome {
+    /// A PNG was written; the path is relative to the session workspace.
+    Image(String),
+    /// No image. This is the ordinary text paste, performed unchanged.
+    Text(String),
+    /// Tools exist and the clipboard held nothing either of them could read.
+    Empty,
+    /// This machine has no clipboard tool at all. Said once.
+    NoTool,
+    /// A tool ran and something went wrong, named.
+    Failed(String),
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -716,6 +768,16 @@ pub struct App {
     open_url_pending: Option<String>,
     /// Tick at which a pending Ctrl+X leader chord expires.
     pub leader_until: Option<u64>,
+    /// How far the `?` panel is scrolled. Reset when it opens: a help panel that
+    /// remembered where the last reader left it would open on the middle of a table.
+    pub help_scroll: usize,
+    /// The armed first half of an `Esc Esc`, and the session it was pressed in.
+    ///
+    /// The session travels with the arm because the first Escape may have *left* it: on an
+    /// idle session with an empty prompt that is what Escape has always done, and a
+    /// double-Escape that then had nothing to show would be a chord that punished you for
+    /// being idle.
+    pub(super) backtrack_arm: Option<(u64, (Plane, String))>,
     /// Tick at which a second Ctrl+C will open the quit dialog.
     ctrl_c_until: Option<u64>,
     /// Last agent message the I/O driver should copy to the clipboard.
@@ -760,6 +822,11 @@ pub struct App {
     /// storm of events cannot become a storm of bells.
     notify_pending: Vec<notify::Signal>,
     statusline: StatusLine,
+    /// A `Ctrl+V` the driver should service (B4).
+    clipboard_pending: Option<ClipboardRequest>,
+    /// Whether "this machine has no clipboard tool" has been said. Once per run: the
+    /// thing it explains does not change between keystrokes.
+    clipboard_tool_reported: bool,
 }
 
 /// How many notifications one frame may emit. A session that produced fifty terminal
@@ -850,6 +917,8 @@ impl App {
             pending_background_start: None,
             open_url_pending: None,
             leader_until: None,
+            help_scroll: 0,
+            backtrack_arm: None,
             ctrl_c_until: None,
             copy_pending: None,
             external_editor_pending: None,
@@ -865,6 +934,8 @@ impl App {
             title_pending: None,
             notify_pending: Vec::new(),
             statusline: StatusLine::default(),
+            clipboard_pending: None,
+            clipboard_tool_reported: false,
         }
     }
 
@@ -991,6 +1062,25 @@ impl App {
         }
     }
 
+    /// Counts one sent prompt, until the onboarding threshold (B9).
+    ///
+    /// Written quietly: the marker is a side effect of something else being done, and the
+    /// notice row belongs to whatever the operator actually asked for.
+    pub(super) fn count_prompt(&mut self) {
+        if self.config.onboarding.prompts_sent >= ONBOARDING_PROMPTS {
+            return;
+        }
+
+        self.config.onboarding.prompts_sent += 1;
+        self.save_pending = true;
+        self.save_quiet = true;
+    }
+
+    /// Whether this operator is still new enough to be pointed at the keys.
+    pub fn onboarding(&self) -> bool {
+        self.config.onboarding.prompts_sent < ONBOARDING_PROMPTS
+    }
+
     /// Keeps the `/` completion list to the verbs the open session can honour.
     ///
     /// The palette, the leader overlay, and the footer are gated where they are drawn;
@@ -1006,6 +1096,20 @@ impl App {
 
         if !self.open_capabilities().interrupt.offered() {
             hidden.push("/interrupt");
+        }
+
+        // B4/B1. `/model` is `interactive.configure`, and `hello.methods` is the feature
+        // gate for every verb. A gateway that does not serve it cannot change a running
+        // session's model, so the completion does not offer to.
+        if !self.hello.serves("interactive.configure") {
+            hidden.push("/model");
+        }
+
+        // B5. Forking needs the method *and* a transport the runtime has not declared
+        // unable to branch; the backtrack menu itself is always reachable, because "edit
+        // and resend" works everywhere.
+        if !self.fork_offered() {
+            hidden.push("/fork");
         }
 
         self.completion_catalog.hide_commands(hidden);
@@ -1063,6 +1167,11 @@ impl App {
 
     pub fn take_copy(&mut self) -> Option<String> {
         self.copy_pending.take()
+    }
+
+    /// The clipboard read the driver should perform, if the composer asked for one.
+    pub fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
+        self.clipboard_pending.take()
     }
 
     pub fn take_external_editor(&mut self) -> Option<String> {
@@ -1480,6 +1589,9 @@ impl App {
                 self.hint_mouse_capture();
                 self.poll();
                 self.refresh_chrome();
+                // B3. A draft queued behind a request that failed, was refused, or simply
+                // took a while is still a draft the operator pressed Enter on.
+                self.flush_queued_drafts();
             }
             Msg::Redraw => {}
             Msg::Scroll(delta) => {
@@ -1526,7 +1638,12 @@ impl App {
                     }
                 }
             }
-            Msg::Answer { tag, result } => self.answer(tag, result),
+            Msg::Clipboard(outcome) => self.clipboard_read(outcome),
+            Msg::Answer { tag, result } => {
+                self.answer(tag, result);
+                // The acknowledgement that was blocking the queue may have just landed.
+                self.flush_queued_drafts();
+            }
             Msg::Reconnected(hello) => {
                 self.connection = Connection::Live;
                 self.hello = *hello;

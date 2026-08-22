@@ -344,6 +344,42 @@ impl Watch {
         self.derived.plan.as_ref()
     }
 
+    /// The last `limit` user turns, oldest first, for the backtrack menu (B5).
+    ///
+    /// Read out of `input_accepted`, which is the durable record of what this session was
+    /// actually asked — not out of the composer's own history, which is per client and
+    /// would show a second `ouro` a list of prompts nobody on this screen ever typed.
+    /// A steer is excluded: it is an injection into a turn, not a turn to go back to.
+    pub fn recent_user_turns(&self, limit: usize) -> Vec<(u64, String)> {
+        let mut turns = self
+            .events
+            .iter()
+            .rev()
+            .filter(|(_sequence, event)| event.kind == EventType::InputAccepted)
+            .filter(|(_sequence, event)| {
+                event
+                    .payload
+                    .get("kind")
+                    .and_then(|kind| kind.as_str())
+                    .map(|kind| kind != "steer")
+                    .unwrap_or(true)
+            })
+            .filter_map(|(sequence, event)| {
+                event
+                    .payload
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| (*sequence, text.to_string()))
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+
+        turns.reverse();
+        turns
+    }
+
     /// The model this session is running, when a provider named one. Only Claude's
     /// `run_started` carries it today, so `None` is the ordinary answer elsewhere.
     pub fn model(&self) -> Option<&str> {

@@ -114,10 +114,17 @@ pub enum Command {
     /// Codex's `/raw`: cells with no frame, gutter, or app wrapping, so a native
     /// selection copies logical lines.
     RawMode,
+    /// B5: the backtrack menu, for anyone who never learns the chord.
+    Backtrack,
+    /// B5: `interactive.fork`, where it is served.
+    Fork,
+    /// B4: `/model` and `/effort`, taught by prefilling the composer with the verb.
+    Model,
+    Effort,
 }
 
 impl Command {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 32] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -146,6 +153,10 @@ impl Command {
         Self::ListCapabilities,
         Self::PreviewCapability,
         Self::AdmitCapability,
+        Self::Backtrack,
+        Self::Fork,
+        Self::Model,
+        Self::Effort,
     ];
 
     pub fn group(self) -> &'static str {
@@ -165,6 +176,10 @@ impl Command {
             | Self::ConnectChatGpt
             | Self::ShowDiff
             | Self::RawMode
+            | Self::Backtrack
+            | Self::Fork
+            | Self::Model
+            | Self::Effort
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -200,6 +215,10 @@ impl Command {
             Self::Help => "Keyboard shortcuts",
             Self::ShowDiff => "Show changed files",
             Self::RawMode => "Toggle raw copy mode",
+            Self::Backtrack => "Go back to an earlier message",
+            Self::Fork => "Fork this session",
+            Self::Model => "Change the model",
+            Self::Effort => "Reasoning effort for the next turn",
         }
     }
 
@@ -233,6 +252,10 @@ impl Command {
             Self::Help => "?",
             Self::ShowDiff => "/diff",
             Self::RawMode => "/raw",
+            Self::Backtrack => "esc esc",
+            Self::Fork => "/fork",
+            Self::Model => "/model",
+            Self::Effort => "/effort",
         }
     }
 
@@ -277,6 +300,8 @@ impl App {
             .filter(|command| match command {
                 Command::Steer => self.steer_offered(),
                 Command::Interrupt => self.open_capabilities().interrupt.offered(),
+                Command::Fork => self.fork_offered(),
+                Command::Model => self.hello.serves("interactive.configure"),
                 _always => true,
             })
             .collect::<Vec<_>>();
@@ -356,6 +381,19 @@ pub enum Overlay {
     New(Box<NewSession>),
     /// Claude Code's `/diff`, scoped to what this client holds. Built when it opens.
     Diff(Box<super::super::diff::DiffOverlay>),
+    /// B5. The last ten user turns of the open session, and the two things that can be
+    /// done with one. Opened by `Esc Esc` (rebindable), `/backtrack`, or the palette.
+    Backtrack {
+        plane: Plane,
+        id: String,
+        /// `(sequence, text)`, oldest first, from `input_accepted`.
+        entries: Vec<(u64, String)>,
+        choice: usize,
+        /// Whether `interactive.fork` is served *and* the transport has not been declared
+        /// unable to fork. Both halves, because the method gate and the capability gate
+        /// are different questions and this menu must not offer a verb that fails either.
+        fork_offered: bool,
+    },
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
@@ -421,6 +459,12 @@ impl App {
     }
 
     // ----- overlays ------------------------------------------------------------------
+
+    /// `?`, always from the top of the table.
+    pub(super) fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.overlay = Some(Overlay::Help);
+    }
 
     pub(super) fn open_quit(&mut self) {
         let options = match self.mode {
@@ -493,11 +537,20 @@ impl App {
         };
 
         match overlay {
-            Overlay::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
-                    self.overlay = None;
+            Overlay::Help => match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => self.overlay = None,
+                // The table is grouped and it grows; the panel scrolls rather than
+                // silently ending, and the limits at its foot are pinned outside this.
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
                 }
-            }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                _ => {}
+            },
             // The overlay owns its own cursor discipline, in the module that knows what a
             // page of a diff is.
             Overlay::Diff(diff) => {
@@ -572,6 +625,29 @@ impl App {
                 KeyCode::Enter => self.submit_approval(),
                 _ => {}
             },
+            // B5. Two verbs, and the menu says which one Enter is before it is pressed:
+            // an "Enter forks" that quietly edited instead would be exactly the rewind
+            // that silently under-delivers (Claude Code #18516).
+            Overlay::Backtrack {
+                entries,
+                choice,
+                fork_offered,
+                ..
+            } => {
+                let last = entries.len().saturating_sub(1);
+                let forkable = *fork_offered;
+
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    KeyCode::Char('e') => self.backtrack_edit(),
+                    KeyCode::Char('f') if forkable => self.backtrack_fork(),
+                    KeyCode::Enter if forkable => self.backtrack_fork(),
+                    KeyCode::Enter => self.backtrack_edit(),
+                    _ => {}
+                }
+            }
             Overlay::Prompt { buffer, .. } => match key.code {
                 KeyCode::Esc => self.resume_approval_choice(),
                 KeyCode::Backspace => {
@@ -683,6 +759,25 @@ impl App {
                 self.overlay = None;
                 self.compose(ComposerVerb::Steer);
             }
+            Command::Backtrack => {
+                self.overlay = None;
+                self.open_backtrack(None);
+            }
+            Command::Fork => {
+                self.overlay = None;
+                self.fork_open_session();
+            }
+            // The palette teaches the verb rather than replacing it: both take an argument
+            // the operator has to type anyway, and a second surface for choosing a model
+            // would be a second place for it to disagree with the runtime.
+            Command::Model => {
+                self.overlay = None;
+                self.prefill_composer("/model ");
+            }
+            Command::Effort => {
+                self.overlay = None;
+                self.prefill_composer("/effort ");
+            }
             Command::ExternalEditor => {
                 self.overlay = None;
                 self.request_external_editor();
@@ -745,7 +840,7 @@ impl App {
                 self.open_settings();
             }
             Command::Help => {
-                self.overlay = Some(Overlay::Help);
+                self.open_help();
             }
             Command::ShowDiff => {
                 self.overlay = None;

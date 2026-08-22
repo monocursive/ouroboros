@@ -14,9 +14,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Event, EventType, Plane, SessionInfo, SessionStatus};
+use crate::model::{AttachmentKind, Event, EventType, Plane, SessionInfo, SessionStatus};
 
-use super::app::{App, Connection};
+use super::app::{App, Composer, ComposerVerb, Connection};
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
@@ -30,6 +30,12 @@ const CHAT_ENTRY_WINDOW: usize = 128;
 /// Rows the plan panel may occupy above the composer, borders included. Past this it
 /// scrolls to its own tail rather than eating the conversation.
 const PLAN_PANEL_ROWS: u16 = 12;
+
+/// How many local drafts the queue lists before it stops listing and starts counting.
+///
+/// The queue is a reminder of what is coming, not a second transcript: past a handful of
+/// rows it is taking space from the conversation it is about.
+const QUEUE_ROWS: u16 = 3;
 
 /// Progressive disclosure keeps the conversation usable before it keeps the ornament.
 /// The Figma workspace deliberately keeps all three surfaces on a tall, laptop-sized
@@ -578,23 +584,19 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        composer_block_height(
-            app.sessions
-                .composer
-                .as_ref()
-                .map(|composer| &composer.editor),
-            area.width,
-        )
+        composer_block_height(app.sessions.composer.as_ref(), area.width)
     } else {
         0
     };
 
     let plan_height = plan_panel_height(app, area);
+    let queue_height = queue_panel_height(app, area, plan_height);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(plan_height),
+            Constraint::Length(queue_height),
             Constraint::Length(composer_height),
         ])
         .split(area);
@@ -605,9 +607,122 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         plan_panel(frame, rows[1], app);
     }
 
-    if composer_height > 0 {
-        composer(frame, rows[2], app, inline_context);
+    if queue_height > 0 {
+        queue_panel(frame, rows[2], app);
     }
+
+    if composer_height > 0 {
+        composer(frame, rows[3], app, inline_context);
+    }
+}
+
+/// How many rows the queue wants above the composer, or zero when nothing is waiting.
+///
+/// Claude Code draws the queue immediately above the input; so does this. It is bounded
+/// on two sides — [`QUEUE_ROWS`] rows at most, and never on a terminal so short that the
+/// conversation would lose its last lines to it.
+fn queue_panel_height(app: &App, area: Rect, plan_height: u16) -> u16 {
+    if !app
+        .sessions
+        .open
+        .as_ref()
+        .is_some_and(|(plane, _id)| *plane == Plane::Interactive)
+    {
+        return 0;
+    }
+
+    let local = app.sessions.open_queued_drafts().len();
+    let runtime = app.sessions.open_runtime_queue();
+
+    if local == 0 && runtime == 0 {
+        return 0;
+    }
+
+    if area.height.saturating_sub(plan_height) < 14 {
+        return 0;
+    }
+
+    // The top border, the heading, one row for the runtime's depth when it has one, and
+    // one row per local draft up to the ceiling.
+    let rows = 2 + u16::from(runtime > 0) + (local as u16).min(QUEUE_ROWS);
+    rows.saturating_add(u16::from(local as u16 > QUEUE_ROWS))
+}
+
+/// The queue: what the runtime durably holds, and what is still only here.
+///
+/// The distinction is the whole point of drawing it. `queue_changed` reports a *depth* and
+/// nothing else — the runtime does not replay the text of a turn it has not started — so
+/// the durable half is stated as a count and the rows with text on them are exactly the
+/// ones this client is still holding and could still lose.
+fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let local = app.sessions.open_queued_drafts();
+    let runtime = app.sessions.open_runtime_queue();
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::MUTED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("QUEUE ", theme::label()),
+        Span::styled(
+            format!("{} durable · {} here", runtime, local.len()),
+            Style::default().fg(theme::MUTED),
+        ),
+        Span::styled(
+            if local.is_empty() {
+                String::new()
+            } else {
+                "   ↑ takes the newest back".to_string()
+            },
+            Style::default().fg(theme::MUTED),
+        ),
+    ])];
+
+    if runtime > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("  runtime  ", Style::default().fg(theme::GOOD)),
+            Span::styled(
+                format!(
+                    "{runtime} follow-up{} the runtime is holding; their text is durable there",
+                    if runtime == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]));
+    }
+
+    let width = inner.width.max(20) as usize;
+    let preview = width.saturating_sub(14);
+
+    for (index, draft) in local.iter().take(QUEUE_ROWS as usize).enumerate() {
+        let carried = draft.input.attachments.len();
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}. local  ", index + 1), theme::label()),
+            Span::raw(super::tree::truncate(
+                &draft.input.prompt().replace('\n', " "),
+                preview,
+            )),
+            Span::styled(
+                if carried == 0 {
+                    String::new()
+                } else {
+                    format!("  +{carried} attached")
+                },
+                Style::default().fg(theme::MUTED),
+            ),
+        ]));
+    }
+
+    if local.len() > QUEUE_ROWS as usize {
+        lines.push(Line::from(Span::styled(
+            format!("  +{} more here", local.len() - QUEUE_ROWS as usize),
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// How many rows the `Ctrl+T` plan panel wants, or zero when it is closed or has nothing.
@@ -656,14 +771,37 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines[start..].to_vec()), inner);
 }
 
+/// The three lines a first-time operator needs, on the one screen they always see (B9).
+///
+/// Empty once three prompts have been sent. An undiscoverable power feature is R1 4d(8) —
+/// OpenCode's fork keybind defaulting to `none`, `/compact` that people found months in —
+/// and the fix everyone converged on is to say it where the eyes already are, once.
+fn first_run_tips(app: &App) -> Vec<Line<'static>> {
+    if !app.onboarding() {
+        return Vec::new();
+    }
+
+    [
+        "@ attaches a file from this workspace, / opens the command list",
+        "ctrl+o expands every cell, ctrl+t shows the plan while it works",
+        "esc interrupts the turn and keeps what is queued; ? lists every key",
+    ]
+    .into_iter()
+    .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::ACCENT))))
+    .collect()
+}
+
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    let composer_height = composer_block_height(Some(&app.home_draft), area.width);
+    // The home composer has no session and therefore no chips: its height is the editor's.
+    let composer_height = COMPOSER_CHROME
+        + editor_rows(Some(&app.home_draft), area.width)
+        + completion_rows(Some(&app.home_draft));
     let rows =
         Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
     let ready = app.home_ready();
     let requested_workspace = app.home_workspace();
 
-    let message = if ready {
+    let mut message: Vec<Line> = if ready {
         vec![
             Line::from(Span::styled(
                 "Ready in this workspace",
@@ -715,6 +853,17 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             )),
         ]
     };
+
+    // B9's tips never cost the logo. On a terminal with room for both they are added; on
+    // one that could show the logo without them they are not; on one too short for the
+    // logo at all they are, because there is nothing left for them to displace.
+    let tips = first_run_tips(app);
+    let logo_without_tips = rows[0].height > logo::HEIGHT + message.len() as u16;
+    let logo_with_tips = rows[0].height > logo::HEIGHT + (message.len() + tips.len()) as u16;
+
+    if logo_with_tips || !logo_without_tips {
+        message.extend(tips);
+    }
 
     if rows[0].height > logo::HEIGHT + message.len() as u16 {
         let vertical = Layout::vertical([
@@ -1355,11 +1504,18 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     frame.render_widget(block, area);
 
     let rows = Layout::vertical([
+        Constraint::Length(chip_rows(active)),
         Constraint::Min(2),
         Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
+
+    if let Some(composer) = active {
+        render_chips(frame, rows[0], composer);
+    }
+
+    let rows = &rows[1..];
 
     if let Some(composer) = active {
         render_editor(
@@ -1379,6 +1535,15 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         );
     }
 
+    // What Enter does right now. `follow_up` is Harness's durable queueing verb, so on a
+    // busy session the key really does queue rather than send, and saying "sends" there
+    // is the queue/steer blur R1 §4d(2) names.
+    let verb_key = match active.map(|composer| composer.verb) {
+        Some(ComposerVerb::FollowUp) => "queues",
+        Some(ComposerVerb::Steer) => "steers",
+        _ => "sends",
+    };
+
     let pending_reconciliations = app.open_pending_reconciliation_count();
     let footer = if pending_reconciliations > 0 {
         format!(
@@ -1396,7 +1561,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         )
     } else if area.width < 76 {
         format!(
-            "Esc abort · {} · Ctrl+J newline · Enter sends",
+            "Esc abort · {} · Ctrl+J newline · Enter {verb_key}",
             if sandbox_writable {
                 "/ commands"
             } else {
@@ -1404,14 +1569,28 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
             }
         )
     } else {
+        // B3/D14. `alt+enter` is the steer key, and it is named only where the runtime
+        // said this transport can steer *and* the terminal reports the modifier at all —
+        // without the kitty protocol `Alt+Enter` arrives as a bare `Enter`, which sends.
+        // On a narrow pane it is the cell that yields, exactly as the footer's do: a hint
+        // cut in half is worse than a hint that waited for the width to hold it.
+        let steer = if app.steer_offered() && app.keyboard_enhanced && area.width >= 100 {
+            " · alt+enter steers"
+        } else {
+            ""
+        };
+
         key_footer(
-            if sandbox_writable {
-                "esc abort · shift+↑ scroll · / commands"
-            } else {
-                "esc abort · /write to edit · / commands"
-            },
+            &format!(
+                "{}{steer}",
+                if sandbox_writable {
+                    "esc abort · shift+↑ scroll · / commands"
+                } else {
+                    "esc abort · /write to edit · / commands"
+                }
+            ),
             app.keyboard_enhanced,
-            "sends",
+            verb_key,
         )
     };
     frame.render_widget(
@@ -1539,7 +1718,11 @@ fn key_footer(left: &str, enhanced: bool, verb: &str) -> String {
         "Ctrl+J"
     };
 
-    format!("{left:<42}{newline} newline · Enter {verb}")
+    // Padded to a column so the two halves line up, but never *less* than a gap: a `left`
+    // that outgrew the column must still read as two things rather than one run-on word.
+    let gap = 42usize.saturating_sub(left.chars().count()).max(3);
+
+    format!("{left}{}{newline} newline · Enter {verb}", " ".repeat(gap))
 }
 
 /// How many matches the popup lists before it stops listing and starts counting.
@@ -1548,8 +1731,84 @@ const COMPOSER_EDITOR_MIN: u16 = 2;
 const COMPOSER_EDITOR_MAX: u16 = 6;
 const COMPOSER_CHROME: u16 = 3;
 
-fn composer_block_height(editor: Option<&Editor>, width: u16) -> u16 {
-    COMPOSER_CHROME + editor_rows(editor, width) + completion_rows(editor)
+fn composer_block_height(composer: Option<&Composer>, width: u16) -> u16 {
+    let editor = composer.map(|composer| &composer.editor);
+
+    COMPOSER_CHROME + chip_rows(composer) + editor_rows(editor, width) + completion_rows(editor)
+}
+
+/// How many rows the attachment chips and their refusal want, above the editor.
+///
+/// Zero for the ordinary turn, which is most of them: a composer with nothing attached
+/// draws exactly what it drew before B4.
+fn chip_rows(composer: Option<&Composer>) -> u16 {
+    let Some(composer) = composer else {
+        return 0;
+    };
+
+    let chips = u16::from(!composer.attachments.is_empty() || composer.reasoning_effort.is_some());
+
+    chips + u16::from(composer.attachment_refusal.is_some())
+}
+
+/// The chips: what this turn will carry as `params.input.attachments`, and the per-turn
+/// effort beside them.
+///
+/// Chips rather than the substituted text alone because they are the only place the
+/// structured half of the turn is visible. The text still says `@src/app.rs`; the chip is
+/// what says that path is *also* travelling as an attachment the runtime will canonicalise.
+fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
+    if chip_rows(Some(composer)) == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+
+    if !composer.attachments.is_empty() || composer.reasoning_effort.is_some() {
+        let mut spans = Vec::new();
+
+        for attachment in &composer.attachments {
+            spans.push(Span::styled(
+                format!(
+                    " {}{} ",
+                    if attachment.kind == AttachmentKind::Image {
+                        "▣ "
+                    } else {
+                        "@"
+                    },
+                    attachment.label()
+                ),
+                theme::label(),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        if let Some(effort) = composer.reasoning_effort {
+            spans.push(Span::styled(
+                format!(" effort {} ", effort.as_str()),
+                Style::default().fg(theme::ACCENT),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        if !composer.attachments.is_empty() {
+            spans.push(Span::styled(
+                "backspace on an empty draft removes the last",
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(refusal) = composer.attachment_refusal.as_deref() {
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(refusal, area.width.max(20) as usize),
+            Style::default().fg(theme::WARN),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn editor_rows(editor: Option<&Editor>, width: u16) -> u16 {

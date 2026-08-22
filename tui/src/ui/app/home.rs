@@ -91,6 +91,13 @@ impl App {
 
         match self.home_draft.handle_key(key, &self.completion_catalog) {
             EditorAction::Submit => self.submit_home(),
+            // There is no session to steer yet, so the home composer keeps `Alt+Enter` as
+            // the newline it was before B3 gave the key a second meaning on a session.
+            EditorAction::SubmitAlternate => {
+                let catalog = self.completion_catalog.clone();
+                self.home_draft.paste("\n", &catalog);
+                self.home_error = None;
+            }
             EditorAction::Cancel => {
                 self.home_draft.clear_text();
                 self.home_error = None;

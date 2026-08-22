@@ -119,6 +119,7 @@ fn connected(defaults: Defaults) -> App {
         onboarding: Onboarding {
             welcomed: true,
             mouse_hint_shown: true,
+            ..Onboarding::default()
         },
         terminal: config::Terminal::default(),
         ..Config::default()
