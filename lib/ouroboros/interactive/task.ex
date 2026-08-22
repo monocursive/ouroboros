@@ -204,8 +204,11 @@ defmodule Ouroboros.Interactive.Task do
          {:ok, runtime} <- persist(runtime, renamed, []) do
       {:reply, {:ok, State.public(runtime.session)}, runtime}
     else
-      {:error, {:invalid_title, _detail} = reason} -> {:reply, {:error, reason}, runtime}
-      {:error, runtime} -> {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
+      {:error, {:invalid_title, _detail} = reason} ->
+        {:reply, {:error, reason}, runtime}
+
+      {:error, runtime} ->
+        {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
     end
   end
 
@@ -1590,7 +1593,10 @@ defmodule Ouroboros.Interactive.Task do
   # was changed mid-life starts under the mode it is actually running with.
   defp fork_start_options(%State{} = session, id, parent_session_id, fork_options) do
     provider_options =
-      session.options |> Map.get(:provider_options, %{}) |> then(&(&1 || %{})) |> Map.merge(fork_options)
+      session.options
+      |> Map.get(:provider_options, %{})
+      |> then(&(&1 || %{}))
+      |> Map.merge(fork_options)
 
     opts =
       session.options

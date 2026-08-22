@@ -163,7 +163,9 @@ defmodule Ouroboros.Models do
         end
       end)
 
-    if rates == %{}, do: nil, else: Map.put(rates, :currency, Map.get(pricing, :currency) || "USD")
+    if rates == %{},
+      do: nil,
+      else: Map.put(rates, :currency, Map.get(pricing, :currency) || "USD")
   end
 
   defp pricing(_absent), do: nil

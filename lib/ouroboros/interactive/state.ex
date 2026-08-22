@@ -362,7 +362,8 @@ defmodule Ouroboros.Interactive.State do
     end
   end
 
-  def validate_title(title), do: {:error, {:invalid_title, %{reason: :not_a_string, value: title}}}
+  def validate_title(title),
+    do: {:error, {:invalid_title, %{reason: :not_a_string, value: title}}}
 
   @doc """
   Returns a title derived from a user prompt, or `nil` when the prompt yields none.
@@ -382,9 +383,14 @@ defmodule Ouroboros.Interactive.State do
       |> String.trim()
 
     cond do
-      not String.valid?(line) or line == "" -> nil
-      String.length(line) <= @auto_title_chars -> strip_controls(line)
-      true -> line |> String.slice(0, @auto_title_chars - 1) |> String.trim_trailing() |> ellipsis()
+      not String.valid?(line) or line == "" ->
+        nil
+
+      String.length(line) <= @auto_title_chars ->
+        strip_controls(line)
+
+      true ->
+        line |> String.slice(0, @auto_title_chars - 1) |> String.trim_trailing() |> ellipsis()
     end
   end
 

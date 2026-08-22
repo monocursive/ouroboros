@@ -155,7 +155,10 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       start_session(id)
 
       assert {:ok, session} =
-               Methods.invoke("interactive.rename", %{"id" => id, "title" => "Named from a client"})
+               Methods.invoke("interactive.rename", %{
+                 "id" => id,
+                 "title" => "Named from a client"
+               })
 
       assert session.title == "Named from a client"
       assert session.title_source == :human
@@ -305,7 +308,8 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
 
     assert_eventually(fn ->
       match?(
-        {:ok, %State{provider_session_id: provider_session_id}} when is_binary(provider_session_id),
+        {:ok, %State{provider_session_id: provider_session_id}}
+        when is_binary(provider_session_id),
         InteractiveSession.info(ref)
       )
     end)

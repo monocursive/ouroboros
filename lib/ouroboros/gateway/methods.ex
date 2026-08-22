@@ -1743,7 +1743,8 @@ defmodule Ouroboros.Gateway.Methods do
     )
   end
 
-  defp reply({:error, {:invalid_title, %{reason: reason}}}) when reason in [:blank, :not_a_string] do
+  defp reply({:error, {:invalid_title, %{reason: reason}}})
+       when reason in [:blank, :not_a_string] do
     invalid_params("params.title must be a nonempty string")
   end
 

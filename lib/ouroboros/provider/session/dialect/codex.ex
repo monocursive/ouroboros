@@ -110,7 +110,9 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     {:handshake, [{:notify, "initialized", %{}}, {:open, method, params}]}
   end
 
-  defp fork?(%{provider_options: options}) when is_map(options), do: option(options, :fork) == true
+  defp fork?(%{provider_options: options}) when is_map(options),
+    do: option(options, :fork) == true
+
   defp fork?(_request), do: false
 
   @impl true

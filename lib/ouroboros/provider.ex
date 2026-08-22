@@ -1337,7 +1337,8 @@ defmodule Ouroboros.Provider do
   @spec session_capabilities(term(), atom() | nil) :: map() | nil
   def session_capabilities(provider, transport \\ nil) do
     with {:ok, spec} <- Registry.spec(provider),
-         %{capabilities: %InteractionCapabilities{}} = declared <- selected_transport(spec, transport) do
+         %{capabilities: %InteractionCapabilities{}} = declared <-
+           selected_transport(spec, transport) do
       capabilities = Session.capabilities(declared)
 
       @capability_keys
@@ -1446,10 +1447,15 @@ defmodule Ouroboros.Provider do
     with {:ok, adapter} <- Registry.lookup(provider),
          option when not is_nil(option) <- declared_fork_option(adapter),
          true <-
-           :fork_session in transport_list(declared.session_provider_options, spec.provider_options),
+           :fork_session in transport_list(
+             declared.session_provider_options,
+             spec.provider_options
+           ),
          true <-
-           :provider_session_id in
-             transport_list(declared.session_options, spec.normalized_options),
+           :provider_session_id in transport_list(
+             declared.session_options,
+             spec.normalized_options
+           ),
          true <- spec.capabilities.resume? do
       option
     else
@@ -1536,8 +1542,7 @@ defmodule Ouroboros.Provider do
         {:ok, spec}
 
       _unresolvable ->
-        {:error,
-         {:unconfigurable_session, %{provider: provider, reason: :unknown_provider}}}
+        {:error, {:unconfigurable_session, %{provider: provider, reason: :unknown_provider}}}
     end
   end
 
@@ -1579,7 +1584,10 @@ defmodule Ouroboros.Provider do
   defp validate_configuration_options(spec, declared, changes) do
     {:ok, accepted} = normalized_options(spec, {:interactive, declared.name})
 
-    case Enum.find(Map.keys(changes), &(&1 not in accepted or &1 not in declared.configuration_options)) do
+    case Enum.find(
+           Map.keys(changes),
+           &(&1 not in accepted or &1 not in declared.configuration_options)
+         ) do
       nil ->
         :ok
 

@@ -736,7 +736,10 @@ defmodule Ouroboros.InteractiveControlsTest do
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
 
     assert_eventually(fn ->
-      match?({:ok, %State{provider_session_id: id}} when is_binary(id), InteractiveSession.info(ref))
+      match?(
+        {:ok, %State{provider_session_id: id}} when is_binary(id),
+        InteractiveSession.info(ref)
+      )
     end)
 
     adapter

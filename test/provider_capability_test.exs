@@ -433,7 +433,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
                Provider.session_configuration(:claude, %{})
 
       assert {:error, {:invalid_configuration, %{reason: :not_a_map}}} =
-               Provider.session_configuration(:claude, [approval_mode: :prompt])
+               Provider.session_configuration(:claude, approval_mode: :prompt)
     end
 
     test "an unresolvable provider or transport is refused rather than guessed at" do
