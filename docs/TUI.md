@@ -1032,6 +1032,93 @@ per-cell excerpts with an explicit omission marker, `Ctrl-O` raises the per-cell
 to 2,000 rather than removing it, and `/details` exposes every event retained by the local
 5,000-event window.
 
+**The approval modal shows what is being approved (A8, X11).** It draws, and draws only,
+what the `approval_requested` payload carries:
+
+- the `kind` as the headline — `sandbox escalation`, `file change`, `permissions` for the
+  Codex app-server dialect, the ACP tool kind (`read`/`edit`/`execute`/…) for ACP;
+- the exact command, bounded to two rows with `… +N more line(s)`, and its `cwd`;
+- the ACP `toolCall.title` and its `locations`, where they exist;
+- the diff, **expanded while the approval is pending** (Warp's rule), coloured, bounded to
+  the rows the popup can spare with `… +N lines · ctrl+o`, and `ctrl+o` raises that ceiling
+  in place. The parse is the transcript's own `Diff::parse`, never a second one. A request
+  that carries no diff **says** it carries none; a diff the gateway had already excerpted is
+  labelled an excerpt so its `+`/`-` counts are not read as a diffstat. An ACP
+  `{"type":"diff", path, oldText, newText}` content block carries whole file bodies rather
+  than a patch, so it is named — path, add/delete/update, the two sizes — and the modal says
+  the unified diff appears in the `file_change` event when the edit is applied, rather than
+  computing a second patch that could disagree with the runtime's;
+- the `reason` the provider gave, verbatim and bounded to three rows;
+- the provider's own option labels (ACP `options[].name`) beside the answer each one maps
+  onto. An option whose `kind` this build does not recognise is listed in the provider's own
+  words and mapped onto nothing, because guessing whether a novel option approves or refuses
+  is the one mistake that cannot be undone.
+
+**Five answers, and the fifth is two calls.** The four keyboard answers are unchanged and
+are exactly `Jido.Harness.ApprovalResponse`'s two enums crossed. A fifth — *approve, and
+don't ask again for `<suggested_rule>`* — appears when three things are true at once: the
+payload carried the `suggested_rule` that `Control.Permissions.Seam` computes on `:ask`,
+this gateway serves `permissions.add`, and the session names a workspace to scope the rule
+to. Choosing it sends `interactive.respond_approval {decision: approve, scope: session}`
+**first** and `permissions.add {scope: "workspace", pattern, decision: "allow", workspace}`
+**second** — the provider is waiting on the answer, and a rule written before it was sent
+would outlive a refused approval. The modal names the exact pattern and the exact scope
+before the answer can be chosen. Where a rule was suggested and one of the other two
+conditions is missing, the modal says which; "this runtime cannot remember that" and
+"nothing was suggested" are different facts. There is no `scope: "always"` anywhere,
+because the pinned `ApprovalResponse` schema admits only `once` and `session` (§2.4).
+
+`Tab` from the answer rows opens the reason field, as Claude Code does; `r` still does too,
+and the modal's hint names both. `Esc` closes without answering.
+
+**A pending approval never scrolls away (Kiro's snack bar).** One row above the composer
+reads `⏸ approval needed · <command> · ctrl+x a to answer`, for as long as the session is
+waiting. It names `ctrl+x a` rather than `a` because the composer holds the keyboard while a
+session is open, so a bare `a` types the letter; a bar that named a key which typed into the
+draft would be the same lie in a smaller font.
+
+**`/details` is a tree (A9).** Each event is a collapsible node over the whole wire object
+this client kept — envelope, `_struct` tag, and payload — drawn by the same generic tree
+widget as agent state. Collapsed is one `{seq} {kind} {summary}` row, which is what the view
+used to be; `Enter`/`→` opens it, `←` walks out, `j`/`k` move, `g`/`G` jump, and `/` filters
+by kind, summary text, or sequence. A filter never hides a floor, gap, note, or
+end-of-stream divider: a filter that hid the note saying history is missing would make a
+partial ledger look complete.
+
+An `_excerpt` leaf is drawn as its prefix followed by `… (N bytes) · enter fetches`, and
+`Enter` on it calls `interactive.event_detail {id, sequence}` (§2.4) — the one method that
+re-encodes a single event under `detail_leaf_bytes` instead of `event_leaf_bytes`. The
+answer replaces that event's tree **for this view only**: the transcript keeps projecting
+the capped event it absorbed, because a fetched copy is a fact about one reader's screen and
+not about the session's history. The fetch is bounded by the client's own 8 MiB inbound line
+ceiling (`DEFAULT_MAX_LINE`), not by the server's cap — see the honest limit on
+`detail_leaf_bytes` in §2.7 — and a gateway that does not serve `event_detail` gets a notice
+saying the excerpt is all there is here, not a spinner.
+
+The ledger's navigation claims a key only while it is the pane being drawn **and** the
+composer draft is empty, the rule `?` and `,` already follow, so a reader who has started
+typing keeps every character. Inside the ledger `/` is the filter, so `ctrl+x d` is the way
+back to the conversation and the pane header names that chord rather than the slash command.
+
+**`/export [--json] [path]` writes the session out.** The text form is
+`ui::export::transcript` — byte-identical to what `ctrl+x [` and `ctrl+x v` carry, and its
+last line says whether history was dropped. `--json` writes the events as NDJSON: one
+`interactive.event` object per line, in sequence order, with nothing added and nothing
+reshaped. The `Gateway.Wire` markers travel in that file rather than being resolved, because
+they are what this client was sent; there is no header or trailing summary line, so whether
+history was pruned is said in the notice — with the count and sequence range — instead of
+being written into a stream something else has to parse. The default path is `exports/`
+under this runtime's data directory, or the system temp directory in attach mode where the
+client does not know that directory; either way the notice names the resolved path. The file
+is created `0600` with `O_NOFOLLOW` and refuses to overwrite, so a second export says the
+file is already there rather than doubling it.
+
+`ctrl+x y` still copies the last agent message. `/copy raw` copies the same message's source
+as the provider sent it. Honest limit: nothing in this build renders Markdown, so today
+those are the same bytes; the verbs are separate because "give me what I am reading" and
+"give me what the model sent" are separate questions, and the second has to keep answering
+the source once a renderer stands between them.
+
 Everything drawn *around* the transcript reads five accessors on `Watch` rather than
 re-deriving the ledger differently: `usage()`, `queue_len()`, `active_turn_elapsed()`,
 `latest_plan()`, and `model()`. All five are recomputed from the held events in the walk
@@ -1040,9 +1127,11 @@ events arrived would count the overlap twice — and `UsageTotals::complete` is 
 pruning means the numbers are a lower bound.
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
-`Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `Ctrl-O` expand/collapse the conversation's cells, `Ctrl-T` plan panel,
-`/details` (or `ctrl+x d`) the event ledger, `ctrl+x [` transcript into the terminal's
+`Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` (or `ctrl+x a`) approval
+modal, `s` steer, `Ctrl-O` expand/collapse the conversation's cells, `Ctrl-T` plan panel,
+`/details` (or `ctrl+x d`) the event ledger — and `ctrl+x d` again to leave it, since `/`
+inside it is the filter — `/export [--json] [path]` a file, `ctrl+x y` copy the last agent
+message and `/copy raw` its source, `ctrl+x [` transcript into the terminal's
 scrollback, `ctrl+x v` transcript in `$EDITOR`, `Ctrl-E` opens `$EDITOR`, `,` settings,
 `q` quit dialog, `?` help with the authoritative key map.
 `s`, `a`, and the interrupt hint are **conditional**: see
