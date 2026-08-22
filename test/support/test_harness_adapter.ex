@@ -1,9 +1,54 @@
+defmodule Ouroboros.Test.ManagedSessionTransport do
+  @moduledoc """
+  The managed session transport with an approvals channel.
+
+  Turn mechanics delegate to `Jido.Harness.SessionAdapters.Managed`, so the one
+  emit/finish controller pattern drives these sessions exactly as before. The one thing
+  added is `respond_approval/3`: a session transport that declares no approvals cannot
+  be started under the plane's default `approval_mode: :prompt`
+  (`Ouroboros.Provider.safety_options/3`), because a managed CLI re-executed per turn
+  has nobody to ask and denies silently instead. A fixture standing in for the
+  approval-capable providers (Codex app-server, ACP) has to answer, not just declare.
+  """
+
+  @behaviour Jido.Harness.SessionAdapter
+
+  @impl true
+  defdelegate open(request, context), to: Jido.Harness.SessionAdapters.Managed
+
+  @impl true
+  defdelegate send(handle, request, turn_id), to: Jido.Harness.SessionAdapters.Managed
+
+  @impl true
+  defdelegate interrupt(handle, turn_id), to: Jido.Harness.SessionAdapters.Managed
+
+  @impl true
+  defdelegate close(handle), to: Jido.Harness.SessionAdapters.Managed
+
+  @impl true
+  def configure(handle, changes),
+    do: Jido.Harness.SessionAdapters.Managed.configure(handle, changes)
+
+  # A real transport would forward the decision to its provider process here. The worker
+  # has already resolved the pending approval, which is the part these tests observe.
+  @impl true
+  def respond_approval(_handle, _request_id, _response), do: :ok
+end
+
 defmodule Ouroboros.Test.HarnessAdapter do
   @moduledoc false
 
   @behaviour Jido.Harness.Adapter
 
-  alias Jido.Harness.{AdapterSpec, Capabilities, Event, ProviderStatus, RunRequest}
+  alias Jido.Harness.{
+    AdapterSpec,
+    Capabilities,
+    Event,
+    InteractionCapabilities,
+    ProviderStatus,
+    RunRequest,
+    SessionTransportSpec
+  }
 
   @provider :ouroboros_test
 
@@ -20,6 +65,8 @@ defmodule Ouroboros.Test.HarnessAdapter do
           usage?: true,
           native_cancel?: true
         ),
+      default_session_transport: :managed,
+      session_transports: [managed_transport()],
       normalized_options: [
         :provider_session_id,
         :approval_mode,
@@ -32,6 +79,29 @@ defmodule Ouroboros.Test.HarnessAdapter do
       ],
       provider_options: []
     )
+  end
+
+  # Named `:managed` because that is the transport Harness would otherwise synthesize for
+  # an adapter that declares none, so every existing expectation about this provider's
+  # transport name still holds. `dynamic_model` is `false` rather than `:managed` because
+  # this adapter normalizes no `:model` — the same narrowing
+  # `Jido.Harness.Session.Manager.specialize_transport/2` applies to the synthetic one.
+  defp managed_transport do
+    %{
+      SessionTransportSpec.managed(:managed)
+      | adapter: Ouroboros.Test.ManagedSessionTransport,
+        capabilities:
+          InteractionCapabilities.new!(
+            transport: :managed,
+            process: :per_turn,
+            multi_turn: :managed,
+            follow_up: :managed,
+            interrupt: :process,
+            approvals: :native,
+            dynamic_model: false,
+            dynamic_configuration: :managed
+          )
+    }
   end
 
   @impl true

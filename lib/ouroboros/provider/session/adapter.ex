@@ -12,6 +12,18 @@ defmodule Ouroboros.Provider.Session.Adapter do
     quote do
       @behaviour Jido.Harness.SessionAdapter
 
+      @doc """
+      The dialect this adapter runs.
+
+      An upstream `SessionTransportSpec` keeps its own `capabilities` when
+      `Ouroboros.Provider.Session.upgrade_acp/1` repoints it here, so the declaration
+      and the code that answers the wire can drift apart. This is the link that lets
+      `Ouroboros.Provider.Session.capabilities/1` read the dialect instead of the
+      declaration it replaced.
+      """
+      @spec __dialect__() :: module()
+      def __dialect__, do: unquote(dialect)
+
       @impl true
       def open(request, context),
         do: unquote(__MODULE__).open(unquote(dialect), request, context)

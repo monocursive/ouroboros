@@ -1131,6 +1131,53 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.delete(id)
   end
 
+  test "what a session spent is folded across turns and is durable", %{id: id} do
+    assert {:ok, ref} =
+             InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
+
+    first = unique_id("usage-one")
+    assert {:ok, _turn} = InteractiveSession.send_message(ref, "count", id: first)
+    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+
+    assert :ok =
+             HarnessAdapter.emit(adapter, :usage, %{
+               "input_tokens" => 12,
+               "output_tokens" => 3,
+               "cache_read_input_tokens" => 40,
+               "total_tokens" => 15
+             })
+
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "counted"})
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, first, 2_000)
+
+    second = unique_id("usage-two")
+    assert {:ok, _turn} = InteractiveSession.send_message(ref, "again", id: second)
+    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, next}, 1_000
+
+    assert :ok =
+             HarnessAdapter.emit(next, :usage, %{"input_tokens" => 8, "total_tokens" => 8})
+
+    assert :ok = HarnessAdapter.emit(next, :output_text_final, %{"text" => "again"})
+    assert :ok = HarnessAdapter.finish(next)
+    assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, second, 2_000)
+
+    assert {:ok, %State{usage: usage}} = InteractiveSession.info(ref)
+    assert usage.input_tokens == 20
+    assert usage.output_tokens == 3
+    assert usage.cache_read_tokens == 40
+    assert usage.total_tokens == 23
+    assert usage.turns_with_usage == 2
+    assert usage.cost_usd == nil
+
+    # The account rides the same checkpoint as the events it was read from, so the
+    # durable record already holds it before the coordinator is asked again.
+    assert {:ok, %State{usage: ^usage}} = Store.get(id)
+    assert State.public(%State{} = elem(InteractiveSession.info(ref), 1)).usage == usage
+
+    assert :ok = InteractiveSession.close(ref)
+  end
+
   # A durable session whose one turn was checkpointed as intended but never dispatched:
   # exactly what recovery finds after a coordinator dies between the two writes.
   defp checkpoint_unsent_turn(id, workspace, attachments) do

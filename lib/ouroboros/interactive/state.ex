@@ -35,6 +35,7 @@ defmodule Ouroboros.Interactive.State do
                 turns: %{},
                 prompt_trace: nil,
                 runtime_snapshot: nil,
+                usage: nil,
                 options: %{},
                 error: nil
               ]
@@ -92,8 +93,25 @@ defmodule Ouroboros.Interactive.State do
           turns: %{optional(String.t()) => turn()},
           prompt_trace: map() | nil,
           runtime_snapshot: map() | nil,
+          usage: usage() | nil,
           options: map(),
           error: term()
+        }
+
+  @typedoc """
+  What the provider said this session has spent. Numbers only, and only numbers a
+  provider actually reported: a counter no `:usage` event carried stays `0`, and
+  `cost_usd` stays `nil` rather than becoming a zero that reads like "free".
+  """
+  @type usage :: %{
+          required(:input_tokens) => non_neg_integer(),
+          required(:output_tokens) => non_neg_integer(),
+          required(:cache_read_tokens) => non_neg_integer(),
+          required(:cache_creation_tokens) => non_neg_integer(),
+          required(:total_tokens) => non_neg_integer(),
+          required(:cost_usd) => number() | nil,
+          required(:turns_with_usage) => non_neg_integer(),
+          required(:last) => map()
         }
 
   @terminal_statuses [:closed, :failed, :cancelled, :lost]
@@ -225,6 +243,19 @@ defmodule Ouroboros.Interactive.State do
               surface: :interactive,
               transport: Map.get(state.options, :transport)
             )
+          ),
+        # Derived from the provider spec at projection time rather than stored, so a
+        # session listed after a restart declares what its transport can do without a
+        # coordinator being up to ask. `nil` where the provider or transport does not
+        # resolve — an absent claim rather than a false one.
+        capabilities:
+          projected(
+            state.options,
+            :capabilities,
+            Ouroboros.Provider.session_capabilities(
+              state.provider,
+              Map.get(state.options, :transport)
+            )
           )
       }
       |> Trace.put(prompt_trace)
@@ -256,6 +287,33 @@ defmodule Ouroboros.Interactive.State do
     :sha256
     |> :crypto.hash(:erlang.term_to_binary({mode, request}, [:deterministic]))
     |> Base.encode16(case: :lower)
+  end
+
+  @doc """
+  Folds what a provider reported spending into the session's durable usage account.
+
+  Reads `:usage` events for token counters and `:run_completed` for `cost_usd`, which is
+  the only event any bundled provider puts a cost on (`claude_stream.ex:61-71`). Provider
+  key spellings vary — `input_tokens`, `inputTokens`, `input`, `prompt_tokens` all mean
+  the same number — so each counter is looked up through a list of known variants and a
+  payload that carries none of them contributes nothing at all rather than a zero.
+
+  ## Why a turn's reports replace rather than add
+
+  Transports disagree about what a usage event means. Claude emits one per turn holding
+  that turn's totals; Codex app-server sends `thread/tokenUsage/updated` repeatedly, and
+  the name says it is a value being updated rather than a delta. Adding both shapes would
+  multiply the Codex numbers by however many times it happened to report. So within one
+  `turn_id` each counter keeps the **largest** figure that turn reported, and only
+  distinct turns are added together. This cannot inflate a total past the provider's own
+  largest claim for that turn; it would under-count only a transport that reported true
+  per-turn deltas, which none of the bundled ones does.
+
+  Bounded: one map, whatever the turn count. Durable through the caller's checkpoint.
+  """
+  @spec fold_usage(t(), [Event.t()]) :: t()
+  def fold_usage(%__MODULE__{} = state, events) when is_list(events) do
+    Enum.reduce(events, state, &fold_usage_event/2)
   end
 
   @spec touch(t()) :: t()
@@ -345,7 +403,7 @@ defmodule Ouroboros.Interactive.State do
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
       serializable?(state.options) and serializable?(Map.get(state, :runtime_snapshot)) and
-      serializable?(state.error)
+      serializable?(Map.get(state, :usage)) and serializable?(state.error)
   rescue
     _error -> false
   end
@@ -516,6 +574,129 @@ defmodule Ouroboros.Interactive.State do
 
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
   defp present?(value), do: value not in [nil, "", [], %{}]
+
+  # The counters a session accounts for, each with the spellings a provider may use.
+  # Claude sends `input_tokens` and `cache_read_input_tokens`; the Codex app-server and
+  # ACP payloads are their server's own map passed through untouched; Harness's own
+  # adapter fixtures carry `input` and `totalTokens`. So each counter is a list of keys,
+  # not a key, and the first one present wins.
+  @usage_counters [
+    input_tokens: ~w(input_tokens inputTokens input prompt_tokens promptTokens),
+    output_tokens: ~w(output_tokens outputTokens output completion_tokens completionTokens),
+    cache_read_tokens:
+      ~w(cache_read_tokens cache_read_input_tokens cacheReadTokens cacheReadInputTokens cached_input_tokens cachedInputTokens),
+    cache_creation_tokens:
+      ~w(cache_creation_tokens cache_creation_input_tokens cacheCreationTokens cacheCreationInputTokens),
+    total_tokens: ~w(total_tokens totalTokens total)
+  ]
+
+  @usage_counter_fields Keyword.keys(@usage_counters)
+  @usage_cost_keys ~w(cost_usd costUsd total_cost_usd totalCostUsd)
+
+  @empty_usage %{
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    total_tokens: 0,
+    cost_usd: nil,
+    turns_with_usage: 0,
+    last: %{}
+  }
+
+  # `:run_completed` is here for one field: no bundled provider puts a cost on a `:usage`
+  # event, and Claude's arrives as `cost_usd` on the run's terminator. Reading only
+  # `:usage` would ship a `cost_usd` that is structurally always `nil`.
+  defp fold_usage_event(%Event{type: type, payload: payload, turn_id: turn_id}, state)
+       when type in [:usage, :run_completed] and is_map(payload) do
+    case reported_usage(payload) do
+      nil -> state
+      reported -> Map.put(state, :usage, account_usage(Map.get(state, :usage), reported, turn_id))
+    end
+  end
+
+  defp fold_usage_event(_event, state), do: state
+
+  defp reported_usage(payload) do
+    counters =
+      Enum.reduce(@usage_counters, %{}, fn {field, keys}, acc ->
+        case usage_number(payload, keys) do
+          nil -> acc
+          value -> Map.put(acc, field, value)
+        end
+      end)
+
+    cost = usage_number(payload, @usage_cost_keys)
+
+    if counters == %{} and is_nil(cost) do
+      nil
+    else
+      counters
+      |> Map.put(:cost_usd, cost)
+      |> Map.put_new_lazy(:total_tokens, fn ->
+        Map.get(counters, :input_tokens, 0) + Map.get(counters, :output_tokens, 0)
+      end)
+    end
+  end
+
+  # A negative or non-numeric figure is not a count of anything. Skipping it leaves the
+  # counter as whatever a provider did report rather than moving a total backwards.
+  defp usage_number(payload, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(payload, key) do
+        value when is_number(value) and value >= 0 -> value
+        _absent_or_unusable -> nil
+      end
+    end)
+  end
+
+  defp account_usage(usage, reported, turn_id) do
+    usage = usage || @empty_usage
+    previous = Map.get(usage, :last) || %{}
+    same_turn? = is_binary(turn_id) and turn_id != "" and Map.get(previous, :turn_id) == turn_id
+
+    {contribution, replaced} =
+      if same_turn?, do: {max_usage(previous, reported), previous}, else: {reported, %{}}
+
+    counters =
+      Map.new(@usage_counter_fields, fn field ->
+        {field,
+         Map.get(usage, field, 0) - Map.get(replaced, field, 0) + Map.get(contribution, field, 0)}
+      end)
+
+    usage
+    |> Map.merge(counters)
+    |> Map.put(
+      :cost_usd,
+      account_cost(
+        Map.get(usage, :cost_usd),
+        Map.get(replaced, :cost_usd),
+        Map.get(contribution, :cost_usd)
+      )
+    )
+    |> Map.put(
+      :turns_with_usage,
+      Map.get(usage, :turns_with_usage, 0) + if(same_turn?, do: 0, else: 1)
+    )
+    |> Map.put(:last, Map.put(contribution, :turn_id, turn_id))
+  end
+
+  defp max_usage(previous, reported) do
+    Map.merge(previous, reported, fn
+      :turn_id, kept, _new -> kept
+      _field, kept, new when is_number(kept) and is_number(new) -> max(kept, new)
+      _field, nil, new -> new
+      _field, kept, nil -> kept
+      _field, _kept, new -> new
+    end)
+  end
+
+  # A provider that never priced the work leaves this `nil` rather than `0.0`: a zero
+  # here would read as "this session was free", which is a claim no payload made.
+  defp account_cost(total, _replaced, nil), do: total
+
+  defp account_cost(total, replaced, contributed),
+    do: (total || 0) - (replaced || 0) + contributed
 
   defp projected(options, key, fallback) do
     if Map.has_key?(options, key), do: Map.get(options, key), else: fallback

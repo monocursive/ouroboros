@@ -410,6 +410,9 @@ defmodule Ouroboros.Interactive.Task do
       end)
       |> apply_turn_event_statuses(projected)
       |> mark_gap_ambiguities(projected)
+      # What the session spent rides the same checkpoint as the events it was read from,
+      # so a restart resumes the account rather than restarting it at zero.
+      |> State.fold_usage(projected)
       |> State.touch()
 
     case persist(runtime, session, projected) do

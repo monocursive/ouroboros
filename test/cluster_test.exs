@@ -1842,10 +1842,15 @@ defmodule Ouroboros.ClusterTest do
   end
 
   defp create_remote_interactive_session!(peer_node, id) do
+    # A test peer never receives this repo's `:jido_harness, :providers` override, so
+    # `:codex` resolves upstream there — to the `exec_jsonl_resume` transport rather than
+    # Ouroboros's app-server one. That transport declares no approvals channel, so the
+    # plane's default `approval_mode: :prompt` is refused on it. These tests are about
+    # session-owner evidence and not about approvals; state a mode the peer can honour.
     assert {:ok, session} =
              :erpc.call(peer_node, Ouroboros.Interactive.State, :new, [
                id,
-               [provider: :codex, workspace: File.cwd!()]
+               [provider: :codex, workspace: File.cwd!(), approval_mode: :default]
              ])
 
     assert :ok =

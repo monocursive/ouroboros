@@ -33,4 +33,31 @@ defmodule Ouroboros.Provider.Session do
     do: %{transport | adapter: Ouroboros.Provider.Session.ACP}
 
   defp upgrade_transport(transport), do: transport
+
+  @doc """
+  What a transport can actually do, once this runtime owns the code that answers it.
+
+  `upgrade_acp/1` replaces an upstream transport's *adapter* and leaves its
+  `capabilities` declaration alone, so for an upgraded transport the spec describes
+  the implementation Ouroboros removed. Where a dialect drives the wire, the dialect's
+  own `capabilities/0` is the truth; every other transport keeps the declaration its
+  adapter shipped with.
+  """
+  @spec capabilities(Jido.Harness.SessionTransportSpec.t()) ::
+          Jido.Harness.InteractionCapabilities.t()
+  def capabilities(%{adapter: adapter, capabilities: declared}) do
+    case dialect(adapter) do
+      nil -> declared
+      dialect -> dialect.capabilities()
+    end
+  end
+
+  @doc "The dialect a session adapter runs, or `nil` for an adapter this runtime does not own."
+  @spec dialect(module()) :: module() | nil
+  def dialect(adapter) when is_atom(adapter) and not is_nil(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :__dialect__, 0),
+      do: adapter.__dialect__()
+  end
+
+  def dialect(_adapter), do: nil
 end
