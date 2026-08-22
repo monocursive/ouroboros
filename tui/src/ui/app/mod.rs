@@ -311,6 +311,23 @@ pub enum Tag {
     },
 }
 
+/// One `/export` the driver has to write.
+///
+/// The App stays a pure state machine: it renders the bytes, names the file it wants, and
+/// says what the file will contain. Resolving a default directory and touching the disk is
+/// the driver's, because both read an environment this type does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRequest {
+    /// The path the operator named, or `None` for the default under the data directory.
+    pub path: Option<String>,
+    /// The filename the default resolves to, inside whichever directory the driver picks.
+    pub filename: String,
+    pub contents: String,
+    /// What the notice says before the path: how much of the session is in the file, and
+    /// whether anything was dropped before it.
+    pub extent: String,
+}
+
 #[derive(Debug)]
 pub enum Msg {
     Key(crossterm::event::KeyEvent),
@@ -739,6 +756,7 @@ pub struct App {
     /// Last agent message the I/O driver should copy to the clipboard.
     /// The `/details` ledger's expansion, cursor, filter, and drill-in answers.
     pub details: DetailsView,
+    export_pending: Option<ExportRequest>,
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
@@ -872,6 +890,7 @@ impl App {
             leader_until: None,
             ctrl_c_until: None,
             details: DetailsView::default(),
+            export_pending: None,
             copy_pending: None,
             external_editor_pending: None,
             scrollback_dump_pending: None,
@@ -1084,6 +1103,10 @@ impl App {
 
     pub fn take_copy(&mut self) -> Option<String> {
         self.copy_pending.take()
+    }
+
+    pub fn take_export(&mut self) -> Option<ExportRequest> {
+        self.export_pending.take()
     }
 
     pub fn take_external_editor(&mut self) -> Option<String> {

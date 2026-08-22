@@ -89,6 +89,8 @@ pub enum Command {
     SwitchSession,
     SessionDetails,
     CopyLast,
+    CopyRawLast,
+    Export,
     DumpScrollback,
     ViewTranscript,
     Interrupt,
@@ -112,11 +114,13 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
         Self::CopyLast,
+        Self::CopyRawLast,
+        Self::Export,
         Self::DumpScrollback,
         Self::ViewTranscript,
         Self::Interrupt,
@@ -149,6 +153,8 @@ impl Command {
             | Self::SwitchSession
             | Self::SessionDetails
             | Self::CopyLast
+            | Self::CopyRawLast
+            | Self::Export
             | Self::DumpScrollback
             | Self::ViewTranscript
             | Self::Interrupt
@@ -169,6 +175,8 @@ impl Command {
             Self::SwitchSession => "Switch session",
             Self::SessionDetails => "Toggle event details",
             Self::CopyLast => "Copy last agent message",
+            Self::CopyRawLast => "Copy last agent message as source Markdown",
+            Self::Export => "Export the transcript to a file",
             Self::DumpScrollback => "Print transcript into terminal scrollback",
             Self::ViewTranscript => "Open transcript in $EDITOR",
             Self::Interrupt => "Interrupt the running turn",
@@ -200,6 +208,8 @@ impl Command {
             Self::SwitchSession => "ctrl+x l",
             Self::SessionDetails => "ctrl+x d",
             Self::CopyLast => "ctrl+x y",
+            Self::CopyRawLast => "/copy raw",
+            Self::Export => "/export",
             Self::DumpScrollback => "ctrl+x [",
             Self::ViewTranscript => "ctrl+x v",
             Self::Interrupt => "esc",
@@ -373,6 +383,32 @@ pub const APPROVAL_CHOICES: [(ApprovalDecision, ApprovalScope); 4] = [
 /// `session` — so the durable form is a session-scoped approval *plus* a `permissions.add`
 /// rule, and the modal says exactly that before it is chosen.
 pub const APPROVAL_REMEMBER: usize = APPROVAL_CHOICES.len();
+
+/// A session id reduced to something safe to put in a filename.
+///
+/// Ids are generated here and are already `[a-z0-9-]`, but an operator may supply their
+/// own with `interactive.start {id}` and this builds a *path* out of it. Anything outside
+/// the allowlist becomes `-`, so no id can walk out of the directory the export was meant
+/// for, and the result is bounded so no id can produce a name the filesystem refuses.
+fn file_stem(id: &str) -> String {
+    let stem: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect();
+
+    if stem.is_empty() {
+        "session".to_string()
+    } else {
+        stem
+    }
+}
 
 /// The rule the fifth answer would write, named in full before it is written.
 ///
@@ -685,6 +721,14 @@ impl App {
             Command::SessionDetails => {
                 self.overlay = None;
                 self.toggle_session_details();
+            }
+            Command::CopyRawLast => {
+                self.overlay = None;
+                self.copy_last_agent_source();
+            }
+            Command::Export => {
+                self.overlay = None;
+                self.export_transcript("");
             }
             Command::CopyLast => {
                 self.overlay = None;
@@ -1115,6 +1159,101 @@ impl App {
             }
             None => self.inform("no agent message to copy yet", NoticeKind::Info),
         }
+    }
+
+    /// `/copy raw`: the last agent message exactly as the provider wrote it.
+    ///
+    /// Honest limit, stated because it will stop being true: nothing in this build renders
+    /// Markdown, so the bytes this copies and the bytes `ctrl+x y` copies are the same
+    /// bytes today. The two verbs are separate because the *questions* are separate — "give
+    /// me what I am reading" and "give me what the model sent" — and the second one has to
+    /// keep answering the source once a renderer stands between them.
+    pub(super) fn copy_last_agent_source(&mut self) {
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform("open a session before copying a message", NoticeKind::Info);
+            return;
+        };
+
+        match transcript_cells::last_agent_message(watch.entries()) {
+            Some(text) => {
+                let bytes = text.len();
+                self.copy_pending = Some(text);
+                self.inform(
+                    format!("copied the last agent message's source, {bytes} bytes as sent"),
+                    NoticeKind::Info,
+                );
+            }
+            None => self.inform("no agent message to copy yet", NoticeKind::Info),
+        }
+    }
+
+    /// `/export [--json] [path]`.
+    ///
+    /// The text form is [`crate::ui::export::transcript`] — the same projection the pane
+    /// draws, with the render-time caps and the gutters removed — and `--json` is
+    /// [`crate::ui::export::events_ndjson`], the events themselves. Both are bounded by
+    /// what this client still holds, and both say so: the text export's last line names the
+    /// floor, and the notice that names the path says it for either.
+    pub(super) fn export_transcript(&mut self, argument: &str) {
+        let mut json = false;
+        let mut path: Option<String> = None;
+
+        for word in argument.split_whitespace() {
+            match word {
+                "--json" | "-j" => json = true,
+                "--text" => json = false,
+                _path if path.is_none() => path = Some(word.to_string()),
+                _extra => {
+                    self.inform(
+                        "usage: /export [--json] [path] — one path, and it is the last word",
+                        NoticeKind::Error,
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Zero before the first frame, and a width of zero would wrap every word onto its
+        // own line. Eighty is what a terminal that has not said otherwise is.
+        let width = match self.terminal_width {
+            0 => 80,
+            width => usize::from(width),
+        };
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        let contents = if json {
+            crate::ui::export::events_ndjson(watch)
+        } else {
+            crate::ui::export::transcript(watch, width)
+        };
+        let extent = crate::ui::export::extent(watch);
+        let extension = if json { "ndjson" } else { "txt" };
+
+        self.overlay = None;
+        self.export_pending = Some(ExportRequest {
+            path,
+            filename: format!("ouro-{}-{}.{extension}", plane.as_str(), file_stem(&id)),
+            contents,
+            extent: format!(
+                "exported {} of {id}",
+                if json { "the events" } else { "the transcript" }
+            ) + &format!(" ({extent})"),
+        });
     }
 
     pub(super) fn request_external_editor(&mut self) {

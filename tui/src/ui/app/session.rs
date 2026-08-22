@@ -879,6 +879,18 @@ impl App {
             return true;
         }
 
+        // A9. `/export` takes `[--json] [path]`; `/copy raw` is the source-Markdown twin of
+        // `/copy`, which keeps its own row below.
+        if let Some(argument) = slash_arg(trimmed, "/export") {
+            self.export_transcript(argument);
+            return true;
+        }
+
+        if slash_arg(trimmed, "/copy").is_some_and(|rest| rest.eq_ignore_ascii_case("raw")) {
+            self.copy_last_agent_source();
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),

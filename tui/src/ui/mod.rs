@@ -576,6 +576,53 @@ fn view_in_editor(path: &Path) -> Result<()> {
 /// this client holds, and the data directory is already this operator's own. Named by
 /// process id so two `ouro`s cannot collide, and written 0600 through the same
 /// create-exclusive, never-follow-a-symlink path as the composer's draft.
+/// Where an `/export` lands.
+///
+/// A path the operator named is used as given, relative to the process's working
+/// directory, because that is what naming a path means. Without one the file goes to an
+/// `exports/` directory under this runtime's data directory — the same directory the
+/// runtime already keeps session state in — or, in attach mode where this client does not
+/// know that directory, to the system temp directory. Either way the notice names the
+/// resolved path, so an export never lands somewhere the operator was not told about.
+fn export_path(request: &app::ExportRequest, data_dir: Option<&str>) -> PathBuf {
+    if let Some(path) = &request.path {
+        return PathBuf::from(shellexpand_home(path));
+    }
+
+    let dir = data_dir
+        .map(|dir| PathBuf::from(dir).join("exports"))
+        .unwrap_or_else(env::temp_dir);
+
+    dir.join(&request.filename)
+}
+
+/// `~` at the front of an operator-typed path. Nothing else is expanded: a path is a path,
+/// and a client that ran a shell over it would be running a shell over it.
+fn shellexpand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => match dirs::home_dir() {
+            Some(home) => home.join(rest).to_string_lossy().into_owned(),
+            None => path.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
+/// Writes an export, owner-readable only, refusing to overwrite.
+///
+/// `create_new` rather than truncate: an export names a file the operator chose, and
+/// silently replacing something already there — including a symlink pointing somewhere
+/// else, which `O_NOFOLLOW` refuses rather than follows — is not something a transcript
+/// dump gets to do. The default path carries the session id, so a second export of the
+/// same session says the file is already there instead of quietly doubling it.
+fn write_export_file(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    write_private_draft(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
 fn transcript_path(data_dir: Option<&str>) -> PathBuf {
     let dir = data_dir.map(PathBuf::from).unwrap_or_else(env::temp_dir);
     dir.join(format!("ouro-transcript-{}.txt", std::process::id()))
@@ -966,6 +1013,24 @@ pub async fn run(
                         "this client has no local data directory, so it cannot join a fleet",
                     );
                 }
+            }
+        }
+
+        if let Some(request) = app.take_export() {
+            let path = export_path(&request, app.data_dir.as_deref());
+
+            match write_export_file(&path, &request.contents) {
+                Ok(()) => app.inform(
+                    format!("{} to {}", request.extent, path.display()),
+                    app::NoticeKind::Info,
+                ),
+                Err(error) => app.inform(
+                    format!(
+                        "the export could not be written to {}: {error:#}",
+                        path.display()
+                    ),
+                    app::NoticeKind::Error,
+                ),
             }
         }
 
@@ -1394,6 +1459,65 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn export_request(path: Option<&str>) -> app::ExportRequest {
+        app::ExportRequest {
+            path: path.map(str::to_string),
+            filename: "ouro-interactive-s1.txt".into(),
+            contents: "the transcript\n".into(),
+            extent: "exported the transcript of s1 (1 event(s))".into(),
+        }
+    }
+
+    #[test]
+    fn an_export_defaults_under_the_data_directory_and_falls_back_where_there_is_none() {
+        assert_eq!(
+            export_path(&export_request(None), Some("/srv/ouro")),
+            PathBuf::from("/srv/ouro/exports/ouro-interactive-s1.txt")
+        );
+
+        // Attach mode: this client did not spawn the runtime and does not know its data
+        // directory, so it uses a directory it does know and the notice names the path.
+        assert_eq!(
+            export_path(&export_request(None), None),
+            env::temp_dir().join("ouro-interactive-s1.txt")
+        );
+
+        // A named path is used as given.
+        assert_eq!(
+            export_path(&export_request(Some("out/here.txt")), Some("/srv/ouro")),
+            PathBuf::from("out/here.txt")
+        );
+    }
+
+    #[test]
+    fn an_export_is_owner_readable_and_never_overwrites() {
+        let dir = env::temp_dir().join(format!("ouro-export-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("export.txt");
+
+        write_export_file(&path, "one\n").expect("the first write creates it");
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "one\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a transcript is the whole conversation; nothing but its owner reads it"
+            );
+        }
+
+        // A second export of the same session says the file is there rather than doubling
+        // it — and a symlink planted at the name is refused rather than followed.
+        assert!(write_export_file(&path, "two\n").is_err());
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "one\n");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A terminal writing into a [`Recorder`] rather than a tty.

@@ -15,12 +15,16 @@ use unicode_width::UnicodeWidthStr;
 const HISTORY_LIMIT: usize = 100;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 28] = [
+pub(crate) const COMMANDS: [(&str, &str); 29] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
     ("/sessions", "switch sessions"),
     ("/details", "toggle normalized event details"),
+    (
+        "/export",
+        "write the transcript to a file ([--json] [path])",
+    ),
     ("/copy", "copy the last agent message"),
     ("/interrupt", "abort the running turn"),
     ("/steer", "steer the running turn"),
