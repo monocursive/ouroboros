@@ -120,6 +120,8 @@ defmodule Ouroboros.Interactive.State do
           required(:total_tokens) => non_neg_integer(),
           required(:cost_usd) => number() | nil,
           required(:turns_with_usage) => non_neg_integer(),
+          required(:context_window) => non_neg_integer() | nil,
+          required(:context_used) => non_neg_integer() | nil,
           required(:last) => map()
         }
 
@@ -698,6 +700,18 @@ defmodule Ouroboros.Interactive.State do
   @usage_counter_fields Keyword.keys(@usage_counters)
   @usage_cost_keys ~w(cost_usd costUsd total_cost_usd totalCostUsd)
 
+  # Not counters. The model's context window and the size of the last request are facts
+  # about one request, so the newest report replaces the previous one rather than being
+  # added to it — summing a window across turns would produce a denominator that grows
+  # with the conversation. A payload that reports neither leaves both alone, which is why
+  # a `:run_completed` terminator cannot blank a window a `:usage` event established.
+  @usage_latest [
+    context_window: ~w(context_window contextWindow),
+    context_used: ~w(context_used contextUsed)
+  ]
+
+  @usage_latest_fields Keyword.keys(@usage_latest)
+
   @empty_usage %{
     input_tokens: 0,
     output_tokens: 0,
@@ -706,6 +720,8 @@ defmodule Ouroboros.Interactive.State do
     total_tokens: 0,
     cost_usd: nil,
     turns_with_usage: 0,
+    context_window: nil,
+    context_used: nil,
     last: %{}
   }
 
@@ -733,10 +749,19 @@ defmodule Ouroboros.Interactive.State do
 
     cost = usage_number(payload, @usage_cost_keys)
 
-    if counters == %{} and is_nil(cost) do
+    latest =
+      Enum.reduce(@usage_latest, %{}, fn {field, keys}, acc ->
+        case usage_number(payload, keys) do
+          nil -> acc
+          value -> Map.put(acc, field, trunc(value))
+        end
+      end)
+
+    if counters == %{} and is_nil(cost) and latest == %{} do
       nil
     else
       counters
+      |> Map.merge(latest)
       |> Map.put(:cost_usd, cost)
       |> Map.put_new_lazy(:total_tokens, fn ->
         Map.get(counters, :input_tokens, 0) + Map.get(counters, :output_tokens, 0)
@@ -782,6 +807,11 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(
       :turns_with_usage,
       Map.get(usage, :turns_with_usage, 0) + if(same_turn?, do: 0, else: 1)
+    )
+    |> Map.merge(
+      Map.new(@usage_latest_fields, fn field ->
+        {field, Map.get(contribution, field) || Map.get(usage, field)}
+      end)
     )
     |> Map.put(:last, Map.put(contribution, :turn_id, turn_id))
   end
