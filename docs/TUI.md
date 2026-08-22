@@ -284,7 +284,7 @@ reading.
 | `agents.list` | `Mesh.list_agents/0` |
 | `agents.state` `{id}` | `Mesh.state/1` |
 | `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0` |
-| `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default |
+| `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default. Also carries `options.capabilities` and `usage`, described below |
 | `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
 | `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
 | `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
@@ -345,6 +345,46 @@ checkpoint rejects it ([coding/task_state.ex](../lib/ouroboros/coding/task_state
 replaces it with options the plane really takes; and `env`, `mcp_config`, and
 `provider_options` stay out entirely, because the checkpoint refuses inline environment
 and MCP config outright and provider knobs are node configuration.
+
+**What a session declares about itself.** `interactive.info` and `interactive.list`
+carry two blocks a client can trust without probing the provider.
+
+`options.capabilities` is the ten-key map
+`transport, process, multi_turn, follow_up, interrupt, approvals, steer, multimodal,
+dynamic_model, dynamic_configuration`, each `"native"`/`"managed"`/`"process"`/`false`
+(`process` is `"persistent"`/`"per_turn"`, `transport` is the transport's name). It is
+derived from the provider spec at projection time, not stored — so a session listed after
+a restart declares what its transport can do without a coordinator being up to answer —
+and it mirrors `Jido.Harness.Session.Manager`'s own transport resolution, including the
+narrowing that stops a managed transport advertising a `model` its adapter does not
+normalize. Where Ouroboros replaced a transport's adapter with one of its own dialects
+(`Dialect.ACP`, `Dialect.Codex`), the dialect's declaration is the one reported: the
+upstream spec still describes code that is no longer running. The whole map is `null`
+when neither the provider nor the transport resolves — an absent claim rather than a
+false one.
+
+`usage` is what the provider said the session spent: `input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_creation_tokens`, `total_tokens`, `cost_usd`,
+`turns_with_usage`, and `last` (the most recent turn's figures and its `turn_id`). It is
+folded from `:usage` events, tolerant of the spellings different transports use, and
+durable through the same checkpoint as the events it was read from. Two honesty rules:
+`cost_usd` is `null` — never `0` — for a provider that never priced the work, and a turn
+that reports repeatedly (Codex's `thread/tokenUsage/updated` is a value being *updated*)
+contributes its largest figure once rather than the sum of its notifications.
+
+**`approval_mode: "prompt"` is refused where nobody can answer it.** The managed
+transports — `claude`, `gemini`, `grok`, `zai`, and the named `codex` `exec_jsonl_resume`
+fallback — re-execute the CLI once per turn and declare no `approvals` capability. Their
+adapters still accept the option, so it used to travel through and do nothing:
+`claude --print --permission-mode default` is never given a `--permission-prompt-tool`
+and denies every permission-needing tool silently. `interactive.start` now answers
+`-32006` with `data` `["unsupported_approval_mode", {provider, transport, requested,
+supported, reason: "no_approval_channel", message, plane}]` — the same `[tag, map]` shape
+as `unsupported_safety_options`, so `model::refusal` renders it as one sentence — whether
+`:prompt` was stated or injected by the plane default. `supported` names the modes that
+work. Codex on app-server, the ACP providers, `pi`, `amp`, and the whole coding plane are
+untouched. This stands until the Claude approval bridge (AGENT_EXPERIENCE Track C2) makes
+`:prompt` true for those providers.
 
 Deliberately absent from v1: `agents.start` (arbitrary module start is a
 bigger authority than a TUI needs; revisit with an allowlisted spec registry),
@@ -1074,7 +1114,12 @@ through config saves; automated pty-level tests for the boot screen and coding h
 graying out approval/sandbox choices a provider cannot take in the `n` dialog
 (`runtime.providers` already
 Wire-encodes `normalized_options`, `normalized_values`, and
-`session_transports`, so the client has the data); a workspace lease posture
+`session_transports`, so the client has the data — and since the runtime began refusing
+`approval_mode: "prompt"` on a transport with no approvals channel (§2.4), the cost of
+not greying it is one named refusal instead of a dead session, which is why this stayed
+deferred rather than urgent); showing `usage` and `options.capabilities` anywhere in the
+client (both cross the wire on every `interactive.info`/`list`; no surface reads them
+yet); a workspace lease posture
 that follows the provider's actual write capability rather than the stated
 `sandbox_mode` alone; steer idempotency (the *text* is durable now — the session
 coordinator stores the redacted steer prompt keyed by the `request_id`

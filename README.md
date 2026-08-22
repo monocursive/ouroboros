@@ -464,6 +464,25 @@ stale.
   deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
   one whose data directory this user cannot read, is reachable only by naming `--addr`
   and `--token-file` explicitly. There is no discovery beyond the file.
+- **A managed provider cannot ask you before it runs a tool, so it is not offered the
+  chance.** Claude, Gemini, Grok, and Z.ai reach an interactive session by re-executing
+  their CLI once per turn. That transport has no approvals channel: `claude --print` is
+  never given a `--permission-prompt-tool`, so `approval_mode: :prompt` is accepted by
+  the CLI and then silently denies every tool call that needs permission — a session
+  that looks alive and cannot work. Rather than start one, `interactive.start` refuses
+  it by name and says which modes do work (`:default`, `:auto_edit`, `:auto_approve`).
+  Codex on app-server and the ACP providers (OpenCode, Kimi) ask for real and are
+  unaffected, as is the non-interactive coding plane. The refusal stands until the
+  Claude approval bridge lands and `:prompt` becomes true for those providers too.
+- **What a session can do and what it has spent are declared, not guessed.**
+  `interactive.info` and `interactive.list` carry `options.capabilities` — `transport`,
+  `process`, `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
+  `dynamic_model`, `dynamic_configuration`, each `native`/`managed`/`process`/`false` —
+  read from the provider's own spec, so a session listed after a restart declares the
+  same thing it started with. They also carry `usage`: input, output, cache-read and
+  cache-creation tokens, a total, `turns_with_usage`, and `cost_usd`. Those are the
+  numbers providers reported and nothing more — `cost_usd` stays `null` for a provider
+  that never priced the work rather than becoming a zero that reads as free.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.
