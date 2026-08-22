@@ -2576,10 +2576,16 @@ instead of making a departed machine disappear.
   much as an asset; a language-server failure is always an error tuple and never blocks a
   write.
 - The post-edit "new diagnostics" line is new relative to what the pool held for that file
-  before the edit. The first edit to a file no session has opened has no baseline, so its
-  pre-existing diagnostics are reported once as new. The alternative — opening every file
-  the runtime hears about, so a baseline always exists — is the memory behaviour the pool
-  exists to bound.
+  before the edit, and "the same diagnostic" is `{code, severity, message, range}` — the
+  key the runtime already dedupes on and the one OpenCode settled on. Two consequences,
+  both observed against a live `clangd`: the first edit to a file no session has opened has
+  no baseline, so its pre-existing diagnostics are reported once as new; and an edit that
+  shifts a pre-existing error to a different line changes its range, so it is reported once
+  more. Both over-report. Dropping the range from the identity would fix them and would
+  instead hide a *second* instance of an identical message in the same file, which is the
+  direction that loses a real error. The alternative to the first — opening every file the
+  runtime hears about so a baseline always exists — is the memory behaviour the pool exists
+  to bound.
 - `ledger.export`'s hash chain is verifiable by a client, not tamper-evident storage. It
   is computed over the answer and stored nowhere, so it detects a copy altered after
   export and says nothing about a node that rewrote its own checkpoint before exporting.
