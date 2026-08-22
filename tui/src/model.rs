@@ -1966,6 +1966,28 @@ pub fn respond_approval_params_with_reason(
     })
 }
 
+/// The exact `params` for the durable half of a "don't ask again" answer.
+///
+/// `scope` is `"workspace"` and never `"user"`: the modal names one workspace before the
+/// answer is chosen, and a client that widened that to the whole account because it had
+/// nowhere else to put the rule would be writing authority nobody read. `decision` is
+/// `"allow"` because this is only ever reached from an approve answer — the deny side of
+/// "don't ask again" is `permissions.add` with `deny`, which belongs to a rules editor and
+/// not to a modal about one command.
+///
+/// `pattern` is the runtime's own `suggested_rule` from the `approval_requested` payload.
+/// This client does not have the rule language and does not invent one:
+/// `Control.Permissions.Pattern` validates it, and an unvalidatable pattern comes back as
+/// `-32602` naming itself rather than as a rule that matches nothing.
+pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
+    serde_json::json!({
+        "scope": "workspace",
+        "pattern": pattern,
+        "decision": "allow",
+        "workspace": workspace,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

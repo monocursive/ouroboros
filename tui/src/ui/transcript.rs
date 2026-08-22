@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::model::transcript::{PlanUpdate, PresentationEvent, RunStart, UsageReport};
-use crate::model::{Event, EventType, Plane};
+use crate::model::transcript::{Diff, PlanUpdate, PresentationEvent, RunStart, UsageReport};
+use crate::model::{ApprovalDecision, ApprovalScope, Event, EventType, Plane};
 
 /// How many events one session's transcript keeps. Past this the oldest are dropped and
 /// the floor rises, which is visible rather than silent.
@@ -80,6 +80,104 @@ pub struct ApprovalRequest {
     pub payload: Value,
 }
 
+/// How many provider-offered options one modal will draw.
+const APPROVAL_OPTIONS: usize = 8;
+
+/// How many `toolCall.locations` paths one modal will draw.
+const APPROVAL_LOCATIONS: usize = 8;
+
+/// How many array entries are searched for a diff before giving up.
+const APPROVAL_DIFF_CANDIDATES: usize = 8;
+
+/// One answer the provider itself offered, as ACP spells them.
+///
+/// The `optionId` is kept even though `interactive.respond_approval` refuses
+/// `provider_options`: it is what the label *means* on the wire, and a modal that showed a
+/// vendor's wording while sending something else would be lying about the button.
+/// [`ProviderOption::decision`] is the mapping onto the four-way answer the gateway does
+/// accept, and it is the only thing the client acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOption {
+    pub option_id: Option<String>,
+    pub name: String,
+    pub kind: Option<String>,
+}
+
+impl ProviderOption {
+    /// Which of the four accepted answers this vendor label corresponds to, where its
+    /// `kind` says so. `None` for a `kind` this build does not recognize — an unknown
+    /// option is shown with its own words and mapped onto nothing, because guessing
+    /// whether a novel option approves or refuses is the one mistake that cannot be undone.
+    ///
+    /// The tables are `Dialect.ACP.select_permission_option/2`'s, read in the same
+    /// direction: there, a decision picks a `kind`; here, a `kind` names the decision it
+    /// would have been picked for.
+    pub fn decision(&self) -> Option<(ApprovalDecision, ApprovalScope)> {
+        match self.kind.as_deref()? {
+            "allow_once" | "allow" | "approve" => {
+                Some((ApprovalDecision::Approve, ApprovalScope::Once))
+            }
+            "allow_always" | "allow_session" | "always" => {
+                Some((ApprovalDecision::Approve, ApprovalScope::Session))
+            }
+            "reject_once" | "reject" | "deny" => {
+                Some((ApprovalDecision::Deny, ApprovalScope::Once))
+            }
+            "reject_always" | "deny_always" => {
+                Some((ApprovalDecision::Deny, ApprovalScope::Session))
+            }
+            _unknown => None,
+        }
+    }
+}
+
+/// What the modal draws, read out of the payload once rather than re-derived per frame.
+///
+/// Every field is optional on purpose: X11's whole complaint was a modal that showed
+/// nothing, and the fix is not a modal that *invents* something. A request with no diff
+/// says it carries no diff; a provider that named no reason gets no reason line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalDetail {
+    /// `sandbox escalation`, `file change`, `permissions`, or the ACP tool kind — as a
+    /// headline, in the words the payload used, spaced rather than snake-cased.
+    pub kind: Option<String>,
+    /// The provider's own title for the call (ACP `toolCall.title`).
+    pub title: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub reason: Option<String>,
+    /// The C1 pattern `Ouroboros.Control.Permissions.suggest/1` computed for this request.
+    pub suggested_rule: Option<String>,
+    /// Paths the call named (ACP `toolCall.locations`).
+    pub locations: Vec<String>,
+    pub options: Vec<ProviderOption>,
+    pub diff: Option<Diff>,
+    /// True when a diff was found but the gateway had already excerpted the leaf, so its
+    /// `+`/`-` counts describe the prefix and not the patch.
+    pub diff_excerpted: bool,
+    /// ACP `{"type": "diff", path, oldText, newText}` content blocks, which carry whole
+    /// file bodies rather than a patch. Named rather than diffed — see [`ApprovalEdit`].
+    pub edits: Vec<ApprovalEdit>,
+}
+
+/// One ACP diff content block, described rather than rendered as a patch.
+///
+/// The ACP v1 schema spells a file edit as the whole `oldText` and `newText`, not as a
+/// unified diff, and `Dialect.ACP` computes the patch server-side only when the edit
+/// becomes a `file_change` event. This client does not compute a second one: a patch it
+/// derived itself could disagree with the one the transcript will show, and a modal that
+/// showed a diff the runtime never produced would be asserting an edit nobody made. So
+/// the modal names the path, the kind, and the two sizes, and says where the patch is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalEdit {
+    pub path: String,
+    /// `add`, `delete`, or `update` — `Dialect.ACP.change_kind/2`'s own three, from the
+    /// same nullness test.
+    pub kind: &'static str,
+    pub old_bytes: usize,
+    pub new_bytes: usize,
+}
+
 impl ApprovalRequest {
     /// The tool call the provider is asking permission for, as one line.
     ///
@@ -95,6 +193,179 @@ impl ApprovalRequest {
             (None, _) => fallback_subject(&self.payload),
         }
     }
+
+    /// Everything the payload actually carries, for the modal to draw.
+    pub fn detail(&self) -> ApprovalDetail {
+        let payload = &self.payload;
+        let call = payload
+            .pointer("/tool_call")
+            .or_else(|| payload.pointer("/toolCall"))
+            .or_else(|| payload.pointer("/tool"));
+
+        let kind = json_nonempty_str(payload, "kind")
+            .or_else(|| call.and_then(|call| json_nonempty_str(call, "kind")))
+            .or_else(|| call.and_then(|call| json_nonempty_str(call, "name")))
+            .map(|kind| kind.replace('_', " "));
+
+        let (diff, diff_excerpted) = approval_diff(payload, call);
+
+        ApprovalDetail {
+            kind,
+            title: call.and_then(|call| json_nonempty_str(call, "title")),
+            command: approval_command(payload),
+            cwd: call
+                .and_then(|call| json_nonempty_str(call, "cwd"))
+                .or_else(|| json_nonempty_str(payload, "cwd")),
+            reason: json_nonempty_str(payload, "reason"),
+            suggested_rule: json_nonempty_str(payload, "suggested_rule"),
+            locations: call.map(approval_locations).unwrap_or_default(),
+            options: approval_options(payload),
+            diff,
+            diff_excerpted,
+            edits: call.map(approval_edits).unwrap_or_default(),
+        }
+    }
+}
+
+/// ACP diff content blocks under `toolCall.content`, in the order the provider listed them.
+fn approval_edits(call: &Value) -> Vec<ApprovalEdit> {
+    call.get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("diff"))
+                .filter_map(|block| {
+                    let path = json_nonempty_str(block, "path")?;
+                    let old = block.get("oldText").and_then(Value::as_str);
+                    let new = block.get("newText").and_then(Value::as_str);
+
+                    Some(ApprovalEdit {
+                        path,
+                        kind: match (old, new) {
+                            (None, _) => "add",
+                            (_, None) => "delete",
+                            _both => "update",
+                        },
+                        old_bytes: old.map(str::len).unwrap_or(0),
+                        new_bytes: new.map(str::len).unwrap_or(0),
+                    })
+                })
+                .take(APPROVAL_LOCATIONS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them.
+///
+/// Bounded at [`APPROVAL_OPTIONS`]: these are drawn as rows in a modal, and a provider
+/// that offered two hundred of them would push the command off the screen.
+fn approval_options(payload: &Value) -> Vec<ProviderOption> {
+    payload
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    let name = json_nonempty_str(option, "name")
+                        .or_else(|| json_nonempty_str(option, "label"))?;
+
+                    Some(ProviderOption {
+                        option_id: json_nonempty_str(option, "optionId")
+                            .or_else(|| json_nonempty_str(option, "option_id")),
+                        name,
+                        kind: json_nonempty_str(option, "kind"),
+                    })
+                })
+                .take(APPROVAL_OPTIONS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// ACP's `toolCall.locations: [{path, line?}]`, paths only.
+fn approval_locations(call: &Value) -> Vec<String> {
+    call.get("locations")
+        .and_then(Value::as_array)
+        .map(|locations| {
+            locations
+                .iter()
+                .filter_map(|location| match location {
+                    Value::String(path) => nonempty_trimmed(path),
+                    other => json_nonempty_str(other, "path"),
+                })
+                .take(APPROVAL_LOCATIONS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The patch this request is asking about, wherever the dialect put it.
+///
+/// Three shapes are known and named: a Codex `file_change` payload's `diff`, an ACP
+/// content block `{"type": "diff", …}` under `toolCall.content`, and the `changes` list
+/// `Dialect.ACP` maps a `diff` update into. The parse is
+/// [`crate::model::transcript::Diff::parse`] in every case — the transcript's own parser,
+/// not a second one that could disagree with it about what a hunk is.
+///
+/// The second half of the pair is whether the gateway had already excerpted the leaf. An
+/// excerpt is still worth showing; a diffstat computed from one is not a diffstat.
+fn approval_diff(payload: &Value, call: Option<&Value>) -> (Option<Diff>, bool) {
+    let mut candidates: Vec<&Value> = Vec::new();
+
+    for source in [Some(payload), call].into_iter().flatten() {
+        for key in ["diff", "patch", "unified_diff", "unifiedDiff"] {
+            if let Some(value) = source.get(key) {
+                candidates.push(value);
+            }
+        }
+
+        for key in ["content", "changes"] {
+            let Some(items) = source.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+
+            for item in items.iter().take(APPROVAL_DIFF_CANDIDATES) {
+                for key in ["diff", "patch"] {
+                    if let Some(value) = item.get(key) {
+                        candidates.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    for candidate in candidates {
+        match candidate {
+            Value::String(text) => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    return (Some(Diff::parse(text)), false);
+                }
+            }
+            Value::Object(_) => {
+                // `{"_excerpt": prefix, "_bytes": n}`: the gateway cut this leaf. Draw the
+                // prefix, and say it is a prefix.
+                if let Some(excerpt) = candidate.get("_excerpt").and_then(Value::as_str) {
+                    let mut diff = Diff::parse(excerpt);
+                    diff.truncated = true;
+                    return (Some(diff), true);
+                }
+
+                if let Some(text) = candidate.get("diff").and_then(Value::as_str) {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        return (Some(Diff::parse(text)), false);
+                    }
+                }
+            }
+            _other => {}
+        }
+    }
+
+    (None, false)
 }
 
 fn approval_command(payload: &Value) -> Option<String> {

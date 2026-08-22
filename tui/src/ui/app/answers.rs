@@ -397,6 +397,26 @@ impl App {
                     NoticeKind::Error,
                 ),
             },
+            // The approval it accompanies was already sent and is reported separately.
+            // A rule that failed to save is not a failed approval, and saying so in the
+            // same sentence would make the operator re-answer a question that was answered.
+            Tag::PermissionRule { pattern } => match result {
+                Ok(_value) => self.inform(
+                    format!("saved the workspace rule {pattern} — this will not be asked again"),
+                    NoticeKind::Info,
+                ),
+                Err(ClientError::Rpc(rpc)) => self.inform(
+                    format!(
+                        "the approval was sent; the rule {pattern} was not saved: {}",
+                        model::refusal(&rpc)
+                    ),
+                    NoticeKind::Error,
+                ),
+                Err(error) => self.inform(
+                    format!("the approval was sent; the rule {pattern} was not saved: {error}"),
+                    NoticeKind::Error,
+                ),
+            },
             Tag::Approval {
                 plane,
                 id,

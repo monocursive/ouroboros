@@ -45,7 +45,7 @@ use crate::transport::ClientError;
 
 use super::editor::{CompletionCatalog, Editor, EditorAction};
 use super::notify::{self, Terminal as TerminalIdentity};
-use super::transcript::{Note, Watch};
+use super::transcript::{ApprovalDetail, Note, Watch};
 use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
@@ -76,8 +76,8 @@ pub use machines::{
 };
 pub use overlays::{
     approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
-    AccountDialog, AccountFlow, Command, CommandPalette, Overlay, PromptKind, APPROVAL_CHOICES,
-    APPROVAL_ROWS, SANDBOX_ROWS,
+    AccountDialog, AccountFlow, ApprovalRule, Command, CommandPalette, Overlay, PromptKind,
+    APPROVAL_CHOICES, APPROVAL_REMEMBER, APPROVAL_ROWS, SANDBOX_ROWS,
 };
 pub use session::{Composer, ComposerVerb, SessionsTab};
 pub use settings::{Settings, SettingsField};
@@ -269,6 +269,14 @@ pub enum Tag {
         input: String,
         reconciling: bool,
         submission_sequence: u64,
+    },
+    /// `permissions.add` for the rule the approval modal's fifth answer names.
+    ///
+    /// Separate from [`Tag::Action`] because it is not a session verb: it fails or succeeds
+    /// on its own, after the approval it accompanies has already been answered, and the
+    /// notice has to be able to say which of the two happened.
+    PermissionRule {
+        pattern: String,
     },
     /// One approval response, keyed by the runtime request id so parallel prompts cannot
     /// collapse into one in-flight action.

@@ -590,11 +590,13 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
     };
 
     let plan_height = plan_panel_height(app, area);
+    let snack = (composer_height > 0).then(|| approval_snack(app)).flatten();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(plan_height),
+            Constraint::Length(u16::from(snack.is_some())),
             Constraint::Length(composer_height),
         ])
         .split(area);
@@ -605,9 +607,58 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         plan_panel(frame, rows[1], app);
     }
 
-    if composer_height > 0 {
-        composer(frame, rows[2], app, inline_context);
+    if let Some(snack) = snack {
+        render_approval_snack(frame, rows[2], &snack);
     }
+
+    if composer_height > 0 {
+        composer(frame, rows[3], app, inline_context);
+    }
+}
+
+/// Kiro's snack bar: one row, above the composer, that a pending approval cannot scroll
+/// away from.
+///
+/// The transcript's own approval cell scrolls with the conversation, so an agent that kept
+/// working after asking would carry the question off the top of the pane and the operator
+/// would be looking at a session that had simply stopped. This row does not move.
+///
+/// It names `ctrl+x a` rather than `a` deliberately: the composer holds the keyboard while
+/// a session is open, so a bare `a` types the letter. A bar that named a key which typed
+/// into the draft instead of answering would be the same lie in a smaller font.
+fn approval_snack(app: &App) -> Option<String> {
+    let request = app.sessions.open_watch().and_then(Watch::next_approval)?;
+
+    Some(
+        request
+            .detail()
+            .command
+            .unwrap_or_else(|| request.subject()),
+    )
+}
+
+fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str) {
+    let width = area.width as usize;
+    let label = "⏸ approval needed · ";
+    let hint = " · ctrl+x a to answer";
+    let room = width.saturating_sub(label.width() + hint.width()).max(8);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(theme::WARN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                super::tree::truncate(subject, room),
+                Style::default().fg(theme::WARN),
+            ),
+            Span::styled(hint, Style::default().fg(theme::MUTED)),
+        ])),
+        area,
+    );
 }
 
 /// How many rows the `Ctrl+T` plan panel wants, or zero when it is closed or has nothing.

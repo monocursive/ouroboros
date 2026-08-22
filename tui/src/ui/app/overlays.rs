@@ -325,8 +325,22 @@ pub enum Overlay {
         request_id: String,
         subject: String,
         choice: usize,
-        /// Optional operator reason attached through the `r` prompt.
         reason: Option<String>,
+        /// Everything the `approval_requested` payload carries, read once when the modal
+        /// opened rather than re-derived on every frame.
+        detail: Box<ApprovalDetail>,
+        /// The fifth answer, present only when the payload suggested a rule *and* this
+        /// gateway serves `permissions.add` *and* the session names a workspace to scope
+        /// it to. Absent rather than broken: an offer this client could not honour would
+        /// be worse than no offer.
+        rule: Option<ApprovalRule>,
+        /// Why the fifth answer is missing although the payload suggested a rule. Shown,
+        /// because "this runtime cannot remember that" and "nothing was suggested" are
+        /// different facts.
+        rule_absent: Option<&'static str>,
+        /// `ctrl+o` inside the modal: draw the diff at its full retained length instead of
+        /// the pane-height budget.
+        expanded: bool,
     },
     Confirm {
         title: String,
@@ -352,6 +366,23 @@ pub const APPROVAL_CHOICES: [(ApprovalDecision, ApprovalScope); 4] = [
     (ApprovalDecision::Deny, ApprovalScope::Once),
     (ApprovalDecision::Deny, ApprovalScope::Session),
 ];
+
+/// The index of the durable "don't ask again" answer, which is the fifth row when there is
+/// one. It is not in [`APPROVAL_CHOICES`] because it is not one call: `respond_approval`
+/// has no `scope: "always"` — the pinned `ApprovalResponse` schema admits only `once` and
+/// `session` — so the durable form is a session-scoped approval *plus* a `permissions.add`
+/// rule, and the modal says exactly that before it is chosen.
+pub const APPROVAL_REMEMBER: usize = APPROVAL_CHOICES.len();
+
+/// The rule the fifth answer would write, named in full before it is written.
+///
+/// `pattern` is the runtime's own `suggested_rule` — this client never invents one, which
+/// is the point of computing it server-side in `Control.Permissions.Seam`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRule {
+    pub pattern: String,
+    pub workspace: String,
+}
 
 impl App {
     /// `control.submit` from the Plans tab. The objective is the only field the plane
@@ -435,7 +466,7 @@ impl App {
     }
 
     pub(super) fn overlay_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         if matches!(self.overlay, Some(Overlay::Commands(_))) {
             self.command_palette_key(key);
@@ -520,32 +551,44 @@ impl App {
                 request_id,
                 choice,
                 reason,
+                rule,
+                expanded,
                 ..
-            } => match key.code {
-                KeyCode::Esc => self.overlay = None,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    *choice = (*choice + 1).min(APPROVAL_CHOICES.len() - 1)
+            } => {
+                let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+
+                match key.code {
+                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(rows - 1),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    // Claude Code's `Ctrl+O`, inside the modal: the diff at full retained
+                    // length instead of the rows the popup could spare for it.
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        *expanded = !*expanded;
+                    }
+                    // Claude Code offers the comment field on `Tab` from the answer row;
+                    // this client has always offered it on `r`. Both, because `r` is what
+                    // the modal's own hint says and `Tab` is what a reader arrives with.
+                    KeyCode::Char('r') | KeyCode::Tab => {
+                        let kind = PromptKind::ApprovalReason {
+                            plane: *plane,
+                            id: id.clone(),
+                            request_id: request_id.clone(),
+                            choice: *choice,
+                            reason: reason.clone(),
+                        };
+                        let buffer = reason.clone().unwrap_or_default();
+                        self.overlay = Some(Overlay::Prompt {
+                            kind,
+                            label: "approval reason — enter attaches it, an empty line keeps none"
+                                .to_string(),
+                            buffer,
+                        });
+                    }
+                    KeyCode::Enter => self.submit_approval(),
+                    _ => {}
                 }
-                KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
-                KeyCode::Char('r') => {
-                    let kind = PromptKind::ApprovalReason {
-                        plane: *plane,
-                        id: id.clone(),
-                        request_id: request_id.clone(),
-                        choice: *choice,
-                        reason: reason.clone(),
-                    };
-                    let buffer = reason.clone().unwrap_or_default();
-                    self.overlay = Some(Overlay::Prompt {
-                        kind,
-                        label: "approval reason — enter attaches it, an empty line keeps none"
-                            .to_string(),
-                        buffer,
-                    });
-                }
-                KeyCode::Enter => self.submit_approval(),
-                _ => {}
-            },
+            }
             Overlay::Prompt { buffer, .. } => match key.code {
                 KeyCode::Esc => self.resume_approval_choice(),
                 KeyCode::Backspace => {
@@ -826,6 +869,7 @@ impl App {
             request_id,
             choice,
             reason,
+            rule,
             ..
         }) = self.overlay.take()
         else {
@@ -836,7 +880,15 @@ impl App {
             return;
         }
 
-        let (decision, scope) = APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)];
+        // The fifth row answers `approve` for the rest of the session and then writes the
+        // durable rule. The other four are exactly themselves.
+        let remembering = choice == APPROVAL_REMEMBER;
+        let rule = remembering.then_some(rule).flatten();
+        let (decision, scope) = if remembering {
+            (ApprovalDecision::Approve, ApprovalScope::Session)
+        } else {
+            APPROVAL_CHOICES[choice.min(APPROVAL_CHOICES.len() - 1)]
+        };
 
         let marked = self
             .sessions
@@ -868,6 +920,18 @@ impl App {
             plane.method("respond_approval"),
             params,
         ));
+
+        // Second, and only second: the provider is waiting on the answer above, and a rule
+        // written before it was sent would be a rule that outlived a refused approval.
+        if let Some(rule) = rule {
+            self.issue(Call::new(
+                Tag::PermissionRule {
+                    pattern: rule.pattern.clone(),
+                },
+                "permissions.add",
+                model::permission_add_params(&rule.pattern, &rule.workspace),
+            ));
+        }
     }
 
     fn submit_prompt(&mut self) {

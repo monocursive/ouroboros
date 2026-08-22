@@ -328,6 +328,11 @@ impl SessionsTab {
     /// interaction context such as provider and whether a new turn must be queued.
     pub fn open_info(&self) -> Option<&SessionInfo> {
         let (plane, id) = self.open.as_ref()?;
+        self.session(*plane, id)
+    }
+
+    /// One listed session by identity, whether or not it is the open one.
+    pub fn session(&self, plane: Plane, id: &str) -> Option<&SessionInfo> {
         let sessions = match plane {
             Plane::Interactive => self.interactive.value.as_ref()?,
             Plane::Coding => self.coding.value.as_ref()?,
@@ -335,7 +340,7 @@ impl SessionsTab {
 
         sessions
             .iter()
-            .find(|session| session.plane == *plane && session.id == *id)
+            .find(|session| session.plane == plane && session.id == id)
     }
 
     pub(super) fn open_watch_mut(&mut self) -> Option<&mut Watch> {
