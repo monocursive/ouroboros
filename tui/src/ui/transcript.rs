@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use crate::model::transcript::{PlanUpdate, PresentationEvent, RunStart, UsageReport};
 use crate::model::{Event, EventType, Plane};
 
 /// How many events one session's transcript keeps. Past this the oldest are dropped and
@@ -217,6 +218,63 @@ pub struct Watch {
     /// Rebuilt from the ordered event ledger after every absorb, so a late replay cannot
     /// move this state backwards by arriving after a newer live event.
     waiting_for_reply: bool,
+    /// Session-wide facts folded out of the ledger, for the chrome that has to state them.
+    derived: Derived,
+}
+
+/// What one session's ordered events add up to.
+///
+/// Rebuilt from the held events after every absorb rather than accumulated as they arrive:
+/// a replay overlaps by design, and a running total that counted the overlap twice would
+/// report tokens nobody spent.
+#[derive(Debug, Default)]
+struct Derived {
+    usage: UsageTotals,
+    queued: usize,
+    model: Option<String>,
+    plan: Option<PlanUpdate>,
+    /// Sequence of the `plan_updated` `plan` was parsed from, so an unchanged plan is not
+    /// re-parsed on every absorb.
+    plan_sequence: Option<u64>,
+    /// When the turn that is still running started, in epoch milliseconds.
+    active_turn_started: Option<i64>,
+}
+
+/// The session's token and cost bookkeeping, as reported.
+///
+/// `complete` is the honest half: once history has been pruned upstream or dropped by this
+/// window, the fold no longer sees every report, and every number below is a lower bound.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: Option<f64>,
+    /// How many `usage` events the total is made of. Zero means the provider reported none,
+    /// which is different from reporting zero.
+    pub reports: usize,
+    pub complete: bool,
+}
+
+impl UsageTotals {
+    pub fn is_empty(&self) -> bool {
+        self.reports == 0 && self.cost_usd.is_none()
+    }
+
+    fn fold(&mut self, report: &UsageReport) {
+        self.reports += 1;
+        self.input_tokens += report.input_tokens.unwrap_or(0);
+        self.output_tokens += report.output_tokens.unwrap_or(0);
+        self.cached_tokens += report.cached_tokens.unwrap_or(0);
+        self.total_tokens += report.total_tokens.unwrap_or_else(|| {
+            report.input_tokens.unwrap_or(0) + report.output_tokens.unwrap_or(0)
+        });
+
+        if let Some(cost) = report.cost_usd {
+            *self.cost_usd.get_or_insert(0.0) += cost;
+        }
+    }
 }
 
 impl Watch {
@@ -240,7 +298,56 @@ impl Watch {
             viewport_height: 0,
             undecodable: 0,
             waiting_for_reply: false,
+            derived: Derived::default(),
         }
+    }
+
+    /// Facts about the whole session that the chrome outside this transcript must state.
+    ///
+    /// These five accessors are the contract between the transcript and everything that
+    /// draws around it — the header, the footer, the composer's queue badge — so a pane can
+    /// render a model name, a token count, a queue depth, an elapsed turn, or the current
+    /// plan without reaching into the event ledger and re-deriving them differently. All
+    /// five are recomputed from the held events after every absorb and describe only what
+    /// this client still holds: [`UsageTotals::complete`] says when that is less than the
+    /// whole session.
+    pub fn usage(&self) -> UsageTotals {
+        self.derived.usage
+    }
+
+    /// How many turns the runtime is holding behind the running one, from the newest
+    /// `queue_changed`.
+    pub fn queue_len(&self) -> usize {
+        self.derived.queued
+    }
+
+    /// How long the turn that is still running has been running, in milliseconds.
+    ///
+    /// `None` when no turn is open, when the stream has ended, or when the runtime's
+    /// timestamp could not be read — never a zero standing in for "do not know".
+    pub fn active_turn_elapsed(&self) -> Option<i64> {
+        if self.ended.is_some() {
+            return None;
+        }
+
+        let started = self.derived.active_turn_started?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+
+        (now >= started).then_some(now - started)
+    }
+
+    /// The newest plan the provider published, whatever dialect it arrived in.
+    pub fn latest_plan(&self) -> Option<&PlanUpdate> {
+        self.derived.plan.as_ref()
+    }
+
+    /// The model this session is running, when a provider named one. Only Claude's
+    /// `run_started` carries it today, so `None` is the ordinary answer elsewhere.
+    pub fn model(&self) -> Option<&str> {
+        self.derived.model.as_deref()
     }
 
     /// The largest [`scroll`](Self::scroll) that still shows content, as of the last frame.
@@ -329,7 +436,7 @@ impl Watch {
 
         self.trim();
         self.recompute_cursor();
-        self.recompute_waiting_for_reply();
+        self.recompute_derived();
     }
 
     /// Records that history at or below `floor` will never arrive.
@@ -527,7 +634,12 @@ impl Watch {
         self.cursor = cursor;
     }
 
-    fn recompute_waiting_for_reply(&mut self) {
+    /// One ordered pass over the held ledger, producing everything derived from it.
+    ///
+    /// Reply-waiting, token totals, queue depth, model, plan, and the running turn's start
+    /// are all "what do these events add up to" questions, and answering them in one walk
+    /// keeps the cost of an absorb where it already was.
+    fn recompute_derived(&mut self) {
         #[derive(Debug, Default)]
         struct ReplyState {
             pending: bool,
@@ -536,8 +648,56 @@ impl Watch {
         }
 
         let mut turns: BTreeMap<String, ReplyState> = BTreeMap::new();
+        let mut usage = UsageTotals {
+            complete: self.floor == 0,
+            ..UsageTotals::default()
+        };
+        let mut queued = 0usize;
+        let mut model: Option<String> = None;
+        let mut plan_sequence: Option<u64> = None;
+        let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
 
         for event in self.events.values() {
+            match PresentationEvent::from_event(event) {
+                PresentationEvent::Usage(report) => usage.fold(&report),
+                PresentationEvent::QueueChanged { queued: depth } => queued = depth,
+                PresentationEvent::RunStarted(RunStart {
+                    model: Some(named), ..
+                }) => model = Some(named),
+                PresentationEvent::Plan(_) => plan_sequence = Some(event.sequence),
+                PresentationEvent::TurnStarted { turn_id, at } => {
+                    if let (Some(turn_id), Some(at)) = (turn_id, at) {
+                        turn_starts.insert(turn_id, at);
+                    }
+                }
+                PresentationEvent::TurnEnded { turn_id, .. } => {
+                    if let Some(turn_id) = turn_id {
+                        turn_starts.remove(&turn_id);
+                    } else {
+                        turn_starts.clear();
+                    }
+                }
+                // A finished run's own report is the only place Claude states a cost.
+                PresentationEvent::Lifecycle { .. } if event.kind == EventType::RunCompleted => {
+                    if let Some(cost) = event
+                        .payload
+                        .get("cost_usd")
+                        .or_else(|| event.payload.get("total_cost_usd"))
+                        .and_then(Value::as_f64)
+                    {
+                        *usage.cost_usd.get_or_insert(0.0) += cost;
+                    }
+                }
+                _ => {}
+            }
+
+            if matches!(
+                event.kind,
+                EventType::SessionClosed | EventType::SessionFailed | EventType::SessionCancelled
+            ) {
+                turn_starts.clear();
+            }
+
             let turn = event
                 .turn_id
                 .clone()
@@ -588,6 +748,20 @@ impl Watch {
         self.waiting_for_reply = turns
             .values()
             .any(|state| state.pending && !state.responded && !state.paused);
+        self.derived.usage = usage;
+        self.derived.queued = queued;
+        self.derived.model = model;
+        self.derived.active_turn_started = turn_starts.values().copied().max();
+
+        if self.derived.plan_sequence != plan_sequence {
+            self.derived.plan_sequence = plan_sequence;
+            self.derived.plan = plan_sequence
+                .and_then(|sequence| self.events.get(&sequence))
+                .and_then(|event| match PresentationEvent::from_event(event) {
+                    PresentationEvent::Plan(plan) => Some(plan),
+                    _ => None,
+                });
+        }
     }
 }
 

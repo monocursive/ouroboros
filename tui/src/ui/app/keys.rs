@@ -59,11 +59,17 @@ impl App {
             return;
         }
 
-        // Event details must remain reachable while the composer owns printable keys.
-        // Ctrl+O is the Pi/OpenCode muscle memory for expanding tool output; Ctrl+E is
-        // readline end-of-line once it reaches the editor.
+        // Ctrl+O is the field's "show more": it expands the conversation's own cells
+        // rather than swapping in a different view. The normalized ledger keeps its own
+        // verbs (`/details`, `ctrl+x d`). Ctrl+E stays readline end-of-line in the editor.
         if ctrl && matches!(key.code, KeyCode::Char('o')) && self.overlay.is_none() {
-            self.toggle_session_details();
+            self.toggle_verbose_transcript();
+            return;
+        }
+
+        // Ctrl+T is the plan/tasks panel, as in Claude Code and Gemini.
+        if ctrl && matches!(key.code, KeyCode::Char('t')) && self.overlay.is_none() {
+            self.toggle_plan_panel();
             return;
         }
 

@@ -1,12 +1,22 @@
 //! Declarative cells for the conversation-first transcript.
 //!
 //! Projection is deliberately one-way: normalized durable events become compact display
-//! cells, but no decision made here is sent back to the runtime. Ctrl-O continues to show
-//! every raw event when this best-effort presentation cannot recognize a newer payload.
+//! cells, but no decision made here is sent back to the runtime. `/details` continues to
+//! show every raw event when this best-effort presentation cannot recognize a newer
+//! payload.
 //!
 //! Chat layout is editorial rather than phone-like: both voices share one readable measure,
 //! human intent is marked in amber, runtime output in cyan, and tool/command activity is
 //! dimmer and more compact than either speaker.
+//!
+//! ## Two verbosities, one projection
+//!
+//! [`Verbosity::Compact`] is the reading view: collapsible cells show a header and a few
+//! rows. [`Verbosity::Verbose`] — `Ctrl+O`, the key the field settled on for "show more" —
+//! renders the same cells expanded in place. Both remain bounded; verbose raises the
+//! per-cell row ceiling to [`VERBOSE_LINES`] rather than removing it, because a transcript
+//! that re-lays out a 64 MiB tool result on every frame is a transcript that stops
+//! redrawing.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -17,7 +27,10 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::transcript::{Diff, FileChange, PresentationEvent, ToolCall, ToolResult};
+use crate::model::transcript::{
+    leaf_text, Diff, FileChange, Lifecycle, PlanStatus, PlanUpdate, PresentationEvent, ToolCall,
+    ToolResult, TurnOutcome, UsageReport,
+};
 
 use super::code;
 use super::theme;
@@ -28,17 +41,60 @@ const COMMAND_OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = 12;
 const MESSAGE_LINES: usize = 256;
 const STATUS_DETAIL_LINES: usize = 32;
+/// The per-cell row ceiling under `Ctrl+O`. Deliberately raised from the compact ceilings
+/// rather than removed: the point of verbose is to read a whole tool result on screen, and
+/// two thousand rows is more than any terminal shows at once while still bounding the wrap
+/// work one frame can be asked to do.
+const VERBOSE_LINES: usize = 2_000;
+/// Crush's middle state: the last N lines of a long block, with what came before named.
+const THINKING_TAIL_LINES: usize = 200;
 const AGENT_OUTPUT_BYTES: usize = 128 * 1024;
 const COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+const THINKING_BYTES: usize = 128 * 1024;
 const TOOL_VALUE_BYTES: usize = 32 * 1024;
 const TOOL_INPUT_BYTES: usize = 8 * 1024;
 const AGENT_TRUNCATION: &str =
     "\n… agent stream truncated; full updates are available in event details";
 const COMMAND_TRUNCATION: &str =
     "\n… command stream truncated; full updates are available in event details";
+const THINKING_TRUNCATION: &str =
+    "\n… reasoning truncated; full text is available in event details";
 const TOOL_VALUE_TRUNCATION: &str =
     "\n… tool value truncated; full value is available in event details";
 const TOOL_INPUT_TRUNCATION: &str = " … full input is available in event details";
+
+/// How much of a collapsible cell the transcript draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verbosity {
+    #[default]
+    Compact,
+    Verbose,
+}
+
+impl Verbosity {
+    pub fn verbose(self) -> bool {
+        self == Self::Verbose
+    }
+
+    /// The row ceiling for one collapsible cell at this verbosity.
+    fn lines(self, compact: usize) -> usize {
+        match self {
+            Self::Compact => compact,
+            Self::Verbose => VERBOSE_LINES,
+        }
+    }
+
+    /// Where the rest of a cut cell lives, phrased for the view the reader is in.
+    ///
+    /// Kept short on purpose: this row is drawn inside tool frames as narrow as twenty
+    /// cells, and a provenance note that is itself truncated has stopped being provenance.
+    fn provenance(self, what: &str) -> String {
+        match self {
+            Self::Compact => format!("full {what} · ctrl+o"),
+            Self::Verbose => format!("full {what} · /details"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Speaker {
@@ -76,6 +132,19 @@ pub struct FileCell {
     pub kind: Option<String>,
 }
 
+/// Crush's three-state collapse, applied to reasoning.
+///
+/// Collapsed is the default because thinking expanded by default in a long session is a
+/// documented 2026 regression (Zed #52536): the reader loses the conversation to the
+/// model's monologue. `Tail` is what a block still being written shows, so reasoning can be
+/// watched as it arrives; `Full` is `Ctrl+O`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingState {
+    Collapsed,
+    Tail,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
     Message {
@@ -83,6 +152,16 @@ pub enum Cell {
         text: String,
         streaming: bool,
     },
+    /// Reasoning for one turn, accumulated. Never rendered as the agent's answer.
+    Thinking {
+        text: String,
+        lines: usize,
+        state: ThinkingState,
+    },
+    Plan(PlanUpdate),
+    /// One provider token report. Folded into the session total everywhere else; drawn
+    /// only under `Ctrl+O`, where the reader has asked for the bookkeeping.
+    Usage(UsageReport),
     Tool(ToolCell),
     CommandOutput(String),
     File(FileCell),
@@ -110,12 +189,25 @@ struct PendingOutput {
     text: String,
 }
 
+/// The open reasoning cell for a turn, and where it sits so later deltas append to it.
+#[derive(Debug)]
+struct PendingThinking {
+    turn_id: Option<String>,
+    index: usize,
+}
+
 /// Projects one ordered durable transcript into display cells.
 pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
     let mut cells = Vec::new();
     let mut pending = None;
+    let mut thinking: Option<PendingThinking> = None;
     let mut tools: BTreeMap<String, usize> = BTreeMap::new();
     let mut approvals: BTreeMap<String, usize> = BTreeMap::new();
+    // Turn start instants, so a turn-end divider can state elapsed time instead of
+    // implying one. A turn whose start this window no longer holds gets no duration.
+    let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
+    // The last queue depth projected, so an unchanged count is not restated.
+    let mut queued: Option<usize> = None;
 
     for entry in entries {
         match entry {
@@ -176,6 +268,69 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     text,
                     final_text,
                 } => project_agent_text(&mut cells, &mut pending, turn_id, text, final_text),
+                PresentationEvent::Thinking { turn_id, text } => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    project_thinking(&mut cells, &mut thinking, turn_id, text);
+                }
+                PresentationEvent::Plan(plan) => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    cells.push(Cell::Plan(plan));
+                }
+                PresentationEvent::Usage(usage) => {
+                    // Folded into the session total the header and footer read from
+                    // `Watch::usage`. The per-event line is verbose-only because one row
+                    // per token report would bury the conversation it is describing.
+                    flush_agent(&mut cells, &mut pending, false);
+                    if !usage.is_empty() {
+                        cells.push(Cell::Usage(usage));
+                    }
+                }
+                PresentationEvent::RunStarted(run) => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    cells.push(Cell::ChatNote {
+                        text: run_started_note(&run),
+                    });
+                }
+                PresentationEvent::TurnStarted { turn_id, at } => {
+                    // No cell: a running turn is already announced by the working
+                    // indicator. The instant is kept so the turn's own end divider can
+                    // state how long it took.
+                    if let (Some(turn_id), Some(at)) = (turn_id, at) {
+                        turn_starts.entry(turn_id).or_insert(at);
+                    }
+                }
+                PresentationEvent::TurnEnded {
+                    turn_id,
+                    at,
+                    outcome,
+                    detail,
+                } => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    project_turn_end(&mut cells, &turn_starts, turn_id, at, outcome, detail);
+                }
+                PresentationEvent::QueueChanged { queued: depth } => {
+                    if queued != Some(depth) {
+                        queued = Some(depth);
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::ChatNote {
+                            text: match depth {
+                                0 => "The follow-up queue is empty".to_string(),
+                                1 => "1 follow-up is queued".to_string(),
+                                depth => format!("{depth} follow-ups are queued"),
+                            },
+                        });
+                    }
+                }
+                PresentationEvent::Lifecycle { marker, detail } => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    project_lifecycle(&mut cells, marker, detail);
+                }
+                PresentationEvent::ProviderNote { kind, detail } => {
+                    flush_agent(&mut cells, &mut pending, false);
+                    cells.push(Cell::ChatNote {
+                        text: provider_note_text(&kind, &detail),
+                    });
+                }
                 PresentationEvent::ToolCall(call) => {
                     flush_agent(&mut cells, &mut pending, false);
                     project_tool_call(&mut cells, &mut tools, call);
@@ -258,13 +413,179 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                         tone: Tone::Warning,
                     });
                 }
-                PresentationEvent::Ignore => {}
+                // Drawn as nothing, for a reason the presentation recorded. The event
+                // itself is still in `/details`.
+                PresentationEvent::Hidden(_reason) => {}
             },
         }
     }
 
     flush_agent(&mut cells, &mut pending, true);
+    settle_thinking(&mut cells);
     cells
+}
+
+/// Reasoning is watched while it is still arriving and folds away once it is not.
+///
+/// "Still arriving" is exactly "nothing has been drawn after it yet", so the rule needs no
+/// bookkeeping: every reasoning cell but the last one is collapsed to its header.
+fn settle_thinking(cells: &mut [Cell]) {
+    let last = cells.len().saturating_sub(1);
+
+    for (index, cell) in cells.iter_mut().enumerate() {
+        if let Cell::Thinking { state, .. } = cell {
+            *state = if index == last {
+                ThinkingState::Tail
+            } else {
+                ThinkingState::Collapsed
+            };
+        }
+    }
+}
+
+fn project_thinking(
+    cells: &mut Vec<Cell>,
+    thinking: &mut Option<PendingThinking>,
+    turn_id: Option<String>,
+    text: String,
+) {
+    let open = thinking.as_ref().filter(|open| {
+        open.index + 1 == cells.len()
+            && (open.turn_id == turn_id || open.turn_id.is_none() || turn_id.is_none())
+    });
+
+    if let Some(open) = open {
+        if let Some(Cell::Thinking {
+            text: existing,
+            lines,
+            ..
+        }) = cells.get_mut(open.index)
+        {
+            append_bounded(existing, &text, THINKING_BYTES, THINKING_TRUNCATION);
+            *lines = existing.lines().count();
+            return;
+        }
+    }
+
+    *thinking = Some(PendingThinking {
+        turn_id,
+        index: cells.len(),
+    });
+    cells.push(Cell::Thinking {
+        lines: text.lines().count(),
+        text: bound_owned(text, THINKING_BYTES, THINKING_TRUNCATION),
+        state: ThinkingState::Tail,
+    });
+}
+
+/// A provider event nobody modelled, as one line that names what it was.
+fn provider_note_text(kind: &str, detail: &str) -> String {
+    let mut text = "provider event".to_string();
+
+    if !kind.trim().is_empty() {
+        text.push_str(" · ");
+        text.push_str(kind.trim());
+    }
+    if !detail.trim().is_empty() {
+        text.push_str(" — ");
+        text.push_str(detail.trim());
+    }
+
+    text
+}
+
+fn run_started_note(run: &crate::model::transcript::RunStart) -> String {
+    let mut parts = vec!["run started".to_string()];
+
+    if let Some(model) = &run.model {
+        parts.push(model.clone());
+    }
+    if run.tool_count > 0 {
+        parts.push(format!("{} tools", run.tool_count));
+    }
+    if let Some(cwd) = &run.cwd {
+        parts.push(cwd.clone());
+    }
+
+    parts.join(" · ")
+}
+
+fn project_lifecycle(cells: &mut Vec<Cell>, marker: Lifecycle, detail: String) {
+    let label = marker.label();
+    let text = if detail.trim().is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} · {detail}")
+    };
+
+    match marker {
+        // A closed session is the end of the reading path, so it reads as a rule across it
+        // rather than as another muted aside.
+        Lifecycle::SessionClosed => cells.push(Cell::Divider {
+            text,
+            tone: Tone::Muted,
+        }),
+        _ => cells.push(Cell::ChatNote { text }),
+    }
+}
+
+fn project_turn_end(
+    cells: &mut Vec<Cell>,
+    turn_starts: &BTreeMap<String, i64>,
+    turn_id: Option<String>,
+    at: Option<i64>,
+    outcome: TurnOutcome,
+    detail: String,
+) {
+    // A failure is still a failure: the divider terminates the turn, and the error the
+    // provider reported keeps its own loud cell above it.
+    match outcome {
+        TurnOutcome::Failed => cells.push(Cell::Status {
+            label: "Agent error".into(),
+            detail: detail.clone(),
+            tone: Tone::Error,
+        }),
+        TurnOutcome::Interrupted => cells.push(Cell::Status {
+            label: "Interrupted".into(),
+            detail: detail.clone(),
+            tone: Tone::Warning,
+        }),
+        TurnOutcome::Completed => {}
+    }
+
+    let elapsed = turn_id
+        .as_ref()
+        .and_then(|turn_id| turn_starts.get(turn_id))
+        .zip(at)
+        .and_then(|(start, end)| end.checked_sub(*start))
+        .filter(|elapsed| *elapsed >= 0)
+        .map(|elapsed| format!(" · {}", duration(elapsed)));
+
+    cells.push(Cell::Divider {
+        text: format!("{}{}", outcome.label(), elapsed.unwrap_or_default()),
+        tone: match outcome {
+            TurnOutcome::Completed => Tone::Muted,
+            TurnOutcome::Failed => Tone::Error,
+            TurnOutcome::Interrupted => Tone::Warning,
+        },
+    });
+}
+
+/// Codex's elapsed-time phrasing: `4m 07s`, `1h 02m`, `840ms`.
+pub fn duration(millis: i64) -> String {
+    let seconds = millis / 1_000;
+
+    if seconds == 0 {
+        return format!("{millis}ms");
+    }
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+
+    format!("{}h {:02}m", seconds / 3_600, (seconds % 3_600) / 60)
 }
 
 /// The newest agent message in chat projection, for copy-last-message.
@@ -284,18 +605,28 @@ pub fn last_agent_message(entries: Vec<Entry<'_>>) -> Option<String> {
 
 /// Projects and renders a transcript. Kept as one pure call for the session pane and tests.
 pub fn render(entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
-    render_at(entries, width, 0)
+    render_at(entries, width, 0, Verbosity::Compact)
 }
 
-pub fn render_at(entries: Vec<Entry<'_>>, width: usize, tick: u64) -> Vec<Line<'static>> {
-    render_cells_at(&project(entries), width, tick)
+pub fn render_at(
+    entries: Vec<Entry<'_>>,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) -> Vec<Line<'static>> {
+    render_cells_at(&project(entries), width, tick, verbosity)
 }
 
 pub fn render_cells(cells: &[Cell], width: usize) -> Vec<Line<'static>> {
-    render_cells_at(cells, width, 0)
+    render_cells_at(cells, width, 0, Verbosity::Compact)
 }
 
-pub fn render_cells_at(cells: &[Cell], width: usize, tick: u64) -> Vec<Line<'static>> {
+pub fn render_cells_at(
+    cells: &[Cell],
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     for cell in cells {
@@ -304,22 +635,201 @@ pub fn render_cells_at(cells: &[Cell], width: usize, tick: u64) -> Vec<Line<'sta
                 speaker,
                 text,
                 streaming,
-            } => render_message(&mut lines, *speaker, text, width, *streaming, tick),
-            Cell::Tool(tool) => render_tool(&mut lines, tool, width, tick),
-            Cell::CommandOutput(text) => render_command_output(&mut lines, text, width),
+            } => render_message(
+                &mut lines, *speaker, text, width, *streaming, tick, verbosity,
+            ),
+            Cell::Thinking {
+                text,
+                lines: rows,
+                state,
+            } => render_thinking(&mut lines, text, *rows, *state, width, verbosity),
+            Cell::Plan(plan) => render_plan(&mut lines, plan, width, "Plan"),
+            Cell::Usage(usage) => {
+                if verbosity.verbose() {
+                    render_chat_note(&mut lines, &usage_note(usage), width);
+                }
+            }
+            Cell::Tool(tool) => render_tool(&mut lines, tool, width, tick, verbosity),
+            Cell::CommandOutput(text) => render_command_output(&mut lines, text, width, verbosity),
             Cell::File(file) => render_file(&mut lines, file, width),
-            Cell::Diff(diff) => render_diff(&mut lines, diff, width),
+            Cell::Diff(diff) => render_diff(&mut lines, diff, width, verbosity),
             Cell::Status {
                 label,
                 detail,
                 tone,
-            } => render_status(&mut lines, label, detail, colour(*tone), width),
+            } => render_status(&mut lines, label, detail, colour(*tone), width, verbosity),
             Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
             Cell::Divider { text, tone } => lines.push(divider(text, width, colour(*tone))),
         }
     }
 
     lines
+}
+
+/// One token report, phrased only in the numbers the provider actually sent.
+pub fn usage_note(usage: &UsageReport) -> String {
+    let mut parts = vec!["usage".to_string()];
+
+    if let Some(input) = usage.input_tokens {
+        parts.push(format!("in {input}"));
+    }
+    if let Some(output) = usage.output_tokens {
+        parts.push(format!("out {output}"));
+    }
+    if let Some(cached) = usage.cached_tokens {
+        parts.push(format!("cached {cached}"));
+    }
+    if let Some(total) = usage.total_tokens {
+        parts.push(format!("total {total}"));
+    }
+    if let Some(cost) = usage.cost_usd {
+        parts.push(format!("${cost:.4}"));
+    }
+
+    parts.join(" · ")
+}
+
+/// The plan as rows, for the transcript cell and the `Ctrl+T` panel alike.
+///
+/// `◌ ● ✓` are Warp's glyphs. A status this client does not recognise keeps the provider's
+/// own word beside a `?`, because a panel that guessed "done" would report finished work
+/// that never happened.
+pub fn render_plan(lines: &mut Vec<Line<'static>>, plan: &PlanUpdate, width: usize, heading: &str) {
+    separate(lines);
+
+    let done = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == PlanStatus::Done)
+        .count();
+    lines.push(Line::from(vec![
+        Span::styled(format!("◇ {heading}  "), theme::heading()),
+        Span::styled(
+            format!("{done}/{} done", plan.step_count.max(plan.steps.len())),
+            theme::quiet(),
+        ),
+    ]));
+
+    if let Some(explanation) = &plan.explanation {
+        for line in wrap_limited(explanation, width.saturating_sub(4).max(8), 8) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line, theme::quiet()),
+            ]));
+        }
+    }
+
+    for step in &plan.steps {
+        let style = match step.status {
+            PlanStatus::Done => Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
+            PlanStatus::InProgress => Style::default().fg(theme::ACCENT),
+            PlanStatus::Pending => theme::quiet(),
+            PlanStatus::Other(_) => Style::default().fg(theme::WARN),
+        };
+        let suffix = match &step.status {
+            PlanStatus::Other(status) => format!("  ({status})"),
+            _ => String::new(),
+        };
+        let body = format!("{}{suffix}", step.text.replace('\n', " "));
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{} ", step.status.glyph()), style),
+            Span::styled(
+                super::tree::truncate(&body, width.saturating_sub(6).max(8)),
+                style,
+            ),
+        ]));
+    }
+
+    if plan.step_count > plan.steps.len() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "… {} more steps; full plan in /details",
+                    plan.step_count - plan.steps.len()
+                ),
+                theme::quiet(),
+            ),
+        ]));
+    }
+}
+
+fn render_thinking(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    rows: usize,
+    state: ThinkingState,
+    width: usize,
+    verbosity: Verbosity,
+) {
+    let state = if verbosity.verbose() {
+        ThinkingState::Full
+    } else {
+        state
+    };
+
+    separate(lines);
+    lines.push(Line::from(vec![
+        Span::styled("◇ thinking  ", theme::quiet()),
+        Span::styled(
+            format!("{rows} line{}", if rows == 1 { "" } else { "s" }),
+            theme::quiet(),
+        ),
+        Span::styled(
+            match state {
+                ThinkingState::Collapsed => "  ctrl+o expands",
+                _ => "",
+            },
+            Style::default().fg(theme::MUTED),
+        ),
+    ]));
+
+    let (body, omitted) = match state {
+        ThinkingState::Collapsed => return,
+        ThinkingState::Full => (text, 0),
+        ThinkingState::Tail => tail_lines(text, THINKING_TAIL_LINES),
+    };
+
+    if omitted > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("… {omitted} earlier lines of reasoning; ctrl+o shows them"),
+                theme::quiet(),
+            ),
+        ]));
+    }
+
+    render_indented_text(
+        lines,
+        body,
+        width,
+        verbosity.lines(THINKING_TAIL_LINES),
+        &verbosity.provenance("reasoning"),
+    );
+}
+
+/// The last `limit` lines of a block, and how many were left above them.
+fn tail_lines(text: &str, limit: usize) -> (&str, usize) {
+    let total = text.lines().count();
+    if total <= limit {
+        return (text, 0);
+    }
+
+    let skip = total - limit;
+    let mut seen = 0;
+    for (at, character) in text.char_indices() {
+        if character == '\n' {
+            seen += 1;
+            if seen == skip {
+                return (&text[at + 1..], skip);
+            }
+        }
+    }
+
+    (text, 0)
 }
 
 fn project_agent_text(
@@ -521,6 +1031,7 @@ fn chat_note(note: &Note) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_message(
     lines: &mut Vec<Line<'static>>,
     speaker: Speaker,
@@ -528,21 +1039,29 @@ fn render_message(
     width: usize,
     streaming: bool,
     tick: u64,
+    verbosity: Verbosity,
 ) {
     separate(lines);
     match speaker {
-        Speaker::You => render_user_message(lines, text, width),
-        Speaker::Agent => render_agent_message(lines, text, width, streaming, tick),
+        Speaker::You => render_user_message(lines, text, width, verbosity),
+        Speaker::Agent => render_agent_message(lines, text, width, streaming, tick, verbosity),
     }
 }
 
-fn render_user_message(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+fn render_user_message(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    verbosity: Verbosity,
+) {
+    let message_lines = verbosity.lines(MESSAGE_LINES);
+
     if width < 16 {
         lines.push(Line::from(vec![
             Span::styled("▌ ", theme::action()),
             Span::styled("YOU", theme::action()),
         ]));
-        for line in wrap_limited(text, width.saturating_sub(2).max(8), MESSAGE_LINES) {
+        for line in wrap_limited(text, width.saturating_sub(2).max(8), message_lines) {
             lines.push(Line::from(Span::raw(line)));
         }
         return;
@@ -562,9 +1081,9 @@ fn render_user_message(lines: &mut Vec<Line<'static>>, text: &str, width: usize)
     let wrapped = wrap_limited(
         text,
         width.saturating_sub(4).max(8),
-        MESSAGE_LINES.saturating_add(1),
+        message_lines.saturating_add(1),
     );
-    let shown = wrapped.len().min(MESSAGE_LINES);
+    let shown = wrapped.len().min(message_lines);
 
     for line in wrapped.iter().take(shown) {
         let padding = width.saturating_sub(line.width() + 4);
@@ -577,7 +1096,8 @@ fn render_user_message(lines: &mut Vec<Line<'static>>, text: &str, width: usize)
     }
 
     if wrapped.len() > shown {
-        let omitted = "… full message in event details";
+        let omitted = format!("… {}", verbosity.provenance("message"));
+        let omitted = super::tree::truncate(&omitted, width.saturating_sub(4).max(8));
         let padding = width.saturating_sub(omitted.width() + 4);
         lines.push(Line::from(vec![
             Span::styled("│ ", border),
@@ -599,7 +1119,9 @@ fn render_agent_message(
     width: usize,
     streaming: bool,
     tick: u64,
+    verbosity: Verbosity,
 ) {
+    let message_lines = verbosity.lines(MESSAGE_LINES);
     lines.push(Line::from(vec![
         Span::styled("◆ ", Style::default().fg(theme::SYSTEM)),
         Span::styled(
@@ -620,12 +1142,12 @@ fn render_agent_message(
     // A segment needs room for its own frame plus this function's truncation notice;
     // starting one with less would overshoot the cap by more than it saves.
     for (index, segment) in segments.iter().enumerate() {
-        if MESSAGE_LINES.saturating_sub(body.len()) < 4 {
+        if message_lines.saturating_sub(body.len()) < 4 {
             complete = false;
             break;
         }
 
-        let remaining = MESSAGE_LINES.saturating_sub(body.len());
+        let remaining = message_lines.saturating_sub(body.len());
 
         match segment {
             code::Segment::Prose(prose) => {
@@ -653,7 +1175,7 @@ fn render_agent_message(
 
     if !complete {
         lines.push(Line::from(Span::styled(
-            "… full message in event details",
+            format!("… {}", verbosity.provenance("message")),
             theme::quiet(),
         )));
     }
@@ -791,7 +1313,13 @@ fn style_inline_code(line: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, tick: u64) {
+fn render_tool(
+    lines: &mut Vec<Line<'static>>,
+    tool: &ToolCell,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) {
     separate(lines);
 
     let (mark, mark_style) = match tool.state {
@@ -845,8 +1373,8 @@ fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, ti
                     lines,
                     &output,
                     width,
-                    TOOL_OUTPUT_LINES,
-                    "full result in event details",
+                    verbosity.lines(TOOL_OUTPUT_LINES),
+                    &verbosity.provenance("result"),
                     if tool.state == ToolState::Failed {
                         Style::default().fg(theme::BAD)
                     } else {
@@ -877,18 +1405,29 @@ fn render_tool(lines: &mut Vec<Line<'static>>, tool: &ToolCell, width: usize, ti
                 _ => theme::quiet(),
             };
             let content_width = width.saturating_sub(4).max(8);
-            let wrapped = wrap_limited(&output, content_width, 2);
-            if let Some(first) = wrapped.first() {
+            // Collapsed by default is the whole point of the row; `Ctrl+O` is what the
+            // field settled on for "show me the rest", and it shows it here rather than in
+            // a different view.
+            let shown = if verbosity.verbose() {
+                VERBOSE_LINES
+            } else {
+                1
+            };
+            let wrapped = wrap_limited(&output, content_width, shown.saturating_add(1));
+            for line in wrapped.iter().take(shown) {
                 lines.push(boxed_tool_row(
-                    vec![Span::styled(first.clone(), body)],
+                    vec![Span::styled(line.clone(), body)],
                     width,
                     border,
                 ));
             }
-            if wrapped.len() > 1 {
+            if wrapped.len() > shown {
                 lines.push(boxed_tool_row(
                     vec![Span::styled(
-                        super::tree::truncate("… full result in event details", content_width),
+                        super::tree::truncate(
+                            &format!("… {}", verbosity.provenance("result")),
+                            content_width,
+                        ),
                         theme::quiet(),
                     )],
                     width,
@@ -917,7 +1456,12 @@ fn boxed_tool_row(mut content: Vec<Span<'static>>, width: usize, border: Style) 
     Line::from(spans)
 }
 
-fn render_command_output(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+fn render_command_output(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    verbosity: Verbosity,
+) {
     if text.trim().is_empty() {
         return;
     }
@@ -926,8 +1470,8 @@ fn render_command_output(lines: &mut Vec<Line<'static>>, text: &str, width: usiz
         lines,
         text,
         width,
-        COMMAND_OUTPUT_LINES,
-        "full command output in event details",
+        verbosity.lines(COMMAND_OUTPUT_LINES),
+        &verbosity.provenance("command output"),
         theme::quiet(),
     );
 }
@@ -951,7 +1495,7 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
     ]));
 }
 
-fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
+fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize, verbosity: Verbosity) {
     let path = diff.path.as_deref().unwrap_or("changes");
     let path = super::tree::truncate(path, width.saturating_sub(24).max(8));
     let mut heading = vec![
@@ -972,9 +1516,10 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
     }
     lines.push(Line::from(heading));
 
+    let diff_lines = verbosity.lines(DIFF_LINES);
     let mut source = diff.text.lines();
     let mut shown = 0;
-    while shown < DIFF_LINES {
+    while shown < diff_lines {
         let Some(line) = source.next() else {
             break;
         };
@@ -1004,7 +1549,10 @@ fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize) {
     if source.next().is_some() {
         lines.push(Line::from(vec![
             Span::styled("    ", theme::quiet()),
-            Span::styled("… full diff in event details", theme::quiet()),
+            Span::styled(
+                format!("… {}", verbosity.provenance("diff")),
+                theme::quiet(),
+            ),
         ]));
     }
 }
@@ -1023,6 +1571,7 @@ fn render_status(
     detail: &str,
     colour: Color,
     width: usize,
+    verbosity: Verbosity,
 ) {
     separate(lines);
     lines.push(Line::from(Span::styled(
@@ -1038,8 +1587,8 @@ fn render_status(
         lines,
         detail,
         width,
-        STATUS_DETAIL_LINES,
-        "full status in event details",
+        verbosity.lines(STATUS_DETAIL_LINES),
+        &verbosity.provenance("status"),
     );
 }
 
@@ -1109,7 +1658,9 @@ fn tool_input(name: &str, input: &Value) -> String {
     };
 
     for key in preferred {
-        if let Some(text) = input.get(*key).and_then(Value::as_str) {
+        // `leaf_text` also reads the gateway's wire markers, so an excerpted command reads
+        // as its own prefix rather than as `{"_excerpt": …}`.
+        if let Some(text) = input.get(*key).and_then(leaf_text) {
             if !text.trim().is_empty() {
                 return bounded_copy(text.trim(), TOOL_INPUT_BYTES, TOOL_INPUT_TRUNCATION);
             }
@@ -1136,6 +1687,11 @@ fn append_value_text(value: &Value, rendered: &mut String) -> bool {
 
     match value {
         Value::String(text) => append_value_piece(rendered, text),
+        // A leaf the gateway replaced with a marker: render the label, never the JSON.
+        Value::Object(_) if crate::model::transcript::wire_marker(value).is_some() => {
+            let marker = crate::model::transcript::wire_marker(value).unwrap_or_default();
+            append_value_piece(rendered, &marker)
+        }
         Value::Array(items) => {
             let mut wrote = false;
             for item in items {
@@ -1697,7 +2253,7 @@ mod tests {
             json!({"call_id": "c-run", "name": "read", "input": {"path": "Cargo.toml"}}),
         );
         let cells = project(vec![Entry::Event(&call)]);
-        let text = plain(&render_cells_at(&cells, 80, 0));
+        let text = plain(&render_cells_at(&cells, 80, 0, Verbosity::Compact));
 
         assert!(text.contains(&theme::spinner(0).to_string()), "{text}");
         assert!(text.contains("running"), "{text}");
@@ -1715,10 +2271,10 @@ mod tests {
             panic!("pending agent text is still streaming")
         };
 
-        let text = plain(&render_cells_at(&cells, 80, 0));
+        let text = plain(&render_cells_at(&cells, 80, 0, Verbosity::Compact));
         assert!(text.contains("Hello▌"), "{text}");
 
-        let hidden = plain(&render_cells_at(&cells, 80, 6));
+        let hidden = plain(&render_cells_at(&cells, 80, 6, Verbosity::Compact));
         assert!(hidden.contains("Hello "), "{hidden}");
         assert!(!hidden.contains("Hello▌"), "{hidden}");
     }
@@ -1790,11 +2346,17 @@ mod tests {
         let text = plain(&render_cells(&cells, 80));
 
         assert_eq!(text.matches("Hello there").count(), 1, "{text}");
-        assert!(text.contains("full result in event details"), "{text}");
+        assert!(text.contains("full result · ctrl+o"), "{text}");
         assert!(
             !text.contains("line 19"),
             "verbose output escaped its cell: {text}"
         );
+
+        // The same cells under Ctrl+O: expanded in place, still bounded, and the row that
+        // said where the rest lives now points only at the ledger.
+        let verbose = plain(&render_cells_at(&cells, 80, 0, Verbosity::Verbose));
+        assert!(verbose.contains("line 19"), "{verbose}");
+        assert!(!verbose.contains("ctrl+o"), "{verbose}");
     }
 
     #[test]
@@ -1900,7 +2462,7 @@ mod tests {
 
         let rendered = render_cells(&[tool], 40);
         assert!(rendered.len() <= TOOL_OUTPUT_LINES + 2);
-        assert!(plain(&rendered).contains("full result in event details"));
+        assert!(plain(&rendered).contains("full result · ctrl+o"));
     }
 
     #[test]
@@ -1913,7 +2475,7 @@ mod tests {
         let rendered = render_cells(&[message], 10);
 
         assert!(rendered.len() <= MESSAGE_LINES + 2, "{}", rendered.len());
-        assert!(plain(&rendered).contains("full message in event details"));
+        assert!(plain(&rendered).contains("full message · ctrl+o"));
 
         let status = Cell::Status {
             label: "Failed".into(),
@@ -1927,7 +2489,7 @@ mod tests {
             "{}",
             rendered.len()
         );
-        assert!(plain(&rendered).contains("full status in event details"));
+        assert!(plain(&rendered).contains("full status · ctrl+o"));
     }
 
     #[test]
@@ -2115,7 +2677,7 @@ mod tests {
             streaming: true,
         }];
 
-        let lines = render_cells_at(&cells, 60, 0);
+        let lines = render_cells_at(&cells, 60, 0, Verbosity::Compact);
         let text = plain(&lines);
 
         assert!(text.contains("┌─ python "), "{text}");

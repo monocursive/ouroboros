@@ -3,6 +3,15 @@
 //! The durable event and its raw payload remain the source of truth. These types name only
 //! the fields a transcript can lay out usefully; missing or newer shapes fall back to the
 //! complete event-details view instead of becoming client-side state or policy.
+//!
+//! ## Every kind is presented, and a hide is a decision with a reason
+//!
+//! There is deliberately no catch-all "ignore" arm. Each of the twenty-nine normalized
+//! event types names a [`PresentationEvent`], and the one arm that draws nothing —
+//! [`PresentationEvent::Hidden`] — carries the reason it drew nothing. A kind the client
+//! did not recognise becomes [`PresentationEvent::ProviderNote`] rather than disappearing:
+//! a transcript that silently omits events is a transcript that cannot be trusted about
+//! the events it does show.
 
 use serde_json::{Map, Value};
 
@@ -16,6 +25,12 @@ const PRESENTATION_VALUE_NODES: usize = 2_048;
 const PRESENTATION_VALUE_DEPTH: usize = 32;
 const PRESENTATION_DIFF_BYTES: usize = 128 * 1024;
 const PRESENTATION_FILE_CHANGES: usize = 256;
+/// Plan payloads are model-authored task lists, not data structures: a provider that emits
+/// a thousand steps is reporting a runaway, and the panel says so rather than drawing it.
+const PRESENTATION_PLAN_STEPS: usize = 64;
+/// How many tool names a `run_started` header fact keeps. The complete list stays on the
+/// event.
+const PRESENTATION_RUN_TOOLS: usize = 128;
 const TEXT_TRUNCATION: &str =
     "\n… transcript excerpt truncated; full value is available in event details";
 const DIFF_TRUNCATION: &str = "\n… diff truncated; full diff is available in event details";
@@ -35,10 +50,41 @@ pub enum PresentationEvent {
         text: String,
         final_text: bool,
     },
+    /// Reasoning the provider chose to publish. Accumulated per turn by the cell
+    /// projection; never treated as the agent's answer.
+    Thinking {
+        turn_id: Option<String>,
+        text: String,
+    },
     ToolCall(ToolCall),
     ToolResult(ToolResult),
     CommandOutput(String),
     FileUpdate(FileUpdate),
+    Plan(PlanUpdate),
+    Usage(UsageReport),
+    /// A provider run began. Claude reports the model and the tool catalogue here; nothing
+    /// else in the stream ever names the model.
+    RunStarted(RunStart),
+    TurnStarted {
+        turn_id: Option<String>,
+        /// Milliseconds since the epoch, from `Event::timestamp`, when it parses.
+        at: Option<i64>,
+    },
+    TurnEnded {
+        turn_id: Option<String>,
+        at: Option<i64>,
+        outcome: TurnOutcome,
+        detail: String,
+    },
+    /// How many turns the runtime is holding behind the running one.
+    QueueChanged {
+        queued: usize,
+    },
+    /// A lifecycle fact with no payload worth a cell of its own.
+    Lifecycle {
+        marker: Lifecycle,
+        detail: String,
+    },
     ApprovalRequested {
         request_id: Option<String>,
         detail: String,
@@ -50,7 +96,171 @@ pub enum PresentationEvent {
     },
     Failure(String),
     Interrupted(String),
-    Ignore,
+    /// Something the provider said that this client does not model. Named by its own kind
+    /// so it is one dim line rather than an invisible event.
+    ProviderNote {
+        kind: String,
+        detail: String,
+    },
+    /// Drawn as nothing, on purpose, for the stated reason.
+    Hidden(Hidden),
+}
+
+/// Why a presentation drew nothing. Every value here is a payload that carried no content,
+/// never a *kind* this client declines to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hidden {
+    /// An output delta or final with no text: transports emit these as keep-alives.
+    EmptyText,
+    /// A reasoning delta with no text.
+    EmptyThinking,
+    /// A command-output delta with no bytes.
+    EmptyCommandOutput,
+}
+
+impl Hidden {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::EmptyText => "an output event carrying no text",
+            Self::EmptyThinking => "a reasoning delta carrying no text",
+            Self::EmptyCommandOutput => "a command-output delta carrying no bytes",
+        }
+    }
+}
+
+/// Lifecycle facts that belong in the reading path as one dim line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    RunCompleted,
+    SessionStarted,
+    SessionReady,
+    SessionIdle,
+    SessionClosed,
+    TurnQueued,
+}
+
+impl Lifecycle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RunCompleted => "run finished",
+            Self::SessionStarted => "session started",
+            Self::SessionReady => "session ready",
+            Self::SessionIdle => "session idle",
+            Self::SessionClosed => "session closed",
+            Self::TurnQueued => "turn queued",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl TurnOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "turn complete",
+            Self::Failed => "turn failed",
+            Self::Interrupted => "turn interrupted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunStart {
+    pub model: Option<String>,
+    pub cwd: Option<String>,
+    /// Tool names the provider declared for the run, bounded.
+    pub tools: Vec<String>,
+    /// How many tools the provider actually declared, which may exceed `tools.len()`.
+    pub tool_count: usize,
+}
+
+/// One `usage` report exactly as the provider phrased it. Absent fields stay absent: a
+/// zero this client invented would be indistinguishable from a zero a provider measured.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct UsageReport {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+impl UsageReport {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.cached_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.cost_usd.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanUpdate {
+    pub explanation: Option<String>,
+    pub steps: Vec<PlanStep>,
+    /// How many steps the provider sent, which may exceed `steps.len()`.
+    pub step_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStep {
+    pub text: String,
+    pub status: PlanStatus,
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanStatus {
+    Pending,
+    InProgress,
+    Done,
+    /// A word this client does not recognise, kept verbatim. Guessing that an unknown
+    /// status meant "done" is how a panel reports finished work that never happened.
+    Other(String),
+}
+
+impl PlanStatus {
+    pub fn parse(status: Option<&str>) -> Self {
+        let Some(status) = status.map(str::trim).filter(|status| !status.is_empty()) else {
+            return Self::Pending;
+        };
+
+        match status.to_ascii_lowercase().as_str() {
+            "pending" | "todo" | "not_started" | "notstarted" | "queued" | "planned" => {
+                Self::Pending
+            }
+            "in_progress" | "inprogress" | "in-progress" | "running" | "active" | "started" => {
+                Self::InProgress
+            }
+            "completed" | "complete" | "done" | "finished" | "succeeded" => Self::Done,
+            _ => Self::Other(status.to_string()),
+        }
+    }
+
+    /// Warp's plan glyphs: `◌` pending, `●` in progress, `✓` done.
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            Self::Pending => "◌",
+            Self::InProgress => "●",
+            Self::Done => "✓",
+            Self::Other(_) => "?",
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in progress",
+            Self::Done => "done",
+            Self::Other(status) => status,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,18 +303,31 @@ pub struct Diff {
 }
 
 impl PresentationEvent {
+    /// Every normalized kind, with no catch-all. Adding a type to [`EventType`] without a
+    /// presentation is a compile error rather than a silent drop.
     pub fn from_event(event: &Event) -> Self {
         match event.kind {
             EventType::InputAccepted => input_accepted(&event.payload),
             EventType::OutputTextDelta | EventType::OutputTextFinal => {
                 let Some(text) = raw_text(&event.payload, &["text"]) else {
-                    return Self::Ignore;
+                    return Self::Hidden(Hidden::EmptyText);
                 };
 
                 Self::AgentText {
                     turn_id: bounded_optional(event.turn_id.as_deref()),
                     text,
                     final_text: event.kind == EventType::OutputTextFinal,
+                }
+            }
+            EventType::ThinkingDelta => {
+                let Some(text) = raw_text(&event.payload, &["text", "thinking", "reasoning"])
+                else {
+                    return Self::Hidden(Hidden::EmptyThinking);
+                };
+
+                Self::Thinking {
+                    turn_id: bounded_optional(event.turn_id.as_deref()),
+                    text,
                 }
             }
             EventType::ToolCall => Self::ToolCall(ToolCall {
@@ -143,8 +366,58 @@ impl PresentationEvent {
             }),
             EventType::CommandOutputDelta => raw_text(&event.payload, &["text", "output"])
                 .map(Self::CommandOutput)
-                .unwrap_or(Self::Ignore),
+                .unwrap_or(Self::Hidden(Hidden::EmptyCommandOutput)),
             EventType::FileChange => Self::FileUpdate(file_update(&event.payload)),
+            EventType::PlanUpdated => Self::Plan(plan_update(&event.payload)),
+            EventType::Usage => Self::Usage(usage_report(&event.payload)),
+            EventType::RunStarted => Self::RunStarted(run_start(&event.payload)),
+            EventType::TurnStarted => Self::TurnStarted {
+                turn_id: bounded_optional(event.turn_id.as_deref()),
+                at: epoch_millis(&event.timestamp),
+            },
+            EventType::TurnCompleted | EventType::TurnFailed | EventType::TurnInterrupted => {
+                Self::TurnEnded {
+                    turn_id: bounded_optional(event.turn_id.as_deref()),
+                    at: epoch_millis(&event.timestamp),
+                    outcome: match event.kind {
+                        EventType::TurnFailed => TurnOutcome::Failed,
+                        EventType::TurnInterrupted => TurnOutcome::Interrupted,
+                        _ => TurnOutcome::Completed,
+                    },
+                    detail: optional_detail(&event.payload).unwrap_or_default(),
+                }
+            }
+            EventType::QueueChanged => Self::QueueChanged {
+                queued: count(
+                    &event.payload,
+                    &["queued_turns", "queued", "length", "count"],
+                ),
+            },
+            EventType::TurnQueued => Self::Lifecycle {
+                marker: Lifecycle::TurnQueued,
+                detail: optional_detail(&event.payload).unwrap_or_default(),
+            },
+            EventType::RunCompleted
+            | EventType::SessionStarted
+            | EventType::SessionReady
+            | EventType::SessionIdle
+            | EventType::SessionClosed => Self::Lifecycle {
+                marker: match event.kind {
+                    EventType::RunCompleted => Lifecycle::RunCompleted,
+                    EventType::SessionStarted => Lifecycle::SessionStarted,
+                    EventType::SessionReady => Lifecycle::SessionReady,
+                    EventType::SessionIdle => Lifecycle::SessionIdle,
+                    _ => Lifecycle::SessionClosed,
+                },
+                detail: lifecycle_detail(&event.payload),
+            },
+            EventType::ProviderEvent => provider_note(&event.payload),
+            // A kind this build does not know. It is still an event the runtime recorded,
+            // so it reads as one dim line naming itself rather than as nothing at all.
+            EventType::Other(ref kind) => Self::ProviderNote {
+                kind: bounded_copy(kind, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION),
+                detail: optional_detail(&event.payload).unwrap_or_default(),
+            },
             EventType::ApprovalRequested => Self::ApprovalRequested {
                 request_id: bounded_optional(event.request_id.as_deref()),
                 detail: subject(&event.payload),
@@ -154,13 +427,12 @@ impl PresentationEvent {
                 decision: text(&event.payload, &["decision"]),
                 detail: approval_resolution(&event.payload),
             },
-            EventType::RunFailed | EventType::SessionFailed | EventType::TurnFailed => {
+            EventType::RunFailed | EventType::SessionFailed => {
                 Self::Failure(detail(&event.payload))
             }
-            EventType::RunCancelled | EventType::SessionCancelled | EventType::TurnInterrupted => {
+            EventType::RunCancelled | EventType::SessionCancelled => {
                 Self::Interrupted(detail(&event.payload))
             }
-            _ => Self::Ignore,
         }
     }
 }
@@ -184,8 +456,320 @@ fn input_accepted(payload: &Value) -> PresentationEvent {
     }
 }
 
+/// The provider kind an escape-hatch event is reporting, so it is never invisible.
+///
+/// ACP wraps every update it does not map in `{"kind": "acp_update", "update": …}`; the
+/// update's own `sessionUpdate` type is the informative half and is lifted out here.
+fn provider_note(payload: &Value) -> PresentationEvent {
+    let kind = text(payload, &["kind", "type", "item_type", "event", "name"]);
+    let nested = payload
+        .get("update")
+        .and_then(|update| text(update, &["sessionUpdate", "session_update", "type"]));
+
+    // Empty when the provider named no kind at all: the cell says "provider event" once,
+    // and inventing a second copy of that phrase to sit in this field would only make it
+    // say it twice.
+    let kind = match (kind, nested) {
+        (Some(kind), Some(nested)) => format!("{kind} · {nested}"),
+        (Some(kind), None) => kind,
+        (None, Some(nested)) => nested,
+        (None, None) => String::new(),
+    };
+
+    PresentationEvent::ProviderNote {
+        kind: bounded_copy(&kind, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION),
+        detail: optional_detail(payload).unwrap_or_default(),
+    }
+}
+
+fn run_start(payload: &Value) -> RunStart {
+    let declared = payload.get("tools").and_then(Value::as_array);
+    let tool_count = declared.map(Vec::len).unwrap_or(0);
+    let tools = declared
+        .map(|tools| {
+            tools
+                .iter()
+                .take(PRESENTATION_RUN_TOOLS)
+                .filter_map(|tool| match tool {
+                    Value::String(name) => nonempty(name),
+                    other => text(other, &["name", "tool", "title"]),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    RunStart {
+        model: text(payload, &["model", "model_id", "modelId"]),
+        cwd: text(payload, &["cwd", "workspace", "working_directory"]),
+        tools,
+        tool_count,
+    }
+}
+
+fn usage_report(payload: &Value) -> UsageReport {
+    UsageReport {
+        input_tokens: number(payload, &["input_tokens", "inputTokens", "prompt_tokens"]),
+        output_tokens: number(
+            payload,
+            &["output_tokens", "outputTokens", "completion_tokens"],
+        ),
+        cached_tokens: number(
+            payload,
+            &[
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+                "cachedInputTokens",
+                "cache_read_tokens",
+            ],
+        ),
+        total_tokens: number(payload, &["total_tokens", "totalTokens"]),
+        cost_usd: first_value(payload, &["cost_usd", "total_cost_usd", "costUsd"])
+            .and_then(Value::as_f64),
+    }
+}
+
+/// Both plan shapes this runtime can deliver, read tolerantly.
+///
+/// Codex sends `{"explanation", "plan": [{"step", "status"}]}`
+/// (`Ouroboros.Provider.Session.Dialect.Codex`); ACP forwards its `plan` session update
+/// verbatim, whose entries are `{"content", "priority", "status"}`.
+fn plan_update(payload: &Value) -> PlanUpdate {
+    let entries = first_value(payload, &["plan", "entries", "steps", "todos", "tasks"])
+        .and_then(Value::as_array);
+    let step_count = entries.map(Vec::len).unwrap_or(0);
+    let steps = entries
+        .map(|entries| {
+            entries
+                .iter()
+                .take(PRESENTATION_PLAN_STEPS)
+                .filter_map(plan_step)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    PlanUpdate {
+        explanation: text(payload, &["explanation", "summary", "description"]),
+        steps,
+        step_count,
+    }
+}
+
+fn plan_step(value: &Value) -> Option<PlanStep> {
+    match value {
+        Value::String(text) => nonempty(text).map(|text| PlanStep {
+            text,
+            status: PlanStatus::Pending,
+            priority: None,
+        }),
+        Value::Object(_) => {
+            let body = text(
+                value,
+                &["step", "content", "text", "title", "description", "name"],
+            )
+            .or_else(|| leaf_text(value.get("content")?));
+
+            body.map(|text| PlanStep {
+                text,
+                status: PlanStatus::parse(
+                    trimmed_string_value(value, &["status", "state"])
+                        .map(str::to_string)
+                        .as_deref(),
+                ),
+                priority: text_field(value, &["priority"]),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn text_field(value: &Value, keys: &[&str]) -> Option<String> {
+    text(value, keys)
+}
+
 fn empty_object() -> Value {
     Value::Object(Default::default())
+}
+
+fn nonempty(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| bounded_copy(text, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION))
+}
+
+fn number(value: &Value, keys: &[&str]) -> Option<u64> {
+    first_value(value, keys).and_then(|value| match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| *value >= 0.0)
+                .map(|value| value as u64)
+        }),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    })
+}
+
+fn count(value: &Value, keys: &[&str]) -> usize {
+    number(value, keys)
+        .map(|count| count.min(usize::MAX as u64) as usize)
+        .or_else(|| {
+            first_value(value, keys)
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .unwrap_or(0)
+}
+
+/// A lifecycle line's detail, preferring the words a provider chose over its bookkeeping.
+fn lifecycle_detail(payload: &Value) -> String {
+    optional_detail(payload)
+        .or_else(|| {
+            let transport = text(payload, &["transport"])?;
+            Some(match text(payload, &["maturity"]) {
+                Some(maturity) => format!("{transport} · {maturity}"),
+                None => transport,
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Human-facing words from a payload, or nothing. Unlike [`detail`] this never falls back
+/// to compact JSON: a lifecycle marker with `{}` behind it must read as a marker.
+fn optional_detail(payload: &Value) -> Option<String> {
+    text(
+        payload,
+        &["error", "reason", "message", "text", "status", "detail"],
+    )
+}
+
+/// Milliseconds since the Unix epoch, for an ISO-8601 instant.
+///
+/// The runtime stamps every event with `DateTime.to_iso8601/1`, which is always UTC with a
+/// `Z` suffix; the offset forms are accepted anyway because a timestamp this client cannot
+/// read must degrade to "no elapsed time shown", never to a wrong one.
+pub fn epoch_millis(timestamp: &str) -> Option<i64> {
+    let timestamp = timestamp.trim();
+    let (date, rest) = timestamp.split_once(['T', 't', ' '])?;
+    let mut date = date.split('-');
+    let year: i64 = date.next()?.parse().ok()?;
+    let month: i64 = date.next()?.parse().ok()?;
+    let day: i64 = date.next()?.parse().ok()?;
+    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Split the zone off before the clock: `+05:30` and `-08:00` both contain digits and
+    // colons that would otherwise read as another field.
+    let (clock, offset_minutes) = match rest.char_indices().find(|(at, character)| {
+        matches!(character, 'Z' | 'z') || (*at > 0 && matches!(character, '+' | '-'))
+    }) {
+        Some((at, 'Z' | 'z')) => (&rest[..at], 0),
+        Some((at, _)) => (&rest[..at], zone_minutes(&rest[at..])?),
+        None => (rest, 0),
+    };
+
+    let mut clock = clock.split(':');
+    let hour: i64 = clock.next()?.parse().ok()?;
+    let minute: i64 = clock.next()?.parse().ok()?;
+    let seconds = clock.next().unwrap_or("0");
+    let (second, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let second: i64 = second.parse().ok()?;
+    if clock.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    let millis: i64 = {
+        let digits: String = fraction
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(3)
+            .collect();
+        let scale = 10i64.pow(3u32.saturating_sub(digits.len() as u32));
+        digits.parse::<i64>().unwrap_or(0) * scale
+    };
+
+    let days = days_from_civil(year, month, day);
+    Some(
+        ((days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60) * 1_000)
+            + millis,
+    )
+}
+
+fn zone_minutes(offset: &str) -> Option<i64> {
+    let sign = match offset.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let body = &offset[1..];
+    let (hours, minutes) = match body.split_once(':') {
+        Some((hours, minutes)) => (hours, minutes),
+        None if body.len() == 4 => body.split_at(2),
+        None => (body, "0"),
+    };
+
+    Some(sign * (hours.parse::<i64>().ok()? * 60 + minutes.parse::<i64>().ok()?))
+}
+
+/// Howard Hinnant's `days_from_civil`, the standard branch-free proleptic Gregorian
+/// conversion. Written out rather than pulled in: one date arithmetic function is not worth
+/// a dependency in a client that has no other use for a calendar.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The label a gateway wire marker renders as, if this value is one.
+///
+/// `Ouroboros.Gateway.Wire` replaces leaves it cannot or will not encode with small tagged
+/// objects. Rendering those as raw JSON in a transcript is how `{"_opaque":"#PID<0.1.0>"}`
+/// ends up looking like tool output; each one gets a short label instead, and the excerpt
+/// marker keeps its prefix so the words the provider wrote are still readable.
+pub fn wire_marker(value: &Value) -> Option<String> {
+    let Value::Object(fields) = value else {
+        return None;
+    };
+
+    if let Some(prefix) = fields.get("_excerpt").and_then(Value::as_str) {
+        let bytes = fields
+            .get("_bytes")
+            .and_then(Value::as_u64)
+            .map(|bytes| format!("{bytes} bytes"))
+            .unwrap_or_else(|| "full value".to_string());
+
+        return Some(format!("{prefix}… ({bytes}; full event via /details)"));
+    }
+
+    if let Some(opaque) = fields.get("_opaque").and_then(Value::as_str) {
+        return Some(format!("[not encodable: {opaque}]"));
+    }
+
+    if fields.contains_key("_b64") {
+        return Some("[binary value; full event via /details]".to_string());
+    }
+
+    if fields
+        .get("_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && fields.len() == 1
+    {
+        return Some("[truncated; full event via /details]".to_string());
+    }
+
+    None
+}
+
+/// One leaf as text: a plain string, or the label of a wire marker standing in for one.
+pub fn leaf_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => nonempty(text),
+        other => wire_marker(other),
+    }
 }
 
 fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -205,12 +789,14 @@ fn trimmed_string_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> 
 fn text(value: &Value, keys: &[&str]) -> Option<String> {
     trimmed_string_value(value, keys)
         .map(|text| bounded_copy(text, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION))
+        .or_else(|| first_value(value, keys).and_then(wire_marker))
 }
 
 fn raw_text(value: &Value, keys: &[&str]) -> Option<String> {
     string_value(value, keys)
         .filter(|text| !text.is_empty())
         .map(|text| bounded_copy(text, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION))
+        .or_else(|| first_value(value, keys).and_then(wire_marker))
 }
 
 fn bounded_optional(text: Option<&str>) -> Option<String> {
@@ -289,12 +875,34 @@ fn file_update(payload: &Value) -> FileUpdate {
                 .into_iter()
                 .collect()
         });
-    let diff = trimmed_string_value(payload, &["diff", "patch", "delta"]).map(Diff::parse);
+    let diff = diff_field(payload);
 
     FileUpdate {
         status,
         changes,
         diff,
+    }
+}
+
+/// A diff leaf, whether the gateway sent the patch or an excerpt of it.
+///
+/// An excerpted patch is still a patch worth colouring, but its `+`/`-` counts describe
+/// only the prefix — so it is marked truncated, which is what makes the cell say
+/// "in excerpt" beside the numbers instead of asserting a diffstat it cannot know.
+fn diff_field(payload: &Value) -> Option<Diff> {
+    let value = first_value(payload, &["diff", "patch", "delta"])?;
+
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| Diff::parse(text))
+        }
+        other => {
+            let excerpt = wire_marker(other)?;
+            let mut diff = Diff::parse(&excerpt);
+            diff.truncated = true;
+            Some(diff)
+        }
     }
 }
 
@@ -312,7 +920,7 @@ fn file_change(value: &Value) -> Option<FileChange> {
         Value::Object(_) => {
             let path = text(value, &["path", "file", "name", "file_path"]);
             let kind = text(value, &["kind", "action", "change_type", "type", "status"]);
-            let diff = trimmed_string_value(value, &["diff", "patch", "delta"]).map(Diff::parse);
+            let diff = diff_field(value);
 
             (path.is_some() || kind.is_some() || diff.is_some()).then_some(FileChange {
                 path,
@@ -701,12 +1309,18 @@ mod tests {
         );
     }
 
+    /// Was `unknown_payload_shapes_remain_ignorable_presentation_data`, which pinned the
+    /// `Ignore` arm this projection no longer has. A payload nobody modelled is still an
+    /// event the runtime recorded, so it reads as one dim line naming itself.
     #[test]
-    fn unknown_payload_shapes_remain_ignorable_presentation_data() {
+    fn unknown_payload_shapes_are_named_rather_than_dropped() {
         let event = event("provider_event", json!({"future": {"shape": true}}));
         assert_eq!(
             PresentationEvent::from_event(&event),
-            PresentationEvent::Ignore
+            PresentationEvent::ProviderNote {
+                kind: String::new(),
+                detail: String::new(),
+            }
         );
         assert_eq!(event.raw["payload"]["future"]["shape"], true);
     }

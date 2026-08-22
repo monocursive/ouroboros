@@ -1432,8 +1432,10 @@ fn the_transcript_renders_the_golden_interactive_event() {
         screen.text()
     );
 
-    // The complete event ledger remains one key away.
-    app.apply(ctrl('o'));
+    // The complete event ledger remains one chord away. `Ctrl+O` now expands the chat's
+    // own cells instead of swapping this view in, so the ledger is reached by `ctrl+x d`
+    // (equivalently `/details`), exactly as before that key changed meaning.
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 24);
     assert!(details.contains("EVENT DETAILS"), "{}", details.text());
     assert!(details.contains("output_text_final"), "{}", details.text());
@@ -1450,7 +1452,7 @@ fn the_transcript_renders_the_golden_interactive_event() {
 }
 
 #[test]
-fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
+fn agent_chat_keeps_protocol_noise_out_while_naming_every_event_it_received() {
     let mut app = with_open_session();
 
     notify(
@@ -1474,12 +1476,11 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
     assert!(chat.contains("AGENT"), "{}", chat.text());
     assert!(chat.contains("The tests are fixed."), "{}", chat.text());
 
+    // Wire spellings and bookkeeping stay out of the reading path.
     for hidden in [
         "session_started",
         "provider_event",
-        "internal provider diagnostic",
         "output_text_final",
-        "usage",
         "input_tokens=21088",
     ] {
         assert!(
@@ -1489,9 +1490,18 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
         );
     }
 
-    // The details shortcut works even while the message composer owns printable keys.
+    // But the events themselves are named rather than dropped: a provider diagnostic the
+    // client cannot model is one dim line, not an invisible event.
+    assert!(chat.contains("session started"), "{}", chat.text());
+    assert!(
+        chat.contains("internal provider diagnostic"),
+        "{}",
+        chat.text()
+    );
+
+    // The details chord works even while the message composer owns printable keys.
     assert!(app.sessions.composer.is_some());
-    app.apply(ctrl('o'));
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 26);
     assert!(details.contains("session_started"), "{}", details.text());
     assert!(details.contains("provider_event"), "{}", details.text());
@@ -2519,7 +2529,7 @@ fn a_lag_divider_renders_with_the_hole_it_left() {
 
     // The technical resync cursor stays out of chat and remains visible in details.
     assert!(!screen.contains("cursor 2"), "{}", screen.text());
-    app.apply(ctrl('o'));
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 24);
     assert!(details.contains("cursor 2"), "{}", details.text());
 
