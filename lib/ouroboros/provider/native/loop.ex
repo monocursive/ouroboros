@@ -39,11 +39,12 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Checkpoint
+  alias Ouroboros.Provider.Native.Context
+  alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Cost
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
-  alias Ouroboros.Provider.Native.Prompt
   alias Ouroboros.Provider.Native.Tools
 
   @default_max_iterations 50
@@ -64,6 +65,15 @@ defmodule Ouroboros.Provider.Native.Loop do
     :approval_mode,
     :allowed_tools,
     :disallowed_tools,
+    # The tool definitions exactly as `Ouroboros.Provider.Native.Context` laid them out,
+    # so the prefix the fingerprint describes is the prefix the model is sent. `nil`
+    # falls back to deriving them here, which is what the coding plane and the older
+    # tests do.
+    :tool_specs,
+    # The model's context window, for the meter merged into every `usage` event. `nil`
+    # means this node could not resolve one, and the meter says so by omitting the key
+    # rather than by inventing a denominator.
+    :context_window,
     # Called with `%{messages:, reads:, session_grants:}` immediately *before* the
     # terminal turn event is emitted. The session makes the conversation durable inside
     # this callback, which is what makes "checkpoint before broadcast" true here rather
@@ -195,8 +205,16 @@ defmodule Ouroboros.Provider.Native.Loop do
     :exit, reason -> {:error, state, {:stream_exited, inspect(reason)}}
   end
 
+  # The meter rides on `usage` because that is the event a client already subscribes to
+  # and `context_window` is the key the TUI footer decodes. `context_used` is the size of
+  # *this* request, not the session's running total: the two diverge the moment anything
+  # is compacted, and it is the request size that decides whether the next one fits.
   defp record_usage(state, usage) do
-    payload = Cost.payload(usage, state.model_spec)
+    payload =
+      usage
+      |> Cost.payload(state.model_spec)
+      |> Window.meter(state.context_window)
+
     emit(state, :usage, payload)
 
     %{
@@ -594,6 +612,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- helpers
 
+  defp tool_specs(%{tool_specs: specs}) when is_list(specs), do: specs
   defp tool_specs(state), do: Tools.specs(state.allowed_tools, state.disallowed_tools)
 
   defp signature(call), do: {call.name, call.input}
@@ -725,16 +744,19 @@ defmodule Ouroboros.Provider.Native.Loop do
              request.add_dirs,
              sandbox_mode(request.sandbox_mode)
            ),
-         {:ok, system} <-
-           Prompt.build(
+         {:ok, model_spec} <- resolve_model(request.model),
+         {:ok, prefix} <-
+           Context.build(
              system_prompt: request.system_prompt,
              cwd: scope.root,
              add_dirs: scope.roots -- [scope.root],
              sandbox_mode: scope.sandbox_mode,
              approval_mode: approval_mode(request.approval_mode),
-             tools: Tools.specs(request.allowed_tools, request.disallowed_tools)
+             tools: Tools.specs(request.allowed_tools, request.disallowed_tools),
+             model_module: Model.module(),
+             model_spec: model_spec,
+             reasoning_effort: request.reasoning_effort
            ),
-         {:ok, model_spec} <- resolve_model(request.model),
          {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
       options = Map.new(request.provider_options || %{})
 
@@ -742,7 +764,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         emit: fn _event -> :ok end,
         model_module: Model.module(),
         model_spec: model_spec,
-        system: system,
+        system: prefix.system,
+        tool_specs: prefix.tools,
+        context_window: prefix.context_window,
         scope: scope,
         session_dir: session_dir,
         session_id: context.run_id,

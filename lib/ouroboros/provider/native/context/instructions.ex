@@ -10,8 +10,8 @@ defmodule Ouroboros.Provider.Native.Context.Instructions do
 
   ## What is loaded, and when
 
-    * **Always.** Every `AGENTS.md`/`CLAUDE.md` from the workspace root upward, bounded to
-      #{16} levels, plus the user-scope file. Nearest first: the file in the workspace the
+    * **Always.** Every `AGENTS.md`/`CLAUDE.md` from the workspace root upward, bounded to sixteen
+      levels, plus the user-scope file. Nearest first: the file in the workspace the
       operator opened is the one the model reads first and the one the budget keeps.
     * **Lazily.** `.agents/rules/*.md` carrying YAML front-matter with a `paths:` list are
       *not* loaded at startup. They are held as descriptors and rendered only once a file
@@ -23,7 +23,7 @@ defmodule Ouroboros.Provider.Native.Context.Instructions do
   ## Imports
 
   A line whose entire content is `@some/relative/path.md` pulls that file in, resolved
-  against the importing file's own directory, up to #{4} hops deep. An import that leaves
+  against the importing file's own directory, up to four hops deep. An import that leaves
   the importing file's root, does not exist, or repeats a file already loaded is dropped
   with a note rather than followed — the cycle guard and the containment guard are the
   same guard.
@@ -154,7 +154,8 @@ defmodule Ouroboros.Provider.Native.Context.Instructions do
   comes back is appended to the conversation, never to the cached prefix, because a
   prefix that changed when a file was read would cost a cache miss on every turn.
   """
-  @spec render_for_path([rule()], String.t(), String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  @spec render_for_path([rule()], String.t(), String.t()) ::
+          {:ok, String.t() | nil} | {:error, term()}
   def render_for_path(rules, path, root) when is_list(rules) do
     matching = Enum.filter(rules, &matches?(&1, path, root))
 
@@ -229,8 +230,11 @@ defmodule Ouroboros.Provider.Native.Context.Instructions do
     |> Enum.with_index()
     |> Enum.flat_map(fn {dir, distance} ->
       case level_file(dir) do
-        nil -> []
-        path -> load_with_imports(path, if(distance == 0, do: :workspace, else: :ancestor), distance)
+        nil ->
+          []
+
+        path ->
+          load_with_imports(path, if(distance == 0, do: :workspace, else: :ancestor), distance)
       end
     end)
   end
