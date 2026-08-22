@@ -868,6 +868,11 @@ configured by hand should add it to `:workspace_allowed_roots`, and a session th
 for a worktree without it is refused with a message naming the fix rather than failing
 mysteriously at the lease.
 
+`worktree: true` is a runtime option today. The gateway verb and the `ouro` flag that
+would let a terminal ask for one are a separate slice, so from the TUI this is not yet
+reachable — `Ouroboros.InteractiveSession.start/1` and `Ouroboros.CodingSession.start/2`
+are.
+
 ## Agent mesh
 
 ```elixir
