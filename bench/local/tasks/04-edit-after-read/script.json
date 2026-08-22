@@ -1,0 +1,22 @@
+{
+  "instruction": "Corpus task 04: in lib/version.ex change the version from 1.0.0 to 2.0.0.",
+  "responses": [
+    [
+      {"type": "text", "text": "Reading before editing."},
+      {"type": "tool_call", "id": "c1", "name": "read", "input": {"path": "lib/version.ex"}}
+    ],
+    [
+      {"type": "text", "text": "Replacing the literal."},
+      {"type": "tool_call", "id": "c2", "name": "edit", "input": {
+        "path": "lib/version.ex",
+        "old_string": "\"1.0.0\"",
+        "new_string": "\"2.0.0\""
+      }}
+    ],
+    [
+      {"type": "text", "text": "Version bumped to 2.0.0."},
+      {"type": "usage", "input_tokens": 210, "output_tokens": 34},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

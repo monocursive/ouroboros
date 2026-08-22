@@ -1,0 +1,17 @@
+{
+  "instruction": "Corpus task 02: create lib/greeter.ex with a Greeter module that says hello.",
+  "responses": [
+    [
+      {"type": "text", "text": "Writing the module."},
+      {"type": "tool_call", "id": "c1", "name": "write", "input": {
+        "path": "lib/greeter.ex",
+        "content": "defmodule Greeter do\n  def hello(name), do: \"hello, #{name}\"\nend\n"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Created lib/greeter.ex."},
+      {"type": "usage", "input_tokens": 140, "output_tokens": 40},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

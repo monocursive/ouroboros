@@ -1,0 +1,14 @@
+{
+  "instruction": "Corpus task 01: read lib/calc.ex and report the module it defines.",
+  "responses": [
+    [
+      {"type": "text", "text": "Opening the file."},
+      {"type": "tool_call", "id": "c1", "name": "read", "input": {"path": "lib/calc.ex"}}
+    ],
+    [
+      {"type": "text", "text": "It defines Calc, with add/2 and mul/2."},
+      {"type": "usage", "input_tokens": 120, "output_tokens": 18},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

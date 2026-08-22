@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 11: list the Elixir sources and then show the top of the tree.",
+  "responses": [
+    [
+      {"type": "text", "text": "Globbing first."},
+      {"type": "tool_call", "id": "c1", "name": "glob", "input": {"pattern": "**/*.ex"}}
+    ],
+    [
+      {"type": "text", "text": "Now the tree."},
+      {"type": "tool_call", "id": "c2", "name": "ls", "input": {"depth": 2}}
+    ],
+    [
+      {"type": "text", "text": "Two sources under lib, plus a docs directory."},
+      {"type": "usage", "input_tokens": 230, "output_tokens": 31},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

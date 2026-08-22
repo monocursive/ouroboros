@@ -1,0 +1,8 @@
+{
+  "title": "grep finds a pattern across the workspace",
+  "exercises": ["grep"],
+  "instruction": "Corpus task 10: find every TODO marker in the workspace and list where they are.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

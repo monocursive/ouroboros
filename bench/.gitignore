@@ -1,0 +1,5 @@
+# The Terminal-Bench adapter is plain Python run straight from the tree; its bytecode is
+# a local artifact of running the tests and belongs to nobody but the machine that ran
+# them.
+__pycache__/
+*.py[cod]

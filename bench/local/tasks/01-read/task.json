@@ -1,0 +1,8 @@
+{
+  "title": "read a file and report what it defines",
+  "exercises": ["read"],
+  "instruction": "Corpus task 01: read lib/calc.ex and report the module it defines.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

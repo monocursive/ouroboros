@@ -1,0 +1,8 @@
+{
+  "title": "an approved shell command runs and its output comes back",
+  "exercises": ["bash", "approval"],
+  "instruction": "Corpus task 08: count the lines in data/rows.txt with a shell command and save the count.",
+  "approval_mode": "prompt",
+  "approve_all": true,
+  "timeout_secs": 60
+}

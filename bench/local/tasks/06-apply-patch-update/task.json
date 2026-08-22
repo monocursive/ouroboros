@@ -1,0 +1,8 @@
+{
+  "title": "a V4A patch updates a file that was read first",
+  "exercises": ["read", "apply_patch"],
+  "instruction": "Corpus task 06: rename the sum function in lib/math.ex to total, with a patch.",
+  "approval_mode": "auto_edit",
+  "approve_all": false,
+  "timeout_secs": 60
+}

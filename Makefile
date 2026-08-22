@@ -12,11 +12,12 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev test golden release-tarball ouro fleet-e2e dist
+.PHONY: help dev test bench-local golden release-tarball ouro fleet-e2e dist
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
 	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
+	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
@@ -39,6 +40,14 @@ test:
 	cd tui && $(CARGO) fmt --check
 	cd tui && $(CARGO) clippy --all-targets -- -D warnings
 	cd tui && $(CARGO) clippy --all-targets --features embed -- -D warnings
+
+# Deliberately not part of `make test`. The corpus spawns a real daemon and drives it
+# through the real client, so it is minutes of wall clock and it needs both halves built;
+# `make test` has to stay the thing you run constantly. CI gets it as a manual job
+# (.github/workflows/bench-local.yml), not on every push. See docs/BENCHMARKS.md.
+bench-local:
+	@echo "==> bench-local: the local eval corpus (no model key, no network, no docker)"
+	./bench/local/run.sh
 
 # The fixtures are the seam between two toolchains that cannot call each other's tests, so
 # a regeneration that changes bytes is a protocol change and has to be committed as one.

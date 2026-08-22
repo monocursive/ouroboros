@@ -1,0 +1,79 @@
+# HONESTY NOTE, and it is not a formality: the configured repository remote is not a
+# public GitHub Actions channel, so nothing here has executed on a hosted runner. The
+# corpus itself has been run — repeatedly, green, on macOS 15 / Elixir 1.20.2 / OTP 29
+# with a debug client — but "passes on a Mac" and "passes on ubuntu-24.04" are different
+# claims and only the first has been made. Treat the first run as a debugging session.
+#
+# Manual only, on purpose. This job builds both halves of the project and then spawns a
+# real runtime and drives it through the real client, which is minutes rather than
+# seconds; `ci.yml` has to stay the thing every push waits on. Run it before a release,
+# after a change to the native agent's tools, permissions, or event stream, or when
+# `docs/BENCHMARKS.md` is about to be updated.
+
+name: Local eval corpus
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Only run tasks whose id contains this string (blank = all)"
+        required: false
+        default: ""
+
+concurrency:
+  group: bench-local-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
+
+jobs:
+  corpus:
+    name: bench/local
+    runs-on: ubuntu-24.04
+    # The corpus bounds every child it starts, and `run.sh` bounds the whole thing by
+    # bounding each task. This is the outer backstop for the build steps around it.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      # `jido_harness` is a git dependency pinned by ref, so the cache key has to move
+      # when the lock does or a stale checkout survives a re-pin.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tui/target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('tui/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bench-
+
+      - run: mix deps.get
+
+      # A debug client is what the corpus grades locally too, and it builds in a third of
+      # the time. The corpus asserts on protocol behaviour, not on speed.
+      - name: Build the client
+        working-directory: tui
+        run: cargo build
+
+      - name: Run the corpus
+        run: ./bench/local/run.sh ${{ inputs.filter && format('--filter {0}', inputs.filter) || '' }}
+
+      # The Terminal-Bench adapter's own tests need neither docker nor a key, so they ride
+      # along here rather than earning a second manual job.
+      - name: Terminal-Bench adapter unit tests
+        run: ./bench/terminal_bench/run_tests.sh -v

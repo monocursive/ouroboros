@@ -1,0 +1,8 @@
+{
+  "title": "an approved write reaches the disk",
+  "exercises": ["write", "approval"],
+  "instruction": "Corpus task 02: create lib/greeter.ex with a Greeter module that says hello.",
+  "approval_mode": "prompt",
+  "approve_all": true,
+  "timeout_secs": 60
+}

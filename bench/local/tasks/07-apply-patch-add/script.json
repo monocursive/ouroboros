@@ -1,0 +1,16 @@
+{
+  "instruction": "Corpus task 07: add lib/logger.ex with a Logger module, using a patch.",
+  "responses": [
+    [
+      {"type": "text", "text": "Adding the file."},
+      {"type": "tool_call", "id": "c1", "name": "apply_patch", "input": {
+        "patch": "*** Begin Patch\n*** Add File: lib/logger.ex\n+defmodule Logger do\n+  def info(message), do: IO.puts(message)\n+end\n*** End Patch\n"
+      }}
+    ],
+    [
+      {"type": "text", "text": "Added lib/logger.ex."},
+      {"type": "usage", "input_tokens": 180, "output_tokens": 44},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

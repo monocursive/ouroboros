@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 05: set the timeout in lib/config.ex to 9000 without opening it.",
+  "responses": [
+    [
+      {"type": "text", "text": "Editing directly."},
+      {"type": "tool_call", "id": "c1", "name": "edit", "input": {
+        "path": "lib/config.ex",
+        "old_string": "5000",
+        "new_string": "9000"
+      }}
+    ],
+    [
+      {"type": "text", "text": "The edit was refused because the file had not been read."},
+      {"type": "usage", "input_tokens": 160, "output_tokens": 26},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

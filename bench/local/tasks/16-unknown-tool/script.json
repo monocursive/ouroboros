@@ -1,0 +1,18 @@
+{
+  "instruction": "Corpus task 16: try a tool this session does not have, then fall back to reading.",
+  "responses": [
+    [
+      {"type": "text", "text": "Trying the search tool."},
+      {"type": "tool_call", "id": "c1", "name": "ripgrep_all", "input": {"pattern": "value"}}
+    ],
+    [
+      {"type": "text", "text": "That tool does not exist here; reading instead."},
+      {"type": "tool_call", "id": "c2", "name": "read", "input": {"path": "lib/thing.ex"}}
+    ],
+    [
+      {"type": "text", "text": "Thing.value/0 returns 7."},
+      {"type": "usage", "input_tokens": 250, "output_tokens": 33},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

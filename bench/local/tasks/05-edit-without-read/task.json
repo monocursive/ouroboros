@@ -1,0 +1,8 @@
+{
+  "title": "editing an unread file is refused and changes nothing",
+  "exercises": ["edit", "read-before-write guard"],
+  "instruction": "Corpus task 05: set the timeout in lib/config.ex to 9000 without opening it.",
+  "approval_mode": "auto_edit",
+  "approve_all": false,
+  "timeout_secs": 60
+}

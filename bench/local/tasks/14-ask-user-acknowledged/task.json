@@ -1,0 +1,8 @@
+{
+  "title": "an approved question with no text is an acknowledgement, not an answer",
+  "exercises": ["ask_user", "approval"],
+  "instruction": "Corpus task 14: ask whether to keep the legacy endpoint, then proceed either way.",
+  "approval_mode": "auto_approve",
+  "approve_all": true,
+  "timeout_secs": 60
+}

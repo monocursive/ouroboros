@@ -1,0 +1,8 @@
+{
+  "title": "a tool that does not exist is refused by name, not silently ignored",
+  "exercises": ["tool dispatch"],
+  "instruction": "Corpus task 16: try a tool this session does not have, then fall back to reading.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}
