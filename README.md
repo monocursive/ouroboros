@@ -314,7 +314,7 @@ an explicitly configured non-Codex provider is not blocked by an unrelated OpenA
 Type what you want done and press Enter: an interactive session
 starts in the displayed requested workspace, the first message carries a stable logical
 turn ID, and the streaming transcript opens as a user/agent conversation. Lifecycle,
-provider, usage, and other normalized events stay behind `Ctrl-E` in the complete
+provider, usage, and other normalized events stay behind `Ctrl-O` in the complete
 event-details view. The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` where the
 terminal reports the kitty keyboard protocol, and the footer only advertises it there),
 normalizes bracketed paste, keeps bounded in-session history, completes local slash

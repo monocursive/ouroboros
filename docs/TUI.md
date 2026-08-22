@@ -792,17 +792,17 @@ the user's message, collapses output deltas into the corresponding final agent m
 correlates normalized tool calls/results into compact activity cells, and renders file
 changes and bounded unified-diff excerpts without interpreting them as execution authority.
 Lifecycle, provider stderr, usage, reasoning, and bookkeeping stay out of the reading path;
-`Ctrl-E` toggles the complete normalized event ledger without discarding anything. Gaps,
+`Ctrl-O` toggles the complete normalized event ledger without discarding anything. Gaps,
 pruning, lag, terminal state, approvals, and actual failures remain visible in chat because
 hiding them would make an incomplete or failed conversation look healthy. Approval request
 IDs remain presentation correlation only: a matching resolution replaces “Approval needed”
 with the approved/denied outcome while the raw pair remains in event details. Redraw work is
 bounded: chat projects the newest 128 entries and bounded per-cell excerpts, with an explicit
-omission marker; `Ctrl-E` still exposes every event retained by the local 5,000-event window.
+omission marker; `Ctrl-O` still exposes every event retained by the local 5,000-event window.
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `Ctrl-E` chat/event details, `,` settings, `q` quit dialog, `?` help with the
+`s` steer, `Ctrl-O` chat/event details (`Ctrl-E` opens `$EDITOR`), `,` settings, `q` quit dialog, `?` help with the
 authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
