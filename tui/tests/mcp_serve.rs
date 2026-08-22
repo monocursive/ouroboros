@@ -21,7 +21,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-use ouro::mcp_serve::{Bridge, Server, APPROVAL_METHOD, PROTOCOL_VERSION, TOOL_NAME};
+use ouro::mcp_serve::{
+    Bridge, Server, APPROVAL_METHOD, CODE_INTEL_TOOL, DIAGNOSTICS_METHOD, DIAGNOSTICS_TOOL,
+    INFO_METHOD, PROTOCOL_VERSION, REQUEST_METHOD, TOOL_NAME, TOUCH_METHOD, TOUCH_TOOL,
+};
 
 use support::{listener, Peer, TOKEN};
 
@@ -156,7 +159,17 @@ async fn the_handshake_and_the_tool_it_advertises() {
     );
 
     let tools = listed["result"]["tools"].as_array().expect("a tool array");
-    assert_eq!(tools.len(), 1);
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+
+    // One tool for the harness and three for the model. The permission prompt is first
+    // because it is the one `--permission-prompt-tool` is pointed at by name.
+    assert_eq!(
+        names,
+        vec![TOOL_NAME, CODE_INTEL_TOOL, DIAGNOSTICS_TOOL, TOUCH_TOOL]
+    );
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["type"], "object");
     assert_eq!(
@@ -491,7 +504,7 @@ async fn a_malformed_call_is_a_denial_rather_than_a_guess() {
                 "jsonrpc": "2.0",
                 "id": 10,
                 "method": "tools/call",
-                "params": {"name": "diagnostics", "arguments": {}}
+                "params": {"name": "rename_everything", "arguments": {}}
             })))
             .await
             .expect("a response"),
@@ -525,4 +538,491 @@ async fn a_bridge_with_no_runtime_to_ask_denies_and_says_it_was_run_by_hand() {
         ))
         .await
         .is_some());
+}
+
+// ---------------------------------------------------------------------------
+// The three code-intelligence tools (E3)
+// ---------------------------------------------------------------------------
+
+const WORKSPACE: &str = "/work/repo";
+
+fn tool_call(name: &str, arguments: Value) -> String {
+    frame(json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    }))
+}
+
+/// The text a model would read out of a tool result.
+fn text(response: &Value) -> String {
+    let content = &response["result"]["content"][0];
+    assert_eq!(content["type"], "text", "{response}");
+
+    content["text"].as_str().expect("text").to_string()
+}
+
+fn failed(response: &Value) -> bool {
+    response["result"]["isError"] == json!(true)
+}
+
+/// A path only means something inside a workspace, and the session is what knows which.
+async fn answer_info(peer: &mut Peer) -> Value {
+    let request = peer.request_for(INFO_METHOD).await;
+    peer.result(
+        &request["id"],
+        json!({"id": SESSION, "workspace": WORKSPACE, "status": "idle"}),
+    )
+    .await;
+
+    request
+}
+
+async fn answer(peer: &mut Peer, method: &str, result: Value) -> Value {
+    let request = peer.request_for(method).await;
+    peer.result(&request["id"], result).await;
+
+    request
+}
+
+fn diagnostic(signature: &str, severity: &str, line: u64, message: &str) -> Value {
+    json!({
+        "signature": signature,
+        "severity": severity,
+        "code": "E001",
+        "source": "fake",
+        "message": message,
+        "tags": [],
+        "range": {
+            "start": {"line": line, "character": 4},
+            "end": {"line": line, "character": 9}
+        }
+    })
+}
+
+#[tokio::test]
+async fn code_intel_asks_in_the_session_workspace_and_renders_what_came_back() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, REQUEST_METHOD]).await;
+        answer_info(&mut peer).await;
+
+        answer(
+            &mut peer,
+            REQUEST_METHOD,
+            json!({
+                "status": "ok",
+                "truncated": 2,
+                "items": [
+                    {
+                        "path": "lib/a.ex",
+                        "external": false,
+                        "range": {"start": {"line": 11, "character": 4},
+                                  "end": {"line": 11, "character": 9}}
+                    },
+                    {
+                        "path": "deps/b/lib/b.ex",
+                        "external": true,
+                        "range": {"start": {"line": 0, "character": 0},
+                                  "end": {"line": 0, "character": 3}}
+                    }
+                ]
+            }),
+        )
+        .await
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                CODE_INTEL_TOOL,
+                json!({"operation": "references", "path": "lib/a.ex", "line": 11, "character": 4}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    assert!(!failed(&response), "{response}");
+
+    let rendered = text(&response);
+    assert!(rendered.starts_with("2 references results:"), "{rendered}");
+    // 0-based on the wire, 1-based where a person reads it.
+    assert!(rendered.contains("  lib/a.ex:12:5"), "{rendered}");
+    assert!(
+        rendered.contains("deps/b/lib/b.ex:1:1 [outside the workspace]"),
+        "{rendered}"
+    );
+    // The runtime's own cap is added to whatever this client left out.
+    assert!(rendered.contains("+2 more"), "{rendered}");
+
+    let asked = script.await.expect("the script");
+    assert_eq!(asked["params"]["workspace"], WORKSPACE);
+    assert_eq!(asked["params"]["operation"], "references");
+    // A relative path is relative to the *workspace*, and this process is the one that
+    // knows what that is; the runtime would expand it against wherever the daemon started.
+    assert_eq!(asked["params"]["path"], "/work/repo/lib/a.ex");
+    assert_eq!(asked["params"]["line"], 11);
+    assert_eq!(asked["params"]["character"], 4);
+    assert_eq!(asked["params"]["node"], "ouroboros@host");
+}
+
+#[tokio::test]
+async fn the_diagnostics_tool_reports_only_what_the_edit_added() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD, DIAGNOSTICS_METHOD])
+            .await;
+        answer_info(&mut peer).await;
+
+        let touched = answer(
+            &mut peer,
+            TOUCH_METHOD,
+            json!({
+                "version": 7,
+                "baseline": {
+                    "fresh?": true,
+                    "version": 6,
+                    "truncated": 0,
+                    "signatures": ["old-one"],
+                    "counts": {"error": 1}
+                }
+            }),
+        )
+        .await;
+
+        answer(
+            &mut peer,
+            DIAGNOSTICS_METHOD,
+            json!({
+                "status": "ok",
+                "version": 7,
+                "truncated": 0,
+                "items": [
+                    diagnostic("old-one", "error", 3, "this was already broken"),
+                    diagnostic("new-one", "error", 11, "undefined variable"),
+                    diagnostic("new-two", "warning", 20, "unused")
+                ]
+            }),
+        )
+        .await;
+
+        touched
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(DIAGNOSTICS_TOOL, json!({"path": "lib/a.ex"})))
+            .await
+            .expect("a response"),
+    );
+
+    let rendered = text(&response);
+    assert!(
+        rendered.starts_with("Found 2 new diagnostic issues in /work/repo/lib/a.ex:"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("undefined variable"), "{rendered}");
+    assert!(rendered.contains("unused"), "{rendered}");
+    // The pre-existing error is not this edit's doing and is not reported as if it were.
+    assert!(!rendered.contains("already broken"), "{rendered}");
+
+    let touched = script.await.expect("the script");
+    assert_eq!(touched["params"]["workspace"], WORKSPACE);
+    assert_eq!(touched["params"]["path"], "/work/repo/lib/a.ex");
+    // The edit already happened, so the file is announced as changed rather than opened.
+    assert_eq!(touched["params"]["action"], "changed");
+}
+
+#[tokio::test]
+async fn a_server_that_has_not_answered_is_no_lsp_data_and_never_an_empty_list() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD, DIAGNOSTICS_METHOD])
+            .await;
+        answer_info(&mut peer).await;
+        answer(&mut peer, TOUCH_METHOD, json!({"version": 2})).await;
+        // The freshness gate: the cache describes text that no longer exists.
+        answer(
+            &mut peer,
+            DIAGNOSTICS_METHOD,
+            json!({"status": "pending", "version": 1}),
+        )
+        .await
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(DIAGNOSTICS_TOOL, json!({"path": "lib/a.ex"})))
+            .await
+            .expect("a response"),
+    );
+
+    assert!(!failed(&response), "{response}");
+    assert_eq!(text(&response), "(no LSP data for /work/repo/lib/a.ex)");
+
+    script.await.expect("the script");
+}
+
+#[tokio::test]
+async fn the_touch_tool_announces_an_edit_made_somewhere_else() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD]).await;
+        answer_info(&mut peer).await;
+        answer(&mut peer, TOUCH_METHOD, json!({"version": 4})).await
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                TOUCH_TOOL,
+                json!({"path": "lib/a.ex", "action": "open"}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    assert!(text(&response).contains("version 4"), "{response}");
+
+    let asked = script.await.expect("the script");
+    assert_eq!(asked["params"]["action"], "open");
+}
+
+#[tokio::test]
+async fn the_workspace_is_read_once_and_then_held() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, REQUEST_METHOD]).await;
+        answer_info(&mut peer).await;
+
+        answer(
+            &mut peer,
+            REQUEST_METHOD,
+            json!({"status": "ok", "truncated": 0, "items": []}),
+        )
+        .await;
+
+        // A second `interactive.info` would show up here as the next frame; what arrives
+        // instead is the second question, which is the assertion.
+        let second = peer.request().await.expect("a second call");
+        assert_eq!(second["method"], REQUEST_METHOD);
+        peer.result(
+            &second["id"],
+            json!({"status": "ok", "truncated": 0, "items": []}),
+        )
+        .await;
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    for _call in 0..2 {
+        let response = decode(
+            &server
+                .handle_line(&tool_call(
+                    CODE_INTEL_TOOL,
+                    json!({"operation": "definition", "path": "lib/a.ex"}),
+                ))
+                .await
+                .expect("a response"),
+        );
+
+        assert_eq!(
+            text(&response),
+            "No definition results for /work/repo/lib/a.ex."
+        );
+    }
+
+    script.await.expect("the script");
+}
+
+#[tokio::test]
+async fn a_runtime_refusal_is_an_error_result_the_model_can_act_on() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, REQUEST_METHOD]).await;
+        answer_info(&mut peer).await;
+
+        let asked = peer.request_for(REQUEST_METHOD).await;
+        peer.error(
+            &asked["id"],
+            -32004,
+            "no language server is available for that file: install rust-analyzer",
+            Some(json!({"reason": "server_unavailable"})),
+        )
+        .await;
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                CODE_INTEL_TOOL,
+                json!({"operation": "references", "path": "src/main.rs"}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    assert!(failed(&response), "{response}");
+    assert!(
+        text(&response).contains("install rust-analyzer"),
+        "{response}"
+    );
+
+    script.await.expect("the script");
+}
+
+#[tokio::test]
+async fn a_malformed_code_intel_call_never_reaches_the_runtime() {
+    // Nothing is listening, so any call that got as far as the gateway would fail with a
+    // connection error rather than the argument message these assert on.
+    let listen = TcpListener::bind(("127.0.0.1", 0)).await.expect("a port");
+    let address = listen.local_addr().expect("an address");
+    drop(listen);
+
+    let mut server = server(address, Duration::from_millis(200));
+
+    let cases = [
+        (
+            CODE_INTEL_TOOL,
+            json!({"operation": "rename", "path": "lib/a.ex"}),
+            "operation must be one of",
+        ),
+        (
+            CODE_INTEL_TOOL,
+            json!({"path": "lib/a.ex"}),
+            "operation must be a non-empty string",
+        ),
+        (
+            CODE_INTEL_TOOL,
+            json!({"operation": "references"}),
+            "path must be a non-empty string",
+        ),
+        (DIAGNOSTICS_TOOL, json!({"path": "  "}), "path must be"),
+        (
+            TOUCH_TOOL,
+            json!({"path": "lib/a.ex", "action": "deleted"}),
+            "action must be one of",
+        ),
+        (TOUCH_TOOL, json!("not an object"), "takes an object"),
+    ];
+
+    for (tool, arguments, expected) in cases {
+        let response = decode(
+            &server
+                .handle_line(&tool_call(tool, arguments))
+                .await
+                .unwrap(),
+        );
+
+        assert!(failed(&response), "{response}");
+        assert!(text(&response).contains(expected), "{response}");
+    }
+}
+
+#[tokio::test]
+async fn an_absolute_path_is_left_alone_and_a_relative_one_is_joined_to_the_workspace() {
+    assert_eq!(
+        ouro::mcp_serve::in_workspace(WORKSPACE, "lib/a.ex"),
+        "/work/repo/lib/a.ex"
+    );
+    assert_eq!(
+        ouro::mcp_serve::in_workspace(WORKSPACE, "/elsewhere/a.ex"),
+        "/elsewhere/a.ex"
+    );
+}
+
+#[tokio::test]
+async fn on_demand_diagnostics_open_without_claiming_a_change() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD, DIAGNOSTICS_METHOD])
+            .await;
+        answer_info(&mut peer).await;
+
+        let touched = answer(&mut peer, TOUCH_METHOD, json!({"version": 1})).await;
+
+        answer(
+            &mut peer,
+            DIAGNOSTICS_METHOD,
+            json!({
+                "status": "ok",
+                "version": 1,
+                "truncated": 0,
+                "items": [diagnostic("here", "error", 3, "already broken")]
+            }),
+        )
+        .await;
+
+        touched
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                CODE_INTEL_TOOL,
+                json!({"operation": "diagnostics", "path": "lib/a.ex"}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    // No baseline diff: the question was "what is wrong with this file", not "what did I
+    // just break", so a pre-existing error is the answer rather than something to hide.
+    let rendered = text(&response);
+    assert!(
+        rendered.starts_with("Found 1 diagnostic issue in /work/repo/lib/a.ex:"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("already broken"), "{rendered}");
+
+    // `ensure_open`, not `open`: re-opening assigns a new version, and a server with
+    // nothing new to say never publishes for it, so asking twice would answer "no LSP data"
+    // the second time. Found by a live run against clangd.
+    let touched = script.await.expect("the script");
+    assert_eq!(touched["params"]["action"], "ensure_open");
+}
+
+#[tokio::test]
+async fn code_intel_without_a_runtime_says_it_was_run_by_hand() {
+    let mut server = Server::new(Err("OUROBOROS_SESSION_ID is not set".to_string()));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                CODE_INTEL_TOOL,
+                json!({"operation": "references", "path": "lib/a.ex"}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    assert!(failed(&response), "{response}");
+    assert!(text(&response).contains("not by hand"), "{response}");
 }

@@ -32,8 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    Cli, Command, FleetCommand, InviteCommand, RunArgs, ServiceCommand, SessionsCommand,
-    SyncCommand,
+    Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, RunArgs, ServiceCommand,
+    SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -75,6 +75,15 @@ async fn run(cli: Cli) -> Result<()> {
     // data directory, parses a config file, or decides what to do with a terminal.
     if matches!(cli.command, Some(Command::McpServe)) {
         return ouro::mcp_serve::serve().await;
+    }
+
+    // A hook is answered here for the same reason and one more: it runs inside somebody
+    // else's turn, on a five-second budget, and a data directory it cannot discover must
+    // not turn into a failure the vendor reads as a refused edit.
+    if let Some(Command::Hook { command }) = &cli.command {
+        return match command {
+            HookCommand::PostToolUse => ouro::hook::post_tool_use().await,
+        };
     }
 
     let paths = Paths::discover(cli.dev)?;
@@ -151,11 +160,15 @@ async fn run(cli: Cli) -> Result<()> {
             print,
         }) => attach_remote(&paths, cli.dev, addr, token_file, print, config).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
+        Some(Command::Ledger(args)) => ledger(&paths, args).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
-        // this process is concerned. The arm keeps the match total.
+        // this process is concerned. The arms keep the match total.
         Some(Command::McpServe) => ouro::mcp_serve::serve().await,
+        Some(Command::Hook {
+            command: HookCommand::PostToolUse,
+        }) => ouro::hook::post_tool_use().await,
         Some(Command::ProcessBirth { pid }) => {
             let birth = runtime::process_birth(pid)?
                 .ok_or_else(|| anyhow!("process pid {pid} is not alive"))?;
@@ -1948,6 +1961,28 @@ async fn attach_remote(
         },
     )
     .await
+}
+
+/// `ouro ledger`: one read against a runtime that is already up.
+///
+/// No spawn and no boot screen. A ledger query is a question about history, and starting a
+/// machine to answer it would change the thing being asked about.
+async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, hook).await?;
+
+    let options = ouro::ledger_cli::Options {
+        fleet: args.fleet,
+        since: args.since,
+        json: args.json,
+        limit: args.limit,
+    };
+
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
+
+    ouro::ledger_cli::run(&connected.client, &options, &mut out, &mut err).await
 }
 
 /// Where a runtime this client did not start listens, and the token to present to it.

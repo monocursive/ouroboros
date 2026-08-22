@@ -47,6 +47,8 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
 
   use Mix.Task
 
+  alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.CodeIntel.Diagnostics
   alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
@@ -58,6 +60,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   @session_id "session-0000000000000000000001"
   @task_id "task-0000000000000000000000002"
   @timestamp "2026-01-01T00:00:00.000000Z"
+
+  @diagnostic %{
+    range: %{start: %{line: 11, character: 4}, end: %{line: 11, character: 12}},
+    severity: :error,
+    code: "E0425",
+    source: "fake",
+    message: "cannot find value `widget` in this scope",
+    tags: []
+  }
 
   @impl Mix.Task
   def run(_args) do
@@ -106,6 +117,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"interactive_event_excerpt_notification", interactive_event_excerpt_notification()},
       {"interactive_event_detail_result", interactive_event_detail_result()},
       {"coding_event_detail_result", coding_event_detail_result()},
+      {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
+      {"ledger_list_result", ledger_list_result()},
+      {"ledger_export_result", ledger_export_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
       {"stream_ended_notification", stream_ended_notification()},
       {"error_unauthenticated", error_unauthenticated()},
@@ -422,6 +436,71 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       "the session no longer retains events at or below that cursor; replay from 96",
       %{"reason" => "cursor_pruned", "floor" => 96}
     )
+  end
+
+  # E2. One diagnostics answer, with the field that makes the new-only rule work across a
+  # process boundary: `signature` is derived here through the live
+  # `CodeIntel.Diagnostics.signature/1`, so a change to what "the same diagnostic" means
+  # is a diff in this file rather than a hook that silently starts re-reporting fixed
+  # errors. Positions stay 0-based, exactly as the protocol reports them.
+  defp code_intel_diagnostics_result do
+    Conn.result_frame(9, %{
+      status: :ok,
+      version: 4,
+      source: "fake",
+      truncated: 0,
+      counts: %{error: 1, warning: 0, information: 0, hint: 0, unknown: 0},
+      items: Enum.map([@diagnostic], &Map.put(&1, :signature, Diagnostics.signature(&1)))
+    })
+  end
+
+  # I3. A fleet answer, which is the shape that matters: entries carry the node they were
+  # minted on, and a machine that did not answer is a row in `nodes` rather than a shorter
+  # list that looks complete.
+  defp ledger_list_result do
+    Conn.result_frame(10, %{
+      entries: [ledger_entry()],
+      nodes: [
+        %{node: :ouroboros@golden, status: :ok},
+        %{node: :ouroboros@offline, status: :unavailable, reason: %{"erpc" => "noconnection"}}
+      ]
+    })
+  end
+
+  # I1's export, derived through `Methods.chain/1` so the fixture *is* the chain a client
+  # verifies. `line` is the byte string its own hash covers.
+  defp ledger_export_result do
+    Conn.result_frame(
+      11,
+      [ledger_entry()]
+      |> Methods.chain()
+      |> Map.merge(%{node: :ouroboros@golden, format: "jsonl", limit: 500, since: 0})
+    )
+  end
+
+  defp ledger_entry do
+    %EffectLedger.Entry{
+      sequence: 12,
+      started_sequence: 11,
+      id: "effect-000000000000000000001",
+      effect: :permission,
+      principal: "session:#{@session_id}",
+      claimed_from: nil,
+      attempt: %{
+        tool: "Bash",
+        mode: :prompt,
+        provider: :claude_code,
+        fingerprint: %{sha256: String.duplicate("a", 64), bytes: 42}
+      },
+      authority: %{decision: :allow, reason: :rule},
+      cause: %{signal_id: "sig-0000000000000000000001"},
+      status: :ok,
+      result: %{decision: :allow, scope: :once, actor: :human, rule_id: nil},
+      error: nil,
+      started_at: @timestamp,
+      settled_at: @timestamp,
+      origin_node: :ouroboros@golden
+    }
   end
 
   defp error_not_found do

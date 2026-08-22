@@ -211,6 +211,19 @@ defmodule Ouroboros.Agent.EffectLedger do
   @spec status(server()) :: map() | {:error, term()}
   def status(server \\ __MODULE__), do: safe_call(server, :status)
 
+  @doc """
+  The bounds `list/2` holds every query to.
+
+  Read by the gateway so that `ledger.list` and `ledger.export` are bounded by the
+  ledger's own numbers rather than by a second set that could drift from them.
+  """
+  @spec query_limits() :: %{default: pos_integer(), max: pos_integer()}
+  def query_limits, do: %{default: @default_query_limit, max: @max_query_limit}
+
+  @doc "The statuses `list/2` accepts as a filter."
+  @spec statuses() :: [Entry.status()]
+  def statuses, do: @statuses
+
   @type durability :: :ephemeral_checkpoint | :durable_checkpoint | :synced_checkpoint
 
   @spec durability(server()) :: durability() | {:error, term()}

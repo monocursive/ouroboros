@@ -308,6 +308,12 @@ reading.
 | `permissions.list` `{scope?, workspace?, node?}` | `Control.Permissions.list/1` on the named machine (local by default; a remote one is a bounded `:erpc`, so an unreachable machine is reported as unreachable rather than as a gateway timeout). Returns the `:node` rules read from `config :ouroboros, :permissions` alongside the stored `:user`/`:workspace`/`:session` ones, each with `id`, `pattern`, `kind`, `decision`, `scope`, `workspace`, `session_id`, `created_at`, and `fragile` — the last true for an argument-constraining `Bash` pattern, which is accepted but easy to route around |
 | `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture |
 | `fleet.doctor` | `Cluster.fleet_doctor/0` — live fleet checks merged with host-local certificate/interface/port/log/service facts |
+| `runtime.lsp.status` | `Ouroboros.CodeIntel.status/0` — every language server this node owns: state, pids, RSS, root, uptime, restarts, open documents, and the host memory budget. `enabled: false` and an empty list where `OUROBOROS_CODE_INTEL=0`. Node-local by construction; a fleet answer is one call per machine, because a pool runs where the files are |
+| `code_intel.request` `{workspace, operation, path, line?, character?, query?, node?}` | `CodeIntel.request/3` — the nine navigation operations (`definition`, `references`, `hover`, `document_symbols`, `workspace_symbols`, `implementation`, `prepare_call_hierarchy`, `incoming_calls`, `outgoing_calls`), 0-based positions as the protocol reports them, paths relative to the project root with `external: true` for anything outside it. `workspace` narrows the marker walk and can never widen it: `CodeIntel.Registry` holds an explicit workspace to the same admitted-roots check as an implicit one, so `"/"` is refused rather than obeyed. Routed to `node` (local by default) over a bounded `:erpc`, and the pool's own timeouts are replaced with gateway ones that sum below the 15s ceiling — a cold ElixirLS is answered "not ready yet", not killed. Typed refusals carry a `reason` in `data`: `server_unavailable` (with the install hint), `outside_workspace`, `unsupported_language`, `no_project_root`, `disabled`, `broken` |
+| `code_intel.diagnostics` `{workspace, path, node?, wait_ms?}` | `CodeIntel.diagnostics/2` — `{status: "ok", version, items, counts, truncated, source}` when the cache describes the file's *current* content, `{status: "pending", version}` when it does not after waiting `wait_ms` (default 5s, ceiling 10s). A pending answer carries **no `items` key at all**, so "nobody has looked yet" cannot be read as "nothing is wrong". Each item adds `signature`, a stable digest of `{code, severity, message, range}` — the same identity `Diagnostics` dedupes on — which is what lets a caller outside the runtime tell a new finding from one that was already there. `document_not_open` until the file has been announced |
+| `ledger.list` `{principal?, effect?, status?, since_sequence?, order?, limit?, node?, fleet?}` | `Agent.EffectLedger.list/2` with its own bounds (limit 1..500, default 100). Answers `{entries, nodes}`: `nodes` names every machine that was asked and whether it answered, so an unreachable one is a row saying `unavailable` rather than a shorter list that looks complete. `fleet: true` fans out to every connected core node with the same bounded `:erpc` the `fleet.*` verbs use. Sequences are minted per node, so there is no cross-node total order; entries are ordered by `{node, sequence}` and every row carries `origin_node` |
+| `ledger.get` `{id, node?}` | `Agent.EffectLedger.get/2`. Unknown id → `-32007` |
+| `ledger.export` `{since?, node?}` | The same query in JSONL, bounded to the ledger's own maximum (500), ordered ascending, with a SHA-256 chain: `hash(n) = sha256(hash(n-1) ‖ line(n))` where `hash(-1)` is `seed` (64 zeros) and `line` is the exact text its hash covers. A client verifies by hashing the strings it was handed, in order — nothing about how this runtime encodes an entry has to be reimplemented. **The chain is computed for the answer and stored nowhere.** It makes an export self-verifying; it is not tamper-evident storage, and a node that rewrote its own checkpoint would produce a perfectly consistent chain over the rewritten history |
 
 **`operate` scope** (additionally require `scope=operate`; each call emits one
 `Logger` audit line: method, param digest, connection peer)
@@ -347,6 +353,7 @@ this repository and moves in lockstep.
 | `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
 | `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
 | `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
+| `code_intel.touch` `{workspace, path, action, node?}` | `CodeIntel.touch_with_baseline/3` — `action` is `changed`, `open`, `ensure_open`, or `closed`. `ensure_open` is the one to reach for when *asking* about a file rather than reporting a change to it: it opens a document the server has never seen and does nothing to one it already holds, where `open` re-reads and assigns a new version. Every version bump invalidates the diagnostics cache, so a caller that asked "what is wrong with this file" by re-opening it would wait out the freshness gate for a push a server with nothing new to say never sends — which is exactly what a live run against `clangd` did before this existed. `operate` rather than `read` because telling a language server about a document is this node spending memory on a caller's say-so; nothing else here mutates a pool. Answers `{version, baseline}`, where `baseline` is the picture *before* the touch: `fresh?`, `version` (`null` when the server had never published for the file, which is how "there is no baseline" is said rather than "the baseline was empty"), `counts`, `truncated`, and `signatures`. Reading the baseline and assigning the new version happen in one call because there is no ordering in two: a push landing between them turns a pre-existing error into a new one |
 | `agents.stop` `{id}` | `Mesh.stop_agent/1` |
 | `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack |
 
@@ -765,6 +772,10 @@ ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       headless: run one prompt, stream the normalised events,
                       exit with a documented code. No alternate screen, ever
 ouro stop             graceful stop of the locally spawned daemon
+ouro ledger [--fleet] [--since N] [--json] [--limit N]
+         [--addr HOST:PORT] [--token-file PATH]
+                      print the durable effect ledger as a table or NDJSON;
+                      reads a runtime that is already up and never starts one
 ouro fleet create     create private CA/cookie/profile for the first machine
 ouro fleet list       Tailscale peers and SSH config hosts this Mac already knows
 ouro fleet add TARGET --machine NAME --host HOST [--via ssh|tailscale] [--binary FILE]
@@ -791,8 +802,12 @@ ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery
 ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
 ouro mcp-serve        hidden. An MCP server on stdio, spawned by a vendor CLI, not
-                      by a person: it is the permission prompt for a transport
-                      that has none of its own
+                      by a person: the permission prompt for a transport that has
+                      none of its own, plus three code-intelligence tools
+ouro hook post-tool-use
+                      hidden. Answers Claude Code's PostToolUse hook with the
+                      diagnostics one edit added. Reads JSON on stdin, writes JSON
+                      on stdout, exits 0 whatever happened
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
@@ -830,6 +845,83 @@ never is, because a question that ran out of time may be in front of a person.
 object, a decision this build cannot parse, a deadline, or a bridge started by hand each
 produce a denial naming the cause. Nothing in this module can produce an `allow` that a
 runtime did not.
+
+*The three tools the model may call.* `approve` is called by the harness; these are called
+by the model, and they are the runtime's language-server pool offered to a vendor agent
+that has none of its own (E3). `code_intel {operation, path, line?, character?, query?}`
+asks one of the nine navigation questions or on-demand `diagnostics` for a file;
+`diagnostics {path}` announces the edit, waits ≤ 5s, and reports only what is new; `touch
+{path, action?}` announces a change made by something other than an edit tool. All three
+read the session's workspace from `interactive.info` once, per `OUROBOROS_SESSION_ID`, and
+hold it — a tool call names a path, and the boundary that path is admitted against is the
+session's rather than the tool's to choose. A relative path is resolved against that
+workspace *here*, before the call: the runtime would expand it against whatever directory
+the daemon was started in, which has nothing to do with the session. `code_intel`'s description tells the model when
+*not* to reach for it: references, call hierarchies and multi-file changes, not a lookup in
+a file it has already read (R4 §(d)).
+
+Because the adapter names this same server in `--mcp-config`, a bridged Claude session gets
+all four with no further configuration. Sessions the approval bridge does not attach to —
+`auto_edit`, `auto_approve`, and the whole coding plane — get none of them; that is a limit
+of where the bridge applies, not of the tools. And `code_intel.touch` is `operate` scope, so
+a gateway listener started at `read` serves navigation and refuses the two tools that
+announce an edit.
+
+#### `ouro hook post-tool-use` — diagnostics after a vendor's edit (`src/hook.rs`)
+
+Claude Code runs `PostToolUse` hooks *after* a tool has already succeeded and reads
+`hookSpecificOutput.additionalContext` off their stdout
+([hooks](https://code.claude.com/docs/en/hooks)). That is the one place a runtime with no
+tool loop of its own can put a diagnostic in front of the model, so
+`Ouroboros.Provider.ClaudeAdapter` composes the hook into the `--settings` JSON a bridged
+session is launched with — matcher `Edit|Write|MultiEdit|NotebookEdit`, 15s timeout — and
+this subcommand is what it runs.
+
+*What it does.* Reads the payload's `tool_input.file_path` (or `notebook_path`, or `path`),
+resolved against `cwd` when relative. Calls `code_intel.touch {action: "changed"}`, keeps
+the pre-edit signatures out of the answer, calls `code_intel.diagnostics`, and reports the
+items whose signature the baseline did not carry. The whole thing is bounded at five
+seconds. `session_id` in the payload is *Claude's* session; the session this reports to is
+`OUROBOROS_SESSION_ID`, which the adapter put in the command's environment.
+
+*What it prints.* One JSON object, and `additionalContext` is one of exactly three shapes:
+
+```text
+Edit applied.                              Edit applied.        Edit applied.
+Found 2 new diagnostic issues in lib/a.ex: No new diagnostics.   (no LSP data for this file)
+  error 12:5 [E001] undefined variable
+  warning 21:1 [W002] unused
+```
+
+Errors always, at most three warnings, at most twenty lines then `+N more` covering
+everything omitted — R4 §2's noise bounds, applied by the same code the `diagnostics` MCP
+tool uses so the two cannot drift into two policies. Positions are printed 1-based; the
+wire keeps them 0-based, as the protocol reports them.
+
+*It never blocks.* A `PostToolUse` hook refuses an edit by exiting 2 with a reason on
+stderr. This one exits **0 on every path** — no runtime, no language server, a timeout, a
+payload that is not JSON, a gateway refusal. The tool has already run by the time the hook
+is called, so a refusal here cannot undo anything; it can only send the model back to redo
+work that succeeded, which is OpenCode #9102 with receipts. That is also why "Edit applied."
+is the first line in all three shapes. A payload with no file in it prints nothing at all.
+
+*Honest limit.* The new-only diff is against whatever the pool held for the file before the
+touch. The first edit to a file no session has opened has no baseline, so its pre-existing
+diagnostics are reported once as new. Hiding real errors to avoid that would be the worse
+trade, and the alternative — a runtime that opens every file it hears about — is the memory
+behaviour the pool exists to bound.
+
+#### `ouro ledger` — the effect ledger from a terminal (`src/ledger_cli.rs`)
+
+`ledger.list` against a runtime that is already up; it never starts one, because a query
+about history should not change the thing being asked about. A table for a person, `--json`
+for a pipe (one JSON object per entry, the runtime's own record unreshaped), `--since N`
+and `--limit N` for paging, `--fleet` to ask every connected core node.
+
+Stdout carries only the answer. A node that did not respond is written to **stderr**, so
+`ouro ledger --json | jq` reads a clean stream of entries and the operator still learns the
+picture is incomplete. Every row names its `origin_node`, because sequences are minted per
+node and a bare "12" means nothing across a fleet.
 
 Spawn-mode environment assembly: `OUROBOROS_GATEWAY=1`, `_SCOPE=operate`,
 `_ALLOW_SHUTDOWN=1`, `_PORT=0`, token: 32 random bytes hex → file 0600 in the

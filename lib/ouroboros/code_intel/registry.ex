@@ -362,10 +362,19 @@ defmodule Ouroboros.CodeIntel.Registry do
 
   ## Internals
 
+  # An explicit `workspace_root:` may only ever *narrow* the walk. Since E2 the string can
+  # come from a gateway caller — `code_intel.request` names the session's workspace — and a
+  # boundary chosen by a caller that admitted itself would be no boundary at all: naming
+  # `/` would turn the containment check below into "is this path absolute". So an explicit
+  # root is held to the same admission as an implicit one and is refused outside it.
   defp workspace_root(file, opts) do
     case Keyword.get(opts, :workspace_root) do
       root when is_binary(root) and root != "" ->
-        WorkspacePath.canonicalize(root)
+        with {:ok, canonical} <- WorkspacePath.canonicalize(root) do
+          if Enum.any?(admitted_roots(), &WorkspacePath.within?(canonical, &1)),
+            do: {:ok, canonical},
+            else: {:error, {:outside_workspace, canonical}}
+        end
 
       _unset ->
         admitted_root(file)
@@ -375,6 +384,16 @@ defmodule Ouroboros.CodeIntel.Registry do
   # Fail closed: a file under no admitted workspace root gets no language server, because
   # the alternative is spawning a program with a foreign directory as its cwd.
   defp admitted_root(file) do
+    admitted_roots()
+    |> Enum.filter(&WorkspacePath.within?(file, &1))
+    |> Enum.max_by(&byte_size/1, fn -> nil end)
+    |> case do
+      nil -> {:error, {:outside_workspace, file}}
+      root -> {:ok, root}
+    end
+  end
+
+  defp admitted_roots do
     :ouroboros
     |> Application.get_env(:workspace_allowed_roots, [])
     |> Enum.flat_map(fn root ->
@@ -383,12 +402,6 @@ defmodule Ouroboros.CodeIntel.Registry do
         {:error, _reason} -> []
       end
     end)
-    |> Enum.filter(&WorkspacePath.within?(file, &1))
-    |> Enum.max_by(&byte_size/1, fn -> nil end)
-    |> case do
-      nil -> {:error, {:outside_workspace, file}}
-      root -> {:ok, root}
-    end
   end
 
   defp project_root(file, workspace_root, definition, opts) do

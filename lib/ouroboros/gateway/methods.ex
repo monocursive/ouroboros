@@ -73,6 +73,8 @@ defmodule Ouroboros.Gateway.Methods do
   and the golden fixtures pin the shape.
   """
 
+  alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.CodeIntel
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskRef
   alias Ouroboros.Coding.TaskState
@@ -103,6 +105,21 @@ defmodule Ouroboros.Gateway.Methods do
   # client a null status for that provider, not a timed-out method.
   @provider_probe_timeout 5_000
   @fleet_query_timeout 5_000
+
+  # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
+  # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
+  # ElixirLS and jdtls compile the world on first launch. A gateway method cannot wait
+  # that long, so these three numbers replace the pool's defaults on every gateway call
+  # and are chosen to sum below the 15s ceiling — a cold server is answered "not ready
+  # yet", which is an honest answer a caller can retry, rather than a killed task.
+  @code_intel_wait_ready_ms 5_000
+  @code_intel_request_timeout_ms 8_000
+  @code_intel_max_wait_ms 10_000
+  @code_intel_erpc_timeout 14_000
+
+  # Where `ledger.export`'s hash chain starts. A fixed, published seed rather than a random
+  # one: the point of the chain is that a client can recompute it from the answer alone.
+  @chain_seed String.duplicate("0", 64)
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -221,6 +238,25 @@ defmodule Ouroboros.Gateway.Methods do
     # route to the machine whose rules they describe. Reading is `read`; writing a rule
     # widens or narrows what a session may do without a human present, so it is `operate`.
     "permissions.list" => %{scope: :read, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # E2/E3/I3. Code intelligence and the effect ledger, on the wire.
+    #
+    # Every one of these is `:read` except `code_intel.touch`, and the split is the same
+    # one the rest of this table makes: reading what a language server or the ledger
+    # already knows changes nothing, while telling a language server that a file moved
+    # spends this node's memory on a document a caller chose. Reads route to the node that
+    # owns the workspace or the entries, because both authorities are node-local — a pool
+    # runs where the files are (D7) and a ledger where the effect ran (I3) — and a remote
+    # answer is a bounded `:erpc` so an unreachable machine reads as unreachable rather
+    # than as a gateway ceiling with no detail.
+    # ---------------------------------------------------------------------------------
+    "runtime.lsp.status" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.request" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.diagnostics" => %{scope: :read, timeout: @default_timeout},
+    "ledger.list" => %{scope: :read, timeout: @default_timeout},
+    "ledger.get" => %{scope: :read, timeout: @default_timeout},
+    "ledger.export" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
     # only after a signed roster tombstone is present and the machine is offline.
@@ -759,6 +795,119 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, id} <- fetch_string(params, "id"),
          {:ok, target} <- permissions_node(params) do
       permissions_call(target, :remove, [scope, id])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # E2/E3 — code intelligence on the wire
+  # ---------------------------------------------------------------------------
+
+  def invoke("runtime.lsp.status", _params), do: safe(fn -> {:ok, CodeIntel.status()} end)
+
+  def invoke("code_intel.request", params) do
+    with :ok <-
+           only_keys(params, [
+             "workspace",
+             "operation",
+             "path",
+             "line",
+             "character",
+             "query",
+             "node"
+           ]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, operation} <- code_intel_operation(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, line} <- code_intel_position(params, "line"),
+         {:ok, character} <- code_intel_position(params, "character"),
+         {:ok, query} <- fetch_optional_string(params, "query"),
+         {:ok, target} <- permissions_node(params) do
+      location = %{path: path, line: line, character: character, query: query}
+
+      code_intel_call(target, :request, [
+        operation,
+        location,
+        code_intel_opts(workspace, query: query)
+      ])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("code_intel.diagnostics", params) do
+    with :ok <- only_keys(params, ["workspace", "path", "wait_ms", "node"]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, wait_ms} <- code_intel_wait_ms(params),
+         {:ok, target} <- permissions_node(params) do
+      code_intel_call(target, :diagnostics, [path, code_intel_opts(workspace, wait_ms: wait_ms)])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # `:operate`, and answered with the pre-touch baseline. An external tool that has just
+  # written a file needs both halves of the new-only rule — what the server said about the
+  # old text, and the version the new text was assigned — and reading the baseline in the
+  # same gateway call is the only ordering in which nothing can arrive between them.
+  def invoke("code_intel.touch", params) do
+    with :ok <- only_keys(params, ["workspace", "path", "action", "node"]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, action} <- code_intel_action(params),
+         {:ok, target} <- permissions_node(params) do
+      code_intel_call(target, :touch_with_baseline, [path, action, code_intel_opts(workspace)])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # I1/I3 — the effect ledger on the wire, and across the fleet
+  # ---------------------------------------------------------------------------
+
+  def invoke("ledger.list", params) do
+    with :ok <-
+           only_keys(params, [
+             "principal",
+             "effect",
+             "status",
+             "since_sequence",
+             "order",
+             "limit",
+             "node",
+             "fleet"
+           ]),
+         {:ok, filters} <- ledger_filters(params),
+         {:ok, fleet?} <- ledger_fleet(params),
+         {:ok, target} <- permissions_node(params) do
+      if fleet? do
+        ledger_fleet_list(filters)
+      else
+        ledger_local_list(target, filters)
+      end
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("ledger.get", params) do
+    with :ok <- only_keys(params, ["id", "node"]),
+         {:ok, id} <- fetch_string(params, "id"),
+         {:ok, target} <- permissions_node(params) do
+      ledger_call(target, :get, [id])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("ledger.export", params) do
+    with :ok <- only_keys(params, ["since", "node"]),
+         {:ok, since} <- ledger_since(params),
+         {:ok, target} <- permissions_node(params) do
+      ledger_export(target, since)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1845,6 +1994,454 @@ defmodule Ouroboros.Gateway.Methods do
       end
     end)
   end
+
+  # ---------------------------------------------------------------------------
+  # Code intelligence (E2/E3)
+  # ---------------------------------------------------------------------------
+
+  # Same posture as `permissions_call/3` and for the same reason: the pool runs where the
+  # files are, so a session on another machine is answered by that machine's pool or not
+  # at all. `Ouroboros.CodeIntel` raises nothing and blocks on nothing without a deadline,
+  # so what crosses `:erpc` is always an ordinary tuple.
+  defp code_intel_call(target, function, arguments) do
+    safe(fn ->
+      if target == node() do
+        code_intel_reply(apply(CodeIntel, function, arguments))
+      else
+        code_intel_reply(
+          :erpc.call(target, CodeIntel, function, arguments, @code_intel_erpc_timeout)
+        )
+      end
+    end)
+  end
+
+  # The pool's own defaults are longer than a gateway method may wait, so every gateway
+  # call states its bounds rather than inheriting them.
+  defp code_intel_opts(workspace, extra \\ []) do
+    [
+      workspace_root: workspace,
+      wait_ready_ms: @code_intel_wait_ready_ms,
+      request_timeout_ms: @code_intel_request_timeout_ms
+    ] ++ Enum.reject(extra, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp code_intel_reply({:ok, %{items: items} = answer}) when is_list(items) do
+    {:ok, answer |> Map.put(:status, :ok) |> Map.put(:items, code_intel_items(items))}
+  end
+
+  defp code_intel_reply({:ok, value}), do: {:ok, value}
+
+  # Not an error: the server has not answered for this version of the document yet. A
+  # caller that treated "no data yet" as a failure of whatever produced the edit is
+  # exactly the regression R4 §2 records against stale diagnostics, so it arrives as an
+  # ordinary result carrying no items at all — there is nothing to mistake for "clean".
+  defp code_intel_reply({:pending, version}), do: {:ok, %{status: :pending, version: version}}
+
+  defp code_intel_reply({:error, {:server_unavailable, server_id, hint}}) do
+    {:error, code(:unavailable), "no language server is available for that file: #{hint}",
+     %{"reason" => "server_unavailable", "server" => server_id, "hint" => hint}}
+  end
+
+  defp code_intel_reply({:error, {:outside_workspace, path}}) do
+    {:error, code(:invalid_params), "that path is not inside a workspace root this node admits",
+     %{"reason" => "outside_workspace", "path" => to_string(path)}}
+  end
+
+  defp code_intel_reply({:error, {:no_project_root, language, markers}}) do
+    {:error, code(:unavailable),
+     "no project root for that #{language} file; expected one of #{Enum.join(markers, ", ")}",
+     %{"reason" => "no_project_root", "language" => to_string(language), "markers" => markers}}
+  end
+
+  # A path that cannot be canonicalised is a path, not an upstream failure: it is missing,
+  # it is a directory, it is a symlink that goes nowhere, or it was relative to a directory
+  # that means nothing here. Saying `-32006 the runtime failed the call` about any of those
+  # sends a caller looking for a fault in the runtime.
+  defp code_intel_reply({:error, {tag, path, reason}})
+       when tag in [:workspace_path_error, :path_unavailable, :symbolic_link_unreadable] do
+    unreadable_path(path, reason)
+  end
+
+  defp code_intel_reply({:error, {tag, path}})
+       when tag in [:not_a_directory, :symbolic_link_cycle] do
+    unreadable_path(path, tag)
+  end
+
+  defp code_intel_reply({:error, :too_many_symbolic_links}) do
+    unreadable_path("that path", :too_many_symbolic_links)
+  end
+
+  defp code_intel_reply({:error, {:not_a_regular_file, path}}) do
+    {:error, code(:invalid_params), "params.path is not a regular file",
+     %{"reason" => "not_a_regular_file", "path" => to_string(path)}}
+  end
+
+  defp code_intel_reply({:error, {:invalid_attachment_path, path}}) do
+    {:error, code(:invalid_params), "params.path must be a nonempty string",
+     %{"reason" => "invalid_path", "path" => inspect(path)}}
+  end
+
+  defp code_intel_reply({:error, {:unsupported_language, extension}}) do
+    {:error, code(:invalid_params), "no language server is registered for #{extension} files",
+     %{"reason" => "unsupported_language", "extension" => extension}}
+  end
+
+  defp code_intel_reply({:error, {:unknown_operation, operation, allowed}}) do
+    invalid_params(
+      "params.operation must be one of " <>
+        (allowed |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")) <>
+        ", got: #{inspect(operation)}"
+    )
+  end
+
+  defp code_intel_reply({:error, :disabled}) do
+    {:error, code(:unavailable), "code intelligence is disabled on this node",
+     %{"reason" => "disabled"}}
+  end
+
+  defp code_intel_reply({:error, :broken}) do
+    {:error, code(:unavailable),
+     "that language server failed too often and is not being respawned for now",
+     %{"reason" => "broken"}}
+  end
+
+  defp code_intel_reply({:error, :document_not_open}) do
+    {:error, code(:unavailable),
+     "no language server holds that document; announce the edit with code_intel.touch first",
+     %{"reason" => "document_not_open"}}
+  end
+
+  defp code_intel_reply({:error, reason}), do: upstream_error(reason)
+  defp code_intel_reply(other), do: {:ok, other}
+
+  defp unreadable_path(path, reason) do
+    {:error, code(:invalid_params),
+     "params.path could not be read as a file (#{inspect(reason)}); name it absolutely, " <>
+       "because a relative path here is expanded against the runtime's own working " <>
+       "directory rather than against the workspace",
+     %{"reason" => "unreadable_path", "path" => to_string(path)}}
+  end
+
+  # Every diagnostic that crosses the wire carries the identity its caller needs to tell a
+  # new finding from one that was already there. Navigation items have no severity and are
+  # left exactly as the pool returned them.
+  defp code_intel_items(items) do
+    Enum.map(items, fn
+      %{severity: _severity, message: _message, range: _range} = item ->
+        Map.put(item, :signature, CodeIntel.Diagnostics.signature(item))
+
+      item ->
+        item
+    end)
+  end
+
+  # Carried as the caller typed it and canonicalised on the *target* node, because a path
+  # is only meaningful where the files are. It narrows the marker walk and can never widen
+  # it: `CodeIntel.Registry` holds an explicit workspace to the same admitted-roots check
+  # as an implicit one, so naming `/` here is refused rather than obeyed.
+  defp code_intel_workspace(params), do: fetch_string(params, "workspace")
+
+  defp code_intel_operation(params) do
+    case Map.get(params, "operation") do
+      value when is_binary(value) ->
+        case Enum.find(CodeIntel.operations(), &(Atom.to_string(&1) == value)) do
+          nil -> {:invalid, code_intel_operation_message()}
+          operation -> {:ok, operation}
+        end
+
+      _other ->
+        {:invalid, code_intel_operation_message()}
+    end
+  end
+
+  defp code_intel_operation_message do
+    "params.operation must be one of " <>
+      (CodeIntel.operations() |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))
+  end
+
+  defp code_intel_action(params) do
+    case Map.get(params, "action") do
+      "open" -> {:ok, :open}
+      "ensure_open" -> {:ok, :ensure_open}
+      "changed" -> {:ok, :changed}
+      "closed" -> {:ok, :closed}
+      _other -> {:invalid, "params.action must be one of changed, closed, ensure_open, open"}
+    end
+  end
+
+  defp code_intel_position(params, key) do
+    case Map.get(params, key, 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a non-negative integer"}
+    end
+  end
+
+  defp code_intel_wait_ms(params) do
+    case Map.get(params, "wait_ms") do
+      nil ->
+        {:ok, nil}
+
+      value when is_integer(value) and value >= 0 and value <= @code_intel_max_wait_ms ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.wait_ms must be an integer between 0 and #{@code_intel_max_wait_ms}"}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The effect ledger (I1/I3)
+  # ---------------------------------------------------------------------------
+
+  defp ledger_call(target, function, arguments) do
+    safe(fn ->
+      if target == node() do
+        reply(apply(EffectLedger, function, arguments))
+      else
+        reply(:erpc.call(target, EffectLedger, function, arguments, @fleet_query_timeout))
+      end
+    end)
+  end
+
+  defp ledger_local_list(target, filters) do
+    case ledger_query(target, filters) do
+      {:ok, entries} ->
+        {:ok, %{entries: entries, nodes: [%{node: target, status: :ok}]}}
+
+      {:error, reason} ->
+        {:ok,
+         %{
+           entries: [],
+           nodes: [%{node: target, status: :unavailable, reason: Wire.to_json(reason)}]
+         }}
+    end
+  end
+
+  # I3. "Survives machine moves" is only true if every owner is asked, so this asks every
+  # connected core node and says which ones did not answer instead of returning a shorter
+  # list that looks complete. Sequences are minted per node, so there is no cross-node
+  # total order to merge into: entries are ordered by `{node, sequence}` and the node is
+  # part of every row.
+  defp ledger_fleet_list(filters) do
+    targets = Cluster.fleet_status() |> fleet_session_targets() |> ensure_local_target()
+
+    results =
+      targets
+      |> Task.async_stream(&{&1, ledger_query(&1, filters)},
+        max_concurrency: max(length(targets), 1),
+        ordered: true,
+        timeout: @fleet_query_timeout + 1_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.zip(targets)
+      |> Enum.map(fn
+        {{:ok, {target, {:ok, entries}}}, _target} ->
+          {%{node: target, status: :ok}, entries}
+
+        {{:ok, {target, {:error, reason}}}, _target} ->
+          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
+
+        {{:exit, reason}, target} ->
+          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
+      end)
+
+    entries =
+      results
+      |> Enum.flat_map(fn {%{node: target}, entries} ->
+        Enum.map(entries, &{Atom.to_string(target), &1})
+      end)
+      |> Enum.sort_by(fn {name, entry} -> {name, -entry.sequence} end)
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.take(filters[:limit])
+
+    {:ok, %{entries: entries, nodes: Enum.map(results, &elem(&1, 0))}}
+  end
+
+  defp ensure_local_target([]), do: [node()]
+
+  defp ensure_local_target(targets) do
+    if node() in targets, do: targets, else: [node() | targets]
+  end
+
+  # Exceptions and exits become data here for the same reason `fleet_session_query/2` does
+  # it: a dead remote ledger must not link-exit the gateway task that is trying to report
+  # honestly that it is dead.
+  defp ledger_query(target, filters) do
+    result =
+      if target == node() do
+        EffectLedger.list(filters)
+      else
+        :erpc.call(target, EffectLedger, :list, [filters], @fleet_query_timeout)
+      end
+
+    case result do
+      {:ok, entries} when is_list(entries) -> {:ok, entries}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_reply, other}}
+    end
+  rescue
+    error -> {:error, {:exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp ledger_filters(params) do
+    with {:ok, principal} <- fetch_optional_string(params, "principal"),
+         {:ok, effect} <- ledger_effect(params),
+         {:ok, status} <- ledger_status(params),
+         {:ok, since} <- ledger_since_sequence(params),
+         {:ok, order} <- ledger_order(params),
+         {:ok, limit} <- ledger_limit(params) do
+      {:ok,
+       [
+         principal: principal,
+         effect: effect,
+         status: status,
+         since_sequence: since,
+         order: order,
+         limit: limit
+       ]
+       |> Enum.reject(fn {key, value} ->
+         is_nil(value) and key in [:principal, :effect, :status]
+       end)}
+    end
+  end
+
+  defp ledger_effect(params), do: ledger_atom(params, "effect", EffectLedger.effects())
+  defp ledger_status(params), do: ledger_atom(params, "status", EffectLedger.statuses())
+
+  # Matched by string against terms that already exist, never converted. Same rule the
+  # provider and node parameters follow.
+  defp ledger_atom(params, key, allowed) do
+    case Map.get(params, key) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        case Enum.find(allowed, &(Atom.to_string(&1) == value)) do
+          nil -> {:invalid, ledger_atom_message(key, allowed)}
+          term -> {:ok, term}
+        end
+
+      _other ->
+        {:invalid, ledger_atom_message(key, allowed)}
+    end
+  end
+
+  defp ledger_atom_message(key, allowed) do
+    "params.#{key} must be one of " <>
+      (allowed |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))
+  end
+
+  defp ledger_since_sequence(params) do
+    case Map.get(params, "since_sequence", 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.since_sequence must be a non-negative integer"}
+    end
+  end
+
+  defp ledger_since(params) do
+    case Map.get(params, "since", 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.since must be a non-negative integer"}
+    end
+  end
+
+  defp ledger_order(params) do
+    case Map.get(params, "order", "desc") do
+      "desc" -> {:ok, :desc}
+      "asc" -> {:ok, :asc}
+      _other -> {:invalid, "params.order must be asc or desc"}
+    end
+  end
+
+  defp ledger_limit(params) do
+    limits = EffectLedger.query_limits()
+
+    case Map.get(params, "limit", limits.default) do
+      value when is_integer(value) and value >= 1 and value <= limits.max ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.limit must be an integer between 1 and #{limits.max}"}
+    end
+  end
+
+  defp ledger_fleet(params) do
+    case Map.get(params, "fleet", false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:invalid, "params.fleet must be a boolean"}
+    end
+  end
+
+  # I1's JSONL export. Each line is the exact text whose bytes the hash covers, so a client
+  # verifies the chain by hashing what it was given rather than by agreeing with this
+  # runtime about how to canonicalise a JSON object. The chain is computed for this answer
+  # and is not stored anywhere: it makes an export self-verifying, which is a different and
+  # much smaller claim than tamper-proof storage.
+  defp ledger_export(target, since) do
+    limits = EffectLedger.query_limits()
+    filters = [since_sequence: since, order: :asc, limit: limits.max]
+
+    case ledger_query(target, filters) do
+      {:ok, entries} ->
+        {:ok,
+         entries
+         |> chain()
+         |> Map.merge(%{node: target, format: "jsonl", limit: limits.max, since: since})}
+
+      {:error, reason} ->
+        unavailable("the effect ledger on #{target} did not answer: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  The hash chain over an ordered run of ledger entries, as `ledger.export` answers it.
+
+  Each line is the exact text whose bytes its hash covers:
+  `hash(n) = sha256(hash(n-1) || line(n))`, with `hash(-1)` the published seed and every
+  hash the lowercase hex of 32 bytes. A client verifies an export by hashing the strings
+  it was handed, in order — no agreement about how to re-encode an entry is needed, which
+  is the only reason the claim is checkable at all.
+
+  Public because the golden fixture is derived through it: a change to the chain has to
+  show up as a fixture diff a reviewer signs off on, not as a silent change to what a
+  client is verifying.
+  """
+  @spec chain([EffectLedger.Entry.t()]) :: map()
+  def chain(entries) when is_list(entries) do
+    {lines, head} =
+      Enum.map_reduce(entries, @chain_seed, fn entry, previous ->
+        line = entry |> Wire.to_json() |> canonical_json()
+        hash = :sha256 |> :crypto.hash([previous, line]) |> Base.encode16(case: :lower)
+
+        {%{sequence: entry.sequence, id: entry.id, line: line, previous: previous, hash: hash},
+         hash}
+      end)
+
+    %{algorithm: "sha256", count: length(lines), seed: @chain_seed, head: head, lines: lines}
+  end
+
+  # Object keys sorted, no whitespace. `JSON.encode!/1` iterates a map in whatever order
+  # the term happens to have, which is stable enough in practice and not a property worth
+  # betting a hash chain on: two exports of the same entry have to produce the same bytes,
+  # on any machine, or the chain a client verifies is a chain over an accident.
+  defp canonical_json(value), do: value |> canonical() |> IO.iodata_to_binary()
+
+  defp canonical(map) when is_map(map) do
+    inner =
+      map
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map(fn {key, value} -> [JSON.encode!(to_string(key)), ?:, canonical(value)] end)
+      |> Enum.intersperse(?,)
+
+    [?{, inner, ?}]
+  end
+
+  defp canonical(list) when is_list(list),
+    do: [?[, list |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
+
+  defp canonical(other), do: JSON.encode!(other)
 
   defp with_replay(params, plane, replay) do
     with :ok <- only_keys(params, ["id", "cursor", "limit", "node"]),

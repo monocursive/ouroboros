@@ -108,16 +108,77 @@ defmodule Ouroboros.CodeIntel do
   no file content crosses a process or node boundary to get here, and two writers cannot
   interleave into a state where the server holds older text under a newer version.
 
+  `:ensure_open` is the fourth action and the one to reach for when *asking* about a file
+  rather than reporting a change to it. It opens a document the server has never seen and
+  does nothing at all to one it already holds, where `:open` re-reads and assigns a new
+  version. That difference decides whether a question can be answered: every version bump
+  invalidates the diagnostics cache, so a caller that asked "what is wrong with this file"
+  by re-opening it would wait out the freshness gate for a push that a server with nothing
+  new to say never sends.
+
   Answers `{:ok, version}` — the version every later `diagnostics/2` is gated against.
   """
-  @spec touch(String.t(), :open | :changed | :closed, keyword()) ::
+  @spec touch(String.t(), :open | :ensure_open | :changed | :closed, keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def touch(path, action, opts \\ [])
-      when is_binary(path) and action in [:open, :changed, :closed] do
+      when is_binary(path) and action in [:open, :ensure_open, :changed, :closed] do
     with :ok <- enabled(),
          {:ok, spec} <- Registry.resolve(path, opts) do
-      LspPool.touch(pool(opts), spec, action)
+      apply_touch(pool(opts), spec, action)
     end
+  end
+
+  defp apply_touch(pool, spec, :ensure_open), do: LspPool.ensure_open(pool, spec)
+  defp apply_touch(pool, spec, action), do: LspPool.touch(pool, spec, action)
+
+  @doc """
+  Announces an edit and answers with the picture that preceded it.
+
+  This is `baseline/2` and `touch/3`, in that order, without a window between them. An
+  external tool — Claude Code's `PostToolUse` hook, an MCP client, anything reached through
+  `code_intel.touch` — has already written the file by the time it calls, so the only
+  chance to learn what the server said about the *old* text is the instant before the new
+  version is assigned. Doing it in two calls would leave a gap in which a push could land
+  and turn a pre-existing error into a new one.
+
+  The baseline is returned as signatures rather than items: a caller diffing two lists
+  needs identity, not messages, and a file with hundreds of findings should not cost its
+  own diagnostics twice. `fresh?` says whether the snapshot described the document as it
+  stood; `version` is `nil` when the server had never published for it, which is the
+  honest way to say "there is no baseline" rather than "the baseline was empty".
+
+  Answers `{:ok, %{version: v, baseline: %{...}}}`. A failure to read the baseline is not
+  a failure to touch: the touch is what a language server needs to stay correct, so it
+  happens either way and the baseline is reported absent.
+  """
+  @spec touch_with_baseline(String.t(), :open | :ensure_open | :changed | :closed, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def touch_with_baseline(path, action, opts \\ [])
+      when is_binary(path) and action in [:open, :ensure_open, :changed, :closed] do
+    with :ok <- enabled(),
+         {:ok, spec} <- Registry.resolve(path, opts) do
+      pool = pool(opts)
+      baseline = LspPool.baseline(pool, spec)
+
+      with {:ok, version} <- apply_touch(pool, spec, action) do
+        {:ok, %{version: version, baseline: baseline_projection(baseline)}}
+      end
+    end
+  end
+
+  defp baseline_projection({:ok, baseline}) do
+    %{
+      fresh?: baseline.fresh?,
+      version: baseline.version,
+      document_version: baseline.document_version,
+      truncated: baseline.truncated,
+      counts: Ouroboros.CodeIntel.Diagnostics.counts(baseline.items),
+      signatures: Enum.map(baseline.items, &Ouroboros.CodeIntel.Diagnostics.signature/1)
+    }
+  end
+
+  defp baseline_projection({:error, reason}) do
+    %{fresh?: false, version: nil, signatures: [], truncated: 0, error: reason}
   end
 
   @doc """
@@ -324,5 +385,27 @@ defmodule Ouroboros.CodeIntel do
     if Config.enabled?(), do: :ok, else: {:error, :disabled}
   end
 
-  defp pool(opts), do: Keyword.get(opts, :pool, @pool)
+  # The pool is a named process and which name is node configuration: the application
+  # starts one at `Ouroboros.CodeIntel.LspPool`, and a suite that wants servers it can tear
+  # down on its own schedule starts its own under another name and says so. An explicit
+  # `opts[:pool]` still wins, because a caller holding a particular pool means that one.
+  defp pool(opts) do
+    case Keyword.get(opts, :pool) do
+      name when is_atom(name) and not is_nil(name) -> name
+      _unset -> configured_pool()
+    end
+  end
+
+  defp configured_pool do
+    case Application.get_env(:ouroboros, :code_intel, []) do
+      config when is_list(config) ->
+        case Keyword.get(config, :pool) do
+          name when is_atom(name) and not is_nil(name) -> name
+          _unset -> @pool
+        end
+
+      _other ->
+        @pool
+    end
+  end
 end
