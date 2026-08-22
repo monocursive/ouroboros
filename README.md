@@ -513,6 +513,14 @@ you can open by id. The parent records `handed_off_to` and keeps running.
   event is broadcast, and a session restored by `provider_session_id` replays it. With
   no data directory configured the checkpoint goes to a temp directory and does not
   survive a reboot.
+- **There is no Terminal-Bench number.** Not a bad one — none. A Terminal-Bench 2.1
+  adapter for this provider exists in [`bench/terminal_bench/`](bench/terminal_bench/README.md)
+  and has never been run against a container; producing a number needs a Linux `ouro`
+  build, a model key, and docker. What *does* run here is a local eval corpus of
+  seventeen deterministic tasks — `make bench-local`, no key, no network, no spend —
+  which checks the plumbing and is not a score. Both are described in
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md), which is also where the number goes when
+  there is one.
 
 ## Terminal UI
 
