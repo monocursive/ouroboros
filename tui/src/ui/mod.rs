@@ -34,6 +34,17 @@
 //! escapes belong: Codex's visible cursor flicker in WezTerm was cursor hide/show leaking
 //! outside the synchronized frame ([R2 §8](../../../docs/research/agent-ux-2026/R2-display-rendering.md)).
 //! Nothing in this module may move them out.
+//!
+//! ## The alternate screen has two doors back out
+//!
+//! An app that owns the screen owns `Cmd+F`, tmux copy mode, and drag-to-select — which is
+//! the single most-punished rendering decision of 2026 when it is done without an escape
+//! hatch. So there are two, both driven from here and both rendering the same
+//! [`export::transcript`]: `ctrl+x [` leaves the alternate screen, writes the whole
+//! retained transcript into the normal buffer where the terminal's own scrollback keeps
+//! it, and comes back; `ctrl+x v` writes it to a private file under the data directory and
+//! opens it in `$VISUAL`/`$EDITOR` through the same suspend/resume the composer's `ctrl+g`
+//! uses.
 
 pub mod app;
 pub mod boot;
@@ -41,6 +52,7 @@ pub mod code;
 pub mod dashboard;
 pub mod editor;
 pub mod explorer;
+pub mod export;
 pub mod logo;
 pub mod logs;
 pub mod sessions;
@@ -422,6 +434,94 @@ fn draft_path() -> PathBuf {
     env::temp_dir().join(format!("ouro-prompt-{}.md", std::process::id()))
 }
 
+/// Opens a file in `$VISUAL`/`$EDITOR` and waits, without reading anything back.
+///
+/// The same invocation [`run_external_editor`] uses — one `sh -c` so `EDITOR="code -w"` and
+/// the rest of the strings people put in that variable work — and deliberately not the same
+/// function: this one is a *viewer*. Whatever the operator typed into the transcript is
+/// theirs to discard, and a composer draft must not change because someone opened the
+/// history beside it.
+fn view_in_editor(path: &Path) -> Result<()> {
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("ouro-editor")
+        .arg(path)
+        .status()
+        .with_context(|| format!("running {editor}"))?;
+
+    if !status.success() {
+        bail!("{editor} exited with {status}");
+    }
+
+    Ok(())
+}
+
+/// Where `ctrl+x v` puts the transcript it is about to open.
+///
+/// Under the data directory rather than `/tmp`: a conversation is the most sensitive thing
+/// this client holds, and the data directory is already this operator's own. Named by
+/// process id so two `ouro`s cannot collide, and written 0600 through the same
+/// create-exclusive, never-follow-a-symlink path as the composer's draft.
+fn transcript_path(data_dir: Option<&str>) -> PathBuf {
+    let dir = data_dir.map(PathBuf::from).unwrap_or_else(env::temp_dir);
+    dir.join(format!("ouro-transcript-{}.txt", std::process::id()))
+}
+
+/// Writes `text` where [`view_in_editor`] can open it, replacing whatever a previous run of
+/// this same process left behind.
+///
+/// `remove_file` first, because the name is predictable and `write_private_draft` refuses
+/// to overwrite. Removing unlinks the name — including a symlink planted at it, which is
+/// unlinked rather than followed — and the create that follows is exclusive and
+/// `O_NOFOLLOW`, so nothing can be preplanted into the window between them.
+fn write_transcript_file(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let _ = fs::remove_file(path);
+    write_private_draft(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes the transcript into the *normal* screen buffer, where the terminal's own
+/// scrollback keeps it, and comes back to the alternate one.
+///
+/// Leaving the alternate screen restores the normal buffer exactly as it was — that is what
+/// the alternate screen is for — so everything printed here lands in the operator's real
+/// scrollback and stays there after `ouro` exits, searchable with `Cmd+F` and selectable
+/// with the mouse. Verified in Ghostty and tmux; see [TUI.md §3.4](../../../docs/TUI.md)
+/// for the terminals where it is known to behave differently.
+///
+/// Raw mode is off between the suspend and the resume, so the terminal turns `\n` back into
+/// a carriage return and a line feed on its own and the text does not need to be rewritten.
+fn dump_to_scrollback(screen: &mut Screen, text: &str) -> Result<()> {
+    screen.suspend();
+
+    let printed = (|| {
+        let mut out = io::stdout();
+        out.write_all(text.as_bytes())?;
+        out.write_all(b"\n")?;
+        out.flush()
+    })();
+
+    screen.resume()?;
+
+    // The alternate screen came back holding the frame it had before, but Ratatui's previous
+    // buffer is the only thing that decides what gets redrawn. Clear both so the next frame
+    // is painted whole rather than diffed against a screen this detour may have changed.
+    screen
+        .terminal
+        .clear()
+        .context("repainting after the scrollback dump")?;
+
+    printed.context("writing the transcript into the terminal's scrollback")
+}
+
 /// Creates the draft exclusively, privately, and never through a symlink that got there
 /// first. A predictable name is safe under those three properties: nothing can preplant
 /// the path, and nothing but its owner can read what lands in it.
@@ -730,6 +830,57 @@ pub async fn run(
             }
         }
 
+        if let Some(text) = app.take_scrollback_dump() {
+            if let Err(error) = dump_to_scrollback(&mut screen, &text) {
+                app.inform(
+                    format!("the transcript could not be written out: {error:#}"),
+                    app::NoticeKind::Error,
+                );
+            } else {
+                app.inform(
+                    "the transcript is in this terminal's scrollback",
+                    app::NoticeKind::Info,
+                );
+            }
+        }
+
+        if let Some(text) = app.take_transcript_view() {
+            let path = transcript_path(app.data_dir.as_deref());
+
+            match write_transcript_file(&path, &text) {
+                Ok(()) => {
+                    screen.suspend();
+
+                    let opened = {
+                        let path = path.clone();
+                        tokio::task::spawn_blocking(move || view_in_editor(&path))
+                            .await
+                            .unwrap_or_else(|join_error| {
+                                Err(anyhow::anyhow!("the editor task failed: {join_error}"))
+                            })
+                    };
+
+                    // The file is this client's, not the operator's copy of anything: it is
+                    // regenerated on demand and removed here so a conversation is not left
+                    // sitting in the data directory after the editor closes.
+                    let _ = fs::remove_file(&path);
+
+                    let result = screen.resume().and(opened);
+
+                    if let Err(error) = result {
+                        app.inform(
+                            format!("the transcript viewer failed: {error:#}"),
+                            app::NoticeKind::Error,
+                        );
+                    }
+                }
+                Err(error) => app.inform(
+                    format!("the transcript could not be written: {error:#}"),
+                    app::NoticeKind::Error,
+                ),
+            }
+        }
+
         if let Some(draft) = app.take_external_editor() {
             screen.suspend();
 
@@ -754,7 +905,12 @@ pub async fn run(
             }
         }
 
-        draw_synchronized(&mut screen.terminal, |frame| view::draw(frame, &mut app))?;
+        draw_synchronized(&mut screen.terminal, |frame| {
+            // The measure the export wraps to, taken where it is authoritative rather than
+            // asked of the OS once a frame.
+            app.terminal_width = frame.area().width;
+            view::draw(frame, &mut app);
+        })?;
 
         if let Some(quit) = app.quit {
             return Ok(quit);
@@ -1166,5 +1322,55 @@ mod tests {
             begin < show && show < end,
             "the cursor show leaked outside the synchronized frame: {bytes:?}"
         );
+    }
+
+    #[test]
+    fn the_transcript_file_lands_in_the_data_directory_when_there_is_one() {
+        let path = transcript_path(Some("/home/operator/.local/share/ouroboros"));
+
+        assert_eq!(
+            path.parent().map(Path::to_path_buf),
+            Some(PathBuf::from("/home/operator/.local/share/ouroboros"))
+        );
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ouro-transcript-")),
+            "{path:?}"
+        );
+
+        // And falls back to the temp directory rather than refusing when there is none.
+        assert_eq!(
+            transcript_path(None).parent().map(Path::to_path_buf),
+            Some(env::temp_dir())
+        );
+    }
+
+    #[test]
+    fn a_transcript_file_is_private_and_replaces_whatever_was_there() {
+        let dir = env::temp_dir().join(format!("ouro-export-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("transcript.txt");
+
+        write_transcript_file(&path, "first").expect("a written transcript");
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "first");
+
+        // A second view in the same process must not fail on the name the first one left.
+        write_transcript_file(&path, "second").expect("a rewritten transcript");
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "second");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a conversation was left world-readable"
+            );
+        }
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

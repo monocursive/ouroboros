@@ -705,6 +705,14 @@ pub struct App {
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
+    /// The transcript the I/O driver should print into the terminal's native scrollback.
+    scrollback_dump_pending: Option<String>,
+    /// The transcript the I/O driver should open in `$VISUAL`/`$EDITOR`, read-only.
+    transcript_view_pending: Option<String>,
+    /// Columns the last frame was laid out against. Written by the driver on every draw;
+    /// the export wraps to it, because the terminal it is about to be printed into is the
+    /// same one that just drew the frame. Zero until the first frame.
+    pub terminal_width: u16,
     /// Monotonic issue order for composer mutations. Outcome-unknown answers may arrive
     /// out of order; reconciliation is sorted by this sequence, never by error arrival.
     next_composer_submission_sequence: u64,
@@ -767,6 +775,9 @@ impl App {
             ctrl_c_until: None,
             copy_pending: None,
             external_editor_pending: None,
+            scrollback_dump_pending: None,
+            transcript_view_pending: None,
+            terminal_width: 0,
             next_composer_submission_sequence: 0,
             resume_session_picker: false,
         }
@@ -782,6 +793,52 @@ impl App {
 
     pub fn take_external_editor(&mut self) -> Option<String> {
         self.external_editor_pending.take()
+    }
+
+    pub fn take_scrollback_dump(&mut self) -> Option<String> {
+        self.scrollback_dump_pending.take()
+    }
+
+    pub fn take_transcript_view(&mut self) -> Option<String> {
+        self.transcript_view_pending.take()
+    }
+
+    /// The open session as plain text, at the measure the transcript is being read at.
+    ///
+    /// `None` — with the sentence already shown — when there is nothing open: both escape
+    /// hatches are about *this* conversation, and a dump of no conversation would leave the
+    /// operator looking at their own shell wondering what happened.
+    fn transcript_export(&mut self) -> Option<String> {
+        // Zero before the first frame, and a width of zero would wrap every word onto its
+        // own line. Eighty is what a terminal that has not said otherwise is.
+        let width = match self.terminal_width {
+            0 => 80,
+            width => usize::from(width),
+        };
+
+        let Some(watch) = self.sessions.open_watch() else {
+            self.inform(
+                "open a session before exporting its transcript",
+                NoticeKind::Info,
+            );
+            return None;
+        };
+
+        Some(super::export::transcript(watch, width))
+    }
+
+    /// Claude Code's `[`: the whole conversation, handed back to the terminal that owns the
+    /// scrollback, so `Cmd+F` and drag-to-copy work on it again.
+    pub(super) fn dump_to_scrollback(&mut self) {
+        self.overlay = None;
+        self.scrollback_dump_pending = self.transcript_export();
+    }
+
+    /// Claude Code's `v`: the same text, in the operator's own editor, where searching and
+    /// saving a piece of it are the editor's problem rather than this client's.
+    pub(super) fn view_transcript(&mut self) {
+        self.overlay = None;
+        self.transcript_view_pending = self.transcript_export();
     }
 
     pub fn take_scan_machines(&mut self) -> bool {
