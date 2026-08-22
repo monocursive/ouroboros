@@ -222,13 +222,37 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!("{marker} "), border_style),
                     Span::styled(label, title_style),
                 ]),
-                Line::from(vec![
-                    Span::styled(session.status.as_str().to_uppercase(), status),
-                    Span::styled(
-                        format!(" · {}", super::tree::truncate(provider, 9)),
-                        Style::default().fg(theme::MUTED),
-                    ),
-                ]),
+                Line::from({
+                    let head = session.status.as_str().to_uppercase();
+                    let named = format!(" · {}", super::tree::truncate(provider, 9));
+                    let mut spans = vec![
+                        Span::styled(head.clone(), status),
+                        Span::styled(named.clone(), Style::default().fg(theme::MUTED)),
+                    ];
+
+                    // I2. Only where the runtime reported one, and only where the whole
+                    // cell fits: the footer's rule, because a half-drawn `42.5k · $0.4` is
+                    // a fact rendered as noise. The short form — the cost alone — is tried
+                    // before the cell is dropped entirely.
+                    let spare =
+                        (content.width as usize).saturating_sub(head.width() + named.width());
+                    let usage = session.usage.as_ref();
+                    let cell = super::panels::usage_cell(usage)
+                        .filter(|cell| cell.width() + 3 <= spare)
+                        .or_else(|| {
+                            super::panels::usage_cell_short(usage)
+                                .filter(|cell| cell.width() + 3 <= spare)
+                        });
+
+                    if let Some(cell) = cell {
+                        spans.push(Span::styled(
+                            format!(" · {cell}"),
+                            Style::default().fg(theme::MUTED),
+                        ));
+                    }
+
+                    spans
+                }),
             ]),
             content,
         );

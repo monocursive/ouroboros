@@ -1901,6 +1901,7 @@ impl App {
             "/settings" => Some(Command::Settings),
             "/help" | "/hotkeys" => Some(Command::Help),
             "/keys" | "/keymap" => Some(Command::Keys),
+            "/cost" | "/usage" => Some(Command::Cost),
             "/quit" => {
                 self.open_quit();
                 return true;

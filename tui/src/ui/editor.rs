@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 34] = [
+pub(crate) const COMMANDS: [(&str, &str); 35] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -53,6 +53,7 @@ pub(crate) const COMMANDS: [(&str, &str); 34] = [
     ("/help", "show keyboard help"),
     ("/hotkeys", "show keyboard help"),
     ("/keys", "show the effective key map and where it came from"),
+    ("/cost", "tokens and cost for this session"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
     ("/close", "end or remove the selected session"),

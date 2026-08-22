@@ -595,10 +595,25 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         }
 
         if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
+            // I2. `[budget] max_cost_usd` is a soft limit: past it the cell turns WARN and
+            // a notice is said once. Nothing is stopped — a client cannot refuse a turn the
+            // runtime runs, and colouring a number is the whole of what it can honestly do.
+            // Ranked up with it, so the row that carries the warning is the last to drop
+            // the cell it is about.
+            let over = app
+                .config
+                .budget
+                .max_cost_usd()
+                .is_some_and(|limit| cost >= limit);
+
             segments.push(Segment::new(
                 money(cost),
-                Style::default().fg(theme::MUTED),
-                2,
+                if over {
+                    Style::default().fg(theme::WARN)
+                } else {
+                    Style::default().fg(theme::MUTED)
+                },
+                if over { 11 } else { 2 },
             ));
         }
     }
@@ -742,6 +757,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         // B8/I2. Both draw in [`super::panels`]: this file is where parallel work
         // collides, and neither page needs anything from it but `centered`.
         Overlay::Keys { scroll } => super::panels::keymap(frame, area, app, *scroll),
+        Overlay::Cost { scroll } => super::panels::cost(frame, area, app, *scroll),
         Overlay::Quit { options, choice } => chooser(
             frame,
             area,
@@ -1253,6 +1269,16 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
                 spans.push(Span::styled(
                     format!("  {}", session.status.as_str()),
                     theme::session_status(&session.status),
+                ));
+            }
+
+            // I2. `tokens · cost`, where the runtime reported one. `interactive.list` does
+            // not carry `usage` on every gateway and never will on `coding.list`; a row
+            // without it shows nothing rather than a zero that reads as a free session.
+            if let Some(cell) = super::panels::usage_cell(session.usage.as_ref()) {
+                spans.push(Span::styled(
+                    format!("  {cell}"),
+                    Style::default().fg(theme::MUTED),
                 ));
             }
 
@@ -3061,6 +3087,11 @@ fn help_keys(app: &App) -> Vec<(&'static str, String, &'static str)> {
         "runtime",
         "/keys".to_string(),
         "every action, its key, and which came from config.toml",
+    ));
+    rows.push((
+        "runtime",
+        "/cost".to_string(),
+        "what this session has spent, as the provider reported it",
     ));
 
     rows

@@ -873,6 +873,11 @@ pub struct App {
     /// Whether "this machine has no clipboard tool" has been said. Once per run: the
     /// thing it explains does not change between keystrokes.
     clipboard_tool_reported: bool,
+    /// Sessions whose reported cost has already crossed `[budget] max_cost_usd` (I2).
+    ///
+    /// A set rather than a flag: two open sessions crossing the same limit are two facts,
+    /// and the warning belongs to the session, not to the run.
+    budget_warned: HashSet<String>,
 }
 
 /// How many notifications one frame may emit. A session that produced fifty terminal
@@ -985,6 +990,7 @@ impl App {
             statusline: StatusLine::default(),
             clipboard_pending: None,
             clipboard_tool_reported: false,
+            budget_warned: HashSet::new(),
         }
     }
 
@@ -1087,12 +1093,52 @@ impl App {
     ///
     /// On the tick rather than on every message: both read the open session's transcript,
     /// and a burst of a hundred streamed deltas must cost one pass, not a hundred.
+    /// I2. Says once, per session, that the reported cost has passed `[budget]
+    /// max_cost_usd`.
+    ///
+    /// Once because the condition does not un-happen: a limit crossed at $5.01 is still
+    /// crossed at $5.02, and a notice on every tick would own the one row a refusal has to
+    /// fit on. Per session because two sessions crossing the same limit are two facts.
+    ///
+    /// The wording is deliberate. This client **warns**; it does not stop, cannot stop, and
+    /// says so — the runtime's own budgets are a later slice, and a client that implied it
+    /// had halted anything would be claiming an authority it does not have.
+    fn warn_over_budget(&mut self, facts: Option<&SessionFacts>) {
+        let Some(limit) = self.config.budget.max_cost_usd() else {
+            return;
+        };
+
+        let Some(facts) = facts else {
+            return;
+        };
+
+        let Some(spent) = facts.usage.as_ref().and_then(|usage| usage.cost_usd) else {
+            return;
+        };
+
+        if spent < limit || !self.budget_warned.insert(facts.id.clone()) {
+            return;
+        }
+
+        self.inform(
+            format!(
+                "{} has reported {} of the {} in [budget] max_cost_usd \u{b7} this client \
+                 warns and does not stop anything",
+                facts.id,
+                super::view::money(spent),
+                super::view::money(limit)
+            ),
+            NoticeKind::Warn,
+        );
+    }
+
     fn refresh_chrome(&mut self) {
         self.refresh_offered_commands();
 
         // Read once. Gathering them walks the retained event window, and the title, the
         // debounce key, and the payload all want the same answer.
         let facts = self.session_facts();
+        self.warn_over_budget(facts.as_ref());
         let title = notify::title(
             self.activity_of(facts.as_ref()),
             self.title_workspace_of(facts.as_ref()).as_deref(),

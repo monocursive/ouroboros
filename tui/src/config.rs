@@ -100,6 +100,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub keys: KeysConfig,
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 /// Chords this operator has rebound.
@@ -157,6 +159,29 @@ impl KeysConfig {
         }
 
         overrides
+    }
+}
+
+/// A soft ceiling on what one session is allowed to have cost before this client says so.
+///
+/// Soft is the whole contract, and it is stated in the overlay as well as here: crossing
+/// it turns the footer's cost cell `WARN` and produces one notice. **This client never
+/// stops anything.** It has no authority to — a turn is the runtime's to run, budgets that
+/// actually refuse work belong on the runtime side, and a client that pretended otherwise
+/// would be claiming a guarantee it cannot keep. The reported cost is also whatever the
+/// provider reported: a session whose provider reports no cost never crosses any threshold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    /// US dollars. Absent, zero, or negative disables the warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
+}
+
+impl BudgetConfig {
+    /// The ceiling, once, with the values that mean "no ceiling" folded to `None`.
+    pub fn max_cost_usd(&self) -> Option<f64> {
+        self.max_cost_usd
+            .filter(|limit| limit.is_finite() && *limit > 0.0)
     }
 }
 

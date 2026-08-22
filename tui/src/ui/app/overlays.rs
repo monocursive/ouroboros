@@ -125,10 +125,12 @@ pub enum Command {
     Effort,
     /// B8: the effective keymap, and where each binding came from.
     Keys,
+    /// I2: what this session has spent.
+    Cost,
 }
 
 impl Command {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -163,6 +165,7 @@ impl Command {
         Self::Fork,
         Self::Model,
         Self::Effort,
+        Self::Cost,
         Self::Keys,
     ];
 
@@ -189,6 +192,7 @@ impl Command {
             | Self::Fork
             | Self::Model
             | Self::Effort
+            | Self::Cost
             | Self::Keys
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
@@ -232,6 +236,7 @@ impl Command {
             Self::Model => "Change the model",
             Self::Effort => "Reasoning effort for the next turn",
             Self::Keys => "Show the effective key map",
+            Self::Cost => "Show tokens and cost for this session",
         }
     }
 
@@ -277,6 +282,7 @@ impl Command {
             Self::Model => "/model",
             Self::Effort => "/effort",
             Self::Keys => "/keys",
+            Self::Cost => "/cost",
         }
     }
 
@@ -414,6 +420,11 @@ pub enum Overlay {
     /// B8. `/keys`: the effective keymap, with the entries that came from `config.toml`
     /// marked and the lines of it this build could not act on named.
     Keys {
+        scroll: usize,
+    },
+    /// I2. `/cost` and `/usage`: what the runtime says this session has spent, beside what
+    /// the transcript this client is holding folds to.
+    Cost {
         scroll: usize,
     },
     /// This client's own preferences, beside the facts the runtime reports.
@@ -601,6 +612,14 @@ impl App {
         };
     }
 
+    /// `/cost` and `/usage`, which are one overlay because they are one question.
+    pub fn open_cost(&mut self) {
+        self.overlay = match &self.overlay {
+            Some(Overlay::Cost { .. }) => None,
+            _other => Some(Overlay::Cost { scroll: 0 }),
+        };
+    }
+
     pub(super) fn open_quit(&mut self) {
         let options = match self.mode {
             Mode::Spawned { pid } => vec![
@@ -687,7 +706,7 @@ impl App {
                 _ => {}
             },
             // Two read-only pages with the same discipline as `?`: scroll, or leave.
-            Overlay::Keys { scroll } => match key.code {
+            Overlay::Keys { scroll } | Overlay::Cost { scroll } => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
                 KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
                 KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
@@ -1009,6 +1028,10 @@ impl App {
             Command::Keys => {
                 self.overlay = None;
                 self.open_keymap();
+            }
+            Command::Cost => {
+                self.overlay = None;
+                self.open_cost();
             }
             Command::ShowDiff => {
                 self.overlay = None;
