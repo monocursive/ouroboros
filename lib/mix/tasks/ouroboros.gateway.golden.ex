@@ -47,6 +47,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
 
   use Mix.Task
 
+  alias Ouroboros.CodeIntel.Diagnostics
   alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
@@ -58,6 +59,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   @session_id "session-0000000000000000000001"
   @task_id "task-0000000000000000000000002"
   @timestamp "2026-01-01T00:00:00.000000Z"
+
+  @diagnostic %{
+    range: %{start: %{line: 11, character: 4}, end: %{line: 11, character: 12}},
+    severity: :error,
+    code: "E0425",
+    source: "fake",
+    message: "cannot find value `widget` in this scope",
+    tags: []
+  }
 
   @impl Mix.Task
   def run(_args) do
@@ -106,6 +116,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"interactive_event_excerpt_notification", interactive_event_excerpt_notification()},
       {"interactive_event_detail_result", interactive_event_detail_result()},
       {"coding_event_detail_result", coding_event_detail_result()},
+      {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
       {"stream_ended_notification", stream_ended_notification()},
       {"error_unauthenticated", error_unauthenticated()},
@@ -422,6 +433,22 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       "the session no longer retains events at or below that cursor; replay from 96",
       %{"reason" => "cursor_pruned", "floor" => 96}
     )
+  end
+
+  # E2. One diagnostics answer, with the field that makes the new-only rule work across a
+  # process boundary: `signature` is derived here through the live
+  # `CodeIntel.Diagnostics.signature/1`, so a change to what "the same diagnostic" means
+  # is a diff in this file rather than a hook that silently starts re-reporting fixed
+  # errors. Positions stay 0-based, exactly as the protocol reports them.
+  defp code_intel_diagnostics_result do
+    Conn.result_frame(9, %{
+      status: :ok,
+      version: 4,
+      source: "fake",
+      truncated: 0,
+      counts: %{error: 1, warning: 0, information: 0, hint: 0, unknown: 0},
+      items: Enum.map([@diagnostic], &Map.put(&1, :signature, Diagnostics.signature(&1)))
+    })
   end
 
   defp error_not_found do

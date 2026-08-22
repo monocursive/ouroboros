@@ -50,6 +50,46 @@ defmodule Ouroboros.CodeIntel.Diagnostics do
     end)
   end
 
+  @doc """
+  A stable, short identity for one diagnostic, so a caller can tell new findings from old.
+
+  The bytes hashed are exactly the dedupe key this module already collapses on — code,
+  severity, message, and range — rendered explicitly rather than through
+  `:erlang.term_to_binary/1`, so the digest is a property of the diagnostic and not of the
+  OTP release that computed it.
+
+  This is what makes E2's new-only rule possible across a process boundary: a caller reads
+  the pre-edit signatures, announces the edit, reads the post-edit items, and reports the
+  difference. Nothing needs to reimplement the identity rule to do that, which is the
+  point — two definitions of "the same diagnostic" is how a fixed error gets reported as a
+  new one.
+  """
+  @spec signature(item()) :: String.t()
+  def signature(item) do
+    range = Map.get(item, :range) || %{}
+    start_position = Map.get(range, :start) || %{}
+    end_position = Map.get(range, :end) || %{}
+
+    :sha256
+    |> :crypto.hash([
+      to_string(Map.get(item, :code) || ""),
+      0,
+      to_string(Map.get(item, :severity) || ""),
+      0,
+      to_string(Map.get(item, :message) || ""),
+      0,
+      Integer.to_string(Map.get(start_position, :line, 0)),
+      ":",
+      Integer.to_string(Map.get(start_position, :character, 0)),
+      "-",
+      Integer.to_string(Map.get(end_position, :line, 0)),
+      ":",
+      Integer.to_string(Map.get(end_position, :character, 0))
+    ])
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 16)
+  end
+
   defp item(%{"range" => range} = raw) when is_map(range) do
     [
       %{

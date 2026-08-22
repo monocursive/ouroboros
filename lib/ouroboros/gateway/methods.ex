@@ -73,6 +73,7 @@ defmodule Ouroboros.Gateway.Methods do
   and the golden fixtures pin the shape.
   """
 
+  alias Ouroboros.CodeIntel
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskRef
   alias Ouroboros.Coding.TaskState
@@ -103,6 +104,17 @@ defmodule Ouroboros.Gateway.Methods do
   # client a null status for that provider, not a timed-out method.
   @provider_probe_timeout 5_000
   @fleet_query_timeout 5_000
+
+  # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
+  # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
+  # ElixirLS and jdtls compile the world on first launch. A gateway method cannot wait
+  # that long, so these three numbers replace the pool's defaults on every gateway call
+  # and are chosen to sum below the 15s ceiling — a cold server is answered "not ready
+  # yet", which is an honest answer a caller can retry, rather than a killed task.
+  @code_intel_wait_ready_ms 5_000
+  @code_intel_request_timeout_ms 8_000
+  @code_intel_max_wait_ms 10_000
+  @code_intel_erpc_timeout 14_000
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -200,6 +212,22 @@ defmodule Ouroboros.Gateway.Methods do
     # route to the machine whose rules they describe. Reading is `read`; writing a rule
     # widens or narrows what a session may do without a human present, so it is `operate`.
     "permissions.list" => %{scope: :read, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # E2/E3/I3. Code intelligence and the effect ledger, on the wire.
+    #
+    # Every one of these is `:read` except `code_intel.touch`, and the split is the same
+    # one the rest of this table makes: reading what a language server or the ledger
+    # already knows changes nothing, while telling a language server that a file moved
+    # spends this node's memory on a document a caller chose. Reads route to the node that
+    # owns the workspace or the entries, because both authorities are node-local — a pool
+    # runs where the files are (D7) and a ledger where the effect ran (I3) — and a remote
+    # answer is a bounded `:erpc` so an unreachable machine reads as unreachable rather
+    # than as a gateway ceiling with no detail.
+    # ---------------------------------------------------------------------------------
+    "runtime.lsp.status" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.request" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.diagnostics" => %{scope: :read, timeout: @default_timeout},
+    "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
     # only after a signed roster tombstone is present and the machine is offline.
@@ -707,6 +735,70 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, id} <- fetch_string(params, "id"),
          {:ok, target} <- permissions_node(params) do
       permissions_call(target, :remove, [scope, id])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # E2/E3 — code intelligence on the wire
+  # ---------------------------------------------------------------------------
+
+  def invoke("runtime.lsp.status", _params), do: safe(fn -> {:ok, CodeIntel.status()} end)
+
+  def invoke("code_intel.request", params) do
+    with :ok <-
+           only_keys(params, [
+             "workspace",
+             "operation",
+             "path",
+             "line",
+             "character",
+             "query",
+             "node"
+           ]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, operation} <- code_intel_operation(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, line} <- code_intel_position(params, "line"),
+         {:ok, character} <- code_intel_position(params, "character"),
+         {:ok, query} <- fetch_optional_string(params, "query"),
+         {:ok, target} <- permissions_node(params) do
+      location = %{path: path, line: line, character: character, query: query}
+
+      code_intel_call(target, :request, [
+        operation,
+        location,
+        code_intel_opts(workspace, query: query)
+      ])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("code_intel.diagnostics", params) do
+    with :ok <- only_keys(params, ["workspace", "path", "wait_ms", "node"]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, wait_ms} <- code_intel_wait_ms(params),
+         {:ok, target} <- permissions_node(params) do
+      code_intel_call(target, :diagnostics, [path, code_intel_opts(workspace, wait_ms: wait_ms)])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # `:operate`, and answered with the pre-touch baseline. An external tool that has just
+  # written a file needs both halves of the new-only rule — what the server said about the
+  # old text, and the version the new text was assigned — and reading the baseline in the
+  # same gateway call is the only ordering in which nothing can arrive between them.
+  def invoke("code_intel.touch", params) do
+    with :ok <- only_keys(params, ["workspace", "path", "action", "node"]),
+         {:ok, workspace} <- code_intel_workspace(params),
+         {:ok, path} <- fetch_string(params, "path"),
+         {:ok, action} <- code_intel_action(params),
+         {:ok, target} <- permissions_node(params) do
+      code_intel_call(target, :touch_with_baseline, [path, action, code_intel_opts(workspace)])
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1659,6 +1751,163 @@ defmodule Ouroboros.Gateway.Methods do
         reply(:erpc.call(target, Permissions, function, arguments, @fleet_query_timeout))
       end
     end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Code intelligence (E2/E3)
+  # ---------------------------------------------------------------------------
+
+  # Same posture as `permissions_call/3` and for the same reason: the pool runs where the
+  # files are, so a session on another machine is answered by that machine's pool or not
+  # at all. `Ouroboros.CodeIntel` raises nothing and blocks on nothing without a deadline,
+  # so what crosses `:erpc` is always an ordinary tuple.
+  defp code_intel_call(target, function, arguments) do
+    safe(fn ->
+      if target == node() do
+        code_intel_reply(apply(CodeIntel, function, arguments))
+      else
+        code_intel_reply(
+          :erpc.call(target, CodeIntel, function, arguments, @code_intel_erpc_timeout)
+        )
+      end
+    end)
+  end
+
+  # The pool's own defaults are longer than a gateway method may wait, so every gateway
+  # call states its bounds rather than inheriting them.
+  defp code_intel_opts(workspace, extra \\ []) do
+    [
+      workspace_root: workspace,
+      wait_ready_ms: @code_intel_wait_ready_ms,
+      request_timeout_ms: @code_intel_request_timeout_ms
+    ] ++ Enum.reject(extra, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp code_intel_reply({:ok, %{items: items} = answer}) when is_list(items) do
+    {:ok, answer |> Map.put(:status, :ok) |> Map.put(:items, code_intel_items(items))}
+  end
+
+  defp code_intel_reply({:ok, value}), do: {:ok, value}
+
+  # Not an error: the server has not answered for this version of the document yet. A
+  # caller that treated "no data yet" as a failure of whatever produced the edit is
+  # exactly the regression R4 §2 records against stale diagnostics, so it arrives as an
+  # ordinary result carrying no items at all — there is nothing to mistake for "clean".
+  defp code_intel_reply({:pending, version}), do: {:ok, %{status: :pending, version: version}}
+
+  defp code_intel_reply({:error, {:server_unavailable, server_id, hint}}) do
+    {:error, code(:unavailable), "no language server is available for that file: #{hint}",
+     %{"reason" => "server_unavailable", "server" => server_id, "hint" => hint}}
+  end
+
+  defp code_intel_reply({:error, {:outside_workspace, path}}) do
+    {:error, code(:invalid_params), "that path is not inside a workspace root this node admits",
+     %{"reason" => "outside_workspace", "path" => to_string(path)}}
+  end
+
+  defp code_intel_reply({:error, {:no_project_root, language, markers}}) do
+    {:error, code(:unavailable),
+     "no project root for that #{language} file; expected one of #{Enum.join(markers, ", ")}",
+     %{"reason" => "no_project_root", "language" => to_string(language), "markers" => markers}}
+  end
+
+  defp code_intel_reply({:error, {:unsupported_language, extension}}) do
+    {:error, code(:invalid_params), "no language server is registered for #{extension} files",
+     %{"reason" => "unsupported_language", "extension" => extension}}
+  end
+
+  defp code_intel_reply({:error, {:unknown_operation, operation, allowed}}) do
+    invalid_params(
+      "params.operation must be one of " <>
+        (allowed |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")) <>
+        ", got: #{inspect(operation)}"
+    )
+  end
+
+  defp code_intel_reply({:error, :disabled}) do
+    {:error, code(:unavailable), "code intelligence is disabled on this node",
+     %{"reason" => "disabled"}}
+  end
+
+  defp code_intel_reply({:error, :broken}) do
+    {:error, code(:unavailable),
+     "that language server failed too often and is not being respawned for now",
+     %{"reason" => "broken"}}
+  end
+
+  defp code_intel_reply({:error, :document_not_open}) do
+    {:error, code(:unavailable),
+     "no language server holds that document; announce the edit with code_intel.touch first",
+     %{"reason" => "document_not_open"}}
+  end
+
+  defp code_intel_reply({:error, reason}), do: upstream_error(reason)
+  defp code_intel_reply(other), do: {:ok, other}
+
+  # Every diagnostic that crosses the wire carries the identity its caller needs to tell a
+  # new finding from one that was already there. Navigation items have no severity and are
+  # left exactly as the pool returned them.
+  defp code_intel_items(items) do
+    Enum.map(items, fn
+      %{severity: _severity, message: _message, range: _range} = item ->
+        Map.put(item, :signature, CodeIntel.Diagnostics.signature(item))
+
+      item ->
+        item
+    end)
+  end
+
+  # Carried as the caller typed it and canonicalised on the *target* node, because a path
+  # is only meaningful where the files are. It narrows the marker walk and can never widen
+  # it: `CodeIntel.Registry` holds an explicit workspace to the same admitted-roots check
+  # as an implicit one, so naming `/` here is refused rather than obeyed.
+  defp code_intel_workspace(params), do: fetch_string(params, "workspace")
+
+  defp code_intel_operation(params) do
+    case Map.get(params, "operation") do
+      value when is_binary(value) ->
+        case Enum.find(CodeIntel.operations(), &(Atom.to_string(&1) == value)) do
+          nil -> {:invalid, code_intel_operation_message()}
+          operation -> {:ok, operation}
+        end
+
+      _other ->
+        {:invalid, code_intel_operation_message()}
+    end
+  end
+
+  defp code_intel_operation_message do
+    "params.operation must be one of " <>
+      (CodeIntel.operations() |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))
+  end
+
+  defp code_intel_action(params) do
+    case Map.get(params, "action") do
+      "open" -> {:ok, :open}
+      "changed" -> {:ok, :changed}
+      "closed" -> {:ok, :closed}
+      _other -> {:invalid, "params.action must be one of changed, closed, open"}
+    end
+  end
+
+  defp code_intel_position(params, key) do
+    case Map.get(params, key, 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a non-negative integer"}
+    end
+  end
+
+  defp code_intel_wait_ms(params) do
+    case Map.get(params, "wait_ms") do
+      nil ->
+        {:ok, nil}
+
+      value when is_integer(value) and value >= 0 and value <= @code_intel_max_wait_ms ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.wait_ms must be an integer between 0 and #{@code_intel_max_wait_ms}"}
+    end
   end
 
   defp with_replay(params, plane, replay) do
