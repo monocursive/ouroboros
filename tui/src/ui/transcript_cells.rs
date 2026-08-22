@@ -2208,13 +2208,20 @@ fn render_exploration(
 ) {
     separate(lines);
 
-    let (mark, mark_style) = if group.done {
-        ("•".to_string(), theme::quiet())
-    } else {
+    // A spinner is a claim that something is happening. An open group whose calls have all
+    // returned — the transcript simply has not drawn anything after it yet — gets Codex's
+    // bullet instead, because the alternative is a client animating work that finished.
+    let running = group
+        .calls
+        .iter()
+        .any(|call| call.state == ToolState::Running);
+    let (mark, mark_style) = if running {
         (
             theme::spinner(tick).to_string(),
             Style::default().fg(theme::ACCENT),
         )
+    } else {
+        ("•".to_string(), theme::quiet())
     };
     let failed = group.failed();
     let mut head = vec![
@@ -2230,7 +2237,9 @@ fn render_exploration(
     ];
 
     if !verbosity.verbose() {
-        head.push(Span::styled("  enter expands", theme::quiet()));
+        // Named because it is the key that works. There is no per-cell focus in this
+        // transcript, so advertising `enter` here would advertise a key the composer owns.
+        head.push(Span::styled("  ctrl+o expands", theme::quiet()));
     }
     lines.push(Line::from(head));
 

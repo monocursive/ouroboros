@@ -1028,9 +1028,13 @@ client invented for it.
 **Consecutive exploration is one row (Codex).** Read, grep, glob, and list calls with no
 other cell drawn between them collapse into `Exploring… (4)` while the run is still
 growing, and flip to `Explored 4 files` the moment anything else is drawn — including the
-turn's own end divider. `Ctrl+O` lists every call. Work the agent *did* — an edit, a
-command, a fetch — is never folded into that count. The group lists sixty-four calls and
-counts the rest.
+turn's own end divider. The row carries a spinner only while a call in it is actually
+running; an open group whose calls have all returned gets Codex's bullet, because a client
+that animates finished work is a client claiming something. `Ctrl+O` lists every call —
+there is no per-cell focus in this transcript, so the row advertises the key that works
+rather than an `Enter` the composer owns. Work the agent *did* — an edit, a command, a
+fetch — is never folded into that count. The group lists sixty-four calls and counts the
+rest.
 
 **A tool result shows both ends.** The first six and last six lines, with
 `… +N lines · ctrl+o` between them: the last rows of a result are where the exit status,
