@@ -67,11 +67,58 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 /// call, so it is a constant on both sides of the bridge rather than a string typed twice.
 pub const SERVER_NAME: &str = "ouroboros";
 
-/// The one tool. `mcp__ouroboros__approve` is what `--permission-prompt-tool` receives.
+/// The permission prompt. `mcp__ouroboros__approve` is what `--permission-prompt-tool`
+/// receives; it is called by the harness, never by the model.
 pub const TOOL_NAME: &str = "approve";
 
-/// The gateway method the tool forwards to.
+/// The three tools the *model* may call: the runtime's language-server pool, offered to a
+/// vendor agent that has no code intelligence of its own (E3).
+pub const CODE_INTEL_TOOL: &str = "code_intel";
+pub const DIAGNOSTICS_TOOL: &str = "diagnostics";
+pub const TOUCH_TOOL: &str = "touch";
+
+/// The gateway method the permission tool forwards to.
 pub const APPROVAL_METHOD: &str = "interactive.request_approval";
+
+/// The methods the three code-intelligence tools forward to, and the one they need first:
+/// a tool call names a path, and only the session knows which workspace that path is in.
+pub const INFO_METHOD: &str = "interactive.info";
+pub const REQUEST_METHOD: &str = "code_intel.request";
+pub const DIAGNOSTICS_METHOD: &str = "code_intel.diagnostics";
+pub const TOUCH_METHOD: &str = "code_intel.touch";
+
+/// The nine navigation operations, exactly as `Ouroboros.CodeIntel.operations/0` names
+/// them. `diagnostics` is a tenth value of the same enum and is handled separately,
+/// because it is the one operation that needs the document open first.
+pub const NAVIGATION_OPERATIONS: [&str; 9] = [
+    "definition",
+    "references",
+    "hover",
+    "document_symbols",
+    "workspace_symbols",
+    "implementation",
+    "prepare_call_hierarchy",
+    "incoming_calls",
+    "outgoing_calls",
+];
+
+/// Above the gateway's own 15s ceiling on the `code_intel.*` verbs, so a slow language
+/// server is reported by the runtime that knows why rather than by a client stopwatch.
+pub const CODE_INTEL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// R4 §2's bounded wait: five seconds for a diagnostics push that matches the file's new
+/// contents, then "no LSP data" and move on.
+pub const DIAGNOSTICS_WAIT_MS: u64 = 5_000;
+
+/// R4's noise bounds. Errors are always shown; warnings are capped because a file full of
+/// style advice is how a useful signal gets ignored; the hard cap exists because thousands
+/// of diagnostics in one file is a real shape (Claude Code v2.1.216).
+pub const MAX_DIAGNOSTIC_LINES: usize = 20;
+pub const MAX_WARNING_LINES: usize = 3;
+
+/// Navigation answers are bounded by the runtime already (`max_results`, 200 by default);
+/// this is the second bound, on what is worth putting in front of a model at once.
+pub const MAX_NAVIGATION_LINES: usize = 50;
 
 pub const ADDR_ENV: &str = "OUROBOROS_GATEWAY_ADDR";
 pub const TOKEN_FILE_ENV: &str = "OUROBOROS_GATEWAY_TOKEN_FILE";
@@ -207,7 +254,7 @@ impl Gateway {
                 // one worth relaying.
                 Err(ClientError::Rpc(error)) => {
                     return Err(format!(
-                        "the runtime refused the approval request ({}: {})",
+                        "the runtime refused the call ({}: {})",
                         error.code, error.message
                     ))
                 }
@@ -241,6 +288,10 @@ impl Gateway {
 pub struct Server {
     bridge: Result<Bridge, String>,
     gateway: Gateway,
+    /// The session's workspace root, read once from `interactive.info` and held. A session
+    /// cannot change the directory it was started in, so asking twice would be asking the
+    /// runtime to repeat itself on every tool call.
+    workspace: Option<String>,
 }
 
 impl Server {
@@ -248,6 +299,7 @@ impl Server {
         Self {
             bridge,
             gateway: Gateway::default(),
+            workspace: None,
         }
     }
 
@@ -298,7 +350,7 @@ impl Server {
         match method {
             "initialize" => Ok(initialize_result(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": [tool_descriptor()]})),
+            "tools/list" => Ok(json!({"tools": tool_descriptors()})),
             "tools/call" => self.tools_call(params).await,
             other => Err((-32601, format!("method not found: {other}"))),
         }
@@ -306,14 +358,212 @@ impl Server {
 
     async fn tools_call(&mut self, params: Value) -> Result<Value, (i64, String)> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-
-        if name != TOOL_NAME {
-            return Err((-32602, format!("unknown tool: {name}")));
-        }
-
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
-        Ok(tool_result(self.approve(arguments).await))
+        match name {
+            TOOL_NAME => Ok(tool_result(self.approve(arguments).await)),
+            CODE_INTEL_TOOL => Ok(text_result(self.code_intel(arguments).await)),
+            DIAGNOSTICS_TOOL => Ok(text_result(self.diagnostics(arguments).await)),
+            TOUCH_TOOL => Ok(text_result(self.touch(arguments).await)),
+            other => Err((-32602, format!("unknown tool: {other}"))),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Code intelligence (E3)
+    // -----------------------------------------------------------------------
+
+    /// One of the nine navigation questions, or on-demand diagnostics for a file.
+    async fn code_intel(&mut self, arguments: Value) -> Result<String, String> {
+        let request = object(&arguments, CODE_INTEL_TOOL)?;
+        let operation = string_argument(request, "operation")?;
+        let path = string_argument(request, "path")?;
+
+        // Argued before asked. A call this build cannot make is a message the model can act
+        // on, and sending it to the runtime first would spend a round trip to learn what
+        // the enum here already says.
+        if operation != "diagnostics" && !NAVIGATION_OPERATIONS.contains(&operation.as_str()) {
+            return Err(format!(
+                "operation must be one of {}, diagnostics",
+                NAVIGATION_OPERATIONS.join(", ")
+            ));
+        }
+
+        let bridge = self.configured()?;
+        let workspace = self.workspace(&bridge).await?;
+
+        if operation == "diagnostics" {
+            // The pool never opens a document behind a caller's back, because opening one
+            // is a decision about what a language server spends memory on. Asking "what is
+            // broken in this file" is that decision, made out loud.
+            self.announce(&bridge, &workspace, &path, "open").await?;
+            let answer = self.read_diagnostics(&bridge, &workspace, &path).await?;
+
+            return Ok(render_diagnostics(&path, &answer, None));
+        }
+
+        let mut params = Map::new();
+        params.insert("workspace".into(), json!(workspace));
+        params.insert("operation".into(), json!(operation));
+        params.insert("path".into(), json!(path));
+        params.insert("line".into(), json!(integer_argument(request, "line")));
+        params.insert(
+            "character".into(),
+            json!(integer_argument(request, "character")),
+        );
+
+        if let Some(query) = optional_string(request, "query") {
+            params.insert("query".into(), json!(query));
+        }
+
+        self.route(&bridge, &mut params);
+
+        let answer = self
+            .gateway
+            .call(
+                &bridge,
+                REQUEST_METHOD,
+                Value::Object(params),
+                CODE_INTEL_TIMEOUT,
+            )
+            .await?;
+
+        Ok(render_navigation(&operation, &path, &answer))
+    }
+
+    /// The post-edit read: announce the change, wait a bounded moment, report only what is
+    /// new. The baseline comes back from the same call that announced the edit, so nothing
+    /// can land between reading it and invalidating it.
+    async fn diagnostics(&mut self, arguments: Value) -> Result<String, String> {
+        let request = object(&arguments, DIAGNOSTICS_TOOL)?;
+        let path = string_argument(request, "path")?;
+        let bridge = self.configured()?;
+        let workspace = self.workspace(&bridge).await?;
+
+        let touched = self.announce(&bridge, &workspace, &path, "changed").await?;
+        let baseline = baseline_signatures(&touched);
+        let answer = self.read_diagnostics(&bridge, &workspace, &path).await?;
+
+        Ok(render_diagnostics(&path, &answer, Some(&baseline)))
+    }
+
+    /// Announce an edit made outside the harness's own edit tools.
+    async fn touch(&mut self, arguments: Value) -> Result<String, String> {
+        let request = object(&arguments, TOUCH_TOOL)?;
+        let path = string_argument(request, "path")?;
+        let action = optional_string(request, "action").unwrap_or_else(|| "changed".to_string());
+
+        if !["open", "changed", "closed"].contains(&action.as_str()) {
+            return Err("action must be one of open, changed, closed".to_string());
+        }
+
+        let bridge = self.configured()?;
+        let workspace = self.workspace(&bridge).await?;
+        let touched = self.announce(&bridge, &workspace, &path, &action).await?;
+
+        let version = touched
+            .get("version")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+
+        Ok(format!(
+            "The language server for {path} was told the file is {action} (version {version})."
+        ))
+    }
+
+    /// `code_intel.touch`, which answers with the version it assigned and the picture that
+    /// preceded it.
+    async fn announce(
+        &mut self,
+        bridge: &Bridge,
+        workspace: &str,
+        path: &str,
+        action: &str,
+    ) -> Result<Value, String> {
+        let mut params = Map::new();
+        params.insert("workspace".into(), json!(workspace));
+        params.insert("path".into(), json!(path));
+        params.insert("action".into(), json!(action));
+        self.route(bridge, &mut params);
+
+        self.gateway
+            .call(
+                bridge,
+                TOUCH_METHOD,
+                Value::Object(params),
+                CODE_INTEL_TIMEOUT,
+            )
+            .await
+    }
+
+    async fn read_diagnostics(
+        &mut self,
+        bridge: &Bridge,
+        workspace: &str,
+        path: &str,
+    ) -> Result<Value, String> {
+        let mut params = Map::new();
+        params.insert("workspace".into(), json!(workspace));
+        params.insert("path".into(), json!(path));
+        params.insert("wait_ms".into(), json!(DIAGNOSTICS_WAIT_MS));
+        self.route(bridge, &mut params);
+
+        self.gateway
+            .call(
+                bridge,
+                DIAGNOSTICS_METHOD,
+                Value::Object(params),
+                CODE_INTEL_TIMEOUT,
+            )
+            .await
+    }
+
+    /// The workspace the session was started in. A tool call names a path; the boundary
+    /// that path is admitted against is the session's, not the tool's to choose.
+    async fn workspace(&mut self, bridge: &Bridge) -> Result<String, String> {
+        if let Some(workspace) = &self.workspace {
+            return Ok(workspace.clone());
+        }
+
+        let mut params = Map::new();
+        params.insert("id".into(), json!(bridge.session_id));
+        self.route(bridge, &mut params);
+
+        let info = self
+            .gateway
+            .call(
+                bridge,
+                INFO_METHOD,
+                Value::Object(params),
+                CODE_INTEL_TIMEOUT,
+            )
+            .await?;
+
+        let workspace = info
+            .get("workspace")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|workspace| !workspace.is_empty())
+            .ok_or_else(|| "the runtime did not report a workspace for this session".to_string())?
+            .to_string();
+
+        self.workspace = Some(workspace.clone());
+        Ok(workspace)
+    }
+
+    fn route(&self, bridge: &Bridge, params: &mut Map<String, Value>) {
+        if let Some(node) = &bridge.node {
+            params.insert("node".into(), json!(node));
+        }
+    }
+
+    fn configured(&self) -> Result<Bridge, String> {
+        self.bridge.clone().map_err(|reason| {
+            format!(
+                "this session is not connected to an Ouroboros runtime ({reason}); \
+                 `ouro mcp-serve` is started by the runtime, not by hand"
+            )
+        })
     }
 
     /// The whole decision, as the behaviour object Claude Code reads.
@@ -431,6 +681,410 @@ fn tool_result(behavior: Value) -> Value {
     });
 
     json!({"content": [{"type": "text", "text": text}], "isError": false})
+}
+
+/// What the three model-facing tools answer with. A refusal is `isError` and says what
+/// went wrong in the same text block, because a tool that fails silently is one the model
+/// will call again with the same arguments.
+fn text_result(outcome: Result<String, String>) -> Value {
+    match outcome {
+        Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),
+        Err(message) => json!({"content": [{"type": "text", "text": message}], "isError": true}),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Argument reading
+// ---------------------------------------------------------------------------
+
+fn object<'a>(arguments: &'a Value, tool: &str) -> Result<&'a Map<String, Value>, String> {
+    arguments
+        .as_object()
+        .ok_or_else(|| format!("the {tool} tool takes an object"))
+}
+
+fn string_argument(request: &Map<String, Value>, key: &str) -> Result<String, String> {
+    optional_string(request, key).ok_or_else(|| format!("{key} must be a non-empty string"))
+}
+
+fn optional_string(request: &Map<String, Value>, key: &str) -> Option<String> {
+    request
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// A missing or nonsensical position is zero rather than a refusal: `document_symbols` and
+/// `workspace_symbols` need none, and a model that omits one for `definition` gets an
+/// answer about the top of the file instead of an error it has to reason about.
+fn integer_argument(request: &Map<String, Value>, key: &str) -> u64 {
+    request.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// The R4 §2 feedback policy, in one place
+// ---------------------------------------------------------------------------
+
+/// The signatures `code_intel.touch` reported for the file as it stood before the edit.
+///
+/// An absent or unreadable baseline is an empty one, which reports every current
+/// diagnostic as new. That is the honest failure direction and it is a stated limit: the
+/// first edit to a file the pool has never held over-reports its pre-existing errors once.
+/// Hiding real errors to avoid that would be the worse trade.
+pub fn baseline_signatures(touched: &Value) -> Vec<String> {
+    touched
+        .get("baseline")
+        .and_then(|baseline| baseline.get("signatures"))
+        .and_then(Value::as_array)
+        .map(|signatures| {
+            signatures
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the runtime answered with diagnostics that describe the file's current content.
+///
+/// `status: "pending"` is not a failure and not an empty list — it is "no LSP data yet",
+/// and the two must never be rendered the same way.
+pub fn diagnostics_ready(answer: &Value) -> bool {
+    answer.get("status").and_then(Value::as_str) == Some("ok")
+}
+
+/// The new-only rule: current items the pre-edit baseline did not carry. Identity is the
+/// runtime's `signature`, so there is exactly one definition of "the same diagnostic".
+pub fn new_diagnostics(baseline: &[String], answer: &Value) -> Vec<Value> {
+    items(answer)
+        .into_iter()
+        .filter(|item| match item.get("signature").and_then(Value::as_str) {
+            Some(signature) => !baseline.iter().any(|seen| seen == signature),
+            // A diagnostic with no signature cannot be matched against the baseline, and
+            // showing it is the direction that cannot hide a real error.
+            None => true,
+        })
+        .collect()
+}
+
+fn items(answer: &Value) -> Vec<Value> {
+    answer
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// R4's noise bound, applied: every error, at most three warnings, at most twenty lines,
+/// and one `+N more` covering everything the two caps left out.
+pub fn diagnostic_lines(items: &[Value]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for item in items {
+        match item.get("severity").and_then(Value::as_str) {
+            Some("error") => errors.push(item),
+            Some("warning") => warnings.push(item),
+            _lower => {}
+        }
+    }
+
+    let shown_warnings = warnings.len().min(MAX_WARNING_LINES);
+    let mut selected: Vec<&Value> = errors;
+    selected.extend(warnings.into_iter().take(shown_warnings));
+
+    let kept = selected.len().min(MAX_DIAGNOSTIC_LINES);
+    let omitted = items.len() - kept;
+
+    let mut lines: Vec<String> = selected
+        .into_iter()
+        .take(kept)
+        .map(diagnostic_line)
+        .collect();
+
+    if omitted > 0 {
+        lines.push(format!("  +{omitted} more"));
+    }
+
+    lines
+}
+
+fn diagnostic_line(item: &Value) -> String {
+    let severity = item
+        .get("severity")
+        .and_then(Value::as_str)
+        .unwrap_or("diagnostic");
+    let message = item
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("");
+
+    let mut line = format!("  {severity} {}", position_of(item));
+
+    if let Some(code) = item.get("code").and_then(Value::as_str) {
+        line.push_str(&format!(" [{code}]"));
+    }
+
+    line.push_str(&format!(" {message}"));
+    line
+}
+
+/// `line:character`, converted to the 1-based numbers an editor shows. The protocol counts
+/// from zero and the wire keeps it that way; a person reading a transcript does not.
+fn position_of(item: &Value) -> String {
+    let start = item
+        .get("range")
+        .or_else(|| item.get("item").and_then(|inner| inner.get("range")))
+        .and_then(|range| range.get("start"));
+
+    let line = start
+        .and_then(|start| start.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    let character = start
+        .and_then(|start| start.get("character"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+
+    format!("{line}:{character}")
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// One diagnostics answer as the model reads it. `baseline` present means "report only
+/// what is new"; absent means "report what is there".
+fn render_diagnostics(path: &str, answer: &Value, baseline: Option<&[String]>) -> String {
+    if !diagnostics_ready(answer) {
+        return format!("(no LSP data for {path})");
+    }
+
+    let (found, adjective) = match baseline {
+        Some(baseline) => (new_diagnostics(baseline, answer), "new "),
+        None => (items(answer), ""),
+    };
+
+    if found.is_empty() {
+        return format!("No {adjective}diagnostics in {path}.");
+    }
+
+    let count = found.len();
+    let mut text = format!(
+        "Found {count} {adjective}diagnostic issue{} in {path}:",
+        plural(count)
+    );
+
+    for line in diagnostic_lines(&found) {
+        text.push('\n');
+        text.push_str(&line);
+    }
+
+    text
+}
+
+/// One navigation answer. Each item is a place plus whatever the operation names it: a
+/// symbol, a call, a hover string. An item this build has no shape for is printed as its
+/// own JSON rather than dropped.
+fn render_navigation(operation: &str, path: &str, answer: &Value) -> String {
+    let items = items(answer);
+
+    if items.is_empty() {
+        return format!("No {operation} results for {path}.");
+    }
+
+    let truncated = answer
+        .get("truncated")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+
+    let count = items.len();
+    let mut text = format!("{count} {operation} result{}:", plural(count));
+
+    for item in items.iter().take(MAX_NAVIGATION_LINES) {
+        text.push('\n');
+        text.push_str(&navigation_line(item));
+    }
+
+    let omitted = count.saturating_sub(MAX_NAVIGATION_LINES) as u64 + truncated;
+
+    if omitted > 0 {
+        text.push_str(&format!("\n  +{omitted} more"));
+    }
+
+    text
+}
+
+fn navigation_line(item: &Value) -> String {
+    // A call hierarchy answer wraps the place one level down, under `item`.
+    let place = item.get("item").unwrap_or(item);
+
+    let Some(path) = place.get("path").and_then(Value::as_str) else {
+        // Hover has no path of its own: it is a string about the position you asked at.
+        if let Some(value) = item.get("value").and_then(Value::as_str) {
+            return format!("  {}", value.trim());
+        }
+
+        return format!(
+            "  {}",
+            serde_json::to_string(item).unwrap_or_else(|_unencodable| "?".to_string())
+        );
+    };
+
+    let mut line = format!("  {path}:{}", position_of(place));
+
+    if place.get("external").and_then(Value::as_bool) == Some(true) {
+        line.push_str(" [outside the workspace]");
+    }
+
+    if let Some(name) = place.get("name").and_then(Value::as_str) {
+        line.push(' ');
+        line.push_str(name);
+    }
+
+    if let Some(kind) = place.get("kind").and_then(Value::as_str) {
+        line.push_str(&format!(" ({kind})"));
+    }
+
+    if let Some(container) = place.get("container").and_then(Value::as_str) {
+        line.push_str(&format!(" in {container}"));
+    }
+
+    if let Some(detail) = place.get("detail").and_then(Value::as_str) {
+        line.push_str(&format!(" — {detail}"));
+    }
+
+    line
+}
+
+fn tool_descriptors() -> Vec<Value> {
+    vec![
+        tool_descriptor(),
+        code_intel_descriptor(),
+        diagnostics_descriptor(),
+        touch_descriptor(),
+    ]
+}
+
+/// The description is written for the model, and R4 §(d) is why it says when *not* to call
+/// this: Serena's own numbers show a small edit costs 4.5× the payload through a code-intel
+/// tool, and an independent benchmark found a simple find-a-rule task four times more
+/// expensive through one. References, call hierarchies, and multi-file changes are where
+/// the tool wins by an order of magnitude; a lookup in a file already in context is not.
+fn code_intel_descriptor() -> Value {
+    let mut operations: Vec<&str> = NAVIGATION_OPERATIONS.to_vec();
+    operations.push("diagnostics");
+
+    json!({
+        "name": CODE_INTEL_TOOL,
+        "title": "Ask this workspace's language server",
+        "description": "Ask the language server Ouroboros already runs for this workspace \
+                        about the symbol at a position. Reach for it when reading files \
+                        would be unreliable or expensive: every reference to a symbol \
+                        before renaming it, who calls a function, where an interface is \
+                        implemented, and any change spanning several files. For a single \
+                        lookup in a file you have already read, grep and reading are \
+                        cheaper and just as correct. `diagnostics` reports what the server \
+                        currently says is wrong with one file. Positions are 0-based, as \
+                        the Language Server Protocol reports them; results are printed \
+                        1-based. Paths may be absolute or relative to the workspace root. \
+                        A missing language server is an ordinary answer, never a failure \
+                        of your edit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": operations,
+                    "description": "Which question to ask."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The file the position is in."
+                },
+                "line": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "0-based line. Omit for document_symbols, workspace_symbols and diagnostics."
+                },
+                "character": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "0-based character on that line."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "The search string, for workspace_symbols."
+                }
+            },
+            "required": ["operation", "path"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn diagnostics_descriptor() -> Value {
+    json!({
+        "name": DIAGNOSTICS_TOOL,
+        "title": "New diagnostics for a file you changed",
+        "description": "Tell the language server one file changed, wait up to five seconds, \
+                        and report only the diagnostics that were not there before. Use it \
+                        after editing a file, or after changing one with a shell command or \
+                        a code generator. It never blocks and never fails an edit: with no \
+                        server for the file, or no answer in time, it says there is no LSP \
+                        data and you should carry on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file that changed."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn touch_descriptor() -> Value {
+    json!({
+        "name": TOUCH_TOOL,
+        "title": "Announce a file change to the language server",
+        "description": "Tell Ouroboros that a file changed on disk, so later diagnostics \
+                        and navigation describe its new contents. Only needed for changes \
+                        made outside your own edit tools — a shell command, a generator, a \
+                        branch switch. Use the diagnostics tool instead when you want to \
+                        know what the change broke.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file that changed."
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["open", "changed", "closed"],
+                    "description": "Defaults to changed."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }
+    })
 }
 
 fn tool_descriptor() -> Value {
