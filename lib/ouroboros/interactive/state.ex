@@ -521,6 +521,43 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:forks, forks(state))
   end
 
+  @doc """
+  Projects one session as a *row*: everything a picker draws, and nothing it does not.
+
+  `public/1` is the whole session, and `interactive.list` answered with it — which meant
+  every row carried its retained event window and its whole turn ledger across the socket,
+  and across an `:erpc` from every fleet node, on every list. A client that wanted one
+  integer — the contiguous high-water mark, to know whether it had replayed everything —
+  paid for a session's entire transcript to learn it.
+
+  So a row is bounded by construction: the same struct, the same `_struct` tag and the same
+  field names, with `events` and `turns` emptied and `usage` reduced to the two figures a
+  row can show. `cursor` is on it, which is the integer that made this necessary. Anything
+  a row drops is one `interactive.info` away, addressed by the id the row carries.
+  """
+  @spec summary(t()) :: t()
+  def summary(%__MODULE__{} = state) do
+    state
+    |> public()
+    |> Map.put(:events, [])
+    |> Map.put(:turns, %{})
+    |> Map.put(:usage, usage_summary(state))
+  end
+
+  @doc """
+  Reduces a session's usage account to what a row can honestly show.
+
+  Two numbers, and `nil` for either that no provider reported. A session nobody has
+  charged keeps `cost_usd: nil` rather than a zero that reads as "this was free", exactly
+  as `fold_usage/2` keeps it.
+  """
+  @spec usage_summary(t()) :: %{total_tokens: non_neg_integer() | nil, cost_usd: number() | nil}
+  def usage_summary(%__MODULE__{} = state) do
+    usage = Map.get(state, :usage) || %{}
+
+    %{total_tokens: Map.get(usage, :total_tokens), cost_usd: Map.get(usage, :cost_usd)}
+  end
+
   @spec public_turn(turn()) :: map()
   def public_turn(turn) do
     case Map.fetch(turn, :request) do

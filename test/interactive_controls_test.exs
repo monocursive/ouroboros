@@ -617,6 +617,87 @@ defmodule Ouroboros.InteractiveControlsTest do
     end
   end
 
+  describe "interactive.list rows" do
+    test "a row carries title, cursor, and a usage summary, and no event window", %{id: id} do
+      ref = start_session(id)
+      assert {:ok, _renamed} = InteractiveSession.rename(ref, "A row in the picker")
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "spend something", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+
+      assert :ok =
+               HarnessAdapter.emit(adapter, :usage, %{
+                 "input_tokens" => 120,
+                 "output_tokens" => 30,
+                 "total_tokens" => 150
+               })
+
+      row =
+        assert_eventually(fn ->
+          case Enum.find(InteractiveSession.list(), &(&1.id == id)) do
+            %State{usage: %{total_tokens: total}} = row when is_integer(total) and total > 0 ->
+              row
+
+            _not_yet ->
+              false
+          end
+        end)
+
+      assert row.title == "A row in the picker"
+      assert row.title_source == :human
+
+      # The integer H1 found a client had to fetch a whole transcript to read.
+      assert is_integer(row.cursor) and row.cursor > 0
+
+      # A summary, not the whole account: two numbers, and `nil` for a cost nobody stated.
+      assert row.usage == %{total_tokens: 150, cost_usd: nil}
+
+      # Bounded by construction. The session itself has both of these.
+      assert row.events == []
+      assert row.turns == %{}
+
+      assert {:ok, %State{} = whole} = InteractiveSession.info(ref)
+      assert whole.events != []
+      assert map_size(whole.turns) > 0
+
+      # And the capability map a footer greys its verbs from is still on the row.
+      assert row.options.capabilities.fork == :native
+      assert Map.has_key?(row.options, :approval_mode)
+
+      assert :ok = HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    test "an unspent session reports no tokens rather than a zero that reads as free",
+         %{id: id} do
+      start_session(id)
+
+      row = Enum.find(InteractiveSession.list(), &(&1.id == id))
+      assert row.usage == %{total_tokens: nil, cost_usd: nil}
+
+      retire_session(id)
+    end
+
+    test "a fork's parentage is visible from the list without opening either session",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+      fork_id = unique_id("listed-fork")
+
+      assert {:ok, _child} = InteractiveSession.fork(ref, fork_id)
+
+      rows = InteractiveSession.list()
+      assert %State{forked_from: ^id} = Enum.find(rows, &(&1.id == fork_id))
+      assert %State{forks: 1, forked_from: nil} = Enum.find(rows, &(&1.id == id))
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(fork_id)
+      retire_session(id)
+    end
+  end
+
   describe "State.auto_title/1" do
     test "takes the first line, bounds it, and refuses to invent one" do
       assert State.auto_title("one line") == "one line"

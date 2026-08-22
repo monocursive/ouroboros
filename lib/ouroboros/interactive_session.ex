@@ -115,11 +115,18 @@ defmodule Ouroboros.InteractiveSession do
   @doc "Returns a durable public session snapshot."
   def info(session), do: call(session, :info)
 
-  @doc "Lists local durable interactive sessions."
+  @doc """
+  Lists local durable interactive sessions as bounded rows.
+
+  Rows, not whole sessions: this list is fanned out over `:erpc` to every fleet node and
+  then across the socket on every refresh, so it carries what a picker draws — id, status,
+  workspace, machine, title, cursor, usage, capabilities — and never a session's retained
+  event window. `info/1` is one call away for anything else.
+  """
   def list do
     Store.list()
     |> Enum.filter(&(&1.node == node()))
-    |> Enum.map(&State.public/1)
+    |> Enum.map(&State.summary/1)
   end
 
   @doc "Atomically subscribes the caller and returns events after an exclusive cursor."
