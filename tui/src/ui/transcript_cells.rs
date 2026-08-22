@@ -32,7 +32,7 @@ use crate::model::transcript::{
     ToolResult, TurnOutcome, UsageReport,
 };
 
-use super::code;
+use super::markdown;
 use super::theme;
 use super::transcript::{Entry, Note};
 
@@ -1755,47 +1755,14 @@ fn render_agent_message(
         Span::styled(" / RESPONSE", Style::default().fg(theme::SYSTEM)),
     ]));
 
-    let width = width.max(8);
-    let segments = code::split_fences(text);
-    let last = segments.len().saturating_sub(1);
-    let mut body: Vec<Line<'static>> = Vec::new();
-    let mut complete = true;
+    // Agent prose is Markdown. Everything about how it becomes styled rows — the block
+    // vocabulary, the streaming rule, the row budget, the per-(text, width) memo that
+    // keeps a settled turn from being re-parsed twelve times a second — lives in one place.
+    let rendered = markdown::render_cached(text, width, message_lines, streaming);
 
-    // A segment needs room for its own frame plus this function's truncation notice;
-    // starting one with less would overshoot the cap by more than it saves.
-    for (index, segment) in segments.iter().enumerate() {
-        if message_lines.saturating_sub(body.len()) < 4 {
-            complete = false;
-            break;
-        }
+    lines.extend(rendered.lines.iter().cloned());
 
-        let remaining = message_lines.saturating_sub(body.len());
-
-        match segment {
-            code::Segment::Prose(prose) => {
-                // The spare row is how wrap_limited reports that more prose followed.
-                let wrapped = wrap_limited(prose, width, remaining.saturating_add(1));
-                if wrapped.len() > remaining {
-                    complete = false;
-                }
-
-                for line in wrapped.into_iter().take(remaining) {
-                    body.push(Line::from(style_inline_code(&line)));
-                }
-            }
-            code::Segment::Code(block) => {
-                // While the agent is still writing this block its frame has no floor yet,
-                // so the caret can sit on the newest code row instead of a bottom border.
-                let open_tail = streaming && index == last && !block.closed;
-
-                render_code_block(&mut body, block, width, remaining, open_tail);
-            }
-        }
-    }
-
-    lines.extend(body);
-
-    if !complete {
+    if !rendered.complete {
         lines.push(Line::from(Span::styled(
             format!("… {}", verbosity.provenance("message")),
             theme::quiet(),
@@ -1818,121 +1785,6 @@ fn render_agent_message(
             }
         }
     }
-}
-
-/// Lays out one fenced block inside a full-width frame with a language label:
-///
-/// ```text
-/// ┌─ rust ───────────┐
-/// │ fn main() {}     │
-/// └──────────────────┘
-/// ```
-///
-/// Grows `body` by at most `budget` rows: the header, up to `budget - 3` code rows, a
-/// truncation notice when rows were cut, and the floor. An unfinished frame (`open_tail`)
-/// omits its bottom border so streaming code can continue under the caret.
-fn render_code_block(
-    body: &mut Vec<Line<'static>>,
-    block: &code::CodeBlock<'_>,
-    width: usize,
-    budget: usize,
-    open_tail: bool,
-) {
-    let language = code::detect(block.lang);
-    let label = match block.lang {
-        Some(_) => language.label(),
-        None => "code",
-    };
-    let border = Style::default()
-        .fg(theme::MUTED)
-        .add_modifier(Modifier::DIM);
-    let label_style = Style::default()
-        .fg(theme::SYSTEM)
-        .add_modifier(Modifier::BOLD);
-
-    let heading = "┌─ ";
-    let rule = width
-        .saturating_sub(heading.width() + label.width() + 2)
-        .max(1);
-    body.push(Line::from(vec![
-        Span::styled(heading, border),
-        Span::styled(label, label_style),
-        Span::styled(format!(" {}┐", "─".repeat(rule)), border),
-    ]));
-
-    // Header, floor, and a possible notice come out of the same budget as the code.
-    let rows_budget = budget.saturating_sub(3).max(1);
-    // One row of look-ahead distinguishes "exactly filled" from "cut short", so a block
-    // that precisely fits never earns a false truncation notice.
-    let highlighted = code::highlight(
-        block.code,
-        language,
-        width.saturating_sub(4).max(8),
-        rows_budget.saturating_add(1),
-    );
-    let complete = highlighted.len() <= rows_budget;
-
-    for line in highlighted.into_iter().take(rows_budget) {
-        body.push(framed_row(line.spans, width, border));
-    }
-
-    if !complete && !open_tail {
-        body.push(framed_row(
-            vec![Span::styled(
-                "… rest of this block in event details",
-                theme::quiet(),
-            )],
-            width,
-            border,
-        ));
-    }
-
-    if !open_tail {
-        body.push(Line::from(Span::styled(
-            format!("└{}┘", "─".repeat(width.saturating_sub(2))),
-            border,
-        )));
-    }
-}
-
-/// One framed row: left rule, content padded to the pane's width, right rule.
-fn framed_row(content: Vec<Span<'static>>, width: usize, border: Style) -> Line<'static> {
-    let used: usize = content.iter().map(|span| span.content.width()).sum();
-
-    let mut spans = Vec::with_capacity(content.len() + 2);
-    spans.push(Span::styled("│ ", border));
-    spans.extend(content);
-    spans.push(Span::raw(
-        " ".repeat(width.saturating_sub(used.saturating_add(4))),
-    ));
-    spans.push(Span::styled(" │", border));
-
-    Line::from(spans)
-}
-
-/// Styles paired backticks inside one already-wrapped prose line. A pair split across two
-/// wrapped rows stays literal rather than guessing where it closed.
-fn style_inline_code(line: &str) -> Vec<Span<'static>> {
-    let Some(open) = line.find('`') else {
-        return vec![Span::raw(line.to_string())];
-    };
-
-    let Some(close) = line[open + 1..].find('`').map(|offset| open + 1 + offset) else {
-        return vec![Span::raw(line.to_string())];
-    };
-
-    let mut spans = Vec::with_capacity(3);
-    if open > 0 {
-        spans.push(Span::raw(line[..open].to_string()));
-    }
-    spans.push(Span::styled(
-        line[open..=close].to_string(),
-        Style::default().fg(theme::SYSTEM),
-    ));
-    if close + 1 < line.len() {
-        spans.push(Span::raw(line[close + 1..].to_string()));
-    }
-    spans
 }
 
 /// The head row of a tool cell: state glyph, verb, subject, what the result proved, and how
@@ -3361,7 +3213,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_limited(text, width, usize::MAX)
 }
 
-fn wrap_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+pub(super) fn wrap_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
     }

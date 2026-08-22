@@ -24,6 +24,14 @@
 //! that has to be repaired by hand. A long line here is soft-wrapped by the terminal, which
 //! is exactly the behaviour that makes a selection yield the logical line back.
 //!
+//! ## The source, not the rendering
+//!
+//! The pane draws agent prose through [`super::markdown`]: `**bold**` becomes weight, a
+//! list becomes bullets with hanging indents, a table becomes columns. An export takes the
+//! Markdown the agent wrote, folded to the measure and otherwise untouched. That is the
+//! whole point of a copy — a person pasting this back into an issue wants the source, and
+//! the rows above them are a lossy projection of it that no editor can read back.
+//!
 //! ## Bounded, and it says so
 //!
 //! An export can only contain what this client still holds: [`Watch`] keeps
@@ -634,6 +642,61 @@ mod tests {
                     "width {width} lost {expected:?}:\n{text}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn an_agent_message_exports_the_markdown_it_was_written_in_folded_to_the_measure() {
+        // The pane renders `**bold**` as weight, `- one` as a bullet and a table as
+        // columns. None of that is what a person pasting this export wants back: the
+        // source is the copy of record, and the export takes the source.
+        let mut watch = Watch::new(Plane::Interactive, "sess-md".into());
+        watch.absorb(vec![event(
+            1,
+            "output_text_final",
+            json!({"text": "## Findings\n\n\
+                            The **lexer** stops at `\\n` and this sentence is deliberately \
+                            long enough that the export has to fold it at any measure it is \
+                            asked for.\n\n\
+                            - one finding\n- another finding\n\n\
+                            | Case | State |\n|---|---|\n| crlf | failing |\n"}),
+        )]);
+
+        for width in [60usize, 100] {
+            let text = transcript(&watch, width);
+
+            for source in [
+                "## Findings",
+                "**lexer**",
+                "`\\n`",
+                "- one finding",
+                "| Case | State |",
+                "| crlf | failing |",
+            ] {
+                assert!(text.contains(source), "{width}: {source:?} lost:\n{text}");
+            }
+
+            // Nothing the renderer invents may appear in a copy.
+            for rendered in ["• one finding", "┌─", "│ crlf"] {
+                assert!(
+                    !text.contains(rendered),
+                    "{width}: rendering leaked into the export: {rendered:?}\n{text}"
+                );
+            }
+
+            // Prose is still folded to the measure — the contract this file already had.
+            assert!(
+                text.lines().all(|line| line.width() <= width),
+                "{width}: a line ran past the measure:\n{text}"
+            );
+            let opening = text
+                .lines()
+                .find(|line| line.starts_with("The **lexer**"))
+                .unwrap_or_else(|| panic!("{width}: the sentence is missing:\n{text}"));
+            assert!(
+                !opening.contains("asked for."),
+                "{width}: the sentence was not folded: {opening:?}"
+            );
         }
     }
 

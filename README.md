@@ -287,6 +287,11 @@ matters: it can **spawn** a runtime — start one as a child process, own its li
 and attach to it — or it can **attach** to one somebody else started, on this host or
 through a tunnel.
 
+Agent prose renders as Markdown — headings, nested lists, tables folded to the pane,
+emphasis as terminal weight, fenced code framed and highlighted — while the line still
+being typed stays plain text until it has finished arriving, and a copy hands back the
+Markdown rather than the rendering ([docs/TUI.md §3.4](docs/TUI.md)).
+
 ```sh
 ouro                    # spawn a runtime, or adopt one already running here, then attach
 ouro daemon             # spawn only: print the port, pid, and token file, then exit

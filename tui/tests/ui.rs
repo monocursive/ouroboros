@@ -5480,6 +5480,27 @@ fn ctrl_x_y_copies_the_last_agent_message() {
 }
 
 #[test]
+fn copying_the_last_agent_message_yields_the_markdown_not_the_rendering() {
+    // The pane draws `**green**` as weight and `- all` as a bullet. A copy is for pasting
+    // somewhere else, so it hands back what the agent wrote.
+    let mut app = with_open_session();
+    notify(
+        &mut app,
+        event(
+            1,
+            "output_text_final",
+            "## Result\n\nThe tests are **green**.\n\n- all suites\n",
+        ),
+    );
+
+    apply_leader(&mut app, 'y');
+    assert_eq!(
+        app.take_copy().as_deref(),
+        Some("## Result\n\nThe tests are **green**.\n\n- all suites\n")
+    );
+}
+
+#[test]
 fn escape_interrupts_a_running_turn_without_closing_the_composer() {
     let mut app = with_open_session();
     assert!(app.sessions.composer.is_some());

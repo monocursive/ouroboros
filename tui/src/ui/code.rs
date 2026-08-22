@@ -13,7 +13,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use super::theme;
 
 /// One fenced region of a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +93,16 @@ fn find_fence(text: &str, from: usize) -> Option<(usize, usize, Option<&str>)> {
 
     while index < text.len() {
         let line_start = index;
-        let line_end = text[index..]
-            .find('\n')
-            .map(|offset| index + offset)
-            .unwrap_or(text.len());
+        let terminated = text[index..].find('\n').map(|offset| index + offset);
+        let line_end = terminated.unwrap_or(text.len());
 
         let trimmed = text[line_start..line_end].trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            // An info line no newline has ended yet is a fence still being typed. Opening
+            // a frame on it would label the block from half a language name — `ru` is not
+            // `rust`, and it is not `ruby` either — and relabel it a delta later.
+            let content = terminated? + 1;
+
             // The language is the first whitespace-delimited word; the remainder of an
             // info line is metadata (`{highlightLines}` and friends) that is not a name.
             let info = trimmed[3..].split_whitespace().next().filter(|word| {
@@ -106,7 +111,6 @@ fn find_fence(text: &str, from: usize) -> Option<(usize, usize, Option<&str>)> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "+#.-_".contains(c))
             });
-            let content = (line_end + 1).min(text.len());
             return Some((line_start, content, info));
         }
 
@@ -1299,6 +1303,103 @@ pub fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static
     }
 
     rows
+}
+
+/// Lays out one fenced block inside a full-width frame with a language label:
+///
+/// ```text
+/// ┌─ rust ───────────┐
+/// │ fn main() {}     │
+/// └──────────────────┘
+/// ```
+///
+/// Grows `body` by at most `budget` rows: the header, up to `budget - 3` code rows, a
+/// truncation notice when rows were cut, and the floor. An unfinished frame (`open_tail`)
+/// omits its bottom border so streaming code can continue under the caret.
+///
+/// Lives here rather than beside the message renderer because two callers now need it:
+/// the top-level fence split, and the Markdown renderer's own fenced blocks (a fence
+/// indented inside a list item never reaches the top-level split).
+pub fn render_block(
+    body: &mut Vec<Line<'static>>,
+    block: &CodeBlock<'_>,
+    width: usize,
+    budget: usize,
+    open_tail: bool,
+) {
+    let language = detect(block.lang);
+    let label = match block.lang {
+        Some(_) => language.label(),
+        None => "code",
+    };
+    let border = Style::default()
+        .fg(theme::MUTED)
+        .add_modifier(Modifier::DIM);
+    let label_style = Style::default()
+        .fg(theme::SYSTEM)
+        .add_modifier(Modifier::BOLD);
+
+    let heading = "┌─ ";
+    let rule = width
+        .saturating_sub(UnicodeWidthStr::width(heading) + UnicodeWidthStr::width(label) + 2)
+        .max(1);
+    body.push(Line::from(vec![
+        Span::styled(heading, border),
+        Span::styled(label, label_style),
+        Span::styled(format!(" {}┐", "─".repeat(rule)), border),
+    ]));
+
+    // Header, floor, and a possible notice come out of the same budget as the code.
+    let rows_budget = budget.saturating_sub(3).max(1);
+    // One row of look-ahead distinguishes "exactly filled" from "cut short", so a block
+    // that precisely fits never earns a false truncation notice.
+    let highlighted = highlight(
+        block.code,
+        language,
+        width.saturating_sub(4).max(8),
+        rows_budget.saturating_add(1),
+    );
+    let complete = highlighted.len() <= rows_budget;
+
+    for line in highlighted.into_iter().take(rows_budget) {
+        body.push(framed_row(line.spans, width, border));
+    }
+
+    if !complete && !open_tail {
+        body.push(framed_row(
+            vec![Span::styled(
+                "… rest of this block in event details",
+                theme::quiet(),
+            )],
+            width,
+            border,
+        ));
+    }
+
+    if !open_tail {
+        body.push(Line::from(Span::styled(
+            format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+            border,
+        )));
+    }
+}
+
+/// One framed row: left rule, content padded to the pane's width, right rule.
+fn framed_row(content: Vec<Span<'static>>, width: usize, border: Style) -> Line<'static> {
+    let used: usize = content
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
+
+    let mut spans = Vec::with_capacity(content.len() + 2);
+    spans.push(Span::styled("│ ", border));
+    spans.extend(content);
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used.saturating_add(4))),
+    ));
+    spans.push(Span::styled(" │", border));
+
+    Line::from(spans)
 }
 
 #[cfg(test)]

@@ -1137,6 +1137,52 @@ stays drawn while the session is idle, because a task list that disappears with 
 is the one thing every plan widget of 2026 was criticised for. The complete normalized
 event ledger is `/details`, `ctrl+x d`, or the palette, and still discards nothing.
 
+**Agent prose is Markdown, because agents write Markdown** ([`ui::markdown`](../tui/src/ui/markdown.rs),
+`pulldown-cmark`). Headings are separated by weight and channel and never by size — a
+banner in a transcript is a banner in the way. Emphasis, strong, and strikethrough become
+terminal modifiers and lose their markers; inline code keeps its backticks, because it is
+verbatim content and the delimiters are what say where the verbatim region begins and ends.
+Bulleted and numbered lists nest to any depth, each level hanging from its own marker
+column so a folded continuation aligns under its item's text rather than under the level
+above it. Task lists draw `[ ]`/`[x]`, block quotes carry a bar down every row they fold
+to, and a horizontal rule spans the pane. Tables are measured in cells, not characters, so
+CJK and emoji stay inside the frame; columns fold to the width that is left, and when even
+a minimum column will not fit the table degrades to stacked `Header: value` rows rather
+than overflowing — Claude Code's screen-reader rendering, used here because a table nobody
+can read a column of has stopped carrying its shape. Links render as `text (url)`, images
+as their alt text in brackets, HTML as the text it is. Fenced blocks take the framed,
+labelled, syntax-highlighted path unchanged.
+
+There is **no OSC 8 hyperlink**. Ratatui has no cell attribute for one, and an escape
+sequence smuggled into a `Span` would be counted as printable cells by the wrapper, the
+buffer diff, and the scroll arithmetic alike — the same call the status line already makes
+when it strips OSC 8 out of a user command's output. The destination is therefore always
+visible as text, which is also what makes it selectable.
+
+**Nothing renders from text that has not finished arriving.** Deltas land while the cell
+redraws, so the end of the text is at any moment half of something. Following Goose's
+`MarkdownBuffer`: complete blocks render as Markdown, and the line no newline has
+terminated yet is held out of the block parse and drawn as the characters that arrived. A
+half-typed `**bold`, an unfinished `[text](htt`, a lone `*` and a half-written table row
+read as themselves; `Hello` does not become a heading for the one frame between the second
+and third hyphen of the `---` under it. Where the fragment sits while it is being typed is
+where it lands: a blank line in the source has already announced a new block, so the gap
+above it is drawn now rather than appearing — and shunting the row down — when the newline
+arrives. A fence still open is the exception — it keeps its
+frame, without a floor, so streaming code keeps its highlighting — and a fence opener whose
+info line has not ended yet is not yet a fence, because `ru` is neither `rust` nor `ruby`.
+
+Rendering is a pure function of (text, width, row budget, streaming), and it is
+**remembered** under exactly those four things, sixteen entries and four megabytes deep per
+thread, most-recently-used first: a settled turn is parsed once per width instead of twelve
+times a second. Every row passes one budget check, so a message costs the rows the pane
+asked for and not the rows its bytes imply — 128 KiB of Markdown draws its 256 rows in
+about 2 ms unoptimised.
+
+A copy is a copy of the **source**. `ctrl+x y` and every export hand back the Markdown the
+agent wrote, folded to the measure and otherwise untouched; the rows above are a lossy
+projection of it that no editor could read back.
+
 Reasoning has Crush's three states: collapsed to one header row (`◇ thinking · N lines`) by
 default, a tail of the last 200 lines with the earlier count named while it is still being
 written, and everything under `Ctrl-O`. Collapsed is the default deliberately — reasoning
