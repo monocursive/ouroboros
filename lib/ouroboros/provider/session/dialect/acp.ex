@@ -5,6 +5,20 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
 
   alias Jido.Harness.{ApprovalResponse, Event, InteractionCapabilities, TurnRequest}
 
+  # Bounds on what one ACP update may turn into. The wire applies no byte cap of its own
+  # (a payload crosses the socket whole on every replay), so the dialect is where an
+  # unbounded agent has to be cut down.
+  @max_file_changes 64
+  @max_commands 64
+  @max_modes 32
+  @max_label_chars 200
+
+  # Either side of one edit above this and the diff is replaced by a note. `oldText` and
+  # `newText` are whole file bodies; a line-wise diff of two 50 MB buffers is not a thing
+  # to compute inside a session process, let alone to broadcast.
+  @max_diff_bytes 1_048_576
+  @diff_context 3
+
   @impl true
   def name, do: :acp
 
@@ -83,6 +97,24 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
 
   @impl true
   def session_id(result), do: result["sessionId"] || result["session_id"]
+
+  @doc """
+  Session modes carried by a `session/new` / `session/load` result.
+
+  Not a `Dialect` callback: `Dialect.verify!/1` pins an exact callback list and the
+  app-server dialect has nothing to say here. `Session.Jsonl` calls this when a dialect
+  exports it, so the modes an ACP agent offers reach the client next to the ready event
+  instead of being dropped with the rest of the open result.
+  """
+  @spec session_opened(term(), map()) :: [{:emit, atom(), map(), keyword()}]
+  def session_opened(result, _state) when is_map(result) do
+    case modes_payload(result["modes"]) do
+      nil -> []
+      payload -> [{:emit, :provider_event, payload, []}]
+    end
+  end
+
+  def session_opened(_result, _state), do: []
 
   @impl true
   def start_turn(turn, _turn_id, runtime) do
@@ -187,20 +219,243 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
     ]
   end
 
+  # `user_message_chunk` deliberately stays in the catch-all. It is the agent echoing the
+  # prompt Ouroboros itself just sent; normalising it to `:output_text_delta` would print
+  # the user's own turn back into the transcript as agent output, and there is no event
+  # type for "the agent's copy of what I said". `input_accepted` already carries the
+  # authoritative text.
   defp map_update(%{"sessionUpdate" => type} = update, raw) do
     case type do
       "agent_message_chunk" -> text_event(:output_text_delta, update, raw)
       "agent_thought_chunk" -> text_event(:thinking_delta, update, raw)
-      "tool_call" -> [event(:tool_call, update, raw)]
-      "tool_call_update" -> [event(:tool_result, update, raw)]
+      "tool_call" -> [event(:tool_call, update, raw) | file_change_events(update, raw)]
+      "tool_call_update" -> [event(:tool_result, update, raw) | file_change_events(update, raw)]
       "plan" -> [event(:plan_updated, update, raw)]
       "usage_update" -> [event(:usage, Map.drop(update, ["sessionUpdate"]), raw)]
+      "diff" -> diff_events([update], update, raw) |> or_else(update, raw)
+      "available_commands_update" -> [commands_event(update, raw)]
+      "current_mode_update" -> mode_events(update, raw) |> or_else(update, raw)
       _ -> [event(:provider_event, %{"kind" => "acp_update", "update" => update}, raw)]
     end
   end
 
   defp map_update(update, raw),
     do: [event(:provider_event, %{"kind" => "acp_update", "update" => update}, raw)]
+
+  defp or_else([], update, raw),
+    do: [event(:provider_event, %{"kind" => "acp_update", "update" => update}, raw)]
+
+  defp or_else(events, _update, _raw), do: events
+
+  # Where an ACP edit actually lives. The v1 schema
+  # (https://agentclientprotocol.com/protocol/schema, tool calls at
+  # https://agentclientprotocol.com/protocol/tool-calls) has no `diff` arm in the
+  # `SessionUpdate` union; a file edit is a `{"type":"diff","path","oldText","newText"}`
+  # block inside a tool call's `content`. Both are read: those content blocks, and a bare
+  # `diff` update, which X8 named and which costs nothing to accept from an agent that
+  # sends one.
+  defp file_change_events(update, raw), do: diff_events(content_blocks(update), update, raw)
+
+  defp content_blocks(%{"content" => content}) when is_list(content),
+    do: Enum.filter(content, &match?(%{"type" => "diff"}, &1))
+
+  defp content_blocks(_update), do: []
+
+  defp diff_events(blocks, update, raw) do
+    case blocks |> Enum.take(@max_file_changes) |> Enum.flat_map(&file_change/1) do
+      [] ->
+        []
+
+      changes ->
+        [event(:file_change, %{"changes" => changes, "status" => change_status(update)}, raw)]
+    end
+  end
+
+  # The item-level `file_change` shape the client already parses: it reads `path` and the
+  # +/- counts out of the unified text, so the diff has to be a real one with
+  # `--- a/<path>` / `+++ b/<path>` headers, not a summary.
+  defp file_change(%{"path" => path} = block) when is_binary(path) do
+    old = block["oldText"]
+    new = block["newText"]
+
+    [
+      %{
+        "path" => path,
+        "kind" => change_kind(old, new),
+        "diff" => unified_diff(path, text_or_empty(old), text_or_empty(new))
+      }
+    ]
+  end
+
+  defp file_change(_block), do: []
+
+  # ACP spells a new file as a null `oldText`.
+  defp change_kind(nil, _new), do: "add"
+  defp change_kind(_old, nil), do: "delete"
+  defp change_kind(_old, _new), do: "update"
+
+  defp change_status(%{"status" => status}) when is_binary(status), do: status
+  defp change_status(_update), do: "completed"
+
+  defp text_or_empty(text) when is_binary(text), do: text
+  defp text_or_empty(_other), do: ""
+
+  defp unified_diff(path, old, new) do
+    header = "--- a/#{path}\n+++ b/#{path}\n"
+
+    if byte_size(old) > @max_diff_bytes or byte_size(new) > @max_diff_bytes do
+      header <> "@@ truncated: #{byte_size(old) + byte_size(new)} bytes @@\n"
+    else
+      header <> hunks(diff_lines(old), diff_lines(new))
+    end
+  end
+
+  # Line-wise, via the stdlib. A trailing newline is normalised away and no
+  # "\\ No newline at end of file" marker is emitted: the diff is for reading, not for
+  # feeding back to `patch`.
+  defp diff_lines(""), do: []
+
+  defp diff_lines(text) do
+    lines = String.split(text, "\n")
+    if List.last(lines) == "", do: Enum.drop(lines, -1), else: lines
+  end
+
+  defp hunks(old_lines, new_lines) do
+    rows =
+      old_lines
+      |> List.myers_difference(new_lines)
+      |> numbered_rows()
+
+    rows
+    |> hunk_ranges()
+    |> Enum.map_join(fn {from, to} -> render_hunk(Enum.slice(rows, from..to//1)) end)
+  end
+
+  defp numbered_rows(operations) do
+    {rows, _old_line, _new_line} =
+      Enum.reduce(operations, {[], 1, 1}, fn {tag, lines}, accumulator ->
+        Enum.reduce(lines, accumulator, fn line, {rows, old_line, new_line} ->
+          case tag do
+            :eq -> {[{:eq, line, old_line, new_line} | rows], old_line + 1, new_line + 1}
+            :del -> {[{:del, line, old_line, new_line} | rows], old_line + 1, new_line}
+            :ins -> {[{:ins, line, old_line, new_line} | rows], old_line, new_line + 1}
+          end
+        end)
+      end)
+
+    Enum.reverse(rows)
+  end
+
+  defp hunk_ranges(rows) do
+    total = length(rows)
+
+    rows
+    |> Enum.with_index()
+    |> Enum.filter(fn {{tag, _line, _old, _new}, _index} -> tag != :eq end)
+    |> Enum.map(fn {_row, index} ->
+      {max(index - @diff_context, 0), min(index + @diff_context, total - 1)}
+    end)
+    |> Enum.reduce([], fn
+      {from, to}, [{previous_from, previous_to} | rest] when from <= previous_to + 1 ->
+        [{previous_from, max(previous_to, to)} | rest]
+
+      range, ranges ->
+        [range | ranges]
+    end)
+    |> Enum.reverse()
+  end
+
+  defp render_hunk(rows) do
+    old_rows = Enum.filter(rows, fn {tag, _line, _old, _new} -> tag in [:eq, :del] end)
+    new_rows = Enum.filter(rows, fn {tag, _line, _old, _new} -> tag in [:eq, :ins] end)
+
+    header =
+      "@@ -#{hunk_start(old_rows, :old)},#{length(old_rows)} " <>
+        "+#{hunk_start(new_rows, :new)},#{length(new_rows)} @@\n"
+
+    header <> Enum.map_join(rows, fn {tag, line, _old, _new} -> marker(tag) <> line <> "\n" end)
+  end
+
+  defp hunk_start([], _side), do: 0
+  defp hunk_start([{_tag, _line, old, _new} | _rest], :old), do: old
+  defp hunk_start([{_tag, _line, _old, new} | _rest], :new), do: new
+
+  defp marker(:eq), do: " "
+  defp marker(:del), do: "-"
+  defp marker(:ins), do: "+"
+
+  # Names and one-line descriptions only. A command's `input.hint` is the agent's own
+  # prompt-completion detail and nothing here renders it yet.
+  defp commands_event(update, raw) do
+    commands =
+      update
+      |> list_field("availableCommands", "available_commands")
+      |> Enum.take(@max_commands)
+      |> Enum.flat_map(&command_entry/1)
+
+    event(:provider_event, %{"kind" => "available_commands", "commands" => commands}, raw)
+  end
+
+  defp command_entry(%{"name" => name} = command) when is_binary(name),
+    do: [%{"name" => label(name), "description" => label(command["description"])}]
+
+  defp command_entry(_command), do: []
+
+  # The schema calls this `currentModeId`; the session-modes guide's example writes
+  # `modeId`. Read either rather than pick a side, and fall back to the catch-all when
+  # neither is there, so an unrecognised shape stays visible as raw.
+  defp mode_events(update, raw) do
+    case first_binary([
+           update["currentModeId"],
+           update["current_mode_id"],
+           update["modeId"],
+           update["mode_id"]
+         ]) do
+      nil -> []
+      id -> [event(:provider_event, %{"kind" => "mode", "mode" => label(id)}, raw)]
+    end
+  end
+
+  defp modes_payload(modes) when is_map(modes) do
+    current = first_binary([modes["currentModeId"], modes["current_mode_id"]])
+
+    available =
+      modes
+      |> list_field("availableModes", "available_modes")
+      |> Enum.take(@max_modes)
+      |> Enum.flat_map(&mode_entry/1)
+
+    if is_nil(current) and available == [],
+      do: nil,
+      else: %{"kind" => "modes", "mode" => current, "modes" => available}
+  end
+
+  defp modes_payload(_modes), do: nil
+
+  defp mode_entry(%{"id" => id} = mode) when is_binary(id),
+    do: [
+      %{
+        "id" => label(id),
+        "name" => label(mode["name"]),
+        "description" => label(mode["description"])
+      }
+    ]
+
+  defp mode_entry(_mode), do: []
+
+  defp list_field(map, camel, snake) when is_map(map) do
+    case Map.get(map, camel) || Map.get(map, snake) do
+      list when is_list(list) -> list
+      _other -> []
+    end
+  end
+
+  defp list_field(_map, _camel, _snake), do: []
+
+  defp first_binary(values), do: Enum.find(values, &(is_binary(&1) and &1 != ""))
+
+  defp label(text) when is_binary(text), do: String.slice(text, 0, @max_label_chars)
+  defp label(_other), do: ""
 
   defp text_event(type, update, raw) do
     content = update["content"] || %{}
