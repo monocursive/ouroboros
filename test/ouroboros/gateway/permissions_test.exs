@@ -138,9 +138,18 @@ defmodule Ouroboros.Gateway.PermissionsTest do
                "workspace" => "/tmp/some-workspace"
              })
 
-    assert rule.workspace == "/tmp/some-workspace"
+    # Stored under the canonical root, which is what the scopes table promises and what a
+    # request's own root is resolved to before the two are compared. On a host where
+    # `/tmp` is a symlink these are two strings for one directory, and a rule written
+    # under the unresolved one would never apply to anything.
+    {:ok, canonical} = Ouroboros.Control.Permissions.Paths.canonicalize("/tmp/some-workspace")
+    assert rule.workspace == canonical
 
+    # The filter resolves the same way, so an operator naming the directory as they typed
+    # it finds the rule they just wrote.
     assert {:ok, [^rule]} =
              Methods.invoke("permissions.list", %{"workspace" => "/tmp/some-workspace"})
+
+    assert {:ok, [^rule]} = Methods.invoke("permissions.list", %{"workspace" => canonical})
   end
 end

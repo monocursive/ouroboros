@@ -123,6 +123,11 @@ defmodule Ouroboros.Gateway.Methods do
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
   @approval_prompt_timeout 15 * 60 * 1_000
 
+  # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
+  # A ceiling below the runner's would kill the gateway task while the command kept
+  # running, and the entry it started would be settled by nobody.
+  @shell_timeout 10 * 60 * 1_000
+
   # D9. A compaction that has to summarise makes one model call on the session's own
   # model with no tools. That is provider latency, not control-plane latency, so it gets
   # a ceiling of its own — well above the default and well below a start's.
@@ -251,6 +256,11 @@ defmodule Ouroboros.Gateway.Methods do
     # starts nothing, so it sits with the other reads. `handoff` starts a session, so it
     # inherits `interactive.start`'s ceiling and its outcome admission.
     "interactive.compact" => %{scope: :operate, timeout: @compaction_timeout},
+    # B7. The operator's own shell, in the session's admitted workspace, on its owner
+    # node. `:operate` and nothing less: it runs a command. The ceiling is the runner's
+    # own — ten minutes — because the gateway killing the task would leave a ledger entry
+    # nobody settles, and `Exec` already stops the command at the same number.
+    "workspace.exec" => %{scope: :operate, timeout: @shell_timeout, outcome: :unknown},
     "interactive.handoff" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     # C2. The one method whose latency is a person's: it asks the session's owner for a
@@ -872,6 +882,22 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("interactive.context", params) do
     with_session(params, :interactive, ["id", "node"], fn session ->
       safe(fn -> reply(InteractiveSession.context(session)) end)
+    end)
+  end
+
+  # B7. The one verb here that runs a command. Everything that decides whether it may —
+  # the session's approval mode, the permission engine, the ledger entry that has to
+  # exist first — is the coordinator's, so this is only the parameter contract and the
+  # routing. A refusal comes back as `["shell_refused", {reason, suggested_rule, …}]`.
+  def invoke("workspace.exec", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "command", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, command} <- fetch_string(params, "command") do
+        reply(InteractiveSession.exec(session, command))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
     end)
   end
 

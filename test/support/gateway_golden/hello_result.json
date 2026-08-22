@@ -71,7 +71,8 @@
       "teams.state",
       "upgrade.history",
       "upgrade.rollouts",
-      "upgrade.status"
+      "upgrade.status",
+      "workspace.exec"
     ],
     "node": "ouroboros@golden",
     "protocol": 1,

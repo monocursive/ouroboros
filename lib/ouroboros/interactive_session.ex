@@ -8,6 +8,7 @@ defmodule Ouroboros.InteractiveSession do
   """
 
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
+  alias Ouroboros.Workspace.Exec
 
   @type session :: Ref.t() | String.t()
 
@@ -280,6 +281,73 @@ defmodule Ouroboros.InteractiveSession do
 
       {:error, reason} ->
         {:error, {failure_tag, reason}}
+    end
+  end
+
+  @doc """
+  Runs one command in this session's admitted workspace, on its owner node (B7).
+
+  The operator's own act, not a tool: no model asks for it, no provider is told about it,
+  and it is permitted only where the session is already at `approval_mode: :auto_approve`
+  or `Ouroboros.Control.Permissions` answers `{:allow, _}` for `tool: "bash"` with that
+  command under this session's principal. Anything else — including a rule store that
+  could not be read — is `{:shell_refused, %{reason, suggested_rule, …}}` naming the rule
+  that would have worked.
+
+  Recorded in `Ouroboros.Agent.EffectLedger` as an `:operator_shell` effect *before* it
+  runs and settled after, carrying the command's digest and working directory and never
+  its text. The transcript gains a runtime-native `provider_event` so the conversation
+  shows what happened, and the next turn's `<ouroboros-runtime>` envelope carries the
+  last three commands' excerpts.
+
+  The command runs in the *caller's* process on the owner node rather than inside the
+  session coordinator, because a coordinator held for ten minutes would answer nothing
+  else in that time.
+  """
+  @spec exec(session(), String.t()) :: {:ok, map()} | {:error, term()}
+  def exec(session, command) do
+    with {:ok, id, owner} <- session_identity(session) do
+      if owner == node() do
+        local_exec(id, command)
+      else
+        route(
+          owner,
+          __MODULE__,
+          :local_exec,
+          [id, command],
+          transport_timeout(Exec.timeout_ms())
+        )
+      end
+    end
+  end
+
+  @doc false
+  def local_exec(id, command) do
+    with :ok <- validate_id(id),
+         {:ok, pid} <- ensure_coordinator(id),
+         {:ok, plan} <- safe_call(pid, {:exec_plan, command}, call_timeout()) do
+      outcome = run_planned_command(command, plan)
+
+      # The settlement is told to the coordinator whatever happened, including a command
+      # this runtime could not start: an entry left `:started` would become `:ambiguous`
+      # on the next boot, which is the honest answer for a crash and a misleading one
+      # here.
+      _ = safe_call(pid, {:exec_settled, plan.effect_id, outcome}, call_timeout())
+
+      case outcome do
+        %{error: reason} -> {:error, {:shell_failed, reason}}
+        result -> {:ok, Map.put(result, :effect_id, plan.effect_id)}
+      end
+    end
+  end
+
+  defp run_planned_command(command, plan) do
+    case Exec.run(command, plan.cwd,
+           timeout_ms: plan.timeout_ms,
+           spill_dir: plan.spill_dir
+         ) do
+      {:ok, result} -> result
+      {:error, reason} -> %{error: reason}
     end
   end
 

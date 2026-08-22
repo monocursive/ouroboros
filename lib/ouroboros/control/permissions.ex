@@ -71,7 +71,7 @@ defmodule Ouroboros.Control.Permissions do
   require Logger
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.Control.Permissions.{Pattern, Request, Rule, Rules, Shell}
+  alias Ouroboros.Control.Permissions.{Paths, Pattern, Request, Rule, Rules, Shell}
 
   @store_key {:ouroboros, :control_permissions, 1}
   @checkpoint_version 1
@@ -609,8 +609,15 @@ defmodule Ouroboros.Control.Permissions do
 
   defp filter_workspace(nil), do: {:ok, nil}
 
-  defp filter_workspace(workspace) when is_binary(workspace) and workspace != "",
-    do: {:ok, workspace}
+  # Canonicalised for the same reason `Rule` canonicalises what it stores: the rules are
+  # keyed by canonical root, so a filter naming the same directory by a symlinked path
+  # would answer "no rules here" about a directory that has some.
+  defp filter_workspace(workspace) when is_binary(workspace) and workspace != "" do
+    case Paths.canonicalize(workspace, nil) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:ok, workspace}
+    end
+  end
 
   defp filter_workspace(other), do: {:error, {:invalid_workspace, other}}
 

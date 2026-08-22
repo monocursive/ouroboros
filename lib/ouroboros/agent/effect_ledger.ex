@@ -47,7 +47,12 @@ defmodule Ouroboros.Agent.EffectLedger do
     # A permission decision names the tool and the shape of the call, never the call.
     # `fingerprint` is a digest of the command line, paths, and domains; the text of any
     # of them is exactly the content this ledger exists to keep out.
-    permission: [:tool, :mode, :provider, :fingerprint]
+    permission: [:tool, :mode, :provider, :fingerprint],
+    # B7. A command an operator ran in a session's workspace, recorded before it runs.
+    # `command_digest` is a digest of the command line and `cwd` is the directory it ran
+    # in; the command text is exactly the content this ledger exists to keep out, and a
+    # `cd` a reader cannot see is worth less than a command they could replay.
+    operator_shell: [:session_id, :command_digest, :cwd, :node, :rule_id]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -56,14 +61,19 @@ defmodule Ouroboros.Agent.EffectLedger do
     delegate: [:team, :worker_id, :delegation_id, :status, :delivery],
     forge: [:artifact_id, :module, :epoch, :signer, :source_sha256, :nodes],
     deploy: [:artifact_id, :module, :epoch, :nodes, :state],
-    permission: [:decision, :scope, :actor, :rule_id]
+    permission: [:decision, :scope, :actor, :rule_id],
+    operator_shell: [:exit_status, :duration_ms, :output_bytes, :spilled, :timed_out]
   }
 
   # Effect kinds this ledger records that are not grant-gated agent effects. A permission
   # decision is not something an agent asks for; it is what `Ouroboros.Control.Permissions`
   # answered on a session's behalf, and it belongs in the same durable history for the
   # same reason — an approval nobody can account for later did not happen (I1).
-  @ledger_only_effects [:permission]
+  # `:operator_shell` is here for the same reason and one more: it is the only effect in
+  # this ledger a *person* asked for directly rather than an agent, and the whole claim
+  # `workspace.exec` makes — that a command run through the runtime is accountable
+  # afterwards — is this entry existing before the command did.
+  @ledger_only_effects [:permission, :operator_shell]
 
   defmodule Entry do
     @moduledoc "One durable, content-minimized agent-effect attempt and its outcome."
