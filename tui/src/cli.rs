@@ -124,6 +124,15 @@ pub enum Command {
     /// Stop the runtime this client started.
     Stop,
 
+    /// Print the durable effect ledger: what an agent was allowed to do, and what came
+    /// of it.
+    ///
+    /// Reads a runtime that is already running; it never starts one, because a query is
+    /// not a reason to bring a machine up. `--fleet` asks every connected core node
+    /// instead of this one and names any that did not answer, on stderr, so `--json` stays
+    /// a clean stream for a pipe.
+    Ledger(LedgerArgs),
+
     /// Create, join, and diagnose a secure group of Ouroboros machines.
     Fleet {
         #[command(subcommand)]
@@ -175,6 +184,35 @@ pub enum Command {
 
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+}
+
+/// `ouro ledger`'s flags. Sequences are minted per node, so `--since` is per node too.
+#[derive(Debug, Args)]
+pub struct LedgerArgs {
+    /// Ask every connected core node rather than only this one.
+    #[arg(long)]
+    pub fleet: bool,
+
+    /// Only effects after this sequence number.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub since: u64,
+
+    /// One JSON object per entry on stdout instead of a table. Nodes that did not answer
+    /// go to stderr either way.
+    #[arg(long)]
+    pub json: bool,
+
+    /// How many entries at most. The runtime bounds this as well, and its bound wins.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u64>,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
 }
 
 /// The vendor hook events this build answers. One so far.

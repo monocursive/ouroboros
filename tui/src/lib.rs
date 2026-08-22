@@ -14,6 +14,7 @@ pub mod fleet;
 pub mod fleet_add;
 pub mod hook;
 pub mod keymap;
+pub mod ledger_cli;
 pub mod mcp_serve;
 pub mod model;
 pub mod proto;

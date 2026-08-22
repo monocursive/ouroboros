@@ -73,6 +73,7 @@ defmodule Ouroboros.Gateway.Methods do
   and the golden fixtures pin the shape.
   """
 
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.CodeIntel
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskRef
@@ -115,6 +116,10 @@ defmodule Ouroboros.Gateway.Methods do
   @code_intel_request_timeout_ms 8_000
   @code_intel_max_wait_ms 10_000
   @code_intel_erpc_timeout 14_000
+
+  # Where `ledger.export`'s hash chain starts. A fixed, published seed rather than a random
+  # one: the point of the chain is that a client can recompute it from the answer alone.
+  @chain_seed String.duplicate("0", 64)
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -227,6 +232,9 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime.lsp.status" => %{scope: :read, timeout: @default_timeout},
     "code_intel.request" => %{scope: :read, timeout: @default_timeout},
     "code_intel.diagnostics" => %{scope: :read, timeout: @default_timeout},
+    "ledger.list" => %{scope: :read, timeout: @default_timeout},
+    "ledger.get" => %{scope: :read, timeout: @default_timeout},
+    "ledger.export" => %{scope: :read, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
@@ -799,6 +807,55 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, action} <- code_intel_action(params),
          {:ok, target} <- permissions_node(params) do
       code_intel_call(target, :touch_with_baseline, [path, action, code_intel_opts(workspace)])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # I1/I3 — the effect ledger on the wire, and across the fleet
+  # ---------------------------------------------------------------------------
+
+  def invoke("ledger.list", params) do
+    with :ok <-
+           only_keys(params, [
+             "principal",
+             "effect",
+             "status",
+             "since_sequence",
+             "order",
+             "limit",
+             "node",
+             "fleet"
+           ]),
+         {:ok, filters} <- ledger_filters(params),
+         {:ok, fleet?} <- ledger_fleet(params),
+         {:ok, target} <- permissions_node(params) do
+      if fleet? do
+        ledger_fleet_list(filters)
+      else
+        ledger_local_list(target, filters)
+      end
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("ledger.get", params) do
+    with :ok <- only_keys(params, ["id", "node"]),
+         {:ok, id} <- fetch_string(params, "id"),
+         {:ok, target} <- permissions_node(params) do
+      ledger_call(target, :get, [id])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("ledger.export", params) do
+    with :ok <- only_keys(params, ["since", "node"]),
+         {:ok, since} <- ledger_since(params),
+         {:ok, target} <- permissions_node(params) do
+      ledger_export(target, since)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1909,6 +1966,260 @@ defmodule Ouroboros.Gateway.Methods do
         {:invalid, "params.wait_ms must be an integer between 0 and #{@code_intel_max_wait_ms}"}
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # The effect ledger (I1/I3)
+  # ---------------------------------------------------------------------------
+
+  defp ledger_call(target, function, arguments) do
+    safe(fn ->
+      if target == node() do
+        reply(apply(EffectLedger, function, arguments))
+      else
+        reply(:erpc.call(target, EffectLedger, function, arguments, @fleet_query_timeout))
+      end
+    end)
+  end
+
+  defp ledger_local_list(target, filters) do
+    case ledger_query(target, filters) do
+      {:ok, entries} ->
+        {:ok, %{entries: entries, nodes: [%{node: target, status: :ok}]}}
+
+      {:error, reason} ->
+        {:ok,
+         %{
+           entries: [],
+           nodes: [%{node: target, status: :unavailable, reason: Wire.to_json(reason)}]
+         }}
+    end
+  end
+
+  # I3. "Survives machine moves" is only true if every owner is asked, so this asks every
+  # connected core node and says which ones did not answer instead of returning a shorter
+  # list that looks complete. Sequences are minted per node, so there is no cross-node
+  # total order to merge into: entries are ordered by `{node, sequence}` and the node is
+  # part of every row.
+  defp ledger_fleet_list(filters) do
+    targets = Cluster.fleet_status() |> fleet_session_targets() |> ensure_local_target()
+
+    results =
+      targets
+      |> Task.async_stream(&{&1, ledger_query(&1, filters)},
+        max_concurrency: max(length(targets), 1),
+        ordered: true,
+        timeout: @fleet_query_timeout + 1_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.zip(targets)
+      |> Enum.map(fn
+        {{:ok, {target, {:ok, entries}}}, _target} ->
+          {%{node: target, status: :ok}, entries}
+
+        {{:ok, {target, {:error, reason}}}, _target} ->
+          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
+
+        {{:exit, reason}, target} ->
+          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
+      end)
+
+    entries =
+      results
+      |> Enum.flat_map(fn {%{node: target}, entries} ->
+        Enum.map(entries, &{Atom.to_string(target), &1})
+      end)
+      |> Enum.sort_by(fn {name, entry} -> {name, -entry.sequence} end)
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.take(filters[:limit])
+
+    {:ok, %{entries: entries, nodes: Enum.map(results, &elem(&1, 0))}}
+  end
+
+  defp ensure_local_target([]), do: [node()]
+
+  defp ensure_local_target(targets) do
+    if node() in targets, do: targets, else: [node() | targets]
+  end
+
+  # Exceptions and exits become data here for the same reason `fleet_session_query/2` does
+  # it: a dead remote ledger must not link-exit the gateway task that is trying to report
+  # honestly that it is dead.
+  defp ledger_query(target, filters) do
+    result =
+      if target == node() do
+        EffectLedger.list(filters)
+      else
+        :erpc.call(target, EffectLedger, :list, [filters], @fleet_query_timeout)
+      end
+
+    case result do
+      {:ok, entries} when is_list(entries) -> {:ok, entries}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_reply, other}}
+    end
+  rescue
+    error -> {:error, {:exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp ledger_filters(params) do
+    with {:ok, principal} <- fetch_optional_string(params, "principal"),
+         {:ok, effect} <- ledger_effect(params),
+         {:ok, status} <- ledger_status(params),
+         {:ok, since} <- ledger_since_sequence(params),
+         {:ok, order} <- ledger_order(params),
+         {:ok, limit} <- ledger_limit(params) do
+      {:ok,
+       [
+         principal: principal,
+         effect: effect,
+         status: status,
+         since_sequence: since,
+         order: order,
+         limit: limit
+       ]
+       |> Enum.reject(fn {key, value} ->
+         is_nil(value) and key in [:principal, :effect, :status]
+       end)}
+    end
+  end
+
+  defp ledger_effect(params), do: ledger_atom(params, "effect", EffectLedger.effects())
+  defp ledger_status(params), do: ledger_atom(params, "status", EffectLedger.statuses())
+
+  # Matched by string against terms that already exist, never converted. Same rule the
+  # provider and node parameters follow.
+  defp ledger_atom(params, key, allowed) do
+    case Map.get(params, key) do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        case Enum.find(allowed, &(Atom.to_string(&1) == value)) do
+          nil -> {:invalid, ledger_atom_message(key, allowed)}
+          term -> {:ok, term}
+        end
+
+      _other ->
+        {:invalid, ledger_atom_message(key, allowed)}
+    end
+  end
+
+  defp ledger_atom_message(key, allowed) do
+    "params.#{key} must be one of " <>
+      (allowed |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))
+  end
+
+  defp ledger_since_sequence(params) do
+    case Map.get(params, "since_sequence", 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.since_sequence must be a non-negative integer"}
+    end
+  end
+
+  defp ledger_since(params) do
+    case Map.get(params, "since", 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.since must be a non-negative integer"}
+    end
+  end
+
+  defp ledger_order(params) do
+    case Map.get(params, "order", "desc") do
+      "desc" -> {:ok, :desc}
+      "asc" -> {:ok, :asc}
+      _other -> {:invalid, "params.order must be asc or desc"}
+    end
+  end
+
+  defp ledger_limit(params) do
+    limits = EffectLedger.query_limits()
+
+    case Map.get(params, "limit", limits.default) do
+      value when is_integer(value) and value >= 1 and value <= limits.max ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.limit must be an integer between 1 and #{limits.max}"}
+    end
+  end
+
+  defp ledger_fleet(params) do
+    case Map.get(params, "fleet", false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:invalid, "params.fleet must be a boolean"}
+    end
+  end
+
+  # I1's JSONL export. Each line is the exact text whose bytes the hash covers, so a client
+  # verifies the chain by hashing what it was given rather than by agreeing with this
+  # runtime about how to canonicalise a JSON object. The chain is computed for this answer
+  # and is not stored anywhere: it makes an export self-verifying, which is a different and
+  # much smaller claim than tamper-proof storage.
+  defp ledger_export(target, since) do
+    limits = EffectLedger.query_limits()
+    filters = [since_sequence: since, order: :asc, limit: limits.max]
+
+    case ledger_query(target, filters) do
+      {:ok, entries} ->
+        {:ok,
+         entries
+         |> chain()
+         |> Map.merge(%{node: target, format: "jsonl", limit: limits.max, since: since})}
+
+      {:error, reason} ->
+        unavailable("the effect ledger on #{target} did not answer: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  The hash chain over an ordered run of ledger entries, as `ledger.export` answers it.
+
+  Each line is the exact text whose bytes its hash covers:
+  `hash(n) = sha256(hash(n-1) || line(n))`, with `hash(-1)` the published seed and every
+  hash the lowercase hex of 32 bytes. A client verifies an export by hashing the strings
+  it was handed, in order — no agreement about how to re-encode an entry is needed, which
+  is the only reason the claim is checkable at all.
+
+  Public because the golden fixture is derived through it: a change to the chain has to
+  show up as a fixture diff a reviewer signs off on, not as a silent change to what a
+  client is verifying.
+  """
+  @spec chain([EffectLedger.Entry.t()]) :: map()
+  def chain(entries) when is_list(entries) do
+    {lines, head} =
+      Enum.map_reduce(entries, @chain_seed, fn entry, previous ->
+        line = entry |> Wire.to_json() |> canonical_json()
+        hash = :sha256 |> :crypto.hash([previous, line]) |> Base.encode16(case: :lower)
+
+        {%{sequence: entry.sequence, id: entry.id, line: line, previous: previous, hash: hash},
+         hash}
+      end)
+
+    %{algorithm: "sha256", count: length(lines), seed: @chain_seed, head: head, lines: lines}
+  end
+
+  # Object keys sorted, no whitespace. `JSON.encode!/1` iterates a map in whatever order
+  # the term happens to have, which is stable enough in practice and not a property worth
+  # betting a hash chain on: two exports of the same entry have to produce the same bytes,
+  # on any machine, or the chain a client verifies is a chain over an accident.
+  defp canonical_json(value), do: value |> canonical() |> IO.iodata_to_binary()
+
+  defp canonical(map) when is_map(map) do
+    inner =
+      map
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map(fn {key, value} -> [JSON.encode!(to_string(key)), ?:, canonical(value)] end)
+      |> Enum.intersperse(?,)
+
+    [?{, inner, ?}]
+  end
+
+  defp canonical(list) when is_list(list),
+    do: [?[, list |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
+
+  defp canonical(other), do: JSON.encode!(other)
 
   defp with_replay(params, plane, replay) do
     with :ok <- only_keys(params, ["id", "cursor", "limit", "node"]),

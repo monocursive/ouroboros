@@ -1,0 +1,23 @@
+{
+  "id": 11,
+  "jsonrpc": "2.0",
+  "result": {
+    "algorithm": "sha256",
+    "count": 1,
+    "format": "jsonl",
+    "head": "1835d5da8b1defb2b0dace1880fd4129bb7c1a342ad63aae06f0846e49f27a85",
+    "limit": 500,
+    "lines": [
+      {
+        "hash": "1835d5da8b1defb2b0dace1880fd4129bb7c1a342ad63aae06f0846e49f27a85",
+        "id": "effect-000000000000000000001",
+        "line": "{\"_struct\":\"Ouroboros.Agent.EffectLedger.Entry\",\"attempt\":{\"fingerprint\":{\"bytes\":42,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"mode\":\"prompt\",\"provider\":\"claude_code\",\"tool\":\"Bash\"},\"authority\":{\"decision\":\"allow\",\"reason\":\"rule\"},\"cause\":{\"signal_id\":\"sig-0000000000000000000001\"},\"claimed_from\":null,\"effect\":\"permission\",\"error\":null,\"id\":\"effect-000000000000000000001\",\"origin_node\":\"ouroboros@golden\",\"principal\":\"session:session-0000000000000000000001\",\"result\":{\"actor\":\"human\",\"decision\":\"allow\",\"rule_id\":null,\"scope\":\"once\"},\"sequence\":12,\"settled_at\":\"2026-01-01T00:00:00.000000Z\",\"started_at\":\"2026-01-01T00:00:00.000000Z\",\"started_sequence\":11,\"status\":\"ok\"}",
+        "previous": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sequence": 12
+      }
+    ],
+    "node": "ouroboros@golden",
+    "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+    "since": 0
+  }
+}

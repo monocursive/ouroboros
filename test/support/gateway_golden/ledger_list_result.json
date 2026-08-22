@@ -1,0 +1,57 @@
+{
+  "id": 10,
+  "jsonrpc": "2.0",
+  "result": {
+    "entries": [
+      {
+        "_struct": "Ouroboros.Agent.EffectLedger.Entry",
+        "attempt": {
+          "fingerprint": {
+            "bytes": 42,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "mode": "prompt",
+          "provider": "claude_code",
+          "tool": "Bash"
+        },
+        "authority": {
+          "decision": "allow",
+          "reason": "rule"
+        },
+        "cause": {
+          "signal_id": "sig-0000000000000000000001"
+        },
+        "claimed_from": null,
+        "effect": "permission",
+        "error": null,
+        "id": "effect-000000000000000000001",
+        "origin_node": "ouroboros@golden",
+        "principal": "session:session-0000000000000000000001",
+        "result": {
+          "actor": "human",
+          "decision": "allow",
+          "rule_id": null,
+          "scope": "once"
+        },
+        "sequence": 12,
+        "settled_at": "2026-01-01T00:00:00.000000Z",
+        "started_at": "2026-01-01T00:00:00.000000Z",
+        "started_sequence": 11,
+        "status": "ok"
+      }
+    ],
+    "nodes": [
+      {
+        "node": "ouroboros@golden",
+        "status": "ok"
+      },
+      {
+        "node": "ouroboros@offline",
+        "reason": {
+          "erpc": "noconnection"
+        },
+        "status": "unavailable"
+      }
+    ]
+  }
+}
