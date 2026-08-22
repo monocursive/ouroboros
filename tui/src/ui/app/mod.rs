@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::TryRngCore;
 use serde_json::{json, Value};
 
-use crate::config::{Backtrack, Config, Defaults};
+use crate::config::{Backtrack, Config, Defaults, ONBOARDING_PROMPTS};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
@@ -768,6 +768,9 @@ pub struct App {
     open_url_pending: Option<String>,
     /// Tick at which a pending Ctrl+X leader chord expires.
     pub leader_until: Option<u64>,
+    /// How far the `?` panel is scrolled. Reset when it opens: a help panel that
+    /// remembered where the last reader left it would open on the middle of a table.
+    pub help_scroll: usize,
     /// The armed first half of an `Esc Esc`, and the session it was pressed in.
     ///
     /// The session travels with the arm because the first Escape may have *left* it: on an
@@ -914,6 +917,7 @@ impl App {
             pending_background_start: None,
             open_url_pending: None,
             leader_until: None,
+            help_scroll: 0,
             backtrack_arm: None,
             ctrl_c_until: None,
             copy_pending: None,
@@ -1056,6 +1060,25 @@ impl App {
             Some((settling, _since)) if *settling == key => {}
             _changed => self.statusline.settling = Some((key, self.ticks)),
         }
+    }
+
+    /// Counts one sent prompt, until the onboarding threshold (B9).
+    ///
+    /// Written quietly: the marker is a side effect of something else being done, and the
+    /// notice row belongs to whatever the operator actually asked for.
+    pub(super) fn count_prompt(&mut self) {
+        if self.config.onboarding.prompts_sent >= ONBOARDING_PROMPTS {
+            return;
+        }
+
+        self.config.onboarding.prompts_sent += 1;
+        self.save_pending = true;
+        self.save_quiet = true;
+    }
+
+    /// Whether this operator is still new enough to be pointed at the keys.
+    pub fn onboarding(&self) -> bool {
+        self.config.onboarding.prompts_sent < ONBOARDING_PROMPTS
     }
 
     /// Keeps the `/` completion list to the verbs the open session can honour.

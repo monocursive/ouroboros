@@ -201,6 +201,21 @@ fn footer(screen: &Screen) -> String {
 fn the_footer_snapshot_at_three_widths() {
     let mut app = opened("idle", options(native_capabilities()), usage(), Vec::new());
 
+    // B9. This operator has sent no prompts, so the row carries the "new here" pointer at
+    // `?` — and it outranks the leader and quit hints, which are also on `?` and in the
+    // palette. Three prompts in, the row is the one below.
+    assert_eq!(
+        columns(&footer(&render(&mut app, 160, 24))),
+        (
+            "● LIVE · OWN RUNTIME · operate · 127.0.0.1:4560 · gpt-5-codex · ⏵⏵ auto-edit · \
+             workspace-write · 42.5k tokens · $0.42"
+                .to_string(),
+            "ctrl+p commands · ? new here".to_string()
+        )
+    );
+
+    app.config.onboarding.prompts_sent = 3;
+
     assert_eq!(
         columns(&footer(&render(&mut app, 160, 24))),
         (

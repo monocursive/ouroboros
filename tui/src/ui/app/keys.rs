@@ -111,7 +111,7 @@ impl App {
         }
 
         if matches!(key.code, KeyCode::Char('?')) && !shift && self.focused_prompt_empty() {
-            self.overlay = Some(Overlay::Help);
+            self.open_help();
             return;
         }
 
@@ -157,7 +157,7 @@ impl App {
                 self.select_tab(Tab::ALL[index]);
             }
             KeyCode::Char('q') => self.open_quit(),
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
@@ -244,7 +244,7 @@ impl App {
             KeyCode::Char('x') => self.open_close_confirm(),
             KeyCode::Char('o') | KeyCode::Char('d') => self.toggle_session_details(),
             KeyCode::Char('q') => self.open_quit(),
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('?') => self.open_help(),
             KeyCode::Char(',') => self.open_settings(),
             _ => self.inform(
                 "ctrl+x n new · w write · l sessions · e editor · y copy · [ scrollback · \

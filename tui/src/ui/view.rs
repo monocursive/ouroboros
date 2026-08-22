@@ -629,6 +629,18 @@ fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     }
 
     keys.push(Segment::key("ctrl+p commands"));
+
+    // B9. Until three prompts have been sent, the row points at the page that explains
+    // the rest of it. Ranked lowest of everything so it is the first thing a narrow
+    // terminal drops: a hint is worth having and never worth a fact.
+    if app.onboarding() {
+        keys.push(Segment::new(
+            "? new here",
+            Style::default().fg(theme::ACCENT),
+            1,
+        ));
+    }
+
     // Discoverable through `ctrl+p` and `?`; the first to yield when the row is tight.
     keys.push(Segment::new(
         "ctrl+x leader",
@@ -2352,52 +2364,121 @@ fn backtrack(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-const KEYS: &[(&str, &str)] = &[
+/// The key map the `?` panel is generated from, grouped by the question someone is asking
+/// when they open it (B9).
+///
+/// Four groups, in the order a session is lived: what you are typing into, what you do
+/// while the agent is working, what you do to the session, and what belongs to the runtime
+/// around it. A flat list of twenty-five chords is a list nobody reads twice.
+const KEYS: &[(&str, &str, &str)] = &[
     (
+        "composing",
         "enter",
         "send, or queue a follow-up while the agent is busy",
     ),
     (
+        "composing",
+        "alt+enter",
+        "steer the running turn, where the transport can be steered",
+    ),
+    (
+        "composing",
         "ctrl+j",
         "newline (shift+enter where the terminal reports it)",
     ),
-    ("esc", "abort the running turn; empty prompt returns home"),
     (
+        "composing",
+        "@ path",
+        "completes a workspace file, and attaches it to the turn",
+    ),
+    (
+        "composing",
+        "ctrl+v",
+        "pastes a clipboard image as an attachment; text pastes as text",
+    ),
+    (
+        "composing",
+        "backspace",
+        "on an empty draft, removes the newest attachment",
+    ),
+    (
+        "composing",
+        "\u{2191} / \u{2193}",
+        "takes a queued draft back, then walks prompt history",
+    ),
+    (
+        "composing",
+        "ctrl+w/k/u",
+        "kill word, to line end, to line start",
+    ),
+    ("composing", "alt+b / alt+f", "move by word"),
+    (
+        "composing",
+        "ctrl+g",
+        "edit the prompt in $VISUAL or $EDITOR",
+    ),
+    (
+        "while the agent works",
+        "esc",
+        "interrupt the turn; the queue is kept",
+    ),
+    (
+        "while the agent works",
+        "esc esc",
+        "go back to an earlier message ([keys] backtrack rebinds it)",
+    ),
+    (
+        "while the agent works",
         "ctrl+c",
         "clear the prompt; empty + running interrupts; twice quits",
     ),
-    ("ctrl+p", "command palette"),
     (
-        "ctrl+x",
-        "leader: n new · l sessions · d details · x end · e editor · y copy · q quit",
-    ),
-    (
-        "ctrl+x [ / v",
-        "this transcript into native scrollback / into $EDITOR",
-    ),
-    ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
-    (
+        "while the agent works",
         "ctrl+o",
         "expand, and collapse again, every cell in the conversation",
     ),
     (
+        "while the agent works",
         "ctrl+t",
         "plan and tasks panel, while a provider publishes one",
     ),
-    ("ctrl+q", "quit dialog"),
-    ("? / ,", "this page / settings, when the prompt is empty"),
     (
+        "session",
+        "/model /effort",
+        "the model, and reasoning effort for the next turn only",
+    ),
+    (
+        "session",
+        "/fork",
+        "branch this session, where the runtime serves it",
+    ),
+    (
+        "session",
+        "ctrl+x [ / v",
+        "this transcript into native scrollback / into $EDITOR",
+    ),
+    (
+        "session",
+        "ctrl+x",
+        "leader: n new \u{b7} l sessions \u{b7} d details \u{b7} x end \u{b7} y copy \u{b7} q quit",
+    ),
+    (
+        "session",
+        "1-7 / Tab",
+        "runtime tabs when the prompt is not focused",
+    ),
+    ("runtime", "ctrl+p", "command palette"),
+    ("runtime", "ctrl+q", "quit dialog"),
+    (
+        "runtime",
+        "? / ,",
+        "this page / settings, when the prompt is empty",
+    ),
+    (
+        "runtime",
         "wheel",
-        "scrolls; shift/ctrl+↑↓, pageup/down; config mouse = false frees it",
+        "scrolls; shift/ctrl+\u{2191}\u{2193}, pageup/down; config mouse = false frees it",
     ),
-    ("↑ / ↓", "prompt history (or a line in a multiline draft)"),
-    ("ctrl+w/k/u", "kill word, to line end, to line start"),
-    ("alt+b / alt+f", "move by word"),
-    (
-        "/ commands",
-        "type / for completions — every verb the editor offers",
-    ),
-    ("1-7 / Tab", "runtime tabs when the prompt is not focused"),
 ];
 
 fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
@@ -2441,11 +2522,13 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = help_lines(app);
+    let (rows, limits) = help_sections(app);
 
-    // Sized from the built rows, because the derived command block grows with the
-    // editor's verb table and a fixed budget would push the honest limits off-screen.
-    let popup = centered(area, 84, (lines.len() as u16 + 2).min(area.height));
+    // The panel never reaches the last row: the notice line lives there, and a help panel
+    // that covered it would hide the sentence explaining why a key did nothing.
+    let wanted = (rows.len() + limits.len()) as u16 + 2;
+    let ceiling = area.height.saturating_sub(2).max(6);
+    let popup = centered(area, 84, wanted.min(ceiling));
 
     frame.render_widget(Clear, popup);
 
@@ -2456,63 +2539,100 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // The limits are pinned rather than scrolled. They are the part of this panel that
+    // stops it being a brochure, and a reader who never pressed a key would not see them.
+    let split = Layout::vertical([Constraint::Min(1), Constraint::Length(limits.len() as u16)])
+        .split(inner);
+
+    let height = split[0].height as usize;
+    let hidden = rows.len().saturating_sub(height);
+    let scroll = app.help_scroll.min(hidden);
+
+    let mut visible = rows[scroll..].to_vec();
+
+    if hidden > 0 {
+        // The last visible row says there is more, because a panel that silently ends is
+        // one whose remaining half nobody finds (R1 4d(8)).
+        let marker = Line::from(Span::styled(
+            format!(
+                "\u{2191}\u{2193} scrolls \u{b7} {} more row{}",
+                hidden - scroll,
+                if hidden - scroll == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(theme::ACCENT),
+        ));
+
+        if hidden > scroll && visible.len() >= height && height > 0 {
+            visible[height - 1] = marker;
+        }
+    }
+
+    frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), split[0]);
+    frame.render_widget(Paragraph::new(limits).wrap(Wrap { trim: false }), split[1]);
 }
 
-/// Every row of the help overlay, honest limits included.
-fn help_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = KEYS
-        .iter()
-        .map(|(key, description)| {
-            Line::from(vec![
-                Span::styled(format!("{key:<14}"), Style::default().fg(theme::ACCENT)),
-                Span::raw(*description),
-            ])
-        })
-        .collect();
+/// The help panel, split into the part that scrolls and the part that never does.
+fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let mut rows: Vec<Line> = Vec::new();
+    let mut group = "";
+
+    for (heading, key, description) in KEYS {
+        if *heading != group {
+            group = heading;
+            rows.push(Line::from(Span::styled(
+                heading.to_uppercase(),
+                theme::label(),
+            )));
+        }
+
+        rows.push(Line::from(vec![
+            Span::styled(format!("{key:<15}"), Style::default().fg(theme::ACCENT)),
+            Span::raw(*description),
+        ]));
+    }
 
     // The verb list is derived, never restated: the editor's completion table is the
     // single source of truth, so help cannot advertise what completion does not offer.
+    rows.push(Line::from(Span::styled("COMMANDS", theme::label())));
     let commands: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
-    for (index, chunk) in commands.chunks(8).enumerate() {
-        let label = if index == 0 { "/ commands" } else { "" };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<14}", label), Style::default().fg(theme::ACCENT)),
+    for chunk in commands.chunks(8) {
+        rows.push(Line::from(vec![
+            Span::styled(format!("{:<15}", ""), Style::default().fg(theme::ACCENT)),
             Span::raw(chunk.join("  ")),
         ]));
     }
 
-    lines.push(Line::from(""));
-
     // The honest limits, in the place someone looks when they are confused. Two short
     // lines rather than one long one, so a narrow terminal cannot wrap either of them
     // into something that reads as a different claim.
-    lines.push(Line::from(Span::styled(
-        format!(
-            "one gateway view of the fleet through {}",
-            if app.hello.node.is_empty() {
-                "this runtime".to_string()
-            } else {
-                app.hello.node.clone()
-            }
-        ),
-        Style::default().fg(theme::MUTED),
-    )));
-
-    lines.push(Line::from(Span::styled(
-        "the token authenticates; it is not a sandbox",
-        Style::default().fg(theme::MUTED),
-    )));
+    let mut limits = vec![
+        Line::from(Span::styled(
+            format!(
+                "one gateway view of the fleet through {}",
+                if app.hello.node.is_empty() {
+                    "this runtime".to_string()
+                } else {
+                    app.hello.node.clone()
+                }
+            ),
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(Span::styled(
+            "the token authenticates; it is not a sandbox",
+            Style::default().fg(theme::MUTED),
+        )),
+    ];
 
     if !app.hello.operates() {
-        lines.push(Line::from(Span::styled(
+        limits.push(Line::from(Span::styled(
             "this listener runs at scope `read`: every mutating verb is refused with -32003",
             Style::default().fg(theme::WARN),
         )));
     }
 
-    lines
+    (rows, limits)
 }
+
 /// A popup of `width` percent and an explicit height, clamped to the frame.
 pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     let horizontal = Layout::horizontal([Constraint::Percentage(width_percent)])

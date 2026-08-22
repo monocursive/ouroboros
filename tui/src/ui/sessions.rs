@@ -771,6 +771,26 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines[start..].to_vec()), inner);
 }
 
+/// The three lines a first-time operator needs, on the one screen they always see (B9).
+///
+/// Empty once three prompts have been sent. An undiscoverable power feature is R1 4d(8) —
+/// OpenCode's fork keybind defaulting to `none`, `/compact` that people found months in —
+/// and the fix everyone converged on is to say it where the eyes already are, once.
+fn first_run_tips(app: &App) -> Vec<Line<'static>> {
+    if !app.onboarding() {
+        return Vec::new();
+    }
+
+    [
+        "@ attaches a file from this workspace, / opens the command list",
+        "ctrl+o expands every cell, ctrl+t shows the plan while it works",
+        "esc interrupts the turn and keeps what is queued; ? lists every key",
+    ]
+    .into_iter()
+    .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::ACCENT))))
+    .collect()
+}
+
 fn home(frame: &mut Frame, area: Rect, app: &App) {
     // The home composer has no session and therefore no chips: its height is the editor's.
     let composer_height = COMPOSER_CHROME
@@ -781,7 +801,7 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     let ready = app.home_ready();
     let requested_workspace = app.home_workspace();
 
-    let message = if ready {
+    let mut message: Vec<Line> = if ready {
         vec![
             Line::from(Span::styled(
                 "Ready in this workspace",
@@ -833,6 +853,17 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             )),
         ]
     };
+
+    // B9's tips never cost the logo. On a terminal with room for both they are added; on
+    // one that could show the logo without them they are not; on one too short for the
+    // logo at all they are, because there is nothing left for them to displace.
+    let tips = first_run_tips(app);
+    let logo_without_tips = rows[0].height > logo::HEIGHT + message.len() as u16;
+    let logo_with_tips = rows[0].height > logo::HEIGHT + (message.len() + tips.len()) as u16;
+
+    if logo_with_tips || !logo_without_tips {
+        message.extend(tips);
+    }
 
     if rows[0].height > logo::HEIGHT + message.len() as u16 {
         let vertical = Layout::vertical([

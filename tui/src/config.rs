@@ -321,7 +321,22 @@ pub struct Onboarding {
     /// is a hint nobody reads, and the thing it explains does not change between runs.
     #[serde(default)]
     pub mouse_hint_shown: bool,
+    /// How many prompts this operator has sent, counted only up to the point where the
+    /// "new here?" hint stops (see [`ONBOARDING_PROMPTS`]).
+    ///
+    /// A count rather than a flag because the hint is about *practice*, not about having
+    /// been told: someone who started a session, read the screen, and closed it has not
+    /// yet learned where `@` and `/` are. It stops counting at the threshold so this file
+    /// does not accumulate a running total of the operator's work.
+    #[serde(default)]
+    pub prompts_sent: u32,
 }
+
+/// How many prompts before the coding home's tips and the footer's "new here?" retire.
+///
+/// Three: enough that the keys have been seen in use, few enough that the row is gone
+/// before it becomes furniture.
+pub const ONBOARDING_PROMPTS: u32 = 3;
 
 /// How this client treats the terminal it was started in.
 ///
@@ -739,6 +754,7 @@ mod tests {
             onboarding: Onboarding {
                 welcomed: true,
                 mouse_hint_shown: true,
+                ..Onboarding::default()
             },
             terminal: Terminal { mouse: false },
             ..Config::default()
@@ -996,6 +1012,7 @@ mod tests {
             onboarding: Onboarding {
                 welcomed: true,
                 mouse_hint_shown: false,
+                ..Onboarding::default()
             },
             terminal: Terminal::default(),
             ..Config::default()

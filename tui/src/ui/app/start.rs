@@ -625,6 +625,9 @@ impl App {
                     method,
                     params,
                 ));
+                // The first prompt of a session is a prompt: it is the one that teaches
+                // the most, and it is the one the coding home's tips were beside.
+                self.count_prompt();
             } else {
                 if let Some(composer) = self.sessions.composer.as_mut() {
                     composer.editor.clear_text();

@@ -441,6 +441,12 @@ impl App {
 
     // ----- overlays ------------------------------------------------------------------
 
+    /// `?`, always from the top of the table.
+    pub(super) fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.overlay = Some(Overlay::Help);
+    }
+
     pub(super) fn open_quit(&mut self) {
         let options = match self.mode {
             Mode::Spawned { pid } => vec![
@@ -512,11 +518,20 @@ impl App {
         };
 
         match overlay {
-            Overlay::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
-                    self.overlay = None;
+            Overlay::Help => match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => self.overlay = None,
+                // The table is grouped and it grows; the panel scrolls rather than
+                // silently ending, and the limits at its foot are pinned outside this.
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
                 }
-            }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                _ => {}
+            },
             Overlay::Quit { options, choice } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -800,7 +815,7 @@ impl App {
                 self.open_settings();
             }
             Command::Help => {
-                self.overlay = Some(Overlay::Help);
+                self.open_help();
             }
         }
     }

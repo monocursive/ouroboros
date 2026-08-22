@@ -1115,3 +1115,117 @@ fn the_chord_survives_the_first_esc_leaving_the_session() {
         Some((Plane::Interactive, "session-b3".to_string()))
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// (d) B9 — discoverability
+// ---------------------------------------------------------------------------------------
+
+/// The `?` panel is grouped by the question someone is asking when they open it, and its
+/// honest limits are pinned rather than scrolled off the bottom.
+#[test]
+fn the_help_panel_is_grouped_and_keeps_its_limits_in_view() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    app.sessions.composer = None;
+    app.apply(key(KeyCode::Char('?')));
+
+    let screen = screen(&mut app);
+    let text = screen.text();
+
+    for heading in ["COMPOSING", "WHILE THE AGENT WORKS", "SESSION", "RUNTIME"] {
+        assert!(text.contains(heading), "missing {heading}:\n{text}");
+    }
+
+    assert!(text.contains("one gateway view of the fleet"), "{text}");
+    assert!(text.contains("not a sandbox"), "{text}");
+
+    // The keys this slice added are on it, in the group they belong to.
+    assert!(text.contains("alt+enter"), "{text}");
+    assert!(text.contains("esc esc"), "{text}");
+    assert!(text.contains("ctrl+v"), "{text}");
+}
+
+/// It scrolls rather than silently ending, and it says how much is left.
+#[test]
+fn the_help_panel_scrolls_and_says_there_is_more() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    app.sessions.composer = None;
+    app.apply(key(KeyCode::Char('?')));
+
+    // A short terminal cannot show the whole table.
+    let short = render(&mut app, 120, 20);
+    assert!(short.text().contains("more row"), "{}", short.text());
+    // …and the limits are still there, because they are pinned outside the scroll.
+    assert!(short.text().contains("not a sandbox"), "{}", short.text());
+
+    app.apply(key(KeyCode::Char('j')));
+    assert_eq!(app.help_scroll, 1);
+
+    // Reopening starts at the top rather than where the last reader left it.
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Char('?')));
+    assert_eq!(app.help_scroll, 0);
+}
+
+/// The footer points at that page until three prompts have been sent, and the count
+/// persists.
+#[test]
+fn the_footer_says_new_here_until_three_prompts_have_been_sent() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    assert!(app.onboarding());
+
+    let footer = |app: &mut App| {
+        render(app, 180, 44)
+            .rows
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let row = footer(&mut app);
+    assert!(row.contains("? new here"), "{row}");
+
+    for index in 0..3 {
+        let calls = send(&mut app, &format!("prompt {index}"));
+        let tag = calls
+            .into_iter()
+            .find(|call| {
+                matches!(
+                    call.method.as_str(),
+                    "interactive.send_message" | "interactive.follow_up"
+                )
+            })
+            .expect("a dispatched turn")
+            .tag;
+        answer(&mut app, tag, json!({ "status": "accepted" }));
+    }
+
+    assert_eq!(app.config.onboarding.prompts_sent, 3);
+    assert!(!app.onboarding());
+    assert!(!footer(&mut app).contains("? new here"));
+    assert!(
+        app.take_config_save().is_some(),
+        "the counter is written to config.toml rather than lost with the process"
+    );
+}
+
+/// The coding home names the five keys a first-time operator has no way to guess, and
+/// stops once they have been used.
+#[test]
+fn the_coding_home_carries_three_first_run_tips_until_the_operator_is_no_longer_new() {
+    let mut app = app(full_hello());
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({ "account": { "email": "operator@example.com" }, "requiresOpenaiAuth": true }),
+    );
+    app.config.defaults.provider = Some("codex".into());
+
+    let text = screen(&mut app).text();
+    assert!(text.contains("@ attaches a file"), "{text}");
+    assert!(text.contains("ctrl+o expands every cell"), "{text}");
+    assert!(text.contains("esc interrupts the turn"), "{text}");
+
+    app.config.onboarding.prompts_sent = 3;
+    let text = screen(&mut app).text();
+    assert!(!text.contains("@ attaches a file"), "{text}");
+}

@@ -1647,6 +1647,7 @@ impl App {
 
         if matches!(verb, ComposerVerb::Message | ComposerVerb::FollowUp) {
             self.sessions.mark_reply_pending(plane, id);
+            self.count_prompt();
         }
 
         let tag = Tag::ComposerAction {
