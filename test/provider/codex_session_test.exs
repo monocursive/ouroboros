@@ -77,6 +77,18 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert hd(spec.session_transports).capabilities.approvals == :native
   end
 
+  test "the app-server transport declares multimodal, so a turn with an attachment validates" do
+    transport = hd(CodexAdapter.spec().session_transports)
+
+    # `turn_options: :adapter` inherits `:attachments` from the adapter; without the
+    # capability the validator refused the same turn outright.
+    assert transport.turn_options == :adapter
+    assert :attachments in CodexAdapter.spec().normalized_options
+    assert transport.capabilities.multimodal == :native
+
+    assert Jido.Harness.InteractionCapabilities.supported?(transport.capabilities, :multimodal)
+  end
+
   test "interactive Codex public state can complete an approval; coding cannot" do
     assert {:ok, session} = State.new("codex-session-public", provider: :codex)
     public = State.public(session)
@@ -137,6 +149,60 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert turn["id"] == 3
     assert hd(turn["params"]["input"])["text"] == "say hello"
 
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a turn with attachments is accepted and reaches turn/start as input items" do
+    executable = fake_app_server(@transcript_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    workspace = attachment_workspace()
+    image = Path.join(workspace, "shot.PNG")
+    notes = Path.join(workspace, "notes.md")
+    File.write!(image, "not really a png, but a regular file")
+    File.write!(notes, "# notes")
+
+    turn = TurnRequest.new!(%{prompt: "look at this", attachments: [image, notes]})
+
+    # The refusal X7 names lives in the harness validator, before any dialect runs.
+    assert :ok =
+             Jido.Harness.Session.RequestValidator.validate_turn_request(validator_state(), turn)
+
+    assert :ok = CodexSession.send(handle, turn, "turn-1")
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+    input =
+      executable
+      |> logged()
+      |> Enum.find(&(&1["method"] == "turn/start"))
+      |> get_in(["params", "input"])
+
+    assert [text, local_image, mentions] = input
+    assert text == %{"type" => "text", "text" => "look at this"}
+    assert local_image == %{"type" => "localImage", "path" => image}
+    assert mentions["type"] == "text"
+    assert mentions["text"] =~ "@" <> notes
+    refute mentions["text"] =~ image
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a turn without attachments keeps the single text input item" do
+    executable = fake_app_server(@transcript_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("say hello"), "turn-1")
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+    input =
+      executable
+      |> logged()
+      |> Enum.find(&(&1["method"] == "turn/start"))
+      |> get_in(["params", "input"])
+
+    assert input == [%{"type" => "text", "text" => "say hello"}]
     assert :ok = CodexSession.close(handle)
   end
 
@@ -300,6 +366,29 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert_receive {:session_adapter_event,
                     %{type: :provider_event, payload: %{"kind" => "codex_app_server_ready"}}},
                    5_000
+  end
+
+  defp attachment_workspace do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-codex-attachments-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  # Only the fields `validate_turn_request/2` reads. Building a live session would start a
+  # second process for a check that is purely a function of capabilities and options.
+  defp validator_state do
+    struct(Jido.Harness.Session.State,
+      provider: :codex,
+      adapter: CodexAdapter,
+      transport_spec: hd(CodexAdapter.spec().session_transports),
+      request: SessionRequest.new!(cwd: File.cwd!())
+    )
   end
 
   defp await_event(type, timeout \\ 5_000) do

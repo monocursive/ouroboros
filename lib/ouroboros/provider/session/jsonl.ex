@@ -313,7 +313,8 @@ defmodule Ouroboros.Provider.Session.Jsonl do
 
         if is_binary(session_id) do
           GenServer.reply(from, {:ok, session_id})
-          %{state | provider_session_id: session_id}
+          state = %{state | provider_session_id: session_id}
+          apply_actions(state, session_opened(state, result))
         else
           reply_error(state, from, {:invalid_session_response, result})
         end
@@ -325,6 +326,18 @@ defmodule Ouroboros.Provider.Session.Jsonl do
 
   defp complete_rpc(state, pending, message) do
     apply_actions(state, state.dialect.handle_rpc(pending, message, state))
+  end
+
+  # The open result is otherwise consumed for its session id alone. `Dialect.verify!/1`
+  # pins an exact callback list, so this stays an optional export: a dialect that has
+  # something to say about its own open result (ACP session modes) defines
+  # `session_opened/2`; one that does not is silent, and the contract is unchanged.
+  defp session_opened(state, result) do
+    dialect = state.dialect
+
+    if Code.ensure_loaded?(dialect) and function_exported?(dialect, :session_opened, 2),
+      do: dialect.session_opened(result, state),
+      else: []
   end
 
   defp run_handshake(state, from, steps) do
