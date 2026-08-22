@@ -242,6 +242,97 @@ defmodule Ouroboros.Provider.Native.ContextTest do
     end
   end
 
+  describe "lazy rules reach the model, and only the conversation" do
+    setup context do
+      File.mkdir_p!(Path.join(context.workspace, ".agents/rules"))
+
+      File.write!(
+        Path.join(context.workspace, ".agents/rules/lib.md"),
+        "---\npaths:\n  - \"lib/**/*.ex\"\n---\nRULE-FOR-LIB-FILES\n"
+      )
+
+      File.write!(
+        Path.join(context.workspace, ".agents/rules/docs.md"),
+        "---\npaths:\n  - \"docs/**\"\n---\nRULE-FOR-DOCS\n"
+      )
+
+      :ok
+    end
+
+    defp read_script(path) do
+      [
+        [{:text, "reading"}, {:tool_call, %{id: "c1", name: "read", input: %{"path" => path}}}],
+        [{:text, "done"}, {:usage, %{input_tokens: 5, output_tokens: 1}}]
+      ]
+    end
+
+    test "reading a matching file injects that rule and no other", context do
+      session = open(context, read_script("lib/a.ex"))
+      turn(session, "t1")
+
+      [_first, second] = NativeModelScript.requests(session.agent)
+      contents = Enum.map(second.messages, &to_string(Map.get(&1, :content) || ""))
+
+      assert Enum.any?(contents, &(&1 =~ "RULE-FOR-LIB-FILES"))
+      refute Enum.any?(contents, &(&1 =~ "RULE-FOR-DOCS"))
+    end
+
+    test "the rule is never in the cached prefix", context do
+      session = open(context, read_script("lib/a.ex"))
+      turn(session, "t1")
+
+      systems = session.agent |> NativeModelScript.requests() |> Enum.map(& &1.system)
+      assert length(Enum.uniq(systems)) == 1
+      refute hd(systems) =~ "RULE-FOR-LIB-FILES"
+
+      {:ok, info} = Session.info(session.handle)
+      assert info.prefix_fingerprint
+
+      assert Enum.sort(Enum.map(info.lazy_rules, &Path.basename(&1.path))) == [
+               "docs.md",
+               "lib.md"
+             ]
+    end
+
+    test "a rule enters the conversation once, not once per read", context do
+      script =
+        [
+          [
+            {:text, "one"},
+            {:tool_call, %{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}}
+          ],
+          [
+            {:text, "two"},
+            {:tool_call, %{id: "c2", name: "read", input: %{"path" => "lib/a.ex"}}}
+          ],
+          [{:text, "done"}, {:usage, %{input_tokens: 5, output_tokens: 1}}]
+        ]
+
+      session = open(context, script)
+      turn(session, "t1")
+
+      last = session.agent |> NativeModelScript.requests() |> List.last()
+
+      injections =
+        last.messages
+        |> Enum.map(&to_string(Map.get(&1, :content) || ""))
+        |> Enum.count(&(&1 =~ "RULE-FOR-LIB-FILES"))
+
+      assert injections == 1
+    end
+
+    test "reading a non-matching file injects nothing", context do
+      File.write!(Path.join(context.workspace, "README.md"), "# readme\n")
+      session = open(context, read_script("README.md"))
+      turn(session, "t1")
+
+      [_first, second] = NativeModelScript.requests(session.agent)
+      contents = Enum.map(second.messages, &to_string(Map.get(&1, :content) || ""))
+
+      refute Enum.any?(contents, &(&1 =~ "RULE-FOR-"))
+    end
+  end
+
   describe "public info" do
     test "names and numbers only — never the instruction text", context do
       File.write!(Path.join(context.workspace, "AGENTS.md"), "SECRET-INSTRUCTION-TEXT")

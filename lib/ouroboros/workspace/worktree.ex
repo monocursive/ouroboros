@@ -159,6 +159,11 @@ defmodule Ouroboros.Workspace.Worktree do
   """
   @spec retire(map(), keyword()) ::
           {:ok, map(), :removed | {:kept, term()}} | :not_applicable | {:error, term()}
+  # Already retired. `terminate/2` runs after the terminal transition that retired it, so
+  # without this a kept worktree would be reported twice on the session's own log.
+  def retire(%{worktree: %{"retired" => retired}}, _opts) when is_binary(retired),
+    do: :not_applicable
+
   def retire(%{worktree: %{"path" => path} = worktree} = record, opts) do
     case remove(path, opts) do
       {:ok, :removed} ->

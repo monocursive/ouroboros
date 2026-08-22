@@ -464,6 +464,25 @@ defmodule Ouroboros.WorkspaceWorktreeTest do
       record = %{workspace: context.repo, worktree_requested: false, worktree: nil}
       assert :not_applicable = Worktree.retire(record, root: context.worktrees)
     end
+
+    test "retiring an already-retired record is a no-op, so it is never reported twice",
+         context do
+      {runner, _log} = recording_runner(context)
+      record = %{workspace: context.repo, worktree_requested: true, worktree: nil}
+
+      {:ok, provisioned} =
+        Worktree.provision(record, "s1", runner: runner, root: context.worktrees)
+
+      dirty = fn
+        ["status", "--porcelain"], _cwd -> {:ok, "?? scratch\n"}
+        args, cwd -> runner.(args, cwd)
+      end
+
+      {:ok, kept, {:kept, :dirty}} =
+        Worktree.retire(provisioned, runner: dirty, root: context.worktrees)
+
+      assert :not_applicable = Worktree.retire(kept, runner: dirty, root: context.worktrees)
+    end
   end
 
   # ---------------------------------------------------------------- real git

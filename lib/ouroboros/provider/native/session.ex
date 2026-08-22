@@ -160,7 +160,10 @@ defmodule Ouroboros.Provider.Native.Session do
         thrashing?: false,
         archives: [],
         handed_off_to: nil,
-        plan: nil
+        plan: nil,
+        # A lazily-loaded rule enters the conversation once per session, not once per
+        # turn: the loop reports back what it injected so the next turn does not repeat it.
+        rules_loaded: []
       }
 
       case build_context(state) do
@@ -269,7 +272,8 @@ defmodule Ouroboros.Provider.Native.Session do
       state
       | messages: snapshot.messages,
         reads: snapshot.reads,
-        session_grants: snapshot.session_grants
+        session_grants: snapshot.session_grants,
+        rules_loaded: Map.get(snapshot, :rules_loaded, state.rules_loaded)
     }
 
     _ = checkpoint(state)
@@ -342,6 +346,8 @@ defmodule Ouroboros.Provider.Native.Session do
         system: state.prompt_context.system,
         tool_specs: state.prompt_context.tools,
         context_window: state.prompt_context.context_window,
+        rules: Context.rules(state.prompt_context),
+        rules_loaded: state.rules_loaded,
         scope: state.scope,
         session_dir: state.session_dir,
         session_id: state.context.session_id,

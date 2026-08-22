@@ -40,6 +40,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context
+  alias Ouroboros.Provider.Native.Context.Instructions
   alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Cost
   alias Ouroboros.Provider.Native.Model
@@ -74,6 +75,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     # means this node could not resolve one, and the meter says so by omitting the key
     # rather than by inventing a denominator.
     :context_window,
+    # The `.agents/rules` held back for lazy loading, and the ones already injected. A
+    # rule enters the conversation once per session, however many matching files are
+    # read after it.
+    rules: [],
+    rules_loaded: [],
     # Called with `%{messages:, reads:, session_grants:}` immediately *before* the
     # terminal turn event is emitted. The session makes the conversation durable inside
     # this callback, which is what makes "checkpoint before broadcast" true here rather
@@ -310,9 +316,47 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = tool_result(state, call, result)
     state = emit_changes(state, Map.get(result, :changes, []))
     state = emit_plan(state, Map.get(result, :plan))
+    state = inject_rules(state, Map.get(result, :reads, %{}))
 
     {:continue, state}
   end
+
+  # D3's lazy half. A `.agents/rules/*.md` whose front-matter `paths:` matches the file
+  # this tool just touched is appended to the *conversation*, once, right after the tool
+  # result that earned it — never to the system prompt, because a prefix that changed
+  # when a file was read would cost a cache miss on every turn after it.
+  defp inject_rules(%{rules: rules} = state, reads)
+       when is_list(rules) and rules != [] and map_size(reads) > 0 do
+    Enum.reduce(Map.keys(reads), state, fn path, state ->
+      pending = Enum.reject(rules, &(&1.path in state.rules_loaded))
+
+      case Instructions.render_for_path(pending, path, state.scope.root) do
+        {:ok, nil} ->
+          state
+
+        {:ok, text} ->
+          loaded =
+            pending
+            |> Enum.filter(&Instructions.matches?(&1, path, state.scope.root))
+            |> Enum.map(& &1.path)
+
+          %{
+            state
+            | messages: state.messages ++ [%{role: :user, content: text}],
+              rules_loaded: state.rules_loaded ++ loaded
+          }
+
+        # A rule that would forge a runtime delimiter is dropped rather than injected, and
+        # marked loaded so the same file is not retried on every read of every path it
+        # matches. The session goes on without it; the refusal is the rule's own fault and
+        # not a reason to fail the operator's turn mid-tool.
+        {:error, _reason} ->
+          %{state | rules_loaded: state.rules_loaded ++ Enum.map(pending, & &1.path)}
+      end
+    end)
+  end
+
+  defp inject_rules(state, _reads), do: state
 
   defp emit_changes(state, []), do: state
 
@@ -604,7 +648,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     state.checkpoint.(%{
       messages: state.messages,
       reads: state.reads,
-      session_grants: state.session_grants
+      session_grants: state.session_grants,
+      rules_loaded: state.rules_loaded
     })
 
     :ok
