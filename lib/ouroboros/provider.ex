@@ -74,6 +74,13 @@ defmodule Ouroboros.Provider do
   # the harness schema so an upstream addition fails here rather than in a session.
   @approval_modes [:default, :prompt, :auto_edit, :auto_approve]
 
+  # What `interactive.configure` may name. Exactly the four fields
+  # `Jido.Harness.SessionRequestValidator` normalizes a configuration to
+  # (`deps/jido_harness/lib/jido_harness/session/request_validator.ex:7`) and the four a
+  # managed transport's own `configuration_options` default to — anything else is a start
+  # option, not something an open session can be moved to.
+  @configuration_fields [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
+
   # Codex's non-interactive transport otherwise refuses an empty directory before the
   # model sees the first turn, and its workspace-write sandbox cannot fetch a dependency
   # unless network access is stated. These are execution facts of the node, not knobs a
@@ -1300,10 +1307,217 @@ defmodule Ouroboros.Provider do
     end
   end
 
+  @doc """
+  Returns the options a *running* session may still be changed to, and when it takes hold.
+
+  Validated against exactly what `safety_options/3` validates a start against — the
+  option list the selected transport declares, and the `normalized_values` allowlists the
+  adapter narrows them with — plus the two questions only a mid-session change raises:
+  whether the transport declares `dynamic_configuration` at all, and whether it declares
+  `dynamic_model` for a change that names a model.
+
+  The second element of a success is the honest half. `:now` is returned only for a
+  transport whose `dynamic_configuration` is `:native` — one that carries the change to a
+  live provider process. `:next_turn` is everything else: a managed transport re-executes
+  the CLI per turn and a Codex app-server rebuilds approval and sandbox in `turn_params/2`,
+  so the turn already running keeps the policy it started under. Callers state which of
+  the two happened; nothing here lets `:next_turn` be presented as immediate.
+
+  The X1 rule applies unchanged: `approval_mode: :prompt` on a transport with no approvals
+  channel is refused with the same typed error a start is refused with, because a session
+  configured into a mode that asks nobody is denied without a word exactly as a session
+  started into it is.
+  """
+  @spec session_configuration(term(), map(), atom() | nil) ::
+          {:ok, map(), :now | :next_turn} | {:error, term()}
+  def session_configuration(provider, changes, transport \\ nil)
+
+  def session_configuration(provider, changes, transport) when is_map(changes) do
+    with :ok <- validate_configuration_fields(changes),
+         {:ok, spec} <- configuration_spec(provider),
+         {:ok, declared} <- configuration_transport(spec, provider, transport),
+         :ok <- validate_dynamic_configuration(spec, declared, changes),
+         :ok <- validate_configuration_options(spec, declared, changes),
+         :ok <- validate_configuration_values(spec, declared, changes),
+         :ok <- validate_configured_approval_mode(spec, declared, changes) do
+      {:ok, changes, applies(declared)}
+    end
+  end
+
+  def session_configuration(_provider, changes, _transport),
+    do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+
+  # `:now` is a claim about a live provider process, so only `:native` earns it.
+  defp applies(%{capabilities: %{dynamic_configuration: :native}}), do: :now
+  defp applies(_declared), do: :next_turn
+
+  defp validate_configuration_fields(changes) do
+    cond do
+      changes == %{} ->
+        {:error,
+         {:invalid_configuration,
+          %{reason: :no_changes, fields: Enum.sort(@configuration_fields)}}}
+
+      field = Enum.find(Map.keys(changes), &(&1 not in @configuration_fields)) ->
+        {:error,
+         {:invalid_configuration,
+          %{reason: :unknown_field, field: field, fields: Enum.sort(@configuration_fields)}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp configuration_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error,
+         {:unconfigurable_session, %{provider: provider, reason: :unknown_provider}}}
+    end
+  end
+
+  # A start may proceed past an unresolvable transport and let the harness name it. A
+  # configure may not: its whole answer includes *when* the change takes effect, and a
+  # transport nobody declares cannot be asked.
+  defp configuration_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unconfigurable_session,
+          %{provider: provider, transport: transport, reason: :unknown_session_transport}}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  defp validate_dynamic_configuration(spec, declared, changes) do
+    capabilities = Session.capabilities(declared)
+
+    cond do
+      not InteractionCapabilities.supported?(capabilities, :dynamic_configuration) ->
+        {:error, unconfigurable(spec, declared, :no_dynamic_configuration, changes)}
+
+      Map.has_key?(changes, :model) and
+          not InteractionCapabilities.supported?(capabilities, :dynamic_model) ->
+        {:error, unconfigurable(spec, declared, :no_dynamic_model, changes)}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Two lists have to agree, and they answer different questions. `normalized_options`
+  # is what this transport accepts *at all* — the same list a start is held to. The
+  # transport's `configuration_options` is the narrower "and can still be changed once
+  # the session is open". A field outside either is refused by name.
+  defp validate_configuration_options(spec, declared, changes) do
+    {:ok, accepted} = normalized_options(spec, {:interactive, declared.name})
+
+    case Enum.find(Map.keys(changes), &(&1 not in accepted or &1 not in declared.configuration_options)) do
+      nil ->
+        :ok
+
+      field ->
+        {:error,
+         {:unconfigurable_session,
+          %{
+            provider: spec.provider,
+            transport: declared.name,
+            reason: :option_not_configurable,
+            field: field,
+            configurable:
+              Enum.sort(Enum.filter(declared.configuration_options, &(&1 in accepted))),
+            message:
+              "#{inspect(spec.provider)} over the #{inspect(declared.name)} transport cannot " <>
+                "change #{inspect(field)} on an open session; it can change " <>
+                "#{inspect(Enum.sort(Enum.filter(declared.configuration_options, &(&1 in accepted))))}"
+          }}}
+    end
+  end
+
+  defp validate_configuration_values(spec, declared, changes) do
+    Enum.reduce_while(changes, :ok, fn {field, value}, :ok ->
+      case Map.get(spec.normalized_values, field) do
+        nil ->
+          {:cont, :ok}
+
+        allowed ->
+          if value in allowed or value in @unset_values do
+            {:cont, :ok}
+          else
+            {:halt,
+             {:error,
+              {:unconfigurable_session,
+               %{
+                 provider: spec.provider,
+                 transport: declared.name,
+                 reason: :value_not_accepted,
+                 field: field,
+                 value: value,
+                 accepted_values: allowed
+               }}}}
+          end
+      end
+    end)
+  end
+
+  # X1, on the configure path. A mode that asks nobody is exactly as broken arrived at by
+  # `interactive.configure` as it is stated at `interactive.start`, so it is refused with
+  # the same tuple and the same sentence rather than a second vocabulary.
+  defp validate_configured_approval_mode(spec, declared, changes) do
+    with :prompt <- Map.get(changes, :approval_mode),
+         %{approvals: false} = capabilities <-
+           Map.new(@capability_keys, &{&1, Map.get(Session.capabilities(declared), &1, false)}) do
+      {:error,
+       {:unsupported_approval_mode,
+        unanswerable(
+          spec.provider,
+          capabilities,
+          capability(spec.provider, {:interactive, declared.name})
+        )}}
+    else
+      _answerable_or_absent -> :ok
+    end
+  end
+
+  defp unconfigurable(spec, declared, reason, changes) do
+    {:unconfigurable_session,
+     %{
+       provider: spec.provider,
+       transport: declared.name,
+       reason: reason,
+       fields: changes |> Map.keys() |> Enum.sort(),
+       message: unconfigurable_message(spec.provider, declared.name, reason)
+     }}
+  end
+
+  defp unconfigurable_message(provider, transport, :no_dynamic_configuration) do
+    "#{inspect(provider)} reaches an interactive session over the #{inspect(transport)} " <>
+      "transport, which declares no dynamic configuration: nothing about an open session " <>
+      "can be changed. Start a new session with the options you want."
+  end
+
+  defp unconfigurable_message(provider, transport, :no_dynamic_model) do
+    "#{inspect(provider)} over the #{inspect(transport)} transport declares no dynamic " <>
+      "model, so the model an open session runs cannot be changed. Start a new session " <>
+      "with the model you want."
+  end
+
   # Mirrors `Jido.Harness.Session.Manager.resolve_transport/2`, including the synthetic
   # managed transport it substitutes for an adapter that declares none. Declaring
   # anything else here would describe a transport the session is not going to get.
   defp selected_capabilities(spec, transport) do
+    case selected_transport(spec, transport) do
+      nil -> nil
+      declared -> Session.capabilities(declared)
+    end
+  end
+
+  defp selected_transport(spec, transport) do
     selected = transport || spec.default_session_transport || first_transport(spec)
 
     declared =
@@ -1312,7 +1526,7 @@ defmodule Ouroboros.Provider do
 
     case declared do
       nil -> nil
-      found -> found |> specialize(spec) |> Session.capabilities()
+      found -> specialize(found, spec)
     end
   end
 

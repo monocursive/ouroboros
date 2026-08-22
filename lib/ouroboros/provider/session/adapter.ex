@@ -40,6 +40,20 @@ defmodule Ouroboros.Provider.Session.Adapter do
       def respond_approval(handle, request_id, response),
         do: Jido.Harness.SessionAdapter.call(handle, {:respond_approval, {request_id, response}})
 
+      @doc """
+      Applies a mid-session configuration change through the dialect.
+
+      `Jido.Harness.SessionWorker` gates this on `function_exported?/3` before it gates
+      it on anything else, so an adapter that does not export it makes every transport it
+      serves silently unconfigurable rather than refused by declaration. Exporting it here
+      puts the refusal back where the capability lives: the worker checks
+      `dynamic_configuration` and the transport's `configuration_options` first, and a
+      dialect that cannot carry a change answers `{:error, :unsupported}` itself.
+      """
+      @impl true
+      def configure(handle, changes),
+        do: Jido.Harness.SessionAdapter.call(handle, {:configure, changes})
+
       @impl true
       def close(handle), do: Jido.Harness.SessionAdapter.call(handle, :close)
     end

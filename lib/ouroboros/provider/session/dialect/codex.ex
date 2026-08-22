@@ -20,6 +20,10 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   # trailing text item rather than dropped in silence.
   @max_attachment_items 64
 
+  # What `turn_params/2` rebuilds from the session request on every turn, and therefore
+  # exactly what a mid-session configuration change can move here.
+  @configurable_fields [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
+
   @impl true
   def name, do: :app_server
 
@@ -110,7 +114,22 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   @impl true
   def steer(_runtime, _request, _request_id), do: {:error, :unsupported}
 
+  # An app-server thread has no "set these options" method: `turn/start` carries model,
+  # effort, approval policy and sandbox policy on every turn, rebuilt from the session
+  # request by `turn_params/2`. So a configuration change here sends nothing and is not
+  # pretending to — it is accepted, the runtime moves its request, and the *next*
+  # `turn/start` carries it. That is `dynamic_configuration: :managed` and the reason
+  # `Ouroboros.Provider.session_configuration/3` answers `:next_turn` for this transport.
+  # The turn already running keeps the policy it was started under, because that is what
+  # the app server was told and nothing here can retract it.
   @impl true
+  def configure(_runtime, changes) when is_map(changes) do
+    case Enum.find(Map.keys(changes), &(&1 not in @configurable_fields)) do
+      nil -> :ok
+      field -> {:error, {:unsupported_configuration, field}}
+    end
+  end
+
   def configure(_runtime, _changes), do: {:error, :unsupported}
 
   @impl true
@@ -406,8 +425,13 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     |> put_sandbox(runtime.request)
   end
 
-  defp turn_model(_runtime, %{provider_options: options}) when is_map(options),
-    do: option(options, :model)
+  # A per-turn `provider_options.model` wins; otherwise the turn carries the session's
+  # own model. `TurnRequest.provider_options` defaults to an empty map, so the first
+  # clause matches every turn — reading only it meant a session model reached
+  # `thread/start` and never `turn/start`, which made a mid-session model change
+  # unobservable to the provider even though the request had moved.
+  defp turn_model(runtime, %{provider_options: options}) when is_map(options),
+    do: option(options, :model) || runtime.request.model
 
   defp turn_model(runtime, _turn), do: runtime.request.model
 

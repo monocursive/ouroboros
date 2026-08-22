@@ -332,6 +332,118 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
   end
 
+  describe "what an open session may still be changed to" do
+    test "every bundled provider's answer is the one its transport declares" do
+      # Read from the specs Harness resolves rather than from a table here, so a
+      # provider that changes what its transport can do upstream fails here instead of
+      # letting a client offer a control the session cannot honour.
+      for spec <- Jido.Harness.providers() do
+        provider = spec.provider
+        capabilities = Provider.session_capabilities(provider)
+        result = Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+
+        case {capabilities.dynamic_configuration, result} do
+          {false, {:error, {:unconfigurable_session, details}}} ->
+            assert details.reason == :no_dynamic_configuration
+
+          {_declared, {:ok, %{approval_mode: :auto_approve}, applies}} ->
+            assert applies == expected_applies(capabilities.dynamic_configuration)
+
+          {_declared, {:error, {:unconfigurable_session, details}}} ->
+            # Pi's RPC transport declares dynamic configuration for model and effort
+            # only; a field outside its `configuration_options` is refused by name.
+            assert details.reason in [:option_not_configurable, :value_not_accepted]
+
+          other ->
+            flunk("#{provider}: unexpected configure answer #{inspect(other)}")
+        end
+      end
+    end
+
+    test "`:now` is claimed only by a transport that carries the change to a live process" do
+      # Pi's RPC transport is the only bundled one with `dynamic_configuration: :native`.
+      assert {:ok, _changes, :now} = Provider.session_configuration(:pi, %{model: "pi-model"})
+
+      # Every managed transport re-executes the CLI per turn, and the Codex app server
+      # rebuilds its policy in `turn_params/2`; neither can move a turn already running.
+      for provider <- [:claude, :codex, :gemini, :grok, :zai] do
+        assert {:ok, _changes, :next_turn} =
+                 Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+      end
+
+      # Amp declares no approval or sandbox option at all, so the only thing its session
+      # can be moved to is the one field it does normalize.
+      assert {:ok, _changes, :next_turn} =
+               Provider.session_configuration(:amp, %{reasoning_effort: :high})
+    end
+
+    test "ACP declares no dynamic configuration, so its sessions are frozen by declaration" do
+      for provider <- [:opencode, :kimi] do
+        assert Provider.session_capabilities(provider).dynamic_configuration == false
+
+        assert {:error, {:unconfigurable_session, details}} =
+                 Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+
+        assert details.transport == :acp
+        assert details.reason == :no_dynamic_configuration
+      end
+
+      # And the dialect refuses on its own account, so a transport that ever declared the
+      # capability would still not silently accept a change it cannot send.
+      assert {:error, :unsupported} = Dialect.ACP.configure(%{}, %{approval_mode: :auto_approve})
+    end
+
+    test "X1 applies on the configure path with the same tuple as on start" do
+      for {provider, transport} <- @interactive_prompt_refusals do
+        assert {:error, {:unsupported_approval_mode, details}} =
+                 Provider.session_configuration(provider, %{approval_mode: :prompt})
+
+        assert details.plane == :interactive
+        assert details.provider == provider
+        assert details.transport == transport
+        assert details.requested == :prompt
+        assert details.reason == :no_approval_channel
+        refute :prompt in details.supported
+
+        # The modes it *can* be moved to are accepted.
+        for mode <- details.supported -- [:default] do
+          assert {:ok, _changes, _applies} =
+                   Provider.session_configuration(provider, %{approval_mode: mode})
+        end
+      end
+    end
+
+    test "a field that is not a configuration field is refused before any spec is read" do
+      assert {:error, {:invalid_configuration, details}} =
+               Provider.session_configuration(:claude, %{workspace: "/tmp"})
+
+      assert details.reason == :unknown_field
+      assert details.field == :workspace
+      assert details.fields == [:approval_mode, :model, :reasoning_effort, :sandbox_mode]
+
+      assert {:error, {:invalid_configuration, %{reason: :no_changes}}} =
+               Provider.session_configuration(:claude, %{})
+
+      assert {:error, {:invalid_configuration, %{reason: :not_a_map}}} =
+               Provider.session_configuration(:claude, [approval_mode: :prompt])
+    end
+
+    test "an unresolvable provider or transport is refused rather than guessed at" do
+      assert {:error, {:unconfigurable_session, %{reason: :unknown_provider}}} =
+               Provider.session_configuration(:no_such_provider, %{model: "x"})
+
+      assert {:error, {:unconfigurable_session, %{reason: :unknown_session_transport}}} =
+               Provider.session_configuration(:claude, %{model: "x"}, :no_such_transport)
+    end
+
+    test "the refusal crosses the wire as data" do
+      assert {:error, refusal} = Provider.session_configuration(:opencode, %{model: "x"})
+
+      assert %{"reason" => "no_dynamic_configuration", "transport" => "acp"} =
+               refusal |> Wire.to_json() |> Enum.at(1)
+    end
+  end
+
   describe "coding plane defaults" do
     for {provider, refused} <- @coding_refusals, refused == [] do
       test "#{provider} keeps the workspace-write default" do
@@ -423,6 +535,11 @@ defmodule Ouroboros.ProviderCapabilityTest do
     assert {:ok, state} = State.new(id, opts)
     State.request(state)
   end
+
+  # `:native` is the only declaration that earns "the change is in force now"; every
+  # other truthy declaration means the request moved and the next turn carries it.
+  defp expected_applies(:native), do: :now
+  defp expected_applies(_declared), do: :next_turn
 
   defp coding_task(opts) do
     id = "capability-#{System.unique_integer([:positive, :monotonic])}"

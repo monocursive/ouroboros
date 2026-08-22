@@ -197,6 +197,27 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
+  @doc """
+  Changes approval mode, sandbox mode, model, or reasoning effort on an open session.
+
+  Answers `{:ok, %{options:, applies:, changed:}}` where `applies` is `:now` only for a
+  transport that carries the change to a live provider process, and `:next_turn` for
+  every transport that rebuilds its request per turn. The turn already running is never
+  retroactively re-governed, so a caller that reports `:next_turn` as immediate is
+  reporting something this runtime did not do.
+  """
+  @spec configure(session(), map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def configure(session, changes) when is_list(changes) do
+    if Keyword.keyword?(changes),
+      do: configure(session, Map.new(changes)),
+      else: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+  end
+
+  def configure(session, changes) when is_map(changes), do: call(session, {:configure, changes})
+
+  def configure(_session, changes),
+    do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+
   @doc "Responds to a normalized provider approval request."
   def respond_approval(session, request_id, response) do
     if is_binary(request_id) and String.trim(request_id) != "",

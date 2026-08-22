@@ -138,8 +138,17 @@ defmodule Ouroboros.Provider.Session.Jsonl do
   def handle_call({:steer, request, request_id}, _from, state),
     do: {:reply, state.dialect.steer(state, request, request_id), state}
 
-  def handle_call({:configure, changes}, _from, state),
-    do: {:reply, state.dialect.configure(state, changes), state}
+  # A dialect that accepts a change is stating that the *request* it builds turns from
+  # here on, so the runtime's own copy of the request has to move with it — the Harness
+  # worker updates its copy, and this process is the one that renders the next turn.
+  # A dialect that refuses leaves both untouched.
+  def handle_call({:configure, changes}, _from, state) do
+    case state.dialect.configure(state, changes) do
+      :ok -> {:reply, :ok, %{state | request: configured_request(state.request, changes)}}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+      other -> {:reply, {:error, {:invalid_dialect_configure_result, other}}, state}
+    end
+  end
 
   def handle_call(:close, _from, state) do
     state = %{state | closing?: true}
@@ -458,6 +467,20 @@ defmodule Ouroboros.Provider.Session.Jsonl do
         state.process_id,
         JSONL.encode(state.dialect.envelope(value))
       )
+
+  # Exactly the four fields `Jido.Harness.SessionRequestValidator` normalizes a
+  # configuration to. Merged by name rather than with `struct!/2` so a key that somehow
+  # reached here without passing the validator cannot raise inside a live session.
+  @configurable_fields [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
+
+  defp configured_request(request, changes) do
+    Enum.reduce(@configurable_fields, request, fn field, request ->
+      case Map.fetch(changes, field) do
+        {:ok, value} -> Map.put(request, field, value)
+        :error -> request
+      end
+    end)
+  end
 
   defp configured_env(config) do
     config[:env] || config["env"] || %{}

@@ -195,6 +195,53 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert :ok = CodexSession.close(handle)
   end
 
+  test "configure moves the next turn/start, and says nothing about the one in flight" do
+    executable = fake_app_server(@transcript_cases)
+    handle = open_session!(executable, approval_mode: :auto_edit, sandbox_mode: :workspace_write)
+    drain_ready()
+
+    # The app server has no "set these options" method: `turn/start` carries the policy
+    # every time. So configure sends no frame at all — it moves the request this process
+    # renders the next turn from, which is exactly `dynamic_configuration: :managed`.
+    before = length(logged(executable))
+
+    assert :ok =
+             CodexSession.configure(handle, %{
+               approval_mode: :auto_approve,
+               sandbox_mode: :read_only,
+               model: "gpt-5-codex"
+             })
+
+    assert length(logged(executable)) == before
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("after the change"), "turn-1")
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+    turn = executable |> logged() |> Enum.find(&(&1["method"] == "turn/start"))
+
+    assert turn["params"]["approvalPolicy"] == "never"
+    assert turn["params"]["sandbox"] == "read-only"
+    assert turn["params"]["model"] == "gpt-5-codex"
+
+    # The handshake still records what the session was *started* under. A client reading
+    # the log can see both, which is the point of not rewriting history.
+    thread = executable |> logged() |> Enum.find(&(&1["method"] == "thread/start"))
+    assert thread["params"]["approvalPolicy"] == "on-request"
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a field turn/start does not carry is refused by the dialect" do
+    executable = fake_app_server(@transcript_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert {:error, {:unsupported_configuration, :system_prompt}} =
+             CodexSession.configure(handle, %{system_prompt: "become someone else"})
+
+    assert :ok = CodexSession.close(handle)
+  end
+
   test "a turn without attachments keeps the single text input item" do
     executable = fake_app_server(@transcript_cases)
     handle = open_session!(executable)

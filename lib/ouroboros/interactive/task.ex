@@ -181,6 +181,13 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, reply, schedule_poll(runtime, 0)}
   end
 
+  def handle_call({:configure, changes}, _from, runtime) do
+    case configure_session(runtime, changes) do
+      {:ok, result, runtime} -> {:reply, {:ok, result}, schedule_poll(runtime, 0)}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
       case harness_turn_id(runtime.session, turn_id) do
@@ -1385,6 +1392,93 @@ defmodule Ouroboros.Interactive.Task do
       {:error, runtime} ->
         _ = safe_session_call(fn -> Session.close(harness_session_id) end)
         retry(runtime, :session_resume_checkpoint_failed, :storage_error)
+    end
+  end
+
+  # Mid-session configuration, in the order that keeps the two records honest.
+  #
+  # The provider is told first. `Jido.Harness.Session.configure/2` is a synchronous call
+  # whose answer is unambiguous — unlike a turn dispatch, nothing here can have half
+  # happened — so a refusal leaves both the provider and the checkpoint on the old
+  # options, which is the only outcome where "nothing changed" is true.
+  #
+  # Only then is the change recorded, and the record is what `interactive.info` answers
+  # with and what a resume rebuilds the request from. A storage outage between the two is
+  # named rather than swallowed: the provider took the change and this node could not
+  # write it down, so the caller is told exactly that instead of being handed a success
+  # that a restart would silently undo.
+  defp configure_session(%{session: session} = runtime, changes) do
+    if State.terminal?(session) do
+      {:error, {:session_not_configurable, session.status}, runtime}
+    else
+      with {:ok, changes, applies} <-
+             Provider.session_configuration(
+               session.provider,
+               changes,
+               Map.get(session.options, :transport)
+             ),
+           :ok <- apply_configuration(runtime, changes) do
+        record_configuration(runtime, changes, applies)
+      else
+        {:error, reason} -> {:error, reason, runtime}
+      end
+    end
+  end
+
+  defp apply_configuration(runtime, changes) do
+    case with_harness_session(runtime, &Session.configure(&1, changes)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
+      other -> {:error, {:configure_refused, durable(other)}}
+    end
+  end
+
+  # The event is Ouroboros's own: no provider reports that its own settings were changed
+  # from outside, and a client watching the stream has to see the change land in the same
+  # ordered log as everything else. `applies` travels with it because "next turn" is a
+  # fact about the transport that a footer has to be able to state rather than imply.
+  #
+  # `sequence_offset` climbs with the cursor for exactly the reason it exists: the next
+  # poll asks Harness for events after `cursor - offset`, and moving one without the
+  # other would either skip a provider event or collide with it.
+  defp record_configuration(runtime, changes, applies) do
+    session = runtime.session
+    sequence = session.cursor + 1
+
+    event =
+      Event.from_runtime(
+        session.id,
+        sequence,
+        :status,
+        %{
+          "kind" => "configured",
+          "applies" => Atom.to_string(applies),
+          "changed" => Map.new(changes, fn {key, value} -> {Atom.to_string(key), value} end)
+        },
+        harness_session_id: session.harness_session_id,
+        provider: session.provider,
+        provider_session_id: session.provider_session_id
+      )
+
+    configured =
+      session
+      |> State.configure(changes)
+      |> Map.put(:cursor, sequence)
+      |> Map.put(:sequence_offset, State.sequence_offset(session) + 1)
+      |> append_event(event)
+      |> State.touch()
+
+    case persist(runtime, configured, [event]) do
+      {:ok, runtime} ->
+        {:ok,
+         %{
+           options: State.public(runtime.session).options,
+           applies: applies,
+           changed: changes |> Map.keys() |> Enum.sort()
+         }, runtime}
+
+      {:error, runtime} ->
+        {:error, {:configure_checkpoint_failed, :provider_accepted}, runtime}
     end
   end
 

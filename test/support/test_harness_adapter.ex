@@ -67,7 +67,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
           native_cancel?: true
         ),
       default_session_transport: :managed,
-      session_transports: [managed_transport()],
+      session_transports: [managed_transport(), unanswerable_transport(), frozen_transport()],
       normalized_options: [
         :provider_session_id,
         :approval_mode,
@@ -106,6 +106,50 @@ defmodule Ouroboros.Test.HarnessAdapter do
     }
   end
 
+  # The managed transport as the bundled ones actually ship it: no approvals channel.
+  # X1 is a rule about *this* shape, and a session cannot be started into `:prompt` here
+  # — which is exactly why the same rule has to hold on `interactive.configure`, where a
+  # session started into a mode that works could otherwise be moved into one that asks
+  # nobody. This transport is what lets that be tested end to end.
+  defp unanswerable_transport do
+    %{
+      SessionTransportSpec.managed(:managed_no_approvals)
+      | adapter: Jido.Harness.SessionAdapters.Managed,
+        capabilities:
+          InteractionCapabilities.new!(
+            transport: :managed_no_approvals,
+            process: :per_turn,
+            multi_turn: :managed,
+            follow_up: :managed,
+            interrupt: :process,
+            dynamic_model: false,
+            dynamic_configuration: :managed
+          )
+    }
+  end
+
+  # A transport that declares no dynamic configuration at all, as ACP does. Nothing about
+  # an open session on it can be changed, and the refusal has to come from the
+  # declaration rather than from a failed call.
+  defp frozen_transport do
+    %{
+      SessionTransportSpec.managed(:managed_frozen)
+      | adapter: Ouroboros.Test.ManagedSessionTransport,
+        configuration_options: [],
+        capabilities:
+          InteractionCapabilities.new!(
+            transport: :managed_frozen,
+            process: :per_turn,
+            multi_turn: :managed,
+            follow_up: :managed,
+            interrupt: :process,
+            approvals: :native,
+            dynamic_model: false,
+            dynamic_configuration: false
+          )
+    }
+  end
+
   @doc """
   Declares which provider session ids this adapter will still answer to.
 
@@ -128,10 +172,16 @@ defmodule Ouroboros.Test.HarnessAdapter do
 
   defp resumes?, do: accepted_resume_ids() != :unsupported
 
+  # Narrowed the way Kimi and Pi narrow theirs: a normalized value the adapter cannot
+  # enforce is named in `normalized_values` and refused by the harness rather than
+  # silently downgraded. `:unrestricted` is the one this provider does not accept, which
+  # is what gives `interactive.configure` an allowlist to be refused by.
+  @accepted_sandbox_modes [:default, :read_only, :workspace_write]
+
   defp accepted_resume_values do
     case accepted_resume_ids() do
-      ids when is_list(ids) -> %{provider_session_id: ids}
-      _every_id -> %{}
+      ids when is_list(ids) -> %{provider_session_id: ids, sandbox_mode: @accepted_sandbox_modes}
+      _every_id -> %{sandbox_mode: @accepted_sandbox_modes}
     end
   end
 

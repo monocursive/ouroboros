@@ -13,6 +13,11 @@ defmodule Ouroboros.Interactive.State do
     :approval_timeout_ms
   ]
 
+  # What `configure/2` may write into a session's durable options. Deliberately a literal
+  # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
+  # even if a capability check somewhere else is ever wrong.
+  @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
+
   @enforce_keys [
     :id,
     :node,
@@ -272,6 +277,21 @@ defmodule Ouroboros.Interactive.State do
       [transport | _rest] -> transport.name
       [] -> :managed
     end
+  end
+
+  @doc """
+  Folds an accepted mid-session configuration into the session's durable options.
+
+  Only the four fields `Ouroboros.Provider.session_configuration/3` validates are ever
+  written, and they are written into the same map a start filled, so `request/1` rebuilds
+  a resumed session under the options it is actually running with rather than the ones it
+  was started with. Anything else in `changes` is ignored here rather than trusted: the
+  authority for what may change is the provider capability check, not this merge.
+  """
+  @spec configure(t(), map()) :: t()
+  def configure(%__MODULE__{} = state, changes) when is_map(changes) do
+    accepted = Map.take(changes, @configurable_options)
+    %{state | options: Map.merge(state.options, accepted)}
   end
 
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()

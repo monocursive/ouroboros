@@ -209,6 +209,11 @@ defmodule Ouroboros.Gateway.Methods do
       timeout: @default_timeout,
       outcome: :unknown
     },
+    # B1/B6. Session controls that change an open session rather than starting a new one.
+    # `configure` is bounded by what the transport declares it can still change and
+    # answers with when the change takes hold. `:operate` because it writes durable
+    # session state and moves a permission posture.
+    "interactive.configure" => %{scope: :operate, timeout: @default_timeout},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
@@ -278,6 +283,18 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime_exposure" => :boolean,
     "machine" => :node,
     "node" => :node
+  }
+
+  # What `interactive.configure` may name on an *open* session. A strict subset of
+  # `@start_options`: everything else there is immutable start intent, and a session that
+  # could have its workspace or its event limit moved underneath it would no longer be
+  # the session its id promised. Whether any one of these four is actually changeable is
+  # the transport's answer, asked per session rather than encoded here.
+  @configuration_options %{
+    "approval_mode" => {:enum, @approval_modes},
+    "sandbox_mode" => {:enum, @sandbox_modes},
+    "model" => :string,
+    "reasoning_effort" => {:enum, @reasoning_efforts}
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -631,6 +648,23 @@ defmodule Ouroboros.Gateway.Methods do
         # the text itself — the coordinator remembers the prompt and enriches the
         # projected `input_accepted(kind=steer)` event, so replay quotes it.
         reply(InteractiveSession.steer(session, input))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B1. What a session may still be changed to is the transport's answer, not this
+  # table's: everything here does is turn four JSON fields into the four atoms the
+  # runtime validates against the provider's own declarations, and hand back what came
+  # out — including `applies`, which a client has to be able to render as "from the next
+  # turn" rather than assume.
+  def invoke("interactive.configure", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "node" | Map.keys(@configuration_options)]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, changes} <- options(params, @configuration_options, ["id", "node"]) do
+        reply(InteractiveSession.configure(session, Map.new(changes)))
       else
         {:invalid, message} -> invalid_params(message)
       end

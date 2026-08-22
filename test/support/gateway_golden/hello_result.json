@@ -32,6 +32,7 @@
       "grants.list",
       "hello",
       "interactive.close",
+      "interactive.configure",
       "interactive.delete",
       "interactive.event_detail",
       "interactive.follow_up",
