@@ -418,6 +418,72 @@ fn choosing_the_fifth_answer_sends_the_approval_first_and_the_rule_second() {
 }
 
 #[test]
+fn a_permissions_request_is_its_own_kind_and_carries_the_root_it_asks_for() {
+    let mut app = opened(full_hello());
+    // `Dialect.Codex.approval_payload/2` for `item/permissions/requestApproval`: the
+    // command text is the `grantRoot` the app server asked for.
+    approve(
+        &mut app,
+        json!({
+            "tool_call": { "name": "permissions", "command": "/tmp/w/vendor", "cwd": "/tmp/w" },
+            "kind": "permissions",
+            "reason": "the model asked to read outside the workspace"
+        }),
+    );
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.contains("approval requested — permissions"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("/tmp/w/vendor"), "{}", screen.text());
+    assert!(
+        screen.contains("the model asked to read outside the workspace"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        !screen.contains("don't ask again"),
+        "no rule was suggested for this one, so nothing is offered and nothing is \
+         explained away:\n{}",
+        screen.text()
+    );
+}
+
+#[test]
+fn the_reason_prompt_never_returns_a_cursor_to_a_row_that_stopped_existing() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    // Land on the fifth row, then take the reason detour and come back.
+    for _ in 0..4 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Tab));
+    for character in "with a note".chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    let approval = calls
+        .iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the approval is answered");
+
+    assert_eq!(approval.params["response"]["decision"], "approve");
+    assert_eq!(approval.params["response"]["scope"], "session");
+    assert_eq!(approval.params["response"]["reason"], "with a note");
+    assert!(
+        calls.iter().any(|call| call.method == "permissions.add"),
+        "the row the cursor was on is the row that was answered"
+    );
+}
+
+#[test]
 fn tab_opens_the_reason_field_the_same_way_r_does() {
     let mut app = opened(full_hello());
     approve(&mut app, codex_sandbox_escalation());

@@ -674,12 +674,17 @@ impl App {
         let detail = request.detail();
         let (rule, rule_absent) = self.approval_rule(plane, &id, detail.suggested_rule.as_deref());
 
+        // The reason prompt reopens this modal, and the fifth row may not exist the second
+        // time — a rule can stop being offerable between the two, and a cursor left past
+        // the last row would answer something the reader never selected.
+        let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+
         self.overlay = Some(Overlay::Approval {
             plane,
             id,
             request_id,
             subject,
-            choice,
+            choice: choice.min(rows - 1),
             reason,
             detail: Box::new(detail),
             rule,
