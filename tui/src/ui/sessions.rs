@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::model::{Event, EventType, Plane, SessionInfo, SessionStatus};
 
 use super::app::{App, Connection};
+use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
@@ -851,6 +852,28 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(1)]).split(area);
     let inner = rows[1];
 
+    // The ledger is a tree, not a wrapped paragraph, so it draws itself and returns before
+    // the chat projection's scroll bookkeeping — which measures rows the tree does not have.
+    if show_event_details {
+        details_pane(
+            frame,
+            rows[0],
+            inner,
+            app,
+            DetailsPane {
+                plane,
+                id: &id,
+                title: &conversation_title,
+                provider: &conversation_provider,
+                header_height,
+                ticks,
+                verbosity,
+            },
+        );
+
+        return;
+    }
+
     let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
@@ -955,6 +978,120 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);
 }
 
+struct DetailsPane<'a> {
+    plane: Plane,
+    id: &'a str,
+    title: &'a str,
+    provider: &'a str,
+    header_height: u16,
+    ticks: u64,
+    verbosity: Verbosity,
+}
+
+/// `/details` and `ctrl+x d`: the normalized event ledger as one collapsible tree per
+/// event (A9).
+///
+/// Drawn from an immutable borrow of the watch so the mutable one the cursor needs is
+/// taken afterwards and separately — the chat pane's `measured` bookkeeping counts wrapped
+/// paragraph rows, which a tree does not produce.
+fn details_pane(
+    frame: &mut Frame,
+    header_area: Rect,
+    inner: Rect,
+    app: &mut App,
+    pane: DetailsPane<'_>,
+) {
+    let key = (pane.plane, pane.id.to_string());
+
+    let Some(watch) = app.sessions.watches.get(&key) else {
+        return;
+    };
+
+    if pane.header_height == 1 {
+        frame.render_widget(
+            Paragraph::new(header(
+                watch,
+                pane.id,
+                pane.plane,
+                pane.ticks,
+                true,
+                pane.verbosity,
+            )),
+            header_area,
+        );
+    } else {
+        render_conversation_header(
+            frame,
+            header_area,
+            watch,
+            ConversationHeader {
+                id: pane.id,
+                plane: pane.plane,
+                title: pane.title,
+                provider: pane.provider,
+                show_event_details: true,
+                verbosity: pane.verbosity,
+            },
+        );
+    }
+
+    app.details.focus(pane.plane, pane.id);
+
+    let Some(watch) = app.sessions.watches.get(&key) else {
+        return;
+    };
+    let rows = app.details.rows(watch);
+
+    // The filter line is the only chrome the ledger adds, and only while it is set: a row
+    // reserved for an empty filter would be a row taken from the ledger for nothing.
+    let filtering = app.details.filtering || !app.details.filter.is_empty();
+    let split = Layout::vertical([Constraint::Length(u16::from(filtering)), Constraint::Min(1)])
+        .split(inner);
+
+    if filtering {
+        let mut spans = vec![
+            Span::styled("filter ", Style::default().fg(theme::MUTED)),
+            Span::raw(app.details.filter.clone()),
+        ];
+
+        if app.details.filtering {
+            spans.push(Span::styled(
+                "_",
+                Style::default().add_modifier(Modifier::SLOW_BLINK),
+            ));
+            spans.push(Span::styled(
+                "  enter keeps it · esc clears it",
+                Style::default().fg(theme::MUTED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("  {} row(s) · esc clears it", rows.len()),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), split[0]);
+    }
+
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                if app.details.filter.is_empty() {
+                    "No events retained for this session."
+                } else {
+                    "No retained event matches that filter."
+                },
+                Style::default().fg(theme::MUTED),
+            )),
+            split[1],
+        );
+
+        return;
+    }
+
+    details::render(frame, split[1], &mut app.details, &rows);
+}
+
 struct ConversationHeader<'a> {
     id: &'a str,
     plane: Plane,
@@ -1007,7 +1144,7 @@ fn render_conversation_header(
             Span::styled(stream, stream_style.add_modifier(Modifier::BOLD)),
             Span::styled(
                 if header.show_event_details {
-                    "  ^O VERBOSE"
+                    "  ^X D CHAT"
                 } else if header.verbosity.verbose() {
                     "  ^O COMPACT"
                 } else {
@@ -1086,7 +1223,9 @@ fn header(
 
     let mut spans = vec![
         Span::styled(" Event details ", theme::heading()),
-        Span::styled("/details chat  ", Style::default().fg(theme::MUTED)),
+        // Not `/details`: inside the ledger `/` is the filter, so the chord is the way
+        // back and naming the slash command here would name a key that does not work.
+        Span::styled("ctrl+x d chat  ", Style::default().fg(theme::MUTED)),
         Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
         Span::raw(format!("{id} ")),
         Span::styled(

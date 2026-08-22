@@ -397,6 +397,11 @@ impl App {
                     NoticeKind::Error,
                 ),
             },
+            Tag::EventDetail {
+                plane,
+                id,
+                sequence,
+            } => self.event_detail_answered(plane, &id, sequence, result),
             // The approval it accompanies was already sent and is reported separately.
             // A rule that failed to save is not a failed approval, and saying so in the
             // same sentence would make the operator re-answer a question that was answered.

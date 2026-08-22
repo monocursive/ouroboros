@@ -43,6 +43,7 @@ use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
 use crate::transport::ClientError;
 
+use super::details::DetailsView;
 use super::editor::{CompletionCatalog, Editor, EditorAction};
 use super::notify::{self, Terminal as TerminalIdentity};
 use super::transcript::{ApprovalDetail, Note, Watch};
@@ -50,6 +51,7 @@ use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod details;
 mod footer;
 mod home;
 mod keys;
@@ -269,6 +271,14 @@ pub enum Tag {
         input: String,
         reconciling: bool,
         submission_sequence: u64,
+    },
+    /// `interactive.event_detail` / `coding.event_detail` for one excerpted event, asked
+    /// for by the `/details` ledger. The sequence is on the tag because the answer is a
+    /// bare event and two drill-ins can be outstanding at once.
+    EventDetail {
+        plane: Plane,
+        id: String,
+        sequence: u64,
     },
     /// `permissions.add` for the rule the approval modal's fifth answer names.
     ///
@@ -727,6 +737,8 @@ pub struct App {
     /// Tick at which a second Ctrl+C will open the quit dialog.
     ctrl_c_until: Option<u64>,
     /// Last agent message the I/O driver should copy to the clipboard.
+    /// The `/details` ledger's expansion, cursor, filter, and drill-in answers.
+    pub details: DetailsView,
     copy_pending: Option<String>,
     /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
     external_editor_pending: Option<String>,
@@ -859,6 +871,7 @@ impl App {
             open_url_pending: None,
             leader_until: None,
             ctrl_c_until: None,
+            details: DetailsView::default(),
             copy_pending: None,
             external_editor_pending: None,
             scrollback_dump_pending: None,

@@ -51,6 +51,12 @@ pub enum Marker {
     B64,
     /// The gateway's depth cap (32) or node cap (50_000) cut the tree here.
     Truncated,
+    /// A string leaf the gateway's byte cap cut (§2.7): the prefix it kept, and how many
+    /// bytes the whole leaf was. The rest exists — `interactive.event_detail` will fetch
+    /// it — which is exactly why this is its own marker and not a `Map` of two keys.
+    Excerpt {
+        bytes: u64,
+    },
 }
 
 impl Marker {
@@ -59,15 +65,20 @@ impl Marker {
             Self::Struct(_) => Style::default().fg(theme::ACCENT),
             Self::Opaque => Style::default().fg(Color::Magenta),
             Self::B64 => Style::default().fg(Color::Magenta),
-            Self::Truncated => Style::default().fg(theme::WARN),
+            Self::Truncated | Self::Excerpt { .. } => Style::default().fg(theme::WARN),
             Self::Map | Self::List => Style::default().fg(theme::MUTED),
             Self::Text | Self::Scalar => Style::default(),
         }
     }
+
+    /// Whether this node is a leaf the gateway cut and a detail fetch could complete.
+    pub fn is_excerpt(&self) -> bool {
+        matches!(self, Self::Excerpt { .. })
+    }
 }
 
 /// One visible line of the tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub path: String,
     pub depth: usize,
@@ -219,7 +230,9 @@ impl<'a> TreeView<'a> {
     }
 }
 
-fn line(row: &Row) -> Line<'static> {
+/// One tree row as a drawn line. Public so a view that interleaves tree rows with rows of
+/// its own — `/details` puts one per event — draws them exactly as the tree does.
+pub fn line(row: &Row) -> Line<'static> {
     let mut spans = Vec::new();
 
     spans.push(Span::raw("  ".repeat(row.depth)));
@@ -307,6 +320,14 @@ pub fn classify(value: &Value) -> Marker {
                 }
             }
 
+            // `{"_excerpt": prefix, "_bytes": n}`, the byte cap's marker. Two keys, so it
+            // is checked outside the one-key block above.
+            if fields.len() == 2 && fields.contains_key("_excerpt") {
+                if let Some(bytes) = fields.get("_bytes").and_then(Value::as_u64) {
+                    return Marker::Excerpt { bytes };
+                }
+            }
+
             match fields.get("_struct") {
                 Some(Value::String(name)) => Marker::Struct(name.clone()),
                 _ => Marker::Map,
@@ -322,9 +343,12 @@ fn children<'a>(value: &'a Value, marker: &Marker) -> Vec<(String, &'a Value)> {
     match marker {
         // A marker's own key is its whole content; opening it would show the reader the
         // sentinel they are already looking at.
-        Marker::Opaque | Marker::B64 | Marker::Truncated | Marker::Text | Marker::Scalar => {
-            Vec::new()
-        }
+        Marker::Opaque
+        | Marker::B64
+        | Marker::Truncated
+        | Marker::Excerpt { .. }
+        | Marker::Text
+        | Marker::Scalar => Vec::new(),
         Marker::Struct(_) | Marker::Map => value
             .as_object()
             .map(|fields| {
@@ -364,6 +388,10 @@ fn summary(value: &Value, marker: &Marker, child_count: usize) -> String {
                 .len()
         ),
         Marker::Truncated => "<truncated by the gateway's depth or node cap>".to_string(),
+        Marker::Excerpt { bytes } => format!(
+            "{}… ({bytes} bytes) · enter fetches",
+            one_line(value.get("_excerpt").and_then(Value::as_str).unwrap_or(""))
+        ),
         Marker::Map => plural(child_count, "key", "keys"),
         Marker::Struct(_) => plural(child_count, "field", "fields"),
         Marker::List => plural(child_count, "item", "items"),
