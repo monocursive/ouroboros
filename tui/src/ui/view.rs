@@ -1901,10 +1901,17 @@ const KEYS: &[(&str, &str)] = &[
     ("ctrl+p", "command palette"),
     (
         "ctrl+x",
-        "leader: n new · l sessions · x end · e editor · y copy · q quit",
+        "leader: n new · l sessions · d details · x end · e editor · y copy · q quit",
     ),
     ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
-    ("ctrl+o", "toggle agent chat and complete event details"),
+    (
+        "ctrl+o",
+        "expand, and collapse again, every cell in the conversation",
+    ),
+    (
+        "ctrl+t",
+        "plan and tasks panel, while a provider publishes one",
+    ),
     ("ctrl+q", "quit dialog"),
     ("?", "this page, when the prompt is empty"),
     (",", "settings, when the prompt is empty"),

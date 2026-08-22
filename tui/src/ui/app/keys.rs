@@ -11,7 +11,7 @@ pub const LEADER_KEYS: &[(&str, &str)] = &[
     ("a", "approval"),
     ("w", "writable session"),
     ("x", "end or remove session"),
-    ("o", "event details"),
+    ("d", "event details"),
     ("q", "quit"),
     ("?", "keyboard help"),
 ];
