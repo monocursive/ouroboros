@@ -600,6 +600,50 @@ fn screen_reader_mode_outranks_raw_mode() {
     assert!(text.starts_with("you:"), "{text:?}");
 }
 
+/// The whole shell, not just the transcript renderer.
+///
+/// Dropping every block's borders changes what `Block::inner` returns for a dozen panels
+/// at once, and a layout that assumed two columns of frame is a layout that can panic or
+/// clip. Drawn at three widths including a narrow one, because that is where the
+/// arithmetic is tightest.
+#[test]
+fn the_whole_shell_draws_without_edges_and_without_panicking() {
+    let _held = screen_reader();
+
+    for (width, height) in [(60u16, 20u16), (100, 30), (160, 48)] {
+        let mut app = support::app(support::full_hello());
+        let screen = support::render(&mut app, width, height);
+
+        assert!(
+            !screen.text().trim().is_empty(),
+            "{width}x{height} drew nothing"
+        );
+
+        for drawn in ['┌', '┐', '└', '┘', '│', '├', '┤', '┬', '┴', '┼'] {
+            assert!(
+                !screen.text().contains(drawn),
+                "{drawn:?} survived at {width}x{height}\n{}",
+                screen.text()
+            );
+        }
+    }
+}
+
+/// …and the same shell keeps its frames when nobody asked for them to go.
+#[test]
+fn the_shell_is_framed_as_it_always_was_by_default() {
+    let _held = holding(Settings::default());
+
+    let mut app = support::app(support::full_hello());
+    let screen = support::render(&mut app, 100, 30);
+
+    assert!(
+        screen.text().chars().any(|c| c == '─' || c == '│'),
+        "the default shell lost its frame:\n{}",
+        screen.text()
+    );
+}
+
 #[test]
 fn without_colour_a_diff_still_tells_its_two_halves_apart() {
     use ouro::ui::theme::{self, Palette};
