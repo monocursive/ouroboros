@@ -7,13 +7,26 @@
 //! headings, modifiers for emphasis, hanging indents for lists, a bar for quotes, real
 //! columns for tables.
 //!
-//! Two rules shape the implementation.
+//! Three rules shape the implementation.
 //!
 //! **The source is the copy of record.** Rendering is lossy on purpose: emphasis becomes a
 //! modifier, a link becomes `text (url)`, a table becomes columns. `/raw` and
 //! [`super::export`] therefore take the message's own text and never the rows below.
 //! [`Rendered`] carries display rows and nothing else, and [`plain`] exists so a caller
 //! that genuinely wants the *rendered* text does not have to scrape spans for it.
+//!
+//! **Nothing renders from text that has not finished arriving.** The cell re-renders on
+//! every frame while deltas are still landing, so the tail of the text is, at any moment,
+//! half of something. Goose's `MarkdownBuffer` rule applies: complete blocks render as
+//! Markdown, and the fragment still being typed stays plain text. Concretely, while
+//! `streaming` is true the message's final line is held out of the block parse until a
+//! newline terminates it, and is drawn as the characters that arrived. A half-typed
+//! `**bold`, an unfinished `[text](htt`, a lone `*` and a half-written table row therefore
+//! read as themselves rather than as a construct guessed from them — and, more quietly,
+//! `Hello\n--` does not promote `Hello` to a heading for the one frame before the third
+//! hyphen lands. An unterminated fence is the one construct that keeps its shape while
+//! open: [`super::code`] already renders it as a frame with no floor, and streaming code
+//! with syntax highlighting beats streaming code as prose.
 //!
 //! **The work is bounded by what is drawn, not by what arrived.** Every row goes through
 //! one budget check, so a three-megabyte message costs the rows the pane asked for rather
@@ -89,7 +102,9 @@ pub fn render_limited(text: &str, width: usize, max_lines: usize, streaming: boo
 
         match segment {
             code::Segment::Prose(prose) => {
-                let rendered = prose_rows(prose, width, remaining);
+                // Only the message's last segment can still be growing.
+                let live = streaming && index == last;
+                let rendered = prose_rows(prose, width, remaining, live);
                 complete &= rendered.complete;
                 lines.extend(rendered.lines);
             }
@@ -125,11 +140,57 @@ pub fn plain(rendered: &Rendered) -> String {
         .join("\n")
 }
 
-/// One prose segment, as blocks.
-fn prose_rows(prose: &str, width: usize, max_lines: usize) -> Rendered {
+/// One prose segment: complete blocks as Markdown, plus the fragment still being typed.
+fn prose_rows(prose: &str, width: usize, max_lines: usize, live: bool) -> Rendered {
+    let (settled, tail) = match live {
+        true => hold_out_tail(prose),
+        false => (prose, ""),
+    };
+
     let mut renderer = Renderer::new(width, max_lines);
-    renderer.run(prose);
-    renderer.finish()
+    renderer.run(settled);
+    let mut rendered = renderer.finish();
+
+    if tail.is_empty() {
+        return rendered;
+    }
+
+    // The held-out fragment belongs to the block above it — it is the next few words of
+    // that paragraph, or the rest of that list item. Dropping the separator keeps it where
+    // the reader's eye already is instead of pushing it into a block of its own.
+    while rendered.lines.last().is_some_and(|line| line.width() == 0) {
+        rendered.lines.pop();
+    }
+
+    let budget = max_lines.saturating_sub(rendered.lines.len());
+    // The spare row is how the folder reports that more text followed.
+    let rows = fold(
+        &[Span::raw(tail.to_string())],
+        width,
+        budget.saturating_add(1),
+    );
+    rendered.complete &= rows.len() <= budget;
+    rendered
+        .lines
+        .extend(rows.into_iter().take(budget).map(Line::from));
+
+    rendered
+}
+
+/// Splits a still-growing prose segment into the part that has finished arriving and the
+/// line that has not.
+///
+/// A line is finished when a newline has terminated it. Everything up to and including the
+/// last newline is complete Markdown input; whatever follows is the fragment the agent is
+/// mid-word on, and it renders as the characters that arrived. A segment ending on a
+/// newline holds nothing back, and a segment with no newline at all holds all of itself
+/// back — which is right for the opening sentence of a reply, where nothing yet says what
+/// block it will turn out to be.
+fn hold_out_tail(prose: &str) -> (&str, &str) {
+    match prose.rfind('\n') {
+        Some(at) => prose.split_at(at + 1),
+        None => ("", prose),
+    }
 }
 
 /// A blank row between blocks, unless the last row is already blank.
@@ -583,21 +644,18 @@ impl Renderer {
         let quote = self.quote_prefix();
         let quote_cells: usize = quote.iter().map(span_cells).sum();
 
+        // An indent of nothing is no span at all: an empty span carries a style into the
+        // row that the row's first word is then read through.
         let (first, hang) = match self.marker.take() {
             Some(marker) => {
-                let indent = " ".repeat(marker.indent);
                 let hang = marker.indent + UnicodeWidthStr::width(marker.text.as_str());
-                (
-                    vec![
-                        Span::raw(indent),
-                        Span::styled(marker.text, theme::markdown_rule()),
-                    ],
-                    hang,
-                )
+                let mut first = indent_span(marker.indent);
+                first.push(Span::styled(marker.text, theme::markdown_rule()));
+                (first, hang)
             }
             None => {
                 let indent = self.content_indent();
-                (vec![Span::raw(" ".repeat(indent))], indent)
+                (indent_span(indent), indent)
             }
         };
 
@@ -631,7 +689,7 @@ impl Renderer {
             let mut line = quote.clone();
             match index {
                 0 => line.extend(first.iter().cloned()),
-                _ => line.push(Span::raw(" ".repeat(hang))),
+                _ => line.extend(indent_span(hang)),
             }
             line.extend(row);
 
@@ -946,6 +1004,14 @@ fn row_cells(row: &[Span<'static>]) -> usize {
     row.iter().map(span_cells).sum()
 }
 
+/// Leading blanks as a span, or nothing at all when there are none to draw.
+fn indent_span(cells: usize) -> Vec<Span<'static>> {
+    match cells {
+        0 => Vec::new(),
+        cells => vec![Span::raw(" ".repeat(cells))],
+    }
+}
+
 fn digits(number: u64) -> usize {
     let mut digits = 1;
     let mut value = number;
@@ -1232,6 +1298,168 @@ Done.";
                 }),
                 line.width()
             );
+        }
+    }
+
+    /// Renders `text` cut at three points inside its last construct, the way a delta
+    /// stream would deliver it, and hands each prefix to `check`.
+    fn at_cut_points(text: &str, mut check: impl FnMut(&str, String)) {
+        let bytes = text.len();
+        let mut cuts: Vec<usize> = [bytes / 2, bytes * 3 / 4, bytes.saturating_sub(1)]
+            .into_iter()
+            .map(|cut| {
+                let mut cut = cut.min(bytes);
+                while cut > 0 && !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                cut
+            })
+            .collect();
+        cuts.dedup();
+
+        for cut in cuts {
+            let prefix = &text[..cut];
+            check(prefix, plain(&render(prefix, 40, true)));
+        }
+    }
+
+    #[test]
+    fn a_message_cut_anywhere_renders_without_a_stray_construct_marker() {
+        // Every construct, cut mid-stream, must read as the characters that arrived —
+        // never as a heading, a rule, a list or a table conjured from half of one.
+        let constructs = [
+            "Some **bold text** here",
+            "Some *italic text* here",
+            "Some ~~struck text~~ here",
+            "Run `mix test --stale` now",
+            "See [the docs](https://example.com/d) now",
+            "An ![image alt](https://example.com/i.png) here",
+            "Heading\n=======\n",
+            "Heading\n-------\n",
+            "# A heading line\n",
+            "- one\n- two\n- three\n",
+            "1. one\n2. two\n3. three\n",
+            "- [ ] open\n- [x] shut\n",
+            "> a quoted claim\n> and its second row\n",
+            "before\n\n---\n\nafter\n",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n",
+            "<div>some raw html</div>\n",
+            "Look:\n```rust\nfn main() {}\n```\n",
+        ];
+
+        for construct in constructs {
+            at_cut_points(construct, |prefix, shown| {
+                assert!(
+                    !shown.contains('\u{1b}'),
+                    "escape from {prefix:?}: {shown:?}"
+                );
+                // A frame either has both its shoulders or is a fence still being written.
+                let framed = shown.contains('┌');
+                let floored = shown.contains('└');
+                let fence = prefix.contains("```");
+                assert!(
+                    !floored || framed,
+                    "a floor with no roof from {prefix:?}: {shown:?}"
+                );
+                assert!(
+                    !framed || floored || fence,
+                    "an open frame that is not a fence from {prefix:?}: {shown:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn a_half_typed_inline_construct_reads_as_the_characters_that_arrived() {
+        for (partial, expected) in [
+            ("Some **bol", "Some **bol"),
+            ("Some *ital", "Some *ital"),
+            ("Some ~~stru", "Some ~~stru"),
+            ("Run `mix te", "Run `mix te"),
+            ("See [the docs](htt", "See [the docs](htt"),
+            ("An ![alt](htt", "An ![alt](htt"),
+            ("A lone * marker", "A lone * marker"),
+        ] {
+            assert_eq!(plain(&render(partial, 60, true)), expected, "{partial:?}");
+        }
+    }
+
+    #[test]
+    fn a_setext_underline_does_not_restyle_the_line_above_it_until_it_lands() {
+        // The one construct that reaches backwards. Held out, it cannot.
+        for partial in ["Hello\n-", "Hello\n--", "Hello\n=", "Hello\n=="] {
+            assert_eq!(plain(&render(partial, 40, true)), partial, "{partial:?}");
+        }
+
+        // And once the newline arrives it is a heading, in the heading's own weight.
+        let settled = render("Hello\n---\n", 40, false);
+        assert_eq!(plain(&settled), "Hello");
+        assert_eq!(
+            find(&settled.lines[0].spans, "Hello").style,
+            theme::markdown_heading(2)
+        );
+    }
+
+    #[test]
+    fn an_unfinished_table_row_never_lands_inside_the_frame() {
+        let shown = plain(&render("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 ", 40, true));
+        let rows: Vec<&str> = shown.lines().collect();
+
+        assert!(rows.iter().any(|row| row.starts_with('└')), "{shown}");
+        assert_eq!(
+            rows.last().copied(),
+            Some("| 3 "),
+            "the half row stays outside the frame: {shown}"
+        );
+    }
+
+    #[test]
+    fn a_list_still_being_typed_keeps_its_finished_items() {
+        let shown = plain(&render("- one\n- two\n- thr", 40, true));
+
+        assert_eq!(shown, "• one\n• two\n- thr");
+    }
+
+    #[test]
+    fn an_open_fence_keeps_its_frame_and_its_highlighting() {
+        let shown = plain(&render("Look:\n```rust\nfn main() {", 40, true));
+
+        assert!(shown.contains("┌─ rust "), "{shown}");
+        assert!(shown.contains("│ fn main() {"), "{shown}");
+        assert!(!shown.contains('└'), "an open block has no floor: {shown}");
+    }
+
+    #[test]
+    fn a_fence_opener_still_being_typed_is_not_yet_a_frame() {
+        // `at_line_start` only sees a fence once the line it opens has ended, so a
+        // language name mid-word must not open a frame it may never close.
+        let shown = plain(&render("Look:\n```ru", 40, true));
+
+        assert!(!shown.contains('┌'), "{shown}");
+        assert!(shown.ends_with("```ru"), "{shown}");
+    }
+
+    #[test]
+    fn the_settled_render_is_what_the_stream_converges_on() {
+        // The last frame of a stream and the first frame after it must agree on the
+        // blocks; only the still-typed line differs, and at the end there is none.
+        let text = "# Title\n\n- one\n- two\n\n> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        assert_eq!(
+            plain(&render(text, 60, true)),
+            plain(&render(text, 60, false))
+        );
+    }
+
+    #[test]
+    fn rendering_is_a_function_of_the_text_the_width_and_the_stream_state() {
+        for streaming in [true, false] {
+            for width in [60usize, 100, 160] {
+                assert_eq!(
+                    render(SAMPLER, width, streaming),
+                    render(SAMPLER, width, streaming),
+                    "{width}/{streaming}"
+                );
+            }
         }
     }
 

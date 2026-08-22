@@ -93,13 +93,16 @@ fn find_fence(text: &str, from: usize) -> Option<(usize, usize, Option<&str>)> {
 
     while index < text.len() {
         let line_start = index;
-        let line_end = text[index..]
-            .find('\n')
-            .map(|offset| index + offset)
-            .unwrap_or(text.len());
+        let terminated = text[index..].find('\n').map(|offset| index + offset);
+        let line_end = terminated.unwrap_or(text.len());
 
         let trimmed = text[line_start..line_end].trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            // An info line no newline has ended yet is a fence still being typed. Opening
+            // a frame on it would label the block from half a language name — `ru` is not
+            // `rust`, and it is not `ruby` either — and relabel it a delta later.
+            let content = terminated? + 1;
+
             // The language is the first whitespace-delimited word; the remainder of an
             // info line is metadata (`{highlightLines}` and friends) that is not a name.
             let info = trimmed[3..].split_whitespace().next().filter(|word| {
@@ -108,7 +111,6 @@ fn find_fence(text: &str, from: usize) -> Option<(usize, usize, Option<&str>)> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "+#.-_".contains(c))
             });
-            let content = (line_end + 1).min(text.len());
             return Some((line_start, content, info));
         }
 
