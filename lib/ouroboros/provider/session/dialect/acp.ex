@@ -4,6 +4,7 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   @behaviour Ouroboros.Provider.Session.Dialect
 
   alias Jido.Harness.{ApprovalResponse, Event, InteractionCapabilities, TurnRequest}
+  alias Ouroboros.Control.Permissions.Seam
 
   # Bounds on what one ACP update may turn into. The wire applies no byte cap of its own
   # (a payload crosses the socket whole on every replay), so the dialect is where an
@@ -44,6 +45,10 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
 
   @impl true
   def command(request, context) do
+    # `approval_request/2` sees only a method and params, so the session this process
+    # speaks for is remembered here, in `Session.Jsonl.init/1`, where both are in hand.
+    _ = Seam.bind(request, context, name())
+
     cli_path = option(request.provider_options, :cli_path)
     argv = option(request.provider_options, :argv) || ["acp"]
 
@@ -141,11 +146,27 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   @impl true
   def configure(_runtime, _changes), do: {:error, :unsupported}
 
+  # The one pre-tool seam ACP gives. `Ouroboros.Control.Permissions` answers first; only
+  # what it leaves as `:ask` becomes an approval the human sees.
   @impl true
-  def approval_request("session/request_permission", params),
-    do: {:approval, permission_payload(params), %{params: params}}
+  def approval_request("session/request_permission" = method, params) do
+    case Seam.decide(:acp, method, params, permission_payload(params)) do
+      {:ask, payload} ->
+        {:approval, payload, %{params: params, method: method}}
+
+      {:allow, _rule} ->
+        {:result, permission_result(params, seam_response(:approve, nil))}
+
+      {:deny, rule} ->
+        {:result, permission_result(params, seam_response(:deny, Seam.refusal(rule)))}
+    end
+  end
 
   def approval_request(_method, _params), do: :method_not_found
+
+  defp seam_response(decision, reason) do
+    %ApprovalResponse{decision: decision, scope: :once, reason: reason, provider_options: %{}}
+  end
 
   @impl true
   def approval_reply(response, stash), do: permission_result(stash[:params] || %{}, response)
