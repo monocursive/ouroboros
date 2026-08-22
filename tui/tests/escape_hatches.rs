@@ -196,7 +196,10 @@ fn the_scrollback_dump_carries_the_whole_transcript_at_the_current_width() {
         dumped.contains("tool Read src/lex.rs → 6 lines · completed"),
         "{dumped}"
     );
-    assert!(dumped.contains("c1"), "the correlation id survives the dump: {dumped}");
+    assert!(
+        dumped.contains("c1"),
+        "the correlation id survives the dump: {dumped}"
+    );
 }
 
 #[test]

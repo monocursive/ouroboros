@@ -5047,4 +5047,319 @@ mod tests {
             "one projection + render took {each:?}"
         );
     }
+
+    // ---------------------------------------------------------------------------------
+    // A4 — diffs v2
+    // ---------------------------------------------------------------------------------
+
+    const PATCH: &str = "\
+diff --git a/src/lex.rs b/src/lex.rs
+--- a/src/lex.rs
++++ b/src/lex.rs
+@@ -1,3 +1,3 @@ fn scan
+ fn scan(text: &str) {
+-    let end = text.find('\\n');
++    let end = text.find(['\\r', '\\n']);
+     ok
+";
+
+    /// An approval event: the correlation id rides on the envelope, not in the payload.
+    fn approval(sequence: u64, kind: &str, payload: Value) -> Event {
+        Event::decode(&json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": kind,
+            "timestamp": "2026-08-14T00:00:00Z",
+            "request_id": "r1",
+            "payload": payload
+        }))
+        .expect("an approval event")
+    }
+
+    fn change(sequence: u64, path: &str, patch: &str) -> Event {
+        event(
+            sequence,
+            "file_change",
+            json!({"changes": [{"path": path, "kind": "modified", "diff": patch}]}),
+        )
+    }
+
+    /// The header's numbers are the parse's, and the gutter numbers both sides.
+    #[test]
+    fn a_diff_cell_counts_the_hunks_it_holds_and_numbers_the_lines() {
+        let update = change(1, "src/lex.rs", PATCH);
+        let cells = project(vec![Entry::Event(&update)]);
+        let text = plain(&render_cells(&cells, 100));
+
+        assert!(text.contains("M src/lex.rs  +1 −1"), "{text}");
+        assert!(text.contains("@@ -1 +1 @@ fn scan"), "{text}");
+        assert!(
+            text.contains("  2     -    let end = text.find('\\n');"),
+            "the removed line is numbered on the old side only: {text}"
+        );
+        assert!(
+            text.contains("      2 +    let end = text.find(['\\r', '\\n']);"),
+            "the added line is numbered on the new side only: {text}"
+        );
+    }
+
+    /// The honesty invariant: the provider's claim never becomes the printed number.
+    #[test]
+    fn a_diff_prints_what_it_can_count_not_what_the_provider_claimed() {
+        let update = event(
+            1,
+            "file_change",
+            json!({
+                "changes": [{
+                    "path": "src/lex.rs",
+                    "diff": PATCH,
+                    // A provider summarising a much larger patch.
+                    "additions": 400,
+                    "deletions": 90
+                }]
+            }),
+        );
+        let cells = project(vec![Entry::Event(&update)]);
+        let Cell::Diff(diff) = cells
+            .iter()
+            .find(|cell| matches!(cell, Cell::Diff(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(diff.parsed.additions(), 1);
+        assert_eq!(diff.parsed.deletions(), 1);
+        let text = plain(&render_cells(&cells, 100));
+        assert!(text.contains("+1 −1"), "{text}");
+        assert!(!text.contains("+400"), "the claim is not the count: {text}");
+    }
+
+    /// Word-level emphasis reaches the rendered spans, not just the parse.
+    #[test]
+    fn only_the_changed_words_of_a_paired_line_are_drawn_undimmed() {
+        let update = change(1, "src/lex.rs", PATCH);
+        let cells = project(vec![Entry::Event(&update)]);
+        let lines = render_cells(&cells, 100);
+
+        let added = lines
+            .iter()
+            .find(|line| plain_line(line).contains("+    let end"))
+            .expect("the added row");
+        let strong: String = added
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(
+            strong.contains("['\\r', '\\n']"),
+            "the rewritten expression is the emphasis: {strong:?}"
+        );
+        assert!(
+            !strong.contains("let end"),
+            "the shared prefix stays dim: {strong:?}"
+        );
+    }
+
+    /// A collapsed diff spends twelve rows and says what the thirteenth would have been.
+    #[test]
+    fn a_long_diff_collapses_to_twelve_rows_and_names_the_key_that_opens_it() {
+        let body: String = (0..60).map(|n| format!("+line {n}\n")).collect();
+        let patch = format!("--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,60 @@\n{body}");
+        let update = change(1, "big.txt", &patch);
+        let cells = project(vec![Entry::Event(&update)]);
+
+        let compact = plain(&render_cells(&cells, 100));
+        assert!(compact.contains("A big.txt  +60 −0"), "{compact}");
+        assert!(compact.contains("line 5"), "{compact}");
+        assert!(!compact.contains("line 59"), "{compact}");
+        assert!(compact.contains("lines · ctrl+o"), "{compact}");
+
+        let verbose = plain(&render_cells_at(&cells, 100, 0, Verbosity::Verbose));
+        assert!(verbose.contains("line 59"), "{verbose}");
+        assert!(!verbose.contains("ctrl+o"), "{verbose}");
+    }
+
+    /// A long line wraps; the only copy of a change is never cut at the right margin.
+    #[test]
+    fn a_diff_wraps_long_lines_instead_of_truncating_them() {
+        let long = "z".repeat(300);
+        let patch = format!("--- a/w.txt\n+++ b/w.txt\n@@ -1,1 +1,1 @@\n+{long}\n");
+        let update = change(1, "w.txt", &patch);
+        let cells = project(vec![Entry::Event(&update)]);
+
+        for width in [60usize, 100, 160] {
+            let lines = render_cells_at(&cells, width, 0, Verbosity::Verbose);
+            let text = plain(&lines);
+            assert_eq!(
+                text.matches('z').count(),
+                300,
+                "width {width} lost part of the change"
+            );
+            assert!(
+                lines.iter().all(|line| line.width() <= width),
+                "width {width} overflowed the pane"
+            );
+        }
+    }
+
+    /// Warp's rule, both halves.
+    #[test]
+    fn a_diff_under_an_open_approval_stays_expanded_and_says_so() {
+        let asked = approval(
+            1,
+            "approval_requested",
+            json!({"tool_call": {"name": "file_change", "path": "big.txt"}}),
+        );
+        let body: String = (0..60).map(|n| format!("+line {n}\n")).collect();
+        let patch = format!("--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,60 @@\n{body}");
+        let update = change(2, "big.txt", &patch);
+        let resolved = approval(3, "approval_resolved", json!({"decision": "approve"}));
+
+        let pending = project(vec![Entry::Event(&asked), Entry::Event(&update)]);
+        let Cell::Diff(diff) = pending
+            .iter()
+            .find(|cell| matches!(cell, Cell::Diff(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(diff.pending_approval);
+
+        let text = plain(&render_cells(&pending, 100));
+        assert!(text.contains("pending approval"), "{text}");
+        assert!(
+            text.contains("line 59"),
+            "expanded while the operator is being asked to judge it: {text}"
+        );
+
+        // Applied: back to the header.
+        let applied = project(vec![
+            Entry::Event(&asked),
+            Entry::Event(&update),
+            Entry::Event(&resolved),
+        ]);
+        let Cell::Diff(diff) = applied
+            .iter()
+            .find(|cell| matches!(cell, Cell::Diff(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(!diff.pending_approval);
+
+        let text = plain(&render_cells(&applied, 100));
+        assert!(!text.contains("pending approval"), "{text}");
+        assert!(!text.contains("line 59"), "collapsed after apply: {text}");
+    }
+
+    /// An approval about something else never marks an unrelated change as pending.
+    #[test]
+    fn an_unrelated_approval_does_not_claim_a_diff_it_was_not_about() {
+        let asked = approval(
+            1,
+            "approval_requested",
+            json!({"tool_call": {"command": "cargo publish"}}),
+        );
+        let update = change(2, "src/lex.rs", PATCH);
+        let cells = project(vec![Entry::Event(&asked), Entry::Event(&update)]);
+        let Cell::Diff(diff) = cells
+            .iter()
+            .find(|cell| matches!(cell, Cell::Diff(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+
+        assert!(!diff.pending_approval);
+    }
+
+    /// The post-turn diffstat, at the boundary the turn ended on.
+    #[test]
+    fn a_turn_end_carries_a_diffstat_of_what_that_turn_changed() {
+        let one = change(
+            1,
+            "a.rs",
+            "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n keep\n+added\n",
+        );
+        let two = change(
+            2,
+            "b.rs",
+            "--- a/b.rs\n+++ b/b.rs\n@@ -1,2 +1,1 @@\n keep\n-gone\n",
+        );
+        let end = event(3, "turn_completed", json!({}));
+        let cells = project(vec![
+            Entry::Event(&one),
+            Entry::Event(&two),
+            Entry::Event(&end),
+        ]);
+
+        let stat = cells
+            .iter()
+            .find_map(|cell| match cell {
+                Cell::DiffStat {
+                    files,
+                    additions,
+                    deletions,
+                    in_excerpt,
+                } => Some((*files, *additions, *deletions, *in_excerpt)),
+                _ => None,
+            })
+            .expect("a diffstat at the turn boundary");
+
+        assert_eq!(stat, (2, 1, 1, false));
+        assert!(plain(&render_cells(&cells, 100)).contains("2 files · +1 −1"));
+    }
+
+    /// A turn that changed nothing gets no diffstat rather than a row of zeroes.
+    #[test]
+    fn a_turn_that_changed_nothing_draws_no_diffstat() {
+        let said = event(1, "output_text_final", json!({"text": "nothing to do"}));
+        let end = event(2, "turn_completed", json!({}));
+        let cells = project(vec![Entry::Event(&said), Entry::Event(&end)]);
+
+        assert!(!cells
+            .iter()
+            .any(|cell| matches!(cell, Cell::DiffStat { .. })));
+    }
+
+    /// An excerpted diff's counts are a floor, and every surface that prints one says so.
+    #[test]
+    fn an_excerpted_diff_marks_its_counts_in_excerpt_everywhere() {
+        let update = event(
+            1,
+            "file_change",
+            json!({
+                "changes": [{
+                    "path": "src/lex.rs",
+                    "diff": {"_excerpt": PATCH, "bytes": 40_000}
+                }]
+            }),
+        );
+        let end = event(2, "turn_completed", json!({}));
+        let cells = project(vec![Entry::Event(&update), Entry::Event(&end)]);
+        let text = plain(&render_cells(&cells, 100));
+
+        assert!(text.contains("in excerpt"), "{text}");
+        assert!(
+            text.contains("· in excerpt"),
+            "the diffstat carries it too: {text}"
+        );
+    }
+
+    /// A payload this client cannot read as a diff is shown anyway, marked as unread.
+    #[test]
+    fn a_diff_with_no_hunks_is_shown_verbatim_rather_than_dropped() {
+        let update = change(1, "notes.md", "the model rewrote three paragraphs");
+        let cells = project(vec![Entry::Event(&update)]);
+        let text = plain(&render_cells(&cells, 100));
+
+        assert!(text.contains("no hunks this client could read"), "{text}");
+        assert!(
+            text.contains("the model rewrote three paragraphs"),
+            "{text}"
+        );
+    }
 }
