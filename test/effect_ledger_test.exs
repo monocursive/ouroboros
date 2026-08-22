@@ -226,6 +226,88 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
              start_supervised({EffectLedger, name: name, storage: storage}, id: name)
   end
 
+  describe "the :permission effect kind" do
+    test "a decision is one terminal entry, written and settled in the same instant" do
+      ledger = start_ledger!()
+
+      assert :permission in EffectLedger.effects()
+      refute :permission in Ouroboros.Control.Grants.effects()
+
+      attrs = %{
+        id: "perm-1",
+        effect: :permission,
+        principal: "session-1",
+        attempt: %{
+          tool: "bash",
+          mode: :execute,
+          provider: :codex,
+          fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12},
+          command: @secret
+        },
+        authority: %{decision: :approve, reason: nil},
+        cause: %{signal_id: "perm-1", signal_type: "permission"},
+        result: %{
+          decision: :approve,
+          scope: :once,
+          actor: :rule,
+          rule_id: "rule-x",
+          note: @secret
+        }
+      }
+
+      assert {:ok, entry, :created} = EffectLedger.record_settled(attrs, ledger)
+      assert entry.status == :ok
+      assert is_binary(entry.settled_at)
+
+      # Only the declared fields survive; the command line and the free-form note do not.
+      assert entry.attempt == %{
+               tool: "bash",
+               mode: :execute,
+               provider: :codex,
+               fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12}
+             }
+
+      assert entry.result == %{decision: :approve, scope: :once, actor: :rule, rule_id: "rule-x"}
+      refute inspect(entry) =~ "objective"
+
+      # Idempotent on the caller-minted id, like the other two writes.
+      assert {:ok, ^entry, :existing} = EffectLedger.record_settled(attrs, ledger)
+    end
+
+    test "a refused decision is a terminal denied entry, and both are queryable" do
+      ledger = start_ledger!()
+
+      base = %{
+        effect: :permission,
+        principal: "session-2",
+        attempt: %{tool: "write", mode: :write},
+        authority: %{decision: :deny, reason: "rule"},
+        cause: %{signal_id: "perm-2", signal_type: "permission"},
+        result: %{decision: :deny, scope: :once, actor: :rule, rule_id: "rule-y"},
+        error: :permission_denied
+      }
+
+      assert {:ok, denied, :created} =
+               EffectLedger.record_denied(Map.put(base, :id, "perm-2"), ledger)
+
+      assert denied.status == :denied
+
+      assert {:ok, allowed, :created} =
+               EffectLedger.record_settled(
+                 base
+                 |> Map.put(:id, "perm-3")
+                 |> Map.put(:result, %{decision: :approve, scope: :session, actor: :human})
+                 |> Map.delete(:error),
+                 ledger
+               )
+
+      assert allowed.status == :ok
+      assert {:ok, entries} = EffectLedger.list([effect: :permission], ledger)
+      assert Enum.map(entries, & &1.id) == ["perm-3", "perm-2"]
+      assert {:ok, [^denied]} = EffectLedger.list([effect: :permission, status: :denied], ledger)
+    end
+  end
+
   defp attrs(id, effect, attempt) do
     %{
       id: id,

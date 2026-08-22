@@ -322,6 +322,12 @@ if config_env() == :prod do
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.
     grants_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "grants")},
+    # Permission rules decide what a provider may do before a human is asked, so an
+    # acknowledged rule has to survive the crash that follows it — the same synced write
+    # the grant authority uses. This path is also why workspace rules live here rather
+    # than in the repository: a clone must not be able to grant itself permissions.
+    permissions_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "permissions")},
     # An admitted effect is not started until this synced checkpoint records it. Outcomes
     # and refusals use the same boundary, so a runtime restart can distinguish an
     # unfinished acknowledged attempt from one that was never requested.
