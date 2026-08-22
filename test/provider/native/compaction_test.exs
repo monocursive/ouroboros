@@ -371,6 +371,33 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       assert info.compaction_thrashing
     end
 
+    test "an archive that cannot be written refuses the compaction rather than dropping it",
+         context do
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+
+      {:ok, before_info} = Session.info(session.handle)
+
+      # Put a regular file where the archive directory has to go. `Archive.write/3` then
+      # cannot create it, the transcript cannot be kept — and the invariant says the
+      # conversation is not folded either.
+      File.write!(
+        Path.join([context.data_dir, before_info.provider_session_id, "compaction"]),
+        "not a directory"
+      )
+
+      assert {:error, {:archive_unwritable, _reason}} = Session.compact(session.handle, nil)
+
+      event = await_provider_event("status")
+      assert event.payload["status"] == "compaction_refused"
+      assert event.payload["message"] =~ "Nothing was dropped."
+
+      {:ok, after_info} = Session.info(session.handle)
+      assert after_info.messages == before_info.messages
+      assert after_info.compactions == []
+    end
+
     test "auto-compaction fires when usage crosses the threshold", context do
       Application.put_env(:ouroboros, :native_context_window, 1_000)
 

@@ -806,7 +806,9 @@ patch lane refuses an artifact that would replace the module deciding what code 
   event, but the archive is bounded by the same message count the checkpoint uses, and a
   conversation longer than that bound loses its oldest messages from the archive with
   `truncated: true` stated rather than implied. The summary itself is a model's work and
-  can be wrong; the archive is what makes that recoverable.
+  can be wrong; the archive is what makes that recoverable — so the archive decides the
+  outcome: a transcript that cannot be written refuses the compaction and leaves the
+  whole conversation standing, rather than folding it and logging the loss.
 - Inline environment maps are rejected rather than persisted. Event payloads and
   result tails are redacted before checkpointing. Objectives and provider-specific
   options are durable domain data and must not contain secrets.

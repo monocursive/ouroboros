@@ -356,8 +356,11 @@ the newest 20,000 tokens (`keep_recent_tokens`) kept verbatim. The pre-compactio
 messages are **retained**, content-addressed, under the session's own directory, and the
 `compaction` event names the archive along with `archived_messages`, `summary_tokens`,
 `before_tokens` and `after_tokens` — so "what was folded" is a question a client can
-answer. Two compactions inside three turns stops and emits a `status` event naming the
-thrash rather than looping.
+answer. The archive decides the outcome rather than decorating it: a transcript that
+cannot be written down refuses the compaction and says so, leaving the whole conversation
+in place. Two compactions inside three turns stops and emits a `status` event naming the
+thrash rather than looping; after that the automatic path stays off for the session, and
+`/compact` still works because the operator asked.
 
 **Handoff.** Rather than compacting a compacted conversation, a session can hand off:
 `Ouroboros.Provider.Native.Session.handoff/2` starts a fresh session in the same

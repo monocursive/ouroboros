@@ -651,8 +651,38 @@ defmodule Ouroboros.Provider.Native.Session do
         summarize: summariser(state)
       )
 
-    entry = archive(state, outcome.archived)
+    case archive(state, outcome.archived) do
+      {:ok, entry} -> apply_compaction(state, outcome, entry, trigger)
+      {:error, reason} -> refuse_compaction(state, reason)
+    end
+  end
 
+  # "Compaction always leaves the archive" is an invariant, so it decides the outcome
+  # rather than decorating it: messages that could not be written down are not dropped.
+  # The session keeps its whole conversation, the operator is told why, and the provider
+  # may still refuse the next request for length — which is a truthful failure rather
+  # than a silent loss.
+  defp refuse_compaction(state, reason) do
+    Logger.warning("native compaction refused: archive unwritable (#{inspect(reason)})")
+
+    emit(state, %{
+      type: :provider_event,
+      payload: %{
+        "kind" => "status",
+        "status" => "compaction_refused",
+        "reason" => inspect(reason),
+        "message" =>
+          "the conversation was not compacted because its pre-compaction transcript " <>
+            "could not be archived. Nothing was dropped."
+      },
+      turn_id: nil,
+      request_id: nil
+    })
+
+    {:error, {:archive_unwritable, reason}, state}
+  end
+
+  defp apply_compaction(state, outcome, entry, trigger) do
     report = %{
       trigger: Atom.to_string(trigger),
       turn: state.turns,
@@ -707,20 +737,12 @@ defmodule Ouroboros.Provider.Native.Session do
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
 
-  defp archive(_state, []), do: nil
+  # Nothing to archive is not a failed archive: eliding tool results alone dropped no
+  # message, so there is no transcript to keep.
+  defp archive(_state, []), do: {:ok, nil}
 
-  defp archive(state, messages) do
-    case Archive.write(state.session_dir, messages, event_limit: state.checkpoint_limit) do
-      {:ok, entry} ->
-        entry
-
-      {:error, reason} ->
-        # An archive that could not be written is stated, not swallowed: "compaction
-        # always leaves the archive" is an invariant this runtime claims out loud.
-        Logger.warning("native compaction archive failed: #{inspect(reason)}")
-        nil
-    end
-  end
+  defp archive(state, messages),
+    do: Archive.write(state.session_dir, messages, event_limit: state.checkpoint_limit)
 
   # The summariser is one more call on the same model module the turn uses, with no
   # tools. It is deliberately not the loop: a summary that could call `bash` would be a
