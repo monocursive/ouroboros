@@ -314,7 +314,8 @@ reading.
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, plus fleet `machine`/`node`). The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
 | `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Steering injects into the running turn and is not durably keyed by the plane: Harness mints the request id inside its worker, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
-| `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
+| `interactive.request_approval` `{id, request, node?}` | The other direction: something outside the Harness asking this runtime for a decision. Today's only caller is `ouro mcp-serve` (§3.1), answering Claude Code's `--permission-prompt-tool`. `request` is a closed `{tool_name, input?, tool_use_id?, cwd?}` object; the coordinator mints a `request_id`, checkpoints an `approval_requested` in the shape the Codex/ACP dialects already emit (`tool_call`, `kind: "permissions"`, plus `suggested_rule` where the permission engine offers one), consults that engine, and otherwise blocks until `interactive.respond_approval` names the id. Bounded at 8 outstanding questions per session; the ninth is denied. The gateway ceiling is **15 min** and is the outermost of three — the coordinator denies at 13 and the plane's transport stops waiting at 14 — so the answer a caller gets is a decision, not a killed task. The reply is `{decision: "allow"\|"deny", request_id, source, reason}`; `source` names which rule answered (`human`, `engine`, `timeout`, `capacity`, `session_terminal`, `checkpoint_failed`, `caller_gone`, `coordinator_restart`). Everything that is not a human or the engine saying yes is a denial. |
+| `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted. A `request_id` this coordinator minted for an external request is answered by the coordinator itself; every other id goes to Harness as before, so the modal is unchanged |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
 | `interactive.delete` `{id}` | `Interactive.Store.delete/1` — terminal sessions only (`closed`/`failed`/`cancelled`/`lost`). Live sessions are refused `-32006` with `reason: session_not_terminal`; the coordinator is stopped first so a retiring process cannot write the record back. The same `{id, node?}` routing as the other session verbs. |
@@ -768,10 +769,46 @@ ouro fleet doctor     actionable profile/network/runtime/service checks
 ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery
 ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
+ouro mcp-serve        hidden. An MCP server on stdio, spawned by a vendor CLI, not
+                      by a person: it is the permission prompt for a transport
+                      that has none of its own
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
 ```
+
+#### `ouro mcp-serve` — the approval bridge (`src/mcp_serve.rs`)
+
+A Model Context Protocol server over stdio, hidden from `--help` because the only thing
+that should ever start it is a provider process this runtime launched.
+`Ouroboros.Provider.ClaudeAdapter` composes an `--mcp-config` naming
+`{"command": "<ouro>", "args": ["mcp-serve"], "env": {…}}` and points Claude Code at
+`--permission-prompt-tool mcp__ouroboros__approve`; Claude Code then calls that tool
+instead of prompting, and reads the decision out of the result.
+
+*Protocol.* Newline-delimited JSON-RPC 2.0 on stdin/stdout, MCP revision **2026-07-28**
+([spec](https://modelcontextprotocol.io/specification)) — `initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`, `ping`. The `protocolVersion` a
+client names is echoed back, so a Claude Code of a different era still negotiates. stdout
+carries messages and nothing else; every log goes to stderr and only under
+`OUROBOROS_MCP_SERVE_VERBOSE=1`. Inbound lines are capped at 4 MiB.
+
+*The one tool.* `approve` takes the permission-prompt contract's own fields — `tool_name`,
+`input`, `tool_use_id` ([CLI reference](https://code.claude.com/docs/en/cli-reference),
+[Agent SDK permissions](https://code.claude.com/docs/en/agent-sdk/user-input)) — and
+returns the `canUseTool` answer as a JSON text content block:
+`{"behavior":"allow","updatedInput":{…}}` or `{"behavior":"deny","message":"…"}`.
+
+*Where it asks.* `OUROBOROS_GATEWAY_ADDR` and `OUROBOROS_GATEWAY_TOKEN_FILE` locate the
+runtime, `OUROBOROS_SESSION_ID` and `OUROBOROS_SESSION_NODE` name the session, and
+`OUROBOROS_APPROVAL_TIMEOUT_MS` (default 600000) bounds the wait. One connection is held
+for the server's lifetime and a transport failure is reopened exactly once; a *timeout*
+never is, because a question that ran out of time may be in front of a person.
+
+*Deny by default.* No runtime, an unreadable token, a refused call, a malformed argument
+object, a decision this build cannot parse, a deadline, or a bridge started by hand each
+produce a denial naming the cause. Nothing in this module can produce an `allow` that a
+runtime did not.
 
 Spawn-mode environment assembly: `OUROBOROS_GATEWAY=1`, `_SCOPE=operate`,
 `_ALLOW_SHUTDOWN=1`, `_PORT=0`, token: 32 random bytes hex → file 0600 in the

@@ -316,6 +316,18 @@ writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells 
 gateway the path. The internally extracted release reads that launcher-owned file; a
 bare release is not a second supported token-generation or lifecycle path.
 
+One subcommand is not for you to type. `ouro mcp-serve` is a Model Context Protocol
+server on stdio, and its whole job is to be the permission prompt for a vendor CLI that
+has no other way to ask: the runtime names it in the `--mcp-config` it composes for a
+Claude session, Claude Code spawns it, and its one tool — `approve` — forwards each
+question to `interactive.request_approval` and returns the decision. It reads the runtime
+to ask from its environment (`OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
+`OUROBOROS_SESSION_ID`, `OUROBOROS_SESSION_NODE`, and an optional
+`OUROBOROS_APPROVAL_TIMEOUT_MS`, default 600000). Run by hand it starts, answers the
+protocol, and denies every approval with a message saying it was not given a runtime —
+because deny is what every failure here means. It is hidden from `--help` for the same
+reason.
+
 ### Headless: `ouro run`
 
 `ouro run` is the same session `ouro new` starts, without a screen. It resolves the
@@ -540,16 +552,38 @@ they do in a shell, and `ouro` scrolls by keyboard.
   deployment configured with `OUROBOROS_GATEWAY_TOKEN` in the service environment, or
   one whose data directory this user cannot read, is reachable only by naming `--addr`
   and `--token-file` explicitly. There is no discovery beyond the file.
-- **A managed provider cannot ask you before it runs a tool, so it is not offered the
-  chance.** Claude, Gemini, Grok, and Z.ai reach an interactive session by re-executing
-  their CLI once per turn. That transport has no approvals channel: `claude --print` is
-  never given a `--permission-prompt-tool`, so `approval_mode: :prompt` is accepted by
-  the CLI and then silently denies every tool call that needs permission — a session
-  that looks alive and cannot work. Rather than start one, `interactive.start` refuses
-  it by name and says which modes do work (`:default`, `:auto_edit`, `:auto_approve`).
-  Codex on app-server and the ACP providers (OpenCode, Kimi) ask for real and are
-  unaffected, as is the non-interactive coding plane. The refusal stands until the
-  Claude approval bridge lands and `:prompt` becomes true for those providers too.
+- **Claude can ask you now; the other managed providers still cannot.** Claude, Gemini,
+  Grok, and Z.ai reach an interactive session by re-executing their CLI once per turn,
+  and that transport has no approvals channel of its own: `approval_mode: :prompt` is
+  accepted by the CLI and then silently denies every tool call that needs permission — a
+  session that looks alive and cannot work.
+
+  For Claude there is now a bridge. `Ouroboros.Provider.ClaudeAdapter` launches an
+  interactive `:prompt` session with `--permission-prompt-tool mcp__ouroboros__approve`
+  and an `--mcp-config` naming `ouro mcp-serve`, the stdio MCP server inside this same
+  binary. Claude Code calls that tool instead of prompting; the tool calls
+  `interactive.request_approval` back into the runtime, which records the question
+  durably and opens the same modal Codex and ACP already use, and answers `allow` or
+  `deny`. The bridge is active when three things hold: the session is interactive (the
+  coding plane has no human watching and is deliberately untouched), its `approval_mode`
+  is `:prompt`, and this node can name an `ouro` binary — `OUROBOROS_PROCESS_ID_HELPER`,
+  which `ouro` sets when it spawned the runtime, or `config :ouroboros, :ouro_binary`.
+  When it is active, `interactive.info` reports `capabilities.approvals: "native"` for
+  the session and `interactive.start` accepts `:prompt`.
+
+  When it is not — a runtime nobody started with `ouro` and nobody configured — the
+  transport declares `approvals: false` and `interactive.start` refuses `:prompt` by
+  name, saying which modes do work (`:default`, `:auto_edit`, `:auto_approve`). Gemini,
+  Grok, and Z.ai are still refused unconditionally: nothing has taught them to ask.
+- **What the bridge does not cover.** `:default` on Claude still means the CLI's own
+  behaviour, which for `claude --print` is to deny a permission-needing tool without
+  asking; the bridge is attached only where `:prompt` promised a person. A node-level MCP
+  configuration supplied as a *string* — a JSON blob or a file path — cannot be merged
+  with the bridge's own server definition without this runtime rewriting somebody else's
+  configuration, so in that case the bridge is not attached and a warning says so; a map
+  merges, and the `ouroboros` server key belongs to the bridge. An approval question that
+  is outstanding when the session coordinator restarts is answered `deny` on revival,
+  because the call that was waiting for it died with the coordinator.
 - **What a session can do and what it has spent are declared, not guessed.**
   `interactive.info` and `interactive.list` carry `options.capabilities` — `transport`,
   `process`, `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
