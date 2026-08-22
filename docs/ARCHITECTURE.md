@@ -842,7 +842,8 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - real CLI fixture tests for argv, JSONL, process ownership, cancellation, and
   timeout behavior;
 - append-oriented durable event store instead of rewriting an aggregate task map;
-- isolated worktree provisioning, explicit network policy, and durable cleanup;
+- ~~worktree provisioning and durable cleanup~~ (done: `Ouroboros.Workspace.Worktree`,
+  above), explicit network policy, and the OS-level isolation a worktree does not give;
 - budgets, retries, idempotency keys, telemetry, and operator diagnostics.
 
 Stop condition: repeated crash/reattach/timeout/cancel tests show no duplicate run,
