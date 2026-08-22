@@ -709,6 +709,11 @@ pub struct App {
     scrollback_dump_pending: Option<String>,
     /// The transcript the I/O driver should open in `$VISUAL`/`$EDITOR`, read-only.
     transcript_view_pending: Option<String>,
+    /// What to tell this operator about the mouse this client captured, or `None` when it
+    /// captured nothing. Set by the driver once the terminal is taken over, because whether
+    /// the capture actually happened is a fact about the terminal and not about this state
+    /// machine — see [`super::mouse_hint`].
+    pub mouse_hint: Option<String>,
     /// Columns the last frame was laid out against. Written by the driver on every draw;
     /// the export wraps to it, because the terminal it is about to be printed into is the
     /// same one that just drew the frame. Zero until the first frame.
@@ -777,6 +782,7 @@ impl App {
             external_editor_pending: None,
             scrollback_dump_pending: None,
             transcript_view_pending: None,
+            mouse_hint: None,
             terminal_width: 0,
             next_composer_submission_sequence: 0,
             resume_session_picker: false,
@@ -839,6 +845,27 @@ impl App {
     pub(super) fn view_transcript(&mut self) {
         self.overlay = None;
         self.transcript_view_pending = self.transcript_export();
+    }
+
+    /// Says once, and only where it is true, that this client took the mouse.
+    ///
+    /// Once per operator rather than once per session (`onboarding.mouse_hint_shown`): the
+    /// thing it explains does not change between runs, and a line that reappears every
+    /// launch is a line nobody reads. Silent capture is the complaint this answers —
+    /// Claude Code #72681 — so it is shown on the first frame rather than waiting for the
+    /// wheel event that proves the operator already found the problem.
+    pub(super) fn hint_mouse_capture(&mut self) {
+        if self.config.onboarding.mouse_hint_shown {
+            return;
+        }
+
+        let Some(hint) = self.mouse_hint.clone() else {
+            return;
+        };
+
+        self.config.onboarding.mouse_hint_shown = true;
+        self.save_pending = true;
+        self.inform(hint, NoticeKind::Info);
     }
 
     pub fn take_scan_machines(&mut self) -> bool {
@@ -1168,10 +1195,17 @@ impl App {
                 self.ticks += 1;
                 self.expire_notice();
                 self.expire_chords();
+                self.hint_mouse_capture();
                 self.poll();
             }
             Msg::Redraw => {}
-            Msg::Scroll(delta) => self.scroll_view(delta),
+            Msg::Scroll(delta) => {
+                // The first wheel event is the second chance: whoever reaches for the mouse
+                // is exactly the person the hint is for, and a notice that had already
+                // expired unread would leave them none the wiser.
+                self.hint_mouse_capture();
+                self.scroll_view(delta);
+            }
             Msg::Notification(notification) => self.notification(notification),
             Msg::Answer { tag, result } => self.answer(tag, result),
             Msg::Reconnected(hello) => {

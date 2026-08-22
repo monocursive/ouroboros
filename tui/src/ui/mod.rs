@@ -193,6 +193,15 @@ pub struct Screen {
 /// panic hook, which has no handle on anything.
 static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
 
+/// Whether this process should capture the mouse. `[terminal] mouse` in `config.toml`.
+///
+/// Process-wide for the same reason [`ENHANCED_KEYBOARD`] is: [`restore`] runs from the
+/// panic hook with no handle on anything, and the boot screen enters the alternate screen
+/// before there is an [`App`] to ask. Default `true`, which is what it was before the key
+/// existed — a setting that changed behaviour by appearing would be the silent screen-model
+/// change this client refuses to make.
+static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(true);
+
 /// Whether this terminal can tell `Shift+Enter` from `Enter`.
 ///
 /// Without the kitty protocol the two are the same bytes — Terminal.app, iTerm2's default
@@ -200,6 +209,50 @@ static ENHANCED_KEYBOARD: AtomicBool = AtomicBool::new(false);
 /// advertised `Shift+Enter` there would be telling someone to press send.
 pub fn keyboard_enhanced() -> bool {
     ENHANCED_KEYBOARD.load(Ordering::SeqCst)
+}
+
+/// States the operator's `[terminal] mouse` answer before any screen is taken over.
+///
+/// Called once, from `main`, on the config it already read. It has to happen before
+/// [`boot::Boot::begin`]: a capture enabled for the boot screen and disabled a second later
+/// would already have eaten the first selection the setting exists to protect.
+pub fn set_mouse_capture(enabled: bool) {
+    MOUSE_CAPTURE.store(enabled, Ordering::SeqCst);
+}
+
+/// Whether the mouse is being captured, and therefore whether native selection needs a
+/// modifier. The hint is only true when this is.
+pub fn mouse_captured() -> bool {
+    MOUSE_CAPTURE.load(Ordering::SeqCst)
+}
+
+/// What to tell someone whose mouse this client just took, or `None` when it did not.
+///
+/// The modifier is named only where it is known to be right. `TERM_PROGRAM` identifies
+/// iTerm2 (Option) and Terminal.app (Fn) exactly; the terminals that report themselves as
+/// something else in that variable follow the xterm convention and take Shift. An
+/// unidentified terminal gets all three, because a hint that named the wrong key would be
+/// worse than one that named several — the honesty invariant applies to hints too.
+pub fn mouse_hint() -> Option<String> {
+    mouse_captured().then(|| selection_hint(env::var("TERM_PROGRAM").ok().as_deref()))
+}
+
+/// [`mouse_hint`]'s sentence, as a pure function of the terminal's own name.
+fn selection_hint(term_program: Option<&str>) -> String {
+    let modifier = match term_program.map(str::trim) {
+        Some("iTerm.app") => Some("hold Option to select text"),
+        Some("Apple_Terminal") => Some("hold Fn to select text"),
+        // The xterm convention, and what every one of these actually does.
+        Some("WezTerm" | "ghostty" | "kitty" | "vscode" | "Hyper" | "rio" | "alacritty") => {
+            Some("hold Shift to select text")
+        }
+        _ => None,
+    };
+
+    format!(
+        "mouse captured for scrolling · {} · `mouse = false` in config.toml disables",
+        modifier.unwrap_or("hold Shift to select text (Option on iTerm2, Fn on Terminal.app)")
+    )
 }
 
 impl Screen {
@@ -235,9 +288,17 @@ impl Screen {
             .execute(EnterAlternateScreen)
             .context("entering the alternate screen")?
             .execute(EnableBracketedPaste)
-            .context("enabling bracketed paste")?
-            .execute(EnableMouseCapture)
-            .context("enabling mouse capture")?;
+            .context("enabling bracketed paste")?;
+
+        // Only where the operator left it on. A captured mouse buys the wheel and costs
+        // drag-to-copy; `[terminal] mouse = false` says the trade is not worth it here, and
+        // then nothing is captured at all — selection and the terminal's own scrolling work
+        // exactly as they do in a shell.
+        if mouse_captured() {
+            io::stdout()
+                .execute(EnableMouseCapture)
+                .context("enabling mouse capture")?;
+        }
 
         // Asked rather than assumed, and only claimed where the terminal answered yes: the
         // composer advertises `Shift+Enter` for a newline, and in a terminal without this
@@ -277,9 +338,13 @@ impl Screen {
             .execute(EnterAlternateScreen)
             .context("re-entering the alternate screen")?
             .execute(EnableBracketedPaste)
-            .context("re-enabling bracketed paste")?
-            .execute(EnableMouseCapture)
-            .context("re-enabling mouse capture")?;
+            .context("re-enabling bracketed paste")?;
+
+        if mouse_captured() {
+            io::stdout()
+                .execute(EnableMouseCapture)
+                .context("re-enabling mouse capture")?;
+        }
 
         if matches!(supports_keyboard_enhancement(), Ok(true))
             && io::stdout()
@@ -739,6 +804,10 @@ pub async fn run(
     // The terminal has been taken over by now, so whether it distinguishes `Shift+Enter`
     // from `Enter` is settled, and the footers can say which binding actually exists here.
     app.keyboard_enhanced = keyboard_enhanced();
+
+    // And so is whether the mouse was captured, which is the only condition under which the
+    // selection hint is true. `None` means nothing was taken and there is nothing to say.
+    app.mouse_hint = mouse_hint();
 
     // The boot renderer and the harness share one alternate screen, but they do not share
     // one frame layout. Clear the physical terminal at the handoff so sparse areas of the
@@ -1322,6 +1391,37 @@ mod tests {
             begin < show && show < end,
             "the cursor show leaked outside the synchronized frame: {bytes:?}"
         );
+    }
+
+    #[test]
+    fn the_selection_hint_names_a_modifier_only_where_it_is_known_to_be_right() {
+        assert!(selection_hint(Some("iTerm.app")).contains("hold Option to select text"));
+        assert!(selection_hint(Some("Apple_Terminal")).contains("hold Fn to select text"));
+        assert!(selection_hint(Some("ghostty")).contains("hold Shift to select text"));
+
+        // An unidentified terminal is told all three rather than the wrong one.
+        for unknown in [None, Some(""), Some("SomeTerminalNobodyHasHeardOf")] {
+            let hint = selection_hint(unknown);
+
+            assert!(
+                hint.contains("hold Shift to select text (Option on iTerm2, Fn on Terminal.app)"),
+                "{unknown:?} was told something this build cannot know: {hint}"
+            );
+        }
+
+        // Every version of it says the same two other things: what was taken, and how to
+        // take it back.
+        for term in [None, Some("iTerm.app"), Some("Apple_Terminal")] {
+            let hint = selection_hint(term);
+            assert!(
+                hint.starts_with("mouse captured for scrolling · "),
+                "{hint}"
+            );
+            assert!(
+                hint.ends_with("`mouse = false` in config.toml disables"),
+                "{hint}"
+            );
+        }
     }
 
     #[test]

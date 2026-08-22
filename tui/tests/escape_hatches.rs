@@ -3,8 +3,9 @@
 //! `ouro` owns the screen, which buys a stable transcript and costs `Cmd+F`, tmux copy
 //! mode, and drag-to-select. The field's verdict on paying that price silently is
 //! unambiguous — it produced the loudest rendering complaints of 2026 — so this file pins
-//! the two things that make it honest: `ctrl+x [` hands the conversation back to the
-//! terminal's own scrollback, and `ctrl+x v` hands it to the operator's editor.
+//! the three things that make it honest: `ctrl+x [` hands the conversation back to the
+//! terminal's own scrollback, `ctrl+x v` hands it to the operator's editor, and a captured
+//! mouse says so once.
 //!
 //! Driven the way `tests/ui.rs` drives everything: messages in, state out. The *effects* of
 //! these two — leaving the alternate screen, running `$EDITOR` — belong to
@@ -288,4 +289,65 @@ fn a_hatch_without_a_session_says_so_rather_than_dumping_a_header() {
             app.notice
         );
     }
+}
+
+#[test]
+fn the_mouse_hint_is_shown_once_per_operator_and_then_written_down() {
+    let mut app = app(full_hello());
+    app.mouse_hint = Some("mouse captured for scrolling · hold Shift to select text".into());
+
+    assert!(!app.config.onboarding.mouse_hint_shown);
+
+    // The first frame, without waiting for the wheel event that proves the operator has
+    // already run into the problem.
+    app.apply(Msg::Tick);
+
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("hold Shift to select text")),
+        "{:?}",
+        app.notice
+    );
+    assert!(app.config.onboarding.mouse_hint_shown);
+
+    // And written down, so the next launch does not say it again.
+    let saved = app.take_config_save().expect("the answer is persisted");
+    assert!(saved.onboarding.mouse_hint_shown);
+
+    // Neither another frame nor the wheel brings it back.
+    app.notice = None;
+    app.apply(Msg::Tick);
+    app.apply(Msg::Scroll(-3));
+
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    assert!(app.take_config_save().is_none(), "a second save was queued");
+}
+
+#[test]
+fn a_terminal_whose_mouse_was_left_alone_is_told_nothing() {
+    // `[terminal] mouse = false`: the driver sets no hint, because there is nothing true to
+    // say — selection already works and the wheel already belongs to the terminal.
+    let mut app = app(full_hello());
+    app.mouse_hint = None;
+
+    app.apply(Msg::Tick);
+    app.apply(Msg::Scroll(-3));
+
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    assert!(!app.config.onboarding.mouse_hint_shown);
+    assert!(app.take_config_save().is_none());
+}
+
+#[test]
+fn an_operator_who_has_already_seen_the_hint_never_sees_it_again() {
+    let mut app = app(full_hello());
+    app.mouse_hint = Some("mouse captured for scrolling · hold Fn to select text".into());
+    app.config.onboarding.mouse_hint_shown = true;
+
+    app.apply(Msg::Tick);
+    app.apply(Msg::Scroll(-3));
+
+    assert!(app.notice.is_none(), "{:?}", app.notice);
+    assert!(app.take_config_save().is_none());
 }
