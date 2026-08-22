@@ -1430,14 +1430,16 @@ impl<'a> Run<'a> {
 
         if let Some(unreconciled) = self.unreconciled.take() {
             // The send was never reconciled and no terminal event resolved it. Whatever
-            // else this run saw, it did not see this turn end.
-            self.report.status = Status::Lost;
-            self.report.error = Some(unreconciled);
+            // else this run saw, it did not see this turn end — so `lost`, unless this
+            // command is the reason the run stopped, in which case saying so is more use
+            // than saying `lost` and the unreconciled sentence still gets told.
+            self.report.status = self.requested.unwrap_or(Status::Lost);
+            self.report.error = Some(match self.report.error.take() {
+                Some(existing) => format!("{unreconciled}; {existing}"),
+                None => unreconciled,
+            });
         } else if self.settled.is_none() {
-            self.report.status = match self.report.status {
-                Status::Completed => Status::Lost,
-                other => other,
-            };
+            self.report.status = self.requested.unwrap_or(Status::Lost);
             self.report.error.get_or_insert_with(|| {
                 format!("turn {} produced no terminal event", self.report.turn_id)
             });

@@ -830,6 +830,48 @@ async fn a_send_whose_outcome_stayed_unknown_is_lost_rather_than_completed() {
     );
 }
 
+/// When this command is itself the reason the run stopped, that is what the status says —
+/// and the unreconciled send is still told, because it is the more actionable half.
+#[tokio::test]
+async fn a_timeout_over_an_unreconciled_send_stays_a_timeout_and_says_both() {
+    let mut options = options(Output::Json);
+    options.timeout = Duration::from_millis(150);
+
+    let ran = run_against(start_plan("do the thing"), options, |mut peer| {
+        tokio::spawn(async move {
+            peer.hello(SERVES).await;
+
+            let start = peer.request_for("interactive.start").await;
+            peer.result(
+                &start["id"],
+                json!({ "id": SESSION, "outcome": "created", "ready": true }),
+            )
+            .await;
+
+            let subscribe = peer.request_for("interactive.subscribe").await;
+            peer.result(&subscribe["id"], json!([])).await;
+
+            for _attempt in 0..2 {
+                let send = peer.request_for("interactive.send_message").await;
+                peer.result(&send["id"], json!({ "id": TURN, "status": "dispatching" }))
+                    .await;
+            }
+
+            let interrupt = peer.request_for("interactive.interrupt").await;
+            peer.result(&interrupt["id"], json!({})).await;
+        })
+    })
+    .await;
+
+    let report = ran.report();
+    assert_eq!(report.status, Status::Timeout);
+    assert_eq!(report.exit().code(), 4);
+
+    let error = report.error.as_deref().unwrap_or_default();
+    assert!(error.contains("outcome remains unknown"), "{error}");
+    assert!(error.contains("ceiling"), "{error}");
+}
+
 // ----- resync ----------------------------------------------------------------------------
 
 #[tokio::test]
