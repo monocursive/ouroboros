@@ -1240,6 +1240,150 @@ agent forged cannot patch the authority that decided it could forge.
   not an append-only external log. `last_effects` and `state.forged` remain short-lived
   agent-local projections; the ledger deliberately cannot restore a forged BEAM.
 
+## Permissions
+
+Grants decide what an *agent* may do to the cluster. Permissions decide what a
+*provider* may do to your machine, at the two places a provider asks first.
+
+`Ouroboros.Control.Permissions` is consulted before any human is. A rule that says
+`allow` answers the provider immediately, a rule that says `deny` refuses it and names
+itself, and everything else becomes the approval prompt that was always there. The point
+is not fewer prompts for their own sake: 98.9% of analysed Claude Code configurations had
+zero deny rules, because a runtime that asks about everything teaches people to stop
+reading. A prompt that survives this engine is one that was worth showing.
+
+```elixir
+# An operator writes node-scope rules in configuration, and nowhere else.
+config :ouroboros,
+  permissions: [
+    {"Bash(git status *)", :allow},
+    {"Bash(cargo test *)", :allow},
+    {"WebFetch(domain:github.com)", :allow},
+    {"Bash(rm *)", :deny}
+  ]
+```
+
+```elixir
+# Everything else is written through the engine, and lands in the data directory.
+{:ok, rule} = Ouroboros.Control.Permissions.add(%{
+  scope: :workspace,
+  decision: :allow,
+  pattern: "Bash(mix test *)",
+  workspace: "/Users/me/code/project"
+})
+
+Ouroboros.Control.Permissions.evaluate(%{
+  principal: %{session_id: "session-1", provider: :codex, node: node()},
+  tool: "bash",
+  command: "mix test --stale",
+  mode: :execute,
+  context: %{workspace: "/Users/me/code/project"}
+})
+# => {:allow, %{scope: :workspace, id: "rule-…", pattern: "Bash(mix test *)"}}
+```
+
+### The rule language
+
+| pattern | matches |
+| --- | --- |
+| `Bash(<prefix> *)` | a command line whose first words are `<prefix>`, at a word boundary — `Bash(ls *)` covers `ls -la` and never `lsof` |
+| `Bash(<prefix>*)` | a literal prefix, for the `Bash(npm run test:*)` shape |
+| `Bash(<exact command>)` | that command line and no other |
+| `Read(<glob>)` `Edit(<glob>)` `Write(<glob>)` | a path read or written; `*` inside a segment, `**` across segments, relative globs resolved against the workspace |
+| `WebFetch(domain:<host>)` | `<host>` and its subdomains; `*.<host>` for subdomains only |
+| `mcp__<server>__<tool>`, `mcp__<server>__*` | one MCP tool, or every tool on one server |
+| `Tool(<name>)` | one tool by the name the provider calls it |
+| `Tool(<name>:<param>=<value>)` | that tool with that parameter — **deny and ask only** |
+
+A compound command splits on `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines, with quoting
+respected, and an `allow` needs **every** part to match while a `deny` needs only one.
+Wrappers (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`, `noglob`,
+and a bare `xargs`) and their own options are stripped, so `nice -n 10 ls` is judged as
+`ls`. Redirect targets are evaluated as write paths, so `echo x > .git/config` is a write
+to `.git/config` however harmless `echo` looks.
+
+`Bash(command:…)` is refused outright, and an argument-constraining pattern such as
+`Bash(curl http://github.com/ *)` is accepted but returned with `fragile: true` — options,
+protocol spellings, redirects, and variables all route around it. Prefer a `deny` plus a
+`WebFetch(domain:)` allow.
+
+### Scopes and precedence
+
+Four scopes, highest authority first:
+
+| scope | where it lives | who writes it |
+| --- | --- | --- |
+| `:node` | `config :ouroboros, :permissions` | the operator, in configuration |
+| `:user` | the node's data directory | `permissions.add` |
+| `:workspace` | the data directory, keyed by canonical root | `permissions.add` |
+| `:session` | the same store, keyed by session id | answering an approval with `scope: "session"` |
+
+Workspace rules are stored **outside the repository** on purpose. A repository that
+shipped its own allow rules would grant itself permissions on every machine that cloned
+it.
+
+The order is: any `deny` wins, then any `ask`, then `allow` — and scope breaks ties only
+*inside* one of those ranks. A session's `deny` therefore beats an operator's `allow`,
+because the strictest reading of two rules that disagree is the one that gets used, and
+adding a rule can only ever narrow what a lower scope permitted. Nothing matched is
+`{:ask, :no_rule}`: at this layer, deny-by-default means the human decides, not that the
+call is refused.
+
+**Protected writes** are decided before any rule is read, and no rule reaches them:
+`.git`, `.ouroboros`, the node's data directory, and `~/.config/ouroboros`. Reads are
+deliberately not protected — refusing to read `.git` breaks every honest use of a
+repository, and the threat here is a session rewriting the authority that governs it.
+
+### Where it applies, and what it records
+
+Two seams: `session/request_permission` on ACP (OpenCode, Kimi) and the three
+`requestApproval` methods on the Codex app server. `:allow` answers the provider with its
+own approve option and emits no event; `:deny` answers with its refusal and names the
+rule; `:ask` emits the same `approval_requested` as before plus `suggested_rule`, the
+pattern that would stop the question recurring — so a client can offer "don't ask again
+for `cargo test *`" without inventing a rule language of its own.
+
+Every rule-made allow and deny, and every human answer, is written to
+`Ouroboros.Agent.EffectLedger` as a `:permission` effect: tool, mode, provider, decision,
+scope, actor, rule id, and a **digest** of the command line and paths, never their text.
+
+```elixir
+Ouroboros.effects(effect: :permission, limit: 5)
+```
+
+### Honest limits
+
+- **This is not a sandbox, and it is not an OS boundary.** It decides what the runtime
+  *asks a provider to do* at the two points where a provider asks first. A vendor CLI
+  that runs a tool without asking runs it. Managed transports (`claude`, `gemini`, `amp`,
+  `grok`, `zai`, `codex exec`) have no approvals channel at all, so nothing here reaches
+  them.
+- **Prefix matching is defeated by construction** by command substitution (`$(…)`,
+  backticks), `eval`, variable expansion, aliases, and `sh -c "…"`. Nothing is expanded;
+  a rule matches the literal command line the provider reported. That is why the honest
+  posture is an allowlist plus protected paths rather than a denylist, and why a
+  denylist-only configuration is a documented mistake rather than a strategy.
+- **There is no classifier.** A classifier-backed `auto` mode is a later slice on top of
+  this engine, never a replacement for rules.
+- **Tools outside these two seams are still the vendor's.** Ouroboros runs no tool loop,
+  so it cannot veto a call it never sees.
+- **The store is node-local and bounded** (`:ouroboros, :permissions_limit`, 500 by
+  default). A machine's rules do not replicate. The bound refuses a new rule rather than
+  evicting an old one, because evicting a `deny` to make room for an `allow` would be a
+  storage limit that widens authority.
+- **A storage fault narrows, never widens.** An unreachable store answers
+  `{:ask, :authority_unavailable}` for anything a stored rule could have allowed — an
+  operator's own `allow` included, since the store is the only place a stricter rule
+  could have been — while protected paths and configured denies still refuse. An `allow`
+  whose ledger entry cannot be written comes back as `{:ask, :unrecordable}`.
+- **A failed rule write leaves the previous state standing**, in both directions, for the
+  reason `Control.Grants` states about revocation.
+- **`scope: "always"` does not exist on an approval.** `Jido.Harness.ApprovalResponse`
+  admits `once` and `session`; the durable form of "never ask me again" is
+  `permissions.add` with the pattern `suggested_rule` named.
+- `Ouroboros.Control.Permissions` lives under the fast patch lane's protected prefix, so
+  a capability an agent forged cannot patch the engine that decides what code may do.
+
 ## Durable OTP releases
 
 The release lane is distinct from fast BEAM patches:
