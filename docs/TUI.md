@@ -620,6 +620,12 @@ ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       provider/workspace/approval resolve flag first, then the
                       config file's [defaults]; only a provider neither names
                       is refused, naming both places
+ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
+         [--sandbox-mode MODE] [--machine NAME] [--resume SESSION-ID]
+         [--json | --stream-json] [--approve-all] [--timeout SECS] [-v]
+         [--addr HOST:PORT] [--token-file PATH]
+                      headless: run one prompt, stream the normalised events,
+                      exit with a documented code. No alternate screen, ever
 ouro stop             graceful stop of the locally spawned daemon
 ouro fleet create     create private CA/cookie/profile for the first machine
 ouro fleet list       Tailscale peers and SSH config hosts this Mac already knows
@@ -672,6 +678,65 @@ warns that the normal `ouroboros-dev` isolation is disabled and a release runtim
 that same directory may be adopted. The override is neither rewritten nor refused;
 operators who want isolation with an explicit root should name a dedicated dev
 directory.
+
+#### `ouro run` — the headless surface (`src/run.rs`)
+
+The scriptable half of `ouro new`. It resolves the runtime the same way — adopt the
+publication in this data directory, else spawn one, or attach when `--addr`/`--token-file`
+name a listener — and starts the session through the same `StartRequest` and the same
+`config::resolve_start` precedence, so a provider neither the flag nor `[defaults]` names
+is the same refusal `ouro new` makes, in the same words. A runtime this command spawned is
+**left running** on exit, with `the runtime is still running (pid …)` on **stderr**: a
+script that calls `ouro run` in a loop should pay one cold start, not one per prompt.
+
+*Stdout is exactly one of three things*, and progress never joins it:
+
+| flag | stdout |
+|---|---|
+| `--stream-json` | one JSON object per normalised event — **verbatim the `event` object from the `interactive.event` notification** (§2.5), which is the golden-pinned contract and not a second schema — then one `{"type":"result", …}` object |
+| `--json` | the result object alone |
+| neither | the agent's final text: the `output_text_final` messages of the turn, or the collapsed `output_text_delta`s where no final arrived |
+
+The result object carries `session_id`, `turn_id`, `status`, `provider`, `node`, `usage`,
+`files_changed`, `approvals` (`requested`/`answered`), `duration_ms`, and `error` when
+there is one. `usage` is **numbers only**, folded from `usage` events by replacement
+rather than addition — those payloads are cumulative for the turn — with camelCase keys
+normalised and `total_tokens` derived from `input_tokens + output_tokens` exactly as the
+Harness mappers derive it, and only when the provider did not send it.
+
+*Ending, and exit codes.* The run stops at `turn_completed`/`turn_failed`/
+`turn_interrupted` for its own `turn_id`, at any terminal session event, or at
+`stream.ended`. `stream.lagged` — and a hole in the live stream that nothing announced —
+is repaired by `interactive.replay {cursor, limit: 500}` from the contiguous high-water
+mark, bounded at 40 rounds, with out-of-order frames held until the gap under them fills
+so nothing prints twice or out of order.
+
+| code | status | meaning |
+|---|---|---|
+| 0 | `completed` | |
+| 1 | `failed` | |
+| 2 | `interrupted` | Ctrl-C, or the runtime interrupted the turn. A second Ctrl-C exits immediately |
+| 3 | `lost` | **the turn's outcome was not observed** — the connection closed, the session ended first, or a send whose outcome was unknown was never reconciled. Never rounded up to `completed` |
+| 4 | `timeout` | `--timeout` (default 600s) expired; `interactive.interrupt` was sent and briefly awaited |
+| 64 | — | usage error or refusal, including a refused `interactive.start`. The `model::refusal` sentence goes to stderr, and under `--json`/`--stream-json` a `{"type":"error", …}` object also goes to stdout |
+
+*Approvals.* There is no approver at a pipe, so an `approval_requested` is answered
+`deny`/`once` with reason `ouro run: headless, no approver`, or `approve`/`once` under
+`--approve-all`. The request and its resolution are on the event stream like everything
+else, and the decision is stated on stderr. This command never waits for a human it does
+not have — hanging until CI kills the job is the failure it is replacing.
+
+*`--resume SESSION-ID`.* No start: `interactive.info` first, whose `cursor` field is
+`Interactive.State`'s own contiguous high-water mark, then `interactive.subscribe` from
+it, so only the new turn's events print. The verb follows the one-in-flight rule —
+`interactive.send_message` into an idle session, `interactive.follow_up` otherwise — and a
+terminal session is refused rather than sent a turn. The start options are refused
+alongside `--resume` rather than ignored: that session's provider and workspace were
+chosen when it started.
+
+Reconnect is deliberately **off** for this command. A silent re-handshake would drop the
+subscription and leave the run waiting out its whole `--timeout` on a stream that is not
+coming back; a closed connection is instead an immediately observable `lost`.
 
 Client-side preferences live in `$XDG_CONFIG_HOME/ouroboros/config.toml`
 (else `~/.config/ouroboros/config.toml`): `[defaults]`
