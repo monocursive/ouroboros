@@ -8,8 +8,12 @@ defmodule Ouroboros.Interactive.Task do
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Provider
+  alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Provider.Native.Session, as: NativeSession
+  alias Ouroboros.Team
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
+  alias Ouroboros.Workspace.Exec
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Path, as: WorkspacePath
   alias Ouroboros.Workspace.Worktree
@@ -23,6 +27,21 @@ defmodule Ouroboros.Interactive.Task do
   @default_unresolved_turn_deadline_ms 10 * 60 * 1_000
   @default_readiness_deadline_ms 10 * 60 * 1_000
   @max_pending_steers 32
+
+  # B7. A command line an operator typed, bounded where it is accepted. The permission
+  # engine bounds its own reading at 8 KiB; anything past this is not a command somebody
+  # meant to run in a terminal.
+  @max_shell_command_bytes 8_192
+
+  # How many of an operator's own commands the next turn's runtime envelope carries.
+  # Three, and only their excerpts: the model is being told what the person just did, not
+  # given a second transcript to read.
+  @max_exposed_operator_commands 3
+
+  # G1. An objective an operator typed into a composer, bounded where it is accepted. It
+  # becomes a coding task's durable objective, and the coding plane has its own bound;
+  # this one is smaller because it is a sentence, not a document.
+  @max_delegation_objective_bytes 8_192
 
   # C2 — external approvals. One session may hold at most this many unanswered questions
   # at once; the next is denied rather than queued, because a provider that can ask nine
@@ -269,6 +288,72 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # D9. Compaction is native-only because only there does this runtime hold the
+  # conversation to fold. A vendor CLI's own compaction is surfaced as an event when it
+  # reports one; imitating it here would be a summary Ouroboros invented for a transcript
+  # it never had.
+  def handle_call({:compact, focus}, _from, runtime) do
+    case native_transport(runtime.session, :compact) do
+      {:ok, pid} ->
+        {:reply, compact_native(pid, focus), runtime}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  # Read-only, and it answers for every transport — with different amounts of truth. The
+  # native session knows its own prefix, window, compactions and instruction files; every
+  # other transport knows only what its `usage` events reported, and that is what it says
+  # rather than a shape padded out with nulls that look like measurements.
+  def handle_call(:context, _from, runtime) do
+    {:reply, {:ok, session_context(runtime.session)}, runtime}
+  end
+
+  # B7. Two calls, not one, and the split is the whole design: a command may run for ten
+  # minutes, and a coordinator blocked behind one would answer nothing — not `info`, not
+  # `interrupt`, not its own turns — for that long. This call decides, records, and hands
+  # back a plan; `Ouroboros.InteractiveSession.exec/2` runs the command in the caller's
+  # own process, under the caller's own ceiling.
+  def handle_call({:exec_plan, command}, _from, runtime) do
+    case plan_operator_shell(runtime, command) do
+      {:ok, plan, runtime} -> {:reply, {:ok, plan}, runtime}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  def handle_call({:exec_settled, effect_id, outcome}, _from, runtime) do
+    {:reply, :ok, settle_operator_shell(runtime, effect_id, outcome)}
+  end
+
+  # G1. Split for the same reason the shell verb is: `Team.add_worker/3` and
+  # `Team.delegate/4` bound themselves at sixty seconds, and a conversation that answered
+  # nothing for a minute because it had asked a team a question would be a worse bargain
+  # than the delegation is worth. This call decides and mints; the caller does the team
+  # work; `{:delegation_started, …}` brings the result back.
+  def handle_call({:delegate_plan, objective, opts}, _from, runtime) do
+    {:reply, delegate_plan(runtime, objective, opts), runtime}
+  end
+
+  def handle_call({:delegation_started, record}, _from, runtime) do
+    case record_delegation(runtime, record) do
+      {:ok, runtime} -> {:reply, {:ok, Map.take(record, [:id, :task_id, :task_node])}, runtime}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  def handle_call(:delegations, _from, runtime) do
+    {:reply, {:ok, State.delegations(runtime.session)}, runtime}
+  end
+
+  # Same three-step shape as a fork, and for the same reason: this coordinator writes the
+  # packet and names the child, and `Ouroboros.InteractiveSession.handoff/3` starts the
+  # child outside this process so a parent is never blocked behind provider readiness it
+  # does not own.
+  def handle_call({:handoff_plan, prompt, id}, _from, runtime) do
+    {:reply, handoff_plan(runtime, prompt, id), runtime}
+  end
+
   # Planning a fork is this coordinator's job; *starting* one is not. A session start
   # waits on provider readiness, which is legitimately unbounded, and a parent blocked on
   # that wait would answer nothing — not `info`, not `interrupt`, not its own turns —
@@ -356,7 +441,16 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call(_message, _from, runtime),
     do: {:reply, {:error, :invalid_session_operation}, runtime}
 
+  # G1's other direction: the team learned a delegated task reached a terminal status and
+  # is telling the conversation that asked for it. A cast rather than a call on purpose —
+  # `Team.Server` must never block on a session coordinator to finish delivering a result
+  # — so a note whose parent is not up is lost, and `interactive.delegations` reads the
+  # team's own record rather than this one when it wants the truth.
   @impl true
+  def handle_cast({:delegation_settled, delegation_id, status, result_digest}, runtime) do
+    {:noreply, settle_delegation(runtime, delegation_id, status, result_digest)}
+  end
+
   def handle_cast({:cancel_await, request_ref}, runtime) do
     {:noreply, drop_turn_waiter(runtime, request_ref)}
   end
@@ -1702,6 +1796,722 @@ defmodule Ouroboros.Interactive.Task do
            Provider.session_fork_options(session.provider, Map.get(session.options, :transport)) do
       {:ok, fork_start_options(session, id, parent_session_id, fork_options)}
     end
+  end
+
+  # ---------------------------------------------------------------- context (D9)
+
+  # The transport a session actually reaches its provider over, asked of the provider spec
+  # rather than read off the stored option: a session that named none still runs on the
+  # provider's default, and refusing it by a `nil` transport would name the wrong thing.
+  defp session_transport(%State{} = session) do
+    case Provider.session_capabilities(session.provider, Map.get(session.options, :transport)) do
+      %{transport: transport} -> transport
+      _unresolvable -> Map.get(session.options, :transport)
+    end
+  end
+
+  # Two refusals, and they say different things. `unsupported_on_transport` is a
+  # capability answer — this verb does not exist on this wire, and no amount of waiting
+  # changes that. `native_transport_unavailable` is a liveness answer — the verb exists,
+  # the session has not opened its transport yet or it has gone away, and retrying is
+  # sensible.
+  defp native_transport(%State{} = session, verb) do
+    case session_transport(session) do
+      :native ->
+        case NativeSession.whereis(session.provider_session_id || "") do
+          pid when is_pid(pid) ->
+            {:ok, pid}
+
+          nil ->
+            {:error,
+             {:native_transport_unavailable,
+              %{
+                verb: verb,
+                reason:
+                  if(session.provider_session_id, do: :no_live_transport, else: :not_started),
+                message:
+                  "this session has no live native transport to ask; send a turn first, " <>
+                    "or reopen the session."
+              }}}
+        end
+
+      transport ->
+        {:error,
+         {:unsupported_on_transport,
+          %{
+            transport: transport,
+            verb: verb,
+            provider: session.provider,
+            message:
+              "#{inspect(session.provider)} reaches this session over the " <>
+                "#{inspect(transport)} transport, which does not hand its conversation to " <>
+                "this runtime. Only a `native` session can #{verb}."
+          }}}
+    end
+  end
+
+  defp compact_native(pid, focus) do
+    case safe_session_call(fn -> NativeSession.compact(pid, focus) end) do
+      {:ok, report} when is_map(report) -> {:ok, durable(report)}
+      {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
+      other -> {:error, {:compaction_refused, durable(other)}}
+    end
+  end
+
+  # Never a guess. A native session answers with the facts it holds; every other transport
+  # answers with the two numbers its `usage` events carried and says so in `source`, so a
+  # footer can tell "this provider never reported a window" from "the window is zero".
+  defp session_context(%State{} = session) do
+    usage = Map.get(session, :usage) || %{}
+
+    base = %{
+      session_id: session.id,
+      provider: session.provider,
+      transport: session_transport(session),
+      model: Map.get(session.options, :model),
+      provider_session_id: session.provider_session_id,
+      context_window: Map.get(usage, :context_window),
+      context_used: Map.get(usage, :context_used),
+      total_tokens: Map.get(usage, :total_tokens),
+      handed_off_from: State.handed_off_from(session),
+      source: :usage
+    }
+
+    case native_transport(session, :context) do
+      {:ok, pid} -> Map.merge(base, native_context(pid))
+      {:error, _reason} -> base
+    end
+  end
+
+  defp native_context(pid) do
+    case safe_session_call(fn -> NativeSession.info(pid) end) do
+      {:ok, info} when is_map(info) ->
+        %{
+          source: :native,
+          prefix_fingerprint: Map.get(info, :prefix_fingerprint),
+          # The native session's own figures win over the folded `usage` account: it is
+          # the thing that counted them, and the fold is a projection of its events.
+          context_window: Map.get(info, :context_window),
+          context_used: Map.get(info, :context_used),
+          compact_at: Map.get(info, :compact_at),
+          keep_recent_tokens: Map.get(info, :keep_recent_tokens),
+          messages: Map.get(info, :messages),
+          compaction_thrashing: Map.get(info, :compaction_thrashing),
+          compactions: durable(List.wrap(Map.get(info, :compactions))),
+          # Ids, not archives: the archive bodies are the conversation this runtime just
+          # folded away, and a context reply that carried them would undo the fold.
+          archive_ids: info |> Map.get(:archives) |> List.wrap() |> Enum.map(&Map.get(&1, :id)),
+          instruction_files: List.wrap(Map.get(info, :instruction_files)),
+          instruction_files_dropped:
+            durable(List.wrap(Map.get(info, :instruction_files_dropped))),
+          instruction_bytes: Map.get(info, :instruction_bytes),
+          tools: List.wrap(Map.get(info, :tools)),
+          handed_off_to: Map.get(info, :handed_off_to)
+        }
+
+      _unavailable ->
+        %{}
+    end
+  end
+
+  # ---------------------------------------------------------------- delegation (G1)
+
+  # What the caller needs to reach a team with, and nothing this coordinator has to hold
+  # a lock for. The workspace defaults to this session's own, which is the whole point of
+  # `/delegate`: the child works where the conversation is.
+  defp delegate_plan(runtime, objective, opts) do
+    session = runtime.session
+
+    with :ok <- delegatable?(session, objective),
+         {:ok, id} <- validate_delegation_id(Keyword.get(opts, :id)),
+         {:ok, workspace} <- delegation_workspace(session, Keyword.get(opts, :workspace)),
+         {:ok, provider} <- delegation_provider(session, Keyword.get(opts, :provider)) do
+      case Map.fetch(State.delegations(session), id) do
+        # An id already recorded is the same delegation, answered from the record rather
+        # than started again: this verb is caller-keyed for the same reason a start is.
+        {:ok, existing} ->
+          {:ok,
+           Map.put(plan_from(existing, session, objective, workspace, provider), :existing, true)}
+
+        :error ->
+          {:ok,
+           %{
+             id: id,
+             team_id: Team.workspace_team_id(workspace),
+             worker_id: delegation_worker_id(session),
+             workspace: workspace,
+             provider: provider,
+             coding_node: node(),
+             parent: %{plane: :interactive, id: session.id},
+             objective_digest: digest_text(objective),
+             existing: false
+           }}
+      end
+    end
+  end
+
+  # Answered from the record, not rebuilt: the child already exists under this id, and
+  # recomputing where it *would* have gone could name a different task than the one this
+  # conversation is actually linked to.
+  defp plan_from(existing, session, objective, workspace, provider) do
+    %{
+      id: existing.id,
+      team_id: existing.team_id,
+      task_id: existing.task_id,
+      worker_id: delegation_worker_id(session),
+      workspace: workspace,
+      provider: provider,
+      coding_node: existing.task_node,
+      parent: %{plane: :interactive, id: session.id},
+      objective_digest: digest_text(objective)
+    }
+  end
+
+  defp delegatable?(session, objective) do
+    cond do
+      State.terminal?(session) ->
+        {:error, {:session_not_delegable, %{status: session.status}}}
+
+      not is_binary(objective) or String.trim(objective) == "" ->
+        {:error, {:invalid_objective, %{reason: :blank}}}
+
+      byte_size(objective) > @max_delegation_objective_bytes ->
+        {:error,
+         {:invalid_objective, %{reason: :too_long, limit: @max_delegation_objective_bytes}}}
+
+      map_size(State.delegations(session)) >= State.max_delegations() ->
+        {:error, {:delegation_limit_reached, %{limit: State.max_delegations()}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_delegation_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
+
+  defp validate_delegation_id(id) when is_binary(id) do
+    if String.trim(id) != "",
+      do: {:ok, id},
+      else: {:error, {:invalid_delegation_id, %{reason: :blank}}}
+  end
+
+  defp validate_delegation_id(id), do: {:error, {:invalid_delegation_id, %{value: id}}}
+
+  defp delegation_workspace(session, nil), do: {:ok, session.workspace}
+
+  defp delegation_workspace(_session, workspace) when is_binary(workspace) do
+    if String.trim(workspace) != "",
+      do: {:ok, workspace},
+      else: {:error, {:invalid_workspace, %{reason: :blank}}}
+  end
+
+  defp delegation_workspace(_session, workspace),
+    do: {:error, {:invalid_workspace, %{value: workspace}}}
+
+  defp delegation_provider(session, nil), do: {:ok, session.provider}
+  defp delegation_provider(_session, provider) when is_atom(provider), do: {:ok, provider}
+  defp delegation_provider(_session, provider), do: {:error, {:invalid_provider, provider}}
+
+  # One worker per conversation, not one per delegation: `Team.Server` refuses a second
+  # active delegation to a busy worker, which is exactly the serialisation a single
+  # conversation's `/delegate` should have, and it embeds `node()` because a worker id is
+  # a mesh agent id.
+  defp delegation_worker_id(%State{} = session), do: "#{node()}:session:#{session.id}"
+
+  defp digest_text(text) when is_binary(text),
+    do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower) |> binary_slice(0, 32)
+
+  defp digest_text(_text), do: nil
+
+  # The parent's durable half of the relationship plus the transcript entry, in one step
+  # for the same reason the shell verb's settlement is: the record and the log answer the
+  # same question from two directions.
+  defp record_delegation(runtime, record) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    delegation =
+      %{
+        id: record.id,
+        team_id: record.team_id,
+        task_id: record.task_id,
+        task_node: record.task_node,
+        objective_digest: record.objective_digest,
+        status: :started,
+        result_digest: nil,
+        created_at: now,
+        updated_at: now
+      }
+
+    case State.put_delegation(runtime.session, delegation) do
+      {:ok, session} ->
+        append_delegation_event(%{runtime | session: session}, delegation, :started)
+
+      {:error, reason} ->
+        {:error, reason, runtime}
+    end
+  end
+
+  defp settle_delegation(runtime, delegation_id, status, result_digest) do
+    case Map.fetch(State.delegations(runtime.session), delegation_id) do
+      {:ok, delegation} when delegation.status != status ->
+        settled = %{
+          delegation
+          | status: status,
+            result_digest: result_digest,
+            updated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+
+        case State.put_delegation(runtime.session, settled) do
+          {:ok, session} ->
+            case append_delegation_event(%{runtime | session: session}, settled, status) do
+              {:ok, runtime} ->
+                runtime
+
+              {:error, _reason, runtime} ->
+                runtime
+            end
+
+          {:error, _reason} ->
+            runtime
+        end
+
+      # A status this conversation already recorded, or a delegation it never started.
+      # Both are silence rather than a second event: the team retries delivery, and one
+      # transcript row per terminal status is the honest count.
+      _nothing_new ->
+        runtime
+    end
+  end
+
+  defp append_delegation_event(runtime, delegation, status) do
+    payload =
+      %{
+        "delegation_id" => delegation.id,
+        "team_id" => delegation.team_id,
+        "task_id" => delegation.task_id,
+        "task_node" => Atom.to_string(delegation.task_node),
+        "objective_digest" => delegation.objective_digest,
+        "status" => Atom.to_string(status)
+      }
+      |> put_present("result_digest", delegation.result_digest)
+
+    case emit_runtime_event(runtime, :delegation, payload,
+           provider: runtime.session.provider,
+           harness_session_id: runtime.session.harness_session_id,
+           provider_session_id: runtime.session.provider_session_id
+         ) do
+      {:ok, runtime} ->
+        {:ok, runtime}
+
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} could not append delegation " <>
+            "#{delegation.id} (#{status}) to its transcript"
+        )
+
+        {:error, {:delegation_checkpoint_failed, delegation.id}, runtime}
+    end
+  end
+
+  # ---------------------------------------------------------------- operator shell (B7)
+
+  # Deny by default, in the order that makes each answer honest. A terminal session has
+  # no workspace to run in. `auto_approve` is the operator having already said "stop
+  # asking me", which is exactly what this verb needs and nothing weaker. Otherwise the
+  # permission engine decides, and anything that is not a rule saying `allow` — including
+  # a store that could not be read — is a refusal that names what would have worked.
+  defp plan_operator_shell(runtime, command) do
+    session = runtime.session
+
+    cond do
+      State.terminal?(session) ->
+        {:error, {:session_not_executable, %{status: session.status}}, runtime}
+
+      not is_binary(command) or String.trim(command) == "" ->
+        {:error, {:invalid_shell_command, %{reason: :blank}}, runtime}
+
+      byte_size(command) > @max_shell_command_bytes ->
+        {:error, {:invalid_shell_command, %{reason: :too_long, limit: @max_shell_command_bytes}},
+         runtime}
+
+      true ->
+        case shell_authority(runtime, command) do
+          {:ok, authority} -> open_operator_shell(runtime, command, authority)
+          {:error, reason} -> {:error, reason, runtime}
+        end
+    end
+  end
+
+  defp shell_authority(runtime, command) do
+    session = runtime.session
+
+    if Map.get(session.options, :approval_mode) == :auto_approve do
+      {:ok, %{reason: :auto_approve, rule: nil}}
+    else
+      case evaluate_shell_permission(runtime, command) do
+        {:allow, rule} -> {:ok, %{reason: :rule, rule: rule}}
+        {:deny, rule} -> {:error, shell_refused(runtime, command, :rule_denied, rule)}
+        {:ask, reason} -> {:error, shell_refused(runtime, command, reason, nil)}
+      end
+    end
+  end
+
+  # Built in the shape `Ouroboros.Control.Permissions.Request` actually normalises, rather
+  # than the coordinator's own approval subject: this is a real command line with a real
+  # working directory, and a request the engine had to guess at would be judged against
+  # `tool: "unknown"`.
+  defp shell_request(%State{} = session, command) do
+    %{
+      principal: %{session_id: session.id, provider: session.provider, node: node()},
+      tool: "bash",
+      command: command,
+      mode: :execute,
+      context: %{workspace: session.workspace}
+    }
+  end
+
+  defp evaluate_shell_permission(runtime, command) do
+    case permissions_engine(:evaluate, 1) do
+      nil ->
+        {:ask, :no_permission_engine}
+
+      engine ->
+        case apply(engine, :evaluate, [shell_request(runtime.session, command)]) do
+          {:allow, rule} -> {:allow, rule}
+          {:deny, rule} -> {:deny, rule}
+          {:ask, reason} -> {:ask, reason}
+          _unrecognised -> {:ask, :engine_answer_unrecognised}
+        end
+    end
+  rescue
+    exception -> {:ask, {:engine_failed, Exception.message(exception)}}
+  catch
+    :exit, _reason -> {:ask, :engine_unavailable}
+  end
+
+  # A refusal that only says no is a refusal an operator has to guess their way out of.
+  # This one names the rule that would allow the command and the two ways to install it,
+  # which is the same pattern `permissions.add` takes and the same one the approval modal
+  # already offers.
+  defp shell_refused(runtime, command, reason, rule) do
+    session = runtime.session
+
+    {:shell_refused,
+     %{
+       reason: shell_reason(reason),
+       session_id: session.id,
+       workspace: session.workspace,
+       approval_mode: Map.get(session.options, :approval_mode),
+       denied_by: rule_reference(rule),
+       suggested_rule: shell_suggestion(session, command),
+       message: shell_refusal_message(reason)
+     }}
+  end
+
+  defp shell_reason(reason) when is_atom(reason), do: reason
+  defp shell_reason({tag, _detail}) when is_atom(tag), do: tag
+  defp shell_reason(_reason), do: :not_permitted
+
+  defp rule_reference(%{scope: scope, id: id, pattern: pattern}),
+    do: %{scope: scope, id: id, pattern: pattern}
+
+  defp rule_reference(_rule), do: nil
+
+  defp shell_suggestion(session, command) do
+    case permissions_engine(:suggest, 1) do
+      nil ->
+        nil
+
+      engine ->
+        case apply(engine, :suggest, [shell_request(session, command)]) do
+          rule when is_binary(rule) and rule != "" -> rule
+          _nothing_to_suggest -> nil
+        end
+    end
+  rescue
+    _exception -> nil
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp shell_refusal_message(:rule_denied),
+    do:
+      "a permission rule denies this command. A deny beats every allow at every scope, " <>
+        "so remove that rule with permissions.remove before adding another."
+
+  defp shell_refusal_message(_reason),
+    do:
+      "workspace.exec runs a command as your own act, so it needs the session to be at " <>
+        "approval_mode auto_approve or a permission rule that allows it. Add the " <>
+        "suggested rule with permissions.add, or move the session with " <>
+        "interactive.configure."
+
+  # Checkpoint before run, and it is a hard gate rather than best effort: the entire
+  # claim this verb makes is that a command run through the runtime is accountable
+  # afterwards, and a command whose attempt could not be written down is not.
+  defp open_operator_shell(runtime, command, authority) do
+    session = runtime.session
+    effect_id = operator_shell_id(session.id, command)
+
+    attrs = %{
+      id: effect_id,
+      effect: :operator_shell,
+      principal: "session:" <> session.id,
+      attempt: %{
+        session_id: session.id,
+        command_digest: Exec.digest(command),
+        cwd: session.workspace,
+        node: node(),
+        rule_id: authority.rule && Map.get(authority.rule, :id)
+      },
+      authority: %{
+        decision: :allow,
+        reason: Atom.to_string(authority.reason),
+        constraints: rule_reference(authority.rule)
+      },
+      cause: %{signal_type: "workspace.exec", signal_id: effect_id}
+    }
+
+    case safe_ledger(fn -> EffectLedger.record_started(attrs) end) do
+      {:ok, _entry, _created} ->
+        {:ok,
+         %{
+           effect_id: effect_id,
+           command_digest: attrs.attempt.command_digest,
+           cwd: session.workspace,
+           spill_dir: shell_spill_dir(session.id),
+           timeout_ms: Exec.timeout_ms(),
+           authority: authority.reason,
+           rule: rule_reference(authority.rule)
+         }, runtime}
+
+      other ->
+        {:error,
+         {:shell_unrecordable,
+          %{
+            reason: :effect_ledger_unavailable,
+            detail: durable(other),
+            message:
+              "the effect ledger could not record this command before it ran, and a " <>
+                "command nobody can account for afterwards does not run."
+          }}, runtime}
+    end
+  end
+
+  defp shell_spill_dir(session_id) do
+    case Exec.spill_dir(session_id) do
+      {:ok, path} -> path
+      {:error, _reason} -> nil
+    end
+  end
+
+  # Embeds `node()` for the same reason every other id in this runtime does: an effect id
+  # is read across a fleet, and a VM-local integer alone collides with the same one
+  # allocated on another machine.
+  defp operator_shell_id(session_id, command) do
+    digest =
+      :sha256
+      |> :crypto.hash(
+        :erlang.term_to_binary(
+          {node(), session_id, Exec.digest(command), System.system_time(:nanosecond),
+           System.unique_integer([:positive, :monotonic])}
+        )
+      )
+      |> Base.encode16(case: :lower)
+
+    "shell-" <> binary_slice(digest, 0, 32)
+  end
+
+  # The settlement and the transcript entry are one step because they answer the same
+  # question from two directions: the ledger says a command this session was authorised
+  # to run has finished, and the session's own log says what it did.
+  defp settle_operator_shell(runtime, effect_id, outcome) do
+    _ = safe_ledger(fn -> EffectLedger.settle(effect_id, settlement(outcome)) end)
+
+    case emit_runtime_event(runtime, :provider_event, shell_event_payload(effect_id, outcome),
+           provider: runtime.session.provider,
+           harness_session_id: runtime.session.harness_session_id,
+           provider_session_id: runtime.session.provider_session_id
+         ) do
+      {:ok, runtime} ->
+        refresh_operator_exposure(runtime)
+
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} ran an operator command but could " <>
+            "not append it to the transcript; the ledger entry #{effect_id} stands"
+        )
+
+        runtime
+    end
+  end
+
+  defp settlement(%{exit_status: status, timed_out: timed_out?} = result) do
+    %{
+      status: if(status == 0 and not timed_out?, do: :ok, else: :failed),
+      result: %{
+        exit_status: status,
+        duration_ms: Map.get(result, :duration_ms),
+        output_bytes: Map.get(result, :output_bytes),
+        spilled: not is_nil(Map.get(result, :spilled)),
+        timed_out: timed_out?
+      }
+    }
+  end
+
+  defp settlement(%{error: reason}), do: %{status: :failed, error: durable(reason)}
+
+  defp shell_event_payload(effect_id, %{exit_status: _status} = result) do
+    %{
+      "kind" => "operator_shell",
+      "effect_id" => effect_id,
+      "command_digest" => Map.get(result, :command_digest),
+      "exit_status" => Map.get(result, :exit_status),
+      "duration_ms" => Map.get(result, :duration_ms),
+      "timed_out" => Map.get(result, :timed_out),
+      "output_bytes" => Map.get(result, :output_bytes),
+      "output_excerpt" => Map.get(result, :excerpt)
+    }
+    |> put_present("spilled", Map.get(result, :spilled))
+  end
+
+  defp shell_event_payload(effect_id, %{error: reason}) do
+    %{
+      "kind" => "operator_shell",
+      "effect_id" => effect_id,
+      "exit_status" => nil,
+      "output_excerpt" => "",
+      "error" => inspect(reason, limit: 6)
+    }
+  end
+
+  # The one place a durable runtime capture is deliberately re-taken. Everywhere else the
+  # capture is frozen at admission so retries and recovery cannot observe a different
+  # runtime; here the runtime genuinely changed, because a person ran a command in the
+  # session's workspace, and the next turn is entitled to know. Bounded and redacted by
+  # `Exposure` itself, so this cannot widen by being called from somewhere else later.
+  defp refresh_operator_exposure(runtime) do
+    session = runtime.session
+
+    if Map.get(session.options, :runtime_exposure, true) do
+      capture =
+        Exposure.capture(
+          sandbox_mode: Map.get(session.options, :sandbox_mode),
+          operator_shell: recent_operator_commands(session)
+        )
+
+      updated = session |> Map.put(:runtime_snapshot, capture) |> State.touch()
+
+      case persist(runtime, updated, []) do
+        {:ok, runtime} ->
+          runtime
+
+        {:error, runtime} ->
+          Logger.warning(
+            "interactive session #{session.id} could not refresh its runtime exposure " <>
+              "after an operator command; the next turn carries the previous envelope"
+          )
+
+          runtime
+      end
+    else
+      runtime
+    end
+  end
+
+  # Read back off the session's own log rather than kept in a second durable list: the
+  # events are already bounded by `event_limit`, already redacted, and already survive a
+  # restart. A command whose event has aged out has aged out of the envelope too, which
+  # is the same honest silence a pruned transcript gives.
+  defp recent_operator_commands(session) do
+    session.events
+    |> Enum.filter(
+      &(&1.type == :provider_event and Map.get(&1.payload, "kind") == "operator_shell")
+    )
+    |> Enum.take(-@max_exposed_operator_commands)
+    |> Enum.map(
+      &%{
+        command_digest: Map.get(&1.payload, "command_digest"),
+        exit_status: Map.get(&1.payload, "exit_status"),
+        excerpt: Map.get(&1.payload, "output_excerpt")
+      }
+    )
+  end
+
+  defp safe_ledger(fun) do
+    fun.()
+  rescue
+    error -> {:error, {:effect_ledger_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:effect_ledger_exit, inspect(reason, limit: 4)}}
+  end
+
+  # ---------------------------------------------------------------- handoff (D9)
+
+  # The packet is written and the child is named here; the child session is started by the
+  # caller. `open_child: false` is load-bearing — a transport process opened here would
+  # inherit this session's harness owner, and the worker adopts the `provider_session_id`
+  # of any adapter event it receives, so the orphan's readiness event would rename *this*
+  # session's provider session to the child's.
+  defp handoff_plan(runtime, prompt, id) do
+    session = runtime.session
+
+    with {:ok, id} <- validate_fork_id(id),
+         {:ok, prompt} <- validate_handoff_prompt(prompt),
+         {:ok, pid} <- native_transport(session, :handoff),
+         {:ok, result} <-
+           safe_session_call(fn -> NativeSession.handoff(pid, prompt, open_child: false) end) do
+      {:ok, handoff_start_options(session, id, result.provider_session_id)}
+    else
+      {:error, reason} -> {:error, handoff_error(reason)}
+      other -> {:error, {:handoff_refused, durable(other)}}
+    end
+  end
+
+  defp handoff_error({tag, _detail} = reason)
+       when tag in [:unsupported_on_transport, :native_transport_unavailable, :invalid_fork_id],
+       do: reason
+
+  defp handoff_error(:invalid_fork_id), do: :invalid_handoff_id
+  defp handoff_error({:invalid_handoff_prompt, _detail} = reason), do: reason
+  defp handoff_error(reason), do: {:handoff_refused, durable(reason)}
+
+  defp validate_handoff_prompt(prompt) when is_binary(prompt) do
+    cond do
+      String.trim(prompt) == "" ->
+        {:error, {:invalid_handoff_prompt, %{reason: :blank}}}
+
+      not String.valid?(prompt) ->
+        {:error, {:invalid_handoff_prompt, %{reason: :not_utf8}}}
+
+      Ouroboros.AgentProfile.reserved_delimiter?(prompt) ->
+        {:error, {:invalid_handoff_prompt, %{reason: :reserved_delimiter}}}
+
+      true ->
+        {:ok, prompt}
+    end
+  end
+
+  defp validate_handoff_prompt(nil), do: {:ok, nil}
+  defp validate_handoff_prompt(prompt), do: {:error, {:invalid_handoff_prompt, %{value: prompt}}}
+
+  # The child's start intent is the parent's, minus this session's identity and plus the
+  # provider session the packet was written under. Unlike a fork it carries no branch
+  # option: the child is a *new* conversation seeded with a packet, and telling the
+  # provider to branch would be a second, contradictory claim about the same session.
+  defp handoff_start_options(%State{} = session, id, child_provider_session_id) do
+    session.options
+    |> Map.drop([:provider_options, :provider_session_id, :attachments])
+    |> Map.to_list()
+    |> Keyword.merge(
+      id: id,
+      provider: session.provider,
+      workspace: session.workspace,
+      workspace_mode: session.workspace_mode,
+      event_limit: session.event_limit,
+      provider_session_id: child_provider_session_id,
+      handed_off_from: session.id
+    )
   end
 
   defp validate_fork_id(nil), do: {:ok, Jido.Signal.ID.generate!()}

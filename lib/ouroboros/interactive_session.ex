@@ -8,6 +8,8 @@ defmodule Ouroboros.InteractiveSession do
   """
 
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
+  alias Ouroboros.Team
+  alias Ouroboros.Workspace.Exec
 
   @type session :: Ref.t() | String.t()
 
@@ -250,7 +252,7 @@ defmodule Ouroboros.InteractiveSession do
   def fork(session, id \\ nil) do
     with {:ok, _parent_id, owner} <- session_identity(session),
          {:ok, opts} <- call(session, {:fork_plan, id}),
-         {:ok, child} <- start_fork(owner, opts) do
+         {:ok, child} <- start_child(owner, opts, :fork_start_failed) do
       # The child exists and carries `forked_from`, which is the durable half of the
       # relationship. The parent's count is a hint that follows it, and a parent that
       # cannot record one does not undo a fork that already happened.
@@ -259,7 +261,10 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
-  defp start_fork(owner, opts) do
+  # Shared by `fork/2` and `handoff/3`: both answer in `start/1`'s shape because both
+  # *are* starts, and a client that can already open a created-but-not-ready session
+  # should not need a third branch to open this one.
+  defp start_child(owner, opts, failure_tag) do
     result =
       if owner == node(),
         do: start_for_gateway(opts),
@@ -276,7 +281,335 @@ defmodule Ouroboros.InteractiveSession do
         {:ok, %{id: id, node: child_node, ready: false, error: reason}}
 
       {:error, reason} ->
-        {:error, {:fork_start_failed, reason}}
+        {:error, {failure_tag, reason}}
+    end
+  end
+
+  @doc """
+  Delegates an objective from this conversation to a coding task (G1).
+
+  A delegation is a *coding task with a parent*, not a sub-conversation: it runs on the
+  coding plane with its own id, its own transcript, and its own durable record, and what
+  makes it this session's is `parent: %{plane: :interactive, id}` on that record. The
+  parent's transcript gains a `delegation` event when it starts and another when it ends.
+
+  The team is the workspace's default one — one per canonical workspace root per node,
+  created lazily, durable through the same checkpoint every other team uses, and visible
+  in `teams.list`. One worker per conversation, which is what makes a second `/delegate`
+  from the same session queue behind the first rather than fan out.
+
+  `id` is caller-owned like a start's: re-delegating under an id this session already
+  recorded answers with that delegation instead of starting a second one.
+
+  Options: `:id`, `:workspace` (default: this session's), `:provider` (default: this
+  session's).
+  """
+  @spec delegate(session(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def delegate(session, objective, opts \\ []) do
+    with :ok <- validate_options(opts, [:id, :workspace, :provider]),
+         {:ok, _id, _owner} <- session_identity(session),
+         {:ok, plan} <- call(session, {:delegate_plan, objective, opts}) do
+      if Map.get(plan, :existing) do
+        {:ok, delegation_reply(plan.id, plan.team_id, plan.task_id, plan.coding_node, :existing)}
+      else
+        start_delegation(session, objective, plan)
+      end
+    end
+  end
+
+  @doc """
+  Lists this conversation's delegations with the status the *team* currently holds.
+
+  The session's own record is a hint that follows the team's — a terminal note the parent
+  was not up to receive is simply missing from it — so this reads the team, and falls back
+  to what the session recorded only when the team is not reachable, saying which it did in
+  `source`.
+  """
+  @spec delegations(session()) :: {:ok, [map()]} | {:error, term()}
+  def delegations(session) do
+    with {:ok, recorded} <- call(session, :delegations) do
+      {:ok,
+       recorded
+       |> Map.values()
+       |> Enum.sort_by(& &1.created_at)
+       |> Enum.map(&current_delegation/1)}
+    end
+  end
+
+  @doc """
+  Tells a conversation that one of its delegations reached a terminal status.
+
+  Called by `Ouroboros.Team.Server` from the seam where it verifies the coding task's
+  durable checkpoint, and fire-and-forget on purpose: the team's obligation is delivering
+  the result to its own worker, and a parent that is closed, unreachable, or simply not
+  running must never hold that up. A note nobody received leaves the parent's copy stale;
+  `delegations/1` reads the team's own record, which is why that is survivable.
+  """
+  @spec note_delegation(session(), String.t(), atom(), String.t() | nil) :: :ok
+  def note_delegation(session, delegation_id, status, result_digest)
+      when is_binary(delegation_id) and is_atom(status) do
+    with {:ok, id, owner} <- session_identity(session) do
+      message = {:delegation_settled, delegation_id, status, result_digest}
+
+      if owner == node() do
+        cast_local(id, message)
+      else
+        :erpc.cast(owner, __MODULE__, :cast_local, [id, message])
+      end
+    end
+
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  def note_delegation(_session, _delegation_id, _status, _result_digest), do: :ok
+
+  @doc false
+  def cast_local(id, message) do
+    case Task.whereis(id) do
+      pid when is_pid(pid) -> GenServer.cast(pid, message)
+      # Deliberately not started here. A conversation nobody has open does not need to be
+      # woken to file a note it can rebuild from the team's own record next time it is.
+      nil -> :ok
+    end
+
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  # The team work happens here rather than inside the coordinator: `add_worker/3` and
+  # `delegate/4` are bounded at sixty seconds each, and a conversation that answered
+  # nothing for two minutes because it asked a team a question would be a worse bargain
+  # than the delegation is worth.
+  defp start_delegation(session, objective, plan) do
+    with {:ok, team, team_id} <- Team.workspace_team(plan.workspace),
+         {:ok, _worker} <- ensure_worker(team, plan),
+         {:ok, delegation} <-
+           Team.delegate(team, plan.worker_id, objective,
+             id: plan.id,
+             coding_node: plan.coding_node,
+             workspace: plan.workspace,
+             provider: plan.provider,
+             parent: plan.parent
+           ) do
+      record = %{
+        id: delegation.id,
+        team_id: team_id,
+        task_id: delegation.task_ref.id,
+        task_node: delegation.task_ref.node,
+        objective_digest: plan.objective_digest
+      }
+
+      case call(session, {:delegation_started, record}) do
+        {:ok, _recorded} ->
+          {:ok,
+           delegation_reply(
+             delegation.id,
+             team_id,
+             delegation.task_ref.id,
+             delegation.task_ref.node,
+             delegation.status
+           )}
+
+        # The child exists and carries the parent, which is the durable half of the
+        # relationship. A parent that could not record it is missing a rail row, not a
+        # delegation — and `_owner` names the node it is on so a caller can still find it.
+        {:error, reason} ->
+          {:error, {:delegation_unrecorded, %{delegation_id: delegation.id, reason: reason}}}
+      end
+    else
+      {:error, reason} -> {:error, {:delegation_failed, reason}}
+    end
+  end
+
+  # A worker this session already has is not an error. `Team.Server` answers
+  # `{:worker_already_added, id}` for a second add of the same id, which for one worker
+  # per conversation is the ordinary case rather than the exception.
+  defp ensure_worker(team, plan) do
+    case Team.add_worker(team, plan.worker_id, node: plan.coding_node) do
+      {:ok, worker} -> {:ok, worker}
+      {:error, {:worker_already_added, _id}} -> {:ok, %{id: plan.worker_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp delegation_reply(id, team_id, task_id, task_node, status) do
+    %{
+      delegation_id: id,
+      team_id: team_id,
+      task_id: task_id,
+      task_node: task_node,
+      plane: :coding,
+      status: status
+    }
+  end
+
+  defp current_delegation(record) do
+    base = %{
+      delegation_id: record.id,
+      team_id: record.team_id,
+      task_id: record.task_id,
+      task_node: record.task_node,
+      plane: :coding,
+      objective_digest: record.objective_digest,
+      status: record.status,
+      result_digest: Map.get(record, :result_digest),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      source: :session
+    }
+
+    case team_delegation(record) do
+      {:ok, delegation} ->
+        %{
+          base
+          | status: delegation.status,
+            updated_at: delegation.updated_at || record.updated_at,
+            source: :team
+        }
+
+      :unavailable ->
+        base
+    end
+  end
+
+  defp team_delegation(record) do
+    with pid when is_pid(pid) <- Team.whereis(record.team_id),
+         %{delegations: delegations} <- Team.state(pid),
+         {:ok, delegation} <- Map.fetch(delegations, record.id) do
+      {:ok, delegation}
+    else
+      _unavailable -> :unavailable
+    end
+  rescue
+    _error -> :unavailable
+  catch
+    :exit, _reason -> :unavailable
+  end
+
+  @doc """
+  Runs one command in this session's admitted workspace, on its owner node (B7).
+
+  The operator's own act, not a tool: no model asks for it, no provider is told about it,
+  and it is permitted only where the session is already at `approval_mode: :auto_approve`
+  or `Ouroboros.Control.Permissions` answers `{:allow, _}` for `tool: "bash"` with that
+  command under this session's principal. Anything else — including a rule store that
+  could not be read — is `{:shell_refused, %{reason, suggested_rule, …}}` naming the rule
+  that would have worked.
+
+  Recorded in `Ouroboros.Agent.EffectLedger` as an `:operator_shell` effect *before* it
+  runs and settled after, carrying the command's digest and working directory and never
+  its text. The transcript gains a runtime-native `provider_event` so the conversation
+  shows what happened, and the next turn's `<ouroboros-runtime>` envelope carries the
+  last three commands' excerpts.
+
+  The command runs in the *caller's* process on the owner node rather than inside the
+  session coordinator, because a coordinator held for ten minutes would answer nothing
+  else in that time.
+  """
+  @spec exec(session(), String.t()) :: {:ok, map()} | {:error, term()}
+  def exec(session, command) do
+    with {:ok, id, owner} <- session_identity(session) do
+      if owner == node() do
+        local_exec(id, command)
+      else
+        route(
+          owner,
+          __MODULE__,
+          :local_exec,
+          [id, command],
+          transport_timeout(Exec.timeout_ms())
+        )
+      end
+    end
+  end
+
+  @doc false
+  def local_exec(id, command) do
+    with :ok <- validate_id(id),
+         {:ok, pid} <- ensure_coordinator(id),
+         {:ok, plan} <- safe_call(pid, {:exec_plan, command}, call_timeout()) do
+      outcome = run_planned_command(command, plan)
+
+      # The settlement is told to the coordinator whatever happened, including a command
+      # this runtime could not start: an entry left `:started` would become `:ambiguous`
+      # on the next boot, which is the honest answer for a crash and a misleading one
+      # here.
+      _ = safe_call(pid, {:exec_settled, plan.effect_id, outcome}, call_timeout())
+
+      case outcome do
+        %{error: reason} -> {:error, {:shell_failed, reason}}
+        result -> {:ok, Map.put(result, :effect_id, plan.effect_id)}
+      end
+    end
+  end
+
+  defp run_planned_command(command, plan) do
+    case Exec.run(command, plan.cwd,
+           timeout_ms: plan.timeout_ms,
+           spill_dir: plan.spill_dir
+         ) do
+      {:ok, result} -> result
+      {:error, reason} -> %{error: reason}
+    end
+  end
+
+  @doc """
+  Compacts an open native session's conversation now, optionally focused.
+
+  Refused with `{:unsupported_on_transport, %{transport:, verb: :compact}}` on every other
+  transport: only a native session hands this runtime the conversation to fold, and a
+  vendor's own compaction is surfaced as an event when it reports one rather than imitated.
+  """
+  @spec compact(session(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def compact(session, focus \\ nil)
+
+  def compact(session, nil), do: call(session, {:compact, nil})
+
+  def compact(session, focus) when is_binary(focus) do
+    if String.trim(focus) == "",
+      do: {:error, {:invalid_compaction_focus, %{reason: :blank}}},
+      else: call(session, {:compact, focus})
+  end
+
+  def compact(_session, focus), do: {:error, {:invalid_compaction_focus, %{value: focus}}}
+
+  @doc """
+  Returns what this session can honestly say about its own context.
+
+  A native session answers with its cached prefix's fingerprint, the window, what the last
+  request used, its compactions, its retained archive ids, and which instruction files were
+  loaded and dropped. Every other transport answers with the subset the runtime folded from
+  its `usage` events, and `source` says which of the two you are reading — never a shape
+  padded with nulls that look like measurements.
+  """
+  @spec context(session()) :: {:ok, map()} | {:error, term()}
+  def context(session), do: call(session, :context)
+
+  @doc """
+  Hands this session's work to a fresh one seeded with a curated packet.
+
+  Amp's answer to compacting a compacted conversation: rather than folding again, the
+  child's first message is the five-heading summary, the files this session touched with
+  their current hashes, the open plan, and whatever the operator typed. The parent is not
+  interrupted and not closed — a handoff is not a close, and ending the parent is the
+  operator's decision.
+
+  Three steps in the same order and for the same reason as `fork/2`: this session's
+  coordinator writes the packet and names the child but never starts it, because starting
+  a session waits on provider readiness with no bound.
+
+  **Honest limit:** workspace admission is unchanged, so handing off from a live session
+  that holds an exclusive lease is refused by the lease (`workspace_conflict`), exactly as
+  a fork is. Starting the parent with `worktree: true` is the composable fix.
+  """
+  @spec handoff(session(), String.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def handoff(session, prompt \\ nil, id \\ nil) do
+    with {:ok, _parent_id, owner} <- session_identity(session),
+         {:ok, opts} <- call(session, {:handoff_plan, prompt, id}) do
+      start_child(owner, opts, :handoff_start_failed)
     end
   end
 
@@ -438,7 +771,16 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   defp same_request?(left, right) do
-    immutable = [:id, :node, :provider, :workspace_mode, :event_limit, :options, :forked_from]
+    immutable = [
+      :id,
+      :node,
+      :provider,
+      :workspace_mode,
+      :event_limit,
+      :options,
+      :forked_from,
+      :handed_off_from
+    ]
 
     Map.take(left, immutable) == Map.take(right, immutable) and
       canonical_workspace(left.workspace) == canonical_workspace(right.workspace)

@@ -8,6 +8,7 @@ defmodule Ouroboros.Control.Permissions.Rule do
   and `remove/2` names something stable across restarts.
   """
 
+  alias Ouroboros.Control.Permissions.Paths
   alias Ouroboros.Control.Permissions.Pattern
 
   @scopes [:node, :user, :workspace, :session]
@@ -122,15 +123,28 @@ defmodule Ouroboros.Control.Permissions.Rule do
 
   defp allowed_decision(_pattern, _decision), do: :ok
 
+  # Canonicalised here, through the same resolver `Permissions.Request` puts a request's
+  # own root through. `Rules.scoped?/2` compares the two by equality, so a rule stored
+  # under `/tmp/project` and a session admitted at `/private/tmp/project` — which is the
+  # same directory on macOS, and on any host with a symlinked prefix — would never meet.
+  # It also makes the derived id stable: two operators naming one directory by two paths
+  # get one rule rather than two that disagree.
   defp workspace(:workspace, workspace) when is_binary(workspace) and workspace != "",
-    do: {:ok, workspace}
+    do: canonical_workspace(workspace)
 
   defp workspace(:workspace, _workspace), do: {:error, :workspace_rule_requires_workspace}
 
   defp workspace(_scope, workspace) when is_binary(workspace) and workspace != "",
-    do: {:ok, workspace}
+    do: canonical_workspace(workspace)
 
   defp workspace(_scope, _workspace), do: {:ok, nil}
+
+  defp canonical_workspace(workspace) do
+    case Paths.canonicalize(workspace, nil) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:ok, workspace}
+    end
+  end
 
   defp session_id(:session, session_id) when is_binary(session_id) and session_id != "",
     do: {:ok, session_id}

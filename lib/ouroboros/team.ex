@@ -70,6 +70,55 @@ defmodule Ouroboros.Team do
 
   def start_or_get(_opts), do: {:error, :invalid_team_options}
 
+  @doc """
+  The id of the default team for one workspace root on this node (G1).
+
+  Derived, not stored: one team per canonical workspace root per machine, so a second
+  `/delegate` from a second conversation in the same repository joins the team the first
+  one created rather than starting a parallel one. The id embeds `node()` for the reason
+  `default_team_id/0` does — a team id becomes a coordinator id in the cluster-wide mesh
+  namespace, and a digest that named only the directory would collide with the same
+  directory on another machine.
+
+  Uncanonicalisable input is digested as given rather than refused: two spellings of one
+  directory then get two teams, which is a duplicate rather than a wrong answer.
+  """
+  @spec workspace_team_id(String.t()) :: String.t()
+  def workspace_team_id(workspace) when is_binary(workspace) do
+    canonical =
+      case Ouroboros.Workspace.Path.canonicalize(workspace) do
+        {:ok, resolved} -> resolved
+        {:error, _reason} -> workspace
+      end
+
+    digest =
+      :sha256
+      |> :crypto.hash(canonical)
+      |> Base.encode16(case: :lower)
+      |> binary_slice(0, 16)
+
+    "#{node()}:workspace-team:#{digest}"
+  end
+
+  @doc """
+  Returns the running default team for `workspace`, starting it if nobody has yet.
+
+  Durable through the same checkpoint every other team uses, so it survives a restart and
+  appears in `teams.list` like any other. `start_or_get/1` is what makes two concurrent
+  delegations from two conversations in one repository one team rather than a race.
+  """
+  @spec workspace_team(String.t()) :: {:ok, pid(), String.t()} | {:error, term()}
+  def workspace_team(workspace) when is_binary(workspace) do
+    id = workspace_team_id(workspace)
+
+    case start_or_get(id: id) do
+      {:ok, pid} -> {:ok, pid, id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def workspace_team(workspace), do: {:error, {:invalid_workspace, workspace}}
+
   @doc "Starts a team server, normally beneath a supervisor."
   defdelegate start_link(opts), to: Server
 

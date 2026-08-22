@@ -169,6 +169,12 @@ defmodule Ouroboros.Application do
         ] ++
         workspace_children() ++
         [
+          # D3/D9. The native transport's own name space, keyed by `provider_session_id`.
+          # `compact`/`handoff`/`context` are not harness callbacks, so the coordinator
+          # has no worker method to reach them through; this is how it finds the process
+          # without reading another supervisor's private state.
+          {Ouroboros.Application.RegistryOwner,
+           keys: :unique, name: Ouroboros.Provider.Native.Registry},
           {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Coding.Registry},
           {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
           Ouroboros.Coding.Recovery,

@@ -123,6 +123,22 @@ defmodule Ouroboros.Gateway.Methods do
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
   @approval_prompt_timeout 15 * 60 * 1_000
 
+  # G1. One `interactive.delegate` may make two team calls, each bounded at 60s by
+  # `Team.control_call/2`, plus the parent's own checkpoint. Below the sum on purpose: a
+  # delegation that has taken this long has a team that is not answering, and the caller
+  # learns which from `teams.state` rather than by waiting out both bounds.
+  @delegate_timeout 90_000
+
+  # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
+  # A ceiling below the runner's would kill the gateway task while the command kept
+  # running, and the entry it started would be settled by nobody.
+  @shell_timeout 10 * 60 * 1_000
+
+  # D9. A compaction that has to summarise makes one model call on the session's own
+  # model with no tools. That is provider latency, not control-plane latency, so it gets
+  # a ceiling of its own — well above the default and well below a start's.
+  @compaction_timeout 120_000
+
   # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
   # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
   @forge_timeout 120_000
@@ -177,6 +193,11 @@ defmodule Ouroboros.Gateway.Methods do
     # routing, same ceiling — so the only thing that makes it a separate method is the
     # larger per-leaf byte cap it encodes the answer under.
     "interactive.event_detail" => %{scope: :read, timeout: @default_timeout},
+    # D9. What a session can honestly say about its own context window. Read scope: it
+    # asks a live transport a question and starts nothing.
+    "interactive.context" => %{scope: :read, timeout: @default_timeout},
+    # G1. What this conversation delegated, with the status the team currently holds.
+    "interactive.delegations" => %{scope: :read, timeout: @default_timeout},
     "interactive.subscribe" => %{scope: :read, timeout: @default_timeout},
     "interactive.unsubscribe" => %{scope: :read, timeout: @default_timeout},
     "coding.list" => %{scope: :read, timeout: @default_timeout},
@@ -238,6 +259,23 @@ defmodule Ouroboros.Gateway.Methods do
     # admission: a gateway timeout here cannot prove the child was not created, and the
     # caller-owned `id` is what makes reconciling it possible rather than guesswork.
     "interactive.fork" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
+    # D9. The three context verbs. `compact` and `handoff` move a session's conversation
+    # and are therefore `:operate`; `context` reads what the session already knows and
+    # starts nothing, so it sits with the other reads. `handoff` starts a session, so it
+    # inherits `interactive.start`'s ceiling and its outcome admission.
+    "interactive.compact" => %{scope: :operate, timeout: @compaction_timeout},
+    # B7. The operator's own shell, in the session's admitted workspace, on its owner
+    # node. `:operate` and nothing less: it runs a command. The ceiling is the runner's
+    # own — ten minutes — because the gateway killing the task would leave a ledger entry
+    # nobody settles, and `Exec` already stops the command at the same number.
+    "workspace.exec" => %{scope: :operate, timeout: @shell_timeout, outcome: :unknown},
+    # G1. A delegation is a coding task with a parent, started through the workspace's
+    # default team. `:operate` because it starts work, and the ceiling is the team's own
+    # (`teams.add_worker` and `teams.delegate` each bound themselves at 60s, and this verb
+    # may make both calls). A ceiling that fires cannot prove the child was not created,
+    # which is why the delegation's id is caller-owned.
+    "interactive.delegate" => %{scope: :operate, timeout: @delegate_timeout, outcome: :unknown},
+    "interactive.handoff" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     # C2. The one method whose latency is a person's: it asks the session's owner for a
     # decision and holds the request open until a human answers, the permission engine
@@ -334,6 +372,11 @@ defmodule Ouroboros.Gateway.Methods do
     "sandbox_mode" => {:enum, @sandbox_modes},
     "reasoning_effort" => {:enum, @reasoning_efforts},
     "runtime_exposure" => :boolean,
+    # D7. Both planes already carry `worktree_requested` durably and provision before the
+    # lease; this is the option that lets `ouro new --worktree` reach it. Deliberately not
+    # in `@configuration_options`: a session cannot be moved into a worktree after its
+    # workspace has been admitted and leased.
+    "worktree" => :boolean,
     "machine" => :node,
     "node" => :node
   }
@@ -359,6 +402,11 @@ defmodule Ouroboros.Gateway.Methods do
     "workspace" => :string,
     "provider" => :provider
   }
+
+  # What `interactive.delegate` may name. A strict subset of `@delegation_options`:
+  # `coding_node` is absent because the child runs where the conversation does, and the
+  # delegation's own `id` is a positional argument rather than an option.
+  @interactive_delegation_options %{"workspace" => :string, "provider" => :provider}
 
   @control_options %{"id" => :string, "max_revisions" => :non_negative_integer}
 
@@ -813,6 +861,106 @@ defmodule Ouroboros.Gateway.Methods do
       else
         {:invalid, message} -> invalid_params(message)
       end
+    end)
+  end
+
+  # D9. Compaction is the one verb here whose refusal is a capability answer rather than a
+  # parameter one: `unsupported_on_transport` names the transport that cannot do it, so a
+  # client greys the key out instead of offering an action that will always fail.
+  def invoke("interactive.compact", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "focus", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, focus} <- fetch_optional_string(params, "focus") do
+        reply(InteractiveSession.compact(session, focus))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # A handoff starts a session, so it answers in `interactive.start`'s shape and carries
+  # the same admission a ceiling forces: the caller-owned `handoff_id` is what makes a
+  # timed-out handoff reconcilable rather than a second child.
+  def invoke("interactive.handoff", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "prompt", "handoff_id", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, prompt} <- fetch_optional_string(params, "prompt"),
+           {:ok, handoff_id} <- fetch_optional_string(params, "handoff_id") do
+        fork_reply(InteractiveSession.handoff(session, prompt, handoff_id))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # Read scope, and it answers for every transport. `source` is the field that keeps it
+  # honest: `"native"` means the session counted these figures itself, `"usage"` means
+  # they are what the provider reported and nothing more was known.
+  def invoke("interactive.context", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.context(session)) end)
+    end)
+  end
+
+  # B7. The one verb here that runs a command. Everything that decides whether it may —
+  # the session's approval mode, the permission engine, the ledger entry that has to
+  # exist first — is the coordinator's, so this is only the parameter contract and the
+  # routing. A refusal comes back as `["shell_refused", {reason, suggested_rule, …}]`.
+  def invoke("workspace.exec", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "command", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, command} <- fetch_string(params, "command") do
+        reply(InteractiveSession.exec(session, command))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # G1. Three optional fields and no more: a delegation inherits this conversation's
+  # workspace and provider unless told otherwise, and everything else about the child —
+  # its team, its worker, its parent link, its coding node — is the runtime's to decide.
+  # `delegation_id` is caller-owned for the reason `fork_id` is: this verb's ceiling
+  # answers `outcome: unknown`, and a client that had to mint a second id to find out
+  # would delegate the same objective twice.
+  def invoke("interactive.delegate", params) do
+    safe(fn ->
+      with :ok <-
+             only_keys(params, [
+               "id",
+               "objective",
+               "delegation_id",
+               "provider",
+               "workspace",
+               "node"
+             ]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, objective} <- fetch_string(params, "objective"),
+           {:ok, delegation_id} <- fetch_optional_string(params, "delegation_id"),
+           {:ok, opts} <-
+             options(params, @interactive_delegation_options, [
+               "id",
+               "objective",
+               "delegation_id",
+               "node"
+             ]) do
+        opts = if delegation_id, do: Keyword.put(opts, :id, delegation_id), else: opts
+        reply(InteractiveSession.delegate(session, objective, opts))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # Read scope: `source` on each row says whether the status came from the team that owns
+  # the delegation or from the conversation's own copy of it, so a client can tell a live
+  # answer from a remembered one.
+  def invoke("interactive.delegations", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.delegations(session)) end)
     end)
   end
 
@@ -1375,6 +1523,7 @@ defmodule Ouroboros.Gateway.Methods do
     "sandbox_mode" => :sandbox_mode,
     "reasoning_effort" => :reasoning_effort,
     "runtime_exposure" => :runtime_exposure,
+    "worktree" => :worktree,
     "role" => :role,
     "machine" => :node,
     "node" => :node,

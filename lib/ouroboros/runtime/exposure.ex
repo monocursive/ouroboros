@@ -26,6 +26,15 @@ defmodule Ouroboros.Runtime.Exposure do
   @max_agents 32
   @max_live 32
 
+  # B7. How much of an operator's own shell the next turn is told about. Three commands
+  # because the point is "what did the person just do", not a transcript; 512 bytes each
+  # because an excerpt is a reminder and the full output is on the session's log where a
+  # client can read it. Every excerpt goes through `Redaction` and loses its control
+  # characters before it is rendered — this block is model-facing text inside a delimiter
+  # the runtime promises is unforgeable.
+  @max_operator_shell 3
+  @max_operator_excerpt_bytes 512
+
   @doc "The opening delimiter this envelope uses."
   @spec open_tag() :: String.t()
   def open_tag, do: @open
@@ -201,16 +210,110 @@ defmodule Ouroboros.Runtime.Exposure do
         entries -> Enum.map(entries, &("  - " <> format_agent(&1)))
       end
 
-    Enum.join(lines ++ live_lines ++ agent_header ++ agent_lines, "\n")
+    Enum.join(
+      lines ++ live_lines ++ agent_header ++ agent_lines ++ operator_lines(snapshot),
+      "\n"
+    )
   end
+
+  # Absent entirely when nobody ran anything, rather than an empty heading: a block that
+  # is always there teaches a model to skim past it.
+  defp operator_lines(snapshot) do
+    case Map.get(snapshot, :operator_shell) do
+      [_first | _rest] = commands ->
+        ["operator_commands:" | Enum.map(commands, &("  - " <> format_operator_command(&1)))]
+
+      _absent ->
+        []
+    end
+  end
+
+  defp format_operator_command(%{command_digest: digest, exit_status: status, excerpt: excerpt}) do
+    [
+      "sha256=#{digest || "unknown"}",
+      "exit=#{if is_integer(status), do: status, else: "unknown"}",
+      if(excerpt in [nil, ""], do: nil, else: "output=" <> inspect(excerpt))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  defp format_operator_command(other), do: inspect(other, limit: 8)
 
   defp live_snapshot(extras) do
     snapshot = snapshot()
 
-    if extras_has_sandbox?(extras) do
-      Map.put(snapshot, :sandbox, sandbox_from(extras))
-    else
-      snapshot
+    snapshot =
+      if extras_has_sandbox?(extras) do
+        Map.put(snapshot, :sandbox, sandbox_from(extras))
+      else
+        snapshot
+      end
+
+    case operator_shell_from(extras) do
+      [] -> snapshot
+      commands -> Map.put(snapshot, :operator_shell, commands)
+    end
+  end
+
+  # Bounded, redacted, and normalised here rather than at the caller, so the same rule
+  # holds however the list was assembled. Newest last, matching the order a reader scans.
+  defp operator_shell_from(extras) do
+    extras
+    |> operator_shell_value()
+    |> List.wrap()
+    |> Enum.filter(&is_map/1)
+    |> Enum.take(-@max_operator_shell)
+    |> Enum.map(&normalize_operator_command/1)
+  end
+
+  defp operator_shell_value(extras) when is_list(extras), do: Keyword.get(extras, :operator_shell)
+
+  defp operator_shell_value(extras) when is_map(extras),
+    do: Map.get(extras, :operator_shell) || Map.get(extras, "operator_shell")
+
+  defp operator_shell_value(_extras), do: nil
+
+  defp normalize_operator_command(command) do
+    %{
+      command_digest: text_value(command, :command_digest, 64),
+      exit_status: integer_value(command, :exit_status),
+      excerpt: text_value(command, :excerpt, @max_operator_excerpt_bytes)
+    }
+  end
+
+  defp text_value(command, key, limit) do
+    case Map.get(command, key) || Map.get(command, Atom.to_string(key)) do
+      value when is_binary(value) ->
+        value
+        |> Jido.Harness.Redaction.redact()
+        |> String.replace(~r/\p{Cc}/u, " ")
+        |> truncate(limit)
+        |> String.trim()
+
+      _absent ->
+        nil
+    end
+  end
+
+  # A hard *byte* bound, then back off until the tail is a whole codepoint again: this
+  # text is rendered into a delimiter-checked block, and a half-written codepoint there
+  # would be an invalid envelope rather than a shortened one.
+  defp truncate(value, limit) when byte_size(value) <= limit, do: value
+  defp truncate(value, limit), do: value |> binary_slice(0, limit) |> whole_codepoints()
+
+  defp whole_codepoints(""), do: ""
+
+  defp whole_codepoints(binary) do
+    if String.valid?(binary),
+      do: binary,
+      else: whole_codepoints(binary_slice(binary, 0, byte_size(binary) - 1))
+  end
+
+  defp integer_value(command, key) do
+    case Map.get(command, key) || Map.get(command, Atom.to_string(key)) do
+      value when is_integer(value) -> value
+      _absent -> nil
     end
   end
 

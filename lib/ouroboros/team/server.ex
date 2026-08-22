@@ -531,6 +531,7 @@ defmodule Ouroboros.Team.Server do
             case checkpoint(put_delegation(state, delegation)) do
               {:ok, state} ->
                 send(self(), {:deliver_terminal, delegation_id})
+                notify_parent(delegation, task)
                 {:ok, reset_backoff(state, {:completion, delegation_id})}
 
               {:error, reason} ->
@@ -545,6 +546,48 @@ defmodule Ouroboros.Team.Server do
             checkpoint_completion_error(state, delegation, delegation_id, reason)
         end
     end
+  end
+
+  # G1. The seam where a conversation learns its delegation ended. Deliberately after the
+  # terminal status is checkpointed and deliberately fire-and-forget: this team's delivery
+  # to its own worker is the obligation, and a parent conversation that is closed, on an
+  # unreachable node, or simply not running must never hold it up or fail it. The parent's
+  # copy is a hint that follows the record checkpointed just above, and
+  # `interactive.delegations` reads *this* record rather than that copy when it wants the
+  # truth.
+  defp notify_parent(%Delegation{} = delegation, %TaskState{} = task) do
+    case Map.get(task, :parent) do
+      %{plane: :interactive, id: parent_id} when is_binary(parent_id) ->
+        Ouroboros.InteractiveSession.note_delegation(
+          Ouroboros.Interactive.Ref.new(parent_id, node_of(task)),
+          delegation.id,
+          delegation.status,
+          result_digest(task.result)
+        )
+
+      _no_parent ->
+        :ok
+    end
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  # The conversation runs where its own record is, which is where the task was placed
+  # from. A task whose node is somehow absent falls back to this one rather than guessing.
+  defp node_of(%TaskState{node: owner}) when is_atom(owner) and not is_nil(owner), do: owner
+  defp node_of(_task), do: node()
+
+  # A digest, never the result. The result belongs to the child task's own record, and a
+  # parent transcript that carried it would copy one plane's content into the other's log.
+  defp result_digest(nil), do: nil
+
+  defp result_digest(result) do
+    :sha256
+    |> :crypto.hash(:erlang.term_to_binary(result))
+    |> Base.encode16(case: :lower)
+    |> binary_slice(0, 32)
   end
 
   # A partitioned owner or a busy store would otherwise checkpoint the whole team
@@ -1590,7 +1633,8 @@ defmodule Ouroboros.Team.Server do
       workspace_mode: delegation.coding_options.workspace_mode,
       provider: delegation.coding_options.provider,
       event_limit: delegation.coding_options.event_limit,
-      origin_digest: delegation.coding_options.origin_digest
+      origin_digest: delegation.coding_options.origin_digest,
+      parent: Map.get(delegation.coding_options, :parent)
     ]
 
     options =
@@ -1842,7 +1886,11 @@ defmodule Ouroboros.Team.Server do
       workspace_mode: task.workspace_mode,
       provider: task.provider,
       event_limit: task.event_limit,
-      options: task.options
+      options: task.options,
+      # G1. Persisted here or the request is silently lost: a delegation restarted from
+      # its snapshot rebuilds the coding task from this map alone, and a child that came
+      # back without its parent would be a conversation's work with nothing linking it.
+      parent: Map.get(task, :parent)
     }
 
     case Keyword.get(coding_options, :agent_profile) do
@@ -2245,7 +2293,8 @@ defmodule Ouroboros.Team.Server do
           provider: delegation.coding_options.provider,
           event_limit: delegation.coding_options.event_limit,
           origin_digest: delegation.coding_options.origin_digest,
-          options: delegation.coding_options.options
+          options: delegation.coding_options.options,
+          parent: Map.get(delegation.coding_options, :parent)
         }
 
         actual = %{
@@ -2257,7 +2306,8 @@ defmodule Ouroboros.Team.Server do
           provider: task.provider,
           event_limit: task.event_limit,
           origin_digest: Map.get(task, :origin_digest),
-          options: task.options
+          options: task.options,
+          parent: Map.get(task, :parent)
         }
 
         if actual == expected do
