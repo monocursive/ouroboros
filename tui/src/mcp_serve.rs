@@ -391,12 +391,17 @@ impl Server {
 
         let bridge = self.configured()?;
         let workspace = self.workspace(&bridge).await?;
+        let path = in_workspace(&workspace, &path);
 
         if operation == "diagnostics" {
             // The pool never opens a document behind a caller's back, because opening one
             // is a decision about what a language server spends memory on. Asking "what is
-            // broken in this file" is that decision, made out loud.
-            self.announce(&bridge, &workspace, &path, "open").await?;
+            // broken in this file" is that decision, made out loud — and `ensure_open`
+            // rather than `open`, because re-opening assigns a new version and a server
+            // with nothing new to say never publishes for it, so the freshness gate would
+            // answer "no LSP data" to every repeat of the same question.
+            self.announce(&bridge, &workspace, &path, "ensure_open")
+                .await?;
             let answer = self.read_diagnostics(&bridge, &workspace, &path).await?;
 
             return Ok(render_diagnostics(&path, &answer));
@@ -438,6 +443,12 @@ impl Server {
         let request = object(&arguments, DIAGNOSTICS_TOOL)?;
         let path = string_argument(request, "path")?;
 
+        // Resolved before the answer is rendered as well as before it is asked for, so the
+        // file named in the text is the file the runtime was actually asked about.
+        let bridge = self.configured()?;
+        let workspace = self.workspace(&bridge).await?;
+        let path = in_workspace(&workspace, &path);
+
         match self.post_edit_diagnostics(&path).await? {
             PostEdit::NoData => Ok(format!("(no LSP data for {path})")),
             PostEdit::Fresh(items) if items.is_empty() => {
@@ -455,6 +466,7 @@ impl Server {
     pub async fn post_edit_diagnostics(&mut self, path: &str) -> Result<PostEdit, String> {
         let bridge = self.configured()?;
         let workspace = self.workspace(&bridge).await?;
+        let path = &in_workspace(&workspace, path);
 
         let touched = self.announce(&bridge, &workspace, path, "changed").await?;
         let baseline = baseline_signatures(&touched);
@@ -473,12 +485,13 @@ impl Server {
         let path = string_argument(request, "path")?;
         let action = optional_string(request, "action").unwrap_or_else(|| "changed".to_string());
 
-        if !["open", "changed", "closed"].contains(&action.as_str()) {
-            return Err("action must be one of open, changed, closed".to_string());
+        if !["open", "ensure_open", "changed", "closed"].contains(&action.as_str()) {
+            return Err("action must be one of open, ensure_open, changed, closed".to_string());
         }
 
         let bridge = self.configured()?;
         let workspace = self.workspace(&bridge).await?;
+        let path = in_workspace(&workspace, &path);
         let touched = self.announce(&bridge, &workspace, &path, &action).await?;
 
         let version = touched
@@ -741,6 +754,23 @@ fn optional_string(request: &Map<String, Value>, key: &str) -> Option<String> {
 /// answer about the top of the file instead of an error it has to reason about.
 fn integer_argument(request: &Map<String, Value>, key: &str) -> u64 {
     request.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A relative path is relative to the workspace, resolved here rather than on the runtime.
+///
+/// It has to be resolved by whoever knows what it is relative to, and that is this process:
+/// the runtime would expand it against its own working directory, which is wherever the
+/// daemon was started and has nothing to do with the session. A model writing `src/main.rs`
+/// means the file in the workspace it was given, every time.
+pub fn in_workspace(workspace: &str, path: &str) -> String {
+    if std::path::Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+
+    std::path::Path::new(workspace)
+        .join(path)
+        .display()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,8 +1140,9 @@ fn touch_descriptor() -> Value {
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["open", "changed", "closed"],
-                    "description": "Defaults to changed."
+                    "enum": ["changed", "open", "ensure_open", "closed"],
+                    "description": "Defaults to changed. Use ensure_open to make a file \
+                                    readable without claiming it changed."
                 }
             },
             "required": ["path"],

@@ -108,17 +108,28 @@ defmodule Ouroboros.CodeIntel do
   no file content crosses a process or node boundary to get here, and two writers cannot
   interleave into a state where the server holds older text under a newer version.
 
+  `:ensure_open` is the fourth action and the one to reach for when *asking* about a file
+  rather than reporting a change to it. It opens a document the server has never seen and
+  does nothing at all to one it already holds, where `:open` re-reads and assigns a new
+  version. That difference decides whether a question can be answered: every version bump
+  invalidates the diagnostics cache, so a caller that asked "what is wrong with this file"
+  by re-opening it would wait out the freshness gate for a push that a server with nothing
+  new to say never sends.
+
   Answers `{:ok, version}` — the version every later `diagnostics/2` is gated against.
   """
-  @spec touch(String.t(), :open | :changed | :closed, keyword()) ::
+  @spec touch(String.t(), :open | :ensure_open | :changed | :closed, keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def touch(path, action, opts \\ [])
-      when is_binary(path) and action in [:open, :changed, :closed] do
+      when is_binary(path) and action in [:open, :ensure_open, :changed, :closed] do
     with :ok <- enabled(),
          {:ok, spec} <- Registry.resolve(path, opts) do
-      LspPool.touch(pool(opts), spec, action)
+      apply_touch(pool(opts), spec, action)
     end
   end
+
+  defp apply_touch(pool, spec, :ensure_open), do: LspPool.ensure_open(pool, spec)
+  defp apply_touch(pool, spec, action), do: LspPool.touch(pool, spec, action)
 
   @doc """
   Announces an edit and answers with the picture that preceded it.
@@ -140,16 +151,16 @@ defmodule Ouroboros.CodeIntel do
   a failure to touch: the touch is what a language server needs to stay correct, so it
   happens either way and the baseline is reported absent.
   """
-  @spec touch_with_baseline(String.t(), :open | :changed | :closed, keyword()) ::
+  @spec touch_with_baseline(String.t(), :open | :ensure_open | :changed | :closed, keyword()) ::
           {:ok, map()} | {:error, term()}
   def touch_with_baseline(path, action, opts \\ [])
-      when is_binary(path) and action in [:open, :changed, :closed] do
+      when is_binary(path) and action in [:open, :ensure_open, :changed, :closed] do
     with :ok <- enabled(),
          {:ok, spec} <- Registry.resolve(path, opts) do
       pool = pool(opts)
       baseline = LspPool.baseline(pool, spec)
 
-      with {:ok, version} <- LspPool.touch(pool, spec, action) do
+      with {:ok, version} <- apply_touch(pool, spec, action) do
         {:ok, %{version: version, baseline: baseline_projection(baseline)}}
       end
     end

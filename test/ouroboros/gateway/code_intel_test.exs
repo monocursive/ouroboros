@@ -138,6 +138,38 @@ defmodule Ouroboros.Gateway.CodeIntelTest do
     assert second.baseline.counts.error == 1
   end
 
+  test "ensure_open asks about a file without claiming it changed", context do
+    # `open` re-reads and assigns a new version every time, which invalidates the
+    # diagnostics cache; a caller asking "what is wrong with this file" twice would wait out
+    # the freshness gate on the second ask for a push a server with nothing new to say never
+    # sends. A live run against clangd is where this was found.
+    assert {:ok, %{version: 1}} = touch(context, "ensure_open")
+    assert {:ok, %{version: 1}} = touch(context, "ensure_open")
+
+    assert {:ok, %{status: :ok, version: 1}} =
+             Methods.invoke("code_intel.diagnostics", %{
+               "workspace" => context.root,
+               "path" => context.source
+             })
+
+    # `open` is still the verb that says "re-read this from disk".
+    assert {:ok, %{version: 2}} = touch(context, "open")
+  end
+
+  test "a path that cannot be read is a path error, not an upstream failure", context do
+    # A relative path is expanded against the *runtime's* working directory, which is why
+    # the MCP client resolves one against the session workspace before it calls. Reaching
+    # here with one has to read as a bad path rather than as a fault in the runtime.
+    assert {:error, -32_602, message, data} =
+             Methods.invoke("code_intel.diagnostics", %{
+               "workspace" => context.root,
+               "path" => "csrc/nowhere.widget"
+             })
+
+    assert message =~ "params.path could not be read as a file"
+    assert data["reason"] == "unreadable_path"
+  end
+
   test "diagnostics carry a signature and the counts a client renders", context do
     assert {:ok, _touched} = touch(context, "open")
 

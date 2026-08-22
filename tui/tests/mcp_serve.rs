@@ -663,7 +663,9 @@ async fn code_intel_asks_in_the_session_workspace_and_renders_what_came_back() {
     let asked = script.await.expect("the script");
     assert_eq!(asked["params"]["workspace"], WORKSPACE);
     assert_eq!(asked["params"]["operation"], "references");
-    assert_eq!(asked["params"]["path"], "lib/a.ex");
+    // A relative path is relative to the *workspace*, and this process is the one that
+    // knows what that is; the runtime would expand it against wherever the daemon started.
+    assert_eq!(asked["params"]["path"], "/work/repo/lib/a.ex");
     assert_eq!(asked["params"]["line"], 11);
     assert_eq!(asked["params"]["character"], 4);
     assert_eq!(asked["params"]["node"], "ouroboros@host");
@@ -725,7 +727,7 @@ async fn the_diagnostics_tool_reports_only_what_the_edit_added() {
 
     let rendered = text(&response);
     assert!(
-        rendered.starts_with("Found 2 new diagnostic issues in lib/a.ex:"),
+        rendered.starts_with("Found 2 new diagnostic issues in /work/repo/lib/a.ex:"),
         "{rendered}"
     );
     assert!(rendered.contains("undefined variable"), "{rendered}");
@@ -735,7 +737,7 @@ async fn the_diagnostics_tool_reports_only_what_the_edit_added() {
 
     let touched = script.await.expect("the script");
     assert_eq!(touched["params"]["workspace"], WORKSPACE);
-    assert_eq!(touched["params"]["path"], "lib/a.ex");
+    assert_eq!(touched["params"]["path"], "/work/repo/lib/a.ex");
     // The edit already happened, so the file is announced as changed rather than opened.
     assert_eq!(touched["params"]["action"], "changed");
 }
@@ -769,7 +771,7 @@ async fn a_server_that_has_not_answered_is_no_lsp_data_and_never_an_empty_list()
     );
 
     assert!(!failed(&response), "{response}");
-    assert_eq!(text(&response), "(no LSP data for lib/a.ex)");
+    assert_eq!(text(&response), "(no LSP data for /work/repo/lib/a.ex)");
 
     script.await.expect("the script");
 }
@@ -843,7 +845,10 @@ async fn the_workspace_is_read_once_and_then_held() {
                 .expect("a response"),
         );
 
-        assert_eq!(text(&response), "No definition results for lib/a.ex.");
+        assert_eq!(
+            text(&response),
+            "No definition results for /work/repo/lib/a.ex."
+        );
     }
 
     script.await.expect("the script");
@@ -935,6 +940,73 @@ async fn a_malformed_code_intel_call_never_reaches_the_runtime() {
         assert!(failed(&response), "{response}");
         assert!(text(&response).contains(expected), "{response}");
     }
+}
+
+#[tokio::test]
+async fn an_absolute_path_is_left_alone_and_a_relative_one_is_joined_to_the_workspace() {
+    assert_eq!(
+        ouro::mcp_serve::in_workspace(WORKSPACE, "lib/a.ex"),
+        "/work/repo/lib/a.ex"
+    );
+    assert_eq!(
+        ouro::mcp_serve::in_workspace(WORKSPACE, "/elsewhere/a.ex"),
+        "/elsewhere/a.ex"
+    );
+}
+
+#[tokio::test]
+async fn on_demand_diagnostics_open_without_claiming_a_change() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD, DIAGNOSTICS_METHOD])
+            .await;
+        answer_info(&mut peer).await;
+
+        let touched = answer(&mut peer, TOUCH_METHOD, json!({"version": 1})).await;
+
+        answer(
+            &mut peer,
+            DIAGNOSTICS_METHOD,
+            json!({
+                "status": "ok",
+                "version": 1,
+                "truncated": 0,
+                "items": [diagnostic("here", "error", 3, "already broken")]
+            }),
+        )
+        .await;
+
+        touched
+    });
+
+    let mut server = server(address, Duration::from_secs(5));
+
+    let response = decode(
+        &server
+            .handle_line(&tool_call(
+                CODE_INTEL_TOOL,
+                json!({"operation": "diagnostics", "path": "lib/a.ex"}),
+            ))
+            .await
+            .expect("a response"),
+    );
+
+    // No baseline diff: the question was "what is wrong with this file", not "what did I
+    // just break", so a pre-existing error is the answer rather than something to hide.
+    let rendered = text(&response);
+    assert!(
+        rendered.starts_with("Found 1 diagnostic issue in /work/repo/lib/a.ex:"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("already broken"), "{rendered}");
+
+    // `ensure_open`, not `open`: re-opening assigns a new version, and a server with
+    // nothing new to say never publishes for it, so asking twice would answer "no LSP data"
+    // the second time. Found by a live run against clangd.
+    let touched = script.await.expect("the script");
+    assert_eq!(touched["params"]["action"], "ensure_open");
 }
 
 #[tokio::test]

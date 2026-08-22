@@ -1868,6 +1868,34 @@ defmodule Ouroboros.Gateway.Methods do
      %{"reason" => "no_project_root", "language" => to_string(language), "markers" => markers}}
   end
 
+  # A path that cannot be canonicalised is a path, not an upstream failure: it is missing,
+  # it is a directory, it is a symlink that goes nowhere, or it was relative to a directory
+  # that means nothing here. Saying `-32006 the runtime failed the call` about any of those
+  # sends a caller looking for a fault in the runtime.
+  defp code_intel_reply({:error, {tag, path, reason}})
+       when tag in [:workspace_path_error, :path_unavailable, :symbolic_link_unreadable] do
+    unreadable_path(path, reason)
+  end
+
+  defp code_intel_reply({:error, {tag, path}})
+       when tag in [:not_a_directory, :symbolic_link_cycle] do
+    unreadable_path(path, tag)
+  end
+
+  defp code_intel_reply({:error, :too_many_symbolic_links}) do
+    unreadable_path("that path", :too_many_symbolic_links)
+  end
+
+  defp code_intel_reply({:error, {:not_a_regular_file, path}}) do
+    {:error, code(:invalid_params), "params.path is not a regular file",
+     %{"reason" => "not_a_regular_file", "path" => to_string(path)}}
+  end
+
+  defp code_intel_reply({:error, {:invalid_attachment_path, path}}) do
+    {:error, code(:invalid_params), "params.path must be a nonempty string",
+     %{"reason" => "invalid_path", "path" => inspect(path)}}
+  end
+
   defp code_intel_reply({:error, {:unsupported_language, extension}}) do
     {:error, code(:invalid_params), "no language server is registered for #{extension} files",
      %{"reason" => "unsupported_language", "extension" => extension}}
@@ -1900,6 +1928,14 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp code_intel_reply({:error, reason}), do: upstream_error(reason)
   defp code_intel_reply(other), do: {:ok, other}
+
+  defp unreadable_path(path, reason) do
+    {:error, code(:invalid_params),
+     "params.path could not be read as a file (#{inspect(reason)}); name it absolutely, " <>
+       "because a relative path here is expanded against the runtime's own working " <>
+       "directory rather than against the workspace",
+     %{"reason" => "unreadable_path", "path" => to_string(path)}}
+  end
 
   # Every diagnostic that crosses the wire carries the identity its caller needs to tell a
   # new finding from one that was already there. Navigation items have no severity and are
@@ -1941,9 +1977,10 @@ defmodule Ouroboros.Gateway.Methods do
   defp code_intel_action(params) do
     case Map.get(params, "action") do
       "open" -> {:ok, :open}
+      "ensure_open" -> {:ok, :ensure_open}
       "changed" -> {:ok, :changed}
       "closed" -> {:ok, :closed}
-      _other -> {:invalid, "params.action must be one of changed, closed, open"}
+      _other -> {:invalid, "params.action must be one of changed, closed, ensure_open, open"}
     end
   end
 
