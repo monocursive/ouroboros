@@ -79,9 +79,19 @@ defmodule Ouroboros.Test.HarnessAdapter do
         :disallowed_tools
       ],
       normalized_values: accepted_resume_values(),
-      provider_options: []
+      provider_options: [:fork_session]
     )
   end
+
+  @doc """
+  Declares that a start request carrying `fork_session: true` branches the resumed session.
+
+  The same declaration `Ouroboros.Provider` reads from a dialect, made by an adapter this
+  repository owns. It is what gives this provider `fork: :native` without adding a test
+  module to the table in `Ouroboros.Provider` that covers the pinned upstream adapters.
+  """
+  @spec fork_option() :: {atom(), term()}
+  def fork_option, do: {:fork_session, true}
 
   # Named `:managed` because that is the transport Harness would otherwise synthesize for
   # an adapter that declares none, so every existing expectation about this provider's

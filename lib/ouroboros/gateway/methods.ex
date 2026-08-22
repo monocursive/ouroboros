@@ -217,6 +217,10 @@ defmodule Ouroboros.Gateway.Methods do
     # A title is durable session state a person chose, so it is `:operate` for the same
     # reason `configure` is, and bounded at the boundary because it lands on every list row.
     "interactive.rename" => %{scope: :operate, timeout: @default_timeout},
+    # A fork starts a session, so it inherits `interactive.start`'s ceiling and the same
+    # admission: a gateway timeout here cannot prove the child was not created, and the
+    # caller-owned `id` is what makes reconciling it possible rather than guesswork.
+    "interactive.fork" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
@@ -683,6 +687,21 @@ defmodule Ouroboros.Gateway.Methods do
            {:ok, session} <- session_target(:interactive, params),
            {:ok, title} <- fetch_string(params, "title") do
         reply(InteractiveSession.rename(session, title))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B6. The child's id is caller-owned for the same reason a start's is: a ceiling can
+  # fire after the child exists, and a client that had to mint a second id to find out
+  # would create a second session instead.
+  def invoke("interactive.fork", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "fork_id", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, fork_id} <- fetch_optional_string(params, "fork_id") do
+        fork_reply(InteractiveSession.fork(session, fork_id))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -1816,6 +1835,22 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp start_reply(result), do: reply(result)
+
+  # Answered in `interactive.start`'s shape, because a fork *is* a start and a client that
+  # already knows how to open a created-but-not-ready session should not need a second
+  # branch to open this one.
+  defp fork_reply({:ok, %{id: id, node: owner, ready: ready?, error: error}}) do
+    {:ok,
+     %{
+       "id" => id,
+       "node" => owner,
+       "outcome" => "created",
+       "ready" => ready?,
+       "error" => Wire.to_json(error)
+     }}
+  end
+
+  defp fork_reply(result), do: reply(result)
 
   @doc false
   # These are not refusals. Harness may already have returned a turn id, its call may

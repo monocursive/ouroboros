@@ -219,6 +219,20 @@ defmodule Ouroboros.InteractiveSession do
     do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
 
   @doc """
+  Branches a session into a new one that carries its provider session and history.
+
+  The new session is started on the parent's own node with the parent's provider,
+  workspace, and effective options; only its start request differs, by carrying the
+  parent's `provider_session_id` and whatever the transport spells "branch this". The
+  parent is not sent a turn, not interrupted, and not closed.
+
+  Refused where the transport declares no way to branch, and where the provider has not
+  yet named a session to branch from.
+  """
+  @spec fork(session(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def fork(session, id \\ nil), do: call(session, {:fork, id})
+
+  @doc """
   Names a session, overriding any title the runtime derived from the first prompt.
 
   Allowed on a terminal session as well as a live one: a finished conversation is exactly
@@ -321,7 +335,7 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   defp same_request?(left, right) do
-    immutable = [:id, :node, :provider, :workspace_mode, :event_limit, :options]
+    immutable = [:id, :node, :provider, :workspace_mode, :event_limit, :options, :forked_from]
 
     Map.take(left, immutable) == Map.take(right, immutable) and
       canonical_workspace(left.workspace) == canonical_workspace(right.workspace)

@@ -188,6 +188,13 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  def handle_call({:fork, id}, _from, runtime) do
+    case fork_session(runtime, id) do
+      {:ok, result, runtime} -> {:reply, {:ok, result}, runtime}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
   # A rename touches nothing but the durable record: no provider knows this session by a
   # name, and a terminal session is still worth finding in a picker, so unlike `configure`
   # this is allowed after the conversation has ended.
@@ -1521,6 +1528,119 @@ defmodule Ouroboros.Interactive.Task do
 
       {:error, runtime} ->
         {:error, {:configure_checkpoint_failed, :provider_accepted}, runtime}
+    end
+  end
+
+  # Branching a session is starting a new one, and the only thing that makes it a fork is
+  # what its start request carries: the parent's `provider_session_id` plus the option the
+  # transport spells "branch this" (`--fork-session` for Claude, `thread/fork` for the
+  # Codex app server). Everything else about the child is the parent's own start intent.
+  #
+  # The parent is untouched. No turn is sent, nothing is interrupted, and the only thing
+  # written to it is a count of forks it has started — recorded after the child exists,
+  # because a counter that ran ahead of a child that failed to start would be a claim
+  # about a session nobody could open. A checkpoint that fails afterwards leaves the count
+  # low rather than losing the child: `forked_from` on the child is the durable half.
+  #
+  # The workspace is admitted exactly as it is for any other session, which means a fork
+  # of a live session holding an exclusive lease is refused by the lease. That is honest
+  # and it is a real limit: until worktrees (D7), a branch runs where the parent is not.
+  defp fork_session(%{session: session} = runtime, id) do
+    with {:ok, id} <- validate_fork_id(id),
+         {:ok, parent_session_id} <- forkable_provider_session(session),
+         {:ok, fork_options} <-
+           Provider.session_fork_options(session.provider, Map.get(session.options, :transport)),
+         {:ok, opts} <- fork_start_options(session, id, parent_session_id, fork_options),
+         {:ok, child} <- start_fork(opts) do
+      {:ok, child, count_fork(runtime)}
+    else
+      {:error, reason} -> {:error, reason, runtime}
+    end
+  end
+
+  defp validate_fork_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
+
+  defp validate_fork_id(id) when is_binary(id) do
+    if String.trim(id) != "", do: {:ok, id}, else: {:error, :invalid_fork_id}
+  end
+
+  defp validate_fork_id(_id), do: {:error, :invalid_fork_id}
+
+  # There is nothing to branch until the provider has named its own session. A fork of a
+  # session the provider never acknowledged would be a fresh conversation wearing a
+  # relationship it does not have.
+  defp forkable_provider_session(%State{provider_session_id: id}) when is_binary(id) and id != "",
+    do: {:ok, id}
+
+  defp forkable_provider_session(%State{} = session) do
+    {:error,
+     {:unforkable_session,
+      %{
+        provider: session.provider,
+        reason: :no_provider_session_id,
+        message:
+          "this session has no provider session id yet, so there is nothing to branch " <>
+            "from; send a turn first, or start a new session."
+      }}}
+  end
+
+  # The child's start intent is the parent's, minus the parts that are this session's
+  # identity (its own id, its own place in a fork tree) and plus the two that make it a
+  # branch. Options are read from the durable record, so a child of a session whose mode
+  # was changed mid-life starts under the mode it is actually running with.
+  defp fork_start_options(%State{} = session, id, parent_session_id, fork_options) do
+    provider_options =
+      session.options |> Map.get(:provider_options, %{}) |> then(&(&1 || %{})) |> Map.merge(fork_options)
+
+    opts =
+      session.options
+      |> Map.drop([:provider_options, :provider_session_id, :attachments])
+      |> Map.to_list()
+      |> Keyword.merge(
+        id: id,
+        provider: session.provider,
+        workspace: session.workspace,
+        workspace_mode: session.workspace_mode,
+        event_limit: session.event_limit,
+        provider_session_id: parent_session_id,
+        provider_options: provider_options,
+        forked_from: session.id
+      )
+
+    {:ok, opts}
+  end
+
+  # `start_for_gateway/1` rather than `start/1`: a child whose provider refused to open is
+  # still a durable session with an id the caller can inspect, and reporting it as a
+  # refusal would leave that session unreachable.
+  defp start_fork(opts) do
+    case Ouroboros.InteractiveSession.start_for_gateway(opts) do
+      {:ok, %{id: id, node: owner}} ->
+        {:ok, %{id: id, node: owner, ready: true, error: nil}}
+
+      {:created, %{id: id, node: owner}, reason} ->
+        {:ok, %{id: id, node: owner, ready: false, error: durable(reason)}}
+
+      {:error, reason} ->
+        {:error, {:fork_start_failed, durable(reason)}}
+    end
+  end
+
+  defp count_fork(runtime) do
+    counted = runtime.session |> State.count_fork() |> State.touch()
+
+    case persist(runtime, counted, []) do
+      {:ok, runtime} ->
+        runtime
+
+      # The child exists and carries `forked_from`; only the parent's hint is behind.
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} started a fork but could not " <>
+            "checkpoint its fork count; the child is unaffected"
+        )
+
+        runtime
     end
   end
 

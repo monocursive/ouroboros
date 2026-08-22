@@ -13,6 +13,11 @@ defmodule Ouroboros.Interactive.State do
     :approval_timeout_ms
   ]
 
+  # Start options that land on the struct rather than in `options`. `forked_from` is a
+  # relationship between two sessions, not something the provider is ever told; putting it
+  # in `options` would send it to `State.request/1` and on to a harness that never asked.
+  @struct_options [:forked_from]
+
   # What `configure/2` may write into a session's durable options. Deliberately a literal
   # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
   # even if a capability check somewhere else is ever wrong.
@@ -41,7 +46,9 @@ defmodule Ouroboros.Interactive.State do
                 :harness_session_id,
                 :provider_session_id,
                 :title,
+                :forked_from,
                 title_source: nil,
+                forks: 0,
                 cursor: 0,
                 sequence_offset: 0,
                 resumes: 0,
@@ -113,6 +120,8 @@ defmodule Ouroboros.Interactive.State do
           provider_session_id: String.t() | nil,
           title: String.t() | nil,
           title_source: title_source(),
+          forked_from: String.t() | nil,
+          forks: non_neg_integer(),
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -150,11 +159,12 @@ defmodule Ouroboros.Interactive.State do
   def new(id, opts) when is_list(opts) do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
+           :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            {:ok, base} <-
              TaskState.new(
                id,
                "interactive coding session",
-               Keyword.drop(opts, @session_options),
+               Keyword.drop(opts, @session_options ++ @struct_options),
                # The transport decides which normalized options a session may carry, so
                # the capability lookup needs the one this session will select. It is a
                # session option and therefore dropped from the base's own options.
@@ -176,6 +186,9 @@ defmodule Ouroboros.Interactive.State do
            event_limit: base.event_limit,
            prompt_trace: Map.get(base, :prompt_trace),
            runtime_snapshot: Map.get(base, :runtime_snapshot),
+           # Immutable start intent, like the workspace: which session this one branched
+           # from is not something a fork can be talked out of afterwards.
+           forked_from: Keyword.get(opts, :forked_from),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -406,6 +419,25 @@ defmodule Ouroboros.Interactive.State do
   @spec title_source(t()) :: title_source()
   def title_source(%__MODULE__{} = state), do: Map.get(state, :title_source)
 
+  @doc "Returns the id of the session this one was forked from, or `nil`."
+  @spec forked_from(t()) :: String.t() | nil
+  def forked_from(%__MODULE__{} = state), do: Map.get(state, :forked_from)
+
+  @doc """
+  Returns how many forks this session has successfully started.
+
+  A count, not a list: the children are addressable by their own ids and carry
+  `forked_from`, which is the durable half of the relationship. This is the hint a picker
+  shows, and it is honest about being one — a fork whose parent checkpoint failed after
+  the child was created leaves it low rather than inventing a child that does not exist.
+  """
+  @spec forks(t()) :: non_neg_integer()
+  def forks(%__MODULE__{} = state), do: Map.get(state, :forks, 0) || 0
+
+  @doc false
+  @spec count_fork(t()) :: t()
+  def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
+
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
   def new_turn(id, mode, %Jido.Harness.TurnRequest{} = request) do
     request = request |> Map.from_struct() |> reject_nil_values()
@@ -485,6 +517,8 @@ defmodule Ouroboros.Interactive.State do
     # before titles existed projects as an unnamed session instead of a missing key.
     |> Map.put(:title, title(state))
     |> Map.put(:title_source, title_source(state))
+    |> Map.put(:forked_from, forked_from(state))
+    |> Map.put(:forks, forks(state))
   end
 
   @spec public_turn(turn()) :: map()
@@ -615,6 +649,7 @@ defmodule Ouroboros.Interactive.State do
       is_binary(state.created_at) and is_binary(state.updated_at) and
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and valid_title?(state) and
+      optional_id?(forked_from(state)) and is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
       sequence_offset(state) <= state.cursor and
@@ -632,9 +667,18 @@ defmodule Ouroboros.Interactive.State do
 
   def loadable?(_state), do: false
 
+  defp validate_parent(nil), do: :ok
+  defp validate_parent(parent) when is_binary(parent), do: validate_forked_from(parent)
+  defp validate_parent(parent), do: {:error, {:invalid_parent_session, parent}}
+
+  defp validate_forked_from(parent) do
+    if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
+  end
+
   defp validate_session_options(opts) do
     accepted =
       @session_options ++
+        @struct_options ++
         [
           :id,
           :workspace,

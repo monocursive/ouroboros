@@ -14,6 +14,7 @@ defmodule Ouroboros.InteractiveControlsTest do
   alias Jido.Harness.{RunRequest, Session, SessionInfo}
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
+  alias Ouroboros.Provider
   alias Ouroboros.Test.HarnessAdapter
 
   @provider :ouroboros_test
@@ -453,6 +454,149 @@ defmodule Ouroboros.InteractiveControlsTest do
     end
   end
 
+  describe "interactive.fork" do
+    test "a fork is a new session carrying the parent's provider session and branch flag",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      assert {:ok, child} = InteractiveSession.fork(ref, unique_id("fork"))
+      assert child.node == node()
+      assert child.id != id
+
+      assert {:ok, %State{} = forked} = InteractiveSession.info(Ref.new(child.id))
+      assert State.forked_from(forked) == id
+      assert forked.provider == @provider
+      assert forked.workspace == File.cwd!()
+
+      # The child's start request is what makes it a fork: the parent's provider session
+      # to branch from, and the option this adapter declares as "branch it". Read from the
+      # durable record rather than the public projection, because the request is what a
+      # restart rebuilds and the projection deliberately hides provider options.
+      assert {:ok, %State{} = durable} = Store.get(child.id)
+      request = State.request(durable)
+      assert request.provider_session_id == "ouroboros-test-session"
+      assert request.provider_options.fork_session == true
+
+      # And it is the request the provider is actually handed, not just the checkpoint.
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(Ref.new(child.id), "carry on the branch",
+                 id: unique_id("turn")
+               )
+
+      assert_receive {:ouroboros_test_adapter_started, _run,
+                      %RunRequest{
+                        provider_session_id: "ouroboros-test-session",
+                        provider_options: %{fork_session: true}
+                      }, child_adapter},
+                     2_000
+
+      # And the parent is untouched but for the count of branches it has started.
+      assert {:ok, %State{} = parent} = InteractiveSession.info(ref)
+      assert State.forks(parent) == 1
+      assert State.forked_from(parent) == nil
+      refute State.terminal?(parent)
+
+      if Process.alive?(child_adapter), do: HarnessAdapter.finish(child_adapter)
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(child.id)
+      retire_session(id)
+    end
+
+    test "the child inherits the options the parent is actually running with", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only, approval_mode: :auto_edit)
+      adapter = name_provider_session(ref)
+
+      # Changed mid-life, so the durable options are no longer the ones it started with.
+      assert {:ok, _result} = InteractiveSession.configure(ref, %{approval_mode: :auto_approve})
+
+      assert {:ok, child} = InteractiveSession.fork(ref, unique_id("fork"))
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(Ref.new(child.id), "carry on the branch",
+                 id: unique_id("turn")
+               )
+
+      assert_receive {:ouroboros_test_adapter_started, _run,
+                      %RunRequest{approval_mode: :auto_approve, sandbox_mode: :read_only},
+                      child_adapter},
+                     2_000
+
+      if Process.alive?(child_adapter), do: HarnessAdapter.finish(child_adapter)
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(child.id)
+      retire_session(id)
+    end
+
+    test "a session the provider has not named yet has nothing to branch", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+
+      assert {:error, {:unforkable_session, details}} = InteractiveSession.fork(ref)
+      assert details.reason == :no_provider_session_id
+      assert details.message =~ "nothing to branch from"
+
+      retire_session(id)
+    end
+
+    test "a transport that declares no branch verb refuses by capability", %{id: id} do
+      ref = start_session(id, transport: :managed_frozen, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      # `:managed_frozen` is `Ouroboros.Test.ManagedSessionTransport` with no
+      # `configuration_options`; it still inherits the adapter's fork declaration, so the
+      # honest per-transport refusal is exercised through ACP below and through the
+      # capability map here.
+      assert Provider.session_capabilities(@provider, :managed_frozen).fork == :native
+
+      for provider <- [:opencode, :kimi] do
+        assert Provider.session_capabilities(provider).fork == false
+
+        assert {:error, {:unforkable_session, details}} =
+                 Provider.session_fork_options(provider)
+
+        assert details.transport == :acp
+        assert details.reason == :transport_cannot_fork
+        assert details.message =~ "declares no way to branch one"
+      end
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    test "the fork id is caller-owned, so a repeat opens the same child", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+      fork_id = unique_id("stable-fork")
+
+      assert {:ok, first} = InteractiveSession.fork(ref, fork_id)
+      assert {:ok, second} = InteractiveSession.fork(ref, fork_id)
+      assert second.id == first.id
+
+      # Idempotent, not duplicated: the second call matched the existing durable session
+      # rather than creating a second one under the same id.
+      assert {:ok, %State{} = forked} = InteractiveSession.info(Ref.new(first.id))
+      assert State.forked_from(forked) == id
+
+      # The parent counts both calls: it started a fork twice, and the second one found
+      # the first. A count is a hint, and it says so.
+      assert {:ok, %State{} = parent} = InteractiveSession.info(ref)
+      assert State.forks(parent) == 2
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(first.id)
+      retire_session(id)
+    end
+
+    test "an invalid fork id is refused before anything is started", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+
+      assert {:error, :invalid_fork_id} = InteractiveSession.fork(ref, "   ")
+      assert {:error, :invalid_fork_id} = InteractiveSession.fork(ref, 42)
+
+      retire_session(id)
+    end
+  end
+
   describe "State.auto_title/1" do
     test "takes the first line, bounds it, and refuses to invent one" do
       assert State.auto_title("one line") == "one line"
@@ -479,6 +623,22 @@ defmodule Ouroboros.InteractiveControlsTest do
     opts = Keyword.merge([id: id, provider: @provider, workspace: File.cwd!()], opts)
     assert {:ok, ref} = InteractiveSession.start(opts)
     ref
+  end
+
+  # Nothing can be branched until the provider has named its own session, which it does by
+  # emitting anything at all. Returns the adapter process so the caller can finish it.
+  defp name_provider_session(ref) do
+    assert {:ok, _turn} =
+             InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
+
+    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
+
+    assert_eventually(fn ->
+      match?({:ok, %State{provider_session_id: id}} when is_binary(id), InteractiveSession.info(ref))
+    end)
+
+    adapter
   end
 
   defp idle?(ref) do

@@ -54,6 +54,21 @@ defmodule Ouroboros.Provider.CodexSessionTest do
       ;;
   """
 
+  # `thread/fork` branches a thread's history into a new thread id and answers with the
+  # child thread, naming the parent in `forkedFromId`
+  # (https://developers.openai.com/codex/app-server, verified 2026-08-22).
+  @fork_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/fork"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-fork-1","sessionId":"thread-parent","forkedFromId":"thread-parent","ephemeral":false}}}'
+      ;;
+    *'"method":"thread/resume"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-parent"}}}'
+      ;;
+  """
+
   @unknown_method_cases """
     *'"method":"initialize"'*)
       echo '{"id":1,"result":{"userAgent":"fake"}}'
@@ -227,6 +242,48 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     # the log can see both, which is the point of not rewriting history.
     thread = executable |> logged() |> Enum.find(&(&1["method"] == "thread/start"))
     assert thread["params"]["approvalPolicy"] == "on-request"
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a fork opens with thread/fork on the parent thread; a plain resume does not" do
+    executable = fake_app_server(@fork_cases)
+
+    handle =
+      open_session!(executable,
+        provider_session_id: "thread-parent",
+        provider_options: %{cli_path: executable, fork: true}
+      )
+
+    drain_ready()
+
+    frames = logged(executable)
+    assert fork = Enum.find(frames, &(&1["method"] == "thread/fork"))
+    assert fork["params"] == %{"threadId" => "thread-parent"}
+    refute Enum.any?(frames, &(&1["method"] == "thread/resume"))
+
+    # `lastTurnId` is deliberately absent: this verb branches at the tail, and choosing a
+    # turn to branch from belongs to the backtrack menu rather than to `interactive.fork`.
+    refute Map.has_key?(fork["params"], "lastTurnId")
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "the same session without the fork option resumes instead" do
+    executable = fake_app_server(@fork_cases)
+
+    handle =
+      open_session!(executable,
+        provider_session_id: "thread-parent",
+        provider_options: %{cli_path: executable}
+      )
+
+    drain_ready()
+
+    frames = logged(executable)
+    assert resume = Enum.find(frames, &(&1["method"] == "thread/resume"))
+    assert resume["params"]["threadId"] == "thread-parent"
+    refute Enum.any?(frames, &(&1["method"] == "thread/fork"))
 
     assert :ok = CodexSession.close(handle)
   end

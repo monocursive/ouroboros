@@ -36,6 +36,7 @@
       "interactive.delete",
       "interactive.event_detail",
       "interactive.follow_up",
+      "interactive.fork",
       "interactive.info",
       "interactive.interrupt",
       "interactive.kill",

@@ -166,7 +166,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
       end
     end
 
-    test "the ten declared keys are present for every bundled provider and Wire-safe" do
+    test "the eleven declared keys are present for every bundled provider and Wire-safe" do
       expected =
         Enum.sort([
           :transport,
@@ -178,8 +178,14 @@ defmodule Ouroboros.ProviderCapabilityTest do
           :steer,
           :multimodal,
           :dynamic_model,
-          :dynamic_configuration
+          :dynamic_configuration,
+          # Not an `InteractionCapabilities` field: the harness has no notion of branching
+          # a session, so this one is derived from the dialect or the adapter's own
+          # provider-option list. It still has to be in the map a client reads.
+          :fork
         ])
+
+      assert Enum.sort(Provider.capability_keys()) == expected
 
       for provider <- Map.keys(@coding_refusals) do
         capabilities = Provider.session_capabilities(provider)
@@ -208,7 +214,9 @@ defmodule Ouroboros.ProviderCapabilityTest do
         declared = Map.from_struct(dialect.capabilities())
         resolved = Provider.session_capabilities(provider)
 
-        for {key, value} <- resolved, key != :transport do
+        # `:fork` is derived beside the declared set rather than read from it, so it is
+        # compared against the declaration that produces it instead.
+        for {key, value} <- Map.delete(resolved, :fork), key != :transport do
           assert Map.fetch!(declared, key) == value
         end
       end
@@ -444,6 +452,95 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
   end
 
+  describe "branching a session" do
+    test "every bundled provider's fork answer matches the wire it would use" do
+      # Claude, Zai and Grok take `--resume <id> --fork-session`; the Codex app server has
+      # `thread/fork`. Gemini and Amp declare no branch option at all, ACP publishes no
+      # branch verb, and Pi's `--fork` takes a session *name* and refuses to be combined
+      # with `provider_session_id`, so it is not credited on an unverified reading.
+      expected = %{
+        claude: :native,
+        zai: :native,
+        grok: :native,
+        codex: :native,
+        gemini: false,
+        amp: false,
+        opencode: false,
+        kimi: false,
+        pi: false
+      }
+
+      for {provider, fork} <- expected do
+        assert Provider.session_capabilities(provider).fork == fork,
+               "#{provider}: expected fork #{inspect(fork)}"
+
+        case fork do
+          :native ->
+            assert {:ok, options} = Provider.session_fork_options(provider)
+            assert map_size(options) == 1
+
+          false ->
+            assert {:error, {:unforkable_session, _details}} =
+                     Provider.session_fork_options(provider)
+        end
+      end
+    end
+
+    test "Claude's fork is `--fork-session` beside `--resume`, and the argv proves it" do
+      assert {:ok, %{fork_session: true}} = Provider.session_fork_options(:claude)
+
+      # The declaration is only worth anything if the adapter turns it into the flag. This
+      # is the pinned adapter's own argv builder, run with the options a fork produces.
+      request =
+        Jido.Harness.RunRequest.new!(%{
+          prompt: "continue on a branch",
+          cwd: File.cwd!(),
+          provider_session_id: "parent-session-id",
+          provider_options: %{fork_session: true, cli_path: "/bin/echo"}
+        })
+
+      options =
+        Jido.Harness.Adapters.Helpers.provider_options(request.provider_options, [
+          :cli_path,
+          :fallback_model,
+          :max_budget_usd,
+          :fork_session,
+          :settings,
+          :betas
+        ])
+
+      assert {:ok, argv} = Jido.Harness.Adapters.Claude.build_argv(request, options)
+      assert "--fork-session" in argv
+      assert argv_pair(argv, "--resume") == "parent-session-id"
+    end
+
+    test "the Codex app server's fork is the dialect's own declaration" do
+      assert Dialect.Codex.fork_option() == {:fork, true}
+      assert {:ok, %{fork: true}} = Provider.session_fork_options(:codex)
+
+      # The option has to be one the transport will accept, or the fork would be refused
+      # by the harness rather than by anything here.
+      assert :fork in Ouroboros.Provider.CodexAdapter.spec().provider_options
+      refute function_exported?(Dialect.ACP, :fork_option, 0)
+    end
+
+    test "the exec fallback cannot fork even though the provider can" do
+      # `thread/fork` is an app-server method. The exec transport's dialect is not this
+      # one, so a session pinned to it declares no fork, and the capability is per
+      # transport rather than per provider.
+      assert Provider.session_capabilities(:codex, :app_server).fork == :native
+      assert Provider.session_capabilities(:codex, :exec_jsonl_resume).fork == false
+    end
+
+    test "an unresolvable provider or transport is refused rather than guessed at" do
+      assert {:error, {:unforkable_session, %{reason: :unknown_provider}}} =
+               Provider.session_fork_options(:no_such_provider)
+
+      assert {:error, {:unforkable_session, %{reason: :unknown_session_transport}}} =
+               Provider.session_fork_options(:claude, :no_such_transport)
+    end
+  end
+
   describe "coding plane defaults" do
     for {provider, refused} <- @coding_refusals, refused == [] do
       test "#{provider} keeps the workspace-write default" do
@@ -534,6 +631,14 @@ defmodule Ouroboros.ProviderCapabilityTest do
     id = "capability-#{System.unique_integer([:positive, :monotonic])}"
     assert {:ok, state} = State.new(id, opts)
     State.request(state)
+  end
+
+  # The value that follows a flag in an argv list, or `nil` when the flag is absent.
+  defp argv_pair(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      index -> Enum.at(argv, index + 1)
+    end
   end
 
   # `:native` is the only declaration that earns "the change is in force now"; every

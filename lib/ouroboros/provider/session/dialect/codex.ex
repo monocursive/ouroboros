@@ -74,18 +74,44 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     }
   end
 
+  @doc """
+  The provider option that turns this dialect's handshake into a branch.
+
+  Not a `Dialect` callback: `Dialect.verify!/1` pins an exact callback list, and a dialect
+  whose protocol has no branch verb has nothing to answer here. `Ouroboros.Provider` asks
+  for it by `function_exported?/3`, so `fork: :native` on the app-server transport is this
+  dialect's own declaration rather than a table in the gateway.
+  """
+  @spec fork_option() :: {atom(), term()}
+  def fork_option, do: {:fork, true}
+
+  # Three ways to open, and the request says which. `thread/fork` branches a thread's
+  # history into a new thread id, taking `threadId` and optional `lastTurnId`/`ephemeral`
+  # (https://developers.openai.com/codex/app-server, verified 2026-08-22); the fork
+  # inherits the parent thread's settings, and `turn_params/2` supplies model, effort,
+  # approval policy and sandbox on every turn regardless. `lastTurnId` is deliberately not
+  # sent: `interactive.fork` branches at the tail, and choosing a turn to branch from is
+  # the backtrack menu's question (B5), not this one's.
   @impl true
   def after_initialize(_result, request, _runtime) do
     {method, params} =
-      if is_binary(request.provider_session_id) do
-        {"thread/resume",
-         Map.put(thread_params(request), "threadId", request.provider_session_id)}
-      else
-        {"thread/start", thread_params(request)}
+      cond do
+        fork?(request) and is_binary(request.provider_session_id) ->
+          {"thread/fork", %{"threadId" => request.provider_session_id}}
+
+        is_binary(request.provider_session_id) ->
+          {"thread/resume",
+           Map.put(thread_params(request), "threadId", request.provider_session_id)}
+
+        true ->
+          {"thread/start", thread_params(request)}
       end
 
     {:handshake, [{:notify, "initialized", %{}}, {:open, method, params}]}
   end
+
+  defp fork?(%{provider_options: options}) when is_map(options), do: option(options, :fork) == true
+  defp fork?(_request), do: false
 
   @impl true
   def session_id(result), do: thread_id(result)

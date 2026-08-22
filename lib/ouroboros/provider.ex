@@ -66,6 +66,40 @@ defmodule Ouroboros.Provider do
     :dynamic_configuration
   ]
 
+  # Not an `InteractionCapabilities` field: the harness has no notion of forking a session,
+  # so `:fork` is derived beside the declared set from the dialect or from the adapter
+  # table below. Listed here so the public shape stays one map with one docstring.
+  @derived_capability_keys [:fork]
+
+  # Run adapters whose `provider_options.fork_session` is a **boolean** that branches the
+  # session named by `provider_session_id`, rather than something else wearing the same
+  # key. Read from each adapter's own argv builder in the pinned Harness:
+  #
+  #   * `Adapters.Claude` — `CLIArgs.pair("--resume", request.provider_session_id)` and
+  #     `CLIArgs.flag("--fork-session", options[:fork_session])` (`claude.ex:92,105`).
+  #   * `Adapters.Zai` — delegates `run/2` to `Claude.run/2` with rewritten env
+  #     (`zai.ex:71`) and declares the same option.
+  #   * `Adapters.Grok` — `pair("--resume", …)` plus `flag("--fork-session", …)`
+  #     (`grok.ex:105,115`), where `flag/2` emits the bare flag only for `true`.
+  #
+  # Pi is deliberately absent although it declares `:fork_session`: there the option is
+  # `pair("--fork", options[:fork_session])`, a *session name* rather than a flag, and its
+  # validator refuses `provider_session_id` and `fork_session` together
+  # (`pi.ex:230,399-401`). Sending `true` there would produce `--fork true` and a refusal,
+  # and inferring the other shape from an argv nobody has run would be a guess about a
+  # user's session. Pi therefore declares `fork: false` until someone verifies it.
+  #
+  # This is a table because no upstream declaration distinguishes the two shapes: an
+  # `AdapterSpec` lists option *names*, never their meaning. It is keyed on the module the
+  # argv was read in so a provider repointed at other code loses the claim automatically,
+  # and `Ouroboros.Provider.CodexAdapter` shows the alternative — an adapter this runtime
+  # owns can declare its own, as `Dialect.Codex.fork_option/0` does.
+  @adapter_fork_flags %{
+    Jido.Harness.Adapters.Claude => {:fork_session, true},
+    Jido.Harness.Adapters.Zai => {:fork_session, true},
+    Jido.Harness.Adapters.Grok => {:fork_session, true}
+  }
+
   # The normalized approval vocabulary `Jido.Harness.SessionRequest` validates against
   # (`deps/jido_harness/lib/jido_harness/session/request.ex:3`). A transport that
   # declares no `normalized_values.approval_mode` allowlist accepts all four, which is
@@ -1296,16 +1330,144 @@ defmodule Ouroboros.Provider do
   `nil` when the provider or the transport does not resolve. An unregistered provider and
   a transport no adapter declares are the harness's to name, and inventing a capability
   map for them would be this module describing a transport it has never seen.
+
+  `:fork` is the one key the harness has no notion of; see `session_fork_options/2` for
+  where its answer comes from.
   """
   @spec session_capabilities(term(), atom() | nil) :: map() | nil
   def session_capabilities(provider, transport \\ nil) do
     with {:ok, spec} <- Registry.spec(provider),
-         %InteractionCapabilities{} = capabilities <- selected_capabilities(spec, transport) do
-      Map.new(@capability_keys, &{&1, Map.get(capabilities, &1, false)})
+         %{capabilities: %InteractionCapabilities{}} = declared <- selected_transport(spec, transport) do
+      capabilities = Session.capabilities(declared)
+
+      @capability_keys
+      |> Map.new(&{&1, Map.get(capabilities, &1, false)})
+      |> Map.put(:fork, fork_capability(provider, spec, declared))
     else
       _unresolvable -> nil
     end
   end
+
+  @doc "Every key `session_capabilities/2` answers with, declared and derived."
+  @spec capability_keys() :: [atom()]
+  def capability_keys, do: @capability_keys ++ @derived_capability_keys
+
+  @doc """
+  Returns the start options that make a new session a fork of an existing provider session.
+
+  A fork is a *new* Ouroboros session that carries the parent's `provider_session_id` plus
+  whatever the transport spells "branch this rather than continue it". Both halves are read
+  from declarations:
+
+    * a dialect this runtime owns declares its own by exporting `fork_option/0` — the Codex
+      app server's `thread/fork`, reached through a `provider_options` flag its
+      `after_initialize/3` reads;
+    * a run adapter declares its own by exporting `fork_option/0`, or — for the three
+      pinned upstream modules that have nowhere to put one — appears in
+      `@adapter_fork_flags`. Either way the structural half is still checked: the transport
+      must be able to carry `:provider_session_id` and the adapter must declare `resume?`,
+      because a branch flag with nothing to branch from is a new conversation.
+
+  Everything else answers `{:error, {:unforkable_session, …}}`, including ACP: neither
+  bundled ACP agent publishes a branch verb, and `session/load` continues a session rather
+  than copying it.
+  """
+  @spec session_fork_options(term(), atom() | nil) :: {:ok, map()} | {:error, term()}
+  def session_fork_options(provider, transport \\ nil) do
+    with {:ok, spec} <- fork_spec(provider),
+         {:ok, declared} <- fork_transport(spec, provider, transport) do
+      case fork_option(provider, spec, declared) do
+        nil ->
+          {:error,
+           {:unforkable_session,
+            %{
+              provider: spec.provider,
+              transport: declared.name,
+              reason: :transport_cannot_fork,
+              message:
+                "#{inspect(spec.provider)} reaches an interactive session over the " <>
+                  "#{inspect(declared.name)} transport, which declares no way to branch one. " <>
+                  "Start a new session instead; the conversation so far stays where it is."
+            }}}
+
+        {key, value} ->
+          {:ok, %{key => value}}
+      end
+    end
+  end
+
+  defp fork_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error, {:unforkable_session, %{provider: provider, reason: :unknown_provider}}}
+    end
+  end
+
+  defp fork_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unforkable_session,
+          %{provider: provider, transport: transport, reason: :unknown_session_transport}}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  defp fork_capability(provider, spec, declared) do
+    if fork_option(provider, spec, declared), do: :native, else: false
+  end
+
+  # The dialect first, because where this runtime owns the wire it is the only thing that
+  # knows whether the protocol has a branch verb. Only then the run adapter.
+  defp fork_option(provider, spec, declared) do
+    dialect_fork_option(declared) || adapter_fork_option(provider, spec, declared)
+  end
+
+  defp dialect_fork_option(%{adapter: adapter}) do
+    with dialect when not is_nil(dialect) <- Session.dialect(adapter),
+         true <- function_exported?(dialect, :fork_option, 0) do
+      dialect.fork_option()
+    else
+      _no_dialect_fork -> nil
+    end
+  end
+
+  # Keyed on the adapter *module*, not the provider name, because a node may point a
+  # provider at a different adapter — this runtime already does for codex, kimi and
+  # opencode — and the claim below is about argv that was read in a particular module.
+  # The structural half is still asked of the spec every time: a branch flag is only a
+  # fork when the request can also carry the session being branched.
+  defp adapter_fork_option(provider, spec, declared) do
+    with {:ok, adapter} <- Registry.lookup(provider),
+         option when not is_nil(option) <- declared_fork_option(adapter),
+         true <-
+           :fork_session in transport_list(declared.session_provider_options, spec.provider_options),
+         true <-
+           :provider_session_id in
+             transport_list(declared.session_options, spec.normalized_options),
+         true <- spec.capabilities.resume? do
+      option
+    else
+      _not_declared -> nil
+    end
+  end
+
+  # An adapter this runtime owns says so itself, the way a dialect does. The table is the
+  # fallback for the three pinned upstream modules, which have nowhere to put it.
+  defp declared_fork_option(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :fork_option, 0),
+      do: adapter.fork_option(),
+      else: Map.get(@adapter_fork_flags, adapter)
+  end
+
+  defp transport_list(:adapter, adapter_list), do: adapter_list
+  defp transport_list(list, _adapter_list) when is_list(list), do: list
+  defp transport_list(_unresolvable, _adapter_list), do: []
 
   @doc """
   Returns the options a *running* session may still be changed to, and when it takes hold.
@@ -1510,13 +1672,6 @@ defmodule Ouroboros.Provider do
   # Mirrors `Jido.Harness.Session.Manager.resolve_transport/2`, including the synthetic
   # managed transport it substitutes for an adapter that declares none. Declaring
   # anything else here would describe a transport the session is not going to get.
-  defp selected_capabilities(spec, transport) do
-    case selected_transport(spec, transport) do
-      nil -> nil
-      declared -> Session.capabilities(declared)
-    end
-  end
-
   defp selected_transport(spec, transport) do
     selected = transport || spec.default_session_transport || first_transport(spec)
 

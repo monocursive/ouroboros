@@ -57,7 +57,7 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     test "the new session controls are operate-scoped and advertised" do
       table = Methods.table()
 
-      for method <- ["interactive.configure", "interactive.rename"] do
+      for method <- ["interactive.configure", "interactive.rename", "interactive.fork"] do
         assert table[method].scope == :operate
         assert method in Methods.names()
 
@@ -201,6 +201,87 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
                })
 
       assert message =~ "title_source"
+    end
+  end
+
+  describe "interactive.fork" do
+    test "a fork answers in interactive.start's shape", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+      fork_id = unique_id("gateway-fork")
+
+      assert {:ok, result} =
+               Methods.invoke("interactive.fork", %{"id" => id, "fork_id" => fork_id})
+
+      assert result["id"] == fork_id
+      assert result["outcome"] == "created"
+      assert result["node"] == node()
+      assert is_boolean(result["ready"])
+
+      assert {:ok, child} = Methods.invoke("interactive.info", %{"id" => fork_id})
+      assert child.forked_from == id
+
+      assert {:ok, parent} = Methods.invoke("interactive.info", %{"id" => id})
+      assert parent.forks == 1
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(fork_id)
+      retire_session(id)
+    end
+
+    test "a fork before the provider named a session is refused with a reason", %{id: id} do
+      start_session(id, sandbox_mode: :read_only)
+
+      assert {:error, -32_006, message, data} = Methods.invoke("interactive.fork", %{"id" => id})
+
+      assert message =~ "refused the call"
+      assert ["unforkable_session", details] = data
+      assert details["reason"] == "no_provider_session_id"
+
+      retire_session(id)
+    end
+
+    test "the outcome is unknown on a ceiling, exactly as a start's is" do
+      assert Methods.table()["interactive.fork"].outcome == :unknown
+      assert Methods.table()["interactive.fork"].scope == :operate
+    end
+
+    test "an unsupported field is refused rather than ignored" do
+      assert {:error, -32_602, message} =
+               Methods.invoke("interactive.fork", %{"id" => "some-session", "provider" => "codex"})
+
+      assert message =~ "provider"
+    end
+  end
+
+  defp name_provider_session(ref) do
+    assert {:ok, _turn} =
+             InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
+
+    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 2_000
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
+
+    assert_eventually(fn ->
+      match?(
+        {:ok, %State{provider_session_id: provider_session_id}} when is_binary(provider_session_id),
+        InteractiveSession.info(ref)
+      )
+    end)
+
+    adapter
+  end
+
+  defp assert_eventually(fun, attempts \\ 200)
+  defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp assert_eventually(fun, attempts) do
+    case fun.() do
+      value when value in [false, nil] ->
+        Process.sleep(10)
+        assert_eventually(fun, attempts - 1)
+
+      value ->
+        value
     end
   end
 

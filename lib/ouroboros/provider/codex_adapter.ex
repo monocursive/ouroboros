@@ -21,7 +21,13 @@ defmodule Ouroboros.Provider.CodexAdapter do
     %{
       base
       | default_session_transport: :app_server,
-        session_transports: [app_server_transport() | exec_jsonl]
+        session_transports: [app_server_transport() | exec_jsonl],
+        # `:fork` is how a start request says "branch the thread named by
+        # `provider_session_id` rather than resume it"; the app-server dialect reads it in
+        # `after_initialize/3` and opens with `thread/fork`. Declared here because the
+        # upstream adapter has no notion of it and `session_provider_options: :adapter`
+        # validates a session's provider options against this list.
+        provider_options: base.provider_options ++ [:fork]
     }
   end
 
