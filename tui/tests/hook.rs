@@ -368,6 +368,43 @@ async fn a_runtime_that_refuses_is_still_an_applied_edit() {
     script.await.expect("the script");
 }
 
+/// The deadline itself, watched at 150ms rather than the five seconds the hook runs under.
+/// The peer accepts, handshakes, and then says nothing at all, which is a runtime that
+/// stopped answering mid-turn.
+#[tokio::test]
+async fn a_deadline_that_passes_is_no_lsp_data_and_the_edit_still_stands() {
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[INFO_METHOD, TOUCH_METHOD, DIAGNOSTICS_METHOD])
+            .await;
+        // And then nothing. The hook's budget is what ends this, not the peer.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    });
+
+    // `Bridge::from_env` is what `outcome_within` reads, so the environment is the bridge.
+    let token = token_file();
+    std::env::set_var("OUROBOROS_GATEWAY_ADDR", address.to_string());
+    std::env::set_var("OUROBOROS_GATEWAY_TOKEN_FILE", &token);
+    std::env::set_var("OUROBOROS_SESSION_ID", SESSION);
+
+    let outcome =
+        ouro::hook::outcome_within("/work/repo/lib/a.ex", Duration::from_millis(150)).await;
+
+    std::env::remove_var("OUROBOROS_GATEWAY_ADDR");
+    std::env::remove_var("OUROBOROS_GATEWAY_TOKEN_FILE");
+    std::env::remove_var("OUROBOROS_SESSION_ID");
+
+    assert!(matches!(outcome, PostEdit::NoData));
+    assert_eq!(
+        additional_context("lib/a.ex", &outcome),
+        format!("{APPLIED}\n{NO_DATA}")
+    );
+
+    script.abort();
+}
+
 #[tokio::test]
 async fn no_runtime_at_all_is_no_lsp_data() {
     // A bridge whose environment is absent: the shape a hook run by hand would take.

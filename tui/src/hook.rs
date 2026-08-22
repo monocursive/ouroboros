@@ -206,13 +206,19 @@ pub async fn post_tool_use() -> Result<()> {
 /// Everything that can go wrong collapses into "no LSP data", because none of it is
 /// something the model can act on and all of it happened after a successful edit.
 async fn outcome(path: &str) -> PostEdit {
+    outcome_within(path, BUDGET).await
+}
+
+/// The same, with the budget named. Public so a test can watch the deadline fire without
+/// spending five seconds waiting for the one this hook actually runs under.
+pub async fn outcome_within(path: &str, budget: Duration) -> PostEdit {
     let Ok(bridge) = Bridge::from_env() else {
         return PostEdit::NoData;
     };
 
     let mut server = Server::new(Ok(bridge));
 
-    match tokio::time::timeout(BUDGET, server.post_edit_diagnostics(path)).await {
+    match tokio::time::timeout(budget, server.post_edit_diagnostics(path)).await {
         Ok(Ok(outcome)) => outcome,
         // A refusal from the runtime and a five-second silence are the same fact from
         // here: nobody looked at the file, and the edit stands either way.
