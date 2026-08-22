@@ -753,6 +753,10 @@ pub async fn run(
                 edited
             };
 
+            // `suspend` restored the terminal through the same path that empties the
+            // title on exit, so the next tick has to write it again.
+            app.forget_title();
+
             match result {
                 Ok(text) => app.apply(Msg::ExternalEditor(text)),
                 Err(error) => app.inform(

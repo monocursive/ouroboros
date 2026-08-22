@@ -853,6 +853,16 @@ impl App {
         self.title_pending.take()
     }
 
+    /// Forgets what was written, so the next tick emits the title again.
+    ///
+    /// For the one thing that takes the terminal away and gives it back: leaving
+    /// `$EDITOR` restores the screen through the same path that empties the title on
+    /// exit, and without this the tab would stay blank until the session's activity
+    /// happened to change.
+    pub fn forget_title(&mut self) {
+        self.title_shown = None;
+    }
+
     /// Notifications the driver should emit, and the channel to emit them through.
     ///
     /// The channel is resolved here rather than in the driver so that `mode = "auto"`
