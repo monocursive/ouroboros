@@ -372,9 +372,14 @@ The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` w
 terminal reports the kitty keyboard protocol, and the footer only advertises it there),
 normalizes bracketed paste, keeps bounded in-session history, completes local slash
 commands, and completes `@` mentions from a bounded index of the launch workspace. An
-`@path` is currently prompt text, not a structured attachment; the gateway already
-accepts a closed attachment envelope whose files are canonicalized beneath the leased
-session workspace, ready for a future runtime-aware picker.
+`@path` is both prompt text and a structured attachment: the turn goes out as the
+gateway's closed `{prompt, attachments, reasoning_effort}` envelope whenever it carries
+one, and as a bare string when it does not. Attachments are canonicalized by the runtime
+beneath the leased session workspace and an outsider is refused — on the composer that
+produced it, beside the chip. `Ctrl+V` pastes a clipboard image as an attachment where
+the provider takes one, through whichever clipboard tool the machine has, and falls
+through to an ordinary text paste otherwise. `/effort low|medium|high` sets the reasoning
+effort of the next turn only.
 
 `,` opens settings: the runtime's facts as it reports them, and this client's own
 defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand
@@ -531,15 +536,37 @@ existing server workflow is unchanged, because nothing else is set.
 bindings would be the second place they are written down and the first place they go
 stale.
 
-Two of them are worth naming here because they are how you get *out* of the client's
-screen and back into your terminal's own:
+It is grouped by the question you are asking when you open it — composing, while the
+agent works, session, runtime — and its honest limits stay pinned at the foot of the
+panel while the table scrolls.
+
+Five are worth naming here. Two are how you get *out* of the client's screen and back
+into your terminal's own:
 
 - `ctrl+x [` prints the whole conversation into this terminal's native scrollback —
   every tool result and diff expanded, no gutters — so `Cmd+F`, tmux copy mode, and
   drag-to-select work on it. The lines stay there after `ouro` exits.
 - `ctrl+x v` opens the same text in `$VISUAL`/`$EDITOR` and leaves your draft alone.
 
-Both are also in the command palette (`ctrl+p`).
+Three are the input grammar:
+
+- `Enter` sends, or queues. While the agent is working it reaches the runtime's durable
+  follow-up queue; while an earlier send is still unacknowledged it goes into a local
+  queue drawn above the composer, and is dispatched the moment that acknowledgement
+  lands. The panel says which rows are durable on the runtime and which are only here.
+  `↑` on an empty draft takes the newest local one back.
+- `Alt+Enter` steers the running turn, on the transports whose runtime says they can be
+  steered. Two explicit keys, never one key whose meaning depends on timing.
+- `Esc` interrupts and keeps the queue; `Esc Esc` opens a menu over the last ten
+  messages, offering "edit and resend as a new turn" everywhere and a fork where the
+  runtime serves one. The chord is rebindable and disableable from day one:
+
+  ```toml
+  [keys]
+  backtrack = "esc esc"   # or "alt+up", or "off"
+  ```
+
+All of them are also in the command palette (`ctrl+p`).
 
 `ouro` captures the mouse so the wheel scrolls the transcript, which means selecting
 text needs a modifier — Shift on most terminals, Option on iTerm2, Fn on Terminal.app.

@@ -1037,13 +1037,133 @@ events arrived would count the overlap twice — and `UsageTotals::complete` is 
 pruning means the numbers are a lower bound.
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
-`Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `Ctrl-O` expand/collapse the conversation's cells, `Ctrl-T` plan panel,
+`Enter` send, `Alt+Enter` steer, `Ctrl-C` interrupt active turn (never the TUI),
+`a` approval modal, `s` steer, `Ctrl-O` expand/collapse the conversation's cells,
+`Ctrl-T` plan panel, `Ctrl-V` paste, `Esc Esc` go back to an earlier message,
 `/details` (or `ctrl+x d`) the event ledger, `ctrl+x [` transcript into the terminal's
 scrollback, `ctrl+x v` transcript in `$EDITOR`, `Ctrl-E` opens `$EDITOR`, `,` settings,
-`q` quit dialog, `?` help with the authoritative key map.
-`s`, `a`, and the interrupt hint are **conditional**: see
+`q` quit dialog, `?` help with the authoritative key map, grouped by
+composing / while the agent works / session / runtime.
+`s`, `Alt+Enter`, `a`, and the interrupt hint are **conditional**: see
 "Capability-driven chrome" below.
+
+### Queue and steer (B3)
+
+Two keys, never one key whose meaning depends on timing. Blurring the two, or changing
+what they mean under people, is what produced Codex #13595 and #17285
+([R1 §4d](research/agent-ux-2026/R1-interaction-model.md)); the fix the field converged
+on is pi's Enter/Alt+Enter split plus a queue you can see.
+
+| Key | On an idle session | While a turn runs | While a send is unacknowledged |
+|---|---|---|---|
+| `Enter` | `interactive.send_message` | `interactive.follow_up` — the runtime's durable queue | held in the local queue, dispatched as a `follow_up` the moment the acknowledgement lands |
+| `Alt+Enter` | `interactive.steer`, where `capabilities.steer` is truthy; a newline where it is `false` | the same | refused, with the reason: a steer delivered several seconds later is not the steer that was asked for |
+| `↑` on an empty draft | the newest local queued draft comes back into the editor; prompt history once the queue is empty | | |
+| `Esc` | leaves the session | interrupts, **and keeps the queue** | interrupts |
+
+The queue is drawn immediately above the composer (Claude Code's placement) and it says
+which half of it is which:
+
+- **durable** — the depth of the runtime's own follow-up queue, from `queue_changed`.
+  A depth and nothing else: the runtime does not replay the text of a turn it has not
+  started, so this client states a count rather than inventing rows for it.
+- **local** — drafts this client accepted with Enter and has not been able to dispatch
+  yet, with their ordinal and their text. These are the ones `↑` takes back, the ones a
+  crash would lose, and the ones the panel names as *not* durable.
+
+Bounded at 32 local drafts per session; the 33rd Enter says so and leaves the draft in
+the editor. A queued draft never overtakes an outcome-unknown turn — the reconciliation
+rule that used to hold the visible draft now holds the queue — and `Esc` is never
+disabled by queued state, which is Claude Code #16905 exactly.
+
+### Structured input: attachments, images, effort (B4)
+
+`params.input` may be a bare string **or** the object
+`{prompt, attachments[≤32], reasoning_effort}` (`structured_turn_input`,
+`gateway/methods.ex`). This client sends both, and which one is a fact about the turn:
+a plain prompt stays a bare string — byte for byte what it was before B4 — and the
+object appears the moment there is something in it a string could not carry. Golden
+fixtures and `tests/input_grammar.rs` pin both shapes.
+
+- **`@path`** completes from the bounded workspace index as it always did, *and* becomes
+  an attachment chip above the composer. The `@path` stays in the sentence: what the
+  operator wrote is what is sent. Backspace on an empty draft removes the newest chip,
+  and the chip row says so.
+- **Attachments are paths inside the session's workspace.** The runtime canonicalises
+  each one against that workspace and refuses an outsider
+  (`authorize_turn_attachments`, `interactive/task.ex`). This client never resolves a
+  path itself — the workspace may be on another machine — and a refusal that names an
+  attachment is rendered on the composer that produced it, beside the chips, rather than
+  only in a notice that scrolls away in eight seconds.
+- **`Ctrl+V`** reads the clipboard through whichever tool this machine actually has,
+  probed with `command -v` and never assumed: `pngpaste` then `osascript` on macOS,
+  `wl-paste` then `xclip` on Linux, or the one command named by
+  `OURO_CLIPBOARD_IMAGE_COMMAND`. An image is written `0600` as
+  `.ouroboros/images/image-<id>.png` **under the session workspace** — the only place
+  the runtime will take an attachment from — and attached as a chip. A clipboard holding
+  text falls through to an ordinary paste. A machine with none of the tools is told once,
+  and told what to install. Bounded: 16 MiB, a 5 s tool timeout, PNG signature checked
+  before anything is written under a `.png` name.
+- **`/effort low|medium|high`** sets `reasoning_effort` on the next turn and clears
+  itself after the send. It is per turn, not a mode; `/effort none` clears it early, and
+  a value outside the gateway's enum is refused here rather than as a `-32602`.
+- **`/model <name>`** calls `interactive.configure`, gated on `hello.methods` like every
+  other verb. Where the gateway does not serve it the answer is local and names the
+  missing method, and `/` completion does not offer the command at all.
+
+Chips and a per-turn effort are part of the unsent draft: they survive a composer closed
+with `Esc` and reopened with `i`, they travel with a queued draft, and they come back
+with a refused turn. A same-id reconciliation replays the whole envelope, because one
+that replayed the prompt without its attachments would present a different fingerprint
+and come back `:turn_id_conflict`.
+
+The whole path is capability-gated. Where the runtime declared `multimodal: false` there
+is no chip and no image: the `@` still completes as text, `Ctrl+V` still pastes text, and
+both refusals name the transport.
+
+### Esc, Esc Esc, and going back (B5)
+
+| Key | What it does |
+|---|---|
+| `Esc` while a turn runs | interrupts it. Never disabled by a queue, a chord, or anything else (Claude Code #16905) |
+| `Esc` on an idle session with an empty prompt | leaves the session, as it always did |
+| `Esc` with text in the prompt | closes the composer, keeping the draft |
+| `Esc Esc` within 400 ms | opens the backtrack menu |
+
+The backtrack menu lists the last ten user turns, read out of the durable
+`input_accepted` ledger rather than this client's own prompt history — a second `ouro`
+on the same session sees the same list — and excludes steers, which are injections into
+a turn rather than turns to go back to.
+
+It offers two verbs and states which one `Enter` is *before* it is pressed:
+
+- **edit and resend as a new turn** (`e`, and `Enter` where the fork is not offered):
+  the message's text goes into the composer. Nothing is removed. The menu says so,
+  because a rewind that silently under-delivers is Claude Code #18516.
+- **fork** (`Enter`, where `interactive.fork` is served **and** the transport's `fork`
+  capability is not `false`): `interactive.fork {id, node}`. The verb takes a session and
+  no message, so **this client does not promise the branch starts at the highlighted
+  row** — Codex can fork a thread from a message, Claude's `--fork-session` branches at
+  the tail, and which one a session gets is decided on the other side of the wire. The
+  menu says that in as many words.
+
+The first `Esc` of the chord still does its ordinary job, including leaving an idle
+session; the arm remembers which session it was pressed in, so the second `Esc` reopens
+that session with the menu rather than finding nothing to show.
+
+### `[keys]` — rebinding the chord
+
+```toml
+[keys]
+backtrack = "esc esc"   # or "alt+up", or "off"
+```
+
+Rebindable on day one, and disableable. Claude Code #43717 is a hardcoded double-Escape
+that "cannot be rebound or disabled" and breaks zsh vi-mode for everyone who uses it; a
+chord that ships without its setting is that bug waiting to be filed. A value this build
+cannot read is reported as a config problem and treated as unset, never as `off` —
+silently disabling a key because a file had a typo in it is the same failure in the other
+direction. With `off`, `/backtrack` and the command palette still open the menu.
 
 ### The footer
 
@@ -1066,7 +1186,8 @@ on it.
 | `⏸ prompt` / `⏵⏵ auto-edit` / `✓ auto-approve` / `⏵ default` | `options.approval_mode` | absent where the start omitted it — the plane's default then applies, and this client does not know what it is |
 | `workspace-write` | `options.sandbox_mode` | its own cell, so the mode survives a narrow row without it |
 | `⠙ Working 4m 07s` | the session status plus the newest unterminated `turn_started`'s timestamp | Codex's format; ranked with `esc interrupt`, because they are one statement |
-| `3 queued` | the newest `queue_changed`'s `queued_turns` | absent, not zero, where no such event has been seen |
+| `3 queued` | the newest `queue_changed`'s `queued_turns` | absent, not zero, where no such event has been seen. The composer's own panel adds what is queued *locally* — see "Queue and steer" |
+| `? new here` | `onboarding.prompts_sent` in `config.toml` | until three prompts have been sent; outranks the leader and quit hints, which are also on `?` |
 | `2 approvals` | the approval requests this client holds unanswered | |
 | `42.5k tokens` | `usage.total_tokens` | a `· 34%` share is appended **only** where the runtime reports a context window. Nothing reports one today; `runtime.models` is where it is meant to arrive, and dividing by a client-side table of model windows would be a lie presented as a measurement |
 | `$0.42` | `usage.cost_usd` | `<$0.01` for a spend too small to show, never `$0.00` |
@@ -1107,9 +1228,13 @@ palette, the `ctrl+x` which-key overlay, and `/` completion in the composer:
 - `esc interrupt` in the footer, the palette's Interrupt entry, and `/interrupt` only
   where `interrupt` is truthy — and the footer adds the second condition that a turn is
   actually running;
-- `multimodal` has a predicate and no affordance yet. B4 is the slice that builds one; the
-  predicate is here so the capability and its consumer arrive together rather than the
-  affordance arriving first.
+- `multimodal` gates the attachment chips and `Ctrl+V` image paste (B4). Where it is
+  `false` the `@` completion still substitutes text and `Ctrl+V` still pastes text; what
+  is withheld is the structured attachment, and the refusal names the transport;
+- `fork` gates the backtrack menu's fork row, together with `hello.methods` — two
+  different questions, and the verb is offered only where both answer yes. An unknown
+  `fork` is not "no", so a runtime that has never spoken about forking still offers it
+  wherever `interactive.fork` is served.
 
 The `n` dialog reads the other half of the same story out of `runtime.providers`, whose
 `normalized_options`, `normalized_values`, and `session_transports` the client already
