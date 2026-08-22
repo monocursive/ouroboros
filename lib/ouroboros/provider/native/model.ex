@@ -12,9 +12,10 @@ defmodule Ouroboros.Provider.Native.Model do
       stream chunk shapes differ; normalizing once here means the loop never learns
       which one is answering.
 
-  The default implementation is `Ouroboros.Provider.Native.Model.ReqLLM`. Override it
-  per session with the `:model_module` provider option, or globally with
-  `config :ouroboros, :native_model_module`.
+  The default implementation is `Ouroboros.Provider.Native.Model.ReqLLM`. It can be
+  replaced for a node with `config :ouroboros, :native_model_module` — node
+  configuration, deliberately, and not a session option: a request that could name the
+  module this runtime calls would be a way to run arbitrary code by opening a session.
   """
 
   @typedoc "A message in the loop's own conversation shape. String-keyed on the wire."
@@ -78,21 +79,9 @@ defmodule Ouroboros.Provider.Native.Model do
   @spec model_env() :: String.t()
   def model_env, do: @model_env
 
-  @doc "The model module this node uses, honouring the session override."
-  @spec module(map() | keyword()) :: module()
-  def module(provider_options \\ %{})
-
-  def module(provider_options) when is_map(provider_options) do
-    provider_options
-    |> fetch_option(:model_module)
-    |> case do
-      module when is_atom(module) and not is_nil(module) -> module
-      _unset -> Application.get_env(:ouroboros, :native_model_module, @default_module)
-    end
-  end
-
-  def module(provider_options) when is_list(provider_options),
-    do: module(Map.new(provider_options))
+  @doc "The model module this node uses."
+  @spec module() :: module()
+  def module, do: Application.get_env(:ouroboros, :native_model_module, @default_module)
 
   @doc "Streams one model response through the configured module."
   @spec stream(module(), request(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
@@ -116,14 +105,14 @@ defmodule Ouroboros.Provider.Native.Model do
   @doc "Whether the default model module can resolve models on this node."
   @spec available?() :: boolean()
   def available? do
-    module = module(%{})
+    module = module()
     if function_exported?(module, :available?, 0), do: module.available?(), else: true
   end
 
   @doc "Credential presence per model provider. Names and booleans only, never values."
   @spec credential_report() :: [%{provider: atom(), env: String.t(), present: boolean()}]
   def credential_report do
-    module = module(%{})
+    module = module()
 
     if function_exported?(module, :credential_report, 0),
       do: module.credential_report(),
@@ -131,8 +120,4 @@ defmodule Ouroboros.Provider.Native.Model do
   end
 
   defp configured_default, do: Application.get_env(:ouroboros, :native_model)
-
-  defp fetch_option(map, key) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
-  end
 end

@@ -728,7 +728,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       state = %__MODULE__{
         emit: fn _event -> :ok end,
-        model_module: Model.module(options),
+        model_module: Model.module(),
         model_spec: model_spec,
         system: system,
         scope: scope,
