@@ -214,6 +214,9 @@ defmodule Ouroboros.Gateway.Methods do
     # answers with when the change takes hold. `:operate` because it writes durable
     # session state and moves a permission posture.
     "interactive.configure" => %{scope: :operate, timeout: @default_timeout},
+    # A title is durable session state a person chose, so it is `:operate` for the same
+    # reason `configure` is, and bounded at the boundary because it lands on every list row.
+    "interactive.rename" => %{scope: :operate, timeout: @default_timeout},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
@@ -665,6 +668,21 @@ defmodule Ouroboros.Gateway.Methods do
            {:ok, session} <- session_target(:interactive, params),
            {:ok, changes} <- options(params, @configuration_options, ["id", "node"]) do
         reply(InteractiveSession.configure(session, Map.new(changes)))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B6. The bound and the sanitising live in `Interactive.State`, not here: the same rule
+  # has to hold for a title a person typed and for one the runtime derived from a prompt,
+  # and a check that lived at the gateway would only cover the first.
+  def invoke("interactive.rename", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "title", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, title} <- fetch_string(params, "title") do
+        reply(InteractiveSession.rename(session, title))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -1687,6 +1705,22 @@ defmodule Ouroboros.Gateway.Methods do
   # A pruned cursor is the one upstream detail a client acts on rather than displays: it
   # restarts from the floor and marks the transcript as truncated below it. So the floor
   # travels as data under a named reason instead of inside a sentence.
+  # A rejected title is the caller's mistake, not the runtime's, and the reason names
+  # which rule it broke so a client can say so next to the field rather than in a toast.
+  defp reply({:error, {:invalid_title, %{reason: :too_long, limit: limit}}}) do
+    invalid_params("params.title must be at most #{limit} characters after trimming")
+  end
+
+  defp reply({:error, {:invalid_title, %{reason: :control_characters}}}) do
+    invalid_params(
+      "params.title must not contain control characters; it is drawn into one line of a list"
+    )
+  end
+
+  defp reply({:error, {:invalid_title, %{reason: reason}}}) when reason in [:blank, :not_a_string] do
+    invalid_params("params.title must be a nonempty string")
+  end
+
   defp reply({:error, {:cursor_pruned, floor}}) do
     {:error, code(:upstream_error),
      "the session no longer retains events at or below that cursor; replay from #{floor}",

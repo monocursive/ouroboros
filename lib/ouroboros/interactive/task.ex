@@ -188,6 +188,20 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # A rename touches nothing but the durable record: no provider knows this session by a
+  # name, and a terminal session is still worth finding in a picker, so unlike `configure`
+  # this is allowed after the conversation has ended.
+  def handle_call({:rename, title}, _from, runtime) do
+    with {:ok, title} <- State.validate_title(title),
+         renamed = runtime.session |> State.put_title(title, :human) |> State.touch(),
+         {:ok, runtime} <- persist(runtime, renamed, []) do
+      {:reply, {:ok, State.public(runtime.session)}, runtime}
+    else
+      {:error, {:invalid_title, _detail} = reason} -> {:reply, {:error, reason}, runtime}
+      {:error, runtime} -> {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
+    end
+  end
+
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
       case harness_turn_id(runtime.session, turn_id) do
@@ -447,6 +461,7 @@ defmodule Ouroboros.Interactive.Task do
       # What the session spent rides the same checkpoint as the events it was read from,
       # so a restart resumes the account rather than restarting it at zero.
       |> State.fold_usage(projected)
+      |> auto_title(projected)
       |> State.touch()
 
     case persist(runtime, session, projected) do
@@ -468,6 +483,33 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp enrich_chat_input(event, _session), do: event
+
+  # Names an unnamed session from the first user input the provider accepted.
+  #
+  # Hung on `input_accepted` rather than on the turn dispatch because that event is the
+  # one whose text is already redacted and durable — `enrich_chat_input/2` put it there —
+  # so the title is derived from exactly the bytes the transcript shows, and a turn that
+  # was never accepted never names anything.
+  #
+  # `State.put_title/3` is what makes this safe to run on every batch: an `:auto` title
+  # writes only into a session nobody has named, so a second prompt cannot rename a
+  # conversation and a rename can never be undone by one.
+  defp auto_title(session, projected) do
+    with nil <- State.title(session),
+         %Event{payload: %{"text" => text}} <- first_accepted_input(projected),
+         title when is_binary(title) <- State.auto_title(text) do
+      State.put_title(session, title, :auto)
+    else
+      _named_or_nothing_to_name -> session
+    end
+  end
+
+  defp first_accepted_input(projected) do
+    Enum.find(projected, fn
+      %Event{type: :input_accepted, payload: %{"kind" => kind}} -> kind in ["message", "steer"]
+      _event -> false
+    end)
+  end
 
   # Harness records only *that* a steer was accepted (`input_accepted` with
   # `%{"kind" => "steer"}` and a fresh request id), never the text that produced it.

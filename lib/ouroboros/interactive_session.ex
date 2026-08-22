@@ -218,6 +218,15 @@ defmodule Ouroboros.InteractiveSession do
   def configure(_session, changes),
     do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
 
+  @doc """
+  Names a session, overriding any title the runtime derived from the first prompt.
+
+  Allowed on a terminal session as well as a live one: a finished conversation is exactly
+  what someone is trying to find again in a picker.
+  """
+  @spec rename(session(), String.t()) :: {:ok, State.t()} | {:error, term()}
+  def rename(session, title), do: call(session, {:rename, title})
+
   @doc "Responds to a normalized provider approval request."
   def respond_approval(session, request_id, response) do
     if is_binary(request_id) and String.trim(request_id) != "",

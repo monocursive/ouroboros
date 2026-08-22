@@ -18,6 +18,13 @@ defmodule Ouroboros.Interactive.State do
   # even if a capability check somewhere else is ever wrong.
   @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
 
+  # A session title is drawn into one picker row on every list, so it is bounded where it
+  # is written rather than by every client that draws it. An auto-title is shorter still:
+  # it is a guess from one prompt, and a guess that filled the row would crowd out the
+  # workspace and machine a person actually picks by.
+  @max_title_chars 120
+  @auto_title_chars 60
+
   @enforce_keys [
     :id,
     :node,
@@ -33,6 +40,8 @@ defmodule Ouroboros.Interactive.State do
                 :workspace_lease_id,
                 :harness_session_id,
                 :provider_session_id,
+                :title,
+                title_source: nil,
                 cursor: 0,
                 sequence_offset: 0,
                 resumes: 0,
@@ -57,6 +66,15 @@ defmodule Ouroboros.Interactive.State do
           | :failed
           | :cancelled
           | :lost
+
+  @typedoc """
+  Who named this session. `nil` until something did.
+
+  The distinction is the whole point of storing it: an auto-title is a guess the runtime
+  made from the first prompt and any later prompt could improve it, while a `:human` title
+  is a decision, and nothing this runtime does may overwrite one.
+  """
+  @type title_source :: :auto | :human | nil
 
   @type turn_status ::
           :dispatching
@@ -93,6 +111,8 @@ defmodule Ouroboros.Interactive.State do
           workspace_lease_id: String.t() | nil,
           harness_session_id: String.t() | nil,
           provider_session_id: String.t() | nil,
+          title: String.t() | nil,
+          title_source: title_source(),
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -294,6 +314,98 @@ defmodule Ouroboros.Interactive.State do
     %{state | options: Map.merge(state.options, accepted)}
   end
 
+  @doc """
+  Validates a human-supplied session title, or says why it is not one.
+
+  Bounded and sanitised at the boundary rather than at every reader: the title travels on
+  every `interactive.list` row and gets drawn into a one-line picker, so an unbounded
+  string or an embedded control character is a rendering problem for every client at once.
+  Trimmed, control characters (including newlines and the ANSI escape a terminal would
+  obey) refused rather than stripped — a title that silently became something else would
+  be worse than a refusal — and capped at #{@max_title_chars} graphemes, counted in
+  graphemes because that is what a terminal column budget is.
+  """
+  @spec validate_title(term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_title(title) when is_binary(title) do
+    trimmed = String.trim(title)
+
+    cond do
+      not String.valid?(title) ->
+        {:error, {:invalid_title, %{reason: :not_valid_utf8}}}
+
+      trimmed == "" ->
+        {:error, {:invalid_title, %{reason: :blank}}}
+
+      String.length(trimmed) > @max_title_chars ->
+        {:error,
+         {:invalid_title,
+          %{reason: :too_long, limit: @max_title_chars, length: String.length(trimmed)}}}
+
+      control_characters?(trimmed) ->
+        {:error, {:invalid_title, %{reason: :control_characters}}}
+
+      true ->
+        {:ok, trimmed}
+    end
+  end
+
+  def validate_title(title), do: {:error, {:invalid_title, %{reason: :not_a_string, value: title}}}
+
+  @doc """
+  Returns a title derived from a user prompt, or `nil` when the prompt yields none.
+
+  The first line, because a prompt's first line is what a person would have typed as a
+  subject; capped at #{@auto_title_chars} graphemes with an ellipsis, because a picker row
+  is not a transcript. Control characters end the line rather than being carried into it.
+  Deliberately not a model call: an auto-title that cost a token would be a cost nobody
+  asked for on every session, and the first line is what four of the six leading tools use.
+  """
+  @spec auto_title(term()) :: String.t() | nil
+  def auto_title(prompt) when is_binary(prompt) do
+    line =
+      prompt
+      |> String.split(["\r\n", "\n", "\r"], parts: 2)
+      |> hd()
+      |> String.trim()
+
+    cond do
+      not String.valid?(line) or line == "" -> nil
+      String.length(line) <= @auto_title_chars -> strip_controls(line)
+      true -> line |> String.slice(0, @auto_title_chars - 1) |> String.trim_trailing() |> ellipsis()
+    end
+  end
+
+  def auto_title(_prompt), do: nil
+
+  @doc """
+  Names a session, recording who named it so a later guess cannot overwrite a decision.
+
+  `:human` always wins. `:auto` writes only where nothing has named the session yet, which
+  is what keeps a second prompt from renaming a conversation a person already named — and
+  from renaming one the runtime titled from the first prompt, since the first prompt is
+  the one that describes what the session is about.
+  """
+  @spec put_title(t(), String.t(), :auto | :human) :: t()
+  def put_title(%__MODULE__{} = state, title, :human) when is_binary(title),
+    do: %{state | title: title, title_source: :human}
+
+  def put_title(%__MODULE__{} = state, title, :auto) when is_binary(title) do
+    case title(state) do
+      nil -> %{state | title: title, title_source: :auto}
+      _already_named -> state
+    end
+  end
+
+  @doc """
+  Returns the session's title, read defensively so a pre-title checkpoint loads as itself.
+  """
+  @spec title(t()) :: String.t() | nil
+  def title(%__MODULE__{} = state), do: Map.get(state, :title)
+
+  @doc "Returns who named this session: `:human`, `:auto`, or `nil` for nobody."
+  @spec title_source(t()) :: title_source()
+  def title_source(%__MODULE__{} = state), do: Map.get(state, :title_source)
+
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
   def new_turn(id, mode, %Jido.Harness.TurnRequest{} = request) do
     request = request |> Map.from_struct() |> reject_nil_values()
@@ -369,6 +481,10 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:runtime_snapshot, nil)
     |> Map.put(:options, options)
     |> Map.put(:turns, turns)
+    # Written explicitly rather than left to the struct, so a checkpoint from a build
+    # before titles existed projects as an unnamed session instead of a missing key.
+    |> Map.put(:title, title(state))
+    |> Map.put(:title_source, title_source(state))
   end
 
   @spec public_turn(turn()) :: map()
@@ -498,7 +614,7 @@ defmodule Ouroboros.Interactive.State do
                          [:starting, :idle, :running, :awaiting_approval, :closing]) and
       is_binary(state.created_at) and is_binary(state.updated_at) and
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
-      optional_id?(state.provider_session_id) and
+      optional_id?(state.provider_session_id) and valid_title?(state) and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
       sequence_offset(state) <= state.cursor and
@@ -670,6 +786,28 @@ defmodule Ouroboros.Interactive.State do
   defp valid_id?(id), do: is_binary(id) and String.trim(id) != ""
   defp optional_id?(nil), do: true
   defp optional_id?(id), do: valid_id?(id)
+
+  # `\p{Cc}` is the Unicode control category, which covers the C0 range a terminal would
+  # interpret, `\e`, and the C1 range a UTF-8 title could smuggle one in as.
+  defp control_characters?(string), do: String.match?(string, ~r/\p{Cc}/u)
+
+  defp strip_controls(string), do: String.replace(string, ~r/\p{Cc}/u, "")
+
+  defp ellipsis(""), do: nil
+  defp ellipsis(string), do: strip_controls(string) <> "…"
+
+  # A checkpoint written before titles existed has neither key, which is read as a session
+  # nobody has named. A title present without a source, or a source without a title, is a
+  # record this build did not write and does not know how to read.
+  defp valid_title?(state) do
+    case {title(state), title_source(state)} do
+      {nil, nil} -> true
+      {title, source} when is_binary(title) and source in [:auto, :human] -> ok_title?(title)
+      _mismatched -> false
+    end
+  end
+
+  defp ok_title?(title), do: match?({:ok, ^title}, validate_title(title))
 
   defp rename(map, old, new) do
     case Map.pop(map, old) do

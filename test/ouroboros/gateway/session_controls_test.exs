@@ -57,12 +57,15 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     test "the new session controls are operate-scoped and advertised" do
       table = Methods.table()
 
-      assert table["interactive.configure"].scope == :operate
-      assert "interactive.configure" in Methods.names()
+      for method <- ["interactive.configure", "interactive.rename"] do
+        assert table[method].scope == :operate
+        assert method in Methods.names()
 
-      # A read listener must not be able to move a permission posture.
-      refute Methods.permits?(:read, table["interactive.configure"])
-      assert Methods.permits?(:operate, table["interactive.configure"])
+        # A read listener must not be able to move a permission posture or rewrite
+        # durable session state.
+        refute Methods.permits?(:read, table[method])
+        assert Methods.permits?(:operate, table[method])
+      end
     end
   end
 
@@ -144,6 +147,60 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert details["supported"] == ["default", "auto_edit", "auto_approve"]
 
       retire_session(id)
+    end
+  end
+
+  describe "interactive.rename" do
+    test "a title crosses the wire and comes back on the session", %{id: id} do
+      start_session(id)
+
+      assert {:ok, session} =
+               Methods.invoke("interactive.rename", %{"id" => id, "title" => "Named from a client"})
+
+      assert session.title == "Named from a client"
+      assert session.title_source == :human
+
+      retire_session(id)
+    end
+
+    test "a title a picker row could not draw is a parameter error, not a mangled title" do
+      assert {:error, -32_602, message} =
+               Methods.invoke("interactive.rename", %{"id" => "some-session", "title" => ""})
+
+      assert message =~ "nonempty string"
+    end
+
+    test "the bound and the control-character rule reach the client as messages", %{id: id} do
+      start_session(id)
+
+      assert {:error, -32_602, too_long} =
+               Methods.invoke("interactive.rename", %{
+                 "id" => id,
+                 "title" => String.duplicate("x", 200)
+               })
+
+      assert too_long =~ "at most 120 characters"
+
+      assert {:error, -32_602, controls} =
+               Methods.invoke("interactive.rename", %{
+                 "id" => id,
+                 "title" => "clear\e[2Jthe screen"
+               })
+
+      assert controls =~ "control characters"
+
+      retire_session(id)
+    end
+
+    test "an unsupported field is refused rather than ignored" do
+      assert {:error, -32_602, message} =
+               Methods.invoke("interactive.rename", %{
+                 "id" => "some-session",
+                 "title" => "fine",
+                 "title_source" => "human"
+               })
+
+      assert message =~ "title_source"
     end
   end
 

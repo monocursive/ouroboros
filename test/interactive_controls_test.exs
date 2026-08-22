@@ -273,10 +273,223 @@ defmodule Ouroboros.InteractiveControlsTest do
     end
   end
 
+  describe "interactive.rename and the auto-title" do
+    test "a session starts unnamed and takes the title a person gives it", %{id: id} do
+      ref = start_session(id)
+
+      assert {:ok, session} = InteractiveSession.info(ref)
+      assert State.title(session) == nil
+      assert State.title_source(session) == nil
+
+      assert {:ok, renamed} = InteractiveSession.rename(ref, "  Ledger retention sweep  ")
+
+      # Trimmed at the boundary, so every client draws the same string.
+      assert renamed.title == "Ledger retention sweep"
+      assert renamed.title_source == :human
+
+      assert {:ok, reread} = InteractiveSession.info(ref)
+      assert State.public(reread).title == "Ledger retention sweep"
+
+      retire_session(id)
+    end
+
+    test "the title survives a coordinator restart", %{id: id} do
+      ref = start_session(id)
+      assert {:ok, _renamed} = InteractiveSession.rename(ref, "Survives the BEAM")
+
+      pid = Task.whereis(id)
+      monitor = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 2_000
+
+      assert {:ok, %State{} = stored} = Store.get(id)
+      assert State.title(stored) == "Survives the BEAM"
+      assert State.title_source(stored) == :human
+
+      retire_session(id)
+    end
+
+    test "an unnamed session takes its title from the first accepted prompt", %{id: id} do
+      ref = start_session(id)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(
+                 ref,
+                 "Trace the retention sweep\nand then explain what it deletes",
+                 id: unique_id("turn")
+               )
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+
+      titled =
+        assert_eventually(fn ->
+          case InteractiveSession.info(ref) do
+            {:ok, %State{} = session} -> State.title(session) && session
+            _other -> false
+          end
+        end)
+
+      # First line only, and marked as a guess rather than a decision.
+      assert State.title(titled) == "Trace the retention sweep"
+      assert State.title_source(titled) == :auto
+
+      # A second prompt does not rename the conversation: the first one is the one that
+      # says what it is about.
+      assert :ok = HarnessAdapter.finish(adapter)
+      assert_eventually(fn -> idle?(ref) end)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "now do something else entirely",
+                 id: unique_id("turn")
+               )
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, second}, 2_000
+
+      assert_eventually(fn -> accepted_inputs(ref) >= 2 end)
+      assert {:ok, session} = InteractiveSession.info(ref)
+      assert State.title(session) == "Trace the retention sweep"
+
+      if Process.alive?(second), do: HarnessAdapter.finish(second)
+      retire_session(id)
+    end
+
+    test "a human title is never overwritten by a later prompt", %{id: id} do
+      ref = start_session(id)
+      assert {:ok, _renamed} = InteractiveSession.rename(ref, "What I called it")
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "a prompt that would have titled it",
+                 id: unique_id("turn")
+               )
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+
+      assert_eventually(fn ->
+        match?({:ok, [_ | _]}, InteractiveSession.replay(ref, cursor: 0, limit: 100))
+      end)
+
+      Process.sleep(100)
+      assert {:ok, session} = InteractiveSession.info(ref)
+      assert State.title(session) == "What I called it"
+      assert State.title_source(session) == :human
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    test "a rename overrides an auto-title and the auto-title never comes back", %{id: id} do
+      ref = start_session(id)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "the runtime's guess", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+
+      assert_eventually(fn ->
+        case InteractiveSession.info(ref) do
+          {:ok, %State{} = session} -> State.title_source(session) == :auto && session
+          _other -> false
+        end
+      end)
+
+      assert {:ok, renamed} = InteractiveSession.rename(ref, "the human's decision")
+      assert renamed.title_source == :human
+
+      assert :ok = HarnessAdapter.finish(adapter)
+      assert_eventually(fn -> idle?(ref) end)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "another prompt", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, second}, 2_000
+      assert_eventually(fn -> accepted_inputs(ref) >= 2 end)
+
+      assert {:ok, session} = InteractiveSession.info(ref)
+      assert State.title(session) == "the human's decision"
+
+      if Process.alive?(second), do: HarnessAdapter.finish(second)
+      retire_session(id)
+    end
+
+    test "a title that would break a picker row is refused rather than mangled", %{id: id} do
+      ref = start_session(id)
+
+      assert {:error, {:invalid_title, %{reason: :blank}}} = InteractiveSession.rename(ref, "   ")
+
+      assert {:error, {:invalid_title, %{reason: :too_long, limit: 120}}} =
+               InteractiveSession.rename(ref, String.duplicate("x", 121))
+
+      assert {:error, {:invalid_title, %{reason: :control_characters}}} =
+               InteractiveSession.rename(ref, "clear\e[2Jthe screen")
+
+      assert {:error, {:invalid_title, %{reason: :control_characters}}} =
+               InteractiveSession.rename(ref, "two\nlines")
+
+      assert {:error, {:invalid_title, %{reason: :not_a_string}}} =
+               InteractiveSession.rename(ref, 42)
+
+      # Exactly at the bound is fine.
+      assert {:ok, renamed} = InteractiveSession.rename(ref, String.duplicate("x", 120))
+      assert String.length(renamed.title) == 120
+
+      retire_session(id)
+    end
+
+    test "a terminal session can still be named", %{id: id} do
+      ref = start_session(id)
+      assert :ok = InteractiveSession.kill(ref)
+
+      assert_eventually(fn ->
+        case InteractiveSession.info(ref) do
+          {:ok, %State{} = session} -> State.terminal?(session) && session
+          _other -> false
+        end
+      end)
+
+      assert {:ok, renamed} = InteractiveSession.rename(ref, "the one that failed")
+      assert renamed.title == "the one that failed"
+
+      retire_session(id)
+    end
+  end
+
+  describe "State.auto_title/1" do
+    test "takes the first line, bounds it, and refuses to invent one" do
+      assert State.auto_title("one line") == "one line"
+      assert State.auto_title("first\nsecond") == "first"
+      assert State.auto_title("first\r\nsecond") == "first"
+      assert State.auto_title("  padded  \nrest") == "padded"
+
+      long = String.duplicate("a", 200)
+      titled = State.auto_title(long)
+      assert String.length(titled) == 60
+      assert String.ends_with?(titled, "…")
+
+      assert State.auto_title("") == nil
+      assert State.auto_title("   \n  ") == nil
+      assert State.auto_title(nil) == nil
+      assert State.auto_title(%{}) == nil
+
+      # A control character never reaches a picker row, whichever half of the rule it hits.
+      refute State.auto_title("bell\ain the middle") =~ "\a"
+    end
+  end
+
   defp start_session(id, opts \\ []) do
     opts = Keyword.merge([id: id, provider: @provider, workspace: File.cwd!()], opts)
     assert {:ok, ref} = InteractiveSession.start(opts)
     ref
+  end
+
+  defp idle?(ref) do
+    match?({:ok, %State{status: :idle}}, InteractiveSession.info(ref))
+  end
+
+  defp accepted_inputs(ref) do
+    case InteractiveSession.replay(ref, cursor: 0, limit: 500) do
+      {:ok, events} -> Enum.count(events, &(&1.type == :input_accepted))
+      _other -> 0
+    end
   end
 
   # A stubbed provider session never answers `close`, so these coordinators are retired
