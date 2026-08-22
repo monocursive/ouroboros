@@ -11,12 +11,17 @@ defmodule Ouroboros.Gateway.StreamingTest do
   alias Ouroboros.Gateway.Listener
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.SessionHarnessAdapter
 
   @moduletag :tmp_dir
   @moduletag :capture_log
 
   @token String.duplicate("s", 48)
   @provider :ouroboros_test
+  # Same run adapter behavior, but its sessions declare a steer-capable transport —
+  # the managed transport the base adapter synthesizes has no `steer`, which is why
+  # steer paths need this twin.
+  @session_provider :ouroboros_test_session
   # A ceiling, not a pace: every wait exits early on its condition. The full suite runs
   # this file alongside 100+ seconds of sync tests, and a starved scheduler has pushed
   # first-event latency past 5s before — the budget must absorb that without flaking.
@@ -35,7 +40,10 @@ defmodule Ouroboros.Gateway.StreamingTest do
     Application.put_env(
       :jido_harness,
       :providers,
-      Map.put(Map.new(old_providers || %{}), @provider, HarnessAdapter)
+      Map.merge(Map.new(old_providers || %{}), %{
+        @provider => HarnessAdapter,
+        @session_provider => SessionHarnessAdapter
+      })
     )
 
     Application.put_env(
@@ -43,7 +51,10 @@ defmodule Ouroboros.Gateway.StreamingTest do
       :provider_config,
       old_config
       |> then(&Map.new(&1 || %{}))
-      |> Map.put(@provider, %{test_pid: self(), retention: %{journal_dir: journal_dir}})
+      |> Map.merge(%{
+        @provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}},
+        @session_provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}}
+      })
     )
 
     config =
@@ -536,14 +547,62 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  defp start_session(opts \\ []) do
+  describe "steering" do
+    test "a steer is quoted by its own accepted event, durably", %{client: client} do
+      {ref, id} = start_session([], @session_provider)
+
+      assert call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
+
+      send_message(ref, "start the work")
+
+      # Steering needs a turn to steer: the worker refuses `:no_active_turn` otherwise.
+      steered = call(client, "interactive.steer", %{"id" => id, "input" => "go left"})
+      assert is_binary(steered["result"])
+
+      steer_event = await_steer_event(client)
+      event = steer_event["params"]["event"]
+      assert event["payload"]["kind"] == "steer"
+      assert event["payload"]["text"] == "go left"
+
+      # The text survives replay from zero: it lives in the durable projected row,
+      # not only in the live notification.
+      replayed =
+        call(client, "interactive.replay", %{"id" => id, "cursor" => 0, "limit" => 500})[
+          "result"
+        ]
+
+      assert Enum.any?(replayed, fn e ->
+               e["type"] == "input_accepted" and e["payload"]["kind"] == "steer" and
+                 e["payload"]["text"] == "go left"
+             end)
+
+      assert Enum.any?(replayed, fn e ->
+               e["type"] == "input_accepted" and e["payload"]["kind"] == "message" and
+                 e["payload"]["text"] == "start the work"
+             end)
+    end
+
+    test "steering without an active turn names the refusal instead of hanging", %{
+      client: client
+    } do
+      {ref, id} = start_session([], @session_provider)
+      wait_until_harness_attached(ref)
+
+      refused = call(client, "interactive.steer", %{"id" => id, "input" => "too early"})
+      assert refused["error"]["code"] == -32006
+    end
+  end
+
+  defp start_session(opts \\ [], provider \\ @provider)
+
+  defp start_session(opts, provider) do
     id = "gateway-stream-#{System.unique_integer([:positive, :monotonic])}"
 
     assert {:ok, ref} =
              InteractiveSession.start(
                [
                  id: id,
-                 provider: @provider,
+                 provider: provider,
                  workspace: File.cwd!(),
                  approval_mode: :prompt,
                  sandbox_mode: :read_only
@@ -586,6 +645,41 @@ defmodule Ouroboros.Gateway.StreamingTest do
       frame
     else
       await_event(client, method, type, attempts - 1)
+    end
+  end
+
+  # The message acceptance and the steer acceptance are both `input_accepted`; only
+  # the steer row carries `kind: "steer"`, so read past everything else.
+  defp await_steer_event(client, attempts \\ 50)
+
+  defp await_steer_event(_client, 0), do: flunk("no steered input_accepted arrived")
+
+  defp await_steer_event(client, attempts) do
+    frame = recv(client)
+    event = frame["params"]["event"] || %{}
+
+    if frame["method"] == "interactive.event" and event["type"] == "input_accepted" and
+         event["payload"]["kind"] == "steer" do
+      frame
+    else
+      await_steer_event(client, attempts - 1)
+    end
+  end
+
+  # Session start returns before the coordinator has attached the Harness session; a
+  # steer sent in that window is `:session_not_started`, not `:no_active_turn`.
+  defp wait_until_harness_attached(ref, attempts \\ 100)
+
+  defp wait_until_harness_attached(_ref, 0), do: flunk("session never attached a provider")
+
+  defp wait_until_harness_attached(ref, attempts) do
+    case InteractiveSession.info(ref) do
+      {:ok, %{harness_session_id: id}} when is_binary(id) ->
+        :ok
+
+      _other ->
+        Process.sleep(25)
+        wait_until_harness_attached(ref, attempts - 1)
     end
   end
 

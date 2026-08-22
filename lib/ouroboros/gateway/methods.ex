@@ -607,9 +607,11 @@ defmodule Ouroboros.Gateway.Methods do
       with :ok <- only_keys(params, ["id", "input", "node"]),
            {:ok, session} <- session_target(:interactive, params),
            {:ok, input} <- fetch_turn_input(params) do
-        # Steering injects into the active provider turn and the interactive plane has no
-        # durable steer-request ledger. Accepting a caller id here would falsely advertise
-        # that a lost acknowledgement can be reconciled or safely replayed.
+        # The interactive plane has no caller-keyed steer idempotency: Harness mints the
+        # request id inside its worker, so a lost acknowledgement cannot be replayed and
+        # re-sending injects the same text twice. What the plane *does* make durable is
+        # the text itself — the coordinator remembers the prompt and enriches the
+        # projected `input_accepted(kind=steer)` event, so replay quotes it.
         reply(InteractiveSession.steer(session, input))
       else
         {:invalid, message} -> invalid_params(message)

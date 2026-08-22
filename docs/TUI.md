@@ -298,6 +298,8 @@ reading.
 | `upgrade.history` `{module}` | `Registry.history/1` — module resolved via `String.to_existing_atom` inside a rescue; unknown → `-32602` |
 | `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
 | `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
+| `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture |
+| `fleet.doctor` | `Cluster.fleet_doctor/0` — live fleet checks merged with host-local certificate/interface/port/log/service facts |
 
 **`operate` scope** (additionally require `scope=operate`; each call emits one
 `Logger` audit line: method, param digest, connection peer)
@@ -307,12 +309,13 @@ reading.
 | `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's signed-roster tombstones, refuses a connected node, and syncs the checkpoint before success. Ordinary invite cancellation/import never invokes it; this removes local discoverability evidence, not remote files or credentials. |
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, plus fleet `machine`/`node`). The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
-| `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Steering injects into the running turn and is not durably keyed by the plane: it has no idempotency, and the steer text is not durably recorded (the transcript marks that a steer happened; replay cannot quote it). A connection loss after submission is therefore unreconcilable; the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. |
+| `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Steering injects into the running turn and is not durably keyed by the plane: Harness mints the request id inside its worker, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
 | `interactive.respond_approval` `{id, request_id, response}` | `response` is `"approve"`, `"deny"`, or `{decision, scope?, reason?}` — exactly what `Jido.Harness.ApprovalResponse` declares, matched against literal terms. `provider_options` is deliberately not accepted |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
 | `interactive.close` / `interactive.kill` `{id}` | |
 | `interactive.delete` `{id}` | `Interactive.Store.delete/1` — terminal sessions only (`closed`/`failed`/`cancelled`/`lost`). Live sessions are refused `-32006` with `reason: session_not_terminal`; the coordinator is stopped first so a retiring process cannot write the record back. The same `{id, node?}` routing as the other session verbs. |
 | `account.login.start` `{flow?}` | `CodexAppServer.login/2` — `flow` is `browser` (default) or `device_code`. The reply is the only surface that carries `authUrl`/`verificationUrl`/`userCode` (allowlisted keys), which is why it is operate-scoped while `account.read` is not |
+| `capabilities.list` `{workspace}` / `capabilities.preview` `{workspace, path}` / `capabilities.admit` `{workspace, path, session_id?}` | `Runtime.Capabilities.list/preview/admit` over `.ouroboros/capabilities/<Name>/` proposals. Preview compiles and tests in the isolated build peer; admit forges and rolls out behind the health gate (optionally `Mesh.start_agent/2`) and records `session:<id>` as the author when a session id is supplied. Preview and admit run a build peer whose default deadline is 60s, so both carry the 120s ceiling (`@forge_timeout`) that lets a named forge refusal beat `-32005`. |
 | `account.login.cancel` `{login_id}` | `CodexAppServer.cancel/2` — completion/cancel notifications are correlated by `loginId`; a stale completion for a superseded login cannot overwrite the pending one |
 | `account.logout` `{}` | `CodexAppServer.logout/1` — reply is `{}`; the account boundary returns nothing it has not named |
 
@@ -1070,13 +1073,12 @@ graying out approval/sandbox choices a provider cannot take in the `n` dialog
 Wire-encodes `normalized_options`, `normalized_values`, and
 `session_transports`, so the client has the data); a workspace lease posture
 that follows the provider's actual write capability rather than the stated
-`sandbox_mode` alone; durable steer requests (today a steer is injected
-into the running Harness turn and never checkpointed, so the transcript can
-mark that a steer happened but replay cannot quote its text, and steer has
-no idempotency; the workable shape is to store the redacted steer prompt
-keyed by the `request_id` that `Session.steer/3` returns and enrich the
-`input_accepted` event carrying it, with a bound on unconsumed entries —
-enriching from the turn's own request would quote the *original* message as
-if it were the steer); a keyboard path back to the advanced `n` session
+`sandbox_mode` alone; steer idempotency (the *text* is durable now — the session
+coordinator stores the redacted steer prompt keyed by the `request_id`
+`Session.steer/3` returned, bounded in memory, and enriches the
+`input_accepted(kind=steer)` event carrying it, so replay quotes every accepted
+steer exactly once; what remains deferred is a caller-supplied key, which the
+pinned Harness worker does not accept — a lost acknowledgement still means the
+provider may have received the same text twice); a keyboard path back to the advanced `n` session
 dialog from the coding home (the composer owns `n` there, so the dialog is
 reachable only with a session open — pinned behavior, chosen by nobody).

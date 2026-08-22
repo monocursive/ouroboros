@@ -21,7 +21,7 @@ defmodule Ouroboros.Interactive.Task do
   @retry_backoff_max_ms 5_000
   @default_unresolved_turn_deadline_ms 10 * 60 * 1_000
   @default_readiness_deadline_ms 10 * 60 * 1_000
-
+  @max_pending_steers 32
   def child_spec(id) do
     %{
       id: {__MODULE__, id},
@@ -164,8 +164,16 @@ defmodule Ouroboros.Interactive.Task do
     do: {:reply, {:error, :not_found}, runtime}
 
   def handle_call({:steer, input, opts}, _from, runtime) do
-    reply = with_harness_session(runtime, &Session.steer(&1, input, opts))
-    {:reply, reply, schedule_poll(runtime, 0)}
+    case with_harness_session(runtime, &Session.steer(&1, input, opts)) do
+      {:ok, request_id} when is_binary(request_id) ->
+        {:reply, {:ok, request_id},
+         runtime
+         |> remember_steer(request_id, input)
+         |> schedule_poll(0)}
+
+      reply ->
+        {:reply, reply, schedule_poll(runtime, 0)}
+    end
   end
 
   def handle_call({:respond_approval, request_id, response}, _from, runtime) do
@@ -274,7 +282,8 @@ defmodule Ouroboros.Interactive.Task do
       workspace_lease: lease,
       workspace_capability: capability,
       retry: no_retry(),
-      terminal_observed_at: nil
+      terminal_observed_at: nil,
+      pending_steers: []
     }
   end
 
@@ -387,6 +396,11 @@ defmodule Ouroboros.Interactive.Task do
     reconciled = reconcile_turn_ids(runtime.session, projected)
     projected = Enum.map(projected, &enrich_chat_input(&1, reconciled))
 
+    {projected, pending_steers} =
+      Enum.map_reduce(projected, runtime.pending_steers, &enrich_steer_input/2)
+
+    runtime = %{runtime | pending_steers: pending_steers}
+
     session =
       Enum.reduce(projected, reconciled, fn event, session ->
         session
@@ -417,6 +431,57 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp enrich_chat_input(event, _session), do: event
+
+  # Harness records only *that* a steer was accepted (`input_accepted` with
+  # `%{"kind" => "steer"}` and a fresh request id), never the text that produced it.
+  # `remember_steer/3` held the prompt for exactly this moment: the first projected
+  # acceptance carrying the matching request id is enriched with it — redacted like
+  # every other durable payload — and consumed, so each remembered prompt quotes one
+  # row exactly once. The ring is in-memory on purpose: a coordinator restart between
+  # the steer call and its event loses one enrichment instead of inventing a second
+  # durable schema, and an event a provider never echoes is bounded by the cap rather
+  # than growing forever.
+  defp enrich_steer_input(
+         %Event{type: :input_accepted, request_id: request_id, payload: %{"kind" => "steer"}} =
+           event,
+         pending
+       )
+       when is_binary(request_id) do
+    case List.keyfind(pending, request_id, 0) do
+      {^request_id, prompt} ->
+        {%{
+           event
+           | payload: Map.put(event.payload, "text", Jido.Harness.Redaction.redact(prompt))
+         }, List.keydelete(pending, request_id, 0)}
+
+      nil ->
+        {event, pending}
+    end
+  end
+
+  defp enrich_steer_input(event, pending), do: {event, pending}
+
+  # The prompt is held raw in process memory only; the durable copy is the redacted
+  # text this enrichment writes into the event. Oldest entries fall off the cap first,
+  # which bounds the cost of a steer whose acceptance event never arrives.
+  defp remember_steer(runtime, request_id, input) do
+    case turn_prompt(input) do
+      prompt when is_binary(prompt) and prompt != "" ->
+        %{
+          runtime
+          | pending_steers:
+              Enum.take([{request_id, prompt} | runtime.pending_steers], @max_pending_steers)
+        }
+
+      _unquotable ->
+        runtime
+    end
+  end
+
+  defp turn_prompt(input) when is_binary(input), do: input
+  defp turn_prompt(%{prompt: prompt}) when is_binary(prompt), do: prompt
+  defp turn_prompt(%{"prompt" => prompt}) when is_binary(prompt), do: prompt
+  defp turn_prompt(_input), do: nil
 
   defp refresh_session(runtime) do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
