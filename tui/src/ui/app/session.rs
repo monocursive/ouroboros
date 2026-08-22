@@ -67,6 +67,29 @@ pub(super) struct ReconciliationDraftOwner {
     pub(super) generation: u64,
 }
 
+/// How many drafts this client will hold for one session before Enter refuses.
+///
+/// The runtime's own follow-up queue is durable and unbounded by anything this client
+/// can see; this bounds only what is still *here*, unsent, and would be lost if the
+/// process died. Thirty-two is the gateway's own attachment ceiling reused as a number
+/// that is obviously a bound rather than a guess.
+pub const QUEUE_LIMIT: usize = 32;
+
+/// A draft the operator sent with Enter that this client could not dispatch yet.
+///
+/// It exists because JSON-RPC acknowledgements are the only proof a turn was accepted and
+/// exactly one same-session mutation may be outstanding at a time (`submission_sequence`
+/// is what protects the order the keys were pressed). Before B3 a second Enter was
+/// *refused* and the draft stayed in the editor; now it is accepted, drawn, and
+/// dispatched the moment the earlier acknowledgement lands.
+///
+/// These are the rows labelled `local` in the queue panel. They are **not** durable: only
+/// the runtime's own `queue_changed` depth is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedDraft {
+    pub input: String,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SavedComposerDraft {
     pub(super) input: String,
@@ -163,6 +186,13 @@ pub struct SessionsTab {
     /// Rows the operator hid or deleted in this client. Last-known reconstruction must
     /// not bring them back; a later list that actually observes the id clears the hide.
     pub(super) hidden: HashSet<(Plane, String)>,
+    /// Drafts accepted with Enter that have not reached the runtime yet, oldest first.
+    ///
+    /// Keyed by session rather than by the open composer, exactly like
+    /// [`pending_reconciliations`](Self::pending_reconciliations), so switching away and
+    /// back does not lose them and an interrupt does not either (Claude Code #16905: Esc
+    /// must keep working *and* keep the queue).
+    pub(super) queued_drafts: HashMap<(Plane, String), Vec<QueuedDraft>>,
 }
 
 impl SessionsTab {
@@ -349,6 +379,22 @@ impl SessionsTab {
 
     pub(super) fn clear_reply_pending(&mut self, plane: Plane, id: &str) {
         self.pending_replies.remove(&(plane, id.to_string()));
+    }
+
+    /// The local, not-yet-durable drafts for the open session, oldest first.
+    pub fn open_queued_drafts(&self) -> &[QueuedDraft] {
+        self.open
+            .as_ref()
+            .and_then(|key| self.queued_drafts.get(key))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The runtime's own follow-up depth for the open session, as `queue_changed` last
+    /// reported it. `0` where no such event has been seen — the footer is the surface that
+    /// distinguishes "zero" from "never said", and the queue panel only needs the rows.
+    pub fn open_runtime_queue(&self) -> usize {
+        self.open_watch().map(Watch::queue_len).unwrap_or(0)
     }
 }
 
@@ -598,6 +644,14 @@ impl App {
             return;
         }
 
+        // B3. `↑` on an empty draft takes the newest queued draft back before the editor
+        // can read it as prompt history. Claimed here rather than in the editor because
+        // the queue belongs to the session, not to the text field, and because a draft
+        // with text in it means the operator is writing rather than retracting.
+        if self.retract_key(key) && self.retract_queued_draft() {
+            return;
+        }
+
         let action = self
             .sessions
             .composer
@@ -614,9 +668,70 @@ impl App {
 
         match action {
             EditorAction::Submit => self.submit_composer(),
+            EditorAction::SubmitAlternate => self.alternate_submit(),
             EditorAction::Cancel => self.escape_from_prompt(),
             EditorAction::Scroll(delta) => self.move_by(delta * 10),
             EditorAction::None => {}
+        }
+    }
+
+    /// Whether this keystroke is the bare `↑` that retracts, on an empty draft.
+    fn retract_key(&self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::KeyCode;
+
+        key.code == KeyCode::Up
+            && key.modifiers.is_empty()
+            && self
+                .sessions
+                .composer
+                .as_ref()
+                .is_some_and(|composer| composer.editor.is_empty())
+    }
+
+    /// `Alt+Enter`: the second send key.
+    ///
+    /// Two explicit keys is the fix R1 §4d(2) names for the queue/steer confusion that
+    /// produced Codex #13595 and #17285 — never one key whose meaning depends on timing.
+    /// Enter queues; `Alt+Enter` steers. Where the runtime declared `steer: false` this
+    /// session has no second verb at all, so the key keeps the newline it always inserted
+    /// there and the composer chrome does not advertise a steer.
+    fn alternate_submit(&mut self) {
+        if !self.steer_offered() {
+            let catalog = self.completion_catalog.clone();
+
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.paste("\n", &catalog);
+                composer.user_changed_draft();
+            }
+
+            return;
+        }
+
+        let Some(composer) = self.sessions.composer.as_ref() else {
+            return;
+        };
+
+        if composer.editor.submission().is_none() {
+            return;
+        }
+
+        let restore = composer.verb;
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.verb = ComposerVerb::Steer;
+        }
+
+        self.submit_composer();
+
+        // The verb is a property of the composer, not of the keystroke: an `Alt+Enter`
+        // must not leave the next bare Enter meaning "steer".
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            if composer.verb == ComposerVerb::Steer {
+                composer.verb = if restore == ComposerVerb::Steer {
+                    ComposerVerb::FollowUp
+                } else {
+                    restore
+                };
+            }
         }
     }
 
@@ -799,10 +914,61 @@ impl App {
         // JSON-RPC requests are handled by independent gateway tasks. Keep the next input
         // visible and untouched until the prior same-session mutation is classified, so
         // scheduler order can never replace the order in which the operator pressed Enter.
+        // B3. Before this slice a second Enter was refused and the draft was left in the
+        // editor for the operator to press Enter again later. That is the one-in-flight
+        // rule showing through as a *refusal*; the rule itself is still here — exactly one
+        // same-session mutation may be outstanding, because `submission_sequence` is what
+        // keeps the order the keys were pressed — but the draft is now accepted, drawn in
+        // the queue panel as `local`, and dispatched as a follow-up the moment the earlier
+        // acknowledgement lands.
+        //
+        // A steer is never queued: it is an injection into a call that is running *now*,
+        // and one delivered several seconds later against a different tool boundary is not
+        // the thing that was asked for.
+        if verb != ComposerVerb::Steer && self.same_session_mutation_in_flight(plane, &id) {
+            let queued = self
+                .sessions
+                .queued_drafts
+                .entry((plane, id.clone()))
+                .or_default();
+
+            if queued.len() >= QUEUE_LIMIT {
+                self.inform(
+                    format!(
+                        "{id} already has {QUEUE_LIMIT} drafts waiting here; this one stays in \
+                         the editor"
+                    ),
+                    NoticeKind::Warn,
+                );
+                return;
+            }
+
+            queued.push(QueuedDraft {
+                input: input.clone(),
+            });
+            let ordinal = queued.len();
+
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.accept_submission();
+                composer.user_changed_draft();
+            }
+            self.remember_composer_history();
+
+            self.inform(
+                format!(
+                    "queued here as #{ordinal} for {id}; it is sent when the earlier request is \
+                     acknowledged. ↑ takes it back"
+                ),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
         if self.same_session_mutation_in_flight(plane, &id) {
             self.inform(
                 format!(
-                    "the earlier request for {id} is still awaiting acknowledgement; this draft remains unsent"
+                    "the earlier request for {id} is still awaiting acknowledgement; this steer \
+                     remains unsent"
                 ),
                 NoticeKind::Info,
             );
@@ -812,6 +978,28 @@ impl App {
         let Some(composer) = self.sessions.composer.as_mut() else {
             return;
         };
+        composer.editor.accept_submission();
+        composer.user_changed_draft();
+
+        // After the first immediate message, every later acknowledged submission uses
+        // Harness's durable queueing verb.
+        if composer.verb == ComposerVerb::Message {
+            composer.verb = ComposerVerb::FollowUp;
+        }
+
+        self.remember_composer_history();
+        self.dispatch_composer_turn(plane, &id, verb, input);
+    }
+
+    /// Issues one turn. The single place a composer submission, a queued draft, and a
+    /// retried steer all become a call, so the three cannot drift apart.
+    fn dispatch_composer_turn(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        verb: ComposerVerb,
+        input: String,
+    ) {
         let turn_id = if verb == ComposerVerb::Steer {
             // A steer is an injection into an already-running provider call. There is no
             // durable request ledger behind it, so do not manufacture an idempotency key.
@@ -819,17 +1007,7 @@ impl App {
         } else {
             Some(new_turn_id())
         };
-        composer.editor.accept_submission();
-        composer.user_changed_draft();
 
-        // After the first immediate message, every later acknowledged submission uses
-        // Harness's durable queueing verb. An Enter while this acknowledgement is still
-        // outstanding was returned above with the next draft visibly untouched.
-        if composer.verb == ComposerVerb::Message {
-            composer.verb = ComposerVerb::FollowUp;
-        }
-
-        self.remember_composer_history();
         let submission_sequence = self.next_composer_submission_sequence();
         let (label, method) = match verb {
             ComposerVerb::Message => ("send_message", plane.method("send_message")),
@@ -838,14 +1016,14 @@ impl App {
         };
 
         if matches!(verb, ComposerVerb::Message | ComposerVerb::FollowUp) {
-            self.sessions.mark_reply_pending(plane, &id);
+            self.sessions.mark_reply_pending(plane, id);
         }
 
         let tag = Tag::ComposerAction {
             label,
             verb,
             plane,
-            id: id.clone(),
+            id: id.to_string(),
             turn_id: turn_id.clone(),
             input: input.clone(),
             reconciling: false,
@@ -856,9 +1034,100 @@ impl App {
             Some(turn_id) => json!({ "id": id, "input": input, "turn_id": turn_id }),
             None => json!({ "id": id, "input": input }),
         };
-        let params = self.routed_session_params(plane, &id, params);
+        let params = self.routed_session_params(plane, id, params);
 
         self.issue(Call::new(tag, method, params));
+    }
+
+    /// Sends whatever the queue is holding, for every session, as soon as it can.
+    ///
+    /// Driven from the answer path and from the tick rather than from one call site, so a
+    /// draft queued behind a request that failed, was refused, or simply took a while is
+    /// still sent — and so that a session the operator has navigated away from does not
+    /// silently keep an unsent draft forever.
+    ///
+    /// Two things hold it back, both of them existing rules rather than new ones: a
+    /// same-session mutation still in flight (the one-in-flight rule), and an
+    /// outcome-unknown turn awaiting reconciliation (Enter reconciles the oldest before it
+    /// can submit anything newer, and a queued draft is newer).
+    pub(super) fn flush_queued_drafts(&mut self) {
+        let ready = self
+            .sessions
+            .queued_drafts
+            .iter()
+            .filter(|(_key, drafts)| !drafts.is_empty())
+            .map(|(key, _drafts)| key.clone())
+            .filter(|(plane, id)| {
+                !self.same_session_mutation_in_flight(*plane, id)
+                    && self
+                        .sessions
+                        .pending_reconciliations
+                        .get(&(*plane, id.clone()))
+                        .map_or(true, VecDeque::is_empty)
+            })
+            .collect::<Vec<_>>();
+
+        for (plane, id) in ready {
+            let Some(drafts) = self.sessions.queued_drafts.get_mut(&(plane, id.clone())) else {
+                continue;
+            };
+
+            if drafts.is_empty() {
+                continue;
+            }
+
+            let draft = drafts.remove(0);
+
+            if drafts.is_empty() {
+                self.sessions.queued_drafts.remove(&(plane, id.clone()));
+            }
+
+            // Durable queueing is what `follow_up` is for, and this draft is by
+            // construction not the session's first turn: something was in flight when it
+            // was typed.
+            self.dispatch_composer_turn(plane, &id, ComposerVerb::FollowUp, draft.input);
+        }
+    }
+
+    /// `↑` on an empty draft: the newest queued draft comes back into the editor.
+    ///
+    /// Claude Code's rule, and the reason a visible queue is safe to have at all — a queue
+    /// nobody can take something out of is a queue that has swallowed the message.
+    /// Returns whether anything was retracted, so the key can fall through to prompt
+    /// history when the queue is empty.
+    pub(super) fn retract_queued_draft(&mut self) -> bool {
+        let Some(key) = self.sessions.open.clone() else {
+            return false;
+        };
+
+        let Some(drafts) = self.sessions.queued_drafts.get_mut(&key) else {
+            return false;
+        };
+
+        let Some(draft) = drafts.pop() else {
+            return false;
+        };
+
+        let remaining = drafts.len();
+
+        if remaining == 0 {
+            self.sessions.queued_drafts.remove(&key);
+        }
+
+        let catalog = self.completion_catalog.clone();
+
+        if let Some(composer) = self.sessions.composer.as_mut() {
+            composer.editor.clear_text();
+            composer.editor.paste(&draft.input, &catalog);
+            composer.user_changed_draft();
+        }
+
+        self.remember_composer_history();
+        self.inform(
+            format!("took the newest queued draft back; {remaining} still waiting here"),
+            NoticeKind::Info,
+        );
+        true
     }
 
     pub(super) fn activate_slash_command(&mut self, input: &str) -> bool {

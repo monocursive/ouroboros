@@ -107,6 +107,11 @@ impl CompletionCatalog {
 pub enum EditorAction {
     None,
     Submit,
+    /// The second send key (`Alt+Enter`). What it *means* is the caller's to decide: the
+    /// editor does not know whether the open session can be steered, and B3's whole point
+    /// is that queue and steer are two explicit keys rather than one key whose meaning
+    /// depends on timing (R1 §4d(2); Codex #13595, #17285).
+    SubmitAlternate,
     Cancel,
     Scroll(isize),
 }
@@ -217,11 +222,15 @@ impl Editor {
                     EditorAction::Cancel
                 }
             }
+            // The second send key. Only reachable where the terminal reports the modifier
+            // at all — without the kitty keyboard protocol `Alt+Enter` arrives as a bare
+            // `Enter` — and the composer chrome advertises it on exactly that condition.
+            KeyCode::Enter if alt => EditorAction::SubmitAlternate,
             // Only reachable where the terminal reports the modifier at all: without the
             // kitty keyboard protocol, `Shift+Enter` arrives as a bare `Enter` and submits.
             // The footers advertise it on exactly that condition; `Ctrl+J` below is the
             // newline every terminal can send.
-            KeyCode::Enter if shift || alt => {
+            KeyCode::Enter if shift => {
                 self.insert("\n");
                 EditorAction::None
             }

@@ -79,7 +79,7 @@ pub use overlays::{
     AccountDialog, AccountFlow, Command, CommandPalette, Overlay, PromptKind, APPROVAL_CHOICES,
     APPROVAL_ROWS, SANDBOX_ROWS,
 };
-pub use session::{Composer, ComposerVerb, SessionsTab};
+pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsField};
 pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
 
@@ -1480,6 +1480,9 @@ impl App {
                 self.hint_mouse_capture();
                 self.poll();
                 self.refresh_chrome();
+                // B3. A draft queued behind a request that failed, was refused, or simply
+                // took a while is still a draft the operator pressed Enter on.
+                self.flush_queued_drafts();
             }
             Msg::Redraw => {}
             Msg::Scroll(delta) => {
@@ -1526,7 +1529,11 @@ impl App {
                     }
                 }
             }
-            Msg::Answer { tag, result } => self.answer(tag, result),
+            Msg::Answer { tag, result } => {
+                self.answer(tag, result);
+                // The acknowledgement that was blocking the queue may have just landed.
+                self.flush_queued_drafts();
+            }
             Msg::Reconnected(hello) => {
                 self.connection = Connection::Live;
                 self.hello = *hello;
