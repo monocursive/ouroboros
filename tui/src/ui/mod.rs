@@ -944,7 +944,19 @@ pub async fn run(
                     // sitting in the data directory after the editor closes.
                     let _ = fs::remove_file(&path);
 
-                    let result = screen.resume().and(opened);
+                    // Re-entering the alternate screen leaves it blank, and this detour
+                    // changed no App state at all — so without a clear, Ratatui's diff
+                    // would find nothing to repaint and the operator would come back from
+                    // their editor to an empty screen.
+                    let result = screen
+                        .resume()
+                        .and_then(|()| {
+                            screen
+                                .terminal
+                                .clear()
+                                .context("repainting after the transcript viewer")
+                        })
+                        .and(opened);
 
                     if let Err(error) = result {
                         app.inform(
