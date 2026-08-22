@@ -348,6 +348,42 @@ impl SessionsTab {
 }
 
 impl App {
+    // ----- what the open session can actually do (B0/D14) ----------------------------
+
+    /// The transport capabilities the runtime declared for the open session.
+    ///
+    /// Default — every capability [`Capability::Unknown`] — where there is no open
+    /// session or the gateway predates the declaration. Unknown is never "no": the
+    /// predicates below hide a control only where the runtime said `false`, because a
+    /// client that hid keys on a gateway's silence would be inventing a ceiling.
+    pub fn open_capabilities(&self) -> Capabilities {
+        self.sessions
+            .open_info()
+            .map(|session| session.capabilities.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether the Steer verb, `s`, `ctrl+x s`, `/steer` and the palette entry exist.
+    ///
+    /// X2: `steer/3` answers `{:error, :unsupported}` on every provider but `pi`, and the
+    /// client offered it on all of them. Now it is offered where the transport says so.
+    pub fn steer_offered(&self) -> bool {
+        self.open_capabilities().steer.offered()
+    }
+
+    /// Whether the approval key and its palette entry exist. A managed transport has no
+    /// approvals channel at all, so nothing will ever open that modal there.
+    pub fn approvals_offered(&self) -> bool {
+        self.open_capabilities().approvals.offered()
+    }
+
+    /// Whether attachment affordances may be offered. Nothing uses it yet — B4 is the
+    /// slice that builds them — and it is here so that the predicate and the capability
+    /// arrive together rather than the affordance arriving first.
+    pub fn multimodal_offered(&self) -> bool {
+        self.open_capabilities().multimodal.offered()
+    }
+
     // ----- session verbs -------------------------------------------------------------
 
     /// Opens the composer, refusing where the plane has no such verb rather than sending
@@ -370,6 +406,29 @@ impl App {
                 format!(
                     "{id} is a coding task: it runs one objective to completion and takes no \
                      input. `x` cancels it"
+                ),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        // X2. Steer is unsupported on every transport but `pi`'s, and the runtime says so
+        // per session. Refused here with the reason rather than sent and answered
+        // `{:error, :unsupported}` — the refusal names the transport that cannot take it,
+        // which is the fact an operator needs, and the key is not advertised anywhere
+        // else on a session that would refuse it.
+        if requested_verb == ComposerVerb::Steer && !self.steer_offered() {
+            let capabilities = self.open_capabilities();
+            let transport = capabilities
+                .transport
+                .as_deref()
+                .map(|transport| format!(" over {transport}"))
+                .unwrap_or_default();
+
+            self.inform(
+                format!(
+                    "{id} cannot be steered mid-turn{transport}; press Enter to queue a \
+                     follow-up instead"
                 ),
                 NoticeKind::Info,
             );
@@ -934,9 +993,28 @@ impl App {
 
         if has_pending {
             self.open_approval(plane, id);
-        } else {
+        } else if self.approvals_offered() {
             self.inform(
                 format!("{id} is not waiting on an approval"),
+                NoticeKind::Info,
+            );
+        } else {
+            // X1's client half. A managed transport runs one process per turn with no
+            // channel to ask through, so this session will never raise an approval and
+            // the key is not advertised for it. Saying why beats "not waiting on one",
+            // which reads as "not yet".
+            let capabilities = self.open_capabilities();
+            let transport = capabilities
+                .transport
+                .as_deref()
+                .map(|transport| format!("{transport} "))
+                .unwrap_or_default();
+
+            self.inform(
+                format!(
+                    "{id} has no approvals channel: {transport}sessions cannot ask before \
+                     acting, so nothing will open this modal"
+                ),
                 NoticeKind::Info,
             );
         }

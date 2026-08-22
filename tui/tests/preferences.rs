@@ -117,6 +117,7 @@ fn connected(defaults: Defaults) -> App {
     app.config = Config {
         defaults,
         onboarding: Onboarding { welcomed: true },
+        ..Config::default()
     };
 
     answer(

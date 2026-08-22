@@ -36,19 +36,21 @@ use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
-    CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo,
-    StartRequest, StartedRef,
+    Capabilities, CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode,
+    SessionInfo, StartRequest, StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
 use crate::transport::ClientError;
 
 use super::editor::{CompletionCatalog, Editor, EditorAction};
+use super::notify::{self, Terminal as TerminalIdentity};
 use super::transcript::{Note, Watch};
 use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod footer;
 mod home;
 mod keys;
 mod machines;
@@ -65,6 +67,7 @@ use session::{
     PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
 };
 
+pub use footer::{SessionFacts, TranscriptFacts};
 pub use keys::LEADER_KEYS;
 pub use machines::{
     AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,
@@ -328,6 +331,13 @@ pub enum Msg {
     },
     /// The driver declined a second machine discovery scan; one is still running.
     MachineScanPending,
+    /// The terminal reported focus in or out (CSI ?1004h). `true` is focused.
+    ///
+    /// Assumed focused until told otherwise: a terminal that never sends this is one
+    /// whose user is, as far as anything here can tell, looking at it.
+    Focus(bool),
+    /// What a `[statusline] command` printed, or why it did not.
+    StatusLine(Result<String, String>),
 }
 
 /// A panel's value, its freshness, and whether a refresh is in flight.
@@ -711,6 +721,61 @@ pub struct App {
     /// After ending a session chosen from the switcher, put the switcher back so several
     /// dead rows can be cleared without reopening it each time.
     resume_session_picker: bool,
+    /// Whether this terminal has focus, as it reports through CSI ?1004h.
+    ///
+    /// `true` until a `FocusLost` says otherwise, and it stays `true` forever in a
+    /// terminal that does not implement focus reporting. That is the safe default for the
+    /// thing it gates: with `when = "unfocused"` an unreporting terminal gets no bells at
+    /// all, which is quieter than the alternative of ringing at every turn.
+    pub focused: bool,
+    /// What this terminal says it is, for resolving `[notifications] mode = "auto"`. Set
+    /// by the driver from the environment; a test sets it directly.
+    pub terminal: TerminalIdentity,
+    /// The title this client last asked the driver to write, so an unchanged title is not
+    /// re-emitted eighty times a second.
+    title_shown: Option<String>,
+    title_pending: Option<String>,
+    /// Notifications the driver should emit. A `Vec` rather than an `Option` because two
+    /// sessions can want attention in the same frame; bounded by [`NOTIFY_BURST`] so a
+    /// storm of events cannot become a storm of bells.
+    notify_pending: Vec<notify::Signal>,
+    statusline: StatusLine,
+}
+
+/// How many notifications one frame may emit. A session that produced fifty terminal
+/// turns in one batch is one thing worth noticing, not fifty.
+const NOTIFY_BURST: usize = 2;
+
+/// Claude Code debounces its status line by 300 ms; this is that window rounded up to a
+/// whole number of the 80 ms tick, so the arithmetic stays integral and testable.
+const STATUSLINE_DEBOUNCE_TICKS: u64 = 4;
+
+/// The scriptable status line's state machine.
+///
+/// Its whole job is to run the command as rarely as it can get away with: only when the
+/// object it would be fed differs from the one it was last fed, only after that object
+/// has stopped changing for the debounce window, and never twice at once.
+#[derive(Debug, Default)]
+pub struct StatusLine {
+    /// The payload the running (or last finished) invocation was given.
+    dispatched: Option<Value>,
+    /// A payload that differs from `dispatched`, and the tick it was first seen at.
+    settling: Option<(Value, u64)>,
+    /// Whether an invocation is outstanding. One at a time: a command slower than the
+    /// debounce window must not stack.
+    running: bool,
+    /// The first line of the last successful run. `None` means there is no row.
+    line: Option<String>,
+    /// Whether a failure has already been reported. Once, then silence — a status line
+    /// that re-announced a broken command every frame would own the notice line.
+    reported: bool,
+}
+
+impl StatusLine {
+    /// What to draw above the footer, if anything.
+    pub fn line(&self) -> Option<&str> {
+        self.line.as_deref().filter(|line| !line.trim().is_empty())
+    }
 }
 
 impl App {
@@ -769,7 +834,164 @@ impl App {
             external_editor_pending: None,
             next_composer_submission_sequence: 0,
             resume_session_picker: false,
+            focused: true,
+            terminal: TerminalIdentity::default(),
+            title_shown: None,
+            title_pending: None,
+            notify_pending: Vec::new(),
+            statusline: StatusLine::default(),
         }
+    }
+
+    /// The row the `[statusline] command` produced, for the renderer.
+    pub fn statusline(&self) -> &StatusLine {
+        &self.statusline
+    }
+
+    /// The title the driver should write, when it differs from the one already written.
+    pub fn take_title(&mut self) -> Option<String> {
+        self.title_pending.take()
+    }
+
+    /// Notifications the driver should emit, and the channel to emit them through.
+    ///
+    /// The channel is resolved here rather than in the driver so that `mode = "auto"`
+    /// stays a pure function of state a test can set.
+    pub fn take_notifications(&mut self) -> Vec<(notify::Channel, notify::Signal)> {
+        let signals = std::mem::take(&mut self.notify_pending);
+
+        let Some(channel) = notify::channel(self.config.notifications.mode(), &self.terminal)
+        else {
+            return Vec::new();
+        };
+
+        signals
+            .into_iter()
+            .map(|signal| (channel, signal))
+            .collect()
+    }
+
+    /// The status-line command the driver should run, and the object to feed it.
+    ///
+    /// `None` until the facts have stopped changing for the debounce window, and never
+    /// while an invocation is outstanding.
+    pub fn take_statusline_request(&mut self) -> Option<(String, Value)> {
+        let command = self.config.statusline.command()?.to_string();
+
+        if self.statusline.running {
+            return None;
+        }
+
+        let (_key, since) = self.statusline.settling.as_ref()?;
+
+        if self.ticks.saturating_sub(*since) < STATUSLINE_DEBOUNCE_TICKS {
+            return None;
+        }
+
+        let (key, _since) = self.statusline.settling.take()?;
+        self.statusline.running = true;
+        self.statusline.dispatched = Some(key);
+
+        // Built fresh rather than replayed from the key, so the elapsed time the command
+        // is handed is the one at dispatch and not the one that started the debounce.
+        Some((command, self.statusline_payload()))
+    }
+
+    /// Notices a change worth re-running the status-line command for.
+    ///
+    /// The comparison deliberately drops `elapsed_ms`: it changes every tick while a turn
+    /// runs, and a status line that re-ran twelve times a second would never settle and
+    /// would fork a process for each attempt. Claude Code's own contract is the same one —
+    /// the command runs on discrete events, not on a clock.
+    fn statusline_key(&self) -> Value {
+        let mut payload = self.statusline_payload();
+
+        if let Some(map) = payload.as_object_mut() {
+            map.remove("elapsed_ms");
+        }
+
+        payload
+    }
+
+    /// The window title and the status-line debounce, once per tick.
+    ///
+    /// On the tick rather than on every message: both read the open session's transcript,
+    /// and a burst of a hundred streamed deltas must cost one pass, not a hundred.
+    fn refresh_chrome(&mut self) {
+        let title = notify::title(self.activity(), self.title_workspace().as_deref());
+
+        if self.title_shown.as_deref() != Some(title.as_str()) {
+            self.title_shown = Some(title.clone());
+            self.title_pending = Some(title);
+        }
+
+        if self.config.statusline.command().is_none() {
+            self.statusline = StatusLine::default();
+            return;
+        }
+
+        if self.statusline.running {
+            return;
+        }
+
+        let key = self.statusline_key();
+
+        if self.statusline.dispatched.as_ref() == Some(&key) {
+            self.statusline.settling = None;
+            return;
+        }
+
+        match &self.statusline.settling {
+            // Still the same candidate: leave the clock where it started.
+            Some((settling, _since)) if *settling == key => {}
+            _changed => self.statusline.settling = Some((key, self.ticks)),
+        }
+    }
+
+    /// Arms a notification, if this session's state and the operator's settings allow one.
+    fn notify(&mut self, signal: notify::Signal) {
+        if !notify::permitted(self.config.notifications.when(), self.focused) {
+            return;
+        }
+
+        if notify::channel(self.config.notifications.mode(), &self.terminal).is_none() {
+            return;
+        }
+
+        if self.notify_pending.len() >= NOTIFY_BURST {
+            return;
+        }
+
+        self.notify_pending.push(signal);
+    }
+
+    /// What a live stream frame is worth interrupting someone for, and which session it
+    /// was about.
+    ///
+    /// Live frames only — this is read from [`Msg::Notification`], never from a replay
+    /// answer, so opening a session with history rings nothing.
+    fn live_signal(notification: &Notification) -> Option<(Plane, String, notify::Signal)> {
+        let plane = match notification.method.as_str() {
+            "interactive.event" => Plane::Interactive,
+            "coding.event" => Plane::Coding,
+            _not_an_event => return None,
+        };
+
+        let id = notification.params.get("id").and_then(Value::as_str)?;
+        let kind = notification
+            .params
+            .pointer("/event/type")
+            .and_then(Value::as_str)?;
+
+        let signal = match EventType::parse(kind) {
+            EventType::ApprovalRequested => notify::Signal::NeedsInput,
+            EventType::TurnCompleted | EventType::TurnFailed | EventType::TurnInterrupted => {
+                notify::Signal::TurnDone
+            }
+            _uninteresting => return None,
+        };
+
+        Some((plane, id.to_string(), signal))
     }
 
     pub fn take_open_url(&mut self) -> Option<String> {
@@ -1112,10 +1334,47 @@ impl App {
                 self.expire_notice();
                 self.expire_chords();
                 self.poll();
+                self.refresh_chrome();
             }
             Msg::Redraw => {}
             Msg::Scroll(delta) => self.scroll_view(delta),
-            Msg::Notification(notification) => self.notification(notification),
+            Msg::Notification(notification) => {
+                let candidate = Self::live_signal(&notification);
+                self.notification(notification);
+
+                // Armed after the dispatch, so a frame for a session this client is no
+                // longer subscribed to — the one frame that can cross an unsubscribe —
+                // does not ring for a conversation nobody is following.
+                if let Some((plane, id, signal)) = candidate {
+                    if self.sessions.watches.contains_key(&(plane, id)) {
+                        self.notify(signal);
+                    }
+                }
+            }
+            Msg::Focus(focused) => self.focused = focused,
+            Msg::StatusLine(result) => {
+                self.statusline.running = false;
+
+                match result {
+                    Ok(line) => {
+                        self.statusline.line = Some(line).filter(|line| !line.trim().is_empty())
+                    }
+                    Err(error) => {
+                        self.statusline.line = None;
+
+                        // Once. A command that is broken is broken on every tick, and a
+                        // notice line that said so every tick would be the status line's
+                        // failure taking over the row it failed to fill.
+                        if !self.statusline.reported {
+                            self.statusline.reported = true;
+                            self.inform(
+                                format!("the statusline command failed: {error}"),
+                                NoticeKind::Warn,
+                            );
+                        }
+                    }
+                }
+            }
             Msg::Answer { tag, result } => self.answer(tag, result),
             Msg::Reconnected(hello) => {
                 self.connection = Connection::Live;

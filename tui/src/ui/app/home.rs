@@ -471,8 +471,10 @@ impl App {
             }
             Some(Overlay::Commands(palette)) => {
                 palette.query.push_str(&flattened);
-                // The selection is derived from the query, exactly as for a typed character.
-                palette.selected = palette.first_match();
+                // The selection is derived from the query, exactly as for a typed
+                // character: the visible list is already filtered to what matches, so the
+                // first row is the first match.
+                palette.selected = 0;
                 true
             }
             Some(Overlay::Prompt { buffer, .. }) => push_into(Some(buffer), &flattened),

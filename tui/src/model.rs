@@ -443,6 +443,167 @@ pub fn compact(value: &Value) -> String {
     }
 }
 
+/// What one entry of `options.capabilities` said.
+///
+/// Three states rather than a `bool`, and the third one is the point. The runtime derives
+/// this map from the transport a session actually selected; a gateway that predates the
+/// declaration sends no map at all, and a map a later runtime extends carries keys this
+/// build has never heard of. Neither of those is the runtime saying "no", so neither
+/// becomes [`Capability::No`] — and only [`Capability::No`] is allowed to take a key off
+/// the screen (D14: the client never asserts a limit the runtime did not declare).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Capability {
+    /// No claim was made. Chrome that depends on it stays as it was.
+    #[default]
+    Unknown,
+    /// Declared `false`. The transport cannot do this at all, and nothing offers it.
+    No,
+    /// Declared as a mechanism — `native`, `managed`, `process`, or a word a later
+    /// runtime invents. Carried verbatim rather than collapsed to `true`, because
+    /// "managed" and "native" are different promises about *when* a control takes effect.
+    Yes(String),
+}
+
+impl Capability {
+    fn decode(value: Option<&Value>) -> Self {
+        match value {
+            None | Some(Value::Null) => Self::Unknown,
+            Some(Value::Bool(false)) => Self::No,
+            Some(Value::Bool(true)) => Self::Yes("true".to_string()),
+            Some(Value::String(mechanism)) if mechanism.trim().is_empty() => Self::Unknown,
+            Some(Value::String(mechanism)) => Self::Yes(mechanism.clone()),
+            // A shape this build cannot read is not a refusal. Treated as unknown so a
+            // later runtime that answers a capability with an object does not silently
+            // delete a working key from this client's chrome.
+            Some(_other) => Self::Unknown,
+        }
+    }
+
+    /// Whether chrome that depends on this capability is offered.
+    ///
+    /// Everything but an explicit `false`. An unknown capability keeps whatever the
+    /// client did before the declaration existed, because hiding a control the runtime
+    /// never spoke about would be this client inventing a ceiling.
+    pub fn offered(&self) -> bool {
+        !matches!(self, Self::No)
+    }
+
+    /// Whether the runtime positively declared it. The footer uses this for the facts it
+    /// only states when it knows them.
+    pub fn declared(&self) -> bool {
+        matches!(self, Self::Yes(_))
+    }
+
+    /// The mechanism the runtime named, if it named one.
+    pub fn mechanism(&self) -> Option<&str> {
+        match self {
+            Self::Yes(mechanism) => Some(mechanism.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// `options.capabilities` from `Interactive.State.public/1`.
+///
+/// Derived server-side from the provider spec and the transport the session selected, so
+/// it is answered for a session listed after a restart as well as for a live one. Every
+/// field defaults to [`Capability::Unknown`], which is what an older gateway's silence
+/// means.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    /// The transport's own name (`app_server`, `acp`, `managed`, …). A label, not a
+    /// yes/no, so it is kept as the string the runtime used.
+    pub transport: Option<String>,
+    pub process: Capability,
+    pub multi_turn: Capability,
+    pub follow_up: Capability,
+    pub interrupt: Capability,
+    pub approvals: Capability,
+    pub steer: Capability,
+    pub multimodal: Capability,
+    pub dynamic_model: Capability,
+    pub dynamic_configuration: Capability,
+    /// Whether a map was present at all. `false` means an older gateway, and is the
+    /// difference between "this session cannot steer" and "nobody said".
+    pub declared: bool,
+}
+
+impl Capabilities {
+    /// Reads `options.capabilities`. Unknown keys are ignored; an absent or non-object
+    /// value is "unknown", never "false".
+    pub fn decode(value: Option<&Value>) -> Self {
+        let Some(map) = value.and_then(Value::as_object) else {
+            return Self::default();
+        };
+
+        let at = |key: &str| Capability::decode(map.get(key));
+
+        Self {
+            transport: map
+                .get("transport")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+            process: at("process"),
+            multi_turn: at("multi_turn"),
+            follow_up: at("follow_up"),
+            interrupt: at("interrupt"),
+            approvals: at("approvals"),
+            steer: at("steer"),
+            multimodal: at("multimodal"),
+            dynamic_model: at("dynamic_model"),
+            dynamic_configuration: at("dynamic_configuration"),
+            declared: true,
+        }
+    }
+}
+
+/// What the provider said this session has spent, as `Interactive.State` folded it.
+///
+/// Every field is optional because a partial map is the ordinary case: the runtime keeps
+/// a counter at `0` when no `:usage` event carried it, and leaves `cost_usd` `nil` rather
+/// than turning "not reported" into a zero that reads as "free". A field this build
+/// cannot read stays `None` and is not drawn.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub turns_with_usage: Option<u64>,
+    /// The model's context window, for the footer's `%` meter.
+    ///
+    /// **No runtime reports this today.** `runtime.models` (A7's runtime half) is where
+    /// the window and pricing from `llm_db` are meant to arrive; until then this is
+    /// always `None` and the footer states tokens without a percentage rather than
+    /// dividing by a number this client made up.
+    pub context_window: Option<u64>,
+}
+
+impl SessionUsage {
+    /// Reads the session's `usage` map. `None` when there is no map: a session that has
+    /// spent nothing and a session whose spend was never reported are different facts.
+    pub fn decode(value: Option<&Value>) -> Option<Self> {
+        let map = value.and_then(Value::as_object)?;
+
+        let count = |key: &str| map.get(key).and_then(Value::as_u64);
+
+        Some(Self {
+            input_tokens: count("input_tokens"),
+            output_tokens: count("output_tokens"),
+            cache_read_tokens: count("cache_read_tokens"),
+            cache_creation_tokens: count("cache_creation_tokens"),
+            total_tokens: count("total_tokens"),
+            cost_usd: map.get("cost_usd").and_then(Value::as_f64),
+            turns_with_usage: count("turns_with_usage"),
+            context_window: count("context_window"),
+        })
+    }
+}
+
 /// One entry of `interactive.list`/`coding.list`, and of `info`.
 ///
 /// `interactive.list` answers `Interactive.State.public/1` structs and `coding.list`
@@ -462,6 +623,19 @@ pub struct SessionInfo {
     pub updated_at: Option<String>,
     pub objective: Option<String>,
     pub struct_tag: Option<String>,
+    /// `options.model`, as the session was started. `None` where the start did not name
+    /// one — the provider then chose, and the transcript's `run_started` is the only
+    /// place that choice is reported.
+    pub model: Option<String>,
+    /// `options.approval_mode` / `options.sandbox_mode`, verbatim. `None` means the start
+    /// omitted them and the plane's own default applies, which is a fact this client does
+    /// not have.
+    pub approval_mode: Option<String>,
+    pub sandbox_mode: Option<String>,
+    /// What the transport this session selected can actually do (B0/D14).
+    pub capabilities: Capabilities,
+    /// What the provider reported spending, folded by the runtime.
+    pub usage: Option<SessionUsage>,
     /// This row came from the previous complete list because runtime.status explicitly
     /// reports its owner offline. It is retained for addressability, not presented as a
     /// fresh observation.
@@ -506,6 +680,20 @@ impl SessionInfo {
             ));
         }
 
+        // Read out of the raw tree rather than through `RawSession`: `options` is a
+        // projection whose keys the runtime is free to extend, and a strict struct here
+        // would be the one place this client refuses a session because a later build
+        // described it more fully.
+        let options = value.get("options");
+        let option = |key: &str| {
+            options
+                .and_then(|options| options.get(key))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+
         Ok(Self {
             plane,
             id: raw.id,
@@ -517,6 +705,13 @@ impl SessionInfo {
             updated_at: raw.updated_at,
             objective: raw.objective,
             struct_tag: raw.struct_tag,
+            model: option("model"),
+            approval_mode: option("approval_mode"),
+            sandbox_mode: option("sandbox_mode"),
+            capabilities: Capabilities::decode(
+                options.and_then(|options| options.get("capabilities")),
+            ),
+            usage: SessionUsage::decode(value.get("usage")),
             last_known: false,
             raw: value.clone(),
         })
@@ -704,6 +899,138 @@ impl ProviderEntry {
             .as_ref()
             .map(|probe| probe.installed && probe.compatible)
             .unwrap_or(false)
+    }
+
+    /// What the interactive transport this provider's sessions will select can do.
+    ///
+    /// The same map `Interactive.State.public/1` projects, read here from the spec so the
+    /// `n` dialog can say what a session *would* be able to do before one exists.
+    pub fn session_capabilities(&self) -> Capabilities {
+        Capabilities::decode(
+            self.selected_transport()
+                .and_then(|transport| transport.get("capabilities")),
+        )
+    }
+
+    /// Why `mode` cannot be the approval mode of a session on this provider, or `None`
+    /// when it can be — or when the spec does not say, which is not the same thing.
+    ///
+    /// Mirrors `Ouroboros.Provider.safety_options/3`: an option the selected transport
+    /// does not normalize takes only `default`; an option it normalizes with an
+    /// allowlist takes only what the allowlist names. X1 is the extra clause — `prompt`
+    /// promises a human is asked, and a transport with `approvals: false` has no channel
+    /// to ask through, so the runtime refuses it even though the schema accepts it.
+    pub fn approval_mode_refusal(&self, mode: ApprovalMode) -> Option<String> {
+        if mode == ApprovalMode::Default {
+            return None;
+        }
+
+        if let Some(refusal) = self.normalized_refusal("approval_mode", mode.as_str()) {
+            return Some(refusal);
+        }
+
+        if mode == ApprovalMode::Prompt && self.session_capabilities().approvals == Capability::No {
+            return Some("no approvals channel".to_string());
+        }
+
+        None
+    }
+
+    /// The same rule for `sandbox_mode`. No X1 clause: a sandbox is argv, not a channel.
+    pub fn sandbox_mode_refusal(&self, mode: SandboxMode) -> Option<String> {
+        if mode == SandboxMode::Default {
+            return None;
+        }
+
+        self.normalized_refusal("sandbox_mode", mode.as_str())
+    }
+
+    fn normalized_refusal(&self, field: &str, value: &str) -> Option<String> {
+        let declared = self.declared_session_options()?;
+
+        if !declared.iter().any(|option| option == field) {
+            return Some(format!("its transport takes no {field}"));
+        }
+
+        let allowed = self
+            .spec
+            .get("normalized_values")
+            .and_then(|values| values.get(field))
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        if allowed.is_empty() || allowed.contains(&value) {
+            return None;
+        }
+
+        Some(format!("takes only {}", allowed.join(", ")))
+    }
+
+    /// The option names the transport a session will select validates against, mirroring
+    /// `Ouroboros.Provider.normalized_options/2`. `None` when the spec does not resolve —
+    /// an unregistered provider or a transport no adapter declares is the harness's to
+    /// name, and greying a row on a guess would be worse than greying none.
+    fn declared_session_options(&self) -> Option<Vec<String>> {
+        let adapter_options = || {
+            Some(
+                self.spec
+                    .get("normalized_options")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        match self.selected_transport() {
+            Some(transport) => match transport.get("session_options") {
+                // `:adapter` — the transport inherits the adapter's own list.
+                Some(Value::String(marker)) if marker == "adapter" => adapter_options(),
+                Some(Value::Array(options)) => Some(
+                    options
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                _unreadable => None,
+            },
+            // The manager synthesizes a managed transport for an adapter that declares
+            // none, and that synthetic transport inherits the adapter's list.
+            None if self.selected_transport_name().as_deref() == Some("managed") => {
+                adapter_options()
+            }
+            None => None,
+        }
+    }
+
+    fn selected_transport_name(&self) -> Option<String> {
+        self.spec
+            .get("default_session_transport")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                self.spec
+                    .get("session_transports")?
+                    .as_array()?
+                    .first()?
+                    .get("name")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+    }
+
+    fn selected_transport(&self) -> Option<&Value> {
+        let selected = self.selected_transport_name()?;
+
+        self.spec
+            .get("session_transports")?
+            .as_array()?
+            .iter()
+            .find(|transport| transport.get("name").and_then(Value::as_str) == Some(&selected))
     }
 }
 

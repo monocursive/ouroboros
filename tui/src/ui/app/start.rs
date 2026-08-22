@@ -193,6 +193,34 @@ impl NewSession {
         sandbox_label(self.sandbox)
     }
 
+    /// The provider entry the cursor is on, once `runtime.providers` has answered.
+    pub fn provider_entry<'a>(&self, providers: &'a [ProviderEntry]) -> Option<&'a ProviderEntry> {
+        providers.get(self.provider)
+    }
+
+    /// Why the selected approval mode cannot start a session on the selected provider.
+    ///
+    /// Read out of `runtime.providers` — the `normalized_values` and `session_transports`
+    /// this client already receives and never used (M2 §6). The dialog greys the row
+    /// rather than removing the value: a mode this provider refuses is still a mode, and
+    /// an operator comparing providers needs to see which one is the obstacle.
+    ///
+    /// `None` also where the spec does not resolve. Greying on a guess would be this
+    /// client overruling a runtime that has not spoken.
+    pub fn approval_refusal(&self, providers: &[ProviderEntry]) -> Option<String> {
+        let entry = self.provider_entry(providers)?;
+        let reason = entry.approval_mode_refusal(self.approval_mode()?)?;
+
+        Some(format!("not offered by {} ({reason})", entry.provider))
+    }
+
+    pub fn sandbox_refusal(&self, providers: &[ProviderEntry]) -> Option<String> {
+        let entry = self.provider_entry(providers)?;
+        let reason = entry.sandbox_mode_refusal(self.sandbox_mode()?)?;
+
+        Some(format!("not offered by {} ({reason})", entry.provider))
+    }
+
     /// The request as the fields currently read.
     pub fn resolved(&self, providers: &[ProviderEntry]) -> StartRequest {
         let mut request = self.request.clone();

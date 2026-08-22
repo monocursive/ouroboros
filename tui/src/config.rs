@@ -85,6 +85,116 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub onboarding: Onboarding,
+    #[serde(default)]
+    pub statusline: StatusLineConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+}
+
+/// An operator-supplied command whose first line of output becomes a row above the
+/// footer (Claude Code's `statusLine`, R2 §5).
+///
+/// Off unless `command` is set. The contract is deliberately the narrow one: this client
+/// runs a shell command on the machine the *client* is on, feeds it one JSON object on
+/// stdin, waits a bounded time, and draws the first line of what came back. It is not a
+/// plugin system and it does not get to decide anything — a command that fails, hangs, or
+/// prints nothing leaves the row absent rather than leaving the footer wrong.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusLineConfig {
+    /// Run through `sh -c`, so a pipeline is a valid answer. `None` disables the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+impl StatusLineConfig {
+    /// The command, once, with blank treated as absent.
+    pub fn command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+    }
+}
+
+/// Terminal-title, bell, and OSC 9 notifications (Codex's `tui.notifications` and
+/// `notification_condition`, R2 §5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    /// `auto` | `bell` | `osc9` | `off`. Absent means `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// `unfocused` | `always`. Absent means `unfocused`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+}
+
+/// How a notification is delivered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NotifyMode {
+    /// OSC 9 where the terminal is known to render it, and the bell everywhere else.
+    #[default]
+    Auto,
+    Bell,
+    Osc9,
+    Off,
+}
+
+impl NotifyMode {
+    pub const ALL: [NotifyMode; 4] = [Self::Auto, Self::Bell, Self::Osc9, Self::Off];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Bell => "bell",
+            Self::Osc9 => "osc9",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
+}
+
+/// When a notification is allowed to fire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NotifyWhen {
+    /// Only while this terminal does not have focus. The default, because a bell for
+    /// something happening on the screen you are already looking at is noise.
+    #[default]
+    Unfocused,
+    Always,
+}
+
+impl NotifyWhen {
+    pub const ALL: [NotifyWhen; 2] = [Self::Unfocused, Self::Always];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unfocused => "unfocused",
+            Self::Always => "always",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|when| when.as_str() == name)
+    }
+}
+
+impl NotificationsConfig {
+    pub fn mode(&self) -> NotifyMode {
+        self.mode
+            .as_deref()
+            .and_then(NotifyMode::parse)
+            .unwrap_or_default()
+    }
+
+    pub fn when(&self) -> NotifyWhen {
+        self.when
+            .as_deref()
+            .and_then(NotifyWhen::parse)
+            .unwrap_or_default()
+    }
 }
 
 /// The answers the `n` dialog and `ouro new` prefill from.
@@ -252,6 +362,43 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.defaults.workspace);
     blank_to_none(&mut config.defaults.approval_mode);
     blank_to_none(&mut config.defaults.sandbox_mode);
+    blank_to_none(&mut config.statusline.command);
+    blank_to_none(&mut config.notifications.mode);
+    blank_to_none(&mut config.notifications.when);
+
+    if let Some(mode) = config.notifications.mode.clone() {
+        if NotifyMode::parse(&mode).is_none() {
+            problems.push(format!(
+                "{}: notifications.mode is {mode:?}, which is not one of {}; treating it as \
+                 unset (auto)",
+                path.display(),
+                NotifyMode::ALL
+                    .iter()
+                    .map(|mode| mode.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            config.notifications.mode = None;
+        }
+    }
+
+    if let Some(when) = config.notifications.when.clone() {
+        if NotifyWhen::parse(&when).is_none() {
+            problems.push(format!(
+                "{}: notifications.when is {when:?}, which is not one of {}; treating it as \
+                 unset (unfocused)",
+                path.display(),
+                NotifyWhen::ALL
+                    .iter()
+                    .map(|when| when.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            config.notifications.when = None;
+        }
+    }
 
     if let Some(mode) = config.defaults.approval_mode.clone() {
         if ApprovalMode::parse(&mode).is_none() {
@@ -476,6 +623,7 @@ mod tests {
                 sandbox_mode: Some("read_only".into()),
             },
             onboarding: Onboarding { welcomed: true },
+            ..Config::default()
         };
 
         config.save(&path).expect("a written config");
@@ -689,6 +837,7 @@ mod tests {
                 ..Defaults::default()
             },
             onboarding: Onboarding::default(),
+            ..Config::default()
         };
 
         first.save(&path).expect("a first write");
@@ -699,6 +848,7 @@ mod tests {
                 ..Defaults::default()
             },
             onboarding: Onboarding { welcomed: true },
+            ..Config::default()
         };
 
         second.save(&path).expect("a second write");

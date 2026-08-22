@@ -22,11 +22,17 @@ use super::theme;
 use crate::model::{Plane, ProviderEntry};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // The scriptable status line gets its own row above the footer, and only when a
+    // command is configured *and* it printed something — an empty row where an operator's
+    // script used to be would be this client reserving space for a fact it does not have.
+    let scripted = app.statusline().line().map(str::to_string);
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(1),
+            Constraint::Length(u16::from(scripted.is_some())),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -42,11 +48,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Logs => super::logs::draw(frame, rows[1], app),
     }
 
-    status_line(frame, rows[2], app);
+    if let Some(scripted) = scripted {
+        frame.render_widget(
+            Paragraph::new(super::statusline::render(&scripted)),
+            rows[2],
+        );
+    }
+
+    status_line(frame, rows[3], app);
     overlay(frame, frame.area(), app);
 
     if app.leader_pending() {
-        leader_hint(frame, frame.area());
+        leader_hint(frame, frame.area(), app);
     }
 }
 
@@ -304,48 +317,317 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
     };
-    let shortcuts = if app.tab == Tab::Sessions {
-        "ctrl+p commands  ·  ctrl+x leader  ·  esc interrupt  ·  ctrl+q quit"
-    } else {
-        "ctrl+p commands  ·  Esc returns to coding  ·  r refresh"
-    };
+    let keys = footer_keys(app);
 
     if area.width >= 112 {
-        // Size this column from what Ratatui will actually draw. A fixed 43-cell column
-        // clipped the last digit from ordinary five-digit loopback ports, making two
-        // attached local runtimes look identical in the footer.
-        let runtime_width = runtime.width().min(area.width as usize) as u16;
+        // The keys keep their half of the row; the facts take what is left of the other
+        // half after the runtime identity, dropping the least important first. Sizing the
+        // runtime column from what Ratatui will actually draw is what stopped two
+        // attached local runtimes looking identical: a fixed 43-cell column clipped the
+        // last digit off ordinary five-digit loopback ports.
+        let keys_width = segments_width(&keys).min(area.width as usize / 2) as u16;
         let columns =
-            Layout::horizontal([Constraint::Length(runtime_width), Constraint::Min(1)]).split(area);
-        frame.render_widget(Paragraph::new(runtime), columns[0]);
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(keys_width)]).split(area);
+
+        let facts_budget = (columns[0].width as usize).saturating_sub(runtime.width() + 3);
+        let mut spans = runtime.spans;
+        for span in join(fit(footer_facts(app), facts_budget)) {
+            spans.push(span);
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), columns[0]);
         frame.render_widget(
-            Paragraph::new(Span::styled(shortcuts, Style::default().fg(theme::MUTED)))
+            Paragraph::new(Line::from(join(fit(keys, keys_width as usize))))
                 .alignment(Alignment::Right),
             columns[1],
         );
-    } else {
-        let compact = match &app.connection {
-            Connection::Lost { reason } => format!(
-                "● DISCONNECTED · {} · ctrl+p commands",
-                super::tree::truncate(reason, area.width.saturating_sub(39) as usize)
-            ),
-            Connection::Live if app.tab == Tab::Sessions => {
-                "ctrl+p commands · ctrl+x leader · ctrl+q quit".to_string()
-            }
-            Connection::Live => shortcuts.to_string(),
-        };
+    } else if let Connection::Lost { reason } = &app.connection {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                compact,
-                if matches!(&app.connection, Connection::Lost { .. }) {
-                    Style::default().fg(theme::BAD)
-                } else {
-                    Style::default().fg(theme::MUTED)
-                },
+                format!(
+                    "● DISCONNECTED · {} · ctrl+p commands",
+                    super::tree::truncate(reason, area.width.saturating_sub(39) as usize)
+                ),
+                Style::default().fg(theme::BAD),
             )),
             area,
         );
+    } else {
+        // Narrow: the facts are the part that could not be read anywhere else, so they
+        // take the row first and the keys keep only what fits after them.
+        let mut segments = footer_facts(app);
+        let facts = segments.len();
+        segments.extend(keys);
+
+        let mut kept = fit(segments, area.width as usize);
+        // A row of nothing but facts states what is happening and offers no way to act on
+        // it. `ctrl+p` is the one key that always leads somewhere, so it outranks the
+        // last fact when only one of them fits.
+        if kept.len() == facts && facts > 1 {
+            kept.pop();
+            kept.push(Segment::key("ctrl+p commands"));
+            kept = fit(kept, area.width as usize);
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(join(kept))), area);
     }
+}
+
+/// One `·`-separated cell of the footer.
+#[derive(Debug, Clone)]
+struct Segment {
+    text: String,
+    style: Style,
+    /// Lower drops first when the row runs out of room.
+    rank: u8,
+}
+
+impl Segment {
+    fn new(text: impl Into<String>, style: Style, rank: u8) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            rank,
+        }
+    }
+
+    fn key(text: impl Into<String>) -> Self {
+        Self::new(text, Style::default().fg(theme::MUTED), 8)
+    }
+}
+
+const SEPARATOR: &str = "  ·  ";
+
+fn segments_width(segments: &[Segment]) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    segments
+        .iter()
+        .map(|segment| segment.text.width())
+        .sum::<usize>()
+        + SEPARATOR.width() * segments.len().saturating_sub(1)
+}
+
+/// Drops the lowest-ranked segments until the rest fit, keeping display order.
+///
+/// Dropping rather than ellipsizing: a truncated `12.3k tok…` is a fact rendered as
+/// noise, and the footer's job is to be readable at a glance in a 96-column tmux pane.
+fn fit(mut segments: Vec<Segment>, budget: usize) -> Vec<Segment> {
+    while segments.len() > 1 && segments_width(&segments) > budget {
+        let weakest = segments
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, segment)| (segment.rank, std::cmp::Reverse(*index)))
+            .map(|(index, _)| index);
+
+        match weakest {
+            Some(index) => {
+                segments.remove(index);
+            }
+            None => break,
+        }
+    }
+
+    if segments.len() == 1 && segments_width(&segments) > budget {
+        segments[0].text = super::tree::truncate(&segments[0].text, budget);
+    }
+
+    segments
+}
+
+fn join(segments: Vec<Segment>) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(segments.len() * 2);
+
+    for segment in segments {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                SEPARATOR,
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+
+        spans.push(Span::styled(segment.text, segment.style));
+    }
+
+    spans
+}
+
+/// What the open session is, in the order it reads best.
+///
+/// Every entry comes from `interactive.info` or from the event stream. Nothing here is a
+/// client-side table of what a provider "usually" does, and a fact the runtime has not
+/// reported is absent rather than guessed (D14).
+fn footer_facts(app: &App) -> Vec<Segment> {
+    let Some(facts) = app.session_facts() else {
+        return Vec::new();
+    };
+
+    let mut segments = Vec::new();
+
+    if let Some(model) = &facts.model {
+        segments.push(Segment::new(
+            super::tree::truncate(model, 28),
+            Style::default().fg(theme::ACCENT),
+            3,
+        ));
+    }
+
+    if let Some((badge, style)) = mode_badge(facts.approval_mode.as_deref()) {
+        let sandbox = facts
+            .sandbox_mode
+            .as_deref()
+            .map(|mode| format!(" · {}", mode.replace('_', "-")))
+            .unwrap_or_default();
+
+        segments.push(Segment::new(format!("{badge}{sandbox}"), style, 9));
+    }
+
+    if facts.working {
+        let elapsed = facts
+            .elapsed_ms
+            .map(|elapsed| format!(" {}", duration(elapsed)))
+            .unwrap_or_default();
+
+        segments.push(Segment::new(
+            format!("{} Working{elapsed}", theme::spinner(app.ticks)),
+            Style::default().fg(theme::SYSTEM),
+            7,
+        ));
+    }
+
+    if let Some(queued) = facts.queued.filter(|queued| *queued > 0) {
+        segments.push(Segment::new(
+            format!("{queued} queued"),
+            Style::default().fg(theme::MUTED),
+            4,
+        ));
+    }
+
+    if facts.approvals > 0 {
+        segments.push(Segment::new(
+            format!(
+                "{} approval{}",
+                facts.approvals,
+                if facts.approvals == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(theme::WARN),
+            6,
+        ));
+    }
+
+    if let Some(usage) = &facts.usage {
+        if let Some(total) = usage.total_tokens.filter(|total| *total > 0) {
+            // The percentage is drawn only where the runtime reported a window. No
+            // runtime reports one today, so this is a hook rather than a feature — and a
+            // context meter divided by a number this client invented would be a lie
+            // presented as a measurement.
+            let share = usage
+                .context_window
+                .filter(|window| *window > 0)
+                .map(|window| format!(" · {}%", (total * 100 / window).min(999)))
+                .unwrap_or_default();
+
+            segments.push(Segment::new(
+                format!("{} tokens{share}", tokens(total)),
+                Style::default().fg(theme::MUTED),
+                2,
+            ));
+        }
+
+        if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
+            segments.push(Segment::new(
+                money(cost),
+                Style::default().fg(theme::MUTED),
+                1,
+            ));
+        }
+    }
+
+    segments
+}
+
+/// The keys this footer is allowed to advertise.
+///
+/// `esc interrupt` appears only while a turn is running *and* the session's transport
+/// declared an interrupt — a footer that offers a key the open session cannot honour is
+/// the exact failure D14 names.
+fn footer_keys(app: &App) -> Vec<Segment> {
+    if app.tab != Tab::Sessions {
+        return vec![
+            Segment::key("ctrl+p commands"),
+            Segment::key("Esc returns to coding"),
+            Segment::key("r refresh"),
+        ];
+    }
+
+    let mut keys = Vec::new();
+
+    if app.interrupt_offered() {
+        keys.push(Segment::new(
+            "esc interrupt",
+            Style::default().fg(theme::ACTION),
+            10,
+        ));
+    }
+
+    keys.push(Segment::key("ctrl+p commands"));
+    keys.push(Segment::key("ctrl+x leader"));
+    keys.push(Segment::key("ctrl+q quit"));
+    keys
+}
+
+/// The permission-mode badge, in the vocabulary the field converged on: `⏸` for "ask me",
+/// `⏵⏵` for "edit without asking", `✓` for "never ask".
+///
+/// `None` when the runtime did not report a mode. That is the ordinary case for a session
+/// started without one — the plane's own default then applies, and this client does not
+/// know what it is. Naming a guess would be worse than saying nothing.
+fn mode_badge(approval_mode: Option<&str>) -> Option<(String, Style)> {
+    let mode = approval_mode?;
+
+    let (glyph, style) = match mode {
+        "prompt" => ("⏸", Style::default().fg(theme::GOOD)),
+        "auto_edit" => ("⏵⏵", Style::default().fg(theme::ACTION)),
+        "auto_approve" => ("✓", Style::default().fg(theme::WARN)),
+        // `default` and anything a later runtime adds: named, not glossed.
+        _stated => ("⏵", Style::default().fg(theme::MUTED)),
+    };
+
+    Some((format!("{glyph} {}", mode.replace('_', "-")), style))
+}
+
+/// Codex's elapsed format: `4m 07s`, and an hour where there is one.
+fn duration(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1_000;
+    let (hours, minutes, seconds) = (seconds / 3_600, (seconds / 60) % 60, seconds % 60);
+
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds}s"),
+        (0, _) => format!("{minutes}m {seconds:02}s"),
+        _ => format!("{hours}h {minutes:02}m"),
+    }
+}
+
+/// Token counts, short enough for a footer and never rounded up to a wrong order of
+/// magnitude.
+fn tokens(total: u64) -> String {
+    match total {
+        0..=999 => total.to_string(),
+        1_000..=999_999 => format!("{:.1}k", total as f64 / 1_000.0),
+        _ => format!("{:.1}M", total as f64 / 1_000_000.0),
+    }
+}
+
+/// Cost, to the cent, with a spend too small to show said as too small rather than as
+/// zero.
+fn money(cost: f64) -> String {
+    if cost < 0.005 {
+        return "<$0.01".to_string();
+    }
+
+    format!("${cost:.2}")
 }
 
 fn overlay(frame: &mut Frame, area: Rect, app: &App) {
@@ -361,7 +643,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         .set_style(area, Style::default().add_modifier(Modifier::DIM));
 
     match overlay {
-        Overlay::Commands(palette) => command_palette(frame, area, palette),
+        Overlay::Commands(palette) => command_palette(frame, area, app, palette),
         Overlay::Account(dialog) => account_dialog(frame, area, app, dialog),
         Overlay::SessionPicker { selected } => session_picker(frame, area, app, selected.as_ref()),
         Overlay::Help => help(frame, area, app),
@@ -416,8 +698,8 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn command_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
-    let commands = palette.visible();
+fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPalette) {
+    let commands = app.palette_commands(palette);
     let width = if area.width >= 110 {
         // Widened first: `u16 * 40` overflows in a debug build at 1639 columns, which is an
         // ordinary width for a full-screen terminal on a wide display.
@@ -1510,6 +1792,27 @@ fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -
 }
 
 /// The new-session form: every choice on screen at once, none of them made for you.
+/// A choice the runtime's own spec says this provider cannot take.
+fn unavailable_style() -> Style {
+    Style::default()
+        .fg(theme::MUTED)
+        .add_modifier(Modifier::DIM)
+}
+
+fn approval_mode_name(dialog: &NewSession) -> String {
+    dialog
+        .approval_mode()
+        .map(|mode| mode.as_str().to_string())
+        .unwrap_or_else(|| "unset".to_string())
+}
+
+fn sandbox_mode_name(dialog: &NewSession) -> String {
+    dialog
+        .sandbox_mode()
+        .map(|mode| mode.as_str().to_string())
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
     let providers = app.providers.value.as_deref().unwrap_or_default();
     let machines = app.machine_choices();
@@ -1597,8 +1900,27 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 ),
                 hint_style(&dialog.request.workspace),
             ),
-            NewField::ApprovalMode => ("approval", dialog.approval_label(), Style::default()),
-            NewField::SandboxMode => ("files", dialog.sandbox_label(), Style::default()),
+            // A value the selected provider cannot take is drawn dim and says whose
+            // limit it is. It stays selectable: the runtime is the authority on whether a
+            // start succeeds, and refusing here on spec data would be this client
+            // overruling it — the same rule the provider list already follows for an
+            // uninstalled executable.
+            NewField::ApprovalMode => match dialog.approval_refusal(providers) {
+                Some(reason) => (
+                    "approval",
+                    format!("{} — {reason}", approval_mode_name(dialog)),
+                    unavailable_style(),
+                ),
+                None => ("approval", dialog.approval_label(), Style::default()),
+            },
+            NewField::SandboxMode => match dialog.sandbox_refusal(providers) {
+                Some(reason) => (
+                    "files",
+                    format!("{} — {reason}", sandbox_mode_name(dialog)),
+                    unavailable_style(),
+                ),
+                None => ("files", dialog.sandbox_label(), Style::default()),
+            },
             NewField::Start => (
                 "",
                 if dialog.pending {
@@ -1922,10 +2244,17 @@ const KEYS: &[(&str, &str)] = &[
     ("1-7 / Tab", "runtime tabs when the prompt is not focused"),
 ];
 
-fn leader_hint(frame: &mut Frame, area: Rect) {
-    let height = (LEADER_KEYS.len() as u16)
-        .saturating_add(2)
-        .min(area.height);
+fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
+    // A chord the open session cannot honour is not drawn (D14). `steer` is
+    // `{:error, :unsupported}` on every transport but `pi`'s, and offering it in a
+    // which-key overlay is how an operator learns a key by being refused by it.
+    let chords = LEADER_KEYS
+        .iter()
+        .filter(|(key, _)| *key != "s" || app.steer_offered())
+        .filter(|(key, _)| *key != "a" || app.approvals_offered())
+        .collect::<Vec<_>>();
+
+    let height = (chords.len() as u16).saturating_add(2).min(area.height);
     let width = area.width.clamp(24, 56);
     let popup = Rect::new(
         area.x.saturating_add(2),
@@ -1942,7 +2271,7 @@ fn leader_hint(frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let lines = LEADER_KEYS
+    let lines = chords
         .iter()
         .map(|(key, description)| {
             Line::from(vec![

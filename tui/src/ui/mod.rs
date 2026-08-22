@@ -29,7 +29,9 @@ pub mod editor;
 pub mod explorer;
 pub mod logo;
 pub mod logs;
+pub mod notify;
 pub mod sessions;
+pub mod statusline;
 pub mod theme;
 pub mod transcript;
 pub mod transcript_cells;
@@ -48,9 +50,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyEventKind, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, Clear, ClearType,
@@ -211,7 +213,12 @@ impl Screen {
             .execute(EnableBracketedPaste)
             .context("enabling bracketed paste")?
             .execute(EnableMouseCapture)
-            .context("enabling mouse capture")?;
+            .context("enabling mouse capture")?
+            // A7/notifications: CSI ?1004h, so `[notifications] when = "unfocused"` has a
+            // focus state to gate on. A terminal that ignores it simply never reports, and
+            // the App stays at its "focused" default.
+            .execute(EnableFocusChange)
+            .context("enabling focus reporting")?;
 
         // Asked rather than assumed, and only claimed where the terminal answered yes: the
         // composer advertises `Shift+Enter` for a newline, and in a terminal without this
@@ -253,7 +260,9 @@ impl Screen {
             .execute(EnableBracketedPaste)
             .context("re-enabling bracketed paste")?
             .execute(EnableMouseCapture)
-            .context("re-enabling mouse capture")?;
+            .context("re-enabling mouse capture")?
+            .execute(EnableFocusChange)
+            .context("re-enabling focus reporting")?;
 
         if matches!(supports_keyboard_enhancement(), Ok(true))
             && io::stdout()
@@ -286,9 +295,44 @@ fn restore() {
 
     let _ = disable_raw_mode();
     let _ = io::stdout()
-        .execute(DisableMouseCapture)
+        .execute(DisableFocusChange)
+        .and_then(|stdout| stdout.execute(DisableMouseCapture))
         .and_then(|stdout| stdout.execute(DisableBracketedPaste))
         .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
+
+    // The window title this process set is this process's to put back.
+    notify::clear_title();
+}
+
+/// Writes the window title the App decided on, and rings for the notifications it armed.
+///
+/// Both are escape sequences straight to stdout rather than cells in a frame, so they are
+/// drained here beside the clipboard rather than drawn by [`view`].
+fn chrome_pending(app: &mut App) {
+    if let Some(title) = app.take_title() {
+        notify::set_title(&title);
+    }
+
+    for (channel, signal) in app.take_notifications() {
+        notify::emit(channel, signal);
+    }
+}
+
+/// Runs the `[statusline] command`, off the render loop.
+///
+/// One task per dispatch, and the App refuses to hand over a second request while one is
+/// outstanding, so a command slower than the debounce window cannot stack.
+fn statusline_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
+    let Some((command, payload)) = app.take_statusline_request() else {
+        return;
+    };
+
+    let sender = sender.clone();
+
+    tokio::spawn(async move {
+        let result = statusline::run(&command, &payload).await;
+        let _ = sender.send(Msg::StatusLine(result));
+    });
 }
 
 fn copy_pending(app: &mut App) {
@@ -445,6 +489,16 @@ fn input(sender: mpsc::UnboundedSender<Msg>) {
             }
             Ok(Event::Paste(text)) => {
                 if sender.send(Msg::Paste(text)).is_err() {
+                    return;
+                }
+            }
+            Ok(Event::FocusGained) => {
+                if sender.send(Msg::Focus(true)).is_err() {
+                    return;
+                }
+            }
+            Ok(Event::FocusLost) => {
+                if sender.send(Msg::Focus(false)).is_err() {
                     return;
                 }
             }
@@ -634,6 +688,8 @@ pub async fn run(
         persist(&mut app);
         open_pending_url(&mut app);
         copy_pending(&mut app);
+        chrome_pending(&mut app);
+        statusline_pending(&mut app, &sender);
         if app.take_scan_machines() {
             spawn_machine_scan(sender.clone());
         }
