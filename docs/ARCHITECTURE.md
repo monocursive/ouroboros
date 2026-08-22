@@ -478,12 +478,14 @@ server, one document stream, and one diagnostics cache. Servers must run where t
 are, so a fleet has one pool per host and a session on machine B uses machine B's pool;
 every status entry names its `node()` for that reason.
 
-The subtree is the last child of the `:core` tree, after even the gateway, and that is
-deliberate on both ends. Its crash must restart nothing — it owns no durable state, no
-plane rebuilds from it, and a session whose language server died must keep editing. Its
-stop must come first — these are foreign OS processes, and they should be asked to leave
-before the surfaces that might still be asking them questions. It is unconditional
-because it is lazy: no language server exists until a caller asks for one.
+The subtree lives in the `:core` tree's operator-surface tail, downstream of cluster
+formation and of every plane and immediately above the Codex account boundary and the
+gateway. It owns no durable state and nothing rebuilds from it, so no session can be
+restarted by a language server dying — every plane starts above it. It is unconditional
+because it is lazy: no language server exists until a caller asks for one. The cost of
+that position is that a crash of the subtree itself also restarts the account boundary
+and the gateway, which is why it carries a deliberately generous restart intensity —
+language-server failures are states inside the pool, never crashes of it.
 
 **Lifecycle.** A server is spawned on the first `acquire`, through the same
 `priv/provider-exec` wrapper every provider CLI crosses, so it runs as the user with

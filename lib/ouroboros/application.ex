@@ -165,16 +165,22 @@ defmodule Ouroboros.Application do
     # what it knows: a crash there must not restart a single live session. It stays
     # unconditional because it is lazy — no `codex` process is spawned until a client
     # actually asks about the account.
-    # The language-server pool is last, after even the gateway, and that is deliberate on
-    # both ends of the chain. Its crash must restart nothing: it owns no durable state, no
-    # plane rebuilds from it, and a session whose language server died must keep editing.
-    # Its stop must come first: language servers are foreign OS processes, and they should
-    # be asked to leave before the surfaces that might still be asking them questions. It
-    # is unconditional for the same reason the Codex account boundary is — it is lazy, and
-    # no language server is spawned until a caller asks for one.
+    #
+    # The language-server pool joins the same operator-surface tail, downstream of every
+    # plane and of cluster formation. It owns no durable state and nothing rebuilds from
+    # it, so no session may be restarted by a language server dying — and none is, because
+    # every plane starts above it. It is unconditional for the reason the Codex account
+    # boundary is: it is lazy, and no language server exists until a caller asks for one.
+    #
+    # It sits below the account boundary rather than below the gateway so that the tail
+    # keeps its shape — the gateway is the last child and the only one a stranger reaches.
+    # The cost is that a crash of this subtree also restarts the account boundary and the
+    # gateway, which is why `CodeIntel.Supervisor` carries a deliberately generous restart
+    # intensity: language-server failures are states inside the pool, never crashes of it,
+    # and the subtree should absorb a great deal before it propagates anything.
     children ++
-      [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++
-      gateway_children() ++ code_intel_children()
+      [Ouroboros.Cluster, Ouroboros.CodeIntel.Supervisor, Ouroboros.Provider.CodexAppServer] ++
+      gateway_children()
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data
@@ -199,17 +205,6 @@ defmodule Ouroboros.Application do
   defp gateway_children do
     if Ouroboros.Gateway.Config.enabled?() do
       [Ouroboros.Gateway]
-    else
-      []
-    end
-  end
-
-  # Only a `:core` node reaches this function at all, because only `children(:core)` calls
-  # it: a `:builder` or `:signer` host has no pool to disable. The switch exists so an
-  # operator can refuse language servers on a core node too.
-  defp code_intel_children do
-    if Ouroboros.CodeIntel.Config.enabled?() do
-      [Ouroboros.CodeIntel.Supervisor]
     else
       []
     end
