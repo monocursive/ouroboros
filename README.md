@@ -429,6 +429,7 @@ ouro new -m "fix the tests"                # the same, with configured defaults 
 ouro run "fix the tests"                   # headless: one prompt, the answer on stdout
 ouro run "fix the tests" --stream-json     # one JSON object per event, then a result object
 ouro run "and now the docs" --resume SESSION-ID   # another turn in a session that exists
+ouro ledger --fleet     # the durable effect ledger, every connected machine's
 ouro stop               # ask the runtime this client started to shut down
 ouro version            # client version, embedded release version and digest, protocol
 ouro --dev              # start `mix run --no-halt` in this checkout instead
@@ -448,17 +449,23 @@ writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells 
 gateway the path. The internally extracted release reads that launcher-owned file; a
 bare release is not a second supported token-generation or lifecycle path.
 
-One subcommand is not for you to type. `ouro mcp-serve` is a Model Context Protocol
-server on stdio, and its whole job is to be the permission prompt for a vendor CLI that
-has no other way to ask: the runtime names it in the `--mcp-config` it composes for a
-Claude session, Claude Code spawns it, and its one tool — `approve` — forwards each
-question to `interactive.request_approval` and returns the decision. It reads the runtime
-to ask from its environment (`OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
+Two subcommands are not for you to type. `ouro mcp-serve` is a Model Context Protocol
+server on stdio: the runtime names it in the `--mcp-config` it composes for a Claude
+session, Claude Code spawns it, and it serves four tools. `approve` is the permission
+prompt for a vendor CLI that has no other way to ask — it forwards each question to
+`interactive.request_approval` and returns the decision, and it is called by the harness
+rather than by the model. `code_intel`, `diagnostics`, and `touch` are the runtime's
+language-server pool, and they are called by the model. It reads the runtime to ask from
+its environment (`OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
 `OUROBOROS_SESSION_ID`, `OUROBOROS_SESSION_NODE`, and an optional
 `OUROBOROS_APPROVAL_TIMEOUT_MS`, default 600000). Run by hand it starts, answers the
 protocol, and denies every approval with a message saying it was not given a runtime —
 because deny is what every failure here means. It is hidden from `--help` for the same
 reason.
+
+`ouro hook post-tool-use` is the other one. Claude Code runs it after every edit in a
+bridged session, and it answers with the diagnostics that edit added. It never refuses an
+edit and exits 0 whatever happens; see [Code intelligence](#code-intelligence).
 
 ### Headless: `ouro run`
 
@@ -879,9 +886,13 @@ they do in a shell, and `ouro` scrolls by keyboard.
   configuration supplied as a *string* — a JSON blob or a file path — cannot be merged
   with the bridge's own server definition without this runtime rewriting somebody else's
   configuration, so in that case the bridge is not attached and a warning says so; a map
-  merges, and the `ouroboros` server key belongs to the bridge. An approval question that
-  is outstanding when the session coordinator restarts is answered `deny` on revival,
-  because the call that was waiting for it died with the coordinator.
+  merges, and the `ouroboros` server key belongs to the bridge. The same rule applies to
+  the `--settings` value the post-edit diagnostics hook is composed into: a map merges (and
+  an operator's own `PostToolUse` groups are appended to, never replaced), a string is
+  refused — and there the refusal costs only the diagnostics line, because the approval
+  half of the bridge is independent of it. An approval question that is outstanding when
+  the session coordinator restarts is answered `deny` on revival, because the call that was
+  waiting for it died with the coordinator.
 - **What a session can do and what it has spent are declared, not guessed.**
   `interactive.info` and `interactive.list` carry `options.capabilities` — `transport`,
   `process`, `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
@@ -1663,6 +1674,52 @@ principal, effect, status, or sequence cursor, and resolve one stable ID with
 `Ouroboros.effect/1`. An effect-ledger restart marks unfinished attempts `:ambiguous`
 rather than claiming they failed or silently starting them again.
 
+### Reading it, and reading every machine's
+
+From a terminal, the same query is `ouro ledger`:
+
+```console
+$ ouro ledger --fleet
+node                          seq  status  effect      principal        id
+ouroboros@studio-mini          31  ok      permission  session:6f2a…    effect-01JD…
+ouroboros@studio-mini          30  denied  send_message  planner        effect-01JD…
+ouroboros@laptop                7  ok      forge       planner          effect-01JC…
+ouro ledger: ouroboros@builder did not answer, so this list is incomplete
+```
+
+`--fleet` asks every connected core node with a bounded `:erpc` and names the machines that
+did not answer rather than returning a shorter list that looks complete — that last line is
+on stderr, so `ouro ledger --json | jq` reads a clean stream of entries and still tells the
+operator the picture has a hole in it. Sequences are minted per node, so every row carries
+the node it was written on; a bare "31" means nothing across a fleet.
+
+This is the whole of the "survives a machine move" claim, and it is worth being precise
+about: the ledger is not replicated. What survives a move is the *record on the machine that
+made it*, and `--fleet` is how you query all of them at once. A replicated append-only
+ledger stays deferred.
+
+### The export, and exactly how far it can be trusted
+
+`ledger.export` (gateway) answers JSONL with a SHA-256 chain over the exported lines:
+
+```
+hash(0) = sha256(seed ‖ line(0))          seed = 64 zeros
+hash(n) = sha256(hash(n-1) ‖ line(n))
+```
+
+where `line(n)` is the exact text whose bytes that hash covers. A client verifies an export
+by hashing the strings it was handed, in order — nothing about how this runtime encodes an
+entry has to be reimplemented for that to work, which is the only reason the claim is
+checkable at all.
+
+**The chain is computed for the answer and stored nowhere.** It makes one export
+self-verifying: a line altered after the fact no longer hashes to the head, so a copy that
+was tampered with in transit or on disk is detectable. It is *not* tamper-evident storage. A
+node that rewrote its own checkpoint and then exported would produce a perfectly consistent
+chain over the rewritten history, because the chain is derived from what the ledger says
+now. Making that impossible means a hash the ledger commits to at write time and publishes
+somewhere it does not control, and this build does not do that.
+
 Grants are also why `Ouroboros.Control.Grants` lives where it does. The fast patch lane
 refuses to load an artifact naming any `Ouroboros.Control.*` module, so a capability an
 agent forged cannot patch the authority that decided it could forge.
@@ -1690,6 +1747,61 @@ agent forged cannot patch the authority that decided it could forge.
   never evicted. This is not a replicated audit service, and the atomic checkpoint is
   not an append-only external log. `last_effects` and `state.forged` remain short-lived
   agent-local projections; the ledger deliberately cannot restore a forged BEAM.
+
+## Code intelligence
+
+`Ouroboros.CodeIntel` pools language servers per node, keyed by `{workspace root, server}`,
+spawned lazily on first touch, idle-stopped at 600s, restart-capped then marked broken, and
+memory-budgeted per host. Nothing is ever installed: a server absent from the project's
+binaries and from `PATH` answers with an install hint and nothing more. A language-server
+failure is always an error tuple and never blocks a write.
+
+Since E2/E3 that pool is reachable from outside the runtime, and one kind of session gets it
+without being asked.
+
+**A bridged Claude session** — an interactive session on `claude` at `approval_mode:
+:prompt` or `:default`, on a node where the `ouro` binary and a gateway are both present —
+now gets two things it did not have:
+
+- **Three MCP tools**, beside the `approve` tool the permission bridge already served.
+  `code_intel` asks the nine navigation questions (definition, references, hover, document
+  and workspace symbols, implementation, and the three call-hierarchy operations) or reads a
+  file's current diagnostics; `diagnostics` reports what one edit added; `touch` announces a
+  change made by a shell command or a generator. The adapter already names `ouro mcp-serve`
+  in the `--mcp-config` it composes, so nothing else had to change for these to arrive.
+- **Diagnostics after every edit.** The adapter composes a `PostToolUse` hook into the
+  session's `--settings`, matched on `Edit|Write|MultiEdit|NotebookEdit`, running
+  `ouro hook post-tool-use`. After each edit the hook announces the change, waits at most
+  five seconds, and injects one of three lines into the model's context: `Edit applied.`
+  followed by the new diagnostics, by `No new diagnostics.`, or by
+  `(no LSP data for this file)`. Errors always, at most three warnings, at most twenty lines
+  then `+N more`. It exits 0 on every path and can never refuse an edit — a `PostToolUse`
+  hook that blocks can only send a model back to redo work that already succeeded.
+
+New-only is against what the server said about the file *before* the edit, read in the same
+call that announced it. Diagnostics identity is a signature the runtime computes, so the
+client and the runtime cannot disagree about what "the same diagnostic" means.
+
+### What does not get this yet
+
+- **Claude sessions the approval bridge does not attach to.** `auto_edit` and
+  `auto_approve` produce byte-identical argv to the pinned adapter's, by design, and a
+  session with no `--mcp-config` has no tools and no hook. So does the whole coding plane,
+  which has no human loop to bridge in the first place.
+- **Codex.** Its hook contract is the same JSON as Claude Code's (`hooks.json` or `[hooks]`
+  TOML, `permissionDecision`/`additionalContext`, exit 2 blocks), but the interactive
+  transport here is `codex app-server --stdio` with fixed argv and no configuration
+  plumbing, and nothing in the sources this repo pins establishes that the app-server honours
+  a hooks config at all. Rather than write a config file into somebody's `~/.codex` and hope,
+  this is recorded as a gap.
+- **ACP providers** (`opencode`, `kimi`). The protocol has no diagnostics channel and
+  Ouroboros does not serve their `fs/write` yet.
+- **The native provider.** Its own edit path appends diagnostics directly; that is a
+  separate slice and not what this section describes.
+
+Anything else can reach the pool through the gateway: `runtime.lsp.status`,
+`code_intel.request`, `code_intel.diagnostics` (read scope) and `code_intel.touch`
+(operate), documented in [TUI.md §2.4](docs/TUI.md).
 
 ## Permissions
 
@@ -2450,15 +2562,29 @@ instead of making a departed machine disappear.
   monotonic across it.
 - Workspace admission is node-local and does not provision worktrees or an OS
   sandbox. Shared filesystems need one routed authority or consensus.
-- Language servers are owned by the node, not by a session, and nothing about them
-  reaches a model yet. `Ouroboros.CodeIntel` pools servers per `{workspace root,
-  server}`, versions documents, gates diagnostics on freshness, and answers the nine
-  navigation operations — but no edit result carries diagnostics, no tool exposes
-  navigation, and there is no gateway method. Nothing is ever installed: a server absent
-  from the project's binaries and the user's `PATH` is an install hint and nothing more.
-  Per-server and per-host memory budgets, a restart cap, and a broken-key window exist
-  because language servers are a liability as much as an asset; a language-server failure
-  is always an error tuple and never blocks a write.
+- Language servers are owned by the node, not by a session. `Ouroboros.CodeIntel` pools
+  servers per `{workspace root, server}`, versions documents, gates diagnostics on
+  freshness, and answers the nine navigation operations; four gateway verbs and three MCP
+  tools now reach it, and a bridged Claude session gets post-edit diagnostics through a
+  `PostToolUse` hook. What that does *not* cover: Claude sessions in `auto_edit` or
+  `auto_approve` (the approval bridge does not attach, so there is no MCP config and no
+  hook), the coding plane, ACP providers, and Codex — whose hook contract is identical on
+  paper but whose app-server transport here has fixed argv and no verified hooks support.
+  Nothing is ever installed: a server absent from the project's binaries and the user's
+  `PATH` is an install hint and nothing more. Per-server and per-host memory budgets, a
+  restart cap, and a broken-key window exist because language servers are a liability as
+  much as an asset; a language-server failure is always an error tuple and never blocks a
+  write.
+- The post-edit "new diagnostics" line is new relative to what the pool held for that file
+  before the edit. The first edit to a file no session has opened has no baseline, so its
+  pre-existing diagnostics are reported once as new. The alternative — opening every file
+  the runtime hears about, so a baseline always exists — is the memory behaviour the pool
+  exists to bound.
+- `ledger.export`'s hash chain is verifiable by a client, not tamper-evident storage. It
+  is computed over the answer and stored nowhere, so it detects a copy altered after
+  export and says nothing about a node that rewrote its own checkpoint before exporting.
+  `ledger.list --fleet` queries every connected core node and names the ones that did not
+  answer; the ledger itself is still node-local and unreplicated.
 - Autonomous evaluation is implemented with bounded revisions and step count, but
   aggregate token/cost/time budgets, independent policy approval, and behavioral
   regression scoring remain.
