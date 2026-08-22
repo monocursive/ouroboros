@@ -988,9 +988,9 @@ that draws nothing, `Hidden`, carries the reason it drew nothing.
 | `input_accepted` | the user's message, a steer note, or "[message not recorded]" when the ledger holds no words |
 | `output_text_delta` / `_final` | the agent message, deltas collapsed into their final |
 | `thinking_delta` | a reasoning cell, accumulated per turn, three-state (below) |
-| `tool_call` / `tool_result` | one activity cell correlated by `call_id` |
-| `command_output_delta` | a bounded tail of command output |
-| `file_change` | file rows and a bounded unified-diff excerpt |
+| `tool_call` / `tool_result` | one activity cell correlated by `call_id`, summarised per tool (below); consecutive exploration collapses into one grouped cell |
+| `command_output_delta` | a bounded **tail** of command output — the newest rows, with the earlier ones counted above them |
+| `file_change` | file rows and a parsed unified diff: per-file grouping, line numbers, word-level emphasis, counted `+N −M`, and the turn's diffstat at its end divider |
 | `plan_updated` | a plan cell, and the `Ctrl-T` panel |
 | `turn_started` | no cell: its instant is what the turn's own end divider measures elapsed time from |
 | `turn_completed` / `_failed` / `_interrupted` | a turn divider stating the outcome and the elapsed time; failures and interruptions keep their own loud cell above it |
@@ -1004,6 +1004,85 @@ that draws nothing, `Hidden`, carries the reason it drew nothing.
 
 The only hides are payloads that carried no content — an empty output delta, an empty
 reasoning delta, an empty command-output delta — and each names itself as the reason.
+
+**A tool row says what the tool did, not what the vendor called it.** Three naming systems
+reach this client and none agrees with the others: Claude's tool names, ACP's `kind` enum
+(`read | edit | delete | move | search | execute | think | fetch | other`), and the item
+types the Codex dialect normalises. One summariser keys on all three, so the same work
+reads the same whichever produced it.
+
+| Row | Read from |
+|---|---|
+| `Read path:12-51` | the path, plus `offset`/`limit` or `start_line`/`end_line` where the call named a window |
+| `Edit path (+3 −2)` | the line counts of `old_string`/`new_string`; a tool that describes an edit without carrying it gets no counts |
+| `Write path`, `Delete path`, `Move path` | the path |
+| `Grep "needle" in lib → 3 matches` | the pattern and scope; the count is of result lines this client holds, with a `+` when the value was bounded |
+| `Glob **/*.ex → 12 files` | the pattern, and the same counted result |
+| `Bash $ cargo test  exit 1  4s` | the command, an exit code where a payload carried one (`failed` where only `is_error` did), and the elapsed time |
+| `Fetch https://…`, `Search "query"` | the url or query |
+| `MCP linear.create_issue` | `mcp__server__tool` and `server.tool` both fold to `server.tool` |
+
+Anything unmatched keeps the provider's own name and its own input rather than a verb this
+client invented for it.
+
+**Consecutive exploration is one row (Codex).** Read, grep, glob, and list calls with no
+other cell drawn between them collapse into `Exploring… (4)` while the run is still
+growing, and flip to `Explored 4 files` the moment anything else is drawn — including the
+turn's own end divider. `Ctrl+O` lists every call. Work the agent *did* — an edit, a
+command, a fetch — is never folded into that count. The group lists sixty-four calls and
+counts the rest.
+
+**A tool result shows both ends.** The first six and last six lines, with
+`… +N lines · ctrl+o` between them: the last rows of a result are where the exit status,
+the summary, or the failure is, and a head-only excerpt is why a collapsed tool row used to
+be worth nothing. A **failure** gets the head alone — the `is_error` text is written first
+and does not belong behind six rows of its own tail. Streaming `command_output_delta` is
+the mirror image: a live tail window of the newest rows, because a command still running is
+watched at its end.
+
+**Elapsed time comes from the ledger, never from a clock.** A finished call is its result's
+instant minus its own; one still running is measured against the newest instant this window
+holds, which is a floor rather than a reading. The projection reads no clock at all, which
+is what makes one watch render and export to the same bytes — and what makes a running
+timer stand still between events.
+
+**Diffs are parsed once.** `ui/diff.rs` reads files, hunks, per-side line numbers,
+add/delete/rename/binary status, and the word-level difference between a removed line and
+the added one that replaces it — pairing them only when the two runs are the same length,
+because emphasis pointing at the wrong words is worse than none. Rendering gets a
+two-column line-number gutter (dropped whole, not shrunk, on a pane too narrow to hold it
+and the content both), syntax colour on context lines through `code.rs` keyed on the file's
+extension, and wrapping rather than truncation — a diff is often the only copy of a change
+on screen. Collapsed spends twelve rows and names the key that opens the rest. Each
+turn-end divider carries that turn's diffstat, `3 files · +120 −18`. Where a diff is the
+subject of an unresolved `approval_requested`, it stays expanded and its header reads
+`pending approval` until the matching resolution lands (Warp's rule); the approval modal
+itself is a separate surface.
+
+**Every count is counted here.** `Diff::additions` — the provider's own claim — stays on
+the payload for `/details` and is never the number on screen. A provider that summarises a
+400-line patch and sends a 40-line excerpt would otherwise have this client repeat a number
+it cannot see. An excerpted diff says `in excerpt` beside its counts, and so does the
+diffstat built from it.
+
+**`/diff` is the review surface**, Claude Code's, scoped to what a client that never reads
+the filesystem and never runs git can hold. It lists the files this session changed,
+grouped by turn: `←`/`→` between "this session" and each turn, `↑`/`↓` between files,
+`Enter` into a pager, `Esc` back out. Turns are counted by the same dividers the transcript
+draws, off the same projection, so the list cannot disagree with the conversation about
+which turn changed what; a file three turns touched is one row with the counts summed. The
+footer names the scope's totals and, when the window has pruned, says the list is partial
+and names the floor. Turn numbers count turns *this client holds*, not the session's.
+
+**`/raw` is Codex's copy mode** and a second renderer rather than a flag inside the first:
+no frames, no gutters, no glyph columns, no app-side wrapping, ASCII where a glyph would
+otherwise be, one output row per logical line. It shows everything a compact cell folds. A
+diff keeps its own `+`/`-` column — that is the file format, not this app's gutter — and
+loses the line numbers this app adds. Both `/diff` and `/raw` are palette and slash only:
+the composer owns the keyboard while a session is open. The honest limit is that this
+client owns the screen, so a row wider than the pane is *clipped* rather than soft-wrapped
+by the terminal; `/raw` makes a native selection yield clean logical lines, and `ctrl+x [`
+and `ctrl+x v` remain the complete escape hatches for anything wider.
 
 **`Ctrl-O` is verbose, `Ctrl-T` is the plan, `/details` is the ledger.** `Ctrl-O` redraws
 the same conversation with every collapsible cell expanded in place (reasoning, tool
@@ -1027,7 +1106,13 @@ own prefix followed by "… (N bytes; full event via /details)", and `_opaque`, 
 Redraw work is bounded in every view: chat projects the newest 128 entries and bounded
 per-cell excerpts with an explicit omission marker, `Ctrl-O` raises the per-cell row ceiling
 to 2,000 rather than removing it, and `/details` exposes every event retained by the local
-5,000-event window.
+5,000-event window. A tool result's compact ceiling is twelve rows — six of head and six of
+tail — raised from the three it was before the head/tail layout; every byte cap on the
+underlying values is unchanged. One diff parse keeps sixty-four files and twenty thousand
+body lines and marks itself truncated at either ceiling. A ten-thousand-line tool result
+projects and renders in a small fraction of one frame, because head/tail is chosen on
+*source* lines before anything is wrapped: twelve rows cost one scan and twelve pointers,
+not ten thousand wrapped strings.
 
 Everything drawn *around* the transcript reads five accessors on `Watch` rather than
 re-deriving the ledger differently: `usage()`, `queue_len()`, `active_turn_elapsed()`,
@@ -1043,7 +1128,9 @@ Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer
 scrollback, `ctrl+x v` transcript in `$EDITOR`, `Ctrl-E` opens `$EDITOR`, `,` settings,
 `q` quit dialog, `?` help with the authoritative key map.
 `s`, `a`, and the interrupt hint are **conditional**: see
-"Capability-driven chrome" below.
+"Capability-driven chrome" below. `/diff` (also `/changes`) opens the review overlay and
+`/raw` toggles copy mode; both are reachable from the palette and neither takes a chord,
+because the composer owns the keyboard while a session is open.
 
 ### The footer
 
