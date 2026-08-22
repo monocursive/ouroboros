@@ -9,6 +9,7 @@ defmodule Ouroboros.Coding.Task do
   alias Ouroboros.Coding.{Store, TaskState}
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
+  alias Ouroboros.Workspace.Worktree
 
   @poll_interval 25
   @replay_limit 100
@@ -202,7 +203,17 @@ defmodule Ouroboros.Coding.Task do
 
   defp no_retry, do: %{signature: nil, count: 0, delay: 0}
 
+  # D7, the coding plane's half. Same order as the interactive plane: provision, then
+  # lease the worktree's own path, so the run is contained by the directory it was given
+  # rather than by the repository that directory came from.
   defp admit_workspace(task) do
+    case Worktree.provision(task, "coding-" <> task.id, []) do
+      {:ok, provisioned} -> admit_leased_workspace(provisioned)
+      {:error, reason} -> checkpoint_admission_failure(task, {:worktree_failed, reason})
+    end
+  end
+
+  defp admit_leased_workspace(task) do
     if is_pid(Process.whereis(WorkspaceManager)) do
       case acquire_workspace(task, @workspace_reacquire_attempts) do
         {:ok, lease, capability} ->
@@ -290,11 +301,59 @@ defmodule Ouroboros.Coding.Task do
     end
   end
 
-  defp release_workspace(%{workspace_lease: nil} = runtime), do: runtime
-
   defp release_workspace(runtime) do
-    _ = safe_workspace_release(runtime.workspace_lease.id, runtime.workspace_capability)
-    %{runtime | workspace_lease: nil, workspace_capability: nil}
+    runtime =
+      case runtime.workspace_lease do
+        nil ->
+          runtime
+
+        lease ->
+          _ = safe_workspace_release(lease.id, runtime.workspace_capability)
+          %{runtime | workspace_lease: nil, workspace_capability: nil}
+      end
+
+    retire_worktree(runtime)
+  end
+
+  # Only for a run that is actually over. `terminate/2` also runs on a restart, and taking
+  # the worktree away there would remove the directory a resumed run is still using.
+  defp retire_worktree(runtime) do
+    if TaskState.terminal?(runtime.task) do
+      case Worktree.retire(runtime.task, []) do
+        {:ok, task, :removed} ->
+          checkpoint_worktree(runtime, task, :worktree_removed, %{
+            path: Map.get(task.worktree, "path")
+          })
+
+        {:ok, task, {:kept, reason}} ->
+          Logger.warning(
+            "coding task #{task.id}: worktree kept at " <>
+              "#{Map.get(task.worktree, "path")} (#{inspect(reason)})"
+          )
+
+          checkpoint_worktree(runtime, task, :worktree_retained, %{
+            path: Map.get(task.worktree, "path"),
+            reason: Map.get(task.worktree, "retained_reason"),
+            message:
+              "the worktree holds uncommitted changes and was left in place. " <>
+                "Commit or discard them, then remove it with `git worktree remove`."
+          })
+
+        _absent_or_failed ->
+          runtime
+      end
+    else
+      runtime
+    end
+  end
+
+  # Best effort by construction: the run has already reached its terminal status and been
+  # checkpointed, so a store that refuses this addendum loses the note, not the result.
+  defp checkpoint_worktree(runtime, task, type, payload) do
+    {task, _event} = append_internal(task, type, payload)
+    task = touch(task)
+    _ = Store.put(task)
+    %{runtime | task: task}
   end
 
   defp safe_workspace_release(lease_id, capability) do

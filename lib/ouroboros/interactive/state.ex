@@ -28,6 +28,9 @@ defmodule Ouroboros.Interactive.State do
                 :workspace_lease_id,
                 :harness_session_id,
                 :provider_session_id,
+                # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
+                worktree_requested: false,
+                worktree: nil,
                 cursor: 0,
                 sequence_offset: 0,
                 resumes: 0,
@@ -86,6 +89,8 @@ defmodule Ouroboros.Interactive.State do
           created_at: String.t(),
           updated_at: String.t(),
           workspace_lease_id: String.t() | nil,
+          worktree_requested: boolean(),
+          worktree: map() | nil,
           harness_session_id: String.t() | nil,
           provider_session_id: String.t() | nil,
           cursor: non_neg_integer(),
@@ -145,6 +150,7 @@ defmodule Ouroboros.Interactive.State do
            provider: base.provider,
            workspace: base.workspace,
            workspace_mode: base.workspace_mode,
+           worktree_requested: Map.get(base, :worktree_requested, false),
            status: :starting,
            created_at: now,
            updated_at: now,
@@ -489,12 +495,24 @@ defmodule Ouroboros.Interactive.State do
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
       serializable?(state.options) and serializable?(Map.get(state, :runtime_snapshot)) and
-      serializable?(Map.get(state, :usage)) and serializable?(state.error)
+      serializable?(Map.get(state, :usage)) and serializable?(state.error) and
+      valid_worktree?(state)
   rescue
     _error -> false
   end
 
   def loadable?(_state), do: false
+
+  # D7's durable half, held to the same rule as everything else here: shape and
+  # serializability. A worktree record is a map of strings, or it is `nil`.
+  defp valid_worktree?(state) do
+    is_boolean(Map.get(state, :worktree_requested, false)) and
+      case Map.get(state, :worktree) do
+        nil -> true
+        record when is_map(record) -> serializable?(record)
+        _other -> false
+      end
+  end
 
   defp validate_session_options(opts) do
     accepted =
@@ -503,6 +521,7 @@ defmodule Ouroboros.Interactive.State do
           :id,
           :workspace,
           :workspace_mode,
+          :worktree,
           :provider,
           :event_limit,
           :model,
