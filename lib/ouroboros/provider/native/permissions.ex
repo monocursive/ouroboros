@@ -34,7 +34,11 @@ defmodule Ouroboros.Provider.Native.Permissions do
   An engine that returns nonsense must not be able to authorize anything.
   """
 
-  @engine Ouroboros.Control.Permissions
+  # The same node-level key the interactive plane reads for external approvals, so one
+  # setting names the engine for every seam; absent, the durable engine is the default.
+  @default_engine Ouroboros.Control.Permissions
+
+  defp engine, do: Application.get_env(:ouroboros, :permissions_engine, @default_engine)
 
   @type decision :: {:allow, term()} | {:deny, term()} | {:ask, term()}
 
@@ -42,7 +46,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
   @spec evaluate(map()) :: decision()
   def evaluate(request) when is_map(request) do
     if exported?(:evaluate, 1) do
-      case apply(@engine, :evaluate, [request]) do
+      case apply(engine(), :evaluate, [request]) do
         {:allow, _rule} = decision -> decision
         {:deny, _rule} = decision -> decision
         {:ask, _reason} = decision -> decision
@@ -68,7 +72,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
   @spec record(String.t(), map()) :: :ok | {:error, term()}
   def record(decision_id, attrs) when is_binary(decision_id) and is_map(attrs) do
     if exported?(:record, 2) do
-      case apply(@engine, :record, [decision_id, attrs]) do
+      case apply(engine(), :record, [decision_id, attrs]) do
         :ok -> :ok
         {:error, _reason} = error -> error
         other -> {:error, {:engine_error, inspect(other)}}
@@ -119,6 +123,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
   defp format_rule(rule), do: inspect(rule)
 
   defp exported?(function, arity) do
-    Code.ensure_loaded?(@engine) and function_exported?(@engine, function, arity)
+    engine = engine()
+    Code.ensure_loaded?(engine) and function_exported?(engine, function, arity)
   end
 end

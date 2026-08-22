@@ -285,7 +285,9 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                "paths" => ask.payload["paths"]
              }
 
-      assert ask.payload["reason"] =~ "no permission rule engine"
+      # Either the durable engine's "no rule matched" or, on a node without one, the
+      # provider's own "no engine" — both are an honest ask, never an allow.
+      assert ask.payload["reason"] =~ ~r/no_rule|no permission rule engine/
       assert is_binary(ask.request_id)
 
       send(
