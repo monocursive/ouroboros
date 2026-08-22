@@ -70,6 +70,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // `mcp-serve` is not a terminal command. Its stdout is a protocol the process that
+    // spawned it is already reading, so it is answered before anything here discovers a
+    // data directory, parses a config file, or decides what to do with a terminal.
+    if matches!(cli.command, Some(Command::McpServe)) {
+        return ouro::mcp_serve::serve().await;
+    }
+
     let paths = Paths::discover(cli.dev)?;
 
     // Read once, for the surfaces that consult it. A file that does not parse costs the
@@ -121,6 +128,9 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
+        // Answered at the top of this function, before the terminal existed as far as
+        // this process is concerned. The arm keeps the match total.
+        Some(Command::McpServe) => ouro::mcp_serve::serve().await,
         Some(Command::ProcessBirth { pid }) => {
             let birth = runtime::process_birth(pid)?
                 .ok_or_else(|| anyhow!("process pid {pid} is not alive"))?;

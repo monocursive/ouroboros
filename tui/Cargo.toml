@@ -48,6 +48,8 @@ tokio = { version = "1", features = [
   "process",
   "signal",
   "io-util",
+  # `ouro mcp-serve` speaks a line protocol on this process's own stdin and stdout.
+  "io-std",
   "time",
   "sync",
   "macros",

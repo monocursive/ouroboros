@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod fleet;
 pub mod fleet_add;
+pub mod mcp_serve;
 pub mod model;
 pub mod proto;
 pub mod run;

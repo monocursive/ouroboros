@@ -154,9 +154,12 @@ config :ouroboros,
 
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its
-# journal deliberately discards raw provider records.
+# journal deliberately discards raw provider records. Claude gains the one flag its
+# managed transport needs to have a human in the loop at all — `--permission-prompt-tool`
+# pointed at `ouro mcp-serve` — and is otherwise the pinned adapter.
 config :jido_harness,
   providers: %{
+    claude: Ouroboros.Provider.ClaudeAdapter,
     codex: Ouroboros.Provider.CodexAdapter,
     kimi: Ouroboros.Provider.KimiAdapter,
     opencode: Ouroboros.Provider.OpenCodeAdapter

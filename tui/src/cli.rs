@@ -127,6 +127,17 @@ pub enum Command {
     #[command(hide = true)]
     ServiceRun,
 
+    /// Serve the session's permission prompt to a vendor CLI over MCP on stdio.
+    ///
+    /// Never run by hand. `Ouroboros.Provider.ClaudeAdapter` names this subcommand in the
+    /// `--mcp-config` it composes for a Claude session, and Claude Code spawns it as the
+    /// server behind `--permission-prompt-tool mcp__ouroboros__approve`. It reads the
+    /// runtime to ask from `OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
+    /// `OUROBOROS_SESSION_ID`, and `OUROBOROS_SESSION_NODE`; started without them, every
+    /// approval is denied with a message saying so.
+    #[command(hide = true)]
+    McpServe,
+
     /// Print the exact kernel incarnation of one process for the BEAM ownership protocol.
     #[command(hide = true)]
     ProcessBirth {
