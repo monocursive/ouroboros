@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Event, EventType, Plane, SessionInfo, SessionStatus};
+use crate::model::{Plane, SessionInfo, SessionStatus};
 
 use super::app::{App, Connection};
 use super::details;
@@ -881,13 +881,9 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = inner.width.max(8) as usize;
     let resyncing = watch.resyncing;
     let entries = watch.entries();
-    let mut lines = if show_event_details {
-        event_lines(entries, width)
-    } else {
-        chat_lines(entries, width, ticks, verbosity)
-    };
+    let mut lines = chat_lines(entries, width, ticks, verbosity);
 
-    if !show_event_details {
+    {
         let empty = lines.is_empty();
         if waiting_for_reply {
             push_working_indicator(&mut lines, ticks, theme::working_verb(ticks));
@@ -1289,41 +1285,6 @@ fn push_stream_state(spans: &mut Vec<Span<'static>>, watch: &Watch, tick: u64, t
     }
 }
 
-fn event_lines(entries: Vec<Entry<'_>>, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    for entry in entries {
-        push_event_entry(&mut lines, entry, width);
-    }
-
-    lines
-}
-
-fn push_event_entry(lines: &mut Vec<Line<'static>>, entry: Entry<'_>, width: usize) {
-    match entry {
-        Entry::Floor(floor) => lines.push(divider(
-            &format!("history truncated below {floor} — the runtime no longer retains it"),
-            width,
-            theme::WARN,
-        )),
-        Entry::Gap { from, to } => lines.push(divider(
-            &format!(
-                "{} events missing ({from}..{to}) — replaying",
-                to - from + 1
-            ),
-            width,
-            theme::WARN,
-        )),
-        Entry::Note(note) => lines.push(divider(&note.text(), width, theme::WARN)),
-        Entry::Ended(status) => lines.push(divider(
-            &format!("stream ended ({status}) — no further events"),
-            width,
-            theme::MUTED,
-        )),
-        Entry::Event(event) => push_event(lines, event, width),
-    }
-}
-
 fn chat_lines(
     mut entries: Vec<Entry<'_>>,
     width: usize,
@@ -1372,55 +1333,6 @@ fn separate(lines: &mut Vec<Line<'static>>) {
     }
 }
 
-fn push_event(lines: &mut Vec<Line<'static>>, event: &Event, width: usize) {
-    let prefix = format!("{:>6}  ", event.sequence);
-    let kind = event.kind.as_str().to_string();
-    let indent = " ".repeat(prefix.len());
-    let body_width = width.saturating_sub(prefix.len()).max(8);
-
-    let mut head = vec![
-        Span::styled(prefix, Style::default().fg(theme::MUTED)),
-        Span::styled(format!("{kind}  "), event_style(&event.kind)),
-    ];
-
-    let summary = event.summary();
-    let mut wrapped = wrap(&summary, body_width.saturating_sub(kind.len() + 2).max(8));
-
-    if let Some(first) = wrapped.first() {
-        head.push(Span::raw(first.clone()));
-    }
-
-    lines.push(Line::from(head));
-
-    if wrapped.len() > 1 {
-        for rest in wrapped.drain(1..) {
-            lines.push(Line::from(vec![Span::raw(indent.clone()), Span::raw(rest)]));
-        }
-    }
-}
-
-fn event_style(kind: &EventType) -> Style {
-    match kind {
-        EventType::ApprovalRequested => Style::default()
-            .fg(theme::WARN)
-            .add_modifier(Modifier::BOLD),
-        EventType::RunFailed
-        | EventType::SessionFailed
-        | EventType::TurnFailed
-        | EventType::RunCancelled
-        | EventType::SessionCancelled
-        | EventType::TurnInterrupted => Style::default().fg(theme::BAD),
-        EventType::OutputTextFinal | EventType::OutputTextDelta => Style::default(),
-        EventType::ThinkingDelta | EventType::Usage | EventType::QueueChanged => {
-            Style::default().fg(theme::MUTED)
-        }
-        EventType::ToolCall | EventType::ToolResult | EventType::FileChange => {
-            Style::default().fg(theme::ACCENT)
-        }
-        _ => Style::default().fg(theme::MUTED),
-    }
-}
-
 fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
     let text = super::tree::truncate(text, width.saturating_sub(8));
     let rule = width.saturating_sub(text.width() + 6);
@@ -1433,64 +1345,6 @@ fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'sta
             Style::default().fg(colour),
         ),
     ])
-}
-
-/// Wrapping done here rather than by `Paragraph` so the scroll offset counts the same
-/// lines the reader sees. A transcript whose scroll position is a guess is a transcript
-/// that jumps.
-///
-/// Measured in terminal cells, like everything else this client lays out by hand: a line
-/// of CJK counted by character is twice as wide as the pane it was measured for.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-
-    for source in text.split('\n') {
-        let mut current = String::new();
-
-        for word in source.split(' ') {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.width() + 1 + word.width() <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
-
-            // A single word wider than the pane is cut rather than allowed to overflow.
-            while current.width() > width {
-                let split = cell_split(&current, width);
-                let tail = current.split_off(split);
-                lines.push(std::mem::replace(&mut current, tail));
-            }
-        }
-
-        lines.push(current);
-    }
-
-    lines
-}
-
-/// The byte offset at which `text` has occupied as many cells as will fit in `width`.
-fn cell_split(text: &str, width: usize) -> usize {
-    let mut used = 0;
-
-    for (at, character) in text.char_indices() {
-        let cells = character.width().unwrap_or(0);
-
-        if used + cells > width {
-            return at;
-        }
-
-        used += cells;
-    }
-
-    text.len()
 }
 
 fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
@@ -1957,6 +1811,8 @@ fn editor_window(text: &str, cursor: usize, width: usize, height: usize) -> Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::model::Event;
 
     #[test]
     fn chat_projection_names_the_ledger_when_older_entries_are_bounded() {
