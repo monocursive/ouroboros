@@ -512,7 +512,10 @@ fn run_started_note(run: &crate::model::transcript::RunStart) -> String {
 
 fn project_lifecycle(cells: &mut Vec<Cell>, marker: Lifecycle, detail: String) {
     let label = marker.label();
-    let text = if detail.trim().is_empty() {
+    // `session_closed` carries `{"reason": "closed"}`, which would otherwise read as
+    // "session closed · closed". A detail the label already contains adds nothing.
+    let detail = detail.trim();
+    let text = if detail.is_empty() || label.contains(&detail.to_ascii_lowercase()) {
         label.to_string()
     } else {
         format!("{label} · {detail}")
