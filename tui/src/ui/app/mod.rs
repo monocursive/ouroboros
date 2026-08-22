@@ -688,6 +688,13 @@ pub struct App {
     /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
     /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
     save_pending: bool,
+    /// Whether the write [`save_pending`](Self::save_pending) asks for is a marker rather
+    /// than an answer, and so should be made without a word about it.
+    ///
+    /// A settings save is the operator's own action and naming the file is the receipt for
+    /// it. An onboarding marker is not: it is written *because* something else is being
+    /// said, and there is one notice row.
+    save_quiet: bool,
     /// The coding home's first prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<PendingFirstMessage>,
@@ -773,6 +780,7 @@ impl App {
             in_flight: HashSet::new(),
             dropped_seen: 0,
             save_pending: false,
+            save_quiet: false,
             first_message: None,
             pending_background_start: None,
             open_url_pending: None,
@@ -865,6 +873,10 @@ impl App {
 
         self.config.onboarding.mouse_hint_shown = true;
         self.save_pending = true;
+        // The marker is written on the same frame the hint is said, and the driver
+        // persists before it draws. Announcing that write would spend the one notice row
+        // on a file the operator never asked for and take the hint with it.
+        self.save_quiet = true;
         self.inform(hint, NoticeKind::Info);
     }
 
@@ -1011,6 +1023,16 @@ impl App {
         }
 
         Some(self.config.clone())
+    }
+
+    /// Whether the write [`take_config_save`](Self::take_config_save) just handed over is
+    /// worth a line on the notice row.
+    ///
+    /// Drained, because the answer belongs to that one write: a quiet marker must not
+    /// silence the settings save after it. A *failed* write is announced either way — a
+    /// file this client could not write is worth saying however it came to be written.
+    pub fn take_config_save_announcement(&mut self) -> bool {
+        !std::mem::take(&mut self.save_quiet)
     }
 
     /// Everything the driver should send, in order. Draining is the only way a request

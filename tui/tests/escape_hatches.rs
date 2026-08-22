@@ -325,6 +325,40 @@ fn the_mouse_hint_is_shown_once_per_operator_and_then_written_down() {
 }
 
 #[test]
+fn writing_the_marker_down_does_not_talk_over_the_hint_it_is_about() {
+    // The hint and the write that remembers it happen on the same frame, and the driver
+    // persists before it draws. A "saved …" line there would spend the one notice row on
+    // a file the operator never asked to have written, and the hint would be gone before
+    // anyone read it.
+    let dir = std::env::temp_dir().join(format!("ouro-hint-notice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+    let mut app = app(full_hello());
+    app.config_path = Some(dir.join("config.toml"));
+    app.mouse_hint = Some("mouse captured for scrolling · hold Shift to select text".into());
+
+    app.apply(Msg::Tick);
+    ouro::ui::persist(&mut app);
+
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("hold Shift to select text")),
+        "the save talked over the hint: {:?}",
+        app.notice
+    );
+
+    // Written all the same — the point is the silence, not the skipping.
+    let text = std::fs::read_to_string(dir.join("config.toml")).expect("a written config");
+    assert!(text.contains("mouse_hint_shown = true"), "{text}");
+
+    // A save the operator *did* ask for still says where it went; that is pinned beside
+    // the settings overlay in `tests/preferences.rs`, which is where the ask lives.
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_terminal_whose_mouse_was_left_alone_is_told_nothing() {
     // `[terminal] mouse = false`: the driver sets no hint, because there is nothing true to
     // say — selection already works and the wheel already belongs to the terminal.

@@ -696,6 +696,11 @@ pub fn persist(app: &mut App) {
         return;
     };
 
+    // Drained beside the config, because the answer belongs to this one write. A marker
+    // the App wrote in order to say something else must not put the filename over the
+    // sentence it was written for.
+    let announce = app.take_config_save_announcement();
+
     let Some(path) = app.config_path.clone() else {
         app.inform(
             "there is nowhere to keep preferences: neither XDG_CONFIG_HOME nor a home \
@@ -707,9 +712,14 @@ pub fn persist(app: &mut App) {
     };
 
     match config.save(&path) {
-        Ok(()) => app.inform(format!("saved {}", path.display()), app::NoticeKind::Info),
+        Ok(()) if announce => {
+            app.inform(format!("saved {}", path.display()), app::NoticeKind::Info)
+        }
+        Ok(()) => {}
         // The App keeps the change in memory either way: it is what the operator chose in
-        // this session. What it must not do is claim the file has it.
+        // this session. What it must not do is claim the file has it. Said whether or not
+        // the write was announced — a file this client could not write is worth a line
+        // however it came to be written.
         Err(error) => app.inform(
             format!("{} could not be written: {error:#}", path.display()),
             app::NoticeKind::Error,
