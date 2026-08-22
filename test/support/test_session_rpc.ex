@@ -35,6 +35,12 @@ defmodule Ouroboros.Test.SessionTransport do
   # worker has already recorded acceptance, which is the part these tests observe.
   @impl true
   def steer(_handle, _request, _request_id), do: :ok
+
+  # Declared for the same reason as `steer/3`: a transport with no approvals channel is
+  # refused under the plane's default `approval_mode: :prompt`, because it would accept
+  # the option and then have nobody to ask.
+  @impl true
+  def respond_approval(_handle, _request_id, _response), do: :ok
 end
 
 defmodule Ouroboros.Test.SessionHarnessAdapter do
@@ -70,7 +76,8 @@ defmodule Ouroboros.Test.SessionHarnessAdapter do
                 multi_turn: :managed,
                 follow_up: :managed,
                 steer: :managed,
-                interrupt: :process
+                interrupt: :process,
+                approvals: :native
               ),
             session_options: :adapter,
             session_provider_options: :adapter,

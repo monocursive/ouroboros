@@ -83,8 +83,15 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert public.options.provider_execution.interactive_approvals
     assert public.options.provider_execution.escalation_behavior == :prompt
 
+    # The exec fallback has no approvals channel, so it cannot be started under the
+    # plane's default `approval_mode: :prompt` at all — stating a mode it can honour is
+    # the only way to reach its public state.
     assert {:ok, exec} =
-             State.new("codex-session-exec", provider: :codex, transport: :exec_jsonl_resume)
+             State.new("codex-session-exec",
+               provider: :codex,
+               transport: :exec_jsonl_resume,
+               approval_mode: :default
+             )
 
     refute State.public(exec).options.provider_execution.interactive_approvals
 

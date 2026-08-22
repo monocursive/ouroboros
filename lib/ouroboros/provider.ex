@@ -32,7 +32,10 @@ defmodule Ouroboros.Provider do
   stated value travels to the harness untouched and the harness refuses it by name.
   """
 
+  alias Jido.Harness.InteractionCapabilities
   alias Jido.Harness.Registry
+  alias Jido.Harness.SessionTransportSpec
+  alias Ouroboros.Provider.Session
 
   require Logger
 
@@ -44,6 +47,32 @@ defmodule Ouroboros.Provider do
 
   # The default posture, in the order a refusal reports it. Read-only is opt-in.
   @plane_defaults [approval_mode: :prompt, sandbox_mode: :workspace_write]
+
+  # The capabilities a session declares publicly. Deliberately the granular set and not
+  # the whole struct: `maturity` describes the transport's own readiness rather than
+  # anything a session can do, and a struct on the wire would carry `_struct` into every
+  # `interactive.list` row. Each value is `:native | :managed | :process | false` and
+  # crosses `Ouroboros.Gateway.Wire` as a string or `false`.
+  @capability_keys [
+    :transport,
+    :process,
+    :multi_turn,
+    :follow_up,
+    :interrupt,
+    :approvals,
+    :steer,
+    :multimodal,
+    :dynamic_model,
+    :dynamic_configuration
+  ]
+
+  # The normalized approval vocabulary `Jido.Harness.SessionRequest` validates against
+  # (`deps/jido_harness/lib/jido_harness/session/request.ex:3`). A transport that
+  # declares no `normalized_values.approval_mode` allowlist accepts all four, which is
+  # what `evaluate/3` already assumes — so this is the list a refusal may recommend from
+  # when the spec narrows nothing. `test/provider_capability_test.exs` checks it against
+  # the harness schema so an upstream addition fails here rather than in a session.
+  @approval_modes [:default, :prompt, :auto_edit, :auto_approve]
 
   # Codex's non-interactive transport otherwise refuses an empty directory before the
   # model sees the first turn, and its workspace-write sandbox cannot fetch a dependency
@@ -1243,9 +1272,133 @@ defmodule Ouroboros.Provider do
         end
       end)
 
-    if unsupported == [],
-      do: {:ok, taken},
-      else: {:error, refusal(provider, unsupported)}
+    cond do
+      unsupported != [] -> {:error, refusal(provider, unsupported)}
+      refused = unanswerable_prompt(provider, plane, taken, capability) -> {:error, refused}
+      true -> {:ok, taken}
+    end
+  end
+
+  @doc """
+  Returns what the transport an interactive session will select can actually do.
+
+  Derived from the provider spec alone. No live process is consulted, because sessions
+  are listed after a restart and a capability that only a running coordinator could
+  answer would be blank on exactly the rows an operator is trying to understand.
+
+  `nil` when the provider or the transport does not resolve. An unregistered provider and
+  a transport no adapter declares are the harness's to name, and inventing a capability
+  map for them would be this module describing a transport it has never seen.
+  """
+  @spec session_capabilities(term(), atom() | nil) :: map() | nil
+  def session_capabilities(provider, transport \\ nil) do
+    with {:ok, spec} <- Registry.spec(provider),
+         %InteractionCapabilities{} = capabilities <- selected_capabilities(spec, transport) do
+      Map.new(@capability_keys, &{&1, Map.get(capabilities, &1, false)})
+    else
+      _unresolvable -> nil
+    end
+  end
+
+  # Mirrors `Jido.Harness.Session.Manager.resolve_transport/2`, including the synthetic
+  # managed transport it substitutes for an adapter that declares none. Declaring
+  # anything else here would describe a transport the session is not going to get.
+  defp selected_capabilities(spec, transport) do
+    selected = transport || spec.default_session_transport || first_transport(spec)
+
+    declared =
+      Enum.find(spec.session_transports, &(&1.name == selected)) ||
+        if selected == :managed, do: SessionTransportSpec.managed()
+
+    case declared do
+      nil -> nil
+      found -> found |> specialize(spec) |> Session.capabilities()
+    end
+  end
+
+  # Mirrors `Jido.Harness.Session.Manager.specialize_transport/2`. A managed transport
+  # re-executes the CLI per turn, so it can only change a setting the adapter actually
+  # normalizes: Amp takes no `model`, and a session that advertised `dynamic_model` for
+  # it would be offering a control that cannot be wired to anything.
+  defp specialize(%{adapter: Jido.Harness.SessionAdapters.Managed} = transport, spec) do
+    configuration_options =
+      Enum.filter(transport.configuration_options, &(&1 in spec.normalized_options))
+
+    capabilities = %{
+      transport.capabilities
+      | dynamic_model:
+          if(:model in configuration_options,
+            do: transport.capabilities.dynamic_model,
+            else: false
+          ),
+        dynamic_configuration:
+          if(configuration_options == [],
+            do: false,
+            else: transport.capabilities.dynamic_configuration
+          )
+    }
+
+    %{transport | capabilities: capabilities, configuration_options: configuration_options}
+  end
+
+  defp specialize(transport, _spec), do: transport
+
+  # X1. `approval_mode: :prompt` promises that a human is asked before a tool runs. A
+  # transport with no approvals channel cannot keep that promise and does not fail
+  # either: `claude --print --permission-mode default` is never given a
+  # `--permission-prompt-tool`
+  # (`deps/jido_harness/lib/jido_harness/adapters/claude.ex:161-163`), so every tool call
+  # that needs permission is denied without a word. The session looks alive and cannot
+  # work. Refusing here is the only place the two spellings that do work can be named.
+  #
+  # Only where the spec would otherwise have *accepted* the value. A transport whose
+  # `normalized_values` already exclude `:prompt` — Pi's RPC, Kimi's ACP — is refused by
+  # name upstream when the caller states it, and has the default omitted when they did
+  # not; neither is this clause's business.
+  defp unanswerable_prompt(provider, {:interactive, transport}, taken, capability) do
+    with :prompt <- Keyword.get(taken, :approval_mode),
+         :supported <- evaluate(capability, :approval_mode, :prompt),
+         %{approvals: false} = capabilities <- session_capabilities(provider, transport) do
+      {:unsupported_approval_mode, unanswerable(provider, capabilities, capability)}
+    else
+      _answerable_or_unresolvable -> nil
+    end
+  end
+
+  defp unanswerable_prompt(_provider, :coding, _taken, _capability), do: nil
+
+  defp unanswerable(provider, capabilities, capability) do
+    supported = answerable_modes(capability)
+
+    %{
+      plane: :interactive,
+      provider: provider,
+      transport: capabilities.transport,
+      requested: :prompt,
+      supported: supported,
+      reason: :no_approval_channel,
+      message: unanswerable_message(provider, capabilities.transport, supported)
+    }
+  end
+
+  # Everything the transport declares it can take, minus the one value it cannot honour.
+  # `:default` stays in the list rather than being filtered out: it is always legal, it
+  # is frequently the only other thing a narrow provider accepts, and the message says
+  # what it means so the list is not read as four equivalent policies.
+  defp answerable_modes({_declared, allowlists}) do
+    (Map.get(allowlists, :approval_mode) || @approval_modes) -- [:prompt]
+  end
+
+  defp answerable_modes(:unresolvable), do: @approval_modes -- [:prompt]
+
+  defp unanswerable_message(provider, transport, supported) do
+    "#{inspect(provider)} reaches an interactive session over the #{inspect(transport)} " <>
+      "transport, which declares no approvals channel. #{inspect(:prompt)} is accepted " <>
+      "there and then asks nobody: every tool call that needs permission is denied " <>
+      "without a word, so the session looks alive and cannot work. It can honour " <>
+      "approval_mode #{Enum.map_join(supported, ", ", &inspect/1)} — :default meaning " <>
+      "the provider's own behavior. State one of those, or start the session on a " <>
+      "transport that can ask (Codex app-server, ACP)."
   end
 
   # The options this provider declares for this plane, and the value allowlists that

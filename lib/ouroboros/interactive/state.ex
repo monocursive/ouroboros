@@ -225,6 +225,19 @@ defmodule Ouroboros.Interactive.State do
               surface: :interactive,
               transport: Map.get(state.options, :transport)
             )
+          ),
+        # Derived from the provider spec at projection time rather than stored, so a
+        # session listed after a restart declares what its transport can do without a
+        # coordinator being up to ask. `nil` where the provider or transport does not
+        # resolve — an absent claim rather than a false one.
+        capabilities:
+          projected(
+            state.options,
+            :capabilities,
+            Ouroboros.Provider.session_capabilities(
+              state.provider,
+              Map.get(state.options, :transport)
+            )
           )
       }
       |> Trace.put(prompt_trace)
