@@ -68,6 +68,19 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
   @spec stop(GenServer.server()) :: :ok
   def stop(server), do: GenServer.cast(server, :begin_shutdown)
 
+  @doc """
+  Blocks until `initialize` has completed, or `timeout_ms` elapses.
+
+  The pool uses this so a caller's first request after a cold spawn waits for the
+  handshake instead of racing it. The waiter list is capped like every other queue here.
+  """
+  @spec await_ready(GenServer.server(), pos_integer()) :: :ok | {:error, term()}
+  def await_ready(server, timeout_ms) do
+    GenServer.call(server, :await_ready, timeout_ms)
+  catch
+    :exit, reason -> {:error, {:server_unavailable, reason}}
+  end
+
   @spec info(GenServer.server()) :: {:ok, info()} | {:error, term()}
   def info(server) do
     GenServer.call(server, :info, 5_000)
@@ -103,7 +116,8 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
       server_info: nil,
       capabilities: %{},
       dropped: 0,
-      initialize_id: nil
+      initialize_id: nil,
+      ready_waiters: []
     }
 
     case open_port(state) do
@@ -114,6 +128,10 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
 
   @impl true
   def handle_continue(:initialize, state) do
+    # The pool needs the OS pid for its RSS watchdog and must not have to ask for it,
+    # because asking means a call into a process that may be busy talking to the server.
+    send(state.owner, {:code_intel_lsp, state.key, {:started, self(), state.os_pid}})
+
     {id, state} = take_id(state)
     Process.send_after(self(), {:deadline, id}, state.initialize_timeout_ms)
 
@@ -138,6 +156,19 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
       {:reply, {:error, :busy}, state}
     else
       dispatch_request(method, params, timeout_ms, from, state)
+    end
+  end
+
+  def handle_call(:await_ready, _from, %{phase: :ready} = state), do: {:reply, :ok, state}
+
+  def handle_call(:await_ready, _from, %{phase: :stopping} = state),
+    do: {:reply, {:error, :shutting_down}, state}
+
+  def handle_call(:await_ready, from, state) do
+    if length(state.ready_waiters) >= state.max_pending do
+      {:reply, {:error, :busy}, state}
+    else
+      {:noreply, %{state | ready_waiters: [from | state.ready_waiters]}}
     end
   end
 
@@ -295,6 +326,10 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
 
     frames = [Codec.notification("initialized", %{}) | Enum.reverse(state.outbox)]
 
+    Enum.each(state.ready_waiters, &GenServer.reply(&1, :ok))
+    send(state.owner, {:code_intel_lsp, state.key, {:ready, state.server_info}})
+    state = %{state | ready_waiters: []}
+
     case write(state, frames) do
       :ok -> {:noreply, %{state | outbox: []}}
       {:error, reason} -> {:stop, {:transport_closed, reason}, state}
@@ -385,12 +420,14 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
   end
 
   defp fail_pending(state, reason) do
+    Enum.each(state.ready_waiters, &GenServer.reply(&1, {:error, reason}))
+
     Enum.each(state.pending, fn
       {_id, %{from: nil}} -> :ok
       {_id, %{from: from}} -> GenServer.reply(from, {:error, reason})
     end)
 
-    %{state | pending: %{}}
+    %{state | pending: %{}, ready_waiters: []}
   end
 
   defp take_id(state), do: {state.next_id, %{state | next_id: state.next_id + 1}}
