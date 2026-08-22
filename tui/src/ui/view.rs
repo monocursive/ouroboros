@@ -578,14 +578,18 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
 
     if let Some(usage) = &facts.usage {
         if let Some(total) = usage.total_tokens.filter(|total| *total > 0) {
-            // The percentage is drawn only where the runtime reported a window. No
-            // runtime reports one today, so this is a hook rather than a feature — and a
+            // D9. The percentage is drawn only where *both* halves were reported, and the
+            // numerator is `context_used` — what the last request actually cost — never
+            // the session's cumulative spend, which crosses its own window many times
+            // over on a long conversation. `/context` is preferred over the session row
+            // because a row's `usage` is reduced by the runtime to tokens and cost; a
             // context meter divided by a number this client invented would be a lie
-            // presented as a measurement.
-            let share = usage
-                .context_window
-                .filter(|window| *window > 0)
-                .map(|window| format!(" · {}%", (total * 100 / window).min(999)))
+            // presented as a measurement, and so would one divided by the wrong number.
+            let share = app
+                .open_context_meter()
+                .and_then(crate::model::native::SessionContext::share)
+                .or_else(|| usage.context_share())
+                .map(|share| format!(" · {share}%"))
                 .unwrap_or_default();
 
             segments.push(Segment::new(
@@ -820,8 +824,31 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             entries,
             choice,
             fork_offered,
+            rewind_offered,
             ..
-        } => backtrack(frame, area, entries, *choice, *fork_offered),
+        } => backtrack(
+            frame,
+            area,
+            entries,
+            *choice,
+            *fork_offered,
+            *rewind_offered,
+        ),
+        // D9/D6/G1. All three draw in [`super::panels`], beside `/keys` and `/cost`: this
+        // file is where parallel work collides, and none of them needs anything from it.
+        Overlay::Context { context, scroll } => {
+            super::panels::context(frame, area, context, *scroll)
+        }
+        Overlay::Rewind {
+            points,
+            choice,
+            what,
+            confirming,
+            ..
+        } => super::panels::rewind(frame, area, points, *choice, *what, *confirming),
+        Overlay::Delegations { rows, choice, .. } => {
+            super::panels::delegations(frame, area, rows, *choice)
+        }
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
         Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
         Overlay::Diff(state) => changed_files(frame, area, state),
@@ -2924,13 +2951,28 @@ fn backtrack(
     entries: &[(u64, String)],
     choice: usize,
     fork_offered: bool,
+    rewind_offered: bool,
 ) {
+    let mut verbs = vec![if fork_offered {
+        "enter forks"
+    } else {
+        "enter edits and resends as a new turn"
+    }];
+
+    if fork_offered {
+        verbs.push("e edits and resends as a new turn");
+    }
+
+    // D6. Named last because it is the only one of the three that *removes* something,
+    // and because it leaves this menu for one that states what it cannot restore.
+    if rewind_offered {
+        verbs.push("r rewinds");
+    }
+
+    verbs.push("esc closes");
+
     let mut lines = vec![Line::from(Span::styled(
-        if fork_offered {
-            "enter forks · e edits and resends as a new turn · esc closes"
-        } else {
-            "enter edits and resends as a new turn · esc closes"
-        },
+        verbs.join(" · "),
         Style::default().fg(theme::muted()),
     ))];
 
@@ -2942,7 +2984,11 @@ fn backtrack(
     }
 
     lines.push(Line::from(Span::styled(
-        "nothing here removes an earlier turn; both verbs only add one",
+        if rewind_offered {
+            "the two verbs above only add a turn; the rewind is the one that undoes"
+        } else {
+            "nothing here removes an earlier turn; both verbs only add one"
+        },
         Style::default().fg(theme::muted()),
     )));
     lines.push(Line::from(""));

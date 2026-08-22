@@ -332,6 +332,59 @@ impl App {
                     }
                 }
             },
+            // D9/D6/B7/G1. Each of these answers with something to *draw* rather than
+            // an acknowledgement to acknowledge, which is why none of them is a
+            // `Tag::Action`. The refusals branch first on the two native-only shapes so a
+            // capability answer and a liveness one do not read the same.
+            Tag::Compact { plane, id } => match result {
+                Ok(value) => self.compacted(plane, &id, &value),
+                Err(error) => self.native_verb_failed("compact", &id, error),
+            },
+            Tag::Handoff {
+                plane: _,
+                id,
+                child,
+            } => match result {
+                Ok(value) => self.handed_off(&id, &child, &value),
+                Err(error) => self.native_verb_failed("handoff", &id, error),
+            },
+            Tag::Context { plane, id, show } => match result {
+                Ok(value) => self.context_read(plane, &id, show, &value),
+                // A background refresh says nothing: it was not asked for, and a notice
+                // about a meter nobody was looking at is noise.
+                Err(error) if show => self.native_verb_failed("context", &id, error),
+                Err(_quiet) => {}
+            },
+            Tag::RewindPoints { plane, id } => match result {
+                Ok(value) => self.rewind_points_read(plane, &id, &value),
+                Err(error) => self.native_verb_failed("rewind", &id, error),
+            },
+            Tag::Rewind {
+                plane,
+                id,
+                label,
+                what,
+            } => match result {
+                Ok(value) => self.rewound(plane, &id, &label, what, &value),
+                Err(error) => self.native_verb_failed("rewind", &id, error),
+            },
+            Tag::Shell { plane, id, command } => match result {
+                Ok(value) => self.shell_finished(plane, &id, &command, &value),
+                Err(error) => self.shell_refused(&error),
+            },
+            Tag::Delegate { plane: _, id } => {
+                self.delegating = false;
+
+                match result {
+                    Ok(value) => self.delegated(&value),
+                    Err(error) => self.action_failed("delegate", Plane::Interactive, &id, error),
+                }
+            }
+            Tag::Delegations { plane, id, show } => match result {
+                Ok(value) => self.delegations_read(plane, &id, show, &value),
+                Err(error) if show => self.action_failed("delegations", plane, &id, error),
+                Err(_quiet) => {}
+            },
             Tag::Action {
                 label, plane, id, ..
             } => match result {
@@ -645,6 +698,21 @@ impl App {
     }
 
     /// A refused operate verb, said in the terms the gateway used.
+    /// A native-only verb's refusal.
+    ///
+    /// Two of the shapes it can take are worth their own sentence: `unsupported_on_transport`
+    /// is permanent for this session, and `native_transport_unavailable` is not. Everything
+    /// else falls through to the ordinary renderer, which keeps every field the runtime
+    /// sent rather than summarising it away.
+    fn native_verb_failed(&mut self, label: &str, id: &str, error: ClientError) {
+        if let Some(sentence) = Self::native_refusal(&error) {
+            self.inform(format!("{label}: {sentence}"), NoticeKind::Info);
+            return;
+        }
+
+        self.action_failed(label, Plane::Interactive, id, error);
+    }
+
     fn action_failed(&mut self, label: &str, _plane: Plane, id: &str, error: ClientError) {
         let text = match &error {
             ClientError::Rpc(rpc) if rpc.code == ErrorCode::ScopeDenied => format!(

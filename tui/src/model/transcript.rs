@@ -96,6 +96,18 @@ pub enum PresentationEvent {
     },
     Failure(String),
     Interrupted(String),
+    /// B7. A command the *operator* ran through `workspace.exec`, as the runtime recorded
+    /// it on the session's own log. Its own cell rather than a dim provider line, because
+    /// it is the one thing in this transcript no model asked for.
+    OperatorShell(Box<crate::model::native::ShellEvent>),
+    /// D9. A fold of the conversation, automatic or asked for. Its own cell because the
+    /// numbers in it — what was archived, and where — are the only record a reader has of
+    /// history that is no longer in front of them.
+    Compaction(Box<crate::model::native::Compaction>),
+    /// G1. A coding task this conversation delegated, starting or ending. Two per child
+    /// and no more; the terminal one carries a digest of the result, never the result,
+    /// because that is the child's own record.
+    Delegation(Box<crate::model::native::DelegationEvent>),
     /// Something the provider said that this client does not model. Named by its own kind
     /// so it is one dim line rather than an invisible event.
     ProviderNote {
@@ -426,6 +438,12 @@ impl PresentationEvent {
                 detail: lifecycle_detail(&event.payload),
             },
             EventType::ProviderEvent => provider_note(&event.payload),
+            // G1. `delegation` is its own runtime-native event type, not a wrapped
+            // provider one: `emit_runtime_event(runtime, :delegation, …)` puts it in the
+            // same sequence space as everything else, so it arrives here as `Other`.
+            EventType::Other(ref kind) if kind == "delegation" => Self::Delegation(Box::new(
+                crate::model::native::DelegationEvent::decode(&event.payload),
+            )),
             // A kind this build does not know. It is still an event the runtime recorded,
             // so it reads as one dim line naming itself rather than as nothing at all.
             EventType::Other(ref kind) => Self::ProviderNote {
@@ -475,6 +493,24 @@ fn input_accepted(payload: &Value) -> PresentationEvent {
 /// ACP wraps every update it does not map in `{"kind": "acp_update", "update": …}`; the
 /// update's own `sessionUpdate` type is the informative half and is lifted out here.
 fn provider_note(payload: &Value) -> PresentationEvent {
+    // Two kinds this runtime writes itself and this client draws in full. Matched before
+    // the generic path because they are not "something the provider said that this client
+    // does not model" — they are Ouroboros's own record of an operator's act (B7) and of
+    // history it folded away (D9).
+    match payload.get("kind").and_then(Value::as_str) {
+        Some("operator_shell") => {
+            return PresentationEvent::OperatorShell(Box::new(
+                crate::model::native::ShellEvent::decode(payload),
+            ));
+        }
+        Some("compaction") => {
+            if let Some(report) = crate::model::native::Compaction::decode(payload) {
+                return PresentationEvent::Compaction(Box::new(report));
+            }
+        }
+        _other => {}
+    }
+
     let kind = text(payload, &["kind", "type", "item_type", "event", "name"]);
     let nested = payload
         .get("update")

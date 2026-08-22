@@ -127,10 +127,25 @@ pub enum Command {
     Keys,
     /// I2: what this session has spent.
     Cost,
+    /// D9: fold the conversation now. `/compact <focus>` takes an argument; the palette
+    /// row is the unfocused fold.
+    Compact,
+    /// D9: a fresh session seeded with a packet about this one.
+    Handoff,
+    /// D9: what this session can honestly say about its own context window.
+    Context,
+    /// D6: the turns this session can go back to.
+    Rewind,
+    /// G1: hand a piece of work to a coding task with this conversation as its parent.
+    Delegate,
+    /// G1: the children this conversation started.
+    Delegations,
+    /// A10: cycle the palette. The one command that was reachable only as a verb.
+    Theme,
 }
 
 impl Command {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 43] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -167,6 +182,13 @@ impl Command {
         Self::Effort,
         Self::Cost,
         Self::Keys,
+        Self::Compact,
+        Self::Handoff,
+        Self::Context,
+        Self::Rewind,
+        Self::Delegate,
+        Self::Delegations,
+        Self::Theme,
     ];
 
     pub fn group(self) -> &'static str {
@@ -194,6 +216,13 @@ impl Command {
             | Self::Effort
             | Self::Cost
             | Self::Keys
+            | Self::Compact
+            | Self::Handoff
+            | Self::Context
+            | Self::Rewind
+            | Self::Delegate
+            | Self::Delegations
+            | Self::Theme
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -237,6 +266,13 @@ impl Command {
             Self::Effort => "Reasoning effort for the next turn",
             Self::Keys => "Show the effective key map",
             Self::Cost => "Show tokens and cost for this session",
+            Self::Compact => "Compact this conversation now",
+            Self::Handoff => "Hand this session's work to a fresh one",
+            Self::Context => "Show what fills the context window",
+            Self::Rewind => "Rewind to an earlier turn",
+            Self::Delegate => "Delegate work to a coding task",
+            Self::Delegations => "Show this conversation's delegations",
+            Self::Theme => "Cycle the colour theme",
         }
     }
 
@@ -283,6 +319,13 @@ impl Command {
             Self::Effort => "/effort",
             Self::Keys => "/keys",
             Self::Cost => "/cost",
+            Self::Compact => "/compact",
+            Self::Handoff => "/handoff",
+            Self::Context => "/context",
+            Self::Rewind => "/rewind",
+            Self::Delegate => "/delegate",
+            Self::Delegations => "/delegations",
+            Self::Theme => "/theme",
         }
     }
 
@@ -353,6 +396,18 @@ impl App {
                 Command::Interrupt => self.open_capabilities().interrupt.offered(),
                 Command::Fork => self.fork_offered(),
                 Command::Model => self.hello.serves("interactive.configure"),
+                // D9/D6. Native only, and the gate is the same two questions the verb
+                // itself asks: a row that always refuses is a row that should not be
+                // drawn.
+                Command::Compact | Command::Handoff | Command::Rewind => {
+                    self.context_verbs_offered()
+                }
+                // Answers for every transport, with different amounts of truth.
+                Command::Context => self.context_overlay_offered(),
+                Command::Delegate => self.delegation_offered(),
+                Command::Delegations => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.delegations")
+                }
                 _always => true,
             })
             .collect::<Vec<_>>();
@@ -487,6 +542,36 @@ pub enum Overlay {
         /// unable to fork. Both halves, because the method gate and the capability gate
         /// are different questions and this menu must not offer a verb that fails either.
         fork_offered: bool,
+        /// D6. Whether `/rewind` is offered here as well as the two above. A rewind is a
+        /// third answer to "go back", and it belongs in the menu that asks the question —
+        /// but only where this session's transport is the one that keeps checkpoints.
+        rewind_offered: bool,
+    },
+    /// D9. `/context`: what this session can honestly say about its own context window.
+    Context {
+        context: Box<crate::model::native::SessionContext>,
+        scroll: usize,
+    },
+    /// D6. `/rewind`: the turns this session can go back to, what each of them cannot put
+    /// back, and the three-way choice of what to restore.
+    ///
+    /// `confirming` is the second screen rather than a second overlay: the warning a turn
+    /// carries has to be read *before* the choice is committed, and a menu that acted on
+    /// the first Enter would be the silently-under-delivering rewind D10 exists to not be.
+    Rewind {
+        plane: Plane,
+        id: String,
+        points: Vec<crate::model::native::RewindPoint>,
+        choice: usize,
+        what: usize,
+        confirming: bool,
+    },
+    /// G1. The coding tasks this conversation delegated, and a way into each one.
+    Delegations {
+        plane: Plane,
+        id: String,
+        rows: Vec<crate::model::native::DelegationRow>,
+        choice: usize,
     },
 }
 
@@ -825,10 +910,12 @@ impl App {
                 entries,
                 choice,
                 fork_offered,
+                rewind_offered,
                 ..
             } => {
                 let last = entries.len().saturating_sub(1);
                 let forkable = *fork_offered;
+                let rewindable = *rewind_offered;
 
                 match key.code {
                     KeyCode::Esc => self.overlay = None,
@@ -836,8 +923,71 @@ impl App {
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     KeyCode::Char('e') => self.backtrack_edit(),
                     KeyCode::Char('f') if forkable => self.backtrack_fork(),
+                    // D6. The third answer to "go back", where this session's transport
+                    // is the one that keeps checkpoints. It leaves the menu and opens the
+                    // rewind's own, because a rewind states what it cannot restore before
+                    // it is chosen and there is no room for that here.
+                    KeyCode::Char('r') if rewindable => {
+                        self.overlay = None;
+                        self.open_rewind();
+                    }
                     KeyCode::Enter if forkable => self.backtrack_fork(),
                     KeyCode::Enter => self.backtrack_edit(),
+                    _ => {}
+                }
+            }
+            // D9. A read-only page, with the same discipline as `?`.
+            Overlay::Context { scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
+                KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                _ => {}
+            },
+            // D6. Two screens: the turns, then what to restore. `Esc` steps back one
+            // screen rather than closing outright, because the second screen is where the
+            // warning is and stepping out of it by accident should not cost the menu.
+            Overlay::Rewind {
+                points,
+                choice,
+                what,
+                confirming,
+                ..
+            } => {
+                let last = points.len().saturating_sub(1);
+
+                if *confirming {
+                    match key.code {
+                        KeyCode::Esc => *confirming = false,
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            *what = (*what + 1).min(super::native::REWIND_WHAT.len() - 1)
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => *what = what.saturating_sub(1),
+                        KeyCode::Enter => self.rewind_confirm(),
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                        KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                        KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                        KeyCode::Enter => *confirming = true,
+                        _ => {}
+                    }
+                }
+            }
+            // G1. `Enter` opens the child's own transcript; there is no way to talk to it
+            // from here, because a delegation is a coding task with a parent and not a
+            // sub-conversation.
+            Overlay::Delegations { rows, choice, .. } => {
+                let last = rows.len().saturating_sub(1);
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    KeyCode::Enter => self.open_delegation_child(),
                     _ => {}
                 }
             }
@@ -1050,6 +1200,37 @@ impl App {
             Command::Cost => {
                 self.overlay = None;
                 self.open_cost();
+            }
+            Command::Compact => {
+                self.overlay = None;
+                self.compact_session(None);
+            }
+            // Both take words, so the palette teaches the verb by prefilling the composer
+            // rather than acting on an argument the operator has not typed yet — the same
+            // thing `/model` and `/effort` do.
+            Command::Handoff => {
+                self.overlay = None;
+                self.prefill_composer("/handoff ");
+            }
+            Command::Delegate => {
+                self.overlay = None;
+                self.prefill_composer("/delegate ");
+            }
+            Command::Context => {
+                self.overlay = None;
+                self.open_context();
+            }
+            Command::Rewind => {
+                self.overlay = None;
+                self.open_rewind();
+            }
+            Command::Delegations => {
+                self.overlay = None;
+                self.open_delegations();
+            }
+            Command::Theme => {
+                self.overlay = None;
+                self.cycle_theme();
             }
             Command::ShowDiff => {
                 self.overlay = None;

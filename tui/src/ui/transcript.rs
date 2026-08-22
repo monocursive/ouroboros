@@ -45,7 +45,7 @@ pub const WINDOW: usize = 5_000;
 /// not accumulate one line per lag forever.
 const MAX_NOTES: usize = 64;
 
-/// Something that happened to the *stream*, recorded in place among the events.
+/// Something recorded in place among the events, by the stream or by this client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     /// Frames the gateway discarded under backpressure.
@@ -54,6 +54,24 @@ pub enum Note {
     ClientDropped,
     /// The connection was lost and re-established here.
     Reconnected,
+    /// What one of the operator's *own* verbs answered, at the point in the conversation
+    /// where they asked: a `/compact` report, a rewind's restored and unrestorable lists,
+    /// a `!` command's result (D9, D6, B7).
+    ///
+    /// Not a claim about the stream and not the agent's words — it is the reply this
+    /// client received, drawn where it belongs rather than in a notice row that scrolls
+    /// away in four seconds.
+    ///
+    /// [`Block::key`] is what the runtime's own durable event for the same act is matched
+    /// against. The runtime writes a `provider_event` for every compaction and every
+    /// operator command, so without it a `!` would draw twice — once from this reply,
+    /// once from the event — and the fuller of the two is this one, because a reply
+    /// carries the elapsed time and the spill path the event does not.
+    ///
+    /// [`Block::key`]: crate::ui::transcript_cells::Block::key
+    Local {
+        block: crate::ui::transcript_cells::Block,
+    },
 }
 
 impl Note {
@@ -67,7 +85,15 @@ impl Note {
             }
             Self::ClientDropped => "this client could not take some event frames here".to_string(),
             Self::Reconnected => "the connection was re-established here".to_string(),
+            Self::Local { block } => block.text(),
         }
+    }
+
+    /// Whether this is one of this client's own notes rather than a stream fact. The two
+    /// are drawn differently — a muted in-conversation cell against a warning divider —
+    /// because only one of them means something went wrong.
+    pub fn local(&self) -> bool {
+        matches!(self, Self::Local { .. })
     }
 }
 
@@ -788,6 +814,18 @@ impl Watch {
 
             self.notes.remove(&oldest);
         }
+    }
+
+    /// Records what one of the operator's own verbs answered, at the tail of what this
+    /// transcript currently holds.
+    ///
+    /// Anchored at the newest sequence for the same reason a stream note is: the reply
+    /// arrived *now*, and putting it anywhere else would place it beside a turn it is not
+    /// about. It shares `MAX_NOTES` with the stream notes, so a session that compacts and
+    /// runs commands all day keeps the newest sixty-four of both rather than growing
+    /// without bound.
+    pub fn local_note(&mut self, block: crate::ui::transcript_cells::Block) {
+        self.note(Note::Local { block }, self.newest());
     }
 
     pub fn end(&mut self, status: String) {

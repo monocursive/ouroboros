@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 36] = [
+pub(crate) const COMMANDS: [(&str, &str); 42] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -38,6 +38,12 @@ pub(crate) const COMMANDS: [(&str, &str); 36] = [
     ("/effort", "reasoning effort for the next turn only"),
     ("/backtrack", "go back to an earlier message"),
     ("/fork", "fork this session"),
+    ("/compact", "fold this conversation now ([focus])"),
+    ("/handoff", "hand this work to a fresh session (<prompt>)"),
+    ("/context", "what fills this session's context window"),
+    ("/rewind", "go back to an earlier turn"),
+    ("/delegate", "hand work to a coding task (<objective>)"),
+    ("/delegations", "the coding tasks this conversation started"),
     ("/model", "change the model on this session"),
     ("/editor", "edit this prompt in $EDITOR"),
     ("/connect", "connect or inspect ChatGPT"),

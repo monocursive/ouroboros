@@ -727,6 +727,13 @@ impl App {
         }
 
         self.sessions.show_plan = !self.sessions.show_plan;
+
+        // G1. The panel lists this conversation's children beside its plan, so opening it
+        // is what reads them. Only on the way *open*: closing a panel is not a reason to
+        // ask the runtime anything.
+        if self.sessions.show_plan {
+            self.read_delegations();
+        }
     }
 
     pub(super) fn toggle_session_details(&mut self) {
@@ -885,6 +892,12 @@ impl App {
 
         let choice = entries.len().saturating_sub(1);
         let fork_offered = self.fork_offered();
+        // D6. A rewind is the third answer this menu can give, and it is offered on the
+        // same two-gate rule as the fork: the method must be served and the transport must
+        // be the one that keeps the checkpoints a rewind restores from.
+        let rewind_offered = self
+            .native_verb_offered("interactive.rewind_points")
+            .is_ok();
 
         self.overlay = Some(Overlay::Backtrack {
             plane,
@@ -892,6 +905,7 @@ impl App {
             entries,
             choice,
             fork_offered,
+            rewind_offered,
         });
     }
 
@@ -1593,6 +1607,21 @@ impl App {
             return;
         }
 
+        // B7. A draft that begins with `!` is the operator's own command, not a message to
+        // the model. Claimed here, beside the slash verbs, because it is the same kind of
+        // thing: a line the composer acts on itself rather than sending as a turn.
+        if let Some(command) = input.strip_prefix('!') {
+            self.run_operator_shell(command);
+
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.accept_submission();
+                composer.user_changed_draft();
+            }
+
+            self.remember_composer_history();
+            return;
+        }
+
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
         };
@@ -1887,6 +1916,24 @@ impl App {
             return true;
         }
 
+        // D9/G1. Four verbs that take the rest of the line: a compaction focus, a handoff
+        // prompt, a delegation's objective. Bare `/compact` is the unfocused fold, which
+        // is why it also has a row in the table below.
+        if let Some(focus) = slash_arg(trimmed, "/compact") {
+            self.compact_session(Some(focus));
+            return true;
+        }
+
+        if let Some(prompt) = slash_arg(trimmed, "/handoff") {
+            self.handoff_session(prompt);
+            return true;
+        }
+
+        if let Some(objective) = slash_arg(trimmed, "/delegate") {
+            self.delegate(objective);
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),
@@ -1898,6 +1945,12 @@ impl App {
             "/steer" => Some(Command::Steer),
             "/backtrack" => Some(Command::Backtrack),
             "/fork" => Some(Command::Fork),
+            "/compact" => Some(Command::Compact),
+            "/handoff" => Some(Command::Handoff),
+            "/context" => Some(Command::Context),
+            "/rewind" => Some(Command::Rewind),
+            "/delegate" => Some(Command::Delegate),
+            "/delegations" => Some(Command::Delegations),
             "/editor" => Some(Command::ExternalEditor),
             "/close" => Some(Command::CloseSession),
             "/options" => Some(Command::NewSessionOptions),

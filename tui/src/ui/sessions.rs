@@ -18,7 +18,7 @@ use crate::keymap::Action;
 use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
 
 use super::access;
-use super::app::{App, Composer, ComposerVerb, Connection};
+use super::app::{App, ComposerVerb, Connection};
 use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
@@ -628,7 +628,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        composer_block_height(app.sessions.composer.as_ref(), area.width)
+        composer_block_height(app, area.width)
     } else {
         0
     };
@@ -832,19 +832,35 @@ fn plan_panel_height(app: &App, area: Rect) -> u16 {
         return 0;
     }
 
-    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
+    // G1. The panel draws whichever of the two the session has. A conversation that
+    // delegated work but published no plan still has something to show here, and one that
+    // has neither draws nothing at all rather than an empty frame.
+    let children = app.open_delegation_rows().len() as u16;
+
+    if plan.is_none() && children == 0 {
         return 0;
-    };
+    }
 
     // Heading, the explanation's first wrapped rows, one row per step, and the borders.
-    let body = 1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some());
-    body.saturating_add(2).min(PLAN_PANEL_ROWS)
+    let steps = plan.map_or(0, |plan| {
+        1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some())
+    });
+    let delegations = if children > 0 { children + 1 } else { 0 };
+
+    steps
+        .saturating_add(delegations)
+        .saturating_add(2)
+        .min(PLAN_PANEL_ROWS)
 }
 
 fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
+    let children = app.open_delegation_rows();
+
+    if plan.is_none() && children.is_empty() {
         return;
-    };
+    }
 
     let block = Block::default()
         .borders(access::borders(Borders::TOP))
@@ -853,12 +869,25 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(block, area);
 
     let mut lines = Vec::new();
-    transcript_cells::render_plan(
-        &mut lines,
-        plan,
-        inner.width.max(8) as usize,
-        &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
-    );
+
+    if let Some(plan) = plan {
+        transcript_cells::render_plan(
+            &mut lines,
+            plan,
+            inner.width.max(8) as usize,
+            &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
+        );
+    }
+
+    // G1. Beside the plan, not instead of it: a delegation is work this conversation
+    // handed to a child, and the plan is work it kept.
+    if !children.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("Delegations  {}  /delegations opens one", children.len()),
+            theme::label(),
+        )));
+        lines.extend(super::panels::delegation_lines(children, None));
+    }
 
     // The newest rows are the ones being worked on, so a plan longer than the panel keeps
     // its tail rather than its head.
@@ -1646,15 +1675,15 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     frame.render_widget(block, area);
 
     let rows = Layout::vertical([
-        Constraint::Length(chip_rows(active)),
+        Constraint::Length(chip_rows(app)),
         Constraint::Min(2),
         Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
 
-    if let Some(composer) = active {
-        render_chips(frame, rows[0], composer);
+    if active.is_some() {
+        render_chips(frame, rows[0], app);
     }
 
     let rows = &rows[1..];
@@ -1877,24 +1906,37 @@ const COMPOSER_EDITOR_MIN: u16 = 2;
 const COMPOSER_EDITOR_MAX: u16 = 6;
 const COMPOSER_CHROME: u16 = 3;
 
-fn composer_block_height(composer: Option<&Composer>, width: u16) -> u16 {
+fn composer_block_height(app: &App, width: u16) -> u16 {
+    let composer = app.sessions.composer.as_ref();
     let editor = composer.map(|composer| &composer.editor);
 
-    COMPOSER_CHROME + chip_rows(composer) + editor_rows(editor, width) + completion_rows(editor)
+    COMPOSER_CHROME + chip_rows(app) + editor_rows(editor, width) + completion_rows(editor)
 }
 
 /// How many rows the attachment chips and their refusal want, above the editor.
 ///
 /// Zero for the ordinary turn, which is most of them: a composer with nothing attached
 /// draws exactly what it drew before B4.
-fn chip_rows(composer: Option<&Composer>) -> u16 {
-    let Some(composer) = composer else {
+fn chip_rows(app: &App) -> u16 {
+    let Some(composer) = app.sessions.composer.as_ref() else {
         return 0;
     };
 
-    let chips = u16::from(!composer.attachments.is_empty() || composer.reasoning_effort.is_some());
+    let chips = u16::from(
+        !composer.attachments.is_empty()
+            || composer.reasoning_effort.is_some()
+            || app.delegating
+            || composer.editor.text().starts_with('!'),
+    );
 
-    chips + u16::from(composer.attachment_refusal.is_some())
+    // B7. A refusal is two rows: what the runtime said, and the rule that would fix it.
+    // Both are on the composer rather than in the notice row, because a one-key action
+    // that expires in four seconds is not an action anyone can take.
+    let refused = app.shell_refusal.as_ref().map_or(0, |refusal| {
+        1 + u16::from(refusal.offer.is_some() || refusal.suggested_rule.is_some())
+    });
+
+    chips + u16::from(composer.attachment_refusal.is_some()) + refused
 }
 
 /// The chips: what this turn will carry as `params.input.attachments`, and the per-turn
@@ -1903,14 +1945,23 @@ fn chip_rows(composer: Option<&Composer>) -> u16 {
 /// Chips rather than the substituted text alone because they are the only place the
 /// structured half of the turn is visible. The text still says `@src/app.rs`; the chip is
 /// what says that path is *also* travelling as an attachment the runtime will canonicalise.
-fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
-    if chip_rows(Some(composer)) == 0 {
+fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
+    if chip_rows(app) == 0 {
         return;
     }
 
-    let mut lines = Vec::new();
+    let Some(composer) = app.sessions.composer.as_ref() else {
+        return;
+    };
 
-    if !composer.attachments.is_empty() || composer.reasoning_effort.is_some() {
+    let mut lines = Vec::new();
+    let shell_draft = composer.editor.text().starts_with('!');
+
+    if !composer.attachments.is_empty()
+        || composer.reasoning_effort.is_some()
+        || app.delegating
+        || shell_draft
+    {
         let mut spans = Vec::new();
 
         for attachment in &composer.attachments {
@@ -1937,7 +1988,31 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
             spans.push(Span::raw(" "));
         }
 
-        if !composer.attachments.is_empty() {
+        // G1. A delegation is two bounded team calls behind a ninety-second ceiling, so
+        // it is worth saying that something is in flight rather than leaving the composer
+        // looking idle.
+        if app.delegating {
+            spans.push(Span::styled(
+                " delegating… ",
+                Style::default().fg(theme::accent()),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        // B7. Said *before* the command is sent, every time, because "where does this
+        // run" is the one thing about `!` that a person cannot infer from the screen: not
+        // here, but on the session's own owner node, in the workspace the agent is
+        // editing.
+        if shell_draft {
+            spans.push(Span::styled(" ! ", Style::default().fg(theme::warn())));
+            spans.push(Span::styled(
+                super::tree::truncate(
+                    &format!("runs on {}", app.shell_where()),
+                    area.width.saturating_sub(6).max(20) as usize,
+                ),
+                Style::default().fg(theme::muted()),
+            ));
+        } else if !composer.attachments.is_empty() {
             spans.push(Span::styled(
                 "backspace on an empty draft removes the last",
                 Style::default().fg(theme::muted()),
@@ -1952,6 +2027,41 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
             super::tree::truncate(refusal, area.width.max(20) as usize),
             Style::default().fg(theme::warn()),
         )));
+    }
+
+    if let Some(refusal) = app.shell_refusal.as_ref() {
+        let mut said = refusal
+            .message
+            .clone()
+            .unwrap_or_else(|| "the command was refused".to_string());
+
+        if let Some(denied) = &refusal.denied_by {
+            said = format!("{said} (denied by {denied})");
+        }
+
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(&said, area.width.max(20) as usize),
+            Style::default().fg(theme::warn()),
+        )));
+
+        // The rule is named in full before it is written, and the key is only offered
+        // where this client could actually honour it. Where it could not, the rule is
+        // still printed — an operator who can run `permissions.add` themselves is better
+        // served by the exact pattern than by silence.
+        if let Some(pattern) = &refusal.suggested_rule {
+            let row = match &refusal.offer {
+                Some(_) => format!(
+                    "{} saves the rule {pattern}",
+                    app.keymap.label(crate::keymap::Action::LeaderShellRule)
+                ),
+                None => format!("the rule {pattern} would allow it; this client cannot save it"),
+            };
+
+            lines.push(Line::from(Span::styled(
+                super::tree::truncate(&row, area.width.max(20) as usize),
+                Style::default().fg(theme::accent()),
+            )));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
