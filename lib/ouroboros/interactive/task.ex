@@ -261,6 +261,60 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, reply, schedule_poll(runtime, 0)}
   end
 
+  def handle_call({:configure, changes}, _from, runtime) do
+    case configure_session(runtime, changes) do
+      {:ok, result, runtime} -> {:reply, {:ok, result}, schedule_poll(runtime, 0)}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  # Planning a fork is this coordinator's job; *starting* one is not. A session start
+  # waits on provider readiness, which is legitimately unbounded, and a parent blocked on
+  # that wait would answer nothing — not `info`, not `interrupt`, not its own turns —
+  # until a child it does not own had finished starting or hit the readiness deadline. So
+  # this answers with the child's start intent and nothing else, and
+  # `Ouroboros.InteractiveSession.fork/2` starts the child outside this process.
+  def handle_call({:fork_plan, id}, _from, runtime) do
+    {:reply, fork_plan(runtime.session, id), runtime}
+  end
+
+  # Counted only once the child exists, so the number never claims a session nobody can
+  # open. A refused checkpoint leaves the count low rather than losing the child:
+  # `forked_from` on the child is the durable half of the relationship.
+  def handle_call(:count_fork, _from, runtime) do
+    counted = runtime.session |> State.count_fork() |> State.touch()
+
+    case persist(runtime, counted, []) do
+      {:ok, runtime} ->
+        {:reply, {:ok, State.forks(runtime.session)}, runtime}
+
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} started a fork but could not " <>
+            "checkpoint its fork count; the child is unaffected"
+        )
+
+        {:reply, {:error, :fork_count_checkpoint_failed}, runtime}
+    end
+  end
+
+  # A rename touches nothing but the durable record: no provider knows this session by a
+  # name, and a terminal session is still worth finding in a picker, so unlike `configure`
+  # this is allowed after the conversation has ended.
+  def handle_call({:rename, title}, _from, runtime) do
+    with {:ok, title} <- State.validate_title(title),
+         renamed = runtime.session |> State.put_title(title, :human) |> State.touch(),
+         {:ok, runtime} <- persist(runtime, renamed, []) do
+      {:reply, {:ok, State.public(runtime.session)}, runtime}
+    else
+      {:error, {:invalid_title, _detail} = reason} ->
+        {:reply, {:error, reason}, runtime}
+
+      {:error, runtime} ->
+        {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
+    end
+  end
+
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
       case harness_turn_id(runtime.session, turn_id) do
@@ -566,6 +620,7 @@ defmodule Ouroboros.Interactive.Task do
       # What the session spent rides the same checkpoint as the events it was read from,
       # so a restart resumes the account rather than restarting it at zero.
       |> State.fold_usage(projected)
+      |> auto_title(projected)
       |> State.touch()
 
     case persist(runtime, session, projected) do
@@ -587,6 +642,33 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp enrich_chat_input(event, _session), do: event
+
+  # Names an unnamed session from the first user input the provider accepted.
+  #
+  # Hung on `input_accepted` rather than on the turn dispatch because that event is the
+  # one whose text is already redacted and durable — `enrich_chat_input/2` put it there —
+  # so the title is derived from exactly the bytes the transcript shows, and a turn that
+  # was never accepted never names anything.
+  #
+  # `State.put_title/3` is what makes this safe to run on every batch: an `:auto` title
+  # writes only into a session nobody has named, so a second prompt cannot rename a
+  # conversation and a rename can never be undone by one.
+  defp auto_title(session, projected) do
+    with nil <- State.title(session),
+         %Event{payload: %{"text" => text}} <- first_accepted_input(projected),
+         title when is_binary(title) <- State.auto_title(text) do
+      State.put_title(session, title, :auto)
+    else
+      _named_or_nothing_to_name -> session
+    end
+  end
+
+  defp first_accepted_input(projected) do
+    Enum.find(projected, fn
+      %Event{type: :input_accepted, payload: %{"kind" => kind}} -> kind in ["message", "steer"]
+      _event -> false
+    end)
+  end
 
   # Harness records only *that* a steer was accepted (`input_accepted` with
   # `%{"kind" => "steer"}` and a fresh request id), never the text that produced it.
@@ -1512,6 +1594,168 @@ defmodule Ouroboros.Interactive.Task do
         _ = safe_session_call(fn -> Session.close(harness_session_id) end)
         retry(runtime, :session_resume_checkpoint_failed, :storage_error)
     end
+  end
+
+  # Mid-session configuration, in the order that keeps the two records honest.
+  #
+  # The provider is told first. `Jido.Harness.Session.configure/2` is a synchronous call
+  # whose answer is unambiguous — unlike a turn dispatch, nothing here can have half
+  # happened — so a refusal leaves both the provider and the checkpoint on the old
+  # options, which is the only outcome where "nothing changed" is true.
+  #
+  # Only then is the change recorded, and the record is what `interactive.info` answers
+  # with and what a resume rebuilds the request from. A storage outage between the two is
+  # named rather than swallowed: the provider took the change and this node could not
+  # write it down, so the caller is told exactly that instead of being handed a success
+  # that a restart would silently undo.
+  defp configure_session(%{session: session} = runtime, changes) do
+    if State.terminal?(session) do
+      {:error, {:session_not_configurable, session.status}, runtime}
+    else
+      with {:ok, changes, applies} <-
+             Provider.session_configuration(
+               session.provider,
+               changes,
+               Map.get(session.options, :transport)
+             ),
+           :ok <- apply_configuration(runtime, changes) do
+        record_configuration(runtime, changes, applies)
+      else
+        {:error, reason} -> {:error, reason, runtime}
+      end
+    end
+  end
+
+  defp apply_configuration(runtime, changes) do
+    case with_harness_session(runtime, &Session.configure(&1, changes)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
+      other -> {:error, {:configure_refused, durable(other)}}
+    end
+  end
+
+  # The event is Ouroboros's own: no provider reports that its own settings were changed
+  # from outside, and a client watching the stream has to see the change land in the same
+  # ordered log as everything else. `applies` travels with it because "next turn" is a
+  # fact about the transport that a footer has to be able to state rather than imply.
+  #
+  # `sequence_offset` climbs with the cursor for exactly the reason it exists: the next
+  # poll asks Harness for events after `cursor - offset`, and moving one without the
+  # other would either skip a provider event or collide with it.
+  defp record_configuration(runtime, changes, applies) do
+    session = runtime.session
+    sequence = session.cursor + 1
+
+    event =
+      Event.from_runtime(
+        session.id,
+        sequence,
+        :status,
+        %{
+          "kind" => "configured",
+          "applies" => Atom.to_string(applies),
+          "changed" => Map.new(changes, fn {key, value} -> {Atom.to_string(key), value} end)
+        },
+        harness_session_id: session.harness_session_id,
+        provider: session.provider,
+        provider_session_id: session.provider_session_id
+      )
+
+    configured =
+      session
+      |> State.configure(changes)
+      |> Map.put(:cursor, sequence)
+      |> Map.put(:sequence_offset, State.sequence_offset(session) + 1)
+      |> append_event(event)
+      |> State.touch()
+
+    case persist(runtime, configured, [event]) do
+      {:ok, runtime} ->
+        {:ok,
+         %{
+           options: State.public(runtime.session).options,
+           applies: applies,
+           changed: changes |> Map.keys() |> Enum.sort()
+         }, runtime}
+
+      {:error, runtime} ->
+        {:error, {:configure_checkpoint_failed, :provider_accepted}, runtime}
+    end
+  end
+
+  # Branching a session is starting a new one, and the only thing that makes it a fork is
+  # what its start request carries: the parent's `provider_session_id` plus the option the
+  # transport spells "branch this" (`--fork-session` for Claude, `thread/fork` for the
+  # Codex app server). Everything else about the child is the parent's own start intent.
+  #
+  # The parent is untouched. No turn is sent, nothing is interrupted, and the only thing
+  # ever written to it is a count of the branches it has started.
+  #
+  # The workspace is admitted exactly as it is for any other session, which means a fork
+  # of a live session holding an exclusive lease is refused by the lease. That is honest
+  # and it is a real limit: until worktrees (D7), a branch runs where the parent is not.
+  defp fork_plan(%State{} = session, id) do
+    with {:ok, id} <- validate_fork_id(id),
+         {:ok, parent_session_id} <- forkable_provider_session(session),
+         {:ok, fork_options} <-
+           Provider.session_fork_options(session.provider, Map.get(session.options, :transport)) do
+      {:ok, fork_start_options(session, id, parent_session_id, fork_options)}
+    end
+  end
+
+  defp validate_fork_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
+
+  defp validate_fork_id(id) when is_binary(id) do
+    if String.trim(id) != "", do: {:ok, id}, else: {:error, :invalid_fork_id}
+  end
+
+  defp validate_fork_id(_id), do: {:error, :invalid_fork_id}
+
+  # There is nothing to branch until the provider has named its own session. A fork of a
+  # session the provider never acknowledged would be a fresh conversation wearing a
+  # relationship it does not have.
+  defp forkable_provider_session(%State{provider_session_id: id}) when is_binary(id) and id != "",
+    do: {:ok, id}
+
+  defp forkable_provider_session(%State{} = session) do
+    {:error,
+     {:unforkable_session,
+      %{
+        provider: session.provider,
+        reason: :no_provider_session_id,
+        message:
+          "this session has no provider session id yet, so there is nothing to branch " <>
+            "from; send a turn first, or start a new session."
+      }}}
+  end
+
+  # The child's start intent is the parent's, minus the parts that are this session's
+  # identity (its own id, its own place in a fork tree) and plus the two that make it a
+  # branch. Options are read from the durable record, so a child of a session whose mode
+  # was changed mid-life starts under the mode it is actually running with.
+  defp fork_start_options(%State{} = session, id, parent_session_id, fork_options) do
+    provider_options =
+      session.options
+      |> Map.get(:provider_options, %{})
+      |> then(&(&1 || %{}))
+      |> Map.merge(fork_options)
+
+    opts =
+      session.options
+      |> Map.drop([:provider_options, :provider_session_id, :attachments])
+      |> Map.to_list()
+      |> Keyword.merge(
+        id: id,
+        provider: session.provider,
+        workspace: session.workspace,
+        workspace_mode: session.workspace_mode,
+        event_limit: session.event_limit,
+        provider_session_id: parent_session_id,
+        provider_options: provider_options,
+        forked_from: session.id
+      )
+
+    opts
   end
 
   defp lose(runtime, reason) do

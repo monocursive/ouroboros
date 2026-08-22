@@ -143,6 +143,18 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   @impl true
   def steer(_runtime, _request, _request_id), do: {:error, :unsupported}
 
+  # ACP's only configuration verb is `session/set_mode`, and its argument is a mode *id*
+  # the agent itself invented and advertised on `session/new` — "ask", "architect",
+  # "code", whatever that agent ships. Ouroboros's four normalized approval modes are not
+  # those ids, and no bundled ACP agent publishes a mapping between them. Guessing one
+  # would move a permission posture on the strength of a string that happened to look
+  # right, which is the one class of mistake this runtime does not make.
+  #
+  # So this refuses, and the refusal is structural rather than special-cased: the ACP
+  # transport declares no `dynamic_configuration` and no `configuration_options`, so
+  # `Ouroboros.Provider.session_configuration/3` and the Harness worker both refuse
+  # before reaching here. Wiring `session/set_mode` needs a mode vocabulary on the wire
+  # (Track C4), not a heuristic here.
   @impl true
   def configure(_runtime, _changes), do: {:error, :unsupported}
 

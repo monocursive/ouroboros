@@ -211,6 +211,17 @@ untrusted work, and a session running under a provider's own behavior still take
 same workspace lease the omitted default would have taken — the lease posture does not
 yet follow the provider's actual write capability.
 
+The same four options can be changed on a session that is already open, with
+`InteractiveSession.configure/2` (`interactive.configure` on the wire), and the answer
+says when the change takes hold — `:now` only where the transport carries it to a live
+provider process, `:next_turn` everywhere the request is rebuilt per turn, which is
+everywhere but `pi`. What may be changed at all is the transport's answer, not a list
+here: it is held to the same option list and the same value allowlists a start is held
+to, plus the transport's own `dynamic_configuration`/`dynamic_model` declarations, and
+`approval_mode: :prompt` is refused on a transport with no approvals channel exactly as
+it is at start. The effective options are durable, so a session that survives a restart
+resumes under the options it is running with rather than the ones it was started with.
+
 Per-run environment maps are rejected because task requests are checkpointed. Put
 provider credentials in the service environment or a dedicated secret boundary,
 never in task options. Persisted normalized event payloads are redacted before they
@@ -761,8 +772,8 @@ they do in a shell, and `ouro` scrolls by keyboard.
 - **What a session can do and what it has spent are declared, not guessed.**
   `interactive.info` and `interactive.list` carry `options.capabilities` — `transport`,
   `process`, `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
-  `dynamic_model`, `dynamic_configuration`, each `native`/`managed`/`process`/`false` —
-  read from the provider's own spec, so a session listed after a restart declares the
+  `dynamic_model`, `dynamic_configuration`, `fork`, each `native`/`managed`/`process`/`false`
+  — read from the provider's own spec, so a session listed after a restart declares the
   same thing it started with. They also carry `usage`: input, output, cache-read and
   cache-creation tokens, a total, `turns_with_usage`, and `cost_usd`. Those are the
   numbers providers reported and nothing more — `cost_usd` stays `null` for a provider
@@ -776,6 +787,43 @@ they do in a shell, and `ouro` scrolls by keyboard.
   scrollback the terminal keeps — verified here under tmux 3.7. A terminal that does not
   restore the normal buffer, or one configured with no scrollback, will not keep them;
   `ctrl+x v` is the escape hatch that does not depend on the terminal at all.
+- **Changing a mode mid-session says when it takes effect, and usually that is next
+  turn.** `interactive.configure` moves an open session's approval mode, sandbox mode,
+  model, or reasoning effort instead of making you start a second session. It answers
+  `applies: "now"` only for a transport that carries the change to a live provider
+  process — today that is `pi` alone. Every other transport answers `"next_turn"`, and
+  means it: a managed CLI is re-executed per turn and the Codex app server rebuilds its
+  approval and sandbox policy on every `turn/start`, so **the turn already running keeps
+  the policy it started under**. OpenCode and Kimi answer neither: ACP's only
+  configuration verb takes a mode id the agent invented, and mapping this runtime's four
+  approval modes onto one would be guessing about a permission posture — so their
+  sessions are refused by declaration, and the options you want have to be chosen at
+  start. `approval_mode: "prompt"` is refused here for exactly the same reason it is
+  refused at start on the managed transports.
+- **A fork is a new session, and it needs somewhere to run.** `interactive.fork` starts
+  a session carrying the parent's provider session and history — `--fork-session`
+  alongside `--resume` for Claude, Z.ai and Grok; `thread/fork` for Codex on app-server.
+  OpenCode and Kimi cannot: no ACP agent publishes a branch verb, and `session/load`
+  continues a session rather than copying it. `pi` cannot either, although it has a
+  `--fork` flag, because that flag names a session rather than branching the resumed one
+  and its own validator refuses the combination. The parent is untouched — no turn, no
+  interrupt. What a fork does *not* get is its own working tree: workspace admission is
+  unchanged, so forking a live session that holds an exclusive lease is refused by the
+  lease. Fork a read-only or a finished session, or wait for worktrees.
+- **Model windows and prices come from a snapshot, not from the provider.**
+  `runtime.models` reports what `llm_db`'s packaged catalogue knows about the models each
+  configured provider draws from — context window, max output, and the four token rates
+  per million — so a client can turn `usage.total_tokens` into a context percentage and a
+  cost estimate. It is not a claim that a listed model will work: Ouroboros drives a
+  vendor CLI, and only that CLI's account knows what it may run. It is not verified
+  pricing either, just the vendor's public list price as of the snapshot's epoch. Which
+  vendor's catalogue a given CLI draws from is Ouroboros's own reading — no adapter
+  declares it — and a node can correct it with `config :ouroboros, model_catalogs:`.
+- **Session names are yours; the runtime only guesses when you have not.**
+  `interactive.rename` sets a title (trimmed, at most 120 characters, control characters
+  refused rather than stripped, because it is drawn into one line of a list). A session
+  nobody has named takes the first line of its first prompt, capped at 60 characters. A
+  name you chose is never overwritten by a later prompt.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.

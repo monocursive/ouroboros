@@ -166,7 +166,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
       end
     end
 
-    test "the ten declared keys are present for every bundled provider and Wire-safe" do
+    test "the eleven declared keys are present for every bundled provider and Wire-safe" do
       expected =
         Enum.sort([
           :transport,
@@ -178,8 +178,14 @@ defmodule Ouroboros.ProviderCapabilityTest do
           :steer,
           :multimodal,
           :dynamic_model,
-          :dynamic_configuration
+          :dynamic_configuration,
+          # Not an `InteractionCapabilities` field: the harness has no notion of branching
+          # a session, so this one is derived from the dialect or the adapter's own
+          # provider-option list. It still has to be in the map a client reads.
+          :fork
         ])
+
+      assert Enum.sort(Provider.capability_keys()) == expected
 
       for provider <- Map.keys(@coding_refusals) do
         capabilities = Provider.session_capabilities(provider)
@@ -208,7 +214,9 @@ defmodule Ouroboros.ProviderCapabilityTest do
         declared = Map.from_struct(dialect.capabilities())
         resolved = Provider.session_capabilities(provider)
 
-        for {key, value} <- resolved, key != :transport do
+        # `:fork` is derived beside the declared set rather than read from it, so it is
+        # compared against the declaration that produces it instead.
+        for {key, value} <- Map.delete(resolved, :fork), key != :transport do
           assert Map.fetch!(declared, key) == value
         end
       end
@@ -332,6 +340,207 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
   end
 
+  describe "what an open session may still be changed to" do
+    test "every bundled provider's answer is the one its transport declares" do
+      # Read from the specs Harness resolves rather than from a table here, so a
+      # provider that changes what its transport can do upstream fails here instead of
+      # letting a client offer a control the session cannot honour.
+      for spec <- Jido.Harness.providers() do
+        provider = spec.provider
+        capabilities = Provider.session_capabilities(provider)
+        result = Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+
+        case {capabilities.dynamic_configuration, result} do
+          {false, {:error, {:unconfigurable_session, details}}} ->
+            assert details.reason == :no_dynamic_configuration
+
+          {_declared, {:ok, %{approval_mode: :auto_approve}, applies}} ->
+            assert applies == expected_applies(capabilities.dynamic_configuration)
+
+          {_declared, {:error, {:unconfigurable_session, details}}} ->
+            # Pi's RPC transport declares dynamic configuration for model and effort
+            # only; a field outside its `configuration_options` is refused by name.
+            assert details.reason in [:option_not_configurable, :value_not_accepted]
+
+          other ->
+            flunk("#{provider}: unexpected configure answer #{inspect(other)}")
+        end
+      end
+    end
+
+    test "`:now` is claimed only by a transport that carries the change to a live process" do
+      # Pi's RPC transport is the only bundled one with `dynamic_configuration: :native`.
+      assert {:ok, _changes, :now} = Provider.session_configuration(:pi, %{model: "pi-model"})
+
+      # Every managed transport re-executes the CLI per turn, and the Codex app server
+      # rebuilds its policy in `turn_params/2`; neither can move a turn already running.
+      for provider <- [:claude, :codex, :gemini, :grok, :zai] do
+        assert {:ok, _changes, :next_turn} =
+                 Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+      end
+
+      # Amp declares no approval or sandbox option at all, so the only thing its session
+      # can be moved to is the one field it does normalize.
+      assert {:ok, _changes, :next_turn} =
+               Provider.session_configuration(:amp, %{reasoning_effort: :high})
+    end
+
+    test "ACP declares no dynamic configuration, so its sessions are frozen by declaration" do
+      for provider <- [:opencode, :kimi] do
+        assert Provider.session_capabilities(provider).dynamic_configuration == false
+
+        assert {:error, {:unconfigurable_session, details}} =
+                 Provider.session_configuration(provider, %{approval_mode: :auto_approve})
+
+        assert details.transport == :acp
+        assert details.reason == :no_dynamic_configuration
+      end
+
+      # And the dialect refuses on its own account, so a transport that ever declared the
+      # capability would still not silently accept a change it cannot send.
+      assert {:error, :unsupported} = Dialect.ACP.configure(%{}, %{approval_mode: :auto_approve})
+    end
+
+    test "X1 applies on the configure path with the same tuple as on start" do
+      for {provider, transport} <- @interactive_prompt_refusals do
+        assert {:error, {:unsupported_approval_mode, details}} =
+                 Provider.session_configuration(provider, %{approval_mode: :prompt})
+
+        assert details.plane == :interactive
+        assert details.provider == provider
+        assert details.transport == transport
+        assert details.requested == :prompt
+        assert details.reason == :no_approval_channel
+        refute :prompt in details.supported
+
+        # The modes it *can* be moved to are accepted.
+        for mode <- details.supported -- [:default] do
+          assert {:ok, _changes, _applies} =
+                   Provider.session_configuration(provider, %{approval_mode: mode})
+        end
+      end
+    end
+
+    test "a field that is not a configuration field is refused before any spec is read" do
+      assert {:error, {:invalid_configuration, details}} =
+               Provider.session_configuration(:claude, %{workspace: "/tmp"})
+
+      assert details.reason == :unknown_field
+      assert details.field == :workspace
+      assert details.fields == [:approval_mode, :model, :reasoning_effort, :sandbox_mode]
+
+      assert {:error, {:invalid_configuration, %{reason: :no_changes}}} =
+               Provider.session_configuration(:claude, %{})
+
+      assert {:error, {:invalid_configuration, %{reason: :not_a_map}}} =
+               Provider.session_configuration(:claude, approval_mode: :prompt)
+    end
+
+    test "an unresolvable provider or transport is refused rather than guessed at" do
+      assert {:error, {:unconfigurable_session, %{reason: :unknown_provider}}} =
+               Provider.session_configuration(:no_such_provider, %{model: "x"})
+
+      assert {:error, {:unconfigurable_session, %{reason: :unknown_session_transport}}} =
+               Provider.session_configuration(:claude, %{model: "x"}, :no_such_transport)
+    end
+
+    test "the refusal crosses the wire as data" do
+      assert {:error, refusal} = Provider.session_configuration(:opencode, %{model: "x"})
+
+      assert %{"reason" => "no_dynamic_configuration", "transport" => "acp"} =
+               refusal |> Wire.to_json() |> Enum.at(1)
+    end
+  end
+
+  describe "branching a session" do
+    test "every bundled provider's fork answer matches the wire it would use" do
+      # Claude, Zai and Grok take `--resume <id> --fork-session`; the Codex app server has
+      # `thread/fork`. Gemini and Amp declare no branch option at all, ACP publishes no
+      # branch verb, and Pi's `--fork` takes a session *name* and refuses to be combined
+      # with `provider_session_id`, so it is not credited on an unverified reading.
+      expected = %{
+        claude: :native,
+        zai: :native,
+        grok: :native,
+        codex: :native,
+        gemini: false,
+        amp: false,
+        opencode: false,
+        kimi: false,
+        pi: false
+      }
+
+      for {provider, fork} <- expected do
+        assert Provider.session_capabilities(provider).fork == fork,
+               "#{provider}: expected fork #{inspect(fork)}"
+
+        case fork do
+          :native ->
+            assert {:ok, options} = Provider.session_fork_options(provider)
+            assert map_size(options) == 1
+
+          false ->
+            assert {:error, {:unforkable_session, _details}} =
+                     Provider.session_fork_options(provider)
+        end
+      end
+    end
+
+    test "Claude's fork is `--fork-session` beside `--resume`, and the argv proves it" do
+      assert {:ok, %{fork_session: true}} = Provider.session_fork_options(:claude)
+
+      # The declaration is only worth anything if the adapter turns it into the flag. This
+      # is the pinned adapter's own argv builder, run with the options a fork produces.
+      request =
+        Jido.Harness.RunRequest.new!(%{
+          prompt: "continue on a branch",
+          cwd: File.cwd!(),
+          provider_session_id: "parent-session-id",
+          provider_options: %{fork_session: true, cli_path: "/bin/echo"}
+        })
+
+      options =
+        Jido.Harness.Adapters.Helpers.provider_options(request.provider_options, [
+          :cli_path,
+          :fallback_model,
+          :max_budget_usd,
+          :fork_session,
+          :settings,
+          :betas
+        ])
+
+      assert {:ok, argv} = Jido.Harness.Adapters.Claude.build_argv(request, options)
+      assert "--fork-session" in argv
+      assert argv_pair(argv, "--resume") == "parent-session-id"
+    end
+
+    test "the Codex app server's fork is the dialect's own declaration" do
+      assert Dialect.Codex.fork_option() == {:fork, true}
+      assert {:ok, %{fork: true}} = Provider.session_fork_options(:codex)
+
+      # The option has to be one the transport will accept, or the fork would be refused
+      # by the harness rather than by anything here.
+      assert :fork in Ouroboros.Provider.CodexAdapter.spec().provider_options
+      refute function_exported?(Dialect.ACP, :fork_option, 0)
+    end
+
+    test "the exec fallback cannot fork even though the provider can" do
+      # `thread/fork` is an app-server method. The exec transport's dialect is not this
+      # one, so a session pinned to it declares no fork, and the capability is per
+      # transport rather than per provider.
+      assert Provider.session_capabilities(:codex, :app_server).fork == :native
+      assert Provider.session_capabilities(:codex, :exec_jsonl_resume).fork == false
+    end
+
+    test "an unresolvable provider or transport is refused rather than guessed at" do
+      assert {:error, {:unforkable_session, %{reason: :unknown_provider}}} =
+               Provider.session_fork_options(:no_such_provider)
+
+      assert {:error, {:unforkable_session, %{reason: :unknown_session_transport}}} =
+               Provider.session_fork_options(:claude, :no_such_transport)
+    end
+  end
+
   describe "coding plane defaults" do
     for {provider, refused} <- @coding_refusals, refused == [] do
       test "#{provider} keeps the workspace-write default" do
@@ -423,6 +632,19 @@ defmodule Ouroboros.ProviderCapabilityTest do
     assert {:ok, state} = State.new(id, opts)
     State.request(state)
   end
+
+  # The value that follows a flag in an argv list, or `nil` when the flag is absent.
+  defp argv_pair(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      index -> Enum.at(argv, index + 1)
+    end
+  end
+
+  # `:native` is the only declaration that earns "the change is in force now"; every
+  # other truthy declaration means the request moved and the next turn carries it.
+  defp expected_applies(:native), do: :now
+  defp expected_applies(_declared), do: :next_turn
 
   defp coding_task(opts) do
     id = "capability-#{System.unique_integer([:positive, :monotonic])}"

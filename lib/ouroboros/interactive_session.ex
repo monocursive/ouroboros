@@ -120,11 +120,18 @@ defmodule Ouroboros.InteractiveSession do
   @doc "Returns a durable public session snapshot."
   def info(session), do: call(session, :info)
 
-  @doc "Lists local durable interactive sessions."
+  @doc """
+  Lists local durable interactive sessions as bounded rows.
+
+  Rows, not whole sessions: this list is fanned out over `:erpc` to every fleet node and
+  then across the socket on every refresh, so it carries what a picker draws — id, status,
+  workspace, machine, title, cursor, usage, capabilities — and never a session's retained
+  event window. `info/1` is one call away for anything else.
+  """
   def list do
     Store.list()
     |> Enum.filter(&(&1.node == node()))
-    |> Enum.map(&State.public/1)
+    |> Enum.map(&State.summary/1)
   end
 
   @doc "Atomically subscribes the caller and returns events after an exclusive cursor."
@@ -201,6 +208,86 @@ defmodule Ouroboros.InteractiveSession do
       call(session, {:steer, input, opts})
     end
   end
+
+  @doc """
+  Changes approval mode, sandbox mode, model, or reasoning effort on an open session.
+
+  Answers `{:ok, %{options:, applies:, changed:}}` where `applies` is `:now` only for a
+  transport that carries the change to a live provider process, and `:next_turn` for
+  every transport that rebuilds its request per turn. The turn already running is never
+  retroactively re-governed, so a caller that reports `:next_turn` as immediate is
+  reporting something this runtime did not do.
+  """
+  @spec configure(session(), map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def configure(session, changes) when is_list(changes) do
+    if Keyword.keyword?(changes),
+      do: configure(session, Map.new(changes)),
+      else: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+  end
+
+  def configure(session, changes) when is_map(changes), do: call(session, {:configure, changes})
+
+  def configure(_session, changes),
+    do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+
+  @doc """
+  Branches a session into a new one that carries its provider session and history.
+
+  The new session is started on the parent's own node with the parent's provider,
+  workspace, and effective options; only its start request differs, by carrying the
+  parent's `provider_session_id` and whatever the transport spells "branch this". The
+  parent is not sent a turn, not interrupted, and not closed.
+
+  Refused where the transport declares no way to branch, and where the provider has not
+  yet named a session to branch from.
+
+  Three steps, in this order for one reason: the parent's coordinator plans the fork and
+  counts it, but never starts it. Starting a session waits on provider readiness with no
+  bound, and a coordinator held behind that wait would answer nothing — not `info/1`, not
+  `interrupt/2`, not its own turns — until a child it does not own had finished starting.
+  """
+  @spec fork(session(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def fork(session, id \\ nil) do
+    with {:ok, _parent_id, owner} <- session_identity(session),
+         {:ok, opts} <- call(session, {:fork_plan, id}),
+         {:ok, child} <- start_fork(owner, opts) do
+      # The child exists and carries `forked_from`, which is the durable half of the
+      # relationship. The parent's count is a hint that follows it, and a parent that
+      # cannot record one does not undo a fork that already happened.
+      _ = call(session, :count_fork)
+      {:ok, child}
+    end
+  end
+
+  defp start_fork(owner, opts) do
+    result =
+      if owner == node(),
+        do: start_for_gateway(opts),
+        else: start_for_gateway_on(owner, opts)
+
+    case result do
+      # `start_for_gateway/1` rather than `start/1`: a child whose provider refused to
+      # open is still a durable session with an id the caller can inspect, and reporting
+      # it as a refusal would leave that session unreachable.
+      {:ok, %Ref{id: id, node: child_node}} ->
+        {:ok, %{id: id, node: child_node, ready: true, error: nil}}
+
+      {:created, %Ref{id: id, node: child_node}, reason} ->
+        {:ok, %{id: id, node: child_node, ready: false, error: reason}}
+
+      {:error, reason} ->
+        {:error, {:fork_start_failed, reason}}
+    end
+  end
+
+  @doc """
+  Names a session, overriding any title the runtime derived from the first prompt.
+
+  Allowed on a terminal session as well as a live one: a finished conversation is exactly
+  what someone is trying to find again in a picker.
+  """
+  @spec rename(session(), String.t()) :: {:ok, State.t()} | {:error, term()}
+  def rename(session, title), do: call(session, {:rename, title})
 
   @doc "Responds to a normalized provider approval request."
   def respond_approval(session, request_id, response) do
@@ -351,7 +438,7 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   defp same_request?(left, right) do
-    immutable = [:id, :node, :provider, :workspace_mode, :event_limit, :options]
+    immutable = [:id, :node, :provider, :workspace_mode, :event_limit, :options, :forked_from]
 
     Map.take(left, immutable) == Map.take(right, immutable) and
       canonical_workspace(left.workspace) == canonical_workspace(right.workspace)

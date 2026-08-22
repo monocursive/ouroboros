@@ -160,6 +160,11 @@ defmodule Ouroboros.Gateway.Methods do
     "hello" => %{scope: :read, timeout: @hello_deadline},
     "runtime.status" => %{scope: :read, timeout: @default_timeout},
     "runtime.providers" => %{scope: :read, timeout: @default_timeout},
+    # A3/F3. What `llm_db` knows about the models each configured provider draws from —
+    # the window and the price a client needs to turn a session's `usage` into a context
+    # percentage and a cost. Read scope: it consults a packaged snapshot and the node's
+    # own provider configuration, and starts nothing.
+    "runtime.models" => %{scope: :read, timeout: @default_timeout},
     "fleet.status" => %{scope: :read, timeout: @default_timeout},
     "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
     "account.read" => %{scope: :read, timeout: @default_timeout},
@@ -221,6 +226,18 @@ defmodule Ouroboros.Gateway.Methods do
       timeout: @default_timeout,
       outcome: :unknown
     },
+    # B1/B6. Session controls that change an open session rather than starting a new one.
+    # `configure` is bounded by what the transport declares it can still change and
+    # answers with when the change takes hold. `:operate` because it writes durable
+    # session state and moves a permission posture.
+    "interactive.configure" => %{scope: :operate, timeout: @default_timeout},
+    # A title is durable session state a person chose, so it is `:operate` for the same
+    # reason `configure` is, and bounded at the boundary because it lands on every list row.
+    "interactive.rename" => %{scope: :operate, timeout: @default_timeout},
+    # A fork starts a session, so it inherits `interactive.start`'s ceiling and the same
+    # admission: a gateway timeout here cannot prove the child was not created, and the
+    # caller-owned `id` is what makes reconciling it possible rather than guesswork.
+    "interactive.fork" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     # C2. The one method whose latency is a person's: it asks the session's owner for a
     # decision and holds the request open until a human answers, the permission engine
@@ -319,6 +336,18 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime_exposure" => :boolean,
     "machine" => :node,
     "node" => :node
+  }
+
+  # What `interactive.configure` may name on an *open* session. A strict subset of
+  # `@start_options`: everything else there is immutable start intent, and a session that
+  # could have its workspace or its event limit moved underneath it would no longer be
+  # the session its id promised. Whether any one of these four is actually changeable is
+  # the transport's answer, asked per session rather than encoded here.
+  @configuration_options %{
+    "approval_mode" => {:enum, @approval_modes},
+    "sandbox_mode" => {:enum, @sandbox_modes},
+    "model" => :string,
+    "reasoning_effort" => {:enum, @reasoning_efforts}
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -473,6 +502,8 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
 
   def invoke("runtime.providers", _params), do: safe(fn -> {:ok, providers()} end)
+
+  def invoke("runtime.models", _params), do: safe(fn -> {:ok, Ouroboros.Models.list()} end)
 
   def invoke("fleet.status", _params), do: safe(fn -> {:ok, Cluster.fleet_status()} end)
 
@@ -732,6 +763,53 @@ defmodule Ouroboros.Gateway.Methods do
           {:ok, answer} -> {:ok, approval_answer(answer)}
           other -> reply(other)
         end
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B1. What a session may still be changed to is the transport's answer, not this
+  # table's: everything here does is turn four JSON fields into the four atoms the
+  # runtime validates against the provider's own declarations, and hand back what came
+  # out — including `applies`, which a client has to be able to render as "from the next
+  # turn" rather than assume.
+  def invoke("interactive.configure", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "node" | Map.keys(@configuration_options)]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, changes} <- options(params, @configuration_options, ["id", "node"]) do
+        reply(InteractiveSession.configure(session, Map.new(changes)))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B6. The bound and the sanitising live in `Interactive.State`, not here: the same rule
+  # has to hold for a title a person typed and for one the runtime derived from a prompt,
+  # and a check that lived at the gateway would only cover the first.
+  def invoke("interactive.rename", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "title", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, title} <- fetch_string(params, "title") do
+        reply(InteractiveSession.rename(session, title))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # B6. The child's id is caller-owned for the same reason a start's is: a ceiling can
+  # fire after the child exists, and a client that had to mint a second id to find out
+  # would create a second session instead.
+  def invoke("interactive.fork", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "fork_id", "node"]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, fork_id} <- fetch_optional_string(params, "fork_id") do
+        fork_reply(InteractiveSession.fork(session, fork_id))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -1887,6 +1965,23 @@ defmodule Ouroboros.Gateway.Methods do
   defp reply({:error, {:signing_service_unavailable, _detail} = reason}),
     do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}
 
+  # A rejected title is the caller's mistake, not the runtime's, and the reason names
+  # which rule it broke so a client can say so next to the field rather than in a toast.
+  defp reply({:error, {:invalid_title, %{reason: :too_long, limit: limit}}}) do
+    invalid_params("params.title must be at most #{limit} characters after trimming")
+  end
+
+  defp reply({:error, {:invalid_title, %{reason: :control_characters}}}) do
+    invalid_params(
+      "params.title must not contain control characters; it is drawn into one line of a list"
+    )
+  end
+
+  defp reply({:error, {:invalid_title, %{reason: reason}}})
+       when reason in [:blank, :not_a_string] do
+    invalid_params("params.title must be a nonempty string")
+  end
+
   # A pruned cursor is the one upstream detail a client acts on rather than displays: it
   # restarts from the floor and marks the transcript as truncated below it. So the floor
   # travels as data under a named reason instead of inside a sentence.
@@ -1985,6 +2080,22 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp start_reply(result), do: reply(result)
+
+  # Answered in `interactive.start`'s shape, because a fork *is* a start and a client that
+  # already knows how to open a created-but-not-ready session should not need a second
+  # branch to open this one.
+  defp fork_reply({:ok, %{id: id, node: owner, ready: ready?, error: error}}) do
+    {:ok,
+     %{
+       "id" => id,
+       "node" => owner,
+       "outcome" => "created",
+       "ready" => ready?,
+       "error" => Wire.to_json(error)
+     }}
+  end
+
+  defp fork_reply(result), do: reply(result)
 
   @doc false
   # These are not refusals. Harness may already have returned a turn id, its call may

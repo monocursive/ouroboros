@@ -120,6 +120,7 @@ defmodule Ouroboros.Provider.NativeTest do
                multimodal: false,
                dynamic_model: :native,
                dynamic_configuration: :native
+               fork: false
              }
     end
 

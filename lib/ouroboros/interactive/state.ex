@@ -13,6 +13,23 @@ defmodule Ouroboros.Interactive.State do
     :approval_timeout_ms
   ]
 
+  # Start options that land on the struct rather than in `options`. `forked_from` is a
+  # relationship between two sessions, not something the provider is ever told; putting it
+  # in `options` would send it to `State.request/1` and on to a harness that never asked.
+  @struct_options [:forked_from]
+
+  # What `configure/2` may write into a session's durable options. Deliberately a literal
+  # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
+  # even if a capability check somewhere else is ever wrong.
+  @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
+
+  # A session title is drawn into one picker row on every list, so it is bounded where it
+  # is written rather than by every client that draws it. An auto-title is shorter still:
+  # it is a guess from one prompt, and a guess that filled the row would crowd out the
+  # workspace and machine a person actually picks by.
+  @max_title_chars 120
+  @auto_title_chars 60
+
   @enforce_keys [
     :id,
     :node,
@@ -28,6 +45,10 @@ defmodule Ouroboros.Interactive.State do
                 :workspace_lease_id,
                 :harness_session_id,
                 :provider_session_id,
+                :title,
+                :forked_from,
+                title_source: nil,
+                forks: 0,
                 cursor: 0,
                 sequence_offset: 0,
                 resumes: 0,
@@ -52,6 +73,15 @@ defmodule Ouroboros.Interactive.State do
           | :failed
           | :cancelled
           | :lost
+
+  @typedoc """
+  Who named this session. `nil` until something did.
+
+  The distinction is the whole point of storing it: an auto-title is a guess the runtime
+  made from the first prompt and any later prompt could improve it, while a `:human` title
+  is a decision, and nothing this runtime does may overwrite one.
+  """
+  @type title_source :: :auto | :human | nil
 
   @type turn_status ::
           :dispatching
@@ -88,6 +118,10 @@ defmodule Ouroboros.Interactive.State do
           workspace_lease_id: String.t() | nil,
           harness_session_id: String.t() | nil,
           provider_session_id: String.t() | nil,
+          title: String.t() | nil,
+          title_source: title_source(),
+          forked_from: String.t() | nil,
+          forks: non_neg_integer(),
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -125,11 +159,12 @@ defmodule Ouroboros.Interactive.State do
   def new(id, opts) when is_list(opts) do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
+           :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            {:ok, base} <-
              TaskState.new(
                id,
                "interactive coding session",
-               Keyword.drop(opts, @session_options),
+               Keyword.drop(opts, @session_options ++ @struct_options),
                # The transport decides which normalized options a session may carry, so
                # the capability lookup needs the one this session will select. It is a
                # session option and therefore dropped from the base's own options.
@@ -151,6 +186,9 @@ defmodule Ouroboros.Interactive.State do
            event_limit: base.event_limit,
            prompt_trace: Map.get(base, :prompt_trace),
            runtime_snapshot: Map.get(base, :runtime_snapshot),
+           # Immutable start intent, like the workspace: which session this one branched
+           # from is not something a fork can be talked out of afterwards.
+           forked_from: Keyword.get(opts, :forked_from),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -274,6 +312,138 @@ defmodule Ouroboros.Interactive.State do
     end
   end
 
+  @doc """
+  Folds an accepted mid-session configuration into the session's durable options.
+
+  Only the four fields `Ouroboros.Provider.session_configuration/3` validates are ever
+  written, and they are written into the same map a start filled, so `request/1` rebuilds
+  a resumed session under the options it is actually running with rather than the ones it
+  was started with. Anything else in `changes` is ignored here rather than trusted: the
+  authority for what may change is the provider capability check, not this merge.
+  """
+  @spec configure(t(), map()) :: t()
+  def configure(%__MODULE__{} = state, changes) when is_map(changes) do
+    accepted = Map.take(changes, @configurable_options)
+    %{state | options: Map.merge(state.options, accepted)}
+  end
+
+  @doc """
+  Validates a human-supplied session title, or says why it is not one.
+
+  Bounded and sanitised at the boundary rather than at every reader: the title travels on
+  every `interactive.list` row and gets drawn into a one-line picker, so an unbounded
+  string or an embedded control character is a rendering problem for every client at once.
+  Trimmed, control characters (including newlines and the ANSI escape a terminal would
+  obey) refused rather than stripped — a title that silently became something else would
+  be worse than a refusal — and capped at #{@max_title_chars} graphemes, counted in
+  graphemes because that is what a terminal column budget is.
+  """
+  @spec validate_title(term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_title(title) when is_binary(title) do
+    trimmed = String.trim(title)
+
+    cond do
+      not String.valid?(title) ->
+        {:error, {:invalid_title, %{reason: :not_valid_utf8}}}
+
+      trimmed == "" ->
+        {:error, {:invalid_title, %{reason: :blank}}}
+
+      String.length(trimmed) > @max_title_chars ->
+        {:error,
+         {:invalid_title,
+          %{reason: :too_long, limit: @max_title_chars, length: String.length(trimmed)}}}
+
+      control_characters?(trimmed) ->
+        {:error, {:invalid_title, %{reason: :control_characters}}}
+
+      true ->
+        {:ok, trimmed}
+    end
+  end
+
+  def validate_title(title),
+    do: {:error, {:invalid_title, %{reason: :not_a_string, value: title}}}
+
+  @doc """
+  Returns a title derived from a user prompt, or `nil` when the prompt yields none.
+
+  The first line, because a prompt's first line is what a person would have typed as a
+  subject; capped at #{@auto_title_chars} graphemes with an ellipsis, because a picker row
+  is not a transcript. Control characters end the line rather than being carried into it.
+  Deliberately not a model call: an auto-title that cost a token would be a cost nobody
+  asked for on every session, and the first line is what four of the six leading tools use.
+  """
+  @spec auto_title(term()) :: String.t() | nil
+  def auto_title(prompt) when is_binary(prompt) do
+    line =
+      prompt
+      |> String.split(["\r\n", "\n", "\r"], parts: 2)
+      |> hd()
+      |> String.trim()
+
+    cond do
+      not String.valid?(line) or line == "" ->
+        nil
+
+      String.length(line) <= @auto_title_chars ->
+        strip_controls(line)
+
+      true ->
+        line |> String.slice(0, @auto_title_chars - 1) |> String.trim_trailing() |> ellipsis()
+    end
+  end
+
+  def auto_title(_prompt), do: nil
+
+  @doc """
+  Names a session, recording who named it so a later guess cannot overwrite a decision.
+
+  `:human` always wins. `:auto` writes only where nothing has named the session yet, which
+  is what keeps a second prompt from renaming a conversation a person already named — and
+  from renaming one the runtime titled from the first prompt, since the first prompt is
+  the one that describes what the session is about.
+  """
+  @spec put_title(t(), String.t(), :auto | :human) :: t()
+  def put_title(%__MODULE__{} = state, title, :human) when is_binary(title),
+    do: %{state | title: title, title_source: :human}
+
+  def put_title(%__MODULE__{} = state, title, :auto) when is_binary(title) do
+    case title(state) do
+      nil -> %{state | title: title, title_source: :auto}
+      _already_named -> state
+    end
+  end
+
+  @doc """
+  Returns the session's title, read defensively so a pre-title checkpoint loads as itself.
+  """
+  @spec title(t()) :: String.t() | nil
+  def title(%__MODULE__{} = state), do: Map.get(state, :title)
+
+  @doc "Returns who named this session: `:human`, `:auto`, or `nil` for nobody."
+  @spec title_source(t()) :: title_source()
+  def title_source(%__MODULE__{} = state), do: Map.get(state, :title_source)
+
+  @doc "Returns the id of the session this one was forked from, or `nil`."
+  @spec forked_from(t()) :: String.t() | nil
+  def forked_from(%__MODULE__{} = state), do: Map.get(state, :forked_from)
+
+  @doc """
+  Returns how many forks this session has successfully started.
+
+  A count, not a list: the children are addressable by their own ids and carry
+  `forked_from`, which is the durable half of the relationship. This is the hint a picker
+  shows, and it is honest about being one — a fork whose parent checkpoint failed after
+  the child was created leaves it low rather than inventing a child that does not exist.
+  """
+  @spec forks(t()) :: non_neg_integer()
+  def forks(%__MODULE__{} = state), do: Map.get(state, :forks, 0) || 0
+
+  @doc false
+  @spec count_fork(t()) :: t()
+  def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
+
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
   def new_turn(id, mode, %Jido.Harness.TurnRequest{} = request) do
     request = request |> Map.from_struct() |> reject_nil_values()
@@ -349,6 +519,49 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:runtime_snapshot, nil)
     |> Map.put(:options, options)
     |> Map.put(:turns, turns)
+    # Written explicitly rather than left to the struct, so a checkpoint from a build
+    # before titles existed projects as an unnamed session instead of a missing key.
+    |> Map.put(:title, title(state))
+    |> Map.put(:title_source, title_source(state))
+    |> Map.put(:forked_from, forked_from(state))
+    |> Map.put(:forks, forks(state))
+  end
+
+  @doc """
+  Projects one session as a *row*: everything a picker draws, and nothing it does not.
+
+  `public/1` is the whole session, and `interactive.list` answered with it — which meant
+  every row carried its retained event window and its whole turn ledger across the socket,
+  and across an `:erpc` from every fleet node, on every list. A client that wanted one
+  integer — the contiguous high-water mark, to know whether it had replayed everything —
+  paid for a session's entire transcript to learn it.
+
+  So a row is bounded by construction: the same struct, the same `_struct` tag and the same
+  field names, with `events` and `turns` emptied and `usage` reduced to the two figures a
+  row can show. `cursor` is on it, which is the integer that made this necessary. Anything
+  a row drops is one `interactive.info` away, addressed by the id the row carries.
+  """
+  @spec summary(t()) :: t()
+  def summary(%__MODULE__{} = state) do
+    state
+    |> public()
+    |> Map.put(:events, [])
+    |> Map.put(:turns, %{})
+    |> Map.put(:usage, usage_summary(state))
+  end
+
+  @doc """
+  Reduces a session's usage account to what a row can honestly show.
+
+  Two numbers, and `nil` for either that no provider reported. A session nobody has
+  charged keeps `cost_usd: nil` rather than a zero that reads as "this was free", exactly
+  as `fold_usage/2` keeps it.
+  """
+  @spec usage_summary(t()) :: %{total_tokens: non_neg_integer() | nil, cost_usd: number() | nil}
+  def usage_summary(%__MODULE__{} = state) do
+    usage = Map.get(state, :usage) || %{}
+
+    %{total_tokens: Map.get(usage, :total_tokens), cost_usd: Map.get(usage, :cost_usd)}
   end
 
   @spec public_turn(turn()) :: map()
@@ -478,7 +691,8 @@ defmodule Ouroboros.Interactive.State do
                          [:starting, :idle, :running, :awaiting_approval, :closing]) and
       is_binary(state.created_at) and is_binary(state.updated_at) and
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
-      optional_id?(state.provider_session_id) and
+      optional_id?(state.provider_session_id) and valid_title?(state) and
+      optional_id?(forked_from(state)) and is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
       sequence_offset(state) <= state.cursor and
@@ -496,9 +710,18 @@ defmodule Ouroboros.Interactive.State do
 
   def loadable?(_state), do: false
 
+  defp validate_parent(nil), do: :ok
+  defp validate_parent(parent) when is_binary(parent), do: validate_forked_from(parent)
+  defp validate_parent(parent), do: {:error, {:invalid_parent_session, parent}}
+
+  defp validate_forked_from(parent) do
+    if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
+  end
+
   defp validate_session_options(opts) do
     accepted =
       @session_options ++
+        @struct_options ++
         [
           :id,
           :workspace,
@@ -650,6 +873,28 @@ defmodule Ouroboros.Interactive.State do
   defp valid_id?(id), do: is_binary(id) and String.trim(id) != ""
   defp optional_id?(nil), do: true
   defp optional_id?(id), do: valid_id?(id)
+
+  # `\p{Cc}` is the Unicode control category, which covers the C0 range a terminal would
+  # interpret, `\e`, and the C1 range a UTF-8 title could smuggle one in as.
+  defp control_characters?(string), do: String.match?(string, ~r/\p{Cc}/u)
+
+  defp strip_controls(string), do: String.replace(string, ~r/\p{Cc}/u, "")
+
+  defp ellipsis(""), do: nil
+  defp ellipsis(string), do: strip_controls(string) <> "…"
+
+  # A checkpoint written before titles existed has neither key, which is read as a session
+  # nobody has named. A title present without a source, or a source without a title, is a
+  # record this build did not write and does not know how to read.
+  defp valid_title?(state) do
+    case {title(state), title_source(state)} do
+      {nil, nil} -> true
+      {title, source} when is_binary(title) and source in [:auto, :human] -> ok_title?(title)
+      _mismatched -> false
+    end
+  end
+
+  defp ok_title?(title), do: match?({:ok, ^title}, validate_title(title))
 
   defp rename(map, old, new) do
     case Map.pop(map, old) do

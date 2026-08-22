@@ -105,6 +105,12 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
     :betas
   ]
 
+  # `Ouroboros.Provider.session_fork_options/2` asks an adapter absent from its table for
+  # its own fork flag. This adapter fronts the pinned Claude adapter, whose
+  # `--fork-session` branches the session `--resume` names, so the answer is Claude's.
+  @spec fork_option() :: {atom(), term()}
+  def fork_option, do: {:fork_session, true}
+
   @impl true
   def spec do
     base = Claude.spec()

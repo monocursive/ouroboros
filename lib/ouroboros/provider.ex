@@ -66,6 +66,40 @@ defmodule Ouroboros.Provider do
     :dynamic_configuration
   ]
 
+  # Not an `InteractionCapabilities` field: the harness has no notion of forking a session,
+  # so `:fork` is derived beside the declared set from the dialect or from the adapter
+  # table below. Listed here so the public shape stays one map with one docstring.
+  @derived_capability_keys [:fork]
+
+  # Run adapters whose `provider_options.fork_session` is a **boolean** that branches the
+  # session named by `provider_session_id`, rather than something else wearing the same
+  # key. Read from each adapter's own argv builder in the pinned Harness:
+  #
+  #   * `Adapters.Claude` — `CLIArgs.pair("--resume", request.provider_session_id)` and
+  #     `CLIArgs.flag("--fork-session", options[:fork_session])` (`claude.ex:92,105`).
+  #   * `Adapters.Zai` — delegates `run/2` to `Claude.run/2` with rewritten env
+  #     (`zai.ex:71`) and declares the same option.
+  #   * `Adapters.Grok` — `pair("--resume", …)` plus `flag("--fork-session", …)`
+  #     (`grok.ex:105,115`), where `flag/2` emits the bare flag only for `true`.
+  #
+  # Pi is deliberately absent although it declares `:fork_session`: there the option is
+  # `pair("--fork", options[:fork_session])`, a *session name* rather than a flag, and its
+  # validator refuses `provider_session_id` and `fork_session` together
+  # (`pi.ex:230,399-401`). Sending `true` there would produce `--fork true` and a refusal,
+  # and inferring the other shape from an argv nobody has run would be a guess about a
+  # user's session. Pi therefore declares `fork: false` until someone verifies it.
+  #
+  # This is a table because no upstream declaration distinguishes the two shapes: an
+  # `AdapterSpec` lists option *names*, never their meaning. It is keyed on the module the
+  # argv was read in so a provider repointed at other code loses the claim automatically,
+  # and `Ouroboros.Provider.CodexAdapter` shows the alternative — an adapter this runtime
+  # owns can declare its own, as `Dialect.Codex.fork_option/0` does.
+  @adapter_fork_flags %{
+    Jido.Harness.Adapters.Claude => {:fork_session, true},
+    Jido.Harness.Adapters.Zai => {:fork_session, true},
+    Jido.Harness.Adapters.Grok => {:fork_session, true}
+  }
+
   # The normalized approval vocabulary `Jido.Harness.SessionRequest` validates against
   # (`deps/jido_harness/lib/jido_harness/session/request.ex:3`). A transport that
   # declares no `normalized_values.approval_mode` allowlist accepts all four, which is
@@ -73,6 +107,13 @@ defmodule Ouroboros.Provider do
   # when the spec narrows nothing. `test/provider_capability_test.exs` checks it against
   # the harness schema so an upstream addition fails here rather than in a session.
   @approval_modes [:default, :prompt, :auto_edit, :auto_approve]
+
+  # What `interactive.configure` may name. Exactly the four fields
+  # `Jido.Harness.SessionRequestValidator` normalizes a configuration to
+  # (`deps/jido_harness/lib/jido_harness/session/request_validator.ex:7`) and the four a
+  # managed transport's own `configuration_options` default to — anything else is a start
+  # option, not something an open session can be moved to.
+  @configuration_fields [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
 
   # Codex's non-interactive transport otherwise refuses an empty directory before the
   # model sees the first turn, and its workspace-write sandbox cannot fetch a dependency
@@ -1289,21 +1330,374 @@ defmodule Ouroboros.Provider do
   `nil` when the provider or the transport does not resolve. An unregistered provider and
   a transport no adapter declares are the harness's to name, and inventing a capability
   map for them would be this module describing a transport it has never seen.
+
+  `:fork` is the one key the harness has no notion of; see `session_fork_options/2` for
+  where its answer comes from.
   """
   @spec session_capabilities(term(), atom() | nil) :: map() | nil
   def session_capabilities(provider, transport \\ nil) do
     with {:ok, spec} <- Registry.spec(provider),
-         %InteractionCapabilities{} = capabilities <- selected_capabilities(spec, transport) do
-      Map.new(@capability_keys, &{&1, Map.get(capabilities, &1, false)})
+         %{capabilities: %InteractionCapabilities{}} = declared <-
+           selected_transport(spec, transport) do
+      capabilities = Session.capabilities(declared)
+
+      @capability_keys
+      |> Map.new(&{&1, Map.get(capabilities, &1, false)})
+      |> Map.put(:fork, fork_capability(provider, spec, declared))
     else
       _unresolvable -> nil
     end
   end
 
+  @doc "Every key `session_capabilities/2` answers with, declared and derived."
+  @spec capability_keys() :: [atom()]
+  def capability_keys, do: @capability_keys ++ @derived_capability_keys
+
+  @doc """
+  Returns the start options that make a new session a fork of an existing provider session.
+
+  A fork is a *new* Ouroboros session that carries the parent's `provider_session_id` plus
+  whatever the transport spells "branch this rather than continue it". Both halves are read
+  from declarations:
+
+    * a dialect this runtime owns declares its own by exporting `fork_option/0` — the Codex
+      app server's `thread/fork`, reached through a `provider_options` flag its
+      `after_initialize/3` reads;
+    * a run adapter declares its own by exporting `fork_option/0`, or — for the three
+      pinned upstream modules that have nowhere to put one — appears in
+      `@adapter_fork_flags`. Either way the structural half is still checked: the transport
+      must be able to carry `:provider_session_id` and the adapter must declare `resume?`,
+      because a branch flag with nothing to branch from is a new conversation.
+
+  Everything else answers `{:error, {:unforkable_session, …}}`, including ACP: neither
+  bundled ACP agent publishes a branch verb, and `session/load` continues a session rather
+  than copying it.
+  """
+  @spec session_fork_options(term(), atom() | nil) :: {:ok, map()} | {:error, term()}
+  def session_fork_options(provider, transport \\ nil) do
+    with {:ok, spec} <- fork_spec(provider),
+         {:ok, declared} <- fork_transport(spec, provider, transport) do
+      case fork_option(provider, spec, declared) do
+        nil ->
+          {:error,
+           {:unforkable_session,
+            %{
+              provider: spec.provider,
+              transport: declared.name,
+              reason: :transport_cannot_fork,
+              message:
+                "#{inspect(spec.provider)} reaches an interactive session over the " <>
+                  "#{inspect(declared.name)} transport, which declares no way to branch one. " <>
+                  "Start a new session instead; the conversation so far stays where it is."
+            }}}
+
+        {key, value} ->
+          {:ok, %{key => value}}
+      end
+    end
+  end
+
+  defp fork_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error, {:unforkable_session, %{provider: provider, reason: :unknown_provider}}}
+    end
+  end
+
+  defp fork_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unforkable_session,
+          %{provider: provider, transport: transport, reason: :unknown_session_transport}}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  defp fork_capability(provider, spec, declared) do
+    if fork_option(provider, spec, declared), do: :native, else: false
+  end
+
+  # The dialect first, because where this runtime owns the wire it is the only thing that
+  # knows whether the protocol has a branch verb. Only then the run adapter.
+  defp fork_option(provider, spec, declared) do
+    dialect_fork_option(declared) || adapter_fork_option(provider, spec, declared)
+  end
+
+  defp dialect_fork_option(%{adapter: adapter}) do
+    with dialect when not is_nil(dialect) <- Session.dialect(adapter),
+         true <- function_exported?(dialect, :fork_option, 0) do
+      dialect.fork_option()
+    else
+      _no_dialect_fork -> nil
+    end
+  end
+
+  # Keyed on the adapter *module*, not the provider name, because a node may point a
+  # provider at a different adapter — this runtime already does for codex, kimi and
+  # opencode — and the claim below is about argv that was read in a particular module.
+  # The structural half is still asked of the spec every time: a branch flag is only a
+  # fork when the request can also carry the session being branched.
+  defp adapter_fork_option(provider, spec, declared) do
+    with {:ok, adapter} <- Registry.lookup(provider),
+         option when not is_nil(option) <- declared_fork_option(adapter),
+         true <-
+           :fork_session in transport_list(
+             declared.session_provider_options,
+             spec.provider_options
+           ),
+         true <-
+           :provider_session_id in transport_list(
+             declared.session_options,
+             spec.normalized_options
+           ),
+         true <- spec.capabilities.resume? do
+      option
+    else
+      _not_declared -> nil
+    end
+  end
+
+  # An adapter this runtime owns says so itself, the way a dialect does. The table is the
+  # fallback for the three pinned upstream modules, which have nowhere to put it.
+  defp declared_fork_option(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :fork_option, 0),
+      do: adapter.fork_option(),
+      else: Map.get(@adapter_fork_flags, adapter)
+  end
+
+  defp transport_list(:adapter, adapter_list), do: adapter_list
+  defp transport_list(list, _adapter_list) when is_list(list), do: list
+  defp transport_list(_unresolvable, _adapter_list), do: []
+
+  @doc """
+  Returns the options a *running* session may still be changed to, and when it takes hold.
+
+  Validated against exactly what `safety_options/3` validates a start against — the
+  option list the selected transport declares, and the `normalized_values` allowlists the
+  adapter narrows them with — plus the two questions only a mid-session change raises:
+  whether the transport declares `dynamic_configuration` at all, and whether it declares
+  `dynamic_model` for a change that names a model.
+
+  The second element of a success is the honest half. `:now` is returned only for a
+  transport whose `dynamic_configuration` is `:native` — one that carries the change to a
+  live provider process. `:next_turn` is everything else: a managed transport re-executes
+  the CLI per turn and a Codex app-server rebuilds approval and sandbox in `turn_params/2`,
+  so the turn already running keeps the policy it started under. Callers state which of
+  the two happened; nothing here lets `:next_turn` be presented as immediate.
+
+  The X1 rule applies unchanged: `approval_mode: :prompt` on a transport with no approvals
+  channel is refused with the same typed error a start is refused with, because a session
+  configured into a mode that asks nobody is denied without a word exactly as a session
+  started into it is.
+  """
+  @spec session_configuration(term(), map(), atom() | nil) ::
+          {:ok, map(), :now | :next_turn} | {:error, term()}
+  def session_configuration(provider, changes, transport \\ nil)
+
+  def session_configuration(provider, changes, transport) when is_map(changes) do
+    with :ok <- validate_configuration_fields(changes),
+         {:ok, spec} <- configuration_spec(provider),
+         {:ok, declared} <- configuration_transport(spec, provider, transport),
+         :ok <- validate_dynamic_configuration(spec, declared, changes),
+         :ok <- validate_configuration_options(spec, declared, changes),
+         :ok <- validate_configuration_values(spec, declared, changes),
+         :ok <- validate_configured_approval_mode(spec, declared, changes) do
+      {:ok, changes, applies(declared)}
+    end
+  end
+
+  def session_configuration(_provider, changes, _transport),
+    do: {:error, {:invalid_configuration, %{reason: :not_a_map, changes: changes}}}
+
+  # `:now` is a claim about a live provider process, so only `:native` earns it.
+  defp applies(%{capabilities: %{dynamic_configuration: :native}}), do: :now
+  defp applies(_declared), do: :next_turn
+
+  defp validate_configuration_fields(changes) do
+    cond do
+      changes == %{} ->
+        {:error,
+         {:invalid_configuration,
+          %{reason: :no_changes, fields: Enum.sort(@configuration_fields)}}}
+
+      field = Enum.find(Map.keys(changes), &(&1 not in @configuration_fields)) ->
+        {:error,
+         {:invalid_configuration,
+          %{reason: :unknown_field, field: field, fields: Enum.sort(@configuration_fields)}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp configuration_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error, {:unconfigurable_session, %{provider: provider, reason: :unknown_provider}}}
+    end
+  end
+
+  # A start may proceed past an unresolvable transport and let the harness name it. A
+  # configure may not: its whole answer includes *when* the change takes effect, and a
+  # transport nobody declares cannot be asked.
+  defp configuration_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unconfigurable_session,
+          %{provider: provider, transport: transport, reason: :unknown_session_transport}}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  defp validate_dynamic_configuration(spec, declared, changes) do
+    capabilities = Session.capabilities(declared)
+
+    cond do
+      not InteractionCapabilities.supported?(capabilities, :dynamic_configuration) ->
+        {:error, unconfigurable(spec, declared, :no_dynamic_configuration, changes)}
+
+      Map.has_key?(changes, :model) and
+          not InteractionCapabilities.supported?(capabilities, :dynamic_model) ->
+        {:error, unconfigurable(spec, declared, :no_dynamic_model, changes)}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Two lists have to agree, and they answer different questions. `normalized_options`
+  # is what this transport accepts *at all* — the same list a start is held to. The
+  # transport's `configuration_options` is the narrower "and can still be changed once
+  # the session is open". A field outside either is refused by name.
+  defp validate_configuration_options(spec, declared, changes) do
+    case normalized_options(spec, {:interactive, declared.name}) do
+      {:ok, accepted} ->
+        validate_configurable_fields(spec, declared, changes, accepted)
+
+      # `selected_transport/2` only answers with a transport the spec declares or the
+      # synthetic managed one, so this is unreachable today. It is a `case` rather than a
+      # match because an unreachable `MatchError` here would crash a live coordinator.
+      :error ->
+        {:error,
+         {:unconfigurable_session,
+          %{
+            provider: spec.provider,
+            transport: declared.name,
+            reason: :unknown_session_transport
+          }}}
+    end
+  end
+
+  defp validate_configurable_fields(spec, declared, changes, accepted) do
+    case Enum.find(
+           Map.keys(changes),
+           &(&1 not in accepted or &1 not in declared.configuration_options)
+         ) do
+      nil ->
+        :ok
+
+      field ->
+        {:error,
+         {:unconfigurable_session,
+          %{
+            provider: spec.provider,
+            transport: declared.name,
+            reason: :option_not_configurable,
+            field: field,
+            configurable:
+              Enum.sort(Enum.filter(declared.configuration_options, &(&1 in accepted))),
+            message:
+              "#{inspect(spec.provider)} over the #{inspect(declared.name)} transport cannot " <>
+                "change #{inspect(field)} on an open session; it can change " <>
+                "#{inspect(Enum.sort(Enum.filter(declared.configuration_options, &(&1 in accepted))))}"
+          }}}
+    end
+  end
+
+  defp validate_configuration_values(spec, declared, changes) do
+    Enum.reduce_while(changes, :ok, fn {field, value}, :ok ->
+      case Map.get(spec.normalized_values, field) do
+        nil ->
+          {:cont, :ok}
+
+        allowed ->
+          if value in allowed or value in @unset_values do
+            {:cont, :ok}
+          else
+            {:halt,
+             {:error,
+              {:unconfigurable_session,
+               %{
+                 provider: spec.provider,
+                 transport: declared.name,
+                 reason: :value_not_accepted,
+                 field: field,
+                 value: value,
+                 accepted_values: allowed
+               }}}}
+          end
+      end
+    end)
+  end
+
+  # X1, on the configure path. A mode that asks nobody is exactly as broken arrived at by
+  # `interactive.configure` as it is stated at `interactive.start`, so it is refused with
+  # the same tuple and the same sentence rather than a second vocabulary.
+  defp validate_configured_approval_mode(spec, declared, changes) do
+    with :prompt <- Map.get(changes, :approval_mode),
+         %{approvals: false} = capabilities <-
+           Map.new(@capability_keys, &{&1, Map.get(Session.capabilities(declared), &1, false)}) do
+      {:error,
+       {:unsupported_approval_mode,
+        unanswerable(
+          spec.provider,
+          capabilities,
+          capability(spec.provider, {:interactive, declared.name})
+        )}}
+    else
+      _answerable_or_absent -> :ok
+    end
+  end
+
+  defp unconfigurable(spec, declared, reason, changes) do
+    {:unconfigurable_session,
+     %{
+       provider: spec.provider,
+       transport: declared.name,
+       reason: reason,
+       fields: changes |> Map.keys() |> Enum.sort(),
+       message: unconfigurable_message(spec.provider, declared.name, reason)
+     }}
+  end
+
+  defp unconfigurable_message(provider, transport, :no_dynamic_configuration) do
+    "#{inspect(provider)} reaches an interactive session over the #{inspect(transport)} " <>
+      "transport, which declares no dynamic configuration: nothing about an open session " <>
+      "can be changed. Start a new session with the options you want."
+  end
+
+  defp unconfigurable_message(provider, transport, :no_dynamic_model) do
+    "#{inspect(provider)} over the #{inspect(transport)} transport declares no dynamic " <>
+      "model, so the model an open session runs cannot be changed. Start a new session " <>
+      "with the model you want."
+  end
+
   # Mirrors `Jido.Harness.Session.Manager.resolve_transport/2`, including the synthetic
   # managed transport it substitutes for an adapter that declares none. Declaring
   # anything else here would describe a transport the session is not going to get.
-  defp selected_capabilities(spec, transport) do
+  defp selected_transport(spec, transport) do
     selected = transport || spec.default_session_transport || first_transport(spec)
 
     declared =
@@ -1312,7 +1706,7 @@ defmodule Ouroboros.Provider do
 
     case declared do
       nil -> nil
-      found -> found |> specialize(spec) |> Session.capabilities()
+      found -> specialize(found, spec)
     end
   end
 
