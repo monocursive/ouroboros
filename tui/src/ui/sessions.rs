@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::keymap::Action;
 use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
 
 use super::app::{App, Composer, ComposerVerb, Connection};
@@ -128,7 +129,10 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::from(vec![
-                Span::styled(" ctrl+x l ", theme::action()),
+                Span::styled(
+                    format!(" {} ", app.keymap.label(Action::LeaderSessions)),
+                    theme::action(),
+                ),
                 Span::styled("switch", Style::default().fg(theme::MUTED)),
             ]),
             Line::from(Span::styled(
@@ -252,8 +256,9 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(
-                        " +{:02} more · ctrl+x l",
-                        sessions.len().saturating_sub(visible_count)
+                        " +{:02} more · {}",
+                        sessions.len().saturating_sub(visible_count),
+                        app.keymap.label(Action::LeaderSessions)
                     ),
                     Style::default().fg(theme::MUTED),
                 ))),
@@ -615,7 +620,10 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
     }
 
     if let Some(snack) = snack {
-        render_approval_snack(frame, rows[3], &snack);
+        // Named as the *leader* chord rather than the bare `a` deliberately: the composer
+        // holds the keyboard while a session is open, so a bare `a` types the letter.
+        let hint = format!(" · {} to answer", app.keymap.label(Action::LeaderApproval));
+        render_approval_snack(frame, rows[3], &snack, &hint);
     }
 
     if composer_height > 0 {
@@ -753,10 +761,9 @@ fn approval_snack(app: &App) -> Option<String> {
     )
 }
 
-fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str) {
+fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str, hint: &str) {
     let width = area.width as usize;
     let label = "⏸ approval needed · ";
-    let hint = " · ctrl+x a to answer";
     let room = width.saturating_sub(label.width() + hint.width()).max(8);
 
     frame.render_widget(
@@ -812,7 +819,7 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
         &mut lines,
         plan,
         inner.width.max(8) as usize,
-        "Plan  ctrl+t",
+        &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
     );
 
     // The newest rows are the ones being worked on, so a plan longer than the panel keeps
@@ -833,10 +840,22 @@ fn first_run_tips(app: &App) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
+    // Every chord named here comes out of the resolved keymap (B8/D14): the one screen a
+    // first-time operator always sees must not teach a key their own config unbound.
+    let keys = &app.keymap;
+
     [
-        "@ attaches a file from this workspace, / opens the command list",
-        "ctrl+o expands every cell, ctrl+t shows the plan while it works",
-        "esc interrupts the turn and keeps what is queued; ? lists every key",
+        "@ attaches a file from this workspace, / opens the command list".to_string(),
+        format!(
+            "{} expands every cell, {} shows the plan while it works",
+            keys.label(Action::Verbose),
+            keys.label(Action::PlanPanel)
+        ),
+        format!(
+            "{} interrupts the turn and keeps what is queued; {} lists every key",
+            keys.label(Action::Interrupt),
+            keys.label(Action::Help)
+        ),
     ]
     .into_iter()
     .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::ACCENT))))
@@ -1027,6 +1046,17 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // Read before the mutable borrow below: the header states two chords, and the map they
+    // come from lives on the same `App` as the watch this is about to take mutably.
+    let (verbose, details) = (
+        app.keymap.label(Action::Verbose),
+        app.keymap.label(Action::LeaderDetails),
+    );
+    let header_keys = HeaderKeys {
+        verbose: &verbose,
+        details: &details,
+    };
+
     let Some(watch) = app.sessions.watches.get_mut(&(plane, id.clone())) else {
         return;
     };
@@ -1080,6 +1110,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 ticks,
                 show_event_details,
                 verbosity,
+                header_keys,
             )),
             rows[0],
         );
@@ -1151,6 +1182,10 @@ fn details_pane(
     pane: DetailsPane<'_>,
 ) {
     let key = (pane.plane, pane.id.to_string());
+    let (verbose, details) = (
+        app.keymap.label(Action::Verbose),
+        app.keymap.label(Action::LeaderDetails),
+    );
 
     let Some(watch) = app.sessions.watches.get(&key) else {
         return;
@@ -1165,6 +1200,10 @@ fn details_pane(
                 pane.ticks,
                 true,
                 pane.verbosity,
+                HeaderKeys {
+                    verbose: &verbose,
+                    details: &details,
+                },
             )),
             header_area,
         );
@@ -1345,6 +1384,17 @@ fn render_conversation_header(
     );
 }
 
+/// The two chords the conversation header names, resolved by the caller.
+///
+/// Two `&str` rather than the map itself: the header is drawn from inside a mutable borrow
+/// of the watch, which lives on the same `App` as the keymap, and a frame that cloned a
+/// forty-entry map to print two words would be paying for the wrong thing.
+#[derive(Debug, Clone, Copy)]
+struct HeaderKeys<'a> {
+    verbose: &'a str,
+    details: &'a str,
+}
+
 fn header(
     watch: &Watch,
     id: &str,
@@ -1352,16 +1402,21 @@ fn header(
     tick: u64,
     show_event_details: bool,
     verbosity: Verbosity,
+    keys: HeaderKeys<'_>,
 ) -> Line<'static> {
     if !show_event_details {
         let mut spans = vec![
             Span::styled(" Agent chat ", theme::heading()),
             Span::styled(
-                if verbosity.verbose() {
-                    "ctrl+o compact "
-                } else {
-                    "ctrl+o verbose "
-                },
+                format!(
+                    "{} {} ",
+                    keys.verbose,
+                    if verbosity.verbose() {
+                        "compact"
+                    } else {
+                        "verbose"
+                    }
+                ),
                 Style::default().fg(theme::MUTED),
             ),
         ];
@@ -1374,7 +1429,10 @@ fn header(
         Span::styled(" Event details ", theme::heading()),
         // Not `/details`: inside the ledger `/` is the filter, so the chord is the way
         // back and naming the slash command here would name a key that does not work.
-        Span::styled("ctrl+x d chat  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            format!("{} chat  ", keys.details),
+            Style::default().fg(theme::MUTED),
+        ),
         Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
         Span::raw(format!("{id} ")),
         Span::styled(
@@ -1619,9 +1677,9 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         // On a narrow pane it is the cell that yields, exactly as the footer's do: a hint
         // cut in half is worse than a hint that waited for the width to hold it.
         let steer = if app.steer_offered() && app.keyboard_enhanced && area.width >= 100 {
-            " · alt+enter steers"
+            format!(" · {} steers", app.keymap.label(Action::Steer))
         } else {
-            ""
+            String::new()
         };
 
         key_footer(

@@ -123,10 +123,12 @@ pub enum Command {
     /// B4: `/model` and `/effort`, taught by prefilling the composer with the verb.
     Model,
     Effort,
+    /// B8: the effective keymap, and where each binding came from.
+    Keys,
 }
 
 impl Command {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -161,6 +163,7 @@ impl Command {
         Self::Fork,
         Self::Model,
         Self::Effort,
+        Self::Keys,
     ];
 
     pub fn group(self) -> &'static str {
@@ -186,6 +189,7 @@ impl Command {
             | Self::Fork
             | Self::Model
             | Self::Effort
+            | Self::Keys
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -227,10 +231,16 @@ impl Command {
             Self::Fork => "Fork this session",
             Self::Model => "Change the model",
             Self::Effort => "Reasoning effort for the next turn",
+            Self::Keys => "Show the effective key map",
         }
     }
 
-    pub fn shortcut(self) -> &'static str {
+    /// The chord or verb this command answers to, as a *literal*.
+    ///
+    /// Only for the commands whose spelling is a slash verb rather than a key. Anything
+    /// with a key goes through [`Command::action`] and the resolved keymap instead, so a
+    /// rebound chord is what the palette shows (D14, B8) — see [`App::command_shortcut`].
+    fn slash(self) -> &'static str {
         match self {
             Self::NewSession => "ctrl+x n",
             Self::NewSessionOptions => "ctrl+x N",
@@ -266,15 +276,40 @@ impl Command {
             Self::Fork => "/fork",
             Self::Model => "/model",
             Self::Effort => "/effort",
+            Self::Keys => "/keys",
         }
     }
 
-    fn matches(self, query: &str) -> bool {
+    /// The keymap action this command is also reachable by, where there is one.
+    ///
+    /// The single place the palette's shortcut column and the keymap agree: adding a key
+    /// to a command means naming its action here, and the column follows.
+    pub fn action(self) -> Option<Action> {
+        Some(match self {
+            Self::NewSession => Action::LeaderNew,
+            Self::NewSessionOptions => Action::LeaderNewOptions,
+            Self::SwitchSession => Action::LeaderSessions,
+            Self::SessionDetails => Action::LeaderDetails,
+            Self::CopyLast => Action::LeaderCopy,
+            Self::DumpScrollback => Action::LeaderScrollback,
+            Self::ViewTranscript => Action::LeaderEditorView,
+            Self::Interrupt => Action::Interrupt,
+            Self::Steer => Action::LeaderSteer,
+            Self::ExternalEditor => Action::Editor,
+            Self::CloseSession => Action::LeaderEnd,
+            Self::Settings => Action::Settings,
+            Self::Help => Action::Help,
+            Self::Backtrack => Action::Backtrack,
+            _slash_only => return None,
+        })
+    }
+
+    fn matches(self, query: &str, shortcut: &str) -> bool {
         let query = query.trim().to_ascii_lowercase();
         query.is_empty()
             || self.label().to_ascii_lowercase().contains(&query)
             || self.group().to_ascii_lowercase().contains(&query)
-            || self.shortcut().contains(&query)
+            || shortcut.contains(&query)
     }
 }
 
@@ -288,11 +323,11 @@ impl CommandPalette {
     /// Every command whose label, group, or shortcut matches the query — before the
     /// capability filter. [`App::palette_commands`] is what a caller draws or activates;
     /// this is the half that does not need to know which session is open.
-    pub fn matching(&self, offered: &[Command]) -> Vec<Command> {
+    pub fn matching(&self, offered: &[Command], keymap: &Keymap) -> Vec<Command> {
         offered
             .iter()
             .copied()
-            .filter(|command| command.matches(&self.query))
+            .filter(|command| command.matches(&self.query, &shortcut_of(*command, keymap)))
             .collect()
     }
 }
@@ -316,7 +351,26 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        palette.matching(&offered)
+        palette.matching(&offered, &self.keymap)
+    }
+
+    /// What the palette prints in a command's shortcut column.
+    ///
+    /// The keymap first, always: a command with a key shows the key the operator would
+    /// actually press, including one they rebound and including `off` — which reads as
+    /// "this has no key any more", not as a chord that does nothing. A command with no
+    /// key shows its slash verb, which is the only spelling it has.
+    pub fn command_shortcut(&self, command: Command) -> String {
+        shortcut_of(command, &self.keymap)
+    }
+}
+
+/// [`App::command_shortcut`] for a caller holding a map and no App — the palette's own
+/// filter runs before the rows are drawn.
+fn shortcut_of(command: Command, keymap: &Keymap) -> String {
+    match command.action() {
+        Some(action) => keymap.label(action),
+        None => command.slash().to_string(),
     }
 }
 
@@ -357,6 +411,11 @@ pub enum Overlay {
         selected: Option<(Plane, String)>,
     },
     Help,
+    /// B8. `/keys`: the effective keymap, with the entries that came from `config.toml`
+    /// marked and the lines of it this build could not act on named.
+    Keys {
+        scroll: usize,
+    },
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
     /// A guided fleet setup surface. Add-another-machine can run after an explicit
@@ -533,6 +592,15 @@ impl App {
         self.overlay = Some(Overlay::Help);
     }
 
+    /// `/keys`, the map itself. Toggles, like the palette: pressing the verb twice is how
+    /// an operator checks a chord and gets back to what they were doing.
+    pub fn open_keymap(&mut self) {
+        self.overlay = match &self.overlay {
+            Some(Overlay::Keys { .. }) => None,
+            _other => Some(Overlay::Keys { scroll: 0 }),
+        };
+    }
+
     pub(super) fn open_quit(&mut self) {
         let options = match self.mode {
             Mode::Spawned { pid } => vec![
@@ -616,6 +684,15 @@ impl App {
                 }
                 KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
                 KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+                _ => {}
+            },
+            // Two read-only pages with the same discipline as `?`: scroll, or leave.
+            Overlay::Keys { scroll } => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
+                KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
                 _ => {}
             },
             // The overlay owns its own cursor discipline, in the module that knows what a
@@ -928,6 +1005,10 @@ impl App {
             }
             Command::Help => {
                 self.open_help();
+            }
+            Command::Keys => {
+                self.overlay = None;
+                self.open_keymap();
             }
             Command::ShowDiff => {
                 self.overlay = None;

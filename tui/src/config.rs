@@ -56,6 +56,7 @@
 //! preferences: which provider a person prefers is a fact about the person, not about
 //! which runtime they happened to start.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
@@ -85,7 +86,7 @@ const HEADER: &str = "\
 
 /// Everything `ouro` remembers between runs. All of it optional, none of it a runtime
 /// fact.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
@@ -103,15 +104,60 @@ pub struct Config {
 
 /// Chords this operator has rebound.
 ///
-/// One entry today, and it is the one the field got wrong: Claude Code #43717 is
-/// "double-Esc cannot be rebound or disabled", which breaks zsh vi-mode for everyone who
-/// uses it. Making a chord rebindable *from day one* is R1 §4d(1), so the chord and its
-/// setting land together rather than the chord landing first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// It started with one entry, and it was the one the field got wrong: Claude Code #43717
+/// is "double-Esc cannot be rebound or disabled", which breaks zsh vi-mode for everyone
+/// who uses it. Making a chord rebindable *from day one* is R1 §4d(1), so the chord and
+/// its setting landed together rather than the chord landing first.
+///
+/// B8 finished the job: every chord this client binds is now a named action in
+/// [`crate::keymap`], and any of them can appear here. `backtrack` keeps its own field
+/// because it predates the rest and its three documented spellings — `"esc esc"`,
+/// `"alt+up"`, `"off"` — are all valid specs in the general grammar, so a file written for
+/// the old build resolves to exactly what it always did.
+///
+/// The remaining entries land in [`KeysConfig::bindings`] through serde's `flatten`, which
+/// is what lets a name this build has never heard of be *reported* rather than refused:
+/// [`crate::keymap::Keymap::resolve`] names it in a notice and ignores the line.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KeysConfig {
-    /// `"esc esc"` (the default), `"alt+up"`, or `"off"`.
+    /// `"esc esc"` (the default), `"alt+up"`, `"off"`, or anything else the key-spec
+    /// grammar reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backtrack: Option<String>,
+    /// Every other `action = "spec"` line, verbatim, in name order.
+    ///
+    /// [`toml::Value`] rather than `String` for the reason the module header gives: a
+    /// `flatten` of `String` would make `[keys] something = true` refuse the *whole* file,
+    /// and a client that goes blind because one line has the wrong type is worse than one
+    /// that names the line. [`normalise`] drops the non-strings and says which.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, toml::Value>,
+}
+
+impl KeysConfig {
+    /// The whole `[keys]` table as the keymap reads it: the flattened string entries plus
+    /// `backtrack`, which is a field here for backward compatibility and an ordinary
+    /// action there.
+    pub fn overrides(&self) -> BTreeMap<String, String> {
+        let mut overrides: BTreeMap<String, String> = self
+            .bindings
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .as_str()
+                    .map(|spec| (name.clone(), spec.trim().to_string()))
+            })
+            .filter(|(_, spec)| !spec.is_empty())
+            .collect();
+
+        if let Some(backtrack) = self.backtrack.as_deref().map(str::trim) {
+            if !backtrack.is_empty() {
+                overrides.insert("backtrack".to_string(), backtrack.to_string());
+            }
+        }
+
+        overrides
+    }
 }
 
 /// What opens the backtrack menu.
@@ -479,10 +525,16 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.notifications.when);
     blank_to_none(&mut config.keys.backtrack);
 
+    // `backtrack` predates the general grammar and its three documented spellings are all
+    // valid specs, so anything [`crate::keymap`] can read is kept and resolved there. Only
+    // a chord *neither* vocabulary knows is turned back into "unset" here, and it is named
+    // rather than silently disabled — quietly turning a typo into `off` is the same
+    // failure as ignoring it.
     if let Some(chord) = config.keys.backtrack.clone() {
-        if Backtrack::parse(&chord).is_none() {
+        if Backtrack::parse(&chord).is_none() && crate::keymap::Spec::parse(&chord).is_err() {
             problems.push(format!(
-                "{}: keys.backtrack is {chord:?}, which is not one of {}; treating it as unset                  (esc esc)",
+                "{}: keys.backtrack is {chord:?}, which is neither {} nor a key this build can \
+                 read; treating it as unset (esc esc)",
                 path.display(),
                 Backtrack::ALL
                     .iter()
@@ -494,6 +546,23 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
             config.keys.backtrack = None;
         }
     }
+
+    // A `[keys]` line whose value is not a string cannot be a key spec. Dropped and named
+    // here rather than in the keymap, because the keymap is handed strings and this is the
+    // one layer that still knows what TOML type the file actually carried.
+    config.keys.bindings.retain(|name, value| {
+        if value.is_str() {
+            return true;
+        }
+
+        problems.push(format!(
+            "{}: keys.{name} is {}, not a key spec; ignored",
+            path.display(),
+            value.type_str()
+        ));
+
+        false
+    });
 
     if let Some(mode) = config.notifications.mode.clone() {
         if NotifyMode::parse(&mode).is_none() {

@@ -12,6 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::keymap::{Action, Keymap};
+
 const HISTORY_LIMIT: usize = 100;
 /// How many un-collected `@` completions the editor will hold. Four more than the
 /// gateway's attachment ceiling, so a full composer still records the one it will refuse
@@ -19,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 33] = [
+pub(crate) const COMMANDS: [(&str, &str); 34] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -50,6 +52,7 @@ pub(crate) const COMMANDS: [(&str, &str); 33] = [
     ("/settings", "open settings"),
     ("/help", "show keyboard help"),
     ("/hotkeys", "show keyboard help"),
+    ("/keys", "show the effective key map and where it came from"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
     ("/close", "end or remove the selected session"),
@@ -231,10 +234,85 @@ impl Editor {
         self.refresh_completion(catalog);
     }
 
+    /// Runs the named composer motion `key` is bound to, if any.
+    ///
+    /// `false` means no motion claimed the key, which is the ordinary case for every
+    /// character typed into a draft. A motion set to `off` claims nothing, so the key falls
+    /// through to whatever the structural reading of it is — which for `ctrl+k` is nothing
+    /// at all, and that is the point of turning it off.
+    fn apply_motion(&mut self, key: KeyEvent, keymap: &Keymap) -> bool {
+        let motion = [
+            Action::EditorWordBack,
+            Action::EditorWordForward,
+            Action::EditorKillWordBack,
+            Action::EditorKillWordForward,
+            Action::EditorKillLine,
+            Action::EditorKillToStart,
+            Action::EditorYank,
+            Action::EditorLineStart,
+            Action::EditorLineEnd,
+        ]
+        .into_iter()
+        .find(|action| keymap.hits(*action, key));
+
+        let Some(motion) = motion else {
+            return false;
+        };
+
+        match motion {
+            Action::EditorWordBack => self.move_word_left(),
+            Action::EditorWordForward => self.move_word_right(),
+            Action::EditorKillWordBack => self.delete_word_backward(),
+            Action::EditorKillWordForward => self.delete_word_forward(),
+            Action::EditorKillLine => self.delete_to_line_end(),
+            Action::EditorKillToStart => self.delete_to_line_start(),
+            Action::EditorYank => self.yank_insert(),
+            Action::EditorLineStart => self.move_line_start(),
+            Action::EditorLineEnd => self.move_line_end(),
+            _not_a_motion => return false,
+        }
+
+        true
+    }
+
+    /// One keystroke against the built-in map.
+    ///
+    /// The map is only ever the operator's on the paths that have an [`App`] to read it
+    /// from; this entry point exists for the surfaces that have no configuration to
+    /// consult — the unit tests below, and anything that would otherwise rebuild the map
+    /// per keystroke.
+    ///
+    /// [`App`]: crate::ui::app::App
     pub fn handle_key(&mut self, key: KeyEvent, catalog: &CompletionCatalog) -> EditorAction {
+        self.handle_key_with(key, catalog, crate::keymap::builtin())
+    }
+
+    /// One keystroke against a resolved keymap (B8).
+    ///
+    /// The named composer motions — [`Action::EditorWordBack`] and its siblings — are
+    /// looked up rather than matched against a literal, so `[keys] editor.kill_line` is
+    /// real and `?` can state what it is. Everything else here is *structure* rather than
+    /// a chord: Backspace, Delete, the arrow keys, Tab through a completion menu, and the
+    /// characters themselves are what a text field is, and this client does not offer to
+    /// rebind them into something that is no longer a text field.
+    pub fn handle_key_with(
+        &mut self,
+        key: KeyEvent,
+        catalog: &CompletionCatalog,
+        keymap: &Keymap,
+    ) -> EditorAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        // The rebindable motions, ahead of the structural keys, so a motion an operator
+        // moved onto another chord wins over that chord's built-in reading. The completion
+        // menu is refreshed exactly as it is for the structural motions below — a caret
+        // that moved is a caret that may have left the `@` it was completing.
+        if self.apply_motion(key, keymap) {
+            self.refresh_completion(catalog);
+            return EditorAction::None;
+        }
 
         let action = match key.code {
             KeyCode::Esc => {
@@ -247,20 +325,20 @@ impl Editor {
             // The second send key. Only reachable where the terminal reports the modifier
             // at all — without the kitty keyboard protocol `Alt+Enter` arrives as a bare
             // `Enter` — and the composer chrome advertises it on exactly that condition.
-            KeyCode::Enter if alt => EditorAction::SubmitAlternate,
+            _steer if keymap.hits(Action::Steer, key) => EditorAction::SubmitAlternate,
             // Only reachable where the terminal reports the modifier at all: without the
             // kitty keyboard protocol, `Shift+Enter` arrives as a bare `Enter` and submits.
-            // The footers advertise it on exactly that condition; `Ctrl+J` below is the
-            // newline every terminal can send.
+            // The footers advertise it on exactly that condition; the `newline` action
+            // below is the one every terminal can send.
             KeyCode::Enter if shift => {
                 self.insert("\n");
                 EditorAction::None
             }
-            KeyCode::Enter => EditorAction::Submit,
-            KeyCode::Char('j') if ctrl => {
+            _newline if keymap.hits(Action::Newline, key) => {
                 self.insert("\n");
                 EditorAction::None
             }
+            _send if keymap.hits(Action::Send, key) => EditorAction::Submit,
             KeyCode::Tab if self.apply_completion() => EditorAction::None,
             KeyCode::Tab => EditorAction::None,
             KeyCode::BackTab if self.completion.is_some() => {

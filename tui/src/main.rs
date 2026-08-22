@@ -2085,14 +2085,26 @@ async fn run_ui(
     app.config_path = Some(local.config.path.clone());
     app.config = local.config.config;
 
+    // B8. The keymap is resolved once, here, from the `[keys]` table that was just read.
+    // Everything that acts on a chord and everything that *draws* one reads this one map,
+    // which is what makes a rebound key the key the UI shows (D14).
+    app.reload_keymap();
+
     // A preference file that did not parse is one sentence, not a refusal to run. It is
     // said before the protocol warning below so that the more urgent of the two is the one
-    // left on screen.
-    if !local.config.problems.is_empty() {
-        app.inform(
-            local.config.problems.join(" · "),
-            ouro::ui::app::NoticeKind::Warn,
-        );
+    // left on screen. A `[keys]` line this build could not act on joins it: the map ran on
+    // its defaults for that action, and an operator who mistyped a chord finds out now
+    // rather than by pressing it.
+    let problems = local
+        .config
+        .problems
+        .iter()
+        .cloned()
+        .chain(app.keymap.problems().iter().cloned())
+        .collect::<Vec<_>>();
+
+    if !problems.is_empty() {
+        app.inform(problems.join(" · "), ouro::ui::app::NoticeKind::Warn);
     }
 
     let opened = open.is_some();

@@ -31,9 +31,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::TryRngCore;
 use serde_json::{json, Value};
 
-use crate::config::{Backtrack, Config, Defaults, ONBOARDING_PROMPTS};
+use crate::config::{Config, Defaults, ONBOARDING_PROMPTS};
 use crate::fleet::Profile as FleetProfile;
 use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
+use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
     Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
@@ -70,7 +71,6 @@ use session::{
 };
 
 pub use footer::{SessionFacts, TranscriptFacts};
-pub use keys::LEADER_KEYS;
 pub use machines::{
     AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,
     MachineCandidate, MachineChoice, MachineForm, MachineReport, MachineSecurity, MachineSummary,
@@ -740,6 +740,14 @@ pub struct App {
     /// This client's preferences, as the file said them plus whatever the settings overlay
     /// has changed since. Never a runtime fact, and labelled as such wherever it is drawn.
     pub config: Config,
+    /// Every chord this client binds, resolved once from [`config`](Self::config) (B8).
+    ///
+    /// Resolved rather than consulted per keystroke because the answer is a fact about a
+    /// file that is read once, and because the surfaces that *draw* a key — the `?` panel,
+    /// the footer, the which-key overlay, the palette — must all be reading the same map
+    /// as the handler that acts on it (D14). A caller that changes `config.keys` calls
+    /// [`App::reload_keymap`]; nothing else in this type may go behind it.
+    pub keymap: Keymap,
     /// Where [`config`](Self::config) is read from and written to. `None` only when there
     /// is nowhere to keep preferences at all, which the settings overlay says out loud.
     pub config_path: Option<PathBuf>,
@@ -930,6 +938,7 @@ impl App {
             cursors: Cursors::default(),
             launch_dir: None,
             config: Config::default(),
+            keymap: Keymap::builtin(),
             config_path: None,
             data_dir: None,
             fleet_profile: None,
@@ -977,6 +986,21 @@ impl App {
             clipboard_pending: None,
             clipboard_tool_reported: false,
         }
+    }
+
+    /// Re-resolves [`keymap`](Self::keymap) from the current `[keys]` table.
+    ///
+    /// Called by the launcher once the preference file has been read, and by any test that
+    /// sets `config.keys` directly. The keymap's own problems are *not* drained here: they
+    /// belong to the map, `/keys` lists them, and the launcher says them once at startup.
+    pub fn reload_keymap(&mut self) {
+        self.keymap = Keymap::resolve(&self.config.keys.overrides());
+    }
+
+    /// Whether `action` still has a key on it, for the surfaces that must not advertise a
+    /// chord an operator turned off.
+    pub fn bound(&self, action: Action) -> bool {
+        !self.keymap.spec(action).is_off()
     }
 
     /// The row the `[statusline] command` produced, for the renderer.
