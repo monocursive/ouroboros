@@ -18,7 +18,7 @@
 //! that re-lays out a 64 MiB tool result on every frame is a transcript that stops
 //! redrawing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 
 use ratatui::layout::Alignment;
@@ -36,9 +36,21 @@ use super::code;
 use super::theme;
 use super::transcript::{Entry, Note};
 
-const TOOL_OUTPUT_LINES: usize = 3;
+/// The head half of Codex's head/tail layout for a tool result.
+const TOOL_HEAD_LINES: usize = 6;
+/// The tail half. A result's last rows are where an exit status, a summary, or the failure
+/// actually is; showing only the head is why "collapsed tool output" used to be useless.
+const TOOL_TAIL_LINES: usize = 6;
+/// The compact row ceiling for one tool result, deliberately raised from the three rows
+/// this file used to spend. Six-and-six with a counted marker between them is R2 §10c
+/// recipe 4/8: enough of a result to recognise it, and an explicit statement of the rest.
+const TOOL_OUTPUT_LINES: usize = TOOL_HEAD_LINES + TOOL_TAIL_LINES;
+/// The live tail window for streaming command output (Kiro, Cursor): the newest rows, not
+/// the oldest, because a command that is still running is watched at its end.
 const COMMAND_OUTPUT_LINES: usize = 4;
-const DIFF_LINES: usize = 12;
+const DIFF_LINES: usize = super::diff::COMPACT_LINES;
+/// How many calls one grouped exploration cell lists before it starts counting instead.
+const EXPLORATION_CALLS: usize = 64;
 const MESSAGE_LINES: usize = 256;
 const STATUS_DETAIL_LINES: usize = 32;
 /// The per-cell row ceiling under `Ctrl+O`. Deliberately raised from the compact ceilings
@@ -69,18 +81,28 @@ pub enum Verbosity {
     #[default]
     Compact,
     Verbose,
+    /// Codex's `/raw`: the same cells with no frame, no gutter, no glyph column, and no
+    /// app-side wrapping, so a native terminal selection yields logical lines.
+    Raw,
 }
 
 impl Verbosity {
+    /// Whether collapsible cells are drawn expanded. Raw shows everything too — it is a
+    /// copying view, and a copying view that folded half the transcript away would be a
+    /// worse answer than the one it replaced.
     pub fn verbose(self) -> bool {
-        self == Self::Verbose
+        self != Self::Compact
+    }
+
+    pub fn raw(self) -> bool {
+        self == Self::Raw
     }
 
     /// The row ceiling for one collapsible cell at this verbosity.
     fn lines(self, compact: usize) -> usize {
         match self {
             Self::Compact => compact,
-            Self::Verbose => VERBOSE_LINES,
+            Self::Verbose | Self::Raw => VERBOSE_LINES,
         }
     }
 
@@ -91,9 +113,25 @@ impl Verbosity {
     fn provenance(self, what: &str) -> String {
         match self {
             Self::Compact => format!("full {what} · ctrl+o"),
-            Self::Verbose => format!("full {what} · /details"),
+            Self::Verbose | Self::Raw => format!("full {what} · /details"),
         }
     }
+}
+
+/// Codex's counted truncation marker, with the key that shows the rest.
+///
+/// Phrased as `… +N lines · ctrl+o` rather than as a bare ellipsis because a collapsed cell
+/// that does not say *how much* it hid is a cell the reader has to expand to find out it
+/// hid nothing worth reading.
+fn more_lines(omitted: usize, verbosity: Verbosity) -> String {
+    format!(
+        "… +{omitted} line{} · {}",
+        if omitted == 1 { "" } else { "s" },
+        match verbosity {
+            Verbosity::Compact => "ctrl+o",
+            Verbosity::Verbose | Verbosity::Raw => "/details",
+        }
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,15 +159,101 @@ pub enum Tone {
 pub struct ToolCell {
     pub call_id: Option<String>,
     pub name: String,
+    /// ACP's `kind`, beside the provider's name rather than instead of it.
+    pub kind: Option<String>,
     pub input: Value,
     pub output: Option<Value>,
     pub state: ToolState,
+    /// When the call was made, in epoch milliseconds.
+    pub started_at: Option<i64>,
+    /// When the ledger last had something to say about it: its result's instant for a call
+    /// that finished, and the newest instant this window holds for one still running.
+    pub settled_at: Option<i64>,
+}
+
+impl ToolCell {
+    fn new(call_id: Option<String>, name: String, kind: Option<String>, input: Value) -> Self {
+        Self {
+            call_id,
+            name,
+            kind,
+            input,
+            output: None,
+            state: ToolState::Running,
+            started_at: None,
+            settled_at: None,
+        }
+    }
+
+    /// How long this call took, as far as the ledger can prove it.
+    ///
+    /// Exact once the result arrived. While the call is still running it is a **floor**:
+    /// the projection reads no clock — that is what keeps the same watch rendering and
+    /// exporting to the same bytes — so the newest event instant in the window is the
+    /// latest moment it can honestly say the call was still going.
+    pub fn elapsed(&self) -> Option<i64> {
+        let started = self.started_at?;
+        let settled = self.settled_at?;
+
+        (settled > started).then_some(settled - started)
+    }
+}
+
+/// Codex's grouped exploration cell: consecutive read/search/list/glob calls, with nothing
+/// else drawn between them, read as one row.
+///
+/// The point is not to hide the calls — expanded, every one of them is a row — but to stop
+/// eight filesystem lookups from occupying eight frames of a conversation about something
+/// else. It says `Exploring…` while it is still growing and `Explored N files` once
+/// anything else has been drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplorationCell {
+    pub calls: Vec<ToolCell>,
+    /// Calls beyond [`EXPLORATION_CALLS`], counted rather than listed.
+    pub overflow: usize,
+    /// Closed: something else was drawn after it, or the turn ended.
+    pub done: bool,
+}
+
+impl ExplorationCell {
+    pub fn total(&self) -> usize {
+        self.calls.len() + self.overflow
+    }
+
+    fn failed(&self) -> usize {
+        self.calls
+            .iter()
+            .filter(|call| call.state == ToolState::Failed)
+            .count()
+    }
+}
+
+/// One unified diff, parsed once at projection time.
+///
+/// The parse is what every count and every row comes from. [`Diff::additions`] — the
+/// provider's own claim — stays on the payload for `/details` and is deliberately not the
+/// number this cell prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffCell {
+    pub diff: Diff,
+    pub parsed: super::diff::ParsedDiff,
+    /// Warp's rule: a diff whose approval is still outstanding stays expanded and says so;
+    /// once the approval resolves it collapses back to its header.
+    pub pending_approval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileCell {
     pub path: Option<String>,
     pub kind: Option<String>,
+}
+
+/// What a divider terminates. Turn boundaries are the ones `/diff` counts turns by, so
+/// they cannot be told apart from "earlier history is gone" by their wording alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DividerKind {
+    TurnEnd,
+    Other,
 }
 
 /// Crush's three-state collapse, applied to reasoning.
@@ -163,9 +287,19 @@ pub enum Cell {
     /// only under `Ctrl+O`, where the reader has asked for the bookkeeping.
     Usage(UsageReport),
     Tool(ToolCell),
+    /// Consecutive filesystem exploration, as one row.
+    Exploration(ExplorationCell),
     CommandOutput(String),
     File(FileCell),
-    Diff(Diff),
+    Diff(DiffCell),
+    /// What one turn changed, drawn at its end divider: `3 files · +120 −18`.
+    DiffStat {
+        files: usize,
+        additions: usize,
+        deletions: usize,
+        /// At least one of the diffs behind these numbers was an excerpt.
+        in_excerpt: bool,
+    },
     Status {
         label: String,
         detail: String,
@@ -180,6 +314,7 @@ pub enum Cell {
     Divider {
         text: String,
         tone: Tone,
+        kind: DividerKind,
     },
 }
 
@@ -201,8 +336,19 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
     let mut cells = Vec::new();
     let mut pending = None;
     let mut thinking: Option<PendingThinking> = None;
-    let mut tools: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tools: BTreeMap<String, ToolSlot> = BTreeMap::new();
     let mut approvals: BTreeMap<String, usize> = BTreeMap::new();
+    // Diff cells an outstanding approval is about, so its resolution can collapse them.
+    let mut approval_diffs: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    // Approval subjects still unanswered, so a diff that arrives after the request can tell
+    // that it is the thing being asked about.
+    let mut open_approvals: Vec<(Option<String>, String)> = Vec::new();
+    // Which cells hold the diffs seen since the last turn boundary, for that turn's stat.
+    let mut turn_diffs: Vec<usize> = Vec::new();
+    // The newest instant the ledger holds. A projection reads no clock — that is what keeps
+    // one watch rendering and exporting to the same bytes — so this is the only "now" a
+    // still-running tool can honestly be measured against.
+    let mut newest_at: Option<i64> = None;
     // Turn start instants, so a turn-end divider can state elapsed time instead of
     // implying one. A turn whose start this window no longer holds gets no duration.
     let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
@@ -216,6 +362,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                 cells.push(Cell::Divider {
                     text: "Earlier conversation is no longer available".into(),
                     tone: Tone::Warning,
+                    kind: DividerKind::Other,
                 });
             }
             Entry::Gap { from, to } => {
@@ -223,6 +370,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                 cells.push(Cell::Divider {
                     text: format!("Restoring {} missing updates", to - from + 1),
                     tone: Tone::Warning,
+                    kind: DividerKind::Other,
                 });
             }
             Entry::Note(note) => {
@@ -230,6 +378,7 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                 cells.push(Cell::Divider {
                     text: chat_note(note).into(),
                     tone: Tone::Warning,
+                    kind: DividerKind::Other,
                 });
             }
             Entry::Ended(status) => {
@@ -237,192 +386,275 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                 cells.push(Cell::Divider {
                     text: format!("Session ended ({status})"),
                     tone: Tone::Muted,
+                    kind: DividerKind::Other,
                 });
             }
-            Entry::Event(event) => match PresentationEvent::from_event(event) {
-                PresentationEvent::UserMessage(text) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::Message {
-                        speaker: Speaker::You,
-                        text,
-                        streaming: false,
-                    });
+            Entry::Event(event) => {
+                if let Some(at) = crate::model::transcript::epoch_millis(&event.timestamp) {
+                    newest_at = Some(newest_at.map_or(at, |newest: i64| newest.max(at)));
                 }
-                PresentationEvent::UserSteer(text) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::ChatNote {
-                        text: match text {
-                            Some(text) => format!("You steered the agent: {text}"),
-                            None => "You steered the agent".to_string(),
-                        },
-                    });
-                }
-                PresentationEvent::UnrecordedInput => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::ChatNote {
-                        text: "[message not recorded]".to_string(),
-                    });
-                }
-                PresentationEvent::AgentText {
-                    turn_id,
-                    text,
-                    final_text,
-                } => project_agent_text(&mut cells, &mut pending, turn_id, text, final_text),
-                PresentationEvent::Thinking { turn_id, text } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_thinking(&mut cells, &mut thinking, turn_id, text);
-                }
-                PresentationEvent::Plan(plan) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::Plan(plan));
-                }
-                PresentationEvent::Usage(usage) => {
-                    // Folded into the session total the header and footer read from
-                    // `Watch::usage`. The per-event line is verbose-only because one row
-                    // per token report would bury the conversation it is describing.
-                    flush_agent(&mut cells, &mut pending, false);
-                    if !usage.is_empty() {
-                        cells.push(Cell::Usage(usage));
+
+                match PresentationEvent::from_event(event) {
+                    PresentationEvent::UserMessage(text) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Message {
+                            speaker: Speaker::You,
+                            text,
+                            streaming: false,
+                        });
                     }
-                }
-                PresentationEvent::RunStarted(run) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::ChatNote {
-                        text: run_started_note(&run),
-                    });
-                }
-                PresentationEvent::TurnStarted { turn_id, at } => {
-                    // No cell: a running turn is already announced by the working
-                    // indicator. The instant is kept so the turn's own end divider can
-                    // state how long it took.
-                    if let (Some(turn_id), Some(at)) = (turn_id, at) {
-                        turn_starts.entry(turn_id).or_insert(at);
-                    }
-                }
-                PresentationEvent::TurnEnded {
-                    turn_id,
-                    at,
-                    outcome,
-                    detail,
-                } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_turn_end(&mut cells, &turn_starts, turn_id, at, outcome, detail);
-                }
-                PresentationEvent::QueueChanged { queued: depth } => {
-                    if queued != Some(depth) {
-                        queued = Some(depth);
+                    PresentationEvent::UserSteer(text) => {
                         flush_agent(&mut cells, &mut pending, false);
                         cells.push(Cell::ChatNote {
-                            text: match depth {
-                                0 => "The follow-up queue is empty".to_string(),
-                                1 => "1 follow-up is queued".to_string(),
-                                depth => format!("{depth} follow-ups are queued"),
+                            text: match text {
+                                Some(text) => format!("You steered the agent: {text}"),
+                                None => "You steered the agent".to_string(),
                             },
                         });
                     }
-                }
-                PresentationEvent::Lifecycle { marker, detail } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_lifecycle(&mut cells, marker, detail);
-                }
-                PresentationEvent::ProviderNote { kind, detail } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::ChatNote {
-                        text: provider_note_text(&kind, &detail),
-                    });
-                }
-                PresentationEvent::ToolCall(call) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_tool_call(&mut cells, &mut tools, call);
-                }
-                PresentationEvent::ToolResult(result) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_tool_result(&mut cells, &tools, result);
-                }
-                PresentationEvent::CommandOutput(text) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    append_command_output(&mut cells, text);
-                }
-                PresentationEvent::FileUpdate(update) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    let mut emitted_file = false;
-                    let inferred_diff_path = if update.changes.len() == 1 {
-                        update.changes[0].path.clone()
-                    } else {
-                        None
-                    };
-
-                    for change in update.changes {
-                        emitted_file = true;
-                        project_file(&mut cells, change, update.status.as_deref());
+                    PresentationEvent::UnrecordedInput => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::ChatNote {
+                            text: "[message not recorded]".to_string(),
+                        });
                     }
-
-                    if !emitted_file && update.diff.is_none() {
-                        cells.push(Cell::File(FileCell {
-                            path: None,
-                            kind: update.status.clone(),
-                        }));
+                    PresentationEvent::AgentText {
+                        turn_id,
+                        text,
+                        final_text,
+                    } => project_agent_text(&mut cells, &mut pending, turn_id, text, final_text),
+                    PresentationEvent::Thinking { turn_id, text } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_thinking(&mut cells, &mut thinking, turn_id, text);
                     }
-
-                    if let Some(mut diff) = update.diff {
-                        if diff.path.is_none() {
-                            diff.path = inferred_diff_path;
+                    PresentationEvent::Plan(plan) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Plan(plan));
+                    }
+                    PresentationEvent::Usage(usage) => {
+                        // Folded into the session total the header and footer read from
+                        // `Watch::usage`. The per-event line is verbose-only because one row
+                        // per token report would bury the conversation it is describing.
+                        flush_agent(&mut cells, &mut pending, false);
+                        if !usage.is_empty() {
+                            cells.push(Cell::Usage(usage));
                         }
-                        cells.push(Cell::Diff(diff));
                     }
-                }
-                PresentationEvent::ApprovalRequested { request_id, detail } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    let index = cells.len();
-                    if let Some(request_id) = request_id {
-                        approvals.insert(request_id, index);
+                    PresentationEvent::RunStarted(run) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::ChatNote {
+                            text: run_started_note(&run),
+                        });
                     }
-                    cells.push(Cell::Status {
-                        label: "Approval needed".into(),
+                    PresentationEvent::TurnStarted { turn_id, at } => {
+                        // No cell: a running turn is already announced by the working
+                        // indicator. The instant is kept so the turn's own end divider can
+                        // state how long it took.
+                        if let (Some(turn_id), Some(at)) = (turn_id, at) {
+                            turn_starts.entry(turn_id).or_insert(at);
+                        }
+                    }
+                    PresentationEvent::TurnEnded {
+                        turn_id,
+                        at,
+                        outcome,
                         detail,
-                        tone: Tone::Warning,
-                    });
-                }
-                PresentationEvent::ApprovalResolved {
-                    request_id,
-                    decision,
-                    detail,
-                } => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    project_approval_resolution(
-                        &mut cells,
-                        &mut approvals,
+                    } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_diffstat(&mut cells, &mut turn_diffs);
+                        project_turn_end(&mut cells, &turn_starts, turn_id, at, outcome, detail);
+                    }
+                    PresentationEvent::QueueChanged { queued: depth } => {
+                        if queued != Some(depth) {
+                            queued = Some(depth);
+                            flush_agent(&mut cells, &mut pending, false);
+                            cells.push(Cell::ChatNote {
+                                text: match depth {
+                                    0 => "The follow-up queue is empty".to_string(),
+                                    1 => "1 follow-up is queued".to_string(),
+                                    depth => format!("{depth} follow-ups are queued"),
+                                },
+                            });
+                        }
+                    }
+                    PresentationEvent::Lifecycle { marker, detail } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_lifecycle(&mut cells, marker, detail);
+                    }
+                    PresentationEvent::ProviderNote { kind, detail } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::ChatNote {
+                            text: provider_note_text(&kind, &detail),
+                        });
+                    }
+                    PresentationEvent::ToolCall(call) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_tool_call(&mut cells, &mut tools, call);
+                    }
+                    PresentationEvent::ToolResult(result) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_tool_result(&mut cells, &mut tools, result);
+                    }
+                    PresentationEvent::CommandOutput(text) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        append_command_output(&mut cells, text);
+                    }
+                    PresentationEvent::FileUpdate(update) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        let mut emitted_file = false;
+                        let inferred_diff_path = if update.changes.len() == 1 {
+                            update.changes[0].path.clone()
+                        } else {
+                            None
+                        };
+
+                        for change in update.changes {
+                            emitted_file = true;
+                            project_file(
+                                &mut cells,
+                                &mut turn_diffs,
+                                &open_approvals,
+                                &mut approval_diffs,
+                                change,
+                                update.status.as_deref(),
+                            );
+                        }
+
+                        if !emitted_file && update.diff.is_none() {
+                            cells.push(Cell::File(FileCell {
+                                path: None,
+                                kind: update.status.clone(),
+                            }));
+                        }
+
+                        if let Some(mut diff) = update.diff {
+                            if diff.path.is_none() {
+                                diff.path = inferred_diff_path;
+                            }
+                            project_diff(
+                                &mut cells,
+                                &mut turn_diffs,
+                                &open_approvals,
+                                &mut approval_diffs,
+                                diff,
+                            );
+                        }
+                    }
+                    PresentationEvent::ApprovalRequested { request_id, detail } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        let index = cells.len();
+                        if let Some(request_id) = &request_id {
+                            approvals.insert(request_id.clone(), index);
+                        }
+                        open_approvals.push((request_id, detail.clone()));
+                        cells.push(Cell::Status {
+                            label: "Approval needed".into(),
+                            detail,
+                            tone: Tone::Warning,
+                        });
+                    }
+                    PresentationEvent::ApprovalResolved {
                         request_id,
                         decision,
                         detail,
-                    );
+                    } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        settle_approved_diffs(
+                            &mut cells,
+                            &mut approval_diffs,
+                            &mut open_approvals,
+                            request_id.as_deref(),
+                        );
+                        project_approval_resolution(
+                            &mut cells,
+                            &mut approvals,
+                            request_id,
+                            decision,
+                            detail,
+                        );
+                    }
+                    PresentationEvent::Failure(detail) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Status {
+                            label: "Agent error".into(),
+                            detail,
+                            tone: Tone::Error,
+                        });
+                    }
+                    PresentationEvent::Interrupted(detail) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Status {
+                            label: "Interrupted".into(),
+                            detail,
+                            tone: Tone::Warning,
+                        });
+                    }
+                    // Drawn as nothing, for a reason the presentation recorded. The event
+                    // itself is still in `/details`.
+                    PresentationEvent::Hidden(_reason) => {}
                 }
-                PresentationEvent::Failure(detail) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::Status {
-                        label: "Agent error".into(),
-                        detail,
-                        tone: Tone::Error,
-                    });
-                }
-                PresentationEvent::Interrupted(detail) => {
-                    flush_agent(&mut cells, &mut pending, false);
-                    cells.push(Cell::Status {
-                        label: "Interrupted".into(),
-                        detail,
-                        tone: Tone::Warning,
-                    });
-                }
-                // Drawn as nothing, for a reason the presentation recorded. The event
-                // itself is still in `/details`.
-                PresentationEvent::Hidden(_reason) => {}
-            },
+            }
         }
     }
 
     flush_agent(&mut cells, &mut pending, true);
     settle_thinking(&mut cells);
+    settle_exploration(&mut cells);
+    settle_running_tools(&mut cells, newest_at);
     cells
+}
+
+/// Where a correlated tool call was projected: a cell of its own, or one row inside a
+/// grouped exploration cell.
+#[derive(Debug, Clone, Copy)]
+struct ToolSlot {
+    cell: usize,
+    entry: Option<usize>,
+}
+
+fn tool_at(cells: &mut [Cell], slot: ToolSlot) -> Option<&mut ToolCell> {
+    match (cells.get_mut(slot.cell)?, slot.entry) {
+        (Cell::Tool(tool), None) => Some(tool),
+        (Cell::Exploration(group), Some(entry)) => group.calls.get_mut(entry),
+        _ => None,
+    }
+}
+
+/// A grouped exploration cell is open exactly while it is the last thing drawn.
+///
+/// The rule needs no bookkeeping because it is the same statement as the requirement:
+/// "consecutive, with no other cell between them". Anything else pushed — a message, a
+/// diff, a turn divider — makes the group no longer last, and it flips to `Explored N`.
+fn settle_exploration(cells: &mut [Cell]) {
+    let last = cells.len().saturating_sub(1);
+
+    for (index, cell) in cells.iter_mut().enumerate() {
+        if let Cell::Exploration(group) = cell {
+            group.done = index != last;
+        }
+    }
+}
+
+/// Gives every still-running tool the newest instant this window holds, so its row can
+/// state a floor on how long it has been running. See [`ToolCell::elapsed`].
+fn settle_running_tools(cells: &mut [Cell], newest_at: Option<i64>) {
+    let Some(newest_at) = newest_at else {
+        return;
+    };
+
+    let mut settle = |tool: &mut ToolCell| {
+        if tool.state == ToolState::Running && tool.settled_at.is_none() {
+            tool.settled_at = Some(newest_at);
+        }
+    };
+
+    for cell in cells {
+        match cell {
+            Cell::Tool(tool) => settle(tool),
+            Cell::Exploration(group) => group.calls.iter_mut().for_each(&mut settle),
+            _ => {}
+        }
+    }
 }
 
 /// Reasoning is watched while it is still arriving and folds away once it is not.
@@ -527,6 +759,7 @@ fn project_lifecycle(cells: &mut Vec<Cell>, marker: Lifecycle, detail: String) {
         Lifecycle::SessionClosed => cells.push(Cell::Divider {
             text,
             tone: Tone::Muted,
+            kind: DividerKind::Other,
         }),
         _ => cells.push(Cell::ChatNote { text }),
     }
@@ -571,6 +804,7 @@ fn project_turn_end(
             TurnOutcome::Failed => Tone::Error,
             TurnOutcome::Interrupted => Tone::Warning,
         },
+        kind: DividerKind::TurnEnd,
     });
 }
 
@@ -632,6 +866,16 @@ pub fn render_cells_at(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
+    // `/raw` is a different renderer, not a flag threaded through this one. Codex's raw
+    // mode exists so a terminal selection yields logical lines, and every `if raw` sprinkled
+    // through a decorating renderer is another place a gutter survives the toggle.
+    if verbosity.raw() {
+        for cell in cells {
+            render_raw(&mut lines, cell);
+        }
+        return lines;
+    }
+
     for cell in cells {
         match cell {
             Cell::Message {
@@ -653,20 +897,189 @@ pub fn render_cells_at(
                 }
             }
             Cell::Tool(tool) => render_tool(&mut lines, tool, width, tick, verbosity),
+            Cell::Exploration(group) => {
+                render_exploration(&mut lines, group, width, tick, verbosity)
+            }
             Cell::CommandOutput(text) => render_command_output(&mut lines, text, width, verbosity),
             Cell::File(file) => render_file(&mut lines, file, width),
             Cell::Diff(diff) => render_diff(&mut lines, diff, width, verbosity),
+            Cell::DiffStat {
+                files,
+                additions,
+                deletions,
+                in_excerpt,
+            } => render_diffstat(&mut lines, *files, *additions, *deletions, *in_excerpt),
             Cell::Status {
                 label,
                 detail,
                 tone,
             } => render_status(&mut lines, label, detail, colour(*tone), width, verbosity),
             Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
-            Cell::Divider { text, tone } => lines.push(divider(text, width, colour(*tone))),
+            Cell::Divider { text, tone, .. } => lines.push(divider(text, width, colour(*tone))),
         }
     }
 
     lines
+}
+
+/// Codex's `/raw`: the same projection with nothing drawn around it.
+///
+/// No frames, no gutters, no glyph columns, no app-side wrapping — one output row per
+/// logical line, so a native selection (`Shift`/`Option`-drag) yields the text back with no
+/// rule characters or padding in it. Colour stays: it is not part of a copy.
+fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
+    fn label(lines: &mut Vec<Line<'static>>, text: String) {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(text, theme::label())));
+    }
+    fn body(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
+        for line in text.lines() {
+            lines.push(Line::from(Span::styled(line.to_string(), style)));
+        }
+    }
+
+    match cell {
+        Cell::Message {
+            speaker,
+            text,
+            streaming,
+        } => {
+            label(
+                lines,
+                match (speaker, streaming) {
+                    (Speaker::You, _) => "you",
+                    (Speaker::Agent, false) => "agent",
+                    (Speaker::Agent, true) => "agent · still writing",
+                }
+                .to_string(),
+            );
+            body(lines, text, Style::default());
+        }
+        Cell::Thinking {
+            text, lines: rows, ..
+        } => {
+            label(lines, format!("thinking · {rows} lines"));
+            body(lines, text, theme::quiet());
+        }
+        Cell::Plan(plan) => {
+            label(lines, format!("plan · {} steps", plan.step_count));
+            for step in &plan.steps {
+                lines.push(Line::from(Span::raw(format!(
+                    "{} {}",
+                    step.status.glyph(),
+                    step.text.replace('\n', " ")
+                ))));
+            }
+        }
+        Cell::Usage(usage) => label(lines, usage_note(usage)),
+        Cell::Tool(tool) => {
+            label(lines, raw_tool_label(tool));
+            if let Some(output) = &tool.output {
+                body(lines, &value_text(output), theme::quiet());
+            }
+        }
+        Cell::Exploration(group) => {
+            label(lines, exploration_heading(group));
+            for call in &group.calls {
+                lines.push(Line::from(Span::raw(raw_tool_label(call))));
+            }
+            if group.overflow > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("+{} more calls · /details", group.overflow),
+                    theme::quiet(),
+                )));
+            }
+        }
+        Cell::CommandOutput(text) => {
+            label(lines, "command output".to_string());
+            body(lines, text, theme::quiet());
+        }
+        Cell::File(file) => label(
+            lines,
+            format!(
+                "file {}{}",
+                file.path.as_deref().unwrap_or("(path not reported)"),
+                file.kind
+                    .as_deref()
+                    .map(|kind| format!(" · {kind}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        Cell::Diff(diff) => {
+            for file in &diff.parsed.files {
+                label(lines, diff_heading(file, diff));
+                for hunk in &file.hunks {
+                    lines.push(Line::from(Span::styled(
+                        super::diff::hunk_label(hunk),
+                        Style::default().fg(theme::ACCENT),
+                    )));
+                    for line in &hunk.lines {
+                        lines.push(Line::from(Span::styled(
+                            format!("{}{}", raw_sign(line.kind), line.text),
+                            raw_diff_style(line.kind),
+                        )));
+                    }
+                }
+            }
+            if diff.parsed.is_empty() {
+                label(lines, "diff".to_string());
+                body(lines, &diff.diff.text, theme::quiet());
+            }
+        }
+        Cell::DiffStat {
+            files,
+            additions,
+            deletions,
+            in_excerpt,
+        } => label(
+            lines,
+            super::diff::diffstat(*files, *additions, *deletions, *in_excerpt),
+        ),
+        Cell::Status {
+            label: heading,
+            detail,
+            ..
+        } => {
+            label(lines, heading.to_ascii_lowercase());
+            body(lines, detail, Style::default());
+        }
+        Cell::ChatNote { text } => label(lines, text.clone()),
+        Cell::Divider { text, .. } => label(lines, format!("── {text}")),
+    }
+}
+
+fn raw_sign(kind: super::diff::LineKind) -> &'static str {
+    match kind {
+        super::diff::LineKind::Added => "+",
+        super::diff::LineKind::Removed => "-",
+        super::diff::LineKind::Context => " ",
+        super::diff::LineKind::Meta => "",
+    }
+}
+
+fn raw_diff_style(kind: super::diff::LineKind) -> Style {
+    match kind {
+        super::diff::LineKind::Added => Style::default().fg(theme::GOOD),
+        super::diff::LineKind::Removed => Style::default().fg(theme::BAD),
+        _ => Style::default(),
+    }
+}
+
+fn raw_tool_label(tool: &ToolCell) -> String {
+    let summary = summarise(tool);
+    let state = match tool.state {
+        ToolState::Running => " · running",
+        ToolState::Failed => " · failed",
+        ToolState::Completed => "",
+    };
+    let elapsed = tool
+        .elapsed()
+        .map(|elapsed| format!(" · {}", duration(elapsed)))
+        .unwrap_or_default();
+
+    format!("{}{state}{elapsed}", summary.line())
 }
 
 /// One token report, phrased only in the numbers the provider actually sent.
@@ -885,49 +1298,121 @@ fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>, strea
     }
 }
 
-fn project_tool_call(cells: &mut Vec<Cell>, tools: &mut BTreeMap<String, usize>, call: ToolCall) {
-    if let Some(call_id) = &call.call_id {
-        if let Some(index) = tools.get(call_id).copied() {
-            if let Some(Cell::Tool(tool)) = cells.get_mut(index) {
-                // Some providers repeat the normalized call when publishing its result.
-                // Refresh the descriptive fields but retain the row's lifecycle and output.
-                tool.name = call.name;
-                tool.input = call.input;
-                return;
-            }
+fn project_tool_call(
+    cells: &mut Vec<Cell>,
+    tools: &mut BTreeMap<String, ToolSlot>,
+    call: ToolCall,
+) {
+    if let Some(slot) = call
+        .call_id
+        .as_ref()
+        .and_then(|call_id| tools.get(call_id))
+        .copied()
+    {
+        if let Some(tool) = tool_at(cells, slot) {
+            // Some providers repeat the normalized call when publishing its result.
+            // Refresh the descriptive fields but retain the row's lifecycle and output.
+            tool.name = call.name;
+            tool.kind = call.kind.or_else(|| tool.kind.take());
+            tool.input = call.input;
+            return;
         }
-
-        tools.insert(call_id.clone(), cells.len());
     }
 
-    cells.push(Cell::Tool(ToolCell {
-        call_id: call.call_id,
-        name: call.name,
-        input: call.input,
-        output: None,
-        state: ToolState::Running,
+    let call_id = call.call_id.clone();
+    let mut cell = ToolCell::new(call.call_id, call.name, call.kind, call.input);
+    cell.started_at = call.at;
+
+    if summarise(&cell).shape.explores() {
+        return group_exploration(cells, tools, call_id, cell);
+    }
+
+    if let Some(call_id) = call_id {
+        tools.insert(
+            call_id,
+            ToolSlot {
+                cell: cells.len(),
+                entry: None,
+            },
+        );
+    }
+    cells.push(Cell::Tool(cell));
+}
+
+/// Codex's coalescing: an exploration call joins the group already at the end of the
+/// transcript, or opens a new one.
+fn group_exploration(
+    cells: &mut Vec<Cell>,
+    tools: &mut BTreeMap<String, ToolSlot>,
+    call_id: Option<String>,
+    cell: ToolCell,
+) {
+    let index = cells.len().saturating_sub(1);
+    if let Some(Cell::Exploration(group)) = cells.last_mut() {
+        if group.calls.len() < EXPLORATION_CALLS {
+            let entry = group.calls.len();
+            group.calls.push(cell);
+            if let Some(call_id) = call_id {
+                tools.insert(
+                    call_id,
+                    ToolSlot {
+                        cell: index,
+                        entry: Some(entry),
+                    },
+                );
+            }
+        } else {
+            // Past the listing ceiling the call is counted, not held. Its own events remain
+            // complete in `/details`; what this cell would lose by holding them is the
+            // bound that keeps one runaway loop from owning the transcript.
+            group.overflow += 1;
+        }
+        return;
+    }
+
+    if let Some(call_id) = call_id {
+        tools.insert(
+            call_id,
+            ToolSlot {
+                cell: cells.len(),
+                entry: Some(0),
+            },
+        );
+    }
+    cells.push(Cell::Exploration(ExplorationCell {
+        calls: vec![cell],
+        overflow: 0,
+        done: false,
     }));
 }
 
-fn project_tool_result(cells: &mut Vec<Cell>, tools: &BTreeMap<String, usize>, result: ToolResult) {
+fn project_tool_result(
+    cells: &mut Vec<Cell>,
+    tools: &mut BTreeMap<String, ToolSlot>,
+    result: ToolResult,
+) {
     let matched = result
         .call_id
         .as_ref()
         .and_then(|call_id| tools.get(call_id))
         .copied();
 
-    if let Some(index) = matched {
-        if let Some(Cell::Tool(tool)) = cells.get_mut(index) {
+    if let Some(slot) = matched {
+        if let Some(tool) = tool_at(cells, slot) {
             if tool.name == "tool" {
                 if let Some(name) = result.name {
                     tool.name = name;
                 }
+            }
+            if tool.kind.is_none() {
+                tool.kind = result.kind;
             }
             tool.state = if result.is_error {
                 ToolState::Failed
             } else {
                 ToolState::Completed
             };
+            tool.settled_at = result.at;
             // Command-output deltas carry no call id, so their presence cannot prove that
             // this result is duplicate. Keep the correlated authoritative result visible;
             // hiding it because another parallel command streamed would lose evidence.
@@ -938,17 +1423,135 @@ fn project_tool_result(cells: &mut Vec<Cell>, tools: &BTreeMap<String, usize>, r
         }
     }
 
-    cells.push(Cell::Tool(ToolCell {
-        call_id: result.call_id,
-        name: result.name.unwrap_or_else(|| "tool result".into()),
-        input: Value::Object(Default::default()),
-        output: (!result.output.is_null()).then_some(result.output),
-        state: if result.is_error {
-            ToolState::Failed
-        } else {
-            ToolState::Completed
-        },
+    let mut cell = ToolCell::new(
+        result.call_id,
+        result.name.unwrap_or_else(|| "tool result".into()),
+        result.kind,
+        Value::Object(Default::default()),
+    );
+    cell.output = (!result.output.is_null()).then_some(result.output);
+    cell.state = if result.is_error {
+        ToolState::Failed
+    } else {
+        ToolState::Completed
+    };
+    cell.settled_at = result.at;
+
+    cells.push(Cell::Tool(cell));
+}
+
+/// Pushes one diff cell, parsed, with Warp's pending-approval state resolved.
+fn project_diff(
+    cells: &mut Vec<Cell>,
+    turn_diffs: &mut Vec<usize>,
+    open_approvals: &[(Option<String>, String)],
+    approval_diffs: &mut BTreeMap<String, Vec<usize>>,
+    diff: Diff,
+) {
+    let parsed = super::diff::parse(&diff.text, diff.path.as_deref());
+    let index = cells.len();
+    let mut pending_approval = false;
+
+    for (request_id, subject) in open_approvals {
+        if !mentions_any(subject, &parsed, diff.path.as_deref()) {
+            continue;
+        }
+        pending_approval = true;
+        if let Some(request_id) = request_id {
+            approval_diffs
+                .entry(request_id.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    turn_diffs.push(index);
+    cells.push(Cell::Diff(DiffCell {
+        diff,
+        parsed,
+        pending_approval,
     }));
+}
+
+/// Whether an outstanding approval's subject names any path this diff touches.
+///
+/// Deliberately a containment test on the paths the *diff* reported, not a parse of the
+/// approval payload: the payload's shape differs per dialect, and a client that guessed
+/// wrong would mark an unrelated change "pending approval" — a claim about authority.
+fn mentions_any(subject: &str, parsed: &super::diff::ParsedDiff, fallback: Option<&str>) -> bool {
+    let candidates = parsed
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(fallback);
+
+    candidates.filter(|path| !path.is_empty()).any(|path| {
+        subject.contains(path)
+            || path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.len() > 3 && subject.contains(name))
+    })
+}
+
+/// Warp's second half: once the approval resolves, its diffs collapse back to their header.
+fn settle_approved_diffs(
+    cells: &mut [Cell],
+    approval_diffs: &mut BTreeMap<String, Vec<usize>>,
+    open_approvals: &mut Vec<(Option<String>, String)>,
+    request_id: Option<&str>,
+) {
+    let Some(request_id) = request_id else {
+        // A resolution with no id cannot be matched to one request, so nothing is collapsed
+        // on the strength of it. The pending diffs stay expanded until their own id lands.
+        return;
+    };
+
+    open_approvals.retain(|(id, _)| id.as_deref() != Some(request_id));
+
+    for index in approval_diffs.remove(request_id).unwrap_or_default() {
+        if let Some(Cell::Diff(diff)) = cells.get_mut(index) {
+            diff.pending_approval = false;
+        }
+    }
+}
+
+/// The post-turn diffstat, counted from the parses rather than from any provider's summary.
+fn project_diffstat(cells: &mut Vec<Cell>, turn_diffs: &mut Vec<usize>) {
+    let indices = std::mem::take(turn_diffs);
+    if indices.is_empty() {
+        return;
+    }
+
+    let mut paths: Vec<String> = Vec::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut in_excerpt = false;
+
+    for index in indices {
+        let Some(Cell::Diff(diff)) = cells.get(index) else {
+            continue;
+        };
+        in_excerpt |= diff.parsed.truncated || diff.diff.truncated;
+        for file in &diff.parsed.files {
+            additions += file.additions;
+            deletions += file.deletions;
+            if !paths.iter().any(|seen| seen == &file.path) {
+                paths.push(file.path.clone());
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        return;
+    }
+
+    cells.push(Cell::DiffStat {
+        files: paths.len(),
+        additions,
+        deletions,
+        in_excerpt,
+    });
 }
 
 fn append_command_output(cells: &mut Vec<Cell>, text: String) {
@@ -1009,7 +1612,14 @@ fn approval_outcome(decision: Option<&str>) -> (&'static str, Tone) {
     }
 }
 
-fn project_file(cells: &mut Vec<Cell>, change: FileChange, inherited_status: Option<&str>) {
+fn project_file(
+    cells: &mut Vec<Cell>,
+    turn_diffs: &mut Vec<usize>,
+    open_approvals: &[(Option<String>, String)],
+    approval_diffs: &mut BTreeMap<String, Vec<usize>>,
+    change: FileChange,
+    inherited_status: Option<&str>,
+) {
     let path = change.path;
     cells.push(Cell::File(FileCell {
         path: path.clone(),
@@ -1022,7 +1632,7 @@ fn project_file(cells: &mut Vec<Cell>, change: FileChange, inherited_status: Opt
         if diff.path.is_none() {
             diff.path = path;
         }
-        cells.push(Cell::Diff(diff));
+        project_diff(cells, turn_diffs, open_approvals, approval_diffs, diff);
     }
 }
 
@@ -1316,15 +1926,9 @@ fn style_inline_code(line: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn render_tool(
-    lines: &mut Vec<Line<'static>>,
-    tool: &ToolCell,
-    width: usize,
-    tick: u64,
-    verbosity: Verbosity,
-) {
-    separate(lines);
-
+/// The head row of a tool cell: state glyph, verb, subject, what the result proved, and how
+/// long the ledger says it took.
+fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
     let (mark, mark_style) = match tool.state {
         ToolState::Running => (
             theme::spinner(tick).to_string(),
@@ -1337,35 +1941,79 @@ fn render_tool(
         ToolState::Failed => Style::default().fg(theme::BAD),
         _ => Style::default(),
     };
-    let input = tool_input(&tool.name, &tool.input);
+    let summary = summarise(tool);
+    // A running row says so; a finished one has its outcome instead, and saying both is how
+    // a status column ends up restating itself.
     let state_suffix = match tool.state {
-        ToolState::Running => "  running",
-        ToolState::Failed => "  failed",
-        ToolState::Completed => "",
+        ToolState::Running => "  running".to_string(),
+        ToolState::Failed if summary.outcome.is_empty() => "  failed".to_string(),
+        _ => String::new(),
     };
-    let display_name = display_tool_name(&tool.name);
-    let reserved = mark.width() + display_name.width() + state_suffix.width() + 3;
-    let shown_input = super::tree::truncate(
-        &input.replace('\n', " "),
+    let elapsed = tool
+        .elapsed()
+        .map(|elapsed| format!("  {}", duration(elapsed)))
+        .unwrap_or_default();
+    let outcome = if summary.outcome.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", summary.outcome)
+    };
+
+    let reserved = mark.width()
+        + summary.verb.width()
+        + state_suffix.width()
+        + outcome.width()
+        + elapsed.width()
+        + 3;
+    let subject = super::tree::truncate(
+        &summary.subject,
         width.saturating_sub(4).saturating_sub(reserved),
     );
+
     let mut head = vec![
         Span::styled(format!("{mark} "), mark_style),
-        Span::styled(display_name, name_style),
+        Span::styled(summary.verb, name_style),
     ];
 
-    if !shown_input.is_empty() {
+    if !subject.is_empty() {
         head.push(Span::raw("  "));
-        head.push(Span::styled(shown_input, theme::quiet()));
+        head.push(Span::styled(subject, theme::quiet()));
+    }
+    if !outcome.is_empty() {
+        head.push(Span::styled(
+            outcome,
+            match tool.state {
+                ToolState::Failed => Style::default().fg(theme::BAD),
+                _ => theme::quiet(),
+            },
+        ));
+    }
+    if !state_suffix.is_empty() {
+        head.push(Span::styled(
+            state_suffix,
+            match tool.state {
+                ToolState::Failed => Style::default().fg(theme::BAD),
+                _ => theme::quiet(),
+            },
+        ));
+    }
+    if !elapsed.is_empty() {
+        head.push(Span::styled(elapsed, theme::quiet()));
     }
 
-    match tool.state {
-        ToolState::Running => head.push(Span::styled("  running", theme::quiet())),
-        ToolState::Failed => {
-            head.push(Span::styled("  failed", Style::default().fg(theme::BAD)));
-        }
-        ToolState::Completed => {}
-    }
+    head
+}
+
+fn render_tool(
+    lines: &mut Vec<Line<'static>>,
+    tool: &ToolCell,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) {
+    separate(lines);
+
+    let head = tool_head(tool, width, tick);
 
     if width < 24 {
         lines.push(Line::from(head));
@@ -1399,50 +2047,241 @@ fn render_tool(
         border,
     )));
     lines.push(boxed_tool_row(head, width, border));
-
-    if let Some(output) = &tool.output {
-        let output = value_text(output);
-        if !output.trim().is_empty() {
-            let body = match tool.state {
-                ToolState::Failed => Style::default().fg(theme::BAD),
-                _ => theme::quiet(),
-            };
-            let content_width = width.saturating_sub(4).max(8);
-            // Collapsed by default is the whole point of the row; `Ctrl+O` is what the
-            // field settled on for "show me the rest", and it shows it here rather than in
-            // a different view.
-            let shown = if verbosity.verbose() {
-                VERBOSE_LINES
-            } else {
-                1
-            };
-            let wrapped = wrap_limited(&output, content_width, shown.saturating_add(1));
-            for line in wrapped.iter().take(shown) {
-                lines.push(boxed_tool_row(
-                    vec![Span::styled(line.clone(), body)],
-                    width,
-                    border,
-                ));
-            }
-            if wrapped.len() > shown {
-                lines.push(boxed_tool_row(
-                    vec![Span::styled(
-                        super::tree::truncate(
-                            &format!("… {}", verbosity.provenance("result")),
-                            content_width,
-                        ),
-                        theme::quiet(),
-                    )],
-                    width,
-                    border,
-                ));
-            }
-        }
-    }
+    render_tool_body(lines, tool, width, border, verbosity);
     lines.push(Line::from(Span::styled(
         format!("└{}┘", "─".repeat(width.saturating_sub(2))),
         border,
     )));
+}
+
+/// Codex's head/tail inside the tool frame: the first rows, a counted marker naming the key
+/// that shows the rest, and the last rows.
+///
+/// A failure gets the head only. The `is_error` text is the message the tool produced, it
+/// is written first, and pushing it behind six rows of the same stack trace's tail is how a
+/// reader ends up expanding every failed cell to learn what a one-line error said.
+fn render_tool_body(
+    lines: &mut Vec<Line<'static>>,
+    tool: &ToolCell,
+    width: usize,
+    border: Style,
+    verbosity: Verbosity,
+) {
+    let Some(output) = &tool.output else {
+        return;
+    };
+    let output = value_text(output);
+    if output.trim().is_empty() {
+        return;
+    }
+
+    let body = match tool.state {
+        ToolState::Failed => Style::default().fg(theme::BAD),
+        _ => theme::quiet(),
+    };
+    let content_width = width.saturating_sub(4).max(8);
+    let mut row = |spans: Vec<Span<'static>>| lines.push(boxed_tool_row(spans, width, border));
+
+    if verbosity.verbose() {
+        let wrapped = wrap_limited(&output, content_width, VERBOSE_LINES.saturating_add(1));
+        for line in wrapped.iter().take(VERBOSE_LINES) {
+            row(vec![Span::styled(line.clone(), body)]);
+        }
+        if wrapped.len() > VERBOSE_LINES {
+            row(vec![Span::styled(
+                super::tree::truncate(
+                    &format!("… {}", verbosity.provenance("result")),
+                    content_width,
+                ),
+                theme::quiet(),
+            )]);
+        }
+        return;
+    }
+
+    let tail_budget = if tool.state == ToolState::Failed {
+        0
+    } else {
+        TOOL_TAIL_LINES
+    };
+    // Codex's order: head/tail on *source* lines first, then a row budget after wrapping.
+    // Both cuts are announced, because a single 32 KiB line and a thousand short ones look
+    // identical once the frame closes over them.
+    let (head, omitted, tail) = head_tail(&output, TOOL_HEAD_LINES, tail_budget);
+    let (head_rows, head_wrapped) = wrap_rows(&head, content_width, TOOL_HEAD_LINES);
+    let (tail_rows, tail_wrapped) = wrap_rows(&tail, content_width, TOOL_TAIL_LINES);
+
+    for line in head_rows {
+        row(vec![Span::styled(line, body)]);
+    }
+
+    if omitted > 0 {
+        row(vec![Span::styled(
+            super::tree::truncate(&more_lines(omitted, verbosity), content_width),
+            theme::quiet(),
+        )]);
+    }
+
+    for line in tail_rows {
+        row(vec![Span::styled(line, body)]);
+    }
+
+    if head_wrapped || tail_wrapped {
+        row(vec![Span::styled(
+            super::tree::truncate(
+                &format!("… {}", verbosity.provenance("result")),
+                content_width,
+            ),
+            theme::quiet(),
+        )]);
+    }
+}
+
+/// Wraps source lines into at most `cap` rows, reporting whether the cap cut anything.
+fn wrap_rows(sources: &[&str], width: usize, cap: usize) -> (Vec<String>, bool) {
+    let mut rows: Vec<String> = Vec::with_capacity(cap.min(sources.len()));
+
+    for source in sources {
+        if rows.len() >= cap {
+            return (rows, true);
+        }
+
+        let room = cap - rows.len();
+        // The spare row is how `wrap_limited` reports that more followed, without wrapping
+        // the remainder of a line that may be tens of kilobytes long.
+        let wrapped = wrap_limited(source, width, room.saturating_add(1));
+        let cut = wrapped.len() > room;
+        rows.extend(wrapped.into_iter().take(room));
+
+        if cut {
+            return (rows, true);
+        }
+    }
+
+    (rows, false)
+}
+
+/// The first `head` and last `tail` source lines, and how many sit between them.
+///
+/// Walks the text once and keeps at most `head + tail` borrowed slices, so a ten-thousand
+/// line result costs one scan and twelve pointers rather than a `Vec` of ten thousand.
+fn head_tail(text: &str, head: usize, tail: usize) -> (Vec<&str>, usize, Vec<&str>) {
+    let mut leading: Vec<&str> = Vec::with_capacity(head);
+    let mut trailing: VecDeque<&str> = VecDeque::with_capacity(tail + 1);
+    let mut total = 0usize;
+
+    for line in text.lines() {
+        total += 1;
+        if leading.len() < head {
+            leading.push(line);
+            continue;
+        }
+        if tail == 0 {
+            continue;
+        }
+        trailing.push_back(line);
+        if trailing.len() > tail {
+            trailing.pop_front();
+        }
+    }
+
+    let omitted = total.saturating_sub(leading.len() + trailing.len());
+    (leading, omitted, trailing.into_iter().collect())
+}
+
+/// Codex's grouped exploration cell.
+fn render_exploration(
+    lines: &mut Vec<Line<'static>>,
+    group: &ExplorationCell,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) {
+    separate(lines);
+
+    let (mark, mark_style) = if group.done {
+        ("•".to_string(), theme::quiet())
+    } else {
+        (
+            theme::spinner(tick).to_string(),
+            Style::default().fg(theme::ACCENT),
+        )
+    };
+    let failed = group.failed();
+    let mut head = vec![
+        Span::styled(format!("{mark} "), mark_style),
+        Span::styled(
+            super::tree::truncate(&exploration_heading(group), width.saturating_sub(4).max(8)),
+            if failed > 0 {
+                Style::default().fg(theme::WARN)
+            } else {
+                theme::quiet()
+            },
+        ),
+    ];
+
+    if !verbosity.verbose() {
+        head.push(Span::styled("  enter expands", theme::quiet()));
+    }
+    lines.push(Line::from(head));
+
+    if !verbosity.verbose() {
+        return;
+    }
+
+    for call in &group.calls {
+        let mark = match call.state {
+            ToolState::Running => theme::spinner(tick).to_string(),
+            ToolState::Completed => "✓".to_string(),
+            ToolState::Failed => "✗".to_string(),
+        };
+        let summary = summarise(call);
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("{mark} "),
+                match call.state {
+                    ToolState::Failed => Style::default().fg(theme::BAD),
+                    ToolState::Completed => Style::default().fg(theme::GOOD),
+                    ToolState::Running => Style::default().fg(theme::ACCENT),
+                },
+            ),
+            Span::styled(
+                super::tree::truncate(&summary.line(), width.saturating_sub(8).max(8)),
+                theme::quiet(),
+            ),
+        ]));
+    }
+
+    if group.overflow > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("… +{} more calls · /details", group.overflow),
+                theme::quiet(),
+            ),
+        ]));
+    }
+}
+
+/// `Exploring… (7)` while it is still growing, `Explored 7 files` once it is not.
+fn exploration_heading(group: &ExplorationCell) -> String {
+    let total = group.total();
+    let failed = group.failed();
+    let failures = if failed > 0 {
+        format!(" · {failed} failed")
+    } else {
+        String::new()
+    };
+
+    if group.done {
+        format!(
+            "Explored {total} file{}{failures}",
+            if total == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("Exploring… ({total}){failures}")
+    }
 }
 
 fn boxed_tool_row(mut content: Vec<Span<'static>>, width: usize, border: Style) -> Line<'static> {
@@ -1459,6 +2298,13 @@ fn boxed_tool_row(mut content: Vec<Span<'static>>, width: usize, border: Style) 
     Line::from(spans)
 }
 
+/// Streaming command output as a **live tail window** (Kiro; Cursor's "you see the latest
+/// output of a streaming command, not the oldest").
+///
+/// A command that is still running is watched at its end: the newest rows are where the
+/// build error, the test failure, or the prompt it is stuck on will be. The rows above are
+/// counted, not silently dropped, so the window never implies the command said less than it
+/// did.
 fn render_command_output(
     lines: &mut Vec<Line<'static>>,
     text: &str,
@@ -1469,11 +2315,38 @@ fn render_command_output(
         return;
     }
 
+    if verbosity.verbose() {
+        render_excerpt(
+            lines,
+            text,
+            width,
+            VERBOSE_LINES,
+            &verbosity.provenance("command output"),
+            theme::quiet(),
+        );
+        return;
+    }
+
+    let (body, omitted) = tail_lines(text, COMMAND_OUTPUT_LINES);
+
+    if omitted > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                super::tree::truncate(
+                    &more_lines(omitted, verbosity),
+                    width.saturating_sub(6).max(8),
+                ),
+                theme::quiet(),
+            ),
+        ]));
+    }
+
     render_excerpt(
         lines,
-        text,
+        body,
         width,
-        verbosity.lines(COMMAND_OUTPUT_LINES),
+        COMMAND_OUTPUT_LINES,
         &verbosity.provenance("command output"),
         theme::quiet(),
     );
@@ -1498,66 +2371,148 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
     ]));
 }
 
-fn render_diff(lines: &mut Vec<Line<'static>>, diff: &Diff, width: usize, verbosity: Verbosity) {
-    let path = diff.path.as_deref().unwrap_or("changes");
-    let path = super::tree::truncate(path, width.saturating_sub(24).max(8));
-    let mut heading = vec![
+/// One file's header row inside a diff cell: `M lib/app.ex  +12 −3`, plus the two states
+/// that change how the number should be read — an excerpt, and a pending approval.
+fn diff_heading(file: &super::diff::DiffFile, cell: &DiffCell) -> String {
+    let excerpt = if cell.parsed.truncated || cell.diff.truncated {
+        " · in excerpt"
+    } else {
+        ""
+    };
+    let pending = if cell.pending_approval {
+        " · pending approval"
+    } else {
+        ""
+    };
+    // The old path is shown only for an actual rename. `--- a/x` / `+++ b/x` records the
+    // same path twice for every ordinary edit, and drawing `x ← x` would invent a move.
+    let rename = file
+        .old_path
+        .as_deref()
+        .filter(|old| file.status == super::diff::FileStatus::Renamed && *old != file.path)
+        .map(|old| format!(" ← {old}"))
+        .unwrap_or_default();
+
+    format!(
+        "{} {}{rename}  +{} −{}{excerpt}{pending}",
+        file.status.mark(),
+        file.path,
+        file.additions,
+        file.deletions
+    )
+}
+
+/// Warp's rule, and the honesty invariant, in one renderer.
+///
+/// The counts on the header are the parse's, not the provider's. A diff whose approval is
+/// still outstanding is drawn expanded — that is the moment the reader is being asked to
+/// judge it — and collapses to its header once the approval resolves.
+fn render_diff(
+    lines: &mut Vec<Line<'static>>,
+    cell: &DiffCell,
+    width: usize,
+    verbosity: Verbosity,
+) {
+    if cell.parsed.is_empty() {
+        // Nothing parsed: the provider sent something this client cannot read as a unified
+        // diff. It is still shown, verbatim and marked, rather than dropped.
+        render_unparsed_diff(lines, cell, width, verbosity);
+        return;
+    }
+
+    // Expanded while an approval is pending, and under `Ctrl+O`; twelve rows otherwise.
+    let budget = if cell.pending_approval {
+        VERBOSE_LINES
+    } else {
+        verbosity.lines(DIFF_LINES)
+    };
+    let mut spent = 0usize;
+
+    for file in &cell.parsed.files {
+        let heading =
+            super::tree::truncate(&diff_heading(file, cell), width.saturating_sub(4).max(8));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                heading,
+                Style::default()
+                    .fg(if cell.pending_approval {
+                        theme::WARN
+                    } else {
+                        file.status.colour()
+                    })
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]));
+
+        let remaining = budget.saturating_sub(spent);
+        let before = lines.len();
+        let undrawn = super::diff::render_file(
+            lines,
+            file,
+            super::diff::Layout::new(width, remaining).indented(2),
+        );
+        spent += lines.len() - before;
+
+        if undrawn > 0 {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    super::tree::truncate(
+                        &more_lines(undrawn, verbosity),
+                        width.saturating_sub(4).max(8),
+                    ),
+                    theme::quiet(),
+                ),
+            ]));
+        }
+    }
+}
+
+fn render_unparsed_diff(
+    lines: &mut Vec<Line<'static>>,
+    cell: &DiffCell,
+    width: usize,
+    verbosity: Verbosity,
+) {
+    let path = cell.diff.path.as_deref().unwrap_or("changes");
+    lines.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled("Diff  ", theme::quiet()),
-        Span::styled(path, theme::quiet()),
         Span::styled(
-            format!("  +{}", diff.additions),
-            Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
+            super::tree::truncate(
+                &format!("Diff  {path}  (no hunks this client could read)"),
+                width.saturating_sub(4).max(8),
+            ),
+            theme::quiet(),
         ),
+    ]));
+
+    render_excerpt(
+        lines,
+        &cell.diff.text,
+        width,
+        verbosity.lines(DIFF_LINES),
+        &verbosity.provenance("diff"),
+        theme::quiet(),
+    );
+}
+
+/// The post-turn diffstat: what the turn changed, counted from the diffs it produced.
+fn render_diffstat(
+    lines: &mut Vec<Line<'static>>,
+    files: usize,
+    additions: usize,
+    deletions: usize,
+    in_excerpt: bool,
+) {
+    separate(lines);
+    lines.push(Line::from(vec![
+        Span::styled("  ± ", theme::quiet()),
         Span::styled(
-            format!(" -{}", diff.deletions),
-            Style::default().fg(theme::BAD).add_modifier(Modifier::DIM),
+            super::diff::diffstat(files, additions, deletions, in_excerpt),
+            Style::default().fg(theme::SYSTEM),
         ),
-    ];
-    if diff.truncated {
-        heading.push(Span::styled("  in excerpt", theme::quiet()));
-    }
-    lines.push(Line::from(heading));
-
-    let diff_lines = verbosity.lines(DIFF_LINES);
-    let mut source = diff.text.lines();
-    let mut shown = 0;
-    while shown < diff_lines {
-        let Some(line) = source.next() else {
-            break;
-        };
-        shown += 1;
-        let style = if line.starts_with('+') && !line.starts_with("+++") {
-            Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM)
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            Style::default().fg(theme::BAD).add_modifier(Modifier::DIM)
-        } else if line.starts_with("@@") {
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::DIM)
-        } else {
-            theme::quiet()
-        };
-        lines.push(Line::from(vec![
-            Span::styled("    ", theme::quiet()),
-            Span::styled(
-                super::tree::truncate(line, width.saturating_sub(6).max(8)),
-                style,
-            ),
-        ]));
-    }
-
-    // Looking one row ahead is enough to know whether this excerpt omitted anything. Do not
-    // collect or count the rest of a large diff merely to draw twelve rows of it.
-    if source.next().is_some() {
-        lines.push(Line::from(vec![
-            Span::styled("    ", theme::quiet()),
-            Span::styled(
-                format!("… {}", verbosity.provenance("diff")),
-                theme::quiet(),
-            ),
-        ]));
-    }
+    ]));
 }
 
 fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
@@ -1738,10 +2693,440 @@ fn append_value_piece(rendered: &mut String, value: &str) -> bool {
 }
 
 fn command_tool(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "bash" | "shell" | "exec" | "exec_command" | "run_command"
+    shape_of(name, None) == ToolShape::Bash
+}
+
+// ---------------------------------------------------------------------------------------
+// Per-tool summarisers
+// ---------------------------------------------------------------------------------------
+
+/// What a tool call *is*, independent of what any one vendor called it.
+///
+/// Three naming systems reach this client and none of them agrees with the others: Claude's
+/// tool names (`Read`, `Grep`, `Bash`, `mcp__server__tool`), ACP's `kind` enum
+/// (`read | edit | delete | move | search | execute | think | fetch | other`), and Codex's
+/// item types, which the runtime already normalises to `exec_command` and the MCP tool's own
+/// name. Keying the summary on the shape rather than on any one of them is what lets a row
+/// read `Bash $ cargo test` whichever dialect produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolShape {
+    Read,
+    Edit,
+    Write,
+    Delete,
+    Move,
+    Grep,
+    Glob,
+    List,
+    Bash,
+    Fetch,
+    WebSearch,
+    Mcp,
+    Think,
+    Other,
+}
+
+impl ToolShape {
+    /// Whether this call is filesystem exploration, and so belongs in a grouped cell.
+    ///
+    /// Reading, searching, listing and globbing only. An edit, a command, or a fetch is
+    /// something the agent *did*, and folding those into a count would hide the actions a
+    /// reader is watching for.
+    fn explores(self) -> bool {
+        matches!(self, Self::Read | Self::Grep | Self::Glob | Self::List)
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Read => "Read",
+            Self::Edit => "Edit",
+            Self::Write => "Write",
+            Self::Delete => "Delete",
+            Self::Move => "Move",
+            Self::Grep => "Grep",
+            Self::Glob => "Glob",
+            Self::List => "List",
+            Self::Bash => "Bash",
+            Self::Fetch => "Fetch",
+            Self::WebSearch => "Search",
+            Self::Mcp => "MCP",
+            Self::Think => "Think",
+            Self::Other => "",
+        }
+    }
+}
+
+/// One tool call in the field's vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSummary {
+    shape: ToolShape,
+    /// `Read`, `Bash`, `MCP`, … or the provider's own name where nothing matched.
+    pub verb: String,
+    /// Its subject on one line: a path, `$ cargo test`, `"needle" in lib`.
+    pub subject: String,
+    /// What the *result* proved, and nothing the result did not: `→ 3 matches`, `exit 1`.
+    pub outcome: String,
+}
+
+impl ToolSummary {
+    /// The whole row as one string, for the exploration list and the plain-text export.
+    pub fn line(&self) -> String {
+        [
+            self.verb.as_str(),
+            self.subject.as_str(),
+            self.outcome.as_str(),
+        ]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+}
+
+fn shape_of(name: &str, kind: Option<&str>) -> ToolShape {
+    let lower = name.trim().to_ascii_lowercase();
+
+    // MCP first: `mcp__linear__create_issue` would otherwise match `create`.
+    if lower.starts_with("mcp__") || lower.starts_with("mcp.") {
+        return ToolShape::Mcp;
+    }
+
+    let normalised = lower.replace([' ', '-'], "_");
+    let matched = match normalised.as_str() {
+        "read" | "read_file" | "readfile" | "view" | "view_file" | "open" | "cat"
+        | "notebookread" | "notebook_read" | "read_many_files" => Some(ToolShape::Read),
+        "edit"
+        | "edit_file"
+        | "editfile"
+        | "str_replace"
+        | "str_replace_editor"
+        | "str_replace_based_edit_tool"
+        | "apply_patch"
+        | "applypatch"
+        | "patch"
+        | "multiedit"
+        | "multi_edit"
+        | "update_file"
+        | "notebookedit"
+        | "notebook_edit"
+        | "file_change" => Some(ToolShape::Edit),
+        "write" | "write_file" | "writefile" | "create" | "create_file" | "new_file" => {
+            Some(ToolShape::Write)
+        }
+        "delete" | "delete_file" | "remove" | "remove_file" | "rm" => Some(ToolShape::Delete),
+        "move" | "move_file" | "rename" | "rename_file" | "mv" => Some(ToolShape::Move),
+        "grep"
+        | "search"
+        | "rg"
+        | "ripgrep"
+        | "grep_search"
+        | "search_files"
+        | "codebase_search"
+        | "search_file_content" => Some(ToolShape::Grep),
+        "glob" | "find" | "find_files" | "file_search" | "glob_file_search" => {
+            Some(ToolShape::Glob)
+        }
+        "ls" | "list" | "list_dir" | "list_files" | "list_directory" | "readdir" => {
+            Some(ToolShape::List)
+        }
+        "bash" | "shell" | "exec" | "exec_command" | "run_command" | "runcommand" | "command"
+        | "commandexecution" | "command_execution" | "terminal" | "run_terminal_cmd"
+        | "bashoutput" => Some(ToolShape::Bash),
+        "fetch" | "web_fetch" | "webfetch" | "url_fetch" | "http" | "curl" => {
+            Some(ToolShape::Fetch)
+        }
+        "web_search" | "websearch" | "search_web" | "google_web_search" => {
+            Some(ToolShape::WebSearch)
+        }
+        "think" | "thinking" | "sequentialthinking" => Some(ToolShape::Think),
+        _ => None,
+    };
+
+    if let Some(shape) = matched {
+        return shape;
+    }
+
+    // Codex's `mcpToolCall` reaches the client under the MCP tool's *own* name, which is
+    // routinely `server.tool`. A dotted name that matched no verb above is that.
+    if lower.contains('.') && !lower.contains(' ') && !lower.starts_with('.') {
+        return ToolShape::Mcp;
+    }
+
+    // ACP's `kind` is the fallback, not the first answer: an agent that sends both a prose
+    // `title` and a `kind` is more specific in the title, and only the kind is an enum.
+    match kind.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("read") => ToolShape::Read,
+        Some("edit") => ToolShape::Edit,
+        Some("delete") => ToolShape::Delete,
+        Some("move") => ToolShape::Move,
+        Some("search") => ToolShape::Grep,
+        Some("execute") => ToolShape::Bash,
+        Some("think") => ToolShape::Think,
+        Some("fetch") => ToolShape::Fetch,
+        _ => ToolShape::Other,
+    }
+}
+
+/// The per-tool summariser. Every claim it makes is read off the call's own input or its
+/// result; nothing is inferred from the tool's name alone.
+pub fn summarise(tool: &ToolCell) -> ToolSummary {
+    let shape = shape_of(&tool.name, tool.kind.as_deref());
+    let input = &tool.input;
+    let output = tool.output.as_ref().map(value_text);
+    let output = output.as_deref();
+
+    let (subject, outcome) = match shape {
+        ToolShape::Read => (read_subject(input), counted(output, "line")),
+        ToolShape::Edit => (join(path_of(input), edit_stat(input)), String::new()),
+        ToolShape::Write => (path_of(input).unwrap_or_default(), String::new()),
+        ToolShape::Delete | ToolShape::Move => (path_of(input).unwrap_or_default(), String::new()),
+        ToolShape::Grep => (grep_subject(input), counted(output, "match")),
+        ToolShape::Glob => (
+            field(input, &["pattern", "glob", "query", "filePattern", "path"]).unwrap_or_default(),
+            counted(output, "file"),
+        ),
+        ToolShape::List => (path_of(input).unwrap_or_default(), counted(output, "entry")),
+        ToolShape::Bash => (
+            field(input, &["cmd", "command", "script", "shell_command"])
+                .map(|command| format!("$ {command}"))
+                .unwrap_or_default(),
+            exit_status(tool, input),
+        ),
+        ToolShape::Fetch => (
+            field(input, &["url", "uri", "href", "link"]).unwrap_or_default(),
+            String::new(),
+        ),
+        ToolShape::WebSearch => (
+            field(input, &["query", "q", "search", "prompt"])
+                .map(|query| format!("\"{query}\""))
+                .unwrap_or_default(),
+            String::new(),
+        ),
+        ToolShape::Mcp => (mcp_subject(&tool.name), String::new()),
+        ToolShape::Think => (String::new(), String::new()),
+        ToolShape::Other => (tool_input(&tool.name, input), String::new()),
+    };
+
+    let verb = match shape {
+        ToolShape::Other => display_tool_name(&tool.name),
+        shape => shape.verb().to_string(),
+    };
+
+    ToolSummary {
+        shape,
+        verb,
+        subject: subject.replace('\n', " ").trim().to_string(),
+        outcome,
+    }
+}
+
+/// `Read path:12-140`, from whatever the provider called its window.
+fn read_subject(input: &Value) -> String {
+    let Some(path) = path_of(input) else {
+        return String::new();
+    };
+
+    let number = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| input.get(*key))
+            .and_then(|value| match value {
+                Value::Number(number) => number.as_u64(),
+                Value::String(text) => text.parse().ok(),
+                _ => None,
+            })
+    };
+
+    let offset = number(&["offset", "start_line", "startLine", "line", "from"]);
+    let limit = number(&["limit", "count", "num_lines", "length"]);
+    let end = number(&["end_line", "endLine", "to"]);
+
+    match (offset, limit, end) {
+        (Some(start), _, Some(end)) => format!("{path}:{start}-{end}"),
+        (Some(start), Some(limit), None) if limit > 0 => {
+            format!("{path}:{start}-{}", start + limit - 1)
+        }
+        (Some(start), _, None) => format!("{path}:{start}"),
+        (None, Some(limit), None) => format!("{path}:1-{limit}"),
+        _ => path,
+    }
+}
+
+/// `(+3 −1)` for an anchored replacement, counted from the two strings the call carries.
+///
+/// Only ever from strings this client can see. An edit tool that describes its change
+/// without carrying it gets no counts rather than a guess, and the authoritative numbers
+/// arrive separately as the `file_change` event's diff.
+fn edit_stat(input: &Value) -> Option<String> {
+    let old = input
+        .get("old_string")
+        .or_else(|| input.get("oldText"))
+        .or_else(|| input.get("old_str"))
+        .and_then(leaf_text);
+    let new = input
+        .get("new_string")
+        .or_else(|| input.get("newText"))
+        .or_else(|| input.get("new_str"))
+        .and_then(leaf_text);
+
+    let (old, new) = (old?, new?);
+    let count = |text: &str| {
+        if text.is_empty() {
+            0
+        } else {
+            text.lines().count()
+        }
+    };
+
+    Some(format!("(+{} −{})", count(&new), count(&old)))
+}
+
+/// `"needle" in lib/`, in the shape Codex and Claude Code both print.
+fn grep_subject(input: &Value) -> String {
+    let pattern = field(input, &["pattern", "query", "regex", "search", "q"]);
+    let scope = field(
+        input,
+        &["path", "dir", "directory", "include", "glob", "in"],
+    );
+
+    match (pattern, scope) {
+        (Some(pattern), Some(scope)) => format!("\"{pattern}\" in {scope}"),
+        (Some(pattern), None) => format!("\"{pattern}\""),
+        (None, Some(scope)) => scope,
+        (None, None) => String::new(),
+    }
+}
+
+/// `MCP linear.create_issue` — the server and the tool, separated the way both dialects
+/// write them.
+fn mcp_subject(name: &str) -> String {
+    let trimmed = name.trim();
+
+    if let Some(rest) = trimmed
+        .strip_prefix("mcp__")
+        .or_else(|| trimmed.strip_prefix("mcp."))
+    {
+        return rest.replacen("__", ".", 1);
+    }
+
+    trimmed.to_string()
+}
+
+/// Gemini's `→ Returned N lines`, said only where the result is actually held.
+///
+/// The count is of the text this client has. A result the projection had to bound says so
+/// rather than reporting the bounded count as the whole.
+fn counted(output: Option<&str>, noun: &str) -> String {
+    // English, spelled out rather than derived: "matchs" is what `noun + "s"` produces, and
+    // a summary row that misspells its own unit reads as a machine talking to itself.
+    let plural = match noun {
+        "match" => "matches",
+        "entry" => "entries",
+        other => return counted_with(output, other, &format!("{other}s")),
+    };
+
+    counted_with(output, noun, plural)
+}
+
+fn counted_with(output: Option<&str>, singular: &str, plural: &str) -> String {
+    let Some(output) = output else {
+        return String::new();
+    };
+    let trimmed = output.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        return format!("→ no {plural}");
+    }
+
+    let bounded = trimmed.ends_with(TOOL_VALUE_TRUNCATION.trim_start_matches('\n'));
+    let lines = trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let lines = if bounded {
+        lines.saturating_sub(1)
+    } else {
+        lines
+    };
+
+    format!(
+        "→ {lines}{} {}",
+        if bounded { "+" } else { "" },
+        if lines == 1 && !bounded {
+            singular
+        } else {
+            plural
+        }
     )
+}
+
+/// `exit 1` where a payload carried one, `failed` where only `is_error` did.
+///
+/// The runtime's Codex dialect folds `exitCode` into `is_error` and does not forward the
+/// number, so `failed` is the ordinary answer there and a numeric code appears only for a
+/// provider that sends one.
+fn exit_status(tool: &ToolCell, input: &Value) -> String {
+    let code = ["exit_code", "exitCode", "status_code", "returncode"]
+        .iter()
+        .find_map(|key| {
+            tool.output
+                .as_ref()
+                .and_then(|output| output.get(*key))
+                .or_else(|| input.get(*key))
+        })
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(text) => text.parse().ok(),
+            _ => None,
+        });
+
+    match (code, tool.state) {
+        (Some(code), _) => format!("exit {code}"),
+        (None, ToolState::Failed) => "failed".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn path_of(input: &Value) -> Option<String> {
+    field(
+        input,
+        &[
+            "path",
+            "file_path",
+            "filePath",
+            "file",
+            "filename",
+            "absolute_path",
+            "abs_path",
+            "uri",
+            "target",
+            "notebook_path",
+        ],
+    )
+}
+
+/// The first of these keys that holds text, already bounded and flattened.
+fn field(input: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(text) = input.get(*key).and_then(leaf_text) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(bounded_copy(
+                    &text.replace('\n', " "),
+                    TOOL_INPUT_BYTES,
+                    TOOL_INPUT_TRUNCATION,
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn join(head: Option<String>, tail: Option<String>) -> String {
+    match (head, tail) {
+        (Some(head), Some(tail)) => format!("{head} {tail}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => String::new(),
+    }
 }
 
 fn display_tool_name(name: &str) -> String {
@@ -2142,7 +3527,7 @@ mod tests {
         let call = event(
             1,
             "tool_call",
-            json!({"call_id": "c1", "name": "read", "input": {"path": "README.md"}}),
+            json!({"call_id": "c1", "name": "write", "input": {"path": "README.md"}}),
         );
         let result = event(
             2,
@@ -2158,7 +3543,7 @@ mod tests {
         assert_eq!(tool.state, ToolState::Completed);
 
         let text = plain(&render_cells(&cells, 80));
-        assert!(text.contains("✓ read"), "{text}");
+        assert!(text.contains("✓ Write"), "{text}");
         assert!(text.contains("README.md"), "{text}");
         assert!(text.contains("project docs"), "{text}");
         assert!(
@@ -2243,7 +3628,11 @@ mod tests {
         let text = plain(&render_cells(&cells, 100));
 
         assert!(text.contains("M File  lib/worker.ex"), "{text}");
-        assert!(text.contains("Diff  lib/worker.ex  +1 -1"), "{text}");
+        assert!(text.contains("M lib/worker.ex  +1 −1"), "{text}");
+        assert!(
+            !text.contains('←'),
+            "an ordinary edit is not a rename: {text}"
+        );
         assert!(text.contains("-old"), "{text}");
         assert!(text.contains("+new"), "{text}");
     }
@@ -2253,7 +3642,7 @@ mod tests {
         let call = event(
             1,
             "tool_call",
-            json!({"call_id": "c-run", "name": "read", "input": {"path": "Cargo.toml"}}),
+            json!({"call_id": "c-run", "name": "bash", "input": {"cmd": "cargo build"}}),
         );
         let cells = project(vec![Entry::Event(&call)]);
         let text = plain(&render_cells_at(&cells, 80, 0, Verbosity::Compact));
@@ -2342,6 +3731,9 @@ mod tests {
                 (0..20).map(|n| format!("line {n}\n")).collect(),
             )),
             state: ToolState::Completed,
+            kind: None,
+            started_at: None,
+            settled_at: None,
         });
 
         let mut cells = project(vec![Entry::Event(&delta), Entry::Event(&final_text)]);
@@ -2349,10 +3741,15 @@ mod tests {
         let text = plain(&render_cells(&cells, 80));
 
         assert_eq!(text.matches("Hello there").count(), 1, "{text}");
-        assert!(text.contains("full result · ctrl+o"), "{text}");
+        // Codex's head/tail: six rows, the counted marker, six rows. The last line of a
+        // result is part of the head/tail layout, so what a compact cell hides is the
+        // middle — and it says how much.
+        assert!(text.contains("line 0"), "{text}");
+        assert!(text.contains("… +8 lines · ctrl+o"), "{text}");
+        assert!(text.contains("line 19"), "the tail is the point: {text}");
         assert!(
-            !text.contains("line 19"),
-            "verbose output escaped its cell: {text}"
+            !text.contains("line 9\n"),
+            "the middle is what a compact cell folds: {text}"
         );
 
         // The same cells under Ctrl+O: expanded in place, still bounded, and the row that
@@ -2454,6 +3851,9 @@ mod tests {
             input: json!({"path": "huge.log"}),
             output: Some(Value::String("x".repeat(3 * 1024 * 1024))),
             state: ToolState::Completed,
+            kind: None,
+            started_at: None,
+            settled_at: None,
         });
 
         let value = match &tool {
@@ -2464,8 +3864,18 @@ mod tests {
         assert!(value.ends_with(TOOL_VALUE_TRUNCATION));
 
         let rendered = render_cells(&[tool], 40);
-        assert!(rendered.len() <= TOOL_OUTPUT_LINES + 2);
-        assert!(plain(&rendered).contains("full result · ctrl+o"));
+        assert!(
+            rendered.len() <= TOOL_OUTPUT_LINES + 6,
+            "{}",
+            rendered.len()
+        );
+        // One three-megabyte token wraps to far more rows than a compact cell spends, and
+        // the row that admits it names the count and the key.
+        assert!(
+            plain(&rendered).contains("full result · ctrl+o"),
+            "{}",
+            plain(&rendered)
+        );
     }
 
     #[test]
@@ -2736,14 +4146,17 @@ mod tests {
                 input: json!({"cmd": "mix test"}),
                 output: Some(Value::String("3 tests, 0 failures".into())),
                 state: ToolState::Completed,
+                kind: None,
+                started_at: None,
+                settled_at: None,
             }),
         ];
         let lines = render_cells(&cells, 80);
         let text = plain(&lines);
 
         assert!(text.contains("I'll run the suite."), "{text}");
-        assert!(text.contains("✓ command"), "{text}");
-        assert!(text.contains("mix test"), "{text}");
+        assert!(text.contains("✓ Bash"), "{text}");
+        assert!(text.contains("$ mix test"), "{text}");
         assert!(text.contains("3 tests, 0 failures"), "{text}");
         assert!(!text.contains("Run  "), "{text}");
         assert!(!text.contains("  done"), "{text}");
@@ -2751,7 +4164,7 @@ mod tests {
 
         let command = lines
             .iter()
-            .find(|line| plain_line(line).contains("✓ command"))
+            .find(|line| plain_line(line).contains("✓ Bash"))
             .expect("a command row");
         assert!(
             command
@@ -3120,6 +4533,9 @@ mod tests {
                     .collect(),
             )),
             state: ToolState::Completed,
+            kind: None,
+            started_at: None,
+            settled_at: None,
         });
 
         let compact = render_cells(std::slice::from_ref(&tool), 80);
@@ -3132,5 +4548,503 @@ mod tests {
             verbose.len()
         );
         assert!(plain(&verbose).contains("full result \u{b7} /details"));
+    }
+
+    // ---------------------------------------------------------------------------------
+    // A3 — tool cells v2
+    // ---------------------------------------------------------------------------------
+
+    fn call(sequence: u64, payload: Value) -> Event {
+        event(sequence, "tool_call", payload)
+    }
+
+    fn result(sequence: u64, payload: Value) -> Event {
+        event(sequence, "tool_result", payload)
+    }
+
+    /// The one summariser, exercised through the three naming systems that reach it.
+    #[test]
+    fn per_tool_summaries_read_the_same_whichever_dialect_named_the_call() {
+        let cases: Vec<(Value, &str)> = vec![
+            // Claude's own names.
+            (
+                json!({"name": "Read", "input": {"file_path": "src/lex.rs", "offset": 12, "limit": 40}}),
+                "Read src/lex.rs:12-51",
+            ),
+            (
+                json!({"name": "Edit", "input": {
+                    "file_path": "src/lex.rs",
+                    "old_string": "a\nb",
+                    "new_string": "a\nB\nc"
+                }}),
+                "Edit src/lex.rs (+3 −2)",
+            ),
+            (
+                json!({"name": "Write", "input": {"file_path": "docs/NEW.md"}}),
+                "Write docs/NEW.md",
+            ),
+            (
+                json!({"name": "Grep", "input": {"pattern": "needle", "path": "lib"}}),
+                "Grep \"needle\" in lib",
+            ),
+            (
+                json!({"name": "Glob", "input": {"pattern": "**/*.ex"}}),
+                "Glob **/*.ex",
+            ),
+            (
+                json!({"name": "Bash", "input": {"command": "cargo test"}}),
+                "Bash $ cargo test",
+            ),
+            (
+                json!({"name": "WebFetch", "input": {"url": "https://example.test/a"}}),
+                "Fetch https://example.test/a",
+            ),
+            (
+                json!({"name": "mcp__linear__create_issue", "input": {}}),
+                "MCP linear.create_issue",
+            ),
+            // Codex item types, as the runtime's dialect normalises them.
+            (
+                json!({"name": "exec_command", "input": {"cmd": "mix test", "cwd": "/ws"}}),
+                "Bash $ mix test",
+            ),
+            (
+                json!({"name": "github.create_pr", "input": {}}),
+                "MCP github.create_pr",
+            ),
+            // ACP `kind`, where the title says nothing an enum would.
+            (
+                json!({"kind": "read", "title": "Looking at the worker", "input": {"path": "lib/w.ex"}}),
+                "Read lib/w.ex",
+            ),
+            (
+                json!({"kind": "execute", "title": "Running the suite", "input": {"command": "mix test"}}),
+                "Bash $ mix test",
+            ),
+            (
+                json!({"kind": "search", "title": "Hunting", "input": {"query": "needle"}}),
+                "Grep \"needle\"",
+            ),
+            (
+                json!({"kind": "delete", "title": "Tidying", "input": {"path": "tmp/x"}}),
+                "Delete tmp/x",
+            ),
+            (
+                json!({"kind": "move", "title": "Shuffling", "input": {"path": "a/b.ex"}}),
+                "Move a/b.ex",
+            ),
+            (
+                json!({"kind": "fetch", "title": "Grabbing", "input": {"url": "https://e.test"}}),
+                "Fetch https://e.test",
+            ),
+            (
+                json!({"kind": "think", "title": "Pondering", "input": {}}),
+                "Think",
+            ),
+            // Nothing matched: the row keeps the provider's own name and its own input,
+            // rather than a verb this client made up for it.
+            (
+                json!({"kind": "other", "title": "whatever", "input": {"z": 1}}),
+                "whatever {\"z\":1}",
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            let event = call(1, payload.clone());
+            let cells = project(vec![Entry::Event(&event)]);
+            let tool = match &cells[0] {
+                Cell::Tool(tool) => tool.clone(),
+                Cell::Exploration(group) => group.calls[0].clone(),
+                other => panic!("{payload}: unexpected cell {other:?}"),
+            };
+
+            assert_eq!(summarise(&tool).line(), expected, "for {payload}");
+        }
+    }
+
+    /// Gemini's `→ Returned N lines`, said only about text this client actually holds.
+    #[test]
+    fn a_result_adds_a_count_the_client_can_see_and_never_one_it_cannot() {
+        let call = call(
+            1,
+            json!({"call_id": "g", "name": "grep", "input": {"pattern": "fn"}}),
+        );
+        let result = result(
+            2,
+            json!({"call_id": "g", "output": {"text": "a.rs:1\nb.rs:2\nc.rs:3"}}),
+        );
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+        let Cell::Exploration(group) = &cells[0] else {
+            panic!("a grep is exploration: {cells:?}")
+        };
+
+        assert_eq!(summarise(&group.calls[0]).line(), "Grep \"fn\" → 3 matches");
+
+        // Still running: no result, therefore no count.
+        let pending = project(vec![Entry::Event(&call)]);
+        let Cell::Exploration(group) = &pending[0] else {
+            panic!("a grep is exploration")
+        };
+        assert_eq!(summarise(&group.calls[0]).line(), "Grep \"fn\"");
+    }
+
+    /// A bounded value's count is a floor, and the `+` says so.
+    #[test]
+    fn a_bounded_result_counts_itself_as_at_least_rather_than_exactly() {
+        let call = call(
+            1,
+            json!({"call_id": "g", "name": "grep", "input": {"pattern": "x"}}),
+        );
+        let huge: String = (0..40_000).map(|n| format!("hit {n}\n")).collect();
+        let result = result(2, json!({"call_id": "g", "output": {"text": huge}}));
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+        let Cell::Exploration(group) = &cells[0] else {
+            panic!("a grep is exploration")
+        };
+
+        let line = summarise(&group.calls[0]).line();
+        assert!(line.contains('+'), "a floor is marked as one: {line}");
+    }
+
+    #[test]
+    fn a_command_states_the_exit_code_a_provider_sent_and_says_failed_when_only_is_error_did() {
+        let with_code = project(vec![
+            Entry::Event(&call(
+                1,
+                json!({"call_id": "b", "name": "bash", "input": {"cmd": "false"}}),
+            )),
+            Entry::Event(&result(
+                2,
+                json!({"call_id": "b", "output": {"exit_code": 3, "text": "boom"}, "is_error": true}),
+            )),
+        ]);
+        let Cell::Tool(tool) = &with_code[0] else {
+            panic!("a command is its own cell")
+        };
+        assert_eq!(summarise(tool).outcome, "exit 3");
+
+        let without = project(vec![
+            Entry::Event(&call(
+                1,
+                json!({"call_id": "b", "name": "bash", "input": {"cmd": "false"}}),
+            )),
+            Entry::Event(&result(
+                2,
+                json!({"call_id": "b", "output": "boom", "is_error": true}),
+            )),
+        ]);
+        let Cell::Tool(tool) = &without[0] else {
+            panic!("a command is its own cell")
+        };
+        assert_eq!(summarise(tool).outcome, "failed");
+    }
+
+    /// Codex's grouped exploration cell, both states.
+    #[test]
+    fn consecutive_exploration_collapses_and_flips_when_anything_else_is_drawn() {
+        let calls: Vec<Event> = vec![
+            call(
+                1,
+                json!({"call_id": "r1", "name": "read", "input": {"path": "a.ex"}}),
+            ),
+            call(
+                2,
+                json!({"call_id": "r2", "name": "grep", "input": {"pattern": "x"}}),
+            ),
+            call(
+                3,
+                json!({"call_id": "r3", "name": "glob", "input": {"pattern": "*.ex"}}),
+            ),
+            call(
+                4,
+                json!({"call_id": "r4", "name": "ls", "input": {"path": "lib"}}),
+            ),
+        ];
+        let results: Vec<Event> = (1..=4)
+            .map(|n| result(10 + n, json!({"call_id": format!("r{n}"), "output": "ok"})))
+            .collect();
+
+        let edit = call(
+            20,
+            json!({"call_id": "e", "name": "edit", "input": {"path": "a.ex"}}),
+        );
+        let entries = || {
+            let mut entries: Vec<Entry> = Vec::new();
+            for (call, result) in calls.iter().zip(results.iter()) {
+                entries.push(Entry::Event(call));
+                entries.push(Entry::Event(result));
+            }
+            entries
+        };
+
+        let open = project(entries());
+        assert_eq!(open.len(), 1, "four calls, one cell: {open:?}");
+        let Cell::Exploration(group) = &open[0] else {
+            panic!("expected one exploration cell")
+        };
+        assert_eq!(group.total(), 4);
+        assert!(!group.done, "nothing has been drawn after it yet");
+        assert!(
+            plain(&render_cells(&open, 80)).contains("Exploring… (4)"),
+            "{}",
+            plain(&render_cells(&open, 80))
+        );
+
+        // A non-exploration cell after it flips the header.
+        let mut with_edit = entries();
+        with_edit.push(Entry::Event(&edit));
+        let closed = project(with_edit);
+        let Cell::Exploration(group) = &closed[0] else {
+            panic!("expected the exploration cell first")
+        };
+        assert!(group.done);
+        let text = plain(&render_cells(&closed, 80));
+        assert!(text.contains("Explored 4 files"), "{text}");
+        assert!(!text.contains("Exploring…"), "{text}");
+
+        // Expanded, every call is its own row.
+        let verbose = plain(&render_cells_at(&closed, 80, 0, Verbosity::Verbose));
+        for expected in ["Read a.ex", "Grep \"x\"", "Glob *.ex", "List lib"] {
+            assert!(
+                verbose.contains(expected),
+                "{expected} missing from {verbose}"
+            );
+        }
+    }
+
+    /// A turn boundary closes the group even when nothing else was drawn.
+    #[test]
+    fn a_turn_boundary_closes_an_open_exploration_group() {
+        let read = call(
+            1,
+            json!({"call_id": "r", "name": "read", "input": {"path": "a.ex"}}),
+        );
+        let end = event(2, "turn_completed", json!({}));
+        let cells = project(vec![Entry::Event(&read), Entry::Event(&end)]);
+        let Cell::Exploration(group) = &cells[0] else {
+            panic!("expected the exploration cell first: {cells:?}")
+        };
+
+        assert!(group.done, "the divider is a cell drawn after it");
+        assert!(plain(&render_cells(&cells, 80)).contains("Explored 1 file"));
+    }
+
+    /// An edit, a command, or a fetch is something the agent *did* and is never folded away.
+    #[test]
+    fn work_is_never_folded_into_the_exploration_count() {
+        for name in ["edit", "write", "bash", "web_fetch", "delete"] {
+            let doing = call(
+                1,
+                json!({"call_id": "d", "name": name, "input": {"path": "a", "cmd": "a", "url": "a"}}),
+            );
+            let cells = project(vec![Entry::Event(&doing)]);
+            assert!(
+                matches!(cells[0], Cell::Tool(_)),
+                "{name} is work, not exploration: {cells:?}"
+            );
+        }
+    }
+
+    /// A run of exploration is bounded; past the ceiling the calls are counted, and said so.
+    #[test]
+    fn an_exploration_group_bounds_what_it_lists_and_counts_the_rest() {
+        let calls: Vec<Event> = (0..(EXPLORATION_CALLS as u64 + 9))
+            .map(|n| {
+                call(
+                    n + 1,
+                    json!({"call_id": format!("r{n}"), "name": "read", "input": {"path": format!("f{n}.ex")}}),
+                )
+            })
+            .collect();
+        let cells = project(calls.iter().map(Entry::Event).collect());
+        let Cell::Exploration(group) = &cells[0] else {
+            panic!("expected one exploration cell")
+        };
+
+        assert_eq!(group.calls.len(), EXPLORATION_CALLS);
+        assert_eq!(group.overflow, 9);
+        assert_eq!(group.total(), EXPLORATION_CALLS + 9);
+        assert!(plain(&render_cells_at(&cells, 100, 0, Verbosity::Verbose))
+            .contains("… +9 more calls · /details"));
+    }
+
+    /// Codex's head/tail, with the exact marker the row is supposed to carry.
+    #[test]
+    fn a_long_tool_result_shows_a_head_a_counted_marker_and_a_tail() {
+        let call = call(
+            1,
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "ls"}}),
+        );
+        let body: String = (0..40).map(|n| format!("row {n}\n")).collect();
+        let result = result(2, json!({"call_id": "b", "output": body}));
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+        let text = plain(&render_cells(&cells, 80));
+
+        for head in 0..TOOL_HEAD_LINES {
+            assert!(
+                text.contains(&format!("row {head}")),
+                "head row {head}: {text}"
+            );
+        }
+        for tail in (40 - TOOL_TAIL_LINES)..40 {
+            assert!(
+                text.contains(&format!("row {tail}")),
+                "tail row {tail}: {text}"
+            );
+        }
+        assert!(
+            text.contains("… +28 lines · ctrl+o"),
+            "the exact marker Codex prints: {text}"
+        );
+        assert!(
+            !text.contains("row 20"),
+            "the middle is what is folded: {text}"
+        );
+    }
+
+    /// A short result is not decorated with a marker it did not earn.
+    #[test]
+    fn a_result_that_fits_carries_no_truncation_marker() {
+        let call = call(
+            1,
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "ls"}}),
+        );
+        let result = result(2, json!({"call_id": "b", "output": "one\ntwo\nthree"}));
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+        let text = plain(&render_cells(&cells, 80));
+
+        assert!(text.contains("one") && text.contains("three"), "{text}");
+        assert!(!text.contains("ctrl+o"), "{text}");
+    }
+
+    /// A failure leads with its own text; the tail is what would push it off the row.
+    #[test]
+    fn a_failed_tool_shows_the_error_from_the_top() {
+        let call = call(
+            1,
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "cargo b"}}),
+        );
+        let body: String = std::iter::once("error[E0432]: unresolved import\n".to_string())
+            .chain((0..40).map(|n| format!("note {n}\n")))
+            .collect();
+        let result = result(2, json!({"call_id": "b", "output": body, "is_error": true}));
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+        let text = plain(&render_cells(&cells, 80));
+
+        assert!(text.contains("error[E0432]"), "{text}");
+        assert!(text.contains("note 4"), "{text}");
+        assert!(
+            !text.contains("note 39"),
+            "a failure gets the head, not the tail: {text}"
+        );
+        assert!(text.contains("… +35 lines · ctrl+o"), "{text}");
+    }
+
+    /// Kiro's live tail: streaming command output shows the newest rows, with the rest
+    /// counted above them.
+    #[test]
+    fn streaming_command_output_is_a_tail_window_not_a_head() {
+        let deltas: Vec<Event> = (0..30)
+            .map(|n| {
+                event(
+                    n + 1,
+                    "command_output_delta",
+                    json!({"text": format!("out {n}\n")}),
+                )
+            })
+            .collect();
+        let cells = project(deltas.iter().map(Entry::Event).collect());
+        let text = plain(&render_cells(&cells, 80));
+
+        assert!(
+            text.contains("out 29"),
+            "the newest row is the point: {text}"
+        );
+        assert!(text.contains("out 26"), "{text}");
+        assert!(!text.contains("out 0\n"), "{text}");
+        assert!(
+            text.contains("… +26 lines · ctrl+o"),
+            "the earlier rows are counted, not dropped: {text}"
+        );
+    }
+
+    /// Elapsed comes from two instants the ledger holds, never from a clock.
+    #[test]
+    fn a_tool_cell_states_the_elapsed_time_its_two_events_measured() {
+        let call = stamped(
+            1,
+            "tool_call",
+            "2026-08-14T09:00:00Z",
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "mix test"}}),
+        );
+        let done = stamped(
+            2,
+            "tool_result",
+            "2026-08-14T09:00:04.500Z",
+            json!({"call_id": "b", "output": "ok"}),
+        );
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&done)]);
+        let Cell::Tool(tool) = &cells[0] else {
+            panic!("a command is its own cell")
+        };
+
+        assert_eq!(tool.elapsed(), Some(4_500));
+        assert!(plain(&render_cells(&cells, 80)).contains("4s"));
+    }
+
+    /// A running call is measured against the newest instant this window holds — a floor,
+    /// and the only number a projection with no clock can honestly print.
+    #[test]
+    fn a_running_tool_is_timed_against_the_newest_event_the_window_holds() {
+        let call = stamped(
+            1,
+            "tool_call",
+            "2026-08-14T09:00:00Z",
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "sleep 60"}}),
+        );
+        let later = stamped(
+            2,
+            "command_output_delta",
+            "2026-08-14T09:00:07Z",
+            json!({"text": "tick\n"}),
+        );
+        let cells = project(vec![Entry::Event(&call), Entry::Event(&later)]);
+        let Cell::Tool(tool) = &cells[0] else {
+            panic!("a command is its own cell")
+        };
+
+        assert_eq!(tool.state, ToolState::Running);
+        assert_eq!(tool.elapsed(), Some(7_000));
+
+        let text = plain(&render_cells(&cells, 80));
+        assert!(text.contains("running"), "{text}");
+        assert!(text.contains("7s"), "{text}");
+    }
+
+    /// The 10 k-line ceiling from A3's acceptance, with a debug-build allowance.
+    #[test]
+    fn a_ten_thousand_line_result_projects_and_renders_well_inside_the_frame_budget() {
+        let call = call(
+            1,
+            json!({"call_id": "b", "name": "bash", "input": {"cmd": "cat big"}}),
+        );
+        let body: String = (0..10_000).map(|n| format!("line {n}\n")).collect();
+        let result = result(2, json!({"call_id": "b", "output": body}));
+
+        let started = std::time::Instant::now();
+        for _ in 0..5 {
+            let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
+            let lines = render_cells(&cells, 120);
+            assert!(!lines.is_empty());
+        }
+        let each = started.elapsed() / 5;
+
+        // The gate is 16 ms of frame time. This runs unoptimised under `cargo test`, so the
+        // ceiling is deliberately generous; what it is guarding against is an accidental
+        // O(n) *per row* — wrapping ten thousand lines to draw twelve of them.
+        assert!(
+            each < std::time::Duration::from_millis(150),
+            "one projection + render took {each:?}"
+        );
     }
 }
