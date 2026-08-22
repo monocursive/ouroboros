@@ -803,7 +803,159 @@ omission marker; `Ctrl-O` still exposes every event retained by the local 5,000-
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
 `s` steer, `Ctrl-O` chat/event details (`Ctrl-E` opens `$EDITOR`), `,` settings, `q` quit dialog, `?` help with the
-authoritative key map.
+authoritative key map. `s`, `a`, and the interrupt hint are **conditional**: see
+"Capability-driven chrome" below.
+
+### The footer
+
+Three rows, in this order from the bottom: the footer itself, an optional scripted status
+line above it, and above that the pane.
+
+The footer's left half states what the runtime declared about the **open interactive
+session**, and its right half the keys that will actually work on it. Everything on the
+row is `·`-separated, and every cell has a rank: when the row runs out of width the
+lowest-ranked cell is *dropped* rather than ellipsized, because a truncated `12.3k tok…`
+is a fact rendered as noise. The ranking is one list across both halves — deciding each
+half against its own budget is how a footer ends up with a `ctrl+q quit` hint and no model
+on it.
+
+| Cell | Source | Notes |
+|---|---|---|
+| `● LIVE` / `● DISCONNECTED` | the transport | never dropped |
+| `OWN RUNTIME · operate · 127.0.0.1:4560` | spawn mode, `hello.scope`, the address | the first thing to yield: it is on the Dashboard and in the header |
+| model | `interactive.info` `options.model`, else the transcript's `run_started.model` | absent where neither said |
+| `⏸ prompt` / `⏵⏵ auto-edit` / `✓ auto-approve` / `⏵ default` | `options.approval_mode` | absent where the start omitted it — the plane's default then applies, and this client does not know what it is |
+| `workspace-write` | `options.sandbox_mode` | its own cell, so the mode survives a narrow row without it |
+| `⠙ Working 4m 07s` | the session status plus the newest unterminated `turn_started`'s timestamp | Codex's format; ranked with `esc interrupt`, because they are one statement |
+| `3 queued` | the newest `queue_changed`'s `queued_turns` | absent, not zero, where no such event has been seen |
+| `2 approvals` | the approval requests this client holds unanswered | |
+| `42.5k tokens` | `usage.total_tokens` | a `· 34%` share is appended **only** where the runtime reports a context window. Nothing reports one today; `runtime.models` is where it is meant to arrive, and dividing by a client-side table of model windows would be a lie presented as a measurement |
+| `$0.42` | `usage.cost_usd` | `<$0.01` for a spend too small to show, never `$0.00` |
+| `esc interrupt` | conditional; see below | |
+| `ctrl+p commands`, `ctrl+x leader`, `ctrl+q quit` | this client | the last two are also on `?` and in the palette, so they yield first |
+
+The notice line keeps precedence: while a notice is showing it owns the whole row, folded
+onto one line, exactly as before.
+
+### Capability-driven chrome (B0, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D14/X1/X2)
+
+`Interactive.State.public/1` projects `options.capabilities` — a map the runtime derives
+from the transport a session actually selected, with the keys `transport`, `process`,
+`multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
+`dynamic_model`, and `dynamic_configuration`, whose values are a mechanism name
+(`native` / `managed` / `process`) or `false`. The client decodes it as **three** states,
+and the third one is the point:
+
+- a value the runtime gave → *declared*, and the mechanism is kept verbatim, because
+  "managed" and "native" are different promises about *when* a control takes effect;
+- `false` → the transport cannot do this at all;
+- **anything else — no map, an absent key, a shape this build cannot read — is *unknown*,
+  never "no".**
+
+Only an explicit `false` takes a control off the screen. An older gateway that sends no
+map at all changes nothing, because hiding a key on a gateway's silence would be this
+client inventing a ceiling it was never told about.
+
+What that gates today: the Steer verb, `s`, `ctrl+x s`, `/steer`, and the palette's Steer
+entry exist only where `steer` is truthy — which is `pi` alone (X2); `a`, `ctrl+x a`, and
+the palette's approval entry only where `approvals` is truthy, and where it is `false` the
+key says *why* nothing will ever open that modal rather than "not waiting on one" (X1);
+`esc interrupt` in the footer only where `interrupt` is truthy **and** a turn is running.
+`multimodal` has a predicate and no affordance yet — B4 is the slice that builds one.
+
+The `n` dialog reads the other half of the same story out of `runtime.providers`, whose
+`normalized_options`, `normalized_values`, and `session_transports` the client already
+received and never used. It greys a mode the selected provider cannot take, dim and
+naming whose limit it is: `prompt — not offered by claude (no approvals channel)`,
+`prompt — not offered by pi (takes only default, auto_approve)`. The rule mirrors
+`Ouroboros.Provider.safety_options/3` exactly — an option the selected transport does not
+normalize takes only `default`; one it normalizes with an allowlist takes only what the
+allowlist names; and `prompt` is refused on a transport whose `approvals` is `false`
+because a mode that promises a human is asked cannot be honoured with no channel to ask
+through. A greyed value stays **selectable**: the runtime is the authority on whether a
+start succeeds, and the refusal it returns renders on the form that produced it, as it
+always did. Where the spec does not resolve, nothing is greyed — greying on a guess would
+be worse than greying none.
+
+### The scriptable status line
+
+`[statusline] command` in `config.toml`, off unless set. Its first line of stdout is drawn
+in its own row above the footer; the row does not exist when the command is unset, fails,
+or prints nothing.
+
+The contract, narrowed from Claude Code's `statusLine`
+([R2 §5](research/agent-ux-2026/R2-display-rendering.md)) to what this client can promise:
+
+- run through `sh -c`, on the machine the **client** is on — which is not necessarily the
+  machine a fleet session is on, so a fleet session's `git branch` is not this command's
+  to read;
+- one JSON object on stdin, with fixed keys and `null` where a fact is unknown:
+
+  ```json
+  {
+    "session":  {"id": …, "provider": …, "model": …, "workspace": …, "machine": …, "status": …},
+    "modes":    {"approval_mode": …, "sandbox_mode": …},
+    "usage":    {"input_tokens": …, "output_tokens": …, "cache_read_tokens": …,
+                 "cache_creation_tokens": …, "total_tokens": …, "turns_with_usage": …,
+                 "context_window": …},
+    "cost_usd": …,
+    "elapsed_ms": …,
+    "connection": {"state": "live"|"lost", "reason": …, "address": …, "scope": …,
+                   "node": …, "spawned": true|false}
+  }
+  ```
+
+  `session`, `modes`, and `usage` are `null` — not empty objects — when there is no open
+  interactive session, or when the runtime reported no usage at all: a session that has
+  spent nothing and one whose spend was never reported are different facts;
+- **bounded**: 2 s, 4 KiB of stdout read at all, first line only, stderr discarded, the
+  child killed on abandonment. A command that backgrounds a grandchild is beyond what a
+  kill on the shell can reclaim, which is a limit of running arbitrary shell;
+- **debounced 300 ms**, one invocation at a time, and re-run only when that object
+  *changes*. `elapsed_ms` is deliberately outside the change comparison though it is still
+  handed to the command: it moves every tick while a turn runs, and a status line keyed on
+  it would never settle and would fork a process twelve times a second;
+- ANSI SGR is honoured and becomes cell style. Every **other** escape sequence is removed
+  rather than passed through — the row is drawn into a buffer this client owns, and a
+  command emitting `ESC [ 2 J` would clear the frame around it. OSC 8 hyperlinks are
+  dropped too, because Ratatui has no cell attribute for them;
+- a failure renders nothing and is reported **once**. A status line that re-announced a
+  broken command every frame would be its failure taking over the row it failed to fill.
+
+It decides nothing. Its output is text on a row; the footer beside it still comes from the
+runtime's own declarations.
+
+### Notifications
+
+`[notifications] mode = "auto" | "bell" | "osc9" | "off"` (default `auto`) and
+`when = "unfocused" | "always"` (default `unfocused`), following Codex's
+`tui.notifications` / `notification_condition`.
+
+`auto` resolves to OSC 9 (`ESC ] 9 ; text BEL`) on the terminals R2 §5 records as
+implementing it — iTerm2, WezTerm, Ghostty, kitty, matched on `TERM_PROGRAM`/`TERM` — and
+to `BEL` everywhere else. A short allowlist rather than a probe: no query asks a terminal
+whether it implements OSC 9, and guessing optimistically produces a notification that
+silently never arrives.
+
+Focus comes from CSI `?1004h`, enabled beside mouse capture and disabled on the way out.
+A terminal that never reports focus is treated as focused forever, which is the safe
+default for what it gates: with `when = "unfocused"` an unreporting terminal is silent
+rather than constantly ringing.
+
+Two things ring, both of them things a *session* did: `approval_requested`, and a turn
+reaching a terminal state (`turn_completed`, `turn_failed`, `turn_interrupted`). Only for
+sessions this client is subscribed to, only from the live stream, and at most two per
+frame. A keystroke never rings, and neither does the backlog a replay hands over when a
+session is opened — a three-day-old transcript must not become three days of bells.
+
+The window title is OSC 0: `ouro · <glyph> <workspace basename>`, with `✦` working, `✋`
+needs input, and `◇` idle (Gemini CLI's `dynamicWindowTitle` vocabulary, which is the one
+that already distinguishes "busy" from "blocked on you"). "Needs input" is checked across
+every subscribed session, because an approval on a session that scrolled away is exactly
+what a title bar exists to surface; "working" is the open session's own status. On exit
+the title is emptied, which returns a tab to the terminal's default — there is no portable
+way to *read* the previous title back, so this restores the default rather than the exact
+string that was there before.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:

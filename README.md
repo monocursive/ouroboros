@@ -331,6 +331,45 @@ itself is configured by environment, exactly as before. `ouro new` resolves prov
 workspace, and approval mode as flag first, then configured default; only a provider
 that neither names is refused, and the refusal says where both live.
 
+The footer states what the runtime declared about the open session — model, permission
+mode, sandbox, tokens, cost, an elapsed timer while a turn runs, the durable queue depth,
+and pending approvals — and it advertises no key the open session cannot honour: `esc
+interrupt` only while a turn is running on a transport that declared an interrupt, and
+`s`/`/steer` only where the transport declared `steer`. A fact the runtime has not
+reported is left out rather than guessed, which is why a context percentage does not
+appear yet: no runtime reports a model's window.
+
+Two optional tables tune the chrome. Neither is on by default, and unknown values are
+reported and treated as unset rather than refused:
+
+```toml
+[statusline]
+# Run through `sh -c` with one JSON object on stdin. The first line of stdout is drawn
+# in its own row above the footer; ANSI colour is honoured. Bounded: 2s, 4 KiB, one
+# invocation at a time, debounced 300ms and re-run only when the object changes.
+command = "jq -r '\"\\(.session.provider) · \\(.modes.approval_mode // \"—\")\"'"
+
+[notifications]
+mode = "auto"        # auto | bell | osc9 | off — auto is OSC 9 on iTerm2, WezTerm,
+                     # Ghostty, and kitty, and the bell everywhere else
+when = "unfocused"   # unfocused | always
+```
+
+The status-line command runs on the machine the *client* is on, which is not necessarily
+the machine a fleet session is on. It is fed
+`{session: {id, provider, model, workspace, machine, status}, modes: {approval_mode,
+sandbox_mode}, usage: {…}, cost_usd, elapsed_ms, connection: {…}}` with fixed keys and
+`null` where a fact is unknown; the full shape is in [docs/TUI.md §3.4](docs/TUI.md). A
+command that fails, hangs, or prints nothing leaves the row absent and is reported once.
+
+Notifications fire on `approval_requested` and on a turn reaching a terminal state, for
+sessions this client is subscribed to, and never for a keystroke or for the backlog a
+replay hands over when a session is opened. Focus is tracked through CSI `?1004h`; a
+terminal that does not report focus is treated as focused, so `when = "unfocused"` is
+silent there rather than constant. The window title carries `ouro · <glyph> <workspace>`
+with `✦` working, `✋` needs input, `◇` idle, and is emptied back to the terminal's
+default on exit.
+
 ### How a client finds a runtime
 
 The runtime binds an ephemeral port and publishes it to `gateway.json` in its data

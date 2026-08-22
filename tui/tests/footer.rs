@@ -193,6 +193,58 @@ fn footer(screen: &Screen) -> String {
 // (a) the footer
 // ---------------------------------------------------------------------------------------
 
+/// The whole row, cell by cell, so that a change to the layout is a change someone chose.
+///
+/// The two halves are compared separately: the gap between them is whatever
+/// right-alignment leaves over at that width, which is arithmetic rather than a decision.
+#[test]
+fn the_footer_snapshot_at_three_widths() {
+    let mut app = opened("idle", options(native_capabilities()), usage(), Vec::new());
+
+    assert_eq!(
+        columns(&footer(&render(&mut app, 160, 24))),
+        (
+            "● LIVE · OWN RUNTIME · operate · 127.0.0.1:4560 · gpt-5-codex · ⏵⏵ auto-edit · \
+             workspace-write · 42.5k tokens · $0.42"
+                .to_string(),
+            "ctrl+p commands · ctrl+x leader".to_string()
+        )
+    );
+
+    // 112: the runtime identity yields first — it is on the Dashboard and in the header,
+    // and the session's spend is not anywhere else.
+    assert_eq!(
+        columns(&footer(&render(&mut app, 112, 24))),
+        (
+            "● LIVE · gpt-5-codex · ⏵⏵ auto-edit · workspace-write · 42.5k tokens · $0.42"
+                .to_string(),
+            "ctrl+p commands".to_string()
+        )
+    );
+
+    // 80: one column, and the spend goes before the mode does.
+    assert_eq!(
+        columns(&footer(&render(&mut app, 80, 24))),
+        (
+            "● LIVE · gpt-5-codex · ⏵⏵ auto-edit · workspace-write · ctrl+p commands".to_string(),
+            String::new()
+        )
+    );
+}
+
+/// A rendered footer split at the run of padding between its two halves.
+fn columns(row: &str) -> (String, String) {
+    let row = row.trim_end();
+
+    match row.find("   ") {
+        Some(index) => (
+            row[..index].to_string(),
+            row[index..].trim_start().to_string(),
+        ),
+        None => (row.to_string(), String::new()),
+    }
+}
+
 #[test]
 fn an_idle_session_states_its_model_mode_and_spend_at_every_width() {
     let mut app = opened("idle", options(native_capabilities()), usage(), Vec::new());
@@ -300,9 +352,16 @@ fn a_pending_approval_and_a_queue_are_counted_in_the_footer() {
     // The event opened the modal; the footer is behind it and still says what is pending.
     app.overlay = None;
 
+    // The count outranks every other fact at every width: it is the one thing on the row
+    // that is waiting on the person reading it.
+    for width in [160, 112, 80] {
+        let row = footer(&render(&mut app, width, 24));
+        assert!(row.contains("1 approval"), "{width}: {row}");
+    }
+
     let row = footer(&render(&mut app, 160, 24));
-    assert!(row.contains("1 approval"), "{row}");
     assert!(row.contains("3 queued"), "{row}");
+    assert!(row.contains("esc interrupt"), "{row}");
 }
 
 #[test]
