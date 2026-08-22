@@ -232,6 +232,34 @@ fn the_footer_snapshot_at_three_widths() {
     );
 }
 
+/// What the composer's `/` completion offers for `prefix`, on the open session.
+fn slash_completions(app: &mut App, prefix: &str) -> Vec<String> {
+    // The tick is what refreshes the catalog from the open session's capabilities.
+    app.apply(Msg::Tick);
+    app.apply(key(KeyCode::Char('i')));
+    assert!(app.sessions.composer.is_some(), "`i` opens the composer");
+
+    for character in prefix.chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+
+    let offered = app
+        .sessions
+        .composer
+        .as_ref()
+        .and_then(|composer| composer.editor.completion())
+        .map(|menu| {
+            menu.items
+                .iter()
+                .map(|item| item.value.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    app.sessions.composer = None;
+    offered
+}
+
 /// A rendered footer split at the run of padding between its two halves.
 fn columns(row: &str) -> (String, String) {
     let row = row.trim_end();
@@ -873,6 +901,15 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     assert!(native.steer_offered());
 
+    // The four places the verb is advertised: `/` completion in the composer, the command
+    // palette, the leader overlay, and the key itself.
+    assert!(
+        slash_completions(&mut native, "/steer")
+            .iter()
+            .any(|name| name == "/steer"),
+        "the verb completes where the transport declares it"
+    );
+
     native.apply(ctrl('p'));
     let screen = render(&mut native, 160, 30);
     assert!(
@@ -893,6 +930,13 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
         Vec::new(),
     );
     assert!(!managed.steer_offered());
+
+    assert!(
+        !slash_completions(&mut managed, "/steer")
+            .iter()
+            .any(|name| name == "/steer"),
+        "a transport that cannot steer must not complete `/steer`"
+    );
 
     managed.apply(ctrl('p'));
     let screen = render(&mut managed, 160, 30);

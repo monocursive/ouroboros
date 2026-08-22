@@ -79,6 +79,11 @@ impl CompletionMenu {
 #[derive(Debug, Clone, Default)]
 pub struct CompletionCatalog {
     files: Vec<String>,
+    /// Slash commands the open session cannot honour (B0/D14): `/steer` on a transport
+    /// whose `steer` capability is `false`, and so on. Empty by default — a catalog that
+    /// has not been told anything hides nothing, which is what an older gateway's silence
+    /// about capabilities has to mean.
+    hidden: Vec<&'static str>,
 }
 
 impl CompletionCatalog {
@@ -86,6 +91,15 @@ impl CompletionCatalog {
         files.sort();
         files.dedup();
         self.files = files;
+    }
+
+    /// Names with their leading `/`, as [`COMMANDS`] spells them.
+    pub fn hide_commands(&mut self, hidden: Vec<&'static str>) {
+        self.hidden = hidden;
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.hidden.contains(&name)
     }
 }
 
@@ -573,7 +587,7 @@ impl Editor {
             if !self.text[..start].trim().is_empty() {
                 Vec::new()
             } else {
-                matching_commands(query)
+                matching_commands(query, catalog)
             }
         } else if let Some(query) = token.strip_prefix('@') {
             matching_files(query, &catalog.files)
@@ -635,10 +649,11 @@ impl PartialEq<&str> for Editor {
     }
 }
 
-fn matching_commands(query: &str) -> Vec<CompletionItem> {
+fn matching_commands(query: &str, catalog: &CompletionCatalog) -> Vec<CompletionItem> {
     let query = query.to_ascii_lowercase();
     COMMANDS
         .iter()
+        .filter(|(name, _detail)| !catalog.hides(name))
         .filter(|(name, detail)| {
             name[1..].to_ascii_lowercase().contains(&query)
                 || detail.to_ascii_lowercase().contains(&query)

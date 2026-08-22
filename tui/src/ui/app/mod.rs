@@ -918,6 +918,8 @@ impl App {
     /// On the tick rather than on every message: both read the open session's transcript,
     /// and a burst of a hundred streamed deltas must cost one pass, not a hundred.
     fn refresh_chrome(&mut self) {
+        self.refresh_offered_commands();
+
         let title = notify::title(self.activity(), self.title_workspace().as_deref());
 
         if self.title_shown.as_deref() != Some(title.as_str()) {
@@ -946,6 +948,26 @@ impl App {
             Some((settling, _since)) if *settling == key => {}
             _changed => self.statusline.settling = Some((key, self.ticks)),
         }
+    }
+
+    /// Keeps the `/` completion list to the verbs the open session can honour.
+    ///
+    /// The palette, the leader overlay, and the footer are gated where they are drawn;
+    /// this is the fourth place a verb is advertised, and a completion menu offering
+    /// `/steer` on a transport that answers `{:error, :unsupported}` is the same failure
+    /// D14 names.
+    fn refresh_offered_commands(&mut self) {
+        let mut hidden = Vec::new();
+
+        if !self.steer_offered() {
+            hidden.push("/steer");
+        }
+
+        if !self.open_capabilities().interrupt.offered() {
+            hidden.push("/interrupt");
+        }
+
+        self.completion_catalog.hide_commands(hidden);
     }
 
     /// Arms a notification, if this session's state and the operator's settings allow one.
