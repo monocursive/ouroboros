@@ -136,6 +136,17 @@ defmodule Ouroboros.CodeIntel.LspPool do
     do: call(pool, {:touch, spec, action})
 
   @doc """
+  Opens a document only if it is not open already.
+
+  A navigation request against a file the server has never been told about is answered
+  wrongly or not at all, so `request/3` uses this. Opening an already-open document
+  through `touch/3` would bump its version on every question asked about it, which is
+  exactly the version churn the freshness gate is built to notice.
+  """
+  @spec ensure_open(GenServer.server(), spec()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def ensure_open(pool, spec), do: call(pool, {:touch, spec, :ensure_open})
+
+  @doc """
   Returns the diagnostics for a document, but only when they describe its current
   content.
 
@@ -695,6 +706,13 @@ defmodule Ouroboros.CodeIntel.LspPool do
         }
 
         {{:ok, version}, cancel_debounce(fail_waiters_for(server, path), path)}
+    end
+  end
+
+  defp apply_touch(state, server, spec, :ensure_open) do
+    case Map.get(server.documents, Map.get(spec, :path)) do
+      %{version: version} -> {{:ok, version}, server}
+      nil -> apply_touch(state, server, spec, :open)
     end
   end
 

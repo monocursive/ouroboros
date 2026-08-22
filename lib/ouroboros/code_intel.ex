@@ -22,10 +22,24 @@ defmodule Ouroboros.CodeIntel do
 
   alias Ouroboros.CodeIntel.Config
   alias Ouroboros.CodeIntel.Handle
+  alias Ouroboros.CodeIntel.Lsp.Server
   alias Ouroboros.CodeIntel.LspPool
   alias Ouroboros.CodeIntel.Registry
+  alias Ouroboros.CodeIntel.Results
 
   @pool Ouroboros.CodeIntel.LspPool
+
+  @operations [
+    :definition,
+    :references,
+    :hover,
+    :document_symbols,
+    :workspace_symbols,
+    :implementation,
+    :prepare_call_hierarchy,
+    :incoming_calls,
+    :outgoing_calls
+  ]
 
   @doc """
   Claims the language server for `path` on behalf of the calling process.
@@ -43,6 +57,48 @@ defmodule Ouroboros.CodeIntel do
 
   @spec release(Handle.t(), keyword()) :: :ok
   def release(%Handle{} = handle, opts \\ []), do: LspPool.release(pool(opts), handle)
+
+  @doc """
+  Asks one of the nine navigation questions at a position in a file.
+
+  The operation set is the de-facto standard OpenCode, Claude Code, Kilo and Kiro all
+  converged on, and SWE-Master's ablation is the reason it is worth having at all: on
+  SWE-bench Verified it moved resolve rates by one to two points and cut turn counts by
+  four to six percent — a modest, consistent win, and mostly a turn-count one.
+
+      Ouroboros.CodeIntel.request(:references, %{path: "lib/a.ex", line: 12, character: 4})
+
+  `:document_symbols` and `:workspace_symbols` need no position; the latter takes
+  `query:` and uses `path` only to choose which server to ask. `:incoming_calls` and
+  `:outgoing_calls` run `prepareCallHierarchy` first and follow the item it returns, so a
+  caller asks "who calls the thing at this position" rather than assembling a protocol
+  item by hand.
+
+  Answers are `{:ok, %{items: [...], truncated: n}}` with paths relative to the project
+  root, positions left 0-based as the protocol reports them, and `external: true` on any
+  result outside the root — a definition in a dependency is a different kind of answer
+  from one in your own tree. Everything is bounded: `max_results` (default 200) caps the
+  list, `request_timeout_ms` (default 10 s) caps the wait, and a server that is starting,
+  broken, absent, or simply slow is an error tuple, never an exception.
+  """
+  @spec request(atom(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def request(operation, location, opts \\ [])
+
+  def request(operation, %{path: path} = location, opts) when is_binary(path) do
+    with :ok <- enabled(),
+         :ok <- known_operation(operation),
+         {:ok, spec} <- Registry.resolve(path, opts),
+         {:ok, server} <- checkout(spec, opts),
+         :ok <- open_document(spec, opts) do
+      dispatch(operation, server, spec, location, opts)
+    end
+  end
+
+  def request(_operation, location, _opts), do: {:error, {:invalid_location, location}}
+
+  @doc "The operations `request/3` understands."
+  @spec operations() :: [atom()]
+  def operations, do: @operations
 
   @doc """
   Tells the language server that a file was opened, changed on disk, or closed.
@@ -144,6 +200,125 @@ defmodule Ouroboros.CodeIntel do
   """
   @spec resolve(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   defdelegate resolve(path, opts \\ []), to: Registry
+
+  ## Navigation
+
+  defp dispatch(:definition, server, spec, location, opts) do
+    with {:ok, result} <- ask(server, "textDocument/definition", position(spec, location), opts),
+         do: {:ok, Results.locations(result, spec.root, max_results(opts))}
+  end
+
+  defp dispatch(:implementation, server, spec, location, opts) do
+    with {:ok, result} <-
+           ask(server, "textDocument/implementation", position(spec, location), opts),
+         do: {:ok, Results.locations(result, spec.root, max_results(opts))}
+  end
+
+  defp dispatch(:references, server, spec, location, opts) do
+    params =
+      Map.put(position(spec, location), "context", %{
+        "includeDeclaration" => Keyword.get(opts, :include_declaration, true)
+      })
+
+    with {:ok, result} <- ask(server, "textDocument/references", params, opts),
+         do: {:ok, Results.locations(result, spec.root, max_results(opts))}
+  end
+
+  defp dispatch(:hover, server, spec, location, opts) do
+    with {:ok, result} <- ask(server, "textDocument/hover", position(spec, location), opts) do
+      case Results.hover(result || %{}, spec.root) do
+        nil -> {:ok, %{items: [], truncated: 0}}
+        hover -> {:ok, %{items: [hover], truncated: 0}}
+      end
+    end
+  end
+
+  defp dispatch(:document_symbols, server, spec, _location, opts) do
+    params = %{"textDocument" => text_document(spec)}
+
+    with {:ok, result} <- ask(server, "textDocument/documentSymbol", params, opts),
+         do: {:ok, Results.document_symbols(result, spec.root, spec.path, max_results(opts))}
+  end
+
+  defp dispatch(:workspace_symbols, server, spec, location, opts) do
+    query = Keyword.get(opts, :query) || Map.get(location, :query) || ""
+
+    with {:ok, result} <- ask(server, "workspace/symbol", %{"query" => query}, opts),
+         do: {:ok, Results.workspace_symbols(result, spec.root, max_results(opts))}
+  end
+
+  defp dispatch(:prepare_call_hierarchy, server, spec, location, opts) do
+    with {:ok, result} <-
+           ask(server, "textDocument/prepareCallHierarchy", position(spec, location), opts),
+         do: {:ok, Results.call_hierarchy_items(result, spec.root, max_results(opts))}
+  end
+
+  defp dispatch(:incoming_calls, server, spec, location, opts),
+    do: hierarchy_calls(server, spec, location, opts, "callHierarchy/incomingCalls", "from")
+
+  defp dispatch(:outgoing_calls, server, spec, location, opts),
+    do: hierarchy_calls(server, spec, location, opts, "callHierarchy/outgoingCalls", "to")
+
+  # `incomingCalls` needs a `CallHierarchyItem`, which only `prepareCallHierarchy`
+  # produces. Making the caller carry a raw protocol item between two calls would put LSP
+  # back into an API whose whole point is not to have it, so the preparation happens here
+  # and the first item is followed. Both requests are separately bounded.
+  defp hierarchy_calls(server, spec, location, opts, method, key) do
+    with {:ok, prepared} <-
+           ask(server, "textDocument/prepareCallHierarchy", position(spec, location), opts) do
+      case prepared |> List.wrap() |> List.first() do
+        nil ->
+          {:ok, %{items: [], truncated: 0}}
+
+        item ->
+          with {:ok, result} <- ask(server, method, %{"item" => item}, opts),
+               do: {:ok, Results.calls(result, spec.root, key, max_results(opts))}
+      end
+    end
+  end
+
+  defp ask(server, method, params, opts) do
+    timeout = Keyword.get(opts, :request_timeout_ms, Config.get(:request_timeout_ms))
+    Server.request(server, method, params, timeout)
+  end
+
+  defp checkout(spec, opts) do
+    LspPool.checkout(pool(opts), spec,
+      wait_ready_ms: Keyword.get(opts, :wait_ready_ms, Config.get(:initialize_timeout_ms))
+    )
+  end
+
+  # A navigation request against a document the server has never seen is answered wrongly
+  # or not at all, so the document is opened first unless the caller says otherwise. An
+  # already-open document is left at its version.
+  defp open_document(spec, opts) do
+    if Keyword.get(opts, :open, true) do
+      with {:ok, _version} <- LspPool.ensure_open(pool(opts), spec), do: :ok
+    else
+      :ok
+    end
+  end
+
+  defp position(spec, location) do
+    spec
+    |> text_document()
+    |> then(&%{"textDocument" => &1})
+    |> Map.put("position", %{
+      "line" => max(Map.get(location, :line, 0), 0),
+      "character" => max(Map.get(location, :character, 0), 0)
+    })
+  end
+
+  defp text_document(spec), do: %{"uri" => Server.uri(spec.path)}
+
+  defp max_results(opts),
+    do: Keyword.get(opts, :max_results, Config.get(:max_results))
+
+  defp known_operation(operation) do
+    if operation in @operations,
+      do: :ok,
+      else: {:error, {:unknown_operation, operation, @operations}}
+  end
 
   defp enabled do
     if Config.enabled?(), do: :ok, else: {:error, :disabled}

@@ -263,9 +263,28 @@ defmodule Ouroboros.CodeIntel.Lsp.Server do
 
   @impl true
   def terminate(_reason, state) do
+    farewell(state)
     kill(state)
     :ok
   end
+
+  # Best effort when the tree comes down rather than the pool asking: both frames go out
+  # before the pipes close, and a server that tracks `shutdown` then exits 0 instead of 1.
+  # Nothing waits for either — `terminate/2` runs inside the supervisor's shutdown budget,
+  # and the OS process is reaped immediately afterwards regardless.
+  defp farewell(%{phase: :stopping}), do: :ok
+
+  defp farewell(%{port: port} = state) when is_port(port) do
+    _ =
+      write(state, [
+        Codec.request(state.next_id, "shutdown", nil),
+        Codec.notification("exit", nil)
+      ])
+
+    :ok
+  end
+
+  defp farewell(_state), do: :ok
 
   ## Frames
 
