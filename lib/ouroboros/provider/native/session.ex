@@ -593,6 +593,11 @@ defmodule Ouroboros.Provider.Native.Session do
 
   # ---------------------------------------------------------------- compaction
 
+  # The thrash latch is deliberately permanent for the *automatic* path. "Stop rather
+  # than loop" means stop: a session whose tail alone fills the window will keep meeting
+  # the threshold on every turn, and re-arming would be the loop the guard exists to
+  # prevent. The operator's own `/compact` is not latched — they were told what happened
+  # and what to change, and overruling them would be a different mistake.
   defp maybe_compact(%{thrashing?: true} = state), do: {:ok, state}
 
   defp maybe_compact(state) do
