@@ -136,6 +136,16 @@ makes retries idempotent, while the returned reference routes over distribution:
 `steer/3`, `respond_approval/3`, and `interrupt/2` route to native Harness
 capabilities when the selected provider transport supports them.
 
+A turn may carry `attachments` — workspace-canonicalised paths, refused if they leave
+the session's workspace — on the two session transports Ouroboros owns. Interactive
+Codex (app-server) sends each `.png`, `.jpg`, `.jpeg`, `.gif`, or `.webp` attachment as
+a `localImage` input item; the app-server protocol has no input item that carries a
+non-image file, so those attachments are *named* rather than sent — they become `@path`
+lines in a trailing text item, which tells the agent where the file is and leaves the
+reading to the agent's own tools. At most 64 attachment items travel with one turn; any
+further ones are counted in that text item rather than dropped in silence. ACP agents
+(opencode, kimi) receive every attachment as a `resource_link` prompt block.
+
 Agent behavior can be assembled from a strict, versioned profile without moving
 execution authority out of Harness:
 

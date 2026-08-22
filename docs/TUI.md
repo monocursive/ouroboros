@@ -808,6 +808,28 @@ authoritative key map.
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:
 
+- **An ACP edit is a `file_change` now, not an opaque provider event.** ACP v1 carries a
+  file edit as a `{"type":"diff","path","oldText","newText"}` block inside a tool call's
+  `content` — its `SessionUpdate` union has no `diff` arm — so the ACP dialect reads those
+  blocks off `tool_call`/`tool_call_update` and emits a `file_change` beside the unchanged
+  tool event, in the item-level `{"changes": [{"path","kind","diff"}], "status"}` shape the
+  transcript already parses. The `diff` is generated here, not by the agent: line-wise from
+  `oldText`/`newText` with three lines of context and `--- a/<path>` / `+++ b/<path>`
+  headers, which is where the client gets the path and the +/- counts. Either side over
+  1 MiB is replaced by those headers plus a single `@@ truncated: N bytes @@` line rather
+  than a megabyte crossing the socket on every replay. A `kind` is `add` when ACP reports a
+  null `oldText`, `delete` on a null `newText`, `update` otherwise.
+- **ACP session modes and slash commands arrive as bounded `provider_event`s the client may
+  render later.** `available_commands_update` becomes
+  `{"kind": "available_commands", "commands": [{"name","description"}, …]}` (names and
+  descriptions only, at most 64, each cut to 200 characters); `current_mode_update` becomes
+  `{"kind": "mode", "mode": <id>}`; the `modes` an agent returns from `session/new` become
+  `{"kind": "modes", "mode": <current id>, "modes": [{"id","name","description"}, …]}`
+  emitted next to the session-ready event. Nothing in the TUI renders these yet — they are
+  visible in `Ctrl-O` event details, and switching a mode still needs `session/set_mode`,
+  which this dialect does not send. `user_message_chunk` stays opaque on purpose: it is the
+  agent echoing the prompt the runtime just sent, and `input_accepted` already carries the
+  authoritative text.
 - **`Enter` alone cannot mean "send".** Typing into an input box and `1`-`7` selecting a
   tab are the same keystrokes, so there is an explicit composer: `i` (or `Enter` on an
   already-open session) opens it, `Enter` sends, `Esc` closes it. Without the mode, the
