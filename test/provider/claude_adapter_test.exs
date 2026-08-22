@@ -1,0 +1,264 @@
+defmodule Ouroboros.Provider.ClaudeAdapterTest do
+  @moduledoc """
+  What Claude Code is actually launched with, read off the process spec.
+
+  The adapter's whole job is two elements of argv and one JSON blob, so these tests take
+  the same seam `Jido.Harness.Adapters.CLIStream` offers every adapter — a
+  `process_manager` in the run context — and assert on the spec that would have been
+  spawned. Nothing here starts a `claude`.
+
+  The property under all of it: the bridge is present exactly when a person could be
+  asked, and the argv is byte-identical to the pinned adapter's everywhere else.
+  """
+
+  use ExUnit.Case, async: false
+
+  # The unbridged paths log the warning they are supposed to log; one of the tests below
+  # reads it back deliberately.
+  @moduletag :capture_log
+
+  alias Jido.Harness.RunRequest
+  alias Ouroboros.Provider
+  alias Ouroboros.Provider.ClaudeAdapter
+
+  defmodule SpecCapture do
+    @moduledoc false
+
+    def start_owned_process(spec, owner) do
+      send(owner, {:claude_process_spec, spec})
+      {:ok, "claude-process"}
+    end
+
+    def stream_process("claude-process"), do: {:ok, []}
+  end
+
+  setup do
+    previous_binary = Application.get_env(:ouroboros, :ouro_binary)
+    previous_gateway = Application.get_env(:ouroboros, :gateway)
+
+    on_exit(fn ->
+      restore(:ouro_binary, previous_binary)
+      restore(:gateway, previous_gateway)
+    end)
+
+    :ok
+  end
+
+  describe "with no ouro binary on the node" do
+    test "the argv is the pinned adapter's, to the element" do
+      argv = argv_for(interactive_request(approval_mode: :prompt))
+
+      refute "--permission-prompt-tool" in argv
+      refute "--mcp-config" in argv
+      assert argv == pinned_argv(interactive_request(approval_mode: :prompt))
+    end
+
+    test "the transport declares no approvals and the X1 refusal still stands" do
+      assert %{approvals: false} = Provider.session_capabilities(:claude, :stream_json_resume)
+
+      assert {:error, {:unsupported_approval_mode, refusal}} =
+               Provider.safety_options(:claude, [approval_mode: :prompt], {:interactive, nil})
+
+      assert refusal.reason == :no_approval_channel
+      assert refusal.message =~ "declares no approvals channel"
+    end
+  end
+
+  describe "with an ouro binary and a gateway" do
+    setup :bridge_available
+
+    test "an interactive session at :prompt is launched with the permission prompt tool",
+         %{binary: binary, token_file: token_file} do
+      argv = argv_for(interactive_request(approval_mode: :prompt))
+
+      assert flag_value(argv, "--permission-prompt-tool") == "mcp__ouroboros__approve"
+      assert flag_value(argv, "--permission-mode") == "default"
+
+      # The flag comes before `--`, which is what separates options from the prompt.
+      assert Enum.find_index(argv, &(&1 == "--permission-prompt-tool")) <
+               Enum.find_index(argv, &(&1 == "--"))
+
+      assert List.last(argv) == "do the thing"
+
+      assert %{"mcpServers" => %{"ouroboros" => server}} =
+               argv |> flag_value("--mcp-config") |> Jason.decode!()
+
+      assert server["command"] == binary
+      assert server["args"] == ["mcp-serve"]
+
+      # The path to the credential, never the credential — the same posture every other
+      # client already has.
+      assert server["env"] == %{
+               "OUROBOROS_GATEWAY_ADDR" => "127.0.0.1:4599",
+               "OUROBOROS_GATEWAY_TOKEN_FILE" => token_file,
+               "OUROBOROS_SESSION_ID" => "session-1",
+               "OUROBOROS_SESSION_NODE" => "ouroboros@somewhere"
+             }
+
+      refute Enum.any?(argv, &String.contains?(&1, String.duplicate("t", 40)))
+    end
+
+    test "the three other approval modes are left exactly as they were" do
+      for mode <- [:default, :auto_edit, :auto_approve] do
+        argv = argv_for(interactive_request(approval_mode: mode))
+
+        refute "--permission-prompt-tool" in argv, "#{mode} was bridged"
+        assert argv == pinned_argv(interactive_request(approval_mode: mode))
+      end
+    end
+
+    test "the coding plane is untouched: there is no human loop there to ask" do
+      argv =
+        argv_for(
+          request(
+            approval_mode: :prompt,
+            metadata: %{ouroboros_task_id: "task-1", ouroboros_node: "ouroboros@somewhere"}
+          )
+        )
+
+      refute "--permission-prompt-tool" in argv
+      refute "--mcp-config" in argv
+    end
+
+    test "a run with no Ouroboros metadata at all is not bridged" do
+      argv = argv_for(request(approval_mode: :prompt, metadata: %{}))
+
+      refute "--permission-prompt-tool" in argv
+    end
+
+    test "the transport declares native approvals, which lifts the X1 refusal" do
+      assert %{approvals: :native} = Provider.session_capabilities(:claude, :stream_json_resume)
+
+      assert {:ok, taken} =
+               Provider.safety_options(:claude, [approval_mode: :prompt], {:interactive, nil})
+
+      assert Keyword.get(taken, :approval_mode) == :prompt
+    end
+
+    test "a node-level MCP config that is a map merges; a string is refused out loud" do
+      argv =
+        argv_for(
+          interactive_request(
+            approval_mode: :prompt,
+            mcp_config: %{"docs" => %{"command" => "docs-mcp"}}
+          )
+        )
+
+      assert %{"mcpServers" => servers} = argv |> flag_value("--mcp-config") |> Jason.decode!()
+      assert Map.keys(servers) |> Enum.sort() == ["docs", "ouroboros"]
+      assert servers["docs"] == %{"command" => "docs-mcp"}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          argv =
+            argv_for(interactive_request(approval_mode: :prompt, mcp_config: ~s({"docs": {}})))
+
+          refute "--permission-prompt-tool" in argv
+        end)
+
+      assert log =~ "unmergeable_mcp_config"
+      assert log =~ "denied by claude --print without asking"
+    end
+
+    test "the composed server definition is readable without starting a provider",
+         %{binary: binary} do
+      assert %{"command" => ^binary, "args" => ["mcp-serve"], "env" => env} =
+               ClaudeAdapter.mcp_server("session-2", "ouroboros@elsewhere")
+
+      assert env["OUROBOROS_SESSION_ID"] == "session-2"
+      assert env["OUROBOROS_SESSION_NODE"] == "ouroboros@elsewhere"
+      assert ClaudeAdapter.prompt_tool() == "mcp__ouroboros__approve"
+    end
+  end
+
+  test "a binary that is not an executable regular file is not a binary" do
+    path = Path.join(System.tmp_dir!(), "ouroboros-claude-adapter-not-executable")
+    File.write!(path, "")
+    File.chmod!(path, 0o600)
+    on_exit(fn -> File.rm(path) end)
+
+    Application.put_env(:ouroboros, :ouro_binary, path)
+    assert %{approvals: false} = Provider.session_capabilities(:claude, :stream_json_resume)
+
+    Application.put_env(:ouroboros, :ouro_binary, "relative/ouro")
+    assert %{approvals: false} = Provider.session_capabilities(:claude, :stream_json_resume)
+  end
+
+  defp bridge_available(_context) do
+    binary = Path.join(System.tmp_dir!(), "ouroboros-claude-adapter-test-ouro")
+    File.write!(binary, "#!/bin/sh\nexit 0\n")
+    File.chmod!(binary, 0o700)
+
+    token_file = Path.join(System.tmp_dir!(), "ouroboros-claude-adapter-test.token")
+    File.write!(token_file, String.duplicate("t", 40))
+    File.chmod!(token_file, 0o600)
+
+    Application.put_env(:ouroboros, :ouro_binary, binary)
+
+    Application.put_env(:ouroboros, :gateway,
+      token_file: token_file,
+      port: 4599,
+      bind: "127.0.0.1",
+      data_dir: System.tmp_dir!()
+    )
+
+    on_exit(fn ->
+      File.rm(binary)
+      File.rm(token_file)
+    end)
+
+    {:ok, binary: binary, token_file: token_file}
+  end
+
+  defp interactive_request(opts) do
+    request(
+      Keyword.put_new(opts, :metadata, %{
+        ouroboros_session_id: "session-1",
+        ouroboros_node: "ouroboros@somewhere"
+      })
+    )
+  end
+
+  defp request(opts) do
+    RunRequest.new!([prompt: "do the thing", cwd: File.cwd!(), model: "sonnet", env: %{}] ++ opts)
+  end
+
+  defp argv_for(request) do
+    assert {:ok, stream} = ClaudeAdapter.run(request, context())
+    assert [] = Enum.to_list(stream)
+    assert_receive {:claude_process_spec, %{argv: argv}}
+
+    argv
+  end
+
+  # The pinned adapter, run through the same seam, so "unchanged" is an equality rather
+  # than a list of flags somebody remembered to check.
+  defp pinned_argv(request) do
+    assert {:ok, stream} = Jido.Harness.Adapters.Claude.run(request, context())
+    assert [] = Enum.to_list(stream)
+    assert_receive {:claude_process_spec, %{argv: argv}}
+
+    argv
+  end
+
+  defp context do
+    %{
+      run_id: "run-claude-adapter",
+      provider: :claude,
+      config: %{},
+      telemetry_context: %{},
+      process_manager: SpecCapture,
+      run_owner: self()
+    }
+  end
+
+  defp flag_value(argv, flag) do
+    case Enum.find_index(argv, &(&1 == flag)) do
+      nil -> nil
+      index -> Enum.at(argv, index + 1)
+    end
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+end
