@@ -98,8 +98,14 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
       refute Enum.any?(argv, &String.contains?(&1, String.duplicate("t", 40)))
     end
 
-    test "the three other approval modes are left exactly as they were" do
-      for mode <- [:default, :auto_edit, :auto_approve] do
+    test ":default is bridged like :prompt, because Claude's own default mode asks" do
+      argv = argv_for(interactive_request(approval_mode: :default))
+      assert "--permission-prompt-tool" in argv
+      assert "mcp__ouroboros__approve" in argv
+    end
+
+    test "the two auto modes are left exactly as they were" do
+      for mode <- [:auto_edit, :auto_approve] do
         argv = argv_for(interactive_request(approval_mode: mode))
 
         refute "--permission-prompt-tool" in argv, "#{mode} was bridged"

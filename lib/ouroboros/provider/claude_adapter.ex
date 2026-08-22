@@ -33,9 +33,11 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       `ouroboros_task_id` instead and is left exactly as it was. There is no human loop
       on the coding plane — a `coding.start` is a caller handing over a whole objective —
       so a permission prompt there would block on somebody who is not watching.
-    * **`approval_mode: :prompt` only.** `:default`, `:auto_edit`, and `:auto_approve`
+    * **`approval_mode: :prompt` and `:default`.** `:auto_edit` and `:auto_approve`
       produce byte-identical argv to the pinned adapter's. `:prompt` is the mode that
-      promises a person is asked, so it is the mode that gets one.
+      promises a person is asked, so it is the mode that gets one; `:default` is Claude's
+      own default permission mode, which asks too — and under `--print` can only ask
+      through this tool, so leaving it unbridged would be the silent denial again.
     * **Only when there is a binary to run.** `OUROBOROS_PROCESS_ID_HELPER` names the
       product binary when `ouro` spawned this runtime (README, "What a spawned runtime
       inherits"); `config :ouroboros, :ouro_binary` names it for a runtime that was
@@ -168,7 +170,7 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   # Dispatch
   # ---------------------------------------------------------------------------
 
-  defp bridge(%RunRequest{approval_mode: :prompt} = request) do
+  defp bridge(%RunRequest{approval_mode: mode} = request) when mode in [:prompt, :default] do
     case session_id(request) do
       nil -> nil
       session_id -> interactive_bridge(request, session_id)

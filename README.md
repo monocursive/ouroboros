@@ -614,9 +614,9 @@ they do in a shell, and `ouro` scrolls by keyboard.
   transport declares `approvals: false` and `interactive.start` refuses `:prompt` by
   name, saying which modes do work (`:default`, `:auto_edit`, `:auto_approve`). Gemini,
   Grok, and Z.ai are still refused unconditionally: nothing has taught them to ask.
-- **What the bridge does not cover.** `:default` on Claude still means the CLI's own
-  behaviour, which for `claude --print` is to deny a permission-needing tool without
-  asking; the bridge is attached only where `:prompt` promised a person. A node-level MCP
+- **What the bridge does not cover.** The bridge is attached at `:prompt` and at
+  `:default` — Claude's own default mode asks too, and under `--print` it can only ask
+  through this tool — never at `:auto_edit` or `:auto_approve`. A node-level MCP
   configuration supplied as a *string* — a JSON blob or a file path — cannot be merged
   with the bridge's own server definition without this runtime rewriting somebody else's
   configuration, so in that case the bridge is not attached and a warning says so; a map
