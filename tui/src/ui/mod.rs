@@ -55,6 +55,7 @@ pub mod explorer;
 pub mod export;
 pub mod logo;
 pub mod logs;
+pub mod markdown;
 pub mod notify;
 pub mod sessions;
 pub mod statusline;

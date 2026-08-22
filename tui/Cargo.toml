@@ -28,6 +28,12 @@ crossterm = "0.29"
 dirs = "6"
 libc = "0.2"
 ratatui = "0.30"
+# The Markdown parser behind agent prose. `default-features = false` drops the crate's
+# `html` renderer and its `getopts` CLI: this client never emits HTML and never reads a
+# file through it, so what is left is a pull parser over a `&str` — no I/O, no network,
+# and nothing that allocates the whole document at once. 0.13 is the first line that
+# tracks CommonMark 0.31.2, which is the spec the agents on the other end write to.
+pulldown-cmark = { version = "0.13", default-features = false }
 rand = { version = "0.9", default-features = false, features = ["os_rng"] }
 rcgen = { version = "0.13.2", features = ["x509-parser", "zeroize"] }
 ring = "0.17"

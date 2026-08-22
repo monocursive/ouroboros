@@ -45,6 +45,62 @@ pub fn quiet() -> Style {
     Style::default().fg(MUTED).add_modifier(Modifier::DIM)
 }
 
+/// A Markdown heading, by level.
+///
+/// Never a banner. A terminal heading is a line of ordinary text that reads heavier than
+/// the lines around it, so the six levels are separated by weight and channel rather than
+/// by size: the first two carry the system colour that already means "the machine is
+/// talking", the middle two are weight alone, and the deepest two fade toward the muted
+/// channel the rest of the transcript uses for secondary matter. Levels above six do not
+/// exist in CommonMark; anything out of range renders as the deepest one.
+pub fn markdown_heading(level: u8) -> Style {
+    match level {
+        1 => Style::default()
+            .fg(SYSTEM)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        2 => Style::default().fg(SYSTEM).add_modifier(Modifier::BOLD),
+        3 => Style::default().add_modifier(Modifier::BOLD),
+        4 => Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+        _ => Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// Inline code, and the backticks that still delimit it.
+pub fn markdown_code() -> Style {
+    Style::default().fg(SYSTEM)
+}
+
+/// Link text. Underlined rather than coloured: the action channel is reserved for things
+/// a keystroke acts on, and a URL in a transcript is not one of them.
+pub fn markdown_link() -> Style {
+    Style::default().add_modifier(Modifier::UNDERLINED)
+}
+
+/// The `(url)` that follows link text, so the destination is readable and copyable
+/// without being mistaken for the sentence it sits in.
+pub fn markdown_url() -> Style {
+    Style::default().fg(MUTED)
+}
+
+/// The bar down the left of a block quote, and the rule of a horizontal break.
+pub fn markdown_rule() -> Style {
+    Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+}
+
+/// A table's header row: the only row in a table that is not data.
+pub fn markdown_table_header() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// A task-list checkbox. Done is the good channel because it is a completed thing;
+/// pending is muted because an unticked box is not a warning.
+pub fn markdown_task(done: bool) -> Style {
+    match done {
+        true => Style::default().fg(GOOD),
+        false => Style::default().fg(MUTED),
+    }
+}
+
 /// The cursor row, as an inversion rather than a colour.
 ///
 /// White-on-blue is a colour scheme this client does not own: it is illegible on a light
