@@ -29,6 +29,8 @@ defmodule Ouroboros.Interactive.State do
                 :harness_session_id,
                 :provider_session_id,
                 cursor: 0,
+                sequence_offset: 0,
+                resumes: 0,
                 event_floor: 0,
                 event_limit: 10_000,
                 events: [],
@@ -86,6 +88,8 @@ defmodule Ouroboros.Interactive.State do
           harness_session_id: String.t() | nil,
           provider_session_id: String.t() | nil,
           cursor: non_neg_integer(),
+          sequence_offset: non_neg_integer(),
+          resumes: non_neg_integer(),
           event_floor: non_neg_integer(),
           event_limit: pos_integer(),
           events: [Event.t()],
@@ -168,9 +172,88 @@ defmodule Ouroboros.Interactive.State do
       cwd: state.workspace,
       metadata: metadata
     })
+    |> put_provider_session_id(state.provider_session_id)
     |> reject_nil_values()
     |> Ouroboros.Provider.apply_runtime_provider_policy(state.provider)
     |> Ouroboros.Provider.apply_execution_directories(state.provider, :session)
+  end
+
+  # The provider session id a session learned from its own events is the one that can
+  # resume it, and it lives on the struct rather than in the start options. A request
+  # rebuilt to resume therefore has to carry it explicitly; a session that never learned
+  # one keeps whatever the caller stated at start, which is nothing in the normal case.
+  defp put_provider_session_id(request, id) when is_binary(id) and id != "",
+    do: Map.put(request, :provider_session_id, id)
+
+  defp put_provider_session_id(request, _id), do: request
+
+  @doc """
+  Returns the durable offset between this session's event sequence and its Harness one.
+
+  Ouroboros event sequences are strictly monotonic for the life of a session, and a
+  resumed session's Harness log starts counting from one again. The offset is what keeps
+  those two number spaces reconcilable: `ouroboros = harness + offset`. Zero until the
+  first resume, and read defensively so a checkpoint written before this field existed
+  loads as the session it was.
+  """
+  @spec sequence_offset(t()) :: non_neg_integer()
+  def sequence_offset(%__MODULE__{} = state), do: Map.get(state, :sequence_offset, 0) || 0
+
+  @doc "Returns how many times this session has been resumed onto a new Harness session."
+  @spec resumes(t()) :: non_neg_integer()
+  def resumes(%__MODULE__{} = state), do: Map.get(state, :resumes, 0) || 0
+
+  @doc """
+  Returns whether this session could be resumed onto a new Harness session, or why not.
+
+  Two facts have to hold: the session knows the provider's own session id, and the
+  transport this session will select can carry it. The second is asked of the transport
+  rather than the adapter because that is the list the Harness session manager validates
+  a start request against — a transport that does not declare `:provider_session_id`
+  refuses the request, and refusing here first keeps `:lost` reasons honest instead of
+  turning every unsupported transport into a start failure.
+
+  This deliberately does not promise that the *provider* still has the session: only the
+  provider can answer that, and it answers by accepting or refusing the resume.
+  """
+  @spec resume_support(t()) :: :ok | {:error, term()}
+  def resume_support(%__MODULE__{provider_session_id: id}) when not is_binary(id),
+    do: {:error, :no_provider_session_id}
+
+  def resume_support(%__MODULE__{} = state) do
+    with {:ok, spec} <- Jido.Harness.Registry.spec(state.provider),
+         true <- spec.capabilities.resume? || {:error, :provider_does_not_resume},
+         {:ok, options} <- session_options(spec, Map.get(state.options, :transport)) do
+      if :provider_session_id in options,
+        do: :ok,
+        else: {:error, :transport_cannot_carry_provider_session_id}
+    else
+      {:error, _reason} = error -> error
+      :error -> {:error, :unknown_session_transport}
+    end
+  end
+
+  def resume_support(_state), do: {:error, :invalid_session_state}
+
+  # Mirrors the transport resolution `Ouroboros.Provider` performs for safety options.
+  # It is asked here for a different question — can this transport carry a resume id —
+  # and answering it there would make one private helper serve two unrelated refusals.
+  defp session_options(spec, transport) do
+    selected = transport || spec.default_session_transport || first_transport(spec)
+
+    case Enum.find(spec.session_transports, &(&1.name == selected)) do
+      %{session_options: :adapter} -> {:ok, spec.normalized_options}
+      %{session_options: options} when is_list(options) -> {:ok, options}
+      nil when selected == :managed -> {:ok, spec.normalized_options}
+      _unresolvable -> :error
+    end
+  end
+
+  defp first_transport(spec) do
+    case spec.session_transports do
+      [transport | _rest] -> transport.name
+      [] -> :managed
+    end
   end
 
   @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
@@ -339,6 +422,9 @@ defmodule Ouroboros.Interactive.State do
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and
       is_integer(state.cursor) and state.cursor >= 0 and
+      is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
+      sequence_offset(state) <= state.cursor and
+      is_integer(resumes(state)) and resumes(state) >= 0 and
       is_integer(state.event_floor) and state.event_floor >= 0 and
       state.event_floor <= state.cursor and
       is_integer(state.event_limit) and state.event_limit > 0 and state.event_limit <= 100_000 and
