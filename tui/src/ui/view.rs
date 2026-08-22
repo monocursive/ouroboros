@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
+use super::access;
 use super::app::{
     provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
     ApprovalRule, CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport,
@@ -66,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
-        .borders(Borders::BOTTOM)
+        .borders(access::borders(Borders::BOTTOM))
         .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -803,7 +804,7 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
 
     let rows = state.rows();
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
             Span::styled(" /diff ", theme::heading()),
@@ -950,7 +951,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
             Span::styled(" ctrl+p commands", Style::default().fg(theme::muted())),
@@ -988,7 +989,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
             }),
             Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ]))
-        .block(Block::default().borders(Borders::ALL)),
+        .block(Block::default().borders(access::borders(Borders::ALL))),
         rows[1],
     );
 
@@ -1169,7 +1170,7 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(" ChatGPT account ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -1189,10 +1190,12 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     let popup = centered(area, 62, height);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        " switch session · enter open · x end ",
-        theme::heading(),
-    ));
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .title(Span::styled(
+            " switch session · enter open · x end ",
+            theme::heading(),
+        ));
 
     if sessions.is_empty() {
         frame.render_widget(
@@ -1337,7 +1340,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(" settings ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -1474,7 +1477,7 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(" machines ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -2054,7 +2057,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(" new session ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -2524,7 +2527,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::warn()))
         .title(Span::styled(heading, theme::heading()));
     let inner_area = block.inner(popup);
@@ -2539,7 +2542,8 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 
     let items: Vec<ListItem> = answers
         .into_iter()
-        .map(|label| ListItem::new(Line::from(label)))
+        .enumerate()
+        .map(|(index, label)| ListItem::new(Line::from(access::numbered(index, &label))))
         .collect();
     let mut state = ListState::default().with_selected(Some(modal.choice));
 
@@ -2806,7 +2810,7 @@ fn chooser(
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(format!(" {title} "), theme::heading()));
 
     let inner = block.inner(popup);
@@ -2826,7 +2830,8 @@ fn chooser(
 
     let items: Vec<ListItem> = options
         .iter()
-        .map(|label| ListItem::new(Line::from(label.clone())))
+        .enumerate()
+        .map(|(index, label)| ListItem::new(Line::from(access::numbered(index, label))))
         .collect();
 
     let mut state = ListState::default().with_selected(Some(choice));
@@ -2844,7 +2849,7 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(format!(" {label} "), theme::heading()));
 
     let inner = block.inner(popup);
@@ -2926,7 +2931,7 @@ fn backtrack(
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(" go back to a message ", theme::heading()));
 
@@ -3073,7 +3078,7 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(" ctrl+x ", theme::heading()));
     let inner = block.inner(popup);
@@ -3104,7 +3109,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .title(Span::styled(" hotkeys ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -3240,7 +3245,7 @@ pub fn panel_title(name: &str, pending: bool, error: Option<&String>, tick: u64)
 /// The block every pane uses, so focus is visible in exactly one way.
 pub fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
     Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(if focused {
             Style::default().fg(theme::accent())
         } else {

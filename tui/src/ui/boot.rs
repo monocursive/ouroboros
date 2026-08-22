@@ -43,6 +43,7 @@ use ratatui::Frame;
 
 use crate::runtime::{LogRing, Stream};
 
+use super::access;
 use super::theme;
 use super::Screen;
 
@@ -485,14 +486,16 @@ pub fn draw(frame: &mut Frame, progress: &BootProgress, ticks: u64) {
 }
 
 fn phases(frame: &mut Frame, area: Rect, progress: &BootProgress, ticks: u64) {
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        if progress.failure().is_some() {
-            " ouroboros — this runtime did not start "
-        } else {
-            " ouroboros "
-        },
-        theme::heading(),
-    ));
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .title(Span::styled(
+            if progress.failure().is_some() {
+                " ouroboros — this runtime did not start "
+            } else {
+                " ouroboros "
+            },
+            theme::heading(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -560,7 +563,7 @@ fn output(frame: &mut Frame, area: Rect, progress: &BootProgress) {
     }
 
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(" runtime output ", theme::heading()));
 

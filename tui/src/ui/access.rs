@@ -174,6 +174,35 @@ impl Label {
     }
 }
 
+/// Which edges a block actually draws.
+///
+/// Screen-reader mode takes them all away: a rule character is a cell with no word in it,
+/// and a reader that speaks `─────────────` before every panel is a reader nobody can use.
+/// The block's *title* survives, because that is the label the box was standing in for.
+///
+/// Every panel in this client sizes its contents from `Block::inner`, which returns the
+/// whole area when there are no borders — so dropping them can only ever give a panel more
+/// room, never less.
+pub fn borders(wanted: ratatui::widgets::Borders) -> ratatui::widgets::Borders {
+    match screen_reader() {
+        true => ratatui::widgets::Borders::NONE,
+        false => wanted,
+    }
+}
+
+/// A label with the punctuation this client writes but a screen reader cannot say.
+///
+/// The separator throughout `ouro` is ` · `, which reads as "middle dot" or as nothing at
+/// all depending on the reader, and the truncation glyph is `…`. Both are *this client's*
+/// punctuation, so both are this client's to spell differently — unlike the text an agent
+/// wrote, which is never rewritten.
+pub fn speakable(text: &str) -> String {
+    text.replace(" · ", ", ")
+        .replace('·', ",")
+        .replace('…', "...")
+        .replace(['—', '–'], "-")
+}
+
 /// A truncation marker, spelled out.
 ///
 /// The pane's own marker is `… +12 lines · ctrl+o`, which is three pieces of shorthand and
@@ -201,11 +230,23 @@ pub fn row_for_digit(character: char) -> Option<usize> {
         .map(|digit| digit as usize - 1)
 }
 
-/// A menu row's label with its number in front, or unchanged past the ninth.
-pub fn numbered(index: usize, text: &str) -> String {
+/// A menu row's label with its number in front, or aligned under one past the ninth.
+pub fn number_row(index: usize, text: &str) -> String {
     match row_number(index) {
         Some(number) => format!("{number}. {text}"),
         None => format!("   {text}"),
+    }
+}
+
+/// [`number_row`], but only where a number means something.
+///
+/// Outside screen-reader mode the row is unchanged: `1.` through `9.` would be claiming a
+/// binding this client does not have, because those are ordinary characters everywhere
+/// else and taking them would be a keybinding nobody asked for.
+pub fn numbered(index: usize, text: &str) -> String {
+    match screen_reader() {
+        true => number_row(index, text),
+        false => text.to_string(),
     }
 }
 
@@ -293,6 +334,19 @@ mod tests {
     }
 
     #[test]
+    fn this_clients_own_punctuation_is_spelled_the_way_it_is_said() {
+        assert_eq!(
+            speakable("Bash · completed · 1.2s"),
+            "Bash, completed, 1.2s"
+        );
+        assert_eq!(speakable("… +12 lines"), "... +12 lines");
+        assert_eq!(speakable("one — two"), "one - two");
+        // An agent's own words are not rewritten: only the separators this client writes
+        // are ever touched, and a sentence with none of them comes back unchanged.
+        assert_eq!(speakable("the ratio is 3:1"), "the ratio is 3:1");
+    }
+
+    #[test]
     fn every_label_is_a_word_with_a_colon() {
         for label in Label::ALL {
             let text = label.as_str();
@@ -325,9 +379,11 @@ mod tests {
 
     #[test]
     fn rows_are_numbered_only_while_a_digit_can_select_them() {
-        assert_eq!(numbered(0, "Yes"), "1. Yes");
-        assert_eq!(numbered(8, "Ninth"), "9. Ninth");
-        assert_eq!(numbered(9, "Tenth"), "   Tenth");
+        assert_eq!(number_row(0, "Yes"), "1. Yes");
+        assert_eq!(number_row(8, "Ninth"), "9. Ninth");
+        assert_eq!(number_row(9, "Tenth"), "   Tenth");
+        // Off, nothing is numbered: a digit selects nothing outside the mode.
+        assert_eq!(numbered(0, "Yes"), "Yes");
 
         assert_eq!(row_number(0), Some(1));
         assert_eq!(row_number(9), None);

@@ -16,6 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
 
+use super::access;
 use super::app::{App, Composer, ComposerVerb, Connection};
 use super::details;
 use super::editor::{CompletionKind, Editor};
@@ -103,7 +104,7 @@ fn primary(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
 
 fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
-        .borders(Borders::RIGHT)
+        .borders(access::borders(Borders::RIGHT))
         .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -207,7 +208,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             break;
         }
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(access::borders(Borders::ALL))
             .border_style(border_style);
         let content = block.inner(card);
         frame.render_widget(block, card);
@@ -269,7 +270,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(theme::good())
     };
     let fleet_block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             format!(
@@ -345,7 +346,7 @@ fn session_signal(status: &SessionStatus) -> (&'static str, Style) {
 
 fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
-        .borders(Borders::LEFT)
+        .borders(access::borders(Borders::LEFT))
         .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -566,7 +567,7 @@ fn render_context_panel(
     lines: Vec<Line<'static>>,
 ) {
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             title,
@@ -677,7 +678,7 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
     let runtime = app.sessions.open_runtime_queue();
 
     let block = Block::default()
-        .borders(Borders::TOP)
+        .borders(access::borders(Borders::TOP))
         .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -813,7 +814,7 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let block = Block::default()
-        .borders(Borders::TOP)
+        .borders(access::borders(Borders::TOP))
         .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1498,6 +1499,12 @@ fn separate(lines: &mut Vec<Line<'static>>) {
 }
 
 fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
+    // A rule is a row of cells with no word in it. In screen-reader mode the sentence is
+    // the whole divider, and the U+2500s go.
+    if access::screen_reader() {
+        return Line::from(Span::styled(text.to_string(), Style::default().fg(colour)));
+    }
+
     let text = super::tree::truncate(text, width.saturating_sub(8));
     let rule = width.saturating_sub(text.width() + 6);
 
@@ -1548,7 +1555,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         ])
     };
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(if active.is_some() {
             theme::action_colour()
         } else {
@@ -1686,7 +1693,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         Style::default().fg(theme::warn())
     };
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(if ready {
             theme::action_colour()
         } else {

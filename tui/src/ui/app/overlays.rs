@@ -648,6 +648,16 @@ impl App {
                     *choice = (*choice + 1).min(options.len().saturating_sub(1))
                 }
                 KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                // A10: a numbered menu is only a numbered menu if the number selects.
+                // Screen-reader mode only, because `1` through `9` are ordinary characters
+                // everywhere else and taking them would be a keybinding nobody asked for.
+                KeyCode::Char(digit)
+                    if super::super::access::screen_reader()
+                        && super::super::access::row_for_digit(digit)
+                            .is_some_and(|row| row < options.len()) =>
+                {
+                    *choice = super::super::access::row_for_digit(digit).expect("a digit row");
+                }
                 KeyCode::Enter => {
                     let call = options.get(*choice).and_then(|(_label, call)| call.clone());
                     self.overlay = None;
@@ -676,6 +686,14 @@ impl App {
                     KeyCode::Esc => self.overlay = None,
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(rows - 1),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    // A10, as above: the number on the row is the key that picks it.
+                    KeyCode::Char(digit)
+                        if super::super::access::screen_reader()
+                            && super::super::access::row_for_digit(digit)
+                                .is_some_and(|row| row < rows) =>
+                    {
+                        *choice = super::super::access::row_for_digit(digit).expect("a digit row");
+                    }
                     // Claude Code's `Ctrl+O`, inside the modal: the diff at full retained
                     // length instead of the rows the popup could spare for it.
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
