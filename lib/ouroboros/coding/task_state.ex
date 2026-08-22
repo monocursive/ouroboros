@@ -13,7 +13,8 @@ defmodule Ouroboros.Coding.TaskState do
     :provider,
     :event_limit,
     :origin_digest,
-    :worktree
+    :worktree,
+    :parent
   ]
   @request_options [
     :model,
@@ -116,6 +117,11 @@ defmodule Ouroboros.Coding.TaskState do
                 # never the same value.
                 worktree_requested: false,
                 worktree: nil,
+                # G1. Which conversation asked for this task, when one did. Durable and
+                # immutable: a task adopted under an id that already belongs to a
+                # different parent is a different request, so this is in the idempotency
+                # fingerprint alongside the objective and the workspace.
+                parent: nil,
                 harness_run_id: nil,
                 provider_session_id: nil,
                 cursor: 0,
@@ -129,6 +135,15 @@ defmodule Ouroboros.Coding.TaskState do
                 runtime_snapshot: nil,
                 options: %{}
               ]
+
+  @typedoc """
+  The conversation a delegated task belongs to.
+
+  A plane and an id, and nothing else: the parent is addressed by the same pair every
+  other cross-plane reference in this runtime uses, and carrying anything more would put
+  one plane's projection inside the other's checkpoint.
+  """
+  @type parent :: %{plane: :interactive | :coding, id: String.t()}
 
   @type status :: :starting | :running | :completed | :failed | :cancelled | :lost
   @type t :: %__MODULE__{
@@ -145,6 +160,7 @@ defmodule Ouroboros.Coding.TaskState do
           workspace_lease_id: String.t() | nil,
           worktree_requested: boolean(),
           worktree: map() | nil,
+          parent: parent() | nil,
           harness_run_id: String.t() | nil,
           provider_session_id: String.t() | nil,
           cursor: non_neg_integer(),
@@ -184,6 +200,7 @@ defmodule Ouroboros.Coding.TaskState do
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
     worktree = Keyword.get(opts, :worktree, false)
+    parent = Keyword.get(opts, :parent)
     safety = Provider.safety_options(provider, opts, plane)
     assembly = assemble_prompt_options(Map.new(opts))
 
@@ -211,6 +228,9 @@ defmodule Ouroboros.Coding.TaskState do
 
       not is_boolean(worktree) ->
         {:error, {:invalid_worktree, worktree}}
+
+      not valid_parent?(parent) ->
+        {:error, {:invalid_parent, parent}}
 
       inline_environment?(opts) ->
         {:error, :inline_environment_not_persisted}
@@ -270,6 +290,7 @@ defmodule Ouroboros.Coding.TaskState do
            workspace_mode: workspace_mode,
            origin_digest: origin_digest,
            worktree_requested: worktree,
+           parent: parent,
            event_limit: Keyword.get(opts, :event_limit, 10_000),
            prompt_trace: Assembler.trace(prompt_assembly),
            runtime_snapshot: capture_runtime(options),
@@ -427,6 +448,17 @@ defmodule Ouroboros.Coding.TaskState do
   defp default_workspace_mode(_sandbox_mode), do: :exclusive
 
   defp valid_workspace_mode?(mode), do: mode in [:shared_read, :exclusive]
+
+  # Shape only, and both halves required. A parent is a durable claim that some other
+  # record exists; this layer cannot check that it does, and validating the shape is the
+  # part it can honestly do.
+  defp valid_parent?(nil), do: true
+
+  defp valid_parent?(%{plane: plane, id: id} = parent)
+       when plane in [:interactive, :coding] and is_binary(id),
+       do: String.trim(id) != "" and Enum.sort(Map.keys(parent)) == [:id, :plane]
+
+  defp valid_parent?(_parent), do: false
 
   defp valid_origin_digest?(nil), do: true
 

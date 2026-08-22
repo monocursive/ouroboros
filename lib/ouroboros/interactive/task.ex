@@ -10,6 +10,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Provider
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Session, as: NativeSession
+  alias Ouroboros.Team
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Exec
@@ -36,6 +37,11 @@ defmodule Ouroboros.Interactive.Task do
   # Three, and only their excerpts: the model is being told what the person just did, not
   # given a second transcript to read.
   @max_exposed_operator_commands 3
+
+  # G1. An objective an operator typed into a composer, bounded where it is accepted. It
+  # becomes a coding task's durable objective, and the coding plane has its own bound;
+  # this one is smaller because it is a sentence, not a document.
+  @max_delegation_objective_bytes 8_192
 
   # C2 — external approvals. One session may hold at most this many unanswered questions
   # at once; the next is denied rather than queued, because a provider that can ask nine
@@ -320,6 +326,26 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, :ok, settle_operator_shell(runtime, effect_id, outcome)}
   end
 
+  # G1. Split for the same reason the shell verb is: `Team.add_worker/3` and
+  # `Team.delegate/4` bound themselves at sixty seconds, and a conversation that answered
+  # nothing for a minute because it had asked a team a question would be a worse bargain
+  # than the delegation is worth. This call decides and mints; the caller does the team
+  # work; `{:delegation_started, …}` brings the result back.
+  def handle_call({:delegate_plan, objective, opts}, _from, runtime) do
+    {:reply, delegate_plan(runtime, objective, opts), runtime}
+  end
+
+  def handle_call({:delegation_started, record}, _from, runtime) do
+    case record_delegation(runtime, record) do
+      {:ok, runtime} -> {:reply, {:ok, Map.take(record, [:id, :task_id, :task_node])}, runtime}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
+  def handle_call(:delegations, _from, runtime) do
+    {:reply, {:ok, State.delegations(runtime.session)}, runtime}
+  end
+
   # Same three-step shape as a fork, and for the same reason: this coordinator writes the
   # packet and names the child, and `Ouroboros.InteractiveSession.handoff/3` starts the
   # child outside this process so a parent is never blocked behind provider readiness it
@@ -415,7 +441,16 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call(_message, _from, runtime),
     do: {:reply, {:error, :invalid_session_operation}, runtime}
 
+  # G1's other direction: the team learned a delegated task reached a terminal status and
+  # is telling the conversation that asked for it. A cast rather than a call on purpose —
+  # `Team.Server` must never block on a session coordinator to finish delivering a result
+  # — so a note whose parent is not up is lost, and `interactive.delegations` reads the
+  # team's own record rather than this one when it wants the truth.
   @impl true
+  def handle_cast({:delegation_settled, delegation_id, status, result_digest}, runtime) do
+    {:noreply, settle_delegation(runtime, delegation_id, status, result_digest)}
+  end
+
   def handle_cast({:cancel_await, request_ref}, runtime) do
     {:noreply, drop_turn_waiter(runtime, request_ref)}
   end
@@ -1792,7 +1827,8 @@ defmodule Ouroboros.Interactive.Task do
              {:native_transport_unavailable,
               %{
                 verb: verb,
-                reason: if(session.provider_session_id, do: :no_live_transport, else: :not_started),
+                reason:
+                  if(session.provider_session_id, do: :no_live_transport, else: :not_started),
                 message:
                   "this session has no live native transport to ask; send a turn first, " <>
                     "or reopen the session."
@@ -1866,7 +1902,8 @@ defmodule Ouroboros.Interactive.Task do
           # folded away, and a context reply that carried them would undo the fold.
           archive_ids: info |> Map.get(:archives) |> List.wrap() |> Enum.map(&Map.get(&1, :id)),
           instruction_files: List.wrap(Map.get(info, :instruction_files)),
-          instruction_files_dropped: durable(List.wrap(Map.get(info, :instruction_files_dropped))),
+          instruction_files_dropped:
+            durable(List.wrap(Map.get(info, :instruction_files_dropped))),
           instruction_bytes: Map.get(info, :instruction_bytes),
           tools: List.wrap(Map.get(info, :tools)),
           handed_off_to: Map.get(info, :handed_off_to)
@@ -1874,6 +1911,205 @@ defmodule Ouroboros.Interactive.Task do
 
       _unavailable ->
         %{}
+    end
+  end
+
+  # ---------------------------------------------------------------- delegation (G1)
+
+  # What the caller needs to reach a team with, and nothing this coordinator has to hold
+  # a lock for. The workspace defaults to this session's own, which is the whole point of
+  # `/delegate`: the child works where the conversation is.
+  defp delegate_plan(runtime, objective, opts) do
+    session = runtime.session
+
+    with :ok <- delegatable?(session, objective),
+         {:ok, id} <- validate_delegation_id(Keyword.get(opts, :id)),
+         {:ok, workspace} <- delegation_workspace(session, Keyword.get(opts, :workspace)),
+         {:ok, provider} <- delegation_provider(session, Keyword.get(opts, :provider)) do
+      case Map.fetch(State.delegations(session), id) do
+        # An id already recorded is the same delegation, answered from the record rather
+        # than started again: this verb is caller-keyed for the same reason a start is.
+        {:ok, existing} ->
+          {:ok,
+           Map.put(plan_from(existing, session, objective, workspace, provider), :existing, true)}
+
+        :error ->
+          {:ok,
+           %{
+             id: id,
+             team_id: Team.workspace_team_id(workspace),
+             worker_id: delegation_worker_id(session),
+             workspace: workspace,
+             provider: provider,
+             coding_node: node(),
+             parent: %{plane: :interactive, id: session.id},
+             objective_digest: digest_text(objective),
+             existing: false
+           }}
+      end
+    end
+  end
+
+  # Answered from the record, not rebuilt: the child already exists under this id, and
+  # recomputing where it *would* have gone could name a different task than the one this
+  # conversation is actually linked to.
+  defp plan_from(existing, session, objective, workspace, provider) do
+    %{
+      id: existing.id,
+      team_id: existing.team_id,
+      task_id: existing.task_id,
+      worker_id: delegation_worker_id(session),
+      workspace: workspace,
+      provider: provider,
+      coding_node: existing.task_node,
+      parent: %{plane: :interactive, id: session.id},
+      objective_digest: digest_text(objective)
+    }
+  end
+
+  defp delegatable?(session, objective) do
+    cond do
+      State.terminal?(session) ->
+        {:error, {:session_not_delegable, %{status: session.status}}}
+
+      not is_binary(objective) or String.trim(objective) == "" ->
+        {:error, {:invalid_objective, %{reason: :blank}}}
+
+      byte_size(objective) > @max_delegation_objective_bytes ->
+        {:error,
+         {:invalid_objective, %{reason: :too_long, limit: @max_delegation_objective_bytes}}}
+
+      map_size(State.delegations(session)) >= State.max_delegations() ->
+        {:error, {:delegation_limit_reached, %{limit: State.max_delegations()}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_delegation_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
+
+  defp validate_delegation_id(id) when is_binary(id) do
+    if String.trim(id) != "",
+      do: {:ok, id},
+      else: {:error, {:invalid_delegation_id, %{reason: :blank}}}
+  end
+
+  defp validate_delegation_id(id), do: {:error, {:invalid_delegation_id, %{value: id}}}
+
+  defp delegation_workspace(session, nil), do: {:ok, session.workspace}
+
+  defp delegation_workspace(_session, workspace) when is_binary(workspace) do
+    if String.trim(workspace) != "",
+      do: {:ok, workspace},
+      else: {:error, {:invalid_workspace, %{reason: :blank}}}
+  end
+
+  defp delegation_workspace(_session, workspace),
+    do: {:error, {:invalid_workspace, %{value: workspace}}}
+
+  defp delegation_provider(session, nil), do: {:ok, session.provider}
+  defp delegation_provider(_session, provider) when is_atom(provider), do: {:ok, provider}
+  defp delegation_provider(_session, provider), do: {:error, {:invalid_provider, provider}}
+
+  # One worker per conversation, not one per delegation: `Team.Server` refuses a second
+  # active delegation to a busy worker, which is exactly the serialisation a single
+  # conversation's `/delegate` should have, and it embeds `node()` because a worker id is
+  # a mesh agent id.
+  defp delegation_worker_id(%State{} = session), do: "#{node()}:session:#{session.id}"
+
+  defp digest_text(text) when is_binary(text),
+    do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower) |> binary_slice(0, 32)
+
+  defp digest_text(_text), do: nil
+
+  # The parent's durable half of the relationship plus the transcript entry, in one step
+  # for the same reason the shell verb's settlement is: the record and the log answer the
+  # same question from two directions.
+  defp record_delegation(runtime, record) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    delegation =
+      %{
+        id: record.id,
+        team_id: record.team_id,
+        task_id: record.task_id,
+        task_node: record.task_node,
+        objective_digest: record.objective_digest,
+        status: :started,
+        result_digest: nil,
+        created_at: now,
+        updated_at: now
+      }
+
+    case State.put_delegation(runtime.session, delegation) do
+      {:ok, session} ->
+        append_delegation_event(%{runtime | session: session}, delegation, :started)
+
+      {:error, reason} ->
+        {:error, reason, runtime}
+    end
+  end
+
+  defp settle_delegation(runtime, delegation_id, status, result_digest) do
+    case Map.fetch(State.delegations(runtime.session), delegation_id) do
+      {:ok, delegation} when delegation.status != status ->
+        settled = %{
+          delegation
+          | status: status,
+            result_digest: result_digest,
+            updated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+
+        case State.put_delegation(runtime.session, settled) do
+          {:ok, session} ->
+            case append_delegation_event(%{runtime | session: session}, settled, status) do
+              {:ok, runtime} ->
+                runtime
+
+              {:error, _reason, runtime} ->
+                runtime
+            end
+
+          {:error, _reason} ->
+            runtime
+        end
+
+      # A status this conversation already recorded, or a delegation it never started.
+      # Both are silence rather than a second event: the team retries delivery, and one
+      # transcript row per terminal status is the honest count.
+      _nothing_new ->
+        runtime
+    end
+  end
+
+  defp append_delegation_event(runtime, delegation, status) do
+    payload =
+      %{
+        "delegation_id" => delegation.id,
+        "team_id" => delegation.team_id,
+        "task_id" => delegation.task_id,
+        "task_node" => Atom.to_string(delegation.task_node),
+        "objective_digest" => delegation.objective_digest,
+        "status" => Atom.to_string(status)
+      }
+      |> put_present("result_digest", delegation.result_digest)
+
+    case emit_runtime_event(runtime, :delegation, payload,
+           provider: runtime.session.provider,
+           harness_session_id: runtime.session.harness_session_id,
+           provider_session_id: runtime.session.provider_session_id
+         ) do
+      {:ok, runtime} ->
+        {:ok, runtime}
+
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} could not append delegation " <>
+            "#{delegation.id} (#{status}) to its transcript"
+        )
+
+        {:error, {:delegation_checkpoint_failed, delegation.id}, runtime}
     end
   end
 
@@ -1895,8 +2131,7 @@ defmodule Ouroboros.Interactive.Task do
         {:error, {:invalid_shell_command, %{reason: :blank}}, runtime}
 
       byte_size(command) > @max_shell_command_bytes ->
-        {:error,
-         {:invalid_shell_command, %{reason: :too_long, limit: @max_shell_command_bytes}},
+        {:error, {:invalid_shell_command, %{reason: :too_long, limit: @max_shell_command_bytes}},
          runtime}
 
       true ->

@@ -210,7 +210,10 @@ defmodule Ouroboros.Runtime.Exposure do
         entries -> Enum.map(entries, &("  - " <> format_agent(&1)))
       end
 
-    Enum.join(lines ++ live_lines ++ agent_header ++ agent_lines ++ operator_lines(snapshot), "\n")
+    Enum.join(
+      lines ++ live_lines ++ agent_header ++ agent_lines ++ operator_lines(snapshot),
+      "\n"
+    )
   end
 
   # Absent entirely when nobody ran anything, rather than an empty heading: a block that

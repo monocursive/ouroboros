@@ -275,7 +275,8 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
          %{id: id, workspace: workspace} do
       start_session(id, workspace, approval_mode: :auto_approve)
 
-      assert {:ok, _result} = Methods.invoke("workspace.exec", %{"id" => id, "command" => "exit 9"})
+      assert {:ok, _result} =
+               Methods.invoke("workspace.exec", %{"id" => id, "command" => "exit 9"})
 
       settled = wait_until(fn -> Enum.find(shell_entries(id), &(&1.status == :failed)) end)
       assert settled.result.exit_status == 9
@@ -323,7 +324,10 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
                Methods.invoke("interactive.replay", %{"id" => id, "cursor" => 0, "limit" => 100})
 
       event =
-        Enum.find(events, &(&1.type == :provider_event and &1.payload["kind"] == "operator_shell"))
+        Enum.find(
+          events,
+          &(&1.type == :provider_event and &1.payload["kind"] == "operator_shell")
+        )
 
       assert event, "the operator command is not on the session's log"
       assert event.payload["command_digest"] == result.command_digest

@@ -248,7 +248,9 @@ defmodule Ouroboros.Workspace.Exec do
   defp spill(output, opts) do
     case Keyword.get(opts, :spill_dir) do
       dir when is_binary(dir) ->
-        name = "exec-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false) <> ".txt"
+        name =
+          "exec-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false) <> ".txt"
+
         path = Path.join(dir, name)
 
         with :ok <- File.mkdir_p(dir),

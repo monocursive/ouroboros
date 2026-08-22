@@ -357,7 +357,10 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
         Process.exit(pid, :kill)
-        wait_until(fn -> Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil end)
+
+        wait_until(fn ->
+          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
+        end)
       end
 
       assert {:error, -32_006, _message, data} =

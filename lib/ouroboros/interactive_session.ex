@@ -8,6 +8,7 @@ defmodule Ouroboros.InteractiveSession do
   """
 
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
+  alias Ouroboros.Team
   alias Ouroboros.Workspace.Exec
 
   @type session :: Ref.t() | String.t()
@@ -282,6 +283,210 @@ defmodule Ouroboros.InteractiveSession do
       {:error, reason} ->
         {:error, {failure_tag, reason}}
     end
+  end
+
+  @doc """
+  Delegates an objective from this conversation to a coding task (G1).
+
+  A delegation is a *coding task with a parent*, not a sub-conversation: it runs on the
+  coding plane with its own id, its own transcript, and its own durable record, and what
+  makes it this session's is `parent: %{plane: :interactive, id}` on that record. The
+  parent's transcript gains a `delegation` event when it starts and another when it ends.
+
+  The team is the workspace's default one — one per canonical workspace root per node,
+  created lazily, durable through the same checkpoint every other team uses, and visible
+  in `teams.list`. One worker per conversation, which is what makes a second `/delegate`
+  from the same session queue behind the first rather than fan out.
+
+  `id` is caller-owned like a start's: re-delegating under an id this session already
+  recorded answers with that delegation instead of starting a second one.
+
+  Options: `:id`, `:workspace` (default: this session's), `:provider` (default: this
+  session's).
+  """
+  @spec delegate(session(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def delegate(session, objective, opts \\ []) do
+    with :ok <- validate_options(opts, [:id, :workspace, :provider]),
+         {:ok, _id, _owner} <- session_identity(session),
+         {:ok, plan} <- call(session, {:delegate_plan, objective, opts}) do
+      if Map.get(plan, :existing) do
+        {:ok, delegation_reply(plan.id, plan.team_id, plan.task_id, plan.coding_node, :existing)}
+      else
+        start_delegation(session, objective, plan)
+      end
+    end
+  end
+
+  @doc """
+  Lists this conversation's delegations with the status the *team* currently holds.
+
+  The session's own record is a hint that follows the team's — a terminal note the parent
+  was not up to receive is simply missing from it — so this reads the team, and falls back
+  to what the session recorded only when the team is not reachable, saying which it did in
+  `source`.
+  """
+  @spec delegations(session()) :: {:ok, [map()]} | {:error, term()}
+  def delegations(session) do
+    with {:ok, recorded} <- call(session, :delegations) do
+      {:ok,
+       recorded
+       |> Map.values()
+       |> Enum.sort_by(& &1.created_at)
+       |> Enum.map(&current_delegation/1)}
+    end
+  end
+
+  @doc """
+  Tells a conversation that one of its delegations reached a terminal status.
+
+  Called by `Ouroboros.Team.Server` from the seam where it verifies the coding task's
+  durable checkpoint, and fire-and-forget on purpose: the team's obligation is delivering
+  the result to its own worker, and a parent that is closed, unreachable, or simply not
+  running must never hold that up. A note nobody received leaves the parent's copy stale;
+  `delegations/1` reads the team's own record, which is why that is survivable.
+  """
+  @spec note_delegation(session(), String.t(), atom(), String.t() | nil) :: :ok
+  def note_delegation(session, delegation_id, status, result_digest)
+      when is_binary(delegation_id) and is_atom(status) do
+    with {:ok, id, owner} <- session_identity(session) do
+      message = {:delegation_settled, delegation_id, status, result_digest}
+
+      if owner == node() do
+        cast_local(id, message)
+      else
+        :erpc.cast(owner, __MODULE__, :cast_local, [id, message])
+      end
+    end
+
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  def note_delegation(_session, _delegation_id, _status, _result_digest), do: :ok
+
+  @doc false
+  def cast_local(id, message) do
+    case Task.whereis(id) do
+      pid when is_pid(pid) -> GenServer.cast(pid, message)
+      # Deliberately not started here. A conversation nobody has open does not need to be
+      # woken to file a note it can rebuild from the team's own record next time it is.
+      nil -> :ok
+    end
+
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  # The team work happens here rather than inside the coordinator: `add_worker/3` and
+  # `delegate/4` are bounded at sixty seconds each, and a conversation that answered
+  # nothing for two minutes because it asked a team a question would be a worse bargain
+  # than the delegation is worth.
+  defp start_delegation(session, objective, plan) do
+    with {:ok, team, team_id} <- Team.workspace_team(plan.workspace),
+         {:ok, _worker} <- ensure_worker(team, plan),
+         {:ok, delegation} <-
+           Team.delegate(team, plan.worker_id, objective,
+             id: plan.id,
+             coding_node: plan.coding_node,
+             workspace: plan.workspace,
+             provider: plan.provider,
+             parent: plan.parent
+           ) do
+      record = %{
+        id: delegation.id,
+        team_id: team_id,
+        task_id: delegation.task_ref.id,
+        task_node: delegation.task_ref.node,
+        objective_digest: plan.objective_digest
+      }
+
+      case call(session, {:delegation_started, record}) do
+        {:ok, _recorded} ->
+          {:ok,
+           delegation_reply(
+             delegation.id,
+             team_id,
+             delegation.task_ref.id,
+             delegation.task_ref.node,
+             delegation.status
+           )}
+
+        # The child exists and carries the parent, which is the durable half of the
+        # relationship. A parent that could not record it is missing a rail row, not a
+        # delegation — and `_owner` names the node it is on so a caller can still find it.
+        {:error, reason} ->
+          {:error, {:delegation_unrecorded, %{delegation_id: delegation.id, reason: reason}}}
+      end
+    else
+      {:error, reason} -> {:error, {:delegation_failed, reason}}
+    end
+  end
+
+  # A worker this session already has is not an error. `Team.Server` answers
+  # `{:worker_already_added, id}` for a second add of the same id, which for one worker
+  # per conversation is the ordinary case rather than the exception.
+  defp ensure_worker(team, plan) do
+    case Team.add_worker(team, plan.worker_id, node: plan.coding_node) do
+      {:ok, worker} -> {:ok, worker}
+      {:error, {:worker_already_added, _id}} -> {:ok, %{id: plan.worker_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp delegation_reply(id, team_id, task_id, task_node, status) do
+    %{
+      delegation_id: id,
+      team_id: team_id,
+      task_id: task_id,
+      task_node: task_node,
+      plane: :coding,
+      status: status
+    }
+  end
+
+  defp current_delegation(record) do
+    base = %{
+      delegation_id: record.id,
+      team_id: record.team_id,
+      task_id: record.task_id,
+      task_node: record.task_node,
+      plane: :coding,
+      objective_digest: record.objective_digest,
+      status: record.status,
+      result_digest: Map.get(record, :result_digest),
+      created_at: record.created_at,
+      updated_at: record.updated_at,
+      source: :session
+    }
+
+    case team_delegation(record) do
+      {:ok, delegation} ->
+        %{
+          base
+          | status: delegation.status,
+            updated_at: delegation.updated_at || record.updated_at,
+            source: :team
+        }
+
+      :unavailable ->
+        base
+    end
+  end
+
+  defp team_delegation(record) do
+    with pid when is_pid(pid) <- Team.whereis(record.team_id),
+         %{delegations: delegations} <- Team.state(pid),
+         {:ok, delegation} <- Map.fetch(delegations, record.id) do
+      {:ok, delegation}
+    else
+      _unavailable -> :unavailable
+    end
+  rescue
+    _error -> :unavailable
+  catch
+    :exit, _reason -> :unavailable
   end
 
   @doc """

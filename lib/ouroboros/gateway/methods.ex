@@ -123,6 +123,12 @@ defmodule Ouroboros.Gateway.Methods do
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
   @approval_prompt_timeout 15 * 60 * 1_000
 
+  # G1. One `interactive.delegate` may make two team calls, each bounded at 60s by
+  # `Team.control_call/2`, plus the parent's own checkpoint. Below the sum on purpose: a
+  # delegation that has taken this long has a team that is not answering, and the caller
+  # learns which from `teams.state` rather than by waiting out both bounds.
+  @delegate_timeout 90_000
+
   # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
   # A ceiling below the runner's would kill the gateway task while the command kept
   # running, and the entry it started would be settled by nobody.
@@ -190,6 +196,8 @@ defmodule Ouroboros.Gateway.Methods do
     # D9. What a session can honestly say about its own context window. Read scope: it
     # asks a live transport a question and starts nothing.
     "interactive.context" => %{scope: :read, timeout: @default_timeout},
+    # G1. What this conversation delegated, with the status the team currently holds.
+    "interactive.delegations" => %{scope: :read, timeout: @default_timeout},
     "interactive.subscribe" => %{scope: :read, timeout: @default_timeout},
     "interactive.unsubscribe" => %{scope: :read, timeout: @default_timeout},
     "coding.list" => %{scope: :read, timeout: @default_timeout},
@@ -261,6 +269,12 @@ defmodule Ouroboros.Gateway.Methods do
     # own — ten minutes — because the gateway killing the task would leave a ledger entry
     # nobody settles, and `Exec` already stops the command at the same number.
     "workspace.exec" => %{scope: :operate, timeout: @shell_timeout, outcome: :unknown},
+    # G1. A delegation is a coding task with a parent, started through the workspace's
+    # default team. `:operate` because it starts work, and the ceiling is the team's own
+    # (`teams.add_worker` and `teams.delegate` each bound themselves at 60s, and this verb
+    # may make both calls). A ceiling that fires cannot prove the child was not created,
+    # which is why the delegation's id is caller-owned.
+    "interactive.delegate" => %{scope: :operate, timeout: @delegate_timeout, outcome: :unknown},
     "interactive.handoff" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
     # C2. The one method whose latency is a person's: it asks the session's owner for a
@@ -388,6 +402,11 @@ defmodule Ouroboros.Gateway.Methods do
     "workspace" => :string,
     "provider" => :provider
   }
+
+  # What `interactive.delegate` may name. A strict subset of `@delegation_options`:
+  # `coding_node` is absent because the child runs where the conversation does, and the
+  # delegation's own `id` is a positional argument rather than an option.
+  @interactive_delegation_options %{"workspace" => :string, "provider" => :provider}
 
   @control_options %{"id" => :string, "max_revisions" => :non_negative_integer}
 
@@ -898,6 +917,50 @@ defmodule Ouroboros.Gateway.Methods do
       else
         {:invalid, message} -> invalid_params(message)
       end
+    end)
+  end
+
+  # G1. Three optional fields and no more: a delegation inherits this conversation's
+  # workspace and provider unless told otherwise, and everything else about the child —
+  # its team, its worker, its parent link, its coding node — is the runtime's to decide.
+  # `delegation_id` is caller-owned for the reason `fork_id` is: this verb's ceiling
+  # answers `outcome: unknown`, and a client that had to mint a second id to find out
+  # would delegate the same objective twice.
+  def invoke("interactive.delegate", params) do
+    safe(fn ->
+      with :ok <-
+             only_keys(params, [
+               "id",
+               "objective",
+               "delegation_id",
+               "provider",
+               "workspace",
+               "node"
+             ]),
+           {:ok, session} <- session_target(:interactive, params),
+           {:ok, objective} <- fetch_string(params, "objective"),
+           {:ok, delegation_id} <- fetch_optional_string(params, "delegation_id"),
+           {:ok, opts} <-
+             options(params, @interactive_delegation_options, [
+               "id",
+               "objective",
+               "delegation_id",
+               "node"
+             ]) do
+        opts = if delegation_id, do: Keyword.put(opts, :id, delegation_id), else: opts
+        reply(InteractiveSession.delegate(session, objective, opts))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  # Read scope: `source` on each row says whether the status came from the team that owns
+  # the delegation or from the conversation's own copy of it, so a client can tell a live
+  # answer from a remembered one.
+  def invoke("interactive.delegations", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn -> reply(InteractiveSession.delegations(session)) end)
     end)
   end
 

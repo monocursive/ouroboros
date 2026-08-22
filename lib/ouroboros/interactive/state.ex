@@ -54,6 +54,10 @@ defmodule Ouroboros.Interactive.State do
                 :handed_off_from,
                 title_source: nil,
                 forks: 0,
+                # G1. What this conversation delegated, keyed by delegation id. Bounded
+                # by construction: a picker draws these, and a session that delegated
+                # five hundred times is a session whose rail row must still fit.
+                delegations: %{},
                 # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
                 worktree_requested: false,
                 worktree: nil,
@@ -133,6 +137,7 @@ defmodule Ouroboros.Interactive.State do
           forked_from: String.t() | nil,
           handed_off_from: String.t() | nil,
           forks: non_neg_integer(),
+          delegations: %{optional(String.t()) => delegation()},
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -164,6 +169,31 @@ defmodule Ouroboros.Interactive.State do
           required(:context_used) => non_neg_integer() | nil,
           required(:last) => map()
         }
+
+  @typedoc """
+  One delegation this conversation started.
+
+  Ids and a status, and never the objective's text: the objective is the child task's own
+  durable record, and copying it here would put one plane's content in the other's
+  checkpoint. `status` is a hint that follows the team's own record — `interactive.delegations`
+  reads the authority, and this is what a rail row can draw without asking.
+  """
+  @type delegation :: %{
+          required(:id) => String.t(),
+          required(:team_id) => String.t(),
+          required(:task_id) => String.t(),
+          required(:task_node) => node(),
+          required(:objective_digest) => String.t(),
+          required(:status) => atom(),
+          required(:created_at) => String.t(),
+          required(:updated_at) => String.t(),
+          optional(:result_digest) => String.t() | nil
+        }
+
+  # One conversation's delegations, bounded where they are written. A session that
+  # delegated past this is refused a new one rather than silently forgetting an old one:
+  # dropping the oldest would lose the link to a child task that is still running.
+  @max_delegations 100
 
   @terminal_statuses [:closed, :failed, :cancelled, :lost]
   @terminal_turn_statuses [:completed, :failed, :interrupted, :ambiguous]
@@ -467,6 +497,46 @@ defmodule Ouroboros.Interactive.State do
   @spec forks(t()) :: non_neg_integer()
   def forks(%__MODULE__{} = state), do: Map.get(state, :forks, 0) || 0
 
+  @doc """
+  Every delegation this conversation started, keyed by delegation id.
+
+  Read through `Map.get/3` so a checkpoint written before delegations existed projects as
+  a session that delegated nothing rather than a missing key.
+  """
+  @spec delegations(t()) :: %{optional(String.t()) => delegation()}
+  def delegations(%__MODULE__{} = state), do: Map.get(state, :delegations) || %{}
+
+  @doc "The bound on how many delegations one conversation may hold."
+  @spec max_delegations() :: pos_integer()
+  def max_delegations, do: @max_delegations
+
+  @doc """
+  Records or updates one delegation.
+
+  Refused with `:delegation_limit_reached` for a *new* delegation past the bound; an
+  update to one already recorded always lands, because a terminal status arriving for a
+  child that is running is exactly the news this map exists to carry.
+  """
+  @spec put_delegation(t(), delegation()) :: {:ok, t()} | {:error, term()}
+  def put_delegation(%__MODULE__{} = state, %{id: id} = delegation) when is_binary(id) do
+    existing = delegations(state)
+
+    if not Map.has_key?(existing, id) and map_size(existing) >= @max_delegations do
+      {:error, {:delegation_limit_reached, @max_delegations}}
+    else
+      {:ok, %{state | delegations: Map.put(existing, id, delegation)}}
+    end
+  end
+
+  def put_delegation(%__MODULE__{}, delegation),
+    do: {:error, {:invalid_delegation, delegation}}
+
+  @doc "The child task ids this conversation started, sorted, for a nesting client."
+  @spec children(t()) :: [String.t()]
+  def children(%__MODULE__{} = state) do
+    state |> delegations() |> Enum.map(fn {_id, record} -> record.task_id end) |> Enum.sort()
+  end
+
   @doc false
   @spec count_fork(t()) :: t()
   def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
@@ -553,6 +623,7 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:forked_from, forked_from(state))
     |> Map.put(:handed_off_from, handed_off_from(state))
     |> Map.put(:forks, forks(state))
+    |> Map.put(:delegations, delegations(state))
   end
 
   @doc """
@@ -576,6 +647,10 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:events, [])
     |> Map.put(:turns, %{})
     |> Map.put(:usage, usage_summary(state))
+    # Ids, not records: a rail row nests its children by id and fetches the rest from
+    # `coding.info`, exactly as it does for everything else a row drops.
+    |> Map.put(:delegations, %{})
+    |> Map.put(:children, children(state))
   end
 
   @doc """
@@ -721,6 +796,7 @@ defmodule Ouroboros.Interactive.State do
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and valid_title?(state) and
       optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
+      valid_delegations?(state) and
       is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
@@ -750,6 +826,20 @@ defmodule Ouroboros.Interactive.State do
 
   # D7's durable half, held to the same rule as everything else here: shape and
   # serializability. A worktree record is a map of strings, or it is `nil`.
+  defp valid_delegations?(state) do
+    delegations = Map.get(state, :delegations)
+
+    (is_nil(delegations) or is_map(delegations)) and
+      Enum.all?(delegations || %{}, fn
+        {id, %{id: id, team_id: team, task_id: task, task_node: owner, status: status}} ->
+          valid_id?(id) and valid_id?(team) and valid_id?(task) and is_atom(owner) and
+            not is_nil(owner) and is_atom(status)
+
+        _other ->
+          false
+      end)
+  end
+
   defp valid_worktree?(state) do
     is_boolean(Map.get(state, :worktree_requested, false)) and
       case Map.get(state, :worktree) do

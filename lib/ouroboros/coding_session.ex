@@ -25,7 +25,10 @@ defmodule Ouroboros.CodingSession do
     :workspace_mode,
     :origin_digest,
     :event_limit,
-    :options
+    :options,
+    # G1. A task adopted under an id that already belongs to a different conversation is
+    # a different request, not the same one retried.
+    :parent
   ]
 
   @doc "Starts a detached coding task on the local node."
