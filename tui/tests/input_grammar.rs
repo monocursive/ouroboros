@@ -134,6 +134,18 @@ fn opened_serving(status: &str, capabilities: Value, extra: &[&str]) -> App {
     opened_with(hello, status, capabilities, Vec::new())
 }
 
+/// The same, on a gateway that does NOT serve `missing` — an older runtime. The golden
+/// `hello` now lists every verb this checkout serves, so "not served" has to be stated
+/// rather than relied on.
+fn opened_without(status: &str, capabilities: Value, events: Vec<Value>, missing: &[&str]) -> App {
+    let mut hello = full_hello();
+    hello
+        .methods
+        .retain(|method| !missing.contains(&method.as_str()));
+
+    opened_with(hello, status, capabilities, events)
+}
+
 fn opened_with(hello: Hello, status: &str, capabilities: Value, events: Vec<Value>) -> App {
     let mut app = app(hello);
     answer(
@@ -776,7 +788,12 @@ fn ctrl_v_is_refused_by_transport_name_where_multimodal_is_false() {
 /// `/model` is `interactive.configure`, gated on `hello.methods` like every other verb.
 #[test]
 fn model_answers_locally_when_the_gateway_does_not_serve_interactive_configure() {
-    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    let mut app = opened_without(
+        "idle",
+        steering_capabilities(),
+        Vec::new(),
+        &["interactive.configure"],
+    );
 
     compose(&mut app);
     type_text(&mut app, "/model gpt-5-codex-high");
@@ -975,10 +992,11 @@ fn the_first_esc_of_the_chord_still_interrupts() {
 /// Where `interactive.fork` is not served, Enter is "edit and resend" and the menu says so.
 #[test]
 fn enter_edits_and_resends_where_the_gateway_cannot_fork() {
-    let mut app = opened(
+    let mut app = opened_without(
         "idle",
         steering_capabilities(),
         vec![user_turn(1, "first thing"), user_turn(2, "second thing")],
+        &["interactive.fork"],
     );
 
     compose(&mut app);
@@ -1234,7 +1252,12 @@ fn the_coding_home_carries_three_first_run_tips_until_the_operator_is_no_longer_
 /// way.
 #[test]
 fn slash_fork_issues_the_call_directly_and_is_gated_the_same_way() {
-    let mut refused = opened("idle", steering_capabilities(), Vec::new());
+    let mut refused = opened_without(
+        "idle",
+        steering_capabilities(),
+        Vec::new(),
+        &["interactive.fork"],
+    );
     compose(&mut refused);
     type_text(&mut refused, "/fork");
     refused.apply(key(KeyCode::Enter));
