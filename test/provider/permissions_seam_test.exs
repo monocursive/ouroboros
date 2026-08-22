@@ -143,7 +143,14 @@ defmodule Ouroboros.Provider.PermissionsSeamTest do
              end),
              "a session-scoped yes must become a session rule"
 
-      Permissions.forget_session(session_id)
+      # ...and dies with the session, which is what makes the scope mean what it says.
+      assert :ok = ACP.close(handle)
+
+      assert eventually(fn ->
+               {:ok, rules} = Permissions.list(scope: :session)
+               not Enum.any?(rules, &(&1.session_id == session_id))
+             end),
+             "a session rule must not outlive its session"
     end
 
     test "a once-scoped answer is recorded and writes no rule" do

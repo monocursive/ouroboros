@@ -71,7 +71,7 @@ defmodule Ouroboros.Control.Permissions do
   require Logger
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.Control.Permissions.{Pattern, Request, Rule, Rules}
+  alias Ouroboros.Control.Permissions.{Pattern, Request, Rule, Rules, Shell}
 
   @store_key {:ouroboros, :control_permissions, 1}
   @checkpoint_version 1
@@ -703,8 +703,6 @@ defmodule Ouroboros.Control.Permissions do
   # ── suggestions ────────────────────────────────────────────────────────────────────
 
   defp suggest_command(command) do
-    alias Ouroboros.Control.Permissions.Shell
-
     case command |> Shell.split() |> List.first() do
       nil ->
         nil

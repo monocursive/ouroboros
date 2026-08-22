@@ -135,6 +135,27 @@ defmodule Ouroboros.Control.Permissions.Seam do
     _kind, _reason -> :ok
   end
 
+  @doc """
+  Drops the rules this session remembered. Called when its provider process terminates.
+
+  A `:session` rule is one human's "don't ask again *here*". Forgetting it when the
+  session ends is what makes that scope mean what it says, and it is also what keeps the
+  store from growing by one rule per conversation this node has ever had.
+  """
+  @spec forget_session() :: :ok
+  def forget_session do
+    case principal().session_id do
+      session_id when is_binary(session_id) -> Permissions.forget_session(session_id)
+      _unbound -> :ok
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
   @doc "The stable ledger id for one provider approval on one session."
   @spec decision_id(String.t()) :: String.t()
   def decision_id(request_id) do

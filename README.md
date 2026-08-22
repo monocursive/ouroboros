@@ -1320,7 +1320,10 @@ Four scopes, highest authority first:
 
 Workspace rules are stored **outside the repository** on purpose. A repository that
 shipped its own allow rules would grant itself permissions on every machine that cloned
-it.
+it. Session rules are dropped when the session's provider process ends, which is what
+makes that scope mean what it says — and what keeps the store from growing by one rule
+per conversation this machine has ever had. A provider restart the operator did not ask
+for therefore costs one repeated prompt, which is the safe direction to be wrong in.
 
 The order is: any `deny` wins, then any `ask`, then `allow` — and scope breaks ties only
 *inside* one of those ranks. A session's `deny` therefore beats an operator's `allow`,

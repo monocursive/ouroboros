@@ -225,6 +225,11 @@ defmodule Ouroboros.Provider.Session.Jsonl do
   @impl true
   def terminate(_reason, state) do
     _ = deny_pending_approvals(state)
+    # "Don't ask again for this session" ends when the session does. Forgetting them on a
+    # provider restart the operator did not ask for costs one repeated prompt; keeping
+    # them would let an answer outlive the conversation that produced it, and would leave
+    # the rule store growing with every session this node ever ran.
+    _ = Seam.forget_session()
     if state.process_id, do: state.context.process_manager.cancel_process(state.process_id)
     :ok
   rescue
