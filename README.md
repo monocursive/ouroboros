@@ -1745,9 +1745,10 @@ instead of making a departed machine disappear.
   sweep), and `Store.delete/1` refuses anything non-terminal. Team, orchestration,
   control, upgrade, and release aggregates still only accumulate; sizing them is an
   operator concern until each plane grows its own retention policy.
-- Harness runs survive callers and Ouroboros coordinator crashes, but not a full
-  Harness application/BEAM/host restart. Ouroboros retains the task and reports
-  `:lost`; automated resume/retry policy is future work.
+- Harness runs — the one-shot coding plane — survive callers and Ouroboros coordinator
+  crashes, but not a full Harness application/BEAM/host restart. Ouroboros retains the
+  task and reports `:lost`; run resume and retry policy are future work. Interactive
+  sessions are different, and the next two entries say how.
 - Provider installation, authentication, billing, and actual repository effects are
   external gates. The test suite uses a deterministic adapter and does not spend an
   inference call.
@@ -1756,9 +1757,25 @@ instead of making a departed machine disappear.
   restart-persistent in production's configured stores. Security-sensitive mutation
   journals (including grants, signing, and agent effects) use the stronger synced
   adapter; none of these single-node aggregates is HA consensus.
-- Interactive Harness processes, like detached runs, do not survive a full BEAM or
-  host restart. Durable Ouroboros intent remains inspectable, but the local session
-  becomes `:lost` unless the provider process still exists.
+- Interactive Harness processes do not survive a full BEAM or host restart, but the
+  session does. When the Harness session is gone — after a restart, or because the
+  transport died under a live coordinator — the coordinator opens a new Harness session
+  against the durable `provider_session_id` before it will call the session lost
+  (`claude --resume`, Codex `thread/resume`, ACP `session/load`). `:lost` is what is
+  left over: no `provider_session_id` was ever reported, or the provider and its
+  transport do not declare resume, or the provider refuses the resume — recorded as
+  `{:resume_failed, reason}`. The attempt is bounded to one per coordinator start, and a
+  session the caller closed or killed is ended, never resumed.
+- What a resume restores is Ouroboros's record, not the provider's memory. The event
+  journal, the turn ledger, and the workspace lease are Ouroboros's and come back
+  intact; a client reattaches with `interactive.subscribe` and its cursor. The
+  conversation itself is the provider's, and comes back only as far as that provider's
+  own resume carries it — Ouroboros neither measures nor asserts how much that is. The
+  turn that was in flight at the break is finalised outcome-unknown
+  (`{:session_resumed, :outcome_unknown}`) and never redispatched, because the provider
+  may well have completed it. The swap is recorded in the session's own log as a
+  `status` event with `kind: "resumed"`, and event sequence numbers stay strictly
+  monotonic across it.
 - Workspace admission is node-local and does not provision worktrees or an OS
   sandbox. Shared filesystems need one routed authority or consensus.
 - Autonomous evaluation is implemented with bounded revisions and step count, but
