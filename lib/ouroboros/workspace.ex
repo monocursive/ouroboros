@@ -7,10 +7,12 @@ defmodule Ouroboros.Workspace do
   are resolved component-by-component, including symbolic links, before the
   allow-list and conflict checks are applied.
 
-  Git worktree creation is intentionally outside this component. A future
-  provisioner should create a worktree without shell interpolation, verify the
-  resulting directory here, acquire its lease, and record cleanup as a separate
-  recoverable operation. Admission never mutates a repository.
+  Git worktree creation is intentionally outside this component, and now lives in
+  `Ouroboros.Workspace.Worktree`: it creates a worktree without shell interpolation,
+  the resulting directory is verified here through the same canonicalisation and
+  allow-list as any other root, its lease is acquired here, and cleanup is a separate
+  recoverable operation with its own marker and boot-time reconcile. Admission still
+  never mutates a repository — the provisioner does, before admission is asked.
 
   This manager is node-local. Deployments sharing a filesystem across BEAM
   nodes must route admission through one authority or add distributed

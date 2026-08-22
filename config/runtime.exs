@@ -216,6 +216,18 @@ if config_env() == :prod do
       roots -> String.split(roots, ":", trim: true)
     end
 
+  # D7. A worktree is leased through the same admission machinery as any other directory,
+  # so the directory this runtime creates worktrees in has to be an allowed root or every
+  # `worktree: true` session would fail at the lease. Only the runtime writes there, and
+  # only where the operator already granted at least one root — an empty grant stays
+  # empty, and the workspace manager does not even start.
+  workspace_roots =
+    if workspace_roots == [],
+      do: [],
+      else: workspace_roots ++ [Path.join(data_dir, "worktrees")]
+
+  _ = File.mkdir_p(Path.join(data_dir, "worktrees"))
+
   orchestration_concurrency =
     case Integer.parse(System.get_env("OUROBOROS_ORCHESTRATION_CONCURRENCY") || "4") do
       {value, ""} when value > 0 -> value

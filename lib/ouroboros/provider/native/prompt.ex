@@ -33,16 +33,27 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
   Returns `{:error, {:reserved_prompt_delimiter, :system_prompt}}` when the caller's
   prompt would forge a runtime block, which is the assembler's refusal, unchanged.
+
+  `:instructions` carries the rendered project instruction files from
+  `Ouroboros.Provider.Native.Context.Instructions`. They sit between the provider's own
+  text and the operator's, and are held to the same delimiter rule: a repository that
+  could forge an `<ouroboros-runtime>` block would be writing runtime identity into a
+  session opened on it.
   """
   @spec build(keyword()) :: {:ok, String.t()} | {:error, term()}
   def build(opts) do
     caller = Keyword.get(opts, :system_prompt)
+    instructions = Keyword.get(opts, :instructions)
 
     with {:ok, assembly} <- Assembler.assemble(nil, system_prompt: caller),
          :ok <- verify(assembly.system_prompt, :system_prompt),
+         :ok <- verify(instructions, :instruction_files),
          base = base(opts),
          :ok <- verify(base, :native_base_prompt) do
-      {:ok, join(base, assembly.system_prompt)}
+      base
+      |> with_instructions(instructions)
+      |> join(assembly.system_prompt)
+      |> then(&{:ok, &1})
     end
   end
 
@@ -165,6 +176,14 @@ defmodule Ouroboros.Provider.Native.Prompt do
       do: {:error, {:reserved_prompt_delimiter, field}},
       else: :ok
   end
+
+  # Project instructions go *before* the operator's session prompt and after the
+  # runtime's rules, which is the precedence the text itself states: the runtime's rules
+  # are not negotiable, the repository's instructions are how this repository works, and
+  # the operator's instructions for this session outrank the repository's.
+  defp with_instructions(base, nil), do: base
+  defp with_instructions(base, ""), do: base
+  defp with_instructions(base, instructions), do: base <> "\n\n" <> instructions
 
   defp join(base, nil), do: base
   defp join(base, ""), do: base

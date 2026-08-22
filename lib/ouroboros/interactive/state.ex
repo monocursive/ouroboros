@@ -49,6 +49,9 @@ defmodule Ouroboros.Interactive.State do
                 :forked_from,
                 title_source: nil,
                 forks: 0,
+                # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
+                worktree_requested: false,
+                worktree: nil,
                 cursor: 0,
                 sequence_offset: 0,
                 resumes: 0,
@@ -116,6 +119,8 @@ defmodule Ouroboros.Interactive.State do
           created_at: String.t(),
           updated_at: String.t(),
           workspace_lease_id: String.t() | nil,
+          worktree_requested: boolean(),
+          worktree: map() | nil,
           harness_session_id: String.t() | nil,
           provider_session_id: String.t() | nil,
           title: String.t() | nil,
@@ -149,6 +154,8 @@ defmodule Ouroboros.Interactive.State do
           required(:total_tokens) => non_neg_integer(),
           required(:cost_usd) => number() | nil,
           required(:turns_with_usage) => non_neg_integer(),
+          required(:context_window) => non_neg_integer() | nil,
+          required(:context_used) => non_neg_integer() | nil,
           required(:last) => map()
         }
 
@@ -180,6 +187,7 @@ defmodule Ouroboros.Interactive.State do
            provider: base.provider,
            workspace: base.workspace,
            workspace_mode: base.workspace_mode,
+           worktree_requested: Map.get(base, :worktree_requested, false),
            status: :starting,
            created_at: now,
            updated_at: now,
@@ -703,7 +711,8 @@ defmodule Ouroboros.Interactive.State do
       is_list(state.events) and length(state.events) <= state.event_limit and
       valid_events?(state.events, state) and valid_turns?(state.turns) and is_map(state.options) and
       serializable?(state.options) and serializable?(Map.get(state, :runtime_snapshot)) and
-      serializable?(Map.get(state, :usage)) and serializable?(state.error)
+      serializable?(Map.get(state, :usage)) and serializable?(state.error) and
+      valid_worktree?(state)
   rescue
     _error -> false
   end
@@ -718,6 +727,17 @@ defmodule Ouroboros.Interactive.State do
     if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
   end
 
+  # D7's durable half, held to the same rule as everything else here: shape and
+  # serializability. A worktree record is a map of strings, or it is `nil`.
+  defp valid_worktree?(state) do
+    is_boolean(Map.get(state, :worktree_requested, false)) and
+      case Map.get(state, :worktree) do
+        nil -> true
+        record when is_map(record) -> serializable?(record)
+        _other -> false
+      end
+  end
+
   defp validate_session_options(opts) do
     accepted =
       @session_options ++
@@ -726,6 +746,7 @@ defmodule Ouroboros.Interactive.State do
           :id,
           :workspace,
           :workspace_mode,
+          :worktree,
           :provider,
           :event_limit,
           :model,
@@ -924,6 +945,18 @@ defmodule Ouroboros.Interactive.State do
   @usage_counter_fields Keyword.keys(@usage_counters)
   @usage_cost_keys ~w(cost_usd costUsd total_cost_usd totalCostUsd)
 
+  # Not counters. The model's context window and the size of the last request are facts
+  # about one request, so the newest report replaces the previous one rather than being
+  # added to it — summing a window across turns would produce a denominator that grows
+  # with the conversation. A payload that reports neither leaves both alone, which is why
+  # a `:run_completed` terminator cannot blank a window a `:usage` event established.
+  @usage_latest [
+    context_window: ~w(context_window contextWindow),
+    context_used: ~w(context_used contextUsed)
+  ]
+
+  @usage_latest_fields Keyword.keys(@usage_latest)
+
   @empty_usage %{
     input_tokens: 0,
     output_tokens: 0,
@@ -932,6 +965,8 @@ defmodule Ouroboros.Interactive.State do
     total_tokens: 0,
     cost_usd: nil,
     turns_with_usage: 0,
+    context_window: nil,
+    context_used: nil,
     last: %{}
   }
 
@@ -959,10 +994,19 @@ defmodule Ouroboros.Interactive.State do
 
     cost = usage_number(payload, @usage_cost_keys)
 
-    if counters == %{} and is_nil(cost) do
+    latest =
+      Enum.reduce(@usage_latest, %{}, fn {field, keys}, acc ->
+        case usage_number(payload, keys) do
+          nil -> acc
+          value -> Map.put(acc, field, trunc(value))
+        end
+      end)
+
+    if counters == %{} and is_nil(cost) and latest == %{} do
       nil
     else
       counters
+      |> Map.merge(latest)
       |> Map.put(:cost_usd, cost)
       |> Map.put_new_lazy(:total_tokens, fn ->
         Map.get(counters, :input_tokens, 0) + Map.get(counters, :output_tokens, 0)
@@ -1008,6 +1052,11 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(
       :turns_with_usage,
       Map.get(usage, :turns_with_usage, 0) + if(same_turn?, do: 0, else: 1)
+    )
+    |> Map.merge(
+      Map.new(@usage_latest_fields, fn field ->
+        {field, Map.get(contribution, field) || Map.get(usage, field)}
+      end)
     )
     |> Map.put(:last, Map.put(contribution, :turn_id, turn_id))
   end

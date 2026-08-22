@@ -339,6 +339,48 @@ boundary of a running turn, which no other provider here supports. A turn stops 
 the current tool on interrupt, at `max_iterations` (50 by default), and on the third
 identical tool call.
 
+**What it reads from the project.** `AGENTS.md` in the workspace, then every `AGENTS.md`
+above it up to the filesystem root, with `CLAUDE.md` as the fallback name at each level,
+plus `~/.config/ouroboros/AGENTS.md`. A line that is entirely `@some/relative/path.md` is
+an import, followed four hops deep and refused if it names `..`, an absolute path, or a
+file outside the importing file's own tree. `.agents/rules/*.md` carrying YAML
+front-matter `paths:` globs are *not* loaded at startup — they are held back and injected
+only when a file matching one of them is read or edited, so a repository with forty rule
+files costs a session that touches one directory nothing. The whole set is bounded at
+40,000 characters, the farthest sources are dropped first, and the prompt says which
+files were dropped and how large they were. Nothing found in any of them is executed:
+there is no command substitution and no argument interpolation, and a file that tries to
+forge an `<ouroboros-runtime>` block fails the session by name rather than being escaped.
+
+**The context meter and compaction.** Every `usage` event carries `context_used` — the
+size of the last request as the provider counted it — and `context_window` from
+`llm_db`'s entry for the model, or from `config :ouroboros, :native_context_window` when
+`llm_db` does not know it. When neither answers, the window is **absent from the payload
+rather than guessed**, and the footer states tokens without a percentage. When the last
+request crossed 85 % of the window (`compact_at`) the session compacts *before* the next
+turn — never mid-turn — and `/compact [focus]` does the same on demand. Either way it is
+two steps:
+older tool results are elided first, each replaced by `[tool result elided: N bytes]` so
+the model knows it can re-run the tool; only if that is not enough is the conversation
+summarised into a fixed **Goal / Constraints / Progress / Decisions / Next steps**, with
+the newest 20,000 tokens (`keep_recent_tokens`) kept verbatim. The pre-compaction
+messages are **retained**, content-addressed, under the session's own directory, and the
+`compaction` event names the archive along with `archived_messages`, `summary_tokens`,
+`before_tokens` and `after_tokens` — so "what was folded" is a question a client can
+answer. The archive decides the outcome rather than decorating it: a transcript that
+cannot be written down refuses the compaction and says so, leaving the whole conversation
+in place. Two compactions inside three turns stops and emits a `status` event naming the
+thrash rather than looping; after that the automatic path stays off for the session, and
+`/compact` still works because the operator asked.
+
+**Handoff.** Rather than compacting a compacted conversation, a session can hand off:
+`Ouroboros.Provider.Native.Session.handoff/2` starts a fresh session in the same
+workspace whose first message is a curated packet — the five-heading summary, every file
+the session touched with its hash *as of now*, the open plan, and the operator's own
+instruction — and returns its id. The packet is written into the new session's checkpoint
+before that session starts, so a handoff whose child failed to start is still a handoff
+you can open by id. The parent records `handed_off_to` and keeps running.
+
 **What is not enforced, and will not be until it is.**
 
 - **There is no OS sandbox.** `workspace_write` is those path checks and nothing else.
@@ -348,8 +390,14 @@ identical tool call.
   bubblewrap are a later slice.
 - **A command that detaches from its process group can outlive its timeout.** The
   timeout terminates the shell this runtime started.
-- **No LSP, MCP, hooks, or compaction yet.** No diagnostics after an edit, no MCP
-  servers, no `PreToolUse` hooks, no context compaction.
+- **No LSP, MCP, or hooks yet.** No diagnostics after an edit, no MCP servers, no
+  `PreToolUse` hooks.
+- **The context meter is native-only for now.** Vendor providers report `usage` but
+  nothing maps their window yet, so their footer shows tokens without a percentage.
+- **Compaction summaries cost a model call.** One per compaction, on the session's own
+  model, with no tools. When that call fails the summary falls back to a thin structural
+  one built from the transcript, and says so in its own text rather than pretending to
+  be a written summary.
 - **No permission rules yet.** Until `Ouroboros.Control.Permissions` lands, every tool
   with an effect asks; a `session`-scope approval is remembered in the session process
   and is not durable.
@@ -892,6 +940,51 @@ they do in a shell, and `ouro` scrolls by keyboard.
 - The UI is new. The gateway protocol has one version and one implementation of each
   half; `hello.protocol` is the entire compatibility contract, and a mismatch prints
   both numbers rather than guessing.
+
+## Worktrees
+
+Two sessions on one repository conflict: the workspace manager hands out one exclusive
+lease per directory, and it is right to. `worktree: true` is how you get both — the
+session runs in its own `git worktree` instead of the repository you named.
+
+```elixir
+{:ok, session} =
+  Ouroboros.InteractiveSession.start(
+    id: "isolated",
+    provider: :native,          # or codex, claude, opencode — the provider only sees `cwd`
+    workspace: File.cwd!(),
+    worktree: true
+  )
+```
+
+The worktree is created with `git worktree add --detach` under
+`<data_dir>/worktrees/<repository-hash>/<session-id>`, as an argument list and never a
+shell string, from `git` on `PATH`. The resulting path is canonicalised through every
+symlink and *that* is what the lease is taken on — so every containment check in the
+runtime, and every path refusal inside the native agent's tools, applies to the worktree
+rather than to the repository it came from. A workspace that is not a git repository is
+refused by name; a subdirectory of a repository gets the same subdirectory inside the
+worktree. The provider is told nothing about any of this: it receives a `cwd`, and only
+the value of that `cwd` changed.
+
+Cleanup is a recoverable operation and never destroys work. On close the worktree is
+removed **only when `git status --porcelain` inside it is empty** — untracked files
+count. A worktree holding uncommitted changes is left exactly where it is and the
+session's terminal event says so, with the path. A marker file under the worktree root
+records everything this runtime created, and `Ouroboros.Workspace.Worktree.reconcile/1`
+runs at boot to clear the clean strays a crash left behind and to report the dirty ones
+without touching them.
+
+For this to work the worktree root has to be an allowed workspace root. A release
+configured with `OUROBOROS_WORKSPACE_ROOTS` adds `<data_dir>/worktrees` for you; a node
+configured by hand should add it to `:workspace_allowed_roots`, and a session that asks
+for a worktree without it is refused with a message naming the fix rather than failing
+mysteriously at the lease.
+
+`worktree: true` is a runtime option today. The gateway verb and the `ouro` flag that
+would let a terminal ask for one are a separate slice, so from the TUI this is not yet
+reachable — `Ouroboros.InteractiveSession.start/1` and `Ouroboros.CodingSession.start/2`
+are.
 
 ## Agent mesh
 

@@ -39,11 +39,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Checkpoint
+  alias Ouroboros.Provider.Native.Context
+  alias Ouroboros.Provider.Native.Context.Instructions
+  alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Cost
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
-  alias Ouroboros.Provider.Native.Prompt
   alias Ouroboros.Provider.Native.Tools
 
   @default_max_iterations 50
@@ -64,6 +66,20 @@ defmodule Ouroboros.Provider.Native.Loop do
     :approval_mode,
     :allowed_tools,
     :disallowed_tools,
+    # The tool definitions exactly as `Ouroboros.Provider.Native.Context` laid them out,
+    # so the prefix the fingerprint describes is the prefix the model is sent. `nil`
+    # falls back to deriving them here, which is what the coding plane and the older
+    # tests do.
+    :tool_specs,
+    # The model's context window, for the meter merged into every `usage` event. `nil`
+    # means this node could not resolve one, and the meter says so by omitting the key
+    # rather than by inventing a denominator.
+    :context_window,
+    # The `.agents/rules` held back for lazy loading, and the ones already injected. A
+    # rule enters the conversation once per session, however many matching files are
+    # read after it.
+    rules: [],
+    rules_loaded: [],
     # Called with `%{messages:, reads:, session_grants:}` immediately *before* the
     # terminal turn event is emitted. The session makes the conversation durable inside
     # this callback, which is what makes "checkpoint before broadcast" true here rather
@@ -195,8 +211,16 @@ defmodule Ouroboros.Provider.Native.Loop do
     :exit, reason -> {:error, state, {:stream_exited, inspect(reason)}}
   end
 
+  # The meter rides on `usage` because that is the event a client already subscribes to
+  # and `context_window` is the key the TUI footer decodes. `context_used` is the size of
+  # *this* request, not the session's running total: the two diverge the moment anything
+  # is compacted, and it is the request size that decides whether the next one fits.
   defp record_usage(state, usage) do
-    payload = Cost.payload(usage, state.model_spec)
+    payload =
+      usage
+      |> Cost.payload(state.model_spec)
+      |> Window.meter(state.context_window)
+
     emit(state, :usage, payload)
 
     %{
@@ -292,9 +316,47 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = tool_result(state, call, result)
     state = emit_changes(state, Map.get(result, :changes, []))
     state = emit_plan(state, Map.get(result, :plan))
+    state = inject_rules(state, Map.get(result, :reads, %{}))
 
     {:continue, state}
   end
+
+  # D3's lazy half. A `.agents/rules/*.md` whose front-matter `paths:` matches the file
+  # this tool just touched is appended to the *conversation*, once, right after the tool
+  # result that earned it — never to the system prompt, because a prefix that changed
+  # when a file was read would cost a cache miss on every turn after it.
+  defp inject_rules(%{rules: rules} = state, reads)
+       when is_list(rules) and rules != [] and map_size(reads) > 0 do
+    Enum.reduce(Map.keys(reads), state, fn path, state ->
+      pending = Enum.reject(rules, &(&1.path in state.rules_loaded))
+
+      case Instructions.render_for_path(pending, path, state.scope.root) do
+        {:ok, nil} ->
+          state
+
+        {:ok, text} ->
+          loaded =
+            pending
+            |> Enum.filter(&Instructions.matches?(&1, path, state.scope.root))
+            |> Enum.map(& &1.path)
+
+          %{
+            state
+            | messages: state.messages ++ [%{role: :user, content: text}],
+              rules_loaded: state.rules_loaded ++ loaded
+          }
+
+        # A rule that would forge a runtime delimiter is dropped rather than injected, and
+        # marked loaded so the same file is not retried on every read of every path it
+        # matches. The session goes on without it; the refusal is the rule's own fault and
+        # not a reason to fail the operator's turn mid-tool.
+        {:error, _reason} ->
+          %{state | rules_loaded: state.rules_loaded ++ Enum.map(pending, & &1.path)}
+      end
+    end)
+  end
+
+  defp inject_rules(state, _reads), do: state
 
   defp emit_changes(state, []), do: state
 
@@ -586,7 +648,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     state.checkpoint.(%{
       messages: state.messages,
       reads: state.reads,
-      session_grants: state.session_grants
+      session_grants: state.session_grants,
+      rules_loaded: state.rules_loaded
     })
 
     :ok
@@ -594,6 +657,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- helpers
 
+  defp tool_specs(%{tool_specs: specs}) when is_list(specs), do: specs
   defp tool_specs(state), do: Tools.specs(state.allowed_tools, state.disallowed_tools)
 
   defp signature(call), do: {call.name, call.input}
@@ -725,16 +789,19 @@ defmodule Ouroboros.Provider.Native.Loop do
              request.add_dirs,
              sandbox_mode(request.sandbox_mode)
            ),
-         {:ok, system} <-
-           Prompt.build(
+         {:ok, model_spec} <- resolve_model(request.model),
+         {:ok, prefix} <-
+           Context.build(
              system_prompt: request.system_prompt,
              cwd: scope.root,
              add_dirs: scope.roots -- [scope.root],
              sandbox_mode: scope.sandbox_mode,
              approval_mode: approval_mode(request.approval_mode),
-             tools: Tools.specs(request.allowed_tools, request.disallowed_tools)
+             tools: Tools.specs(request.allowed_tools, request.disallowed_tools),
+             model_module: Model.module(),
+             model_spec: model_spec,
+             reasoning_effort: request.reasoning_effort
            ),
-         {:ok, model_spec} <- resolve_model(request.model),
          {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
       options = Map.new(request.provider_options || %{})
 
@@ -742,7 +809,10 @@ defmodule Ouroboros.Provider.Native.Loop do
         emit: fn _event -> :ok end,
         model_module: Model.module(),
         model_spec: model_spec,
-        system: system,
+        system: prefix.system,
+        tool_specs: prefix.tools,
+        context_window: prefix.context_window,
+        rules: Context.rules(prefix),
         scope: scope,
         session_dir: session_dir,
         session_id: context.run_id,

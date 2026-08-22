@@ -12,6 +12,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Path, as: WorkspacePath
+  alias Ouroboros.Workspace.Worktree
 
   @poll_interval 25
   @replay_limit 100
@@ -2449,7 +2450,19 @@ defmodule Ouroboros.Interactive.Task do
 
   defp serializable?(_value), do: true
 
+  # D7. A session that asked for a worktree gets one *before* the lease is acquired, and
+  # the lease is then taken on the worktree's own path — so every containment check in
+  # the runtime, and every path check inside the provider, applies to the worktree rather
+  # than to the repository it came from. Provisioning is idempotent, so the admission
+  # that follows a restart finds the worktree already recorded and re-leases it.
   defp admit_workspace(session) do
+    case Worktree.provision(session, "interactive-" <> session.id, []) do
+      {:ok, provisioned} -> admit_leased_workspace(provisioned)
+      {:error, reason} -> checkpoint_admission_failure(session, {:worktree_failed, reason})
+    end
+  end
+
+  defp admit_leased_workspace(session) do
     if is_pid(Process.whereis(WorkspaceManager)) do
       case acquire_workspace(session, @workspace_reacquire_attempts) do
         {:ok, lease, capability} ->
@@ -2536,11 +2549,66 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp release_workspace(%{workspace_lease: nil} = runtime), do: runtime
-
   defp release_workspace(runtime) do
-    _ = safe_workspace_release(runtime.workspace_lease.id, runtime.workspace_capability)
-    %{runtime | workspace_lease: nil, workspace_capability: nil}
+    runtime =
+      case runtime.workspace_lease do
+        nil ->
+          runtime
+
+        lease ->
+          _ = safe_workspace_release(lease.id, runtime.workspace_capability)
+          %{runtime | workspace_lease: nil, workspace_capability: nil}
+      end
+
+    retire_worktree(runtime)
+  end
+
+  # A worktree is retired only when the session itself is over. `terminate/2` runs on a
+  # supervisor restart too, and removing the directory there would take the isolation out
+  # from under a session that is about to come back. `Worktree.remove/2` never deletes
+  # uncommitted work, so the worst outcome of being wrong here is a stray directory that
+  # `Worktree.reconcile/1` clears at the next boot.
+  defp retire_worktree(runtime) do
+    if State.terminal?(runtime.session) do
+      case Worktree.retire(runtime.session, []) do
+        {:ok, session, :removed} ->
+          %{runtime | session: session}
+
+        {:ok, session, {:kept, reason}} ->
+          Logger.warning(
+            "interactive session #{session.id}: worktree kept at " <>
+              "#{Map.get(session.worktree, "path")} (#{inspect(reason)})"
+          )
+
+          note_retained_worktree(%{runtime | session: session})
+
+        _absent_or_failed ->
+          runtime
+      end
+    else
+      runtime
+    end
+  end
+
+  # The operator is told where their work was left, on the session's own log, in the same
+  # number space as everything else it will replay.
+  defp note_retained_worktree(runtime) do
+    case emit_runtime_event(
+           runtime,
+           :status,
+           %{
+             "kind" => "worktree_retained",
+             "path" => Map.get(runtime.session.worktree, "path"),
+             "reason" => Map.get(runtime.session.worktree, "retained_reason"),
+             "message" =>
+               "the worktree holds uncommitted changes and was left in place. " <>
+                 "Commit or discard them, then remove it with `git worktree remove`."
+           },
+           []
+         ) do
+      {:ok, runtime} -> runtime
+      {:error, runtime} -> runtime
+    end
   end
 
   defp safe_workspace_release(lease_id, capability) do

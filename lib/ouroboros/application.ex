@@ -67,14 +67,55 @@ defmodule Ouroboros.Application do
 
   use Application
 
+  require Logger
+
   @impl true
   def start(_type, _args) do
     # Resolved before anything is supervised, because it decides what gets supervised.
     # An unrecognized role raises here rather than booting the privileged tree.
     role = Ouroboros.Cluster.boot_role!()
 
-    Supervisor.start_link(children(role), strategy: :rest_for_one, name: Ouroboros.Supervisor)
+    case Supervisor.start_link(children(role),
+           strategy: :rest_for_one,
+           name: Ouroboros.Supervisor
+         ) do
+      {:ok, pid} ->
+        reconcile_worktrees(role)
+        {:ok, pid}
+
+      other ->
+        other
+    end
   end
+
+  # D7's recoverable half. A crash or a power cut leaves worktrees this runtime created
+  # and never removed; the marker under the worktree root is what makes them findable
+  # afterwards. Clean ones go, dirty ones are reported and left exactly where they are —
+  # this is the boot path, and a boot that deleted somebody's uncommitted work to tidy up
+  # would be the worst bug in the tree. Never fatal: a reconcile that cannot run leaves
+  # strays, which is a mess, not an outage.
+  defp reconcile_worktrees(:core) do
+    if Application.get_env(:ouroboros, :workspace_allowed_roots, []) != [] do
+      report = Ouroboros.Workspace.Worktree.reconcile()
+
+      if report.removed != [] or report.kept != [] do
+        Logger.info(
+          "worktree reconcile: removed #{length(report.removed)}, " <>
+            "kept #{length(report.kept)} holding uncommitted changes, " <>
+            "forgot #{length(report.missing)} already gone" <> retained(report.kept)
+        )
+      end
+    end
+  rescue
+    error -> Logger.warning("worktree reconcile failed: #{Exception.message(error)}")
+  end
+
+  defp reconcile_worktrees(_role), do: :ok
+
+  defp retained([]), do: ""
+
+  defp retained(kept),
+    do: "; retained: " <> Enum.map_join(kept, ", ", & &1.path)
 
   # A `:builder` node is a least-privileged member of the same release: it holds the code
   # and the cluster membership needed to be asked for a build, and nothing else. A forge

@@ -6,7 +6,15 @@ defmodule Ouroboros.Coding.TaskState do
   alias Ouroboros.Provider
   alias Ouroboros.Runtime.Exposure
 
-  @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :origin_digest]
+  @envelope_options [
+    :id,
+    :workspace,
+    :workspace_mode,
+    :provider,
+    :event_limit,
+    :origin_digest,
+    :worktree
+  ]
   @request_options [
     :model,
     :provider_session_id,
@@ -102,6 +110,12 @@ defmodule Ouroboros.Coding.TaskState do
                 workspace_mode: :shared_read,
                 origin_digest: nil,
                 workspace_lease_id: nil,
+                # D7. `worktree_requested` is the start option; `worktree` is what was
+                # actually provisioned, and stays `nil` until admission made one. Two
+                # fields rather than one so "asked for and not yet made" and "made" are
+                # never the same value.
+                worktree_requested: false,
+                worktree: nil,
                 harness_run_id: nil,
                 provider_session_id: nil,
                 cursor: 0,
@@ -129,6 +143,8 @@ defmodule Ouroboros.Coding.TaskState do
           workspace_mode: :shared_read | :exclusive,
           origin_digest: String.t() | nil,
           workspace_lease_id: String.t() | nil,
+          worktree_requested: boolean(),
+          worktree: map() | nil,
           harness_run_id: String.t() | nil,
           provider_session_id: String.t() | nil,
           cursor: non_neg_integer(),
@@ -167,6 +183,7 @@ defmodule Ouroboros.Coding.TaskState do
     sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
+    worktree = Keyword.get(opts, :worktree, false)
     safety = Provider.safety_options(provider, opts, plane)
     assembly = assemble_prompt_options(Map.new(opts))
 
@@ -191,6 +208,9 @@ defmodule Ouroboros.Coding.TaskState do
 
       not valid_origin_digest?(origin_digest) ->
         {:error, :invalid_origin_digest}
+
+      not is_boolean(worktree) ->
+        {:error, {:invalid_worktree, worktree}}
 
       inline_environment?(opts) ->
         {:error, :inline_environment_not_persisted}
@@ -249,6 +269,7 @@ defmodule Ouroboros.Coding.TaskState do
            node: node(),
            workspace_mode: workspace_mode,
            origin_digest: origin_digest,
+           worktree_requested: worktree,
            event_limit: Keyword.get(opts, :event_limit, 10_000),
            prompt_trace: Assembler.trace(prompt_assembly),
            runtime_snapshot: capture_runtime(options),

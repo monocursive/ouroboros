@@ -184,6 +184,28 @@ The coordinator scans live Harness metadata before starting a missing run. That
 closes the crash window between `Run.start/2` and saving the returned run ID, where an
 unconditional retry could otherwise launch duplicate billable work.
 
+#### Worktrees
+
+`worktree: true` on either plane provisions a `git worktree` before the lease is taken,
+and the lease is taken on the worktree rather than on the repository. `Ouroboros.Workspace.Worktree`
+runs `git` as an argv list — never a shell string, and the exact list is asserted through
+an injectable runner — canonicalises the created path through `Ouroboros.Workspace.Path`,
+and hands *that* to the existing admission machinery, so every containment check the
+runtime already performs now describes the worktree. A workspace that is not a git
+repository is refused; a subdirectory of one gets the same subdirectory inside the
+worktree. Both planes record the result as `worktree: %{path, root, branch, base_commit,
+repository}` on their durable state, and the provider is told nothing beyond `cwd`.
+
+Provisioning is idempotent, because admission runs again after every restart: a record
+that already holds a worktree is returned unchanged rather than stranding the directory
+its session was working in. Cleanup runs only when the session or task is *terminal* —
+`terminate/2` fires on a supervisor restart too — and removes the directory only when
+`git status --porcelain` inside it is empty, untracked files included. A worktree holding
+uncommitted work is left where it is and named in the terminal event. A marker file under
+the worktree root makes the set recoverable: `Worktree.reconcile/1` runs from
+`Ouroboros.Application.start/2`, removes clean strays, and reports dirty ones without
+touching them.
+
 #### The native provider
 
 `Ouroboros.Provider.Native` is the one exception to "Ouroboros does not wrap those CLIs
@@ -198,7 +220,8 @@ a managed transport: a tool call can be blocked on a human approval before it ru
 steered message can be delivered between two tool calls of a running turn, and an
 interrupt can stop the turn after the current tool rather than by killing a process. It
 is therefore where LSP, MCP, hooks, permission rules, compaction, and file checkpoints
-attach natively — none of which exist yet.
+attach natively. Compaction and context management have landed; LSP, MCP and hooks
+have not.
 
 - `Ouroboros.Provider.Native.Loop` drives one turn. It runs in a task so the session
   process stays answerable, emits through a function, and takes control on its mailbox.
@@ -220,6 +243,33 @@ attach natively — none of which exist yet.
   reached by `Code.ensure_loaded?/1`. With no engine present every gated tool answers
   `{:ask, :no_engine}` and reaches a human; a missing rule engine never becomes a silent
   allow.
+- `Ouroboros.Provider.Native.Context` owns the half of a request that is supposed to
+  stay still. It lays a request out as system prompt → tool definitions in a fixed order
+  → conversation, and digests the first two into `prefix_fingerprint/1`. The session
+  builds the prefix once and rebuilds it on exactly two events — an explicit `configure`,
+  and a compaction — which are the two prompt-cache invalidators this runtime can cause.
+  The fingerprint is asserted stable across turns in `test/provider/native/context_test.exs`,
+  which is what stops a well-meaning "put the date in the system prompt" from becoming a
+  bill rather than a failing test.
+  - `Context.Instructions` discovers `AGENTS.md` from the workspace up, with `CLAUDE.md`
+    as the per-level fallback, a user scope, `@relative` imports four hops deep, and
+    `.agents/rules/*.md` held back behind `paths:` globs until a matching file is
+    touched. It executes nothing it finds and refuses, by path, a file that would forge a
+    reserved runtime delimiter. Total budget 40,000 characters, farthest dropped first,
+    with the drop stated in the prompt.
+  - `Context.Window` resolves the model's context window from `llm_db`, then node
+    configuration, then **not at all**. `context_used`/`context_window` ride on every
+    `usage` event; an unknown window omits the key rather than supplying a denominator
+    nobody measured.
+  - `Context.Compaction` elides older tool results before it summarises anything, and
+    summarises into a fixed Goal / Constraints / Progress / Decisions / Next steps,
+    keeping `keep_recent_tokens` of the tail verbatim. `Context.Archive` retains the
+    pre-compaction messages content-addressed under the session directory and the
+    `compaction` event names them, which is the reviewable-history half of R5's open row
+    16. Two compactions inside three turns halts with a named `status` event.
+  - `Context.Handoff` builds the packet a *new* session starts from — summary, touched
+    files with their hashes as of now, open plan, operator instruction — which is Amp's
+    answer to summary-on-summary rather than a third compaction.
 
 There is no OS sandbox. `sandbox_mode: :workspace_write` is those path checks and nothing
 more, `:read_only` refuses `write`, `edit`, and every `bash` command, and `:unrestricted`
@@ -730,6 +780,35 @@ patch lane refuses an artifact that would replace the module deciding what code 
   an unenforceable default and run under the provider's own behavior.
 - Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
   worktree/container/VM boundary with resource and network limits.
+- A worktree (`worktree: true`) is *containment scoping*, not isolation. It narrows what
+  the runtime's own path checks and the native agent's tools consider in-bounds — the
+  lease and every containment test are taken on the canonicalised worktree path, so a
+  session cannot reach the repository it branched from through a relative path or a
+  symlink. It does nothing about a `bash` command, which still runs with the operator's
+  privileges and can write anywhere on the machine; and it shares the repository's object
+  store, so a `git` command inside the worktree can still write refs the repository sees.
+  The container/VM boundary above is what isolation would be, and it is not this.
+- Worktree cleanup is fail-closed toward *keeping* data. Removal happens only when
+  `git status --porcelain` inside the worktree is empty, an unreadable status counts as
+  dirty, and there is no code path in `Ouroboros.Workspace.Worktree` that deletes an
+  uncommitted change — including the boot-time `reconcile/1`, which reports dirty strays
+  rather than tidying them. The failure this chooses is a leftover directory the operator
+  has to remove, over work the runtime removed for them.
+- Instruction files (`AGENTS.md`, `CLAUDE.md`, `.agents/rules/*.md`) are repository
+  content and are treated as untrusted text, never as configuration with effects. Nothing
+  in them is executed — no command substitution, no argument interpolation, no
+  front-matter key naming a program — the only front-matter key read at all is `paths:`,
+  imports cannot leave the importing file's own tree or name an absolute path, and text
+  carrying a reserved runtime delimiter fails the session by path rather than being
+  escaped. What a repository gets from these files is words in a prompt.
+- Compaction is bounded and reviewable, not lossless. The pre-compaction messages are
+  retained content-addressed under the session's directory and named in the `compaction`
+  event, but the archive is bounded by the same message count the checkpoint uses, and a
+  conversation longer than that bound loses its oldest messages from the archive with
+  `truncated: true` stated rather than implied. The summary itself is a model's work and
+  can be wrong; the archive is what makes that recoverable — so the archive decides the
+  outcome: a transcript that cannot be written refuses the compaction and leaves the
+  whole conversation standing, rather than folding it and logging the loss.
 - Inline environment maps are rejected rather than persisted. Event payloads and
   result tails are redacted before checkpointing. Objectives and provider-specific
   options are durable domain data and must not contain secrets.
@@ -763,7 +842,8 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - real CLI fixture tests for argv, JSONL, process ownership, cancellation, and
   timeout behavior;
 - append-oriented durable event store instead of rewriting an aggregate task map;
-- isolated worktree provisioning, explicit network policy, and durable cleanup;
+- ~~worktree provisioning and durable cleanup~~ (done: `Ouroboros.Workspace.Worktree`,
+  above), explicit network policy, and the OS-level isolation a worktree does not give;
 - budgets, retries, idempotency keys, telemetry, and operator diagnostics.
 
 Stop condition: repeated crash/reattach/timeout/cancel tests show no duplicate run,

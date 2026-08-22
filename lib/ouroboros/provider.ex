@@ -120,6 +120,12 @@ defmodule Ouroboros.Provider do
   # unless network access is stated. These are execution facts of the node, not knobs a
   # terminal should have to smuggle through `provider_options`. Explicit caller values
   # still win below, including `false`.
+  #
+  # `skip_git_repo_check` stays on with D7's worktrees, and not because worktrees need
+  # it: a `git worktree` directory *is* a working tree, `git rev-parse` answers inside
+  # it, and Codex's check would pass there anyway. It stays because the case it exists
+  # for — a workspace that is not a repository at all — is unchanged by worktrees being
+  # available for the workspaces that are.
   @execution_defaults %{
     codex: %{skip_git_repo_check: true, network_access_enabled: true}
   }

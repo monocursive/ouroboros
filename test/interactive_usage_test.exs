@@ -189,8 +189,49 @@ defmodule Ouroboros.InteractiveUsageTest do
 
       assert usage.input_tokens == 500
       assert usage.turns_with_usage == 500
-      assert map_size(usage) == 8
+      assert map_size(usage) == 10
       assert Enum.sort(Map.keys(usage)) == Enum.sort(usage_keys())
+    end
+
+    # D9. The window and the last request's size are not counters: the footer divides one
+    # by the other, and a denominator that grew with the conversation would draw a
+    # percentage that falls as the context fills.
+    test "the context meter is carried through, latest wins, never summed" do
+      usage =
+        fold([
+          usage_event("turn-1", %{
+            "input_tokens" => 100,
+            "context_used" => 100,
+            "context_window" => 200_000
+          }),
+          usage_event("turn-2", %{
+            "input_tokens" => 150,
+            "context_used" => 250,
+            "context_window" => 200_000
+          })
+        ])
+
+      assert usage.input_tokens == 250
+      assert usage.context_window == 200_000
+      assert usage.context_used == 250
+    end
+
+    test "an unknown window stays nil rather than becoming a zero the footer would divide by" do
+      usage = fold([usage_event("turn-1", %{"input_tokens" => 10, "context_used" => 10})])
+
+      assert usage.context_used == 10
+      assert usage.context_window == nil
+    end
+
+    test "a later payload without the meter does not blank a window already reported" do
+      usage =
+        fold([
+          usage_event("turn-1", %{"input_tokens" => 10, "context_window" => 128_000}),
+          run_completed("turn-1", %{"cost_usd" => 0.02})
+        ])
+
+      assert usage.context_window == 128_000
+      assert usage.cost_usd == 0.02
     end
 
     test "the account is serializable, so it survives the checkpoint it rides on" do
@@ -251,6 +292,8 @@ defmodule Ouroboros.InteractiveUsageTest do
       :total_tokens,
       :cost_usd,
       :turns_with_usage,
+      :context_window,
+      :context_used,
       :last
     ]
   end

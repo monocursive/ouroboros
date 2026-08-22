@@ -41,10 +41,14 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Jido.Harness.SessionAdapter
   alias Jido.Harness.TurnRequest
   alias Ouroboros.Provider.Native.Checkpoint
+  alias Ouroboros.Provider.Native.Context
+  alias Ouroboros.Provider.Native.Context.Archive
+  alias Ouroboros.Provider.Native.Context.Compaction
+  alias Ouroboros.Provider.Native.Context.Handoff
+  alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Prompt
   alias Ouroboros.Provider.Native.Tools
 
   @startup_timeout 30_000
@@ -122,28 +126,50 @@ defmodule Ouroboros.Provider.Native.Session do
          {:ok, session_dir, durable?} <- Paths.session_dir(provider_session_id),
          {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(provider_session_id),
          {:ok, messages} <- restore(checkpoint_path, request.provider_session_id) do
-      {:ok,
-       %{
-         request: request,
-         context: context,
-         provider_session_id: provider_session_id,
-         scope: scope,
-         session_dir: session_dir,
-         checkpoint_path: checkpoint_path,
-         checkpoint_durable?: durable?,
-         checkpoint_limit: Checkpoint.limit(options),
-         model_module: Model.module(),
-         model_spec: model_spec,
-         reasoning_effort: request.reasoning_effort,
-         approval_mode: Loop.approval_mode(request.approval_mode),
-         max_iterations: Loop.max_iterations(options, nil),
-         tool_timeout_ms: Loop.tool_timeout(options),
-         messages: messages,
-         reads: %{},
-         session_grants: MapSet.new(),
-         loop: nil,
-         approvals: MapSet.new()
-       }}
+      state = %{
+        request: request,
+        context: context,
+        provider_session_id: provider_session_id,
+        scope: scope,
+        session_dir: session_dir,
+        checkpoint_path: checkpoint_path,
+        checkpoint_durable?: durable?,
+        checkpoint_limit: Checkpoint.limit(options),
+        model_module: Model.module(),
+        model_spec: model_spec,
+        reasoning_effort: request.reasoning_effort,
+        approval_mode: Loop.approval_mode(request.approval_mode),
+        max_iterations: Loop.max_iterations(options, nil),
+        tool_timeout_ms: Loop.tool_timeout(options),
+        messages: messages,
+        reads: %{},
+        session_grants: MapSet.new(),
+        loop: nil,
+        approvals: MapSet.new(),
+        # ---- context engineering (D3/D9) ----
+        prompt_context: nil,
+        options: options,
+        compact_at: Window.compact_at(options),
+        keep_recent_tokens: Window.keep_recent_tokens(options),
+        # The last request's size as the provider counted it, and the turn it was
+        # counted on. Both are needed by the thrash guard, which asks "how many turns
+        # ago", not "how long ago".
+        context_used: 0,
+        turns: 0,
+        compactions: [],
+        thrashing?: false,
+        archives: [],
+        handed_off_to: nil,
+        plan: nil,
+        # A lazily-loaded rule enters the conversation once per session, not once per
+        # turn: the loop reports back what it injected so the next turn does not repeat it.
+        rules_loaded: []
+      }
+
+      case build_context(state) do
+        {:ok, state} -> {:ok, state}
+        {:error, reason} -> {:stop, reason}
+      end
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -193,9 +219,33 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
+  # `configure` is one of the two things allowed to change the cached prefix, so it
+  # rebuilds it here rather than letting the next turn discover a stale one. A change
+  # that fails validation leaves both the session and its prefix untouched.
   def handle_call({:configure, changes}, _from, state) do
-    case apply_configuration(state, changes) do
-      {:ok, state} -> {:reply, :ok, state}
+    with {:ok, state} <- apply_configuration(state, changes),
+         {:ok, state} <- build_context(state) do
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:context_info, _from, state), do: {:reply, {:ok, context_info(state)}, state}
+
+  def handle_call({:compact, _focus}, _from, %{loop: loop} = state) when not is_nil(loop),
+    do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:compact, focus}, _from, state) do
+    case run_compaction(state, focus, :manual) do
+      {:ok, state, report} -> {:reply, {:ok, report}, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:handoff, prompt}, _from, state) do
+    case start_handoff(state, prompt) do
+      {:ok, state, result} -> {:reply, {:ok, result}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -222,7 +272,8 @@ defmodule Ouroboros.Provider.Native.Session do
       state
       | messages: snapshot.messages,
         reads: snapshot.reads,
-        session_grants: snapshot.session_grants
+        session_grants: snapshot.session_grants,
+        rules_loaded: Map.get(snapshot, :rules_loaded, state.rules_loaded)
     }
 
     _ = checkpoint(state)
@@ -234,7 +285,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @impl GenServer
   def handle_info({:native_event, turn_id, event}, %{loop: %{turn_id: turn_id}} = state) do
-    state = track_approval(state, event)
+    state = state |> track_approval(event) |> track_usage(event) |> track_plan(event)
     emit(state, event)
 
     if event.type in [:turn_completed, :turn_failed, :turn_interrupted] do
@@ -281,7 +332,8 @@ defmodule Ouroboros.Provider.Native.Session do
   # ---------------------------------------------------------------- turns
 
   defp start_turn(state, request, turn_id) do
-    with {:ok, system} <- system_prompt(state) do
+    with {:ok, state} <- maybe_compact(state),
+         {:ok, state} <- ensure_context(state) do
       owner = self()
 
       loop = %Loop{
@@ -291,7 +343,11 @@ defmodule Ouroboros.Provider.Native.Session do
         end,
         model_module: state.model_module,
         model_spec: state.model_spec,
-        system: system,
+        system: state.prompt_context.system,
+        tool_specs: state.prompt_context.tools,
+        context_window: state.prompt_context.context_window,
+        rules: Context.rules(state.prompt_context),
+        rules_loaded: state.rules_loaded,
         scope: state.scope,
         session_dir: state.session_dir,
         session_id: state.context.session_id,
@@ -317,7 +373,12 @@ defmodule Ouroboros.Provider.Native.Session do
           :ok
         end)
 
-      {:ok, %{state | loop: %{pid: task.pid, ref: task.ref, turn_id: turn_id}}}
+      {:ok,
+       %{
+         state
+         | loop: %{pid: task.pid, ref: task.ref, turn_id: turn_id},
+           turns: state.turns + 1
+       }}
     end
   end
 
@@ -424,14 +485,377 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp system_prompt(state) do
-    Prompt.build(
+  # ---------------------------------------------------------------- context (D3/D9)
+
+  @doc """
+  What this session's cached prefix and context meter currently say.
+
+  Names, digests and numbers only — never the instruction text, never the conversation.
+  The gateway surfaces this as part of `interactive.info`; the footer wants
+  `prefix_fingerprint` and `context_window`/`context_used` from it.
+  """
+  @spec info(pid()) :: {:ok, map()} | {:error, term()}
+  def info(handle), do: SessionAdapter.call(handle, :context_info)
+
+  @doc """
+  Compacts this session's conversation now, optionally focused.
+
+  This is `/compact [focus]`. It returns the same report a client would have seen from
+  the automatic path, so a caller can show "what was folded" without waiting for the
+  threshold.
+  """
+  @spec compact(pid(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def compact(handle, focus \\ nil), do: SessionAdapter.call(handle, {:compact, focus})
+
+  @doc """
+  Starts a fresh native session in this workspace, seeded with a curated packet.
+
+  Amp replaced compaction with Handoff because compaction produces "summary on top of
+  summary" (R3 §5). This is that: rather than folding the conversation again, the
+  operator gets a *new* session whose first message states the goal, the constraints, the
+  progress, the decisions and the next steps, the files this session touched with their
+  current hashes, the open plan items, and whatever the operator typed as `prompt`.
+
+  Returns the new session's `provider_session_id`. The parent records `handed_off_to` and
+  keeps running: a handoff is not a close, and deciding to end the parent is the
+  operator's.
+  """
+  @spec handoff(pid(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def handoff(handle, prompt \\ nil), do: SessionAdapter.call(handle, {:handoff, prompt})
+
+  # ---------------------------------------------------------------- prefix
+
+  defp build_context(state) do
+    case Context.build(context_options(state)) do
+      {:ok, context} -> {:ok, %{state | prompt_context: context}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp context_options(state) do
+    [
       system_prompt: state.request.system_prompt,
       cwd: state.scope.root,
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,
       approval_mode: state.approval_mode,
-      tools: Tools.specs(state.request.allowed_tools, state.request.disallowed_tools)
-    )
+      tools: Tools.specs(state.request.allowed_tools, state.request.disallowed_tools),
+      model_module: state.model_module,
+      model_spec: state.model_spec,
+      reasoning_effort: state.reasoning_effort,
+      compactions: length(state.compactions)
+    ]
   end
+
+  # The prefix is built once and reused. It is rebuilt only where the operator changed
+  # the session — `configure` — or where compaction rewrote the conversation, which are
+  # the two documented cache invalidators this runtime can cause. Rebuilding it per turn
+  # would produce the same bytes today and would be a standing invitation to put
+  # something turn-dependent in it tomorrow.
+  defp ensure_context(%{prompt_context: nil} = state), do: build_context(state)
+  defp ensure_context(state), do: {:ok, state}
+
+  defp context_info(state) do
+    context = state.prompt_context
+
+    base =
+      if context,
+        do: Context.info(context),
+        else: %{prefix_fingerprint: nil, context_window: nil}
+
+    Map.merge(base, %{
+      provider_session_id: state.provider_session_id,
+      context_used: state.context_used,
+      compact_at: state.compact_at,
+      keep_recent_tokens: state.keep_recent_tokens,
+      messages: length(state.messages),
+      compaction_thrashing: state.thrashing?,
+      compactions: Enum.reverse(state.compactions),
+      archives: Enum.reverse(state.archives),
+      handed_off_to: state.handed_off_to
+    })
+  end
+
+  # ---------------------------------------------------------------- the meter
+
+  # The size reported is whatever the provider counted for the last request. A session
+  # that has not spent a turn yet reports zero used, which is true, rather than an
+  # estimate of what the prefix will cost, which would be a guess presented as a
+  # measurement.
+  defp track_usage(state, %{type: :usage, payload: payload}) when is_map(payload) do
+    case Window.used(payload) do
+      used when used > 0 -> %{state | context_used: used}
+      _none -> state
+    end
+  end
+
+  defp track_usage(state, _event), do: state
+
+  # ---------------------------------------------------------------- compaction
+
+  # The thrash latch is deliberately permanent for the *automatic* path. "Stop rather
+  # than loop" means stop: a session whose tail alone fills the window will keep meeting
+  # the threshold on every turn, and re-arming would be the loop the guard exists to
+  # prevent. The operator's own `/compact` is not latched — they were told what happened
+  # and what to change, and overruling them would be a different mistake.
+  defp maybe_compact(%{thrashing?: true} = state), do: {:ok, state}
+
+  defp maybe_compact(state) do
+    window = state.prompt_context && state.prompt_context.context_window
+
+    if Window.over_threshold?(state.context_used, window, state.compact_at) do
+      case run_compaction(state, nil, :automatic) do
+        {:ok, state, _report} -> {:ok, state}
+        # A refused compaction is not a refused turn. The operator has been told, in an
+        # event with the reason in it, and the turn goes to the model as it stands —
+        # which the provider may still reject for length, honestly, rather than this
+        # runtime failing it pre-emptively on a threshold it just admitted it cannot act
+        # on.
+        {:error, _reason, state} -> {:ok, state}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  # Two compactions inside three turns is not a context that needs folding, it is a
+  # threshold or a tail that cannot fit. Say so once, as a `status` provider event, and
+  # stop — Claude Code's thrashing detection with the reason made visible.
+  defp run_compaction(state, focus, trigger) do
+    if thrash_guard(state) do
+      emit(state, %{
+        type: :provider_event,
+        payload: %{
+          "kind" => "status",
+          "status" => "compaction_thrashing",
+          "message" =>
+            "two compactions within three turns; stopping rather than looping. " <>
+              "Raise `keep_recent_tokens`, lower `compact_at`, or hand off to a new " <>
+              "session with the packet this one can build."
+        },
+        turn_id: nil,
+        request_id: nil
+      })
+
+      {:error, :compaction_thrashing, %{state | thrashing?: true}}
+    else
+      do_compaction(state, focus, trigger)
+    end
+  end
+
+  defp do_compaction(state, focus, trigger) do
+    {:ok, outcome} =
+      Compaction.compact(state.messages,
+        keep_recent_tokens: state.keep_recent_tokens,
+        focus: focus,
+        summarize: summariser(state)
+      )
+
+    case archive(state, outcome.archived) do
+      {:ok, entry} -> apply_compaction(state, outcome, entry, trigger)
+      {:error, reason} -> refuse_compaction(state, reason)
+    end
+  end
+
+  # "Compaction always leaves the archive" is an invariant, so it decides the outcome
+  # rather than decorating it: messages that could not be written down are not dropped.
+  # The session keeps its whole conversation, the operator is told why, and the provider
+  # may still refuse the next request for length — which is a truthful failure rather
+  # than a silent loss.
+  defp refuse_compaction(state, reason) do
+    Logger.warning("native compaction refused: archive unwritable (#{inspect(reason)})")
+
+    emit(state, %{
+      type: :provider_event,
+      payload: %{
+        "kind" => "status",
+        "status" => "compaction_refused",
+        "reason" => inspect(reason),
+        "message" =>
+          "the conversation was not compacted because its pre-compaction transcript " <>
+            "could not be archived. Nothing was dropped."
+      },
+      turn_id: nil,
+      request_id: nil
+    })
+
+    {:error, {:archive_unwritable, reason}, state}
+  end
+
+  defp apply_compaction(state, outcome, entry, trigger) do
+    report = %{
+      trigger: Atom.to_string(trigger),
+      turn: state.turns,
+      archived_messages: length(outcome.archived),
+      archive_id: entry && entry.id,
+      elided_tool_results: outcome.elided,
+      summary_tokens: outcome.summary_tokens,
+      before_tokens: outcome.before_tokens,
+      after_tokens: outcome.after_tokens,
+      summarised: outcome.summarised
+    }
+
+    state = %{
+      state
+      | messages: outcome.messages,
+        compactions: [report | state.compactions],
+        archives: if(entry, do: [entry | state.archives], else: state.archives),
+        prompt_context: Context.compacted(state.prompt_context, context_options(state)),
+        context_used: 0
+    }
+
+    # Checkpoint before broadcast, the same order every other durable write in this
+    # process follows: a client told the conversation was folded must never be able to
+    # restart onto a conversation that was not.
+    _ = checkpoint(state)
+
+    emit(state, %{
+      type: :provider_event,
+      payload: compaction_payload(report, outcome),
+      turn_id: nil,
+      request_id: nil
+    })
+
+    {:ok, state, report}
+  end
+
+  defp thrash_guard(%{compactions: [%{turn: turn} | _rest]} = state), do: state.turns - turn <= 3
+  defp thrash_guard(_state), do: false
+
+  defp compaction_payload(report, outcome) do
+    %{
+      "kind" => "compaction",
+      "trigger" => report.trigger,
+      "archived_messages" => report.archived_messages,
+      "archive_id" => report.archive_id,
+      "elided_tool_results" => report.elided_tool_results,
+      "summary_tokens" => report.summary_tokens,
+      "before_tokens" => report.before_tokens,
+      "after_tokens" => report.after_tokens,
+      "summary" => outcome.summary
+    }
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  # Nothing to archive is not a failed archive: eliding tool results alone dropped no
+  # message, so there is no transcript to keep.
+  defp archive(_state, []), do: {:ok, nil}
+
+  defp archive(state, messages),
+    do: Archive.write(state.session_dir, messages, event_limit: state.checkpoint_limit)
+
+  # The summariser is one more call on the same model module the turn uses, with no
+  # tools. It is deliberately not the loop: a summary that could call `bash` would be a
+  # second agent nobody asked for.
+  defp summariser(state) do
+    fn %{messages: messages, instruction: instruction} ->
+      request = %{
+        model: state.model_spec,
+        system: instruction,
+        messages: messages ++ [%{role: :user, content: instruction}],
+        tools: [],
+        reasoning_effort: nil,
+        max_tokens: nil
+      }
+
+      case Model.stream(state.model_module, request, []) do
+        {:ok, stream} -> {:ok, collect_text(stream)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp collect_text(stream) do
+    stream
+    |> Enum.reduce([], fn
+      {:text, delta}, acc when is_binary(delta) -> [acc, delta]
+      _other, acc -> acc
+    end)
+    |> IO.iodata_to_binary()
+  rescue
+    _error -> ""
+  catch
+    :exit, _reason -> ""
+  end
+
+  # ---------------------------------------------------------------- handoff
+
+  # The packet is made durable *before* the child is started. A handoff whose child
+  # failed to start is then still a handoff the operator can open by id, rather than a
+  # summary that existed only inside a call that returned an error.
+  defp start_handoff(state, prompt) do
+    packet =
+      Handoff.packet(
+        summary: handoff_summary(state),
+        files: Map.keys(state.reads),
+        plan: state.plan,
+        prompt: prompt,
+        workspace: state.scope.root,
+        parent: state.provider_session_id
+      )
+
+    child_id = Paths.new_session_id()
+    seeded = [%{role: :user, content: packet}]
+
+    with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
+         :ok <- Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
+         {:ok, pid} <- open_child(state, child_id) do
+      result = %{
+        provider_session_id: child_id,
+        pid: pid,
+        packet_bytes: byte_size(packet),
+        files: length(Map.keys(state.reads)),
+        parent: state.provider_session_id
+      }
+
+      emit(state, %{
+        type: :provider_event,
+        payload: %{
+          "kind" => "handoff",
+          "provider_session_id" => child_id,
+          "packet_bytes" => result.packet_bytes,
+          "files" => result.files
+        },
+        turn_id: nil,
+        request_id: nil
+      })
+
+      {:ok, %{state | handed_off_to: child_id}, result}
+    end
+  end
+
+  # The child inherits this session's request — same workspace, same tools, same posture —
+  # with its own id and no caller-supplied resume. It also inherits `context.owner`,
+  # because a runtime-level handoff has nowhere else to send events; the gateway replaces
+  # the owner when it wires the verb, and that is the one thing this function does not
+  # decide.
+  defp open_child(state, child_id) do
+    request = %{state.request | provider_session_id: child_id}
+    open(request, state.context)
+  end
+
+  # A handoff summarises the whole conversation, not the part past `keep_recent_tokens`:
+  # the new session gets no verbatim tail, so a summary that stopped short of the last
+  # twenty thousand tokens would hand over a packet missing the most recent work.
+  defp handoff_summary(%{messages: []}), do: nil
+
+  defp handoff_summary(state) do
+    instruction = Compaction.summary_instruction(nil)
+
+    case summariser(state).(%{messages: state.messages, focus: nil, instruction: instruction}) do
+      {:ok, summary} when is_binary(summary) ->
+        case String.trim(summary) do
+          "" -> Compaction.structural_summary(state.messages, nil)
+          text -> text
+        end
+
+      _failed ->
+        Compaction.structural_summary(state.messages, nil)
+    end
+  end
+
+  defp track_plan(state, %{type: :plan_updated, payload: payload}) when is_map(payload),
+    do: %{state | plan: payload}
+
+  defp track_plan(state, _event), do: state
 end
