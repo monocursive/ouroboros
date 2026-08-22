@@ -4135,7 +4135,7 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .find(|span| span.content == "fn")
             .expect("the fn keyword");
-        assert_eq!(keyword.style.fg, Some(ratatui::style::Color::Magenta));
+        assert_eq!(keyword.style.fg, Some(theme::code_keyword()));
     }
 
     #[test]

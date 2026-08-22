@@ -2205,15 +2205,23 @@ Done.";
         assert!(rows.iter().any(|row| row == "After."), "{rows:?}");
     }
 
+    /// Every colour this renderer emits is one the active [`theme`] declared.
+    ///
+    /// Named through the tokens rather than as literals: the point of the check is that
+    /// nothing here invented a hue, and a list of `Color::Cyan` and friends would only be
+    /// true of the palette that happens to be installed.
     #[test]
     fn colour_stays_inside_the_palette_the_client_owns() {
+        let declared: Vec<Color> = theme::current()
+            .tokens()
+            .iter()
+            .map(|(_name, colour)| *colour)
+            .collect();
+
         for span in spans_of(SAMPLER, 100) {
             if let Some(colour) = span.style.fg {
                 assert!(
-                    matches!(
-                        colour,
-                        Color::Cyan | Color::DarkGray | Color::Green | Color::Yellow
-                    ),
+                    declared.contains(&colour),
                     "{colour:?} is outside the transcript's palette"
                 );
             }
