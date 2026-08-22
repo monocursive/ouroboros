@@ -170,9 +170,12 @@ defmodule Ouroboros.Gateway.LedgerTest do
 
     assert export.head == head
 
-    # A tampered line breaks the chain from that point on, which is the whole claim.
+    # A tampered line breaks the chain from that point on, which is the whole claim. The
+    # edit is the entry's own id, which every line carries by construction — a substring
+    # picked for its meaning would be a test that passes only for the entries it imagined.
     [first | _rest] = export.lines
-    tampered = String.replace(first.line, "\"status\":\"ok\"", "\"status\":\"denied\"")
+    tampered = String.replace(first.line, first.id, first.id <> "-altered")
+    refute tampered == first.line
 
     refute :sha256 |> :crypto.hash([export.seed, tampered]) |> Base.encode16(case: :lower) ==
              first.hash
