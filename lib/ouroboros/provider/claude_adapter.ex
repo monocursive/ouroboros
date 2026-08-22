@@ -25,6 +25,18 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   there, which is what lifts the X1 refusal — the capability is read from the spec, so
   nothing else has to learn about this.
 
+  ## What rides along with it (E2/E3)
+
+  That same MCP server also carries three tools the *model* may call — `code_intel`,
+  `diagnostics`, `touch` — so a bridged session reaches this node's language-server pool
+  without another line here. And because a Claude session has no other way to be handed a
+  diagnostic, this adapter additionally composes a `PostToolUse` hook into the `--settings`
+  JSON: matched on `Edit|Write|MultiEdit|NotebookEdit`, running `ouro hook post-tool-use`,
+  which announces the edit, waits at most five seconds, and prints the new diagnostics as
+  `additionalContext`. That hook can never refuse an edit; a `PostToolUse` hook runs after
+  the tool has already succeeded, so blocking there only sends a model back to redo work
+  that worked (OpenCode #9102).
+
   ## Where it applies, and where it deliberately does not
 
     * **Interactive sessions only.** The bridge is attached when the run carries an
@@ -66,6 +78,11 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   the bridge is not attached, a warning names the conflict, and the session behaves as it
   did before this adapter existed. A map merges cleanly and the `ouroboros` key is this
   adapter's.
+
+  `settings` is held to exactly the same rule, with one difference in the consequence: a
+  string costs the session its diagnostics hook and nothing else, because the approval
+  bridge does not depend on it. A map merges, and an operator's own `PostToolUse` groups
+  are appended to rather than replaced.
 
   ## Coupling worth stating
 
