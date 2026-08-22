@@ -1728,9 +1728,6 @@ defmodule Ouroboros.Gateway.Methods do
   defp reply({:error, {:signing_service_unavailable, _detail} = reason}),
     do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}
 
-  # A pruned cursor is the one upstream detail a client acts on rather than displays: it
-  # restarts from the floor and marks the transcript as truncated below it. So the floor
-  # travels as data under a named reason instead of inside a sentence.
   # A rejected title is the caller's mistake, not the runtime's, and the reason names
   # which rule it broke so a client can say so next to the field rather than in a toast.
   defp reply({:error, {:invalid_title, %{reason: :too_long, limit: limit}}}) do
@@ -1748,6 +1745,9 @@ defmodule Ouroboros.Gateway.Methods do
     invalid_params("params.title must be a nonempty string")
   end
 
+  # A pruned cursor is the one upstream detail a client acts on rather than displays: it
+  # restarts from the floor and marks the transcript as truncated below it. So the floor
+  # travels as data under a named reason instead of inside a sentence.
   defp reply({:error, {:cursor_pruned, floor}}) do
     {:error, code(:upstream_error),
      "the session no longer retains events at or below that cursor; replay from #{floor}",

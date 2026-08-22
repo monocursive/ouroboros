@@ -607,6 +607,53 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
+    test "the coordinator plans a fork and starts nothing", %{id: id} do
+      # A session start waits on provider readiness with no bound. If that wait happened
+      # inside the parent's coordinator, the parent would answer nothing — not `info`, not
+      # `interrupt`, not its own turns — until a child it does not own had finished
+      # starting. So the coordinator's whole job is the child's start intent.
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+      planned = unique_id("planned-child")
+
+      assert {:ok, opts} = GenServer.call(Task.whereis(id), {:fork_plan, planned})
+
+      assert opts[:id] == planned
+      assert opts[:forked_from] == id
+      assert opts[:provider] == @provider
+      assert opts[:workspace] == File.cwd!()
+      assert opts[:provider_session_id] == "ouroboros-test-session"
+      assert opts[:provider_options][:fork_session] == true
+
+      # A plan is intent, not a session: nothing was created and nothing was started.
+      assert Store.get(planned) == :not_found
+      assert Task.whereis(planned) == nil
+
+      # And the parent still answers, having never left its own loop.
+      assert {:ok, %State{id: ^id}} = InteractiveSession.info(ref)
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    test "the parent answers while a fork is in flight", %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      forker =
+        Elixir.Task.async(fn -> InteractiveSession.fork(ref, unique_id("concurrent-fork")) end)
+
+      for _attempt <- 1..5 do
+        assert {:ok, %State{id: ^id}} = InteractiveSession.info(ref)
+      end
+
+      assert {:ok, child} = Elixir.Task.await(forker, 5_000)
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(child.id)
+      retire_session(id)
+    end
+
     test "an invalid fork id is refused before anything is started", %{id: id} do
       ref = start_session(id, sandbox_mode: :read_only)
 

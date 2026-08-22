@@ -188,10 +188,33 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  def handle_call({:fork, id}, _from, runtime) do
-    case fork_session(runtime, id) do
-      {:ok, result, runtime} -> {:reply, {:ok, result}, runtime}
-      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+  # Planning a fork is this coordinator's job; *starting* one is not. A session start
+  # waits on provider readiness, which is legitimately unbounded, and a parent blocked on
+  # that wait would answer nothing — not `info`, not `interrupt`, not its own turns —
+  # until a child it does not own had finished starting or hit the readiness deadline. So
+  # this answers with the child's start intent and nothing else, and
+  # `Ouroboros.InteractiveSession.fork/2` starts the child outside this process.
+  def handle_call({:fork_plan, id}, _from, runtime) do
+    {:reply, fork_plan(runtime.session, id), runtime}
+  end
+
+  # Counted only once the child exists, so the number never claims a session nobody can
+  # open. A refused checkpoint leaves the count low rather than losing the child:
+  # `forked_from` on the child is the durable half of the relationship.
+  def handle_call(:count_fork, _from, runtime) do
+    counted = runtime.session |> State.count_fork() |> State.touch()
+
+    case persist(runtime, counted, []) do
+      {:ok, runtime} ->
+        {:reply, {:ok, State.forks(runtime.session)}, runtime}
+
+      {:error, runtime} ->
+        Logger.warning(
+          "interactive session #{runtime.session.id} started a fork but could not " <>
+            "checkpoint its fork count; the child is unaffected"
+        )
+
+        {:reply, {:error, :fork_count_checkpoint_failed}, runtime}
     end
   end
 
@@ -1540,24 +1563,17 @@ defmodule Ouroboros.Interactive.Task do
   # Codex app server). Everything else about the child is the parent's own start intent.
   #
   # The parent is untouched. No turn is sent, nothing is interrupted, and the only thing
-  # written to it is a count of forks it has started — recorded after the child exists,
-  # because a counter that ran ahead of a child that failed to start would be a claim
-  # about a session nobody could open. A checkpoint that fails afterwards leaves the count
-  # low rather than losing the child: `forked_from` on the child is the durable half.
+  # ever written to it is a count of the branches it has started.
   #
   # The workspace is admitted exactly as it is for any other session, which means a fork
   # of a live session holding an exclusive lease is refused by the lease. That is honest
   # and it is a real limit: until worktrees (D7), a branch runs where the parent is not.
-  defp fork_session(%{session: session} = runtime, id) do
+  defp fork_plan(%State{} = session, id) do
     with {:ok, id} <- validate_fork_id(id),
          {:ok, parent_session_id} <- forkable_provider_session(session),
          {:ok, fork_options} <-
-           Provider.session_fork_options(session.provider, Map.get(session.options, :transport)),
-         {:ok, opts} <- fork_start_options(session, id, parent_session_id, fork_options),
-         {:ok, child} <- start_fork(opts) do
-      {:ok, child, count_fork(runtime)}
-    else
-      {:error, reason} -> {:error, reason, runtime}
+           Provider.session_fork_options(session.provider, Map.get(session.options, :transport)) do
+      {:ok, fork_start_options(session, id, parent_session_id, fork_options)}
     end
   end
 
@@ -1613,41 +1629,7 @@ defmodule Ouroboros.Interactive.Task do
         forked_from: session.id
       )
 
-    {:ok, opts}
-  end
-
-  # `start_for_gateway/1` rather than `start/1`: a child whose provider refused to open is
-  # still a durable session with an id the caller can inspect, and reporting it as a
-  # refusal would leave that session unreachable.
-  defp start_fork(opts) do
-    case Ouroboros.InteractiveSession.start_for_gateway(opts) do
-      {:ok, %{id: id, node: owner}} ->
-        {:ok, %{id: id, node: owner, ready: true, error: nil}}
-
-      {:created, %{id: id, node: owner}, reason} ->
-        {:ok, %{id: id, node: owner, ready: false, error: durable(reason)}}
-
-      {:error, reason} ->
-        {:error, {:fork_start_failed, durable(reason)}}
-    end
-  end
-
-  defp count_fork(runtime) do
-    counted = runtime.session |> State.count_fork() |> State.touch()
-
-    case persist(runtime, counted, []) do
-      {:ok, runtime} ->
-        runtime
-
-      # The child exists and carries `forked_from`; only the parent's hint is behind.
-      {:error, runtime} ->
-        Logger.warning(
-          "interactive session #{runtime.session.id} started a fork but could not " <>
-            "checkpoint its fork count; the child is unaffected"
-        )
-
-        runtime
-    end
+    opts
   end
 
   defp lose(runtime, reason) do

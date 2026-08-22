@@ -1582,8 +1582,25 @@ defmodule Ouroboros.Provider do
   # transport's `configuration_options` is the narrower "and can still be changed once
   # the session is open". A field outside either is refused by name.
   defp validate_configuration_options(spec, declared, changes) do
-    {:ok, accepted} = normalized_options(spec, {:interactive, declared.name})
+    case normalized_options(spec, {:interactive, declared.name}) do
+      {:ok, accepted} ->
+        validate_configurable_fields(spec, declared, changes, accepted)
 
+      # `selected_transport/2` only answers with a transport the spec declares or the
+      # synthetic managed one, so this is unreachable today. It is a `case` rather than a
+      # match because an unreachable `MatchError` here would crash a live coordinator.
+      :error ->
+        {:error,
+         {:unconfigurable_session,
+          %{
+            provider: spec.provider,
+            transport: declared.name,
+            reason: :unknown_session_transport
+          }}}
+    end
+  end
+
+  defp validate_configurable_fields(spec, declared, changes, accepted) do
     case Enum.find(
            Map.keys(changes),
            &(&1 not in accepted or &1 not in declared.configuration_options)

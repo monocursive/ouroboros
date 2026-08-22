@@ -235,9 +235,45 @@ defmodule Ouroboros.InteractiveSession do
 
   Refused where the transport declares no way to branch, and where the provider has not
   yet named a session to branch from.
+
+  Three steps, in this order for one reason: the parent's coordinator plans the fork and
+  counts it, but never starts it. Starting a session waits on provider readiness with no
+  bound, and a coordinator held behind that wait would answer nothing — not `info/1`, not
+  `interrupt/2`, not its own turns — until a child it does not own had finished starting.
   """
   @spec fork(session(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def fork(session, id \\ nil), do: call(session, {:fork, id})
+  def fork(session, id \\ nil) do
+    with {:ok, _parent_id, owner} <- session_identity(session),
+         {:ok, opts} <- call(session, {:fork_plan, id}),
+         {:ok, child} <- start_fork(owner, opts) do
+      # The child exists and carries `forked_from`, which is the durable half of the
+      # relationship. The parent's count is a hint that follows it, and a parent that
+      # cannot record one does not undo a fork that already happened.
+      _ = call(session, :count_fork)
+      {:ok, child}
+    end
+  end
+
+  defp start_fork(owner, opts) do
+    result =
+      if owner == node(),
+        do: start_for_gateway(opts),
+        else: start_for_gateway_on(owner, opts)
+
+    case result do
+      # `start_for_gateway/1` rather than `start/1`: a child whose provider refused to
+      # open is still a durable session with an id the caller can inspect, and reporting
+      # it as a refusal would leave that session unreachable.
+      {:ok, %Ref{id: id, node: child_node}} ->
+        {:ok, %{id: id, node: child_node, ready: true, error: nil}}
+
+      {:created, %Ref{id: id, node: child_node}, reason} ->
+        {:ok, %{id: id, node: child_node, ready: false, error: reason}}
+
+      {:error, reason} ->
+        {:error, {:fork_start_failed, reason}}
+    end
+  end
 
   @doc """
   Names a session, overriding any title the runtime derived from the first prompt.
