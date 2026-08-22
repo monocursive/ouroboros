@@ -32,7 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    Cli, Command, FleetCommand, InviteCommand, ServiceCommand, SessionsCommand, SyncCommand,
+    Cli, Command, FleetCommand, InviteCommand, RunArgs, ServiceCommand, SessionsCommand,
+    SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -42,7 +43,7 @@ use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
 use ouro::transport::{
     Client, ClientError, Connected, NoReconnectHook, ReconnectHook, Secret, TransportConfig,
 };
-use ouro::ui::boot::{Boot, BootEvent, Progress};
+use ouro::ui::boot::{Boot, BootEvent, BootProgress, Progress};
 use ouro::ui::{self, App, Mode, Quit, Screen};
 use ouro::{fleet, proto, runtime, status, transport};
 
@@ -55,10 +56,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 async fn main() -> ExitCode {
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("ouro: {error:#}");
-            ExitCode::FAILURE
-        }
+        // `ouro run` documents its exit codes, so it ends by carrying one out rather than
+        // by describing a failure. It has already said whatever it had to say, on the
+        // stream it chose, so nothing is printed here.
+        Err(error) => match error.downcast_ref::<ouro::run::Exit>() {
+            Some(exit) => ExitCode::from(exit.code()),
+            None => {
+                eprintln!("ouro: {error:#}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 
@@ -99,6 +106,7 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Some(Command::Run(args)) => run_prompt(&paths, cli.dev, config, *args).await,
         Some(Command::Daemon) => daemon(&paths, cli.dev).await,
         Some(Command::Attach {
             addr,
@@ -595,6 +603,199 @@ async fn new_session(
         first_message_accepted,
     )
     .await
+}
+
+/// `ouro run`: the session `ouro new` starts, streamed to a pipe instead of to a screen.
+///
+/// This function is the seam and nothing else. Every refusal it can make happens *before*
+/// a runtime is started — a prompt with no provider must not leave a daemon behind it —
+/// and everything from `interactive.start` onwards belongs to [`ouro::run::drive`], which
+/// the integration tests drive against a scripted gateway without any of this.
+async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> Result<()> {
+    let options = ouro::run::Options {
+        output: if args.stream_json {
+            ouro::run::Output::StreamJson
+        } else if args.json {
+            ouro::run::Output::Json
+        } else {
+            ouro::run::Output::Text
+        },
+        approve_all: args.approve_all,
+        timeout: Duration::from_secs(args.timeout),
+        verbose: args.verbose,
+    };
+
+    if args.timeout == 0 {
+        return Err(refuse_run(
+            &options,
+            "--timeout 0 has no meaning here: a run with no ceiling is the hang this \
+             command exists to prevent",
+        ));
+    }
+
+    let prompt = args.prompt.trim().to_string();
+
+    if prompt.is_empty() {
+        return Err(refuse_run(
+            &options,
+            "the prompt is empty; `ouro run` has nothing to send",
+        ));
+    }
+
+    for problem in &config.problems {
+        eprintln!("ouro run: {problem}");
+    }
+
+    let plan = match args.resume.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => ouro::run::Plan::Resume {
+            session_id: id.to_string(),
+            prompt,
+        },
+        Some(_blank) => {
+            return Err(refuse_run(&options, "--resume needs a session id"));
+        }
+        None => {
+            let flags = StartFlags {
+                provider: args.provider,
+                workspace: args.workspace.map(workspace_argument).transpose()?,
+                approval_mode: args.approval_mode,
+                sandbox_mode: args.sandbox_mode,
+                machine: args.machine,
+            };
+
+            let plan = ouro::run::start_plan(
+                &flags,
+                &config.config.defaults,
+                &config.path,
+                new_client_session_id()?,
+                |machine, workspace| {
+                    start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
+                },
+                prompt,
+            );
+
+            match plan {
+                Ok(plan) => plan,
+                Err(refusal) => return Err(refuse_run(&options, &refusal.to_string())),
+            }
+        }
+    };
+
+    // A silent sink for the machinery `ouro new` reports its boot through. The lines exist
+    // and are read back below; what they must never do is land on stdout, which here is a
+    // contract rather than a place to talk.
+    let boot = Arc::new(std::sync::Mutex::new(BootProgress::new()));
+    let progress = Progress::Screen(boot.clone());
+
+    let (address, token, mut daemon) = if args.addr.is_some() || args.token_file.is_some() {
+        let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+        (address, token, None)
+    } else {
+        paths.ensure_private_data_dir()?;
+        let (publication, token, daemon) = local_runtime(paths, dev, &progress).await?;
+        (local_address(publication.port), token, daemon)
+    };
+
+    report_boot(&boot, args.verbose);
+
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    // Reconnect stays off deliberately. A silent re-handshake would drop this run's
+    // subscription and leave it waiting out its whole `--timeout` on a stream that is
+    // never coming back; a closed connection is instead an observable `lost`.
+    let attached = match attach_with(address, token, false, hook).await {
+        Ok(attached) => attached,
+        Err(error) => {
+            return Err(clean_up_owned_daemon_after_error(
+                &mut daemon,
+                error,
+                "connecting to the newly started runtime failed",
+            )
+            .await)
+        }
+    };
+
+    let Connected {
+        client,
+        hello,
+        mut notifications,
+    } = attached;
+
+    let report = {
+        let mut out = std::io::stdout().lock();
+        let mut err = std::io::stderr().lock();
+        let mut sinks = ouro::run::Sinks {
+            out: &mut out,
+            err: &mut err,
+        };
+
+        ouro::run::drive(
+            &client,
+            &mut notifications,
+            &hello,
+            plan,
+            &options,
+            &mut sinks,
+        )
+        .await
+    };
+
+    client.stop().await;
+
+    // The session outlives this process only if the runtime does, and `ouro run` is a
+    // command a script calls repeatedly: tearing the daemon down between prompts would
+    // make every one of them pay a cold start.
+    if let Some(daemon) = daemon.as_mut() {
+        let pid = daemon.pid();
+        daemon.detach();
+        eprintln!("the runtime is still running (pid {pid}); `ouro` attaches to it");
+    }
+
+    match report {
+        Ok(report) if report.status == ouro::run::Status::Completed => Ok(()),
+        Ok(report) => Err(anyhow!(report.exit())),
+        Err(refusal) => Err(refuse_run(&options, &refusal.to_string())),
+    }
+}
+
+/// A refusal: the sentence on stderr, the object on stdout where stdout is JSON, and the
+/// documented usage code. Nothing ran, so there is no result object to print.
+fn refuse_run(options: &ouro::run::Options, message: &str) -> anyhow::Error {
+    eprintln!("ouro run: {message}");
+
+    if matches!(
+        options.output,
+        ouro::run::Output::Json | ouro::run::Output::StreamJson
+    ) {
+        let refusal = ouro::run::Refusal(message.to_string());
+
+        if let Ok(line) = serde_json::to_string(&refusal.to_json()) {
+            println!("{line}");
+        }
+    }
+
+    anyhow!(ouro::run::Exit::USAGE)
+}
+
+/// The boot's own lines, on stderr where a headless command's progress belongs.
+///
+/// Warnings are unconditional because they are about this host — an overridden data
+/// directory, a protocol skew — and a script that never sees them debugs the wrong thing.
+fn report_boot(boot: &Arc<std::sync::Mutex<BootProgress>>, verbose: bool) {
+    let Ok(mut boot) = boot.lock() else {
+        return;
+    };
+
+    boot.settle();
+
+    for warning in boot.warnings() {
+        eprintln!("ouro run: {warning}");
+    }
+
+    if verbose {
+        for step in boot.steps() {
+            eprintln!("ouro run: {}", step.label);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1674,6 +1875,50 @@ async fn attach_remote(
     print: bool,
     config: Loaded,
 ) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+
+    if print {
+        report_dev_data_dir_override(paths, dev, &Progress::Plain);
+        let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+
+        return print_page(address, attach_with(address, token, false, hook).await?).await;
+    }
+
+    // No spawn to watch, so the boot screen is one phase long — but it is still where the
+    // terminal is taken, so the handshake to a runtime on the other end of a tunnel has
+    // somewhere to be slow in.
+    let boot = Boot::begin();
+    report_dev_data_dir_override(paths, dev, &boot.progress());
+
+    draw(
+        boot,
+        address,
+        token,
+        Mode::Attached,
+        None,
+        None,
+        Local {
+            // This client did not start it, so it does not know where that runtime keeps
+            // anything.
+            data_dir: None,
+            config,
+            open_machines: false,
+            add_log: Vec::new(),
+            add_recipe: None,
+        },
+    )
+    .await
+}
+
+/// Where a runtime this client did not start listens, and the token to present to it.
+///
+/// Shared by `ouro attach` and `ouro run --addr/--token-file` so the two surfaces cannot
+/// disagree about which file a token is read from or when the cleartext warning is owed.
+async fn remote_endpoint(
+    paths: &Paths,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<(SocketAddr, Secret)> {
     // An explicit address plus token file is fully remote and must not touch local runtime
     // state. Every other form consults the local publication or default token path.
     if addr.is_none() || token_file.is_none() {
@@ -1717,37 +1962,7 @@ async fn attach_remote(
         );
     }
 
-    if print {
-        report_dev_data_dir_override(paths, dev, &Progress::Plain);
-        let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-
-        return print_page(address, attach_with(address, token, false, hook).await?).await;
-    }
-
-    // No spawn to watch, so the boot screen is one phase long — but it is still where the
-    // terminal is taken, so the handshake to a runtime on the other end of a tunnel has
-    // somewhere to be slow in.
-    let boot = Boot::begin();
-    report_dev_data_dir_override(paths, dev, &boot.progress());
-
-    draw(
-        boot,
-        address,
-        token,
-        Mode::Attached,
-        None,
-        None,
-        Local {
-            // This client did not start it, so it does not know where that runtime keeps
-            // anything.
-            data_dir: None,
-            config,
-            open_machines: false,
-            add_log: Vec::new(),
-            add_recipe: None,
-        },
-    )
-    .await
+    Ok((address, token))
 }
 
 /// Connects with the boot screen still live, and hands the terminal to the UI.

@@ -294,6 +294,9 @@ ouro attach             # connect to the runtime published in this data director
 ouro attach --addr 127.0.0.1:4560 --token-file ~/.ouro-token
 ouro new --provider claude --workspace .   # start a session and drop into the UI
 ouro new -m "fix the tests"                # the same, with configured defaults filling the rest
+ouro run "fix the tests"                   # headless: one prompt, the answer on stdout
+ouro run "fix the tests" --stream-json     # one JSON object per event, then a result object
+ouro run "and now the docs" --resume SESSION-ID   # another turn in a session that exists
 ouro stop               # ask the runtime this client started to shut down
 ouro version            # client version, embedded release version and digest, protocol
 ouro --dev              # start `mix run --no-halt` in this checkout instead
@@ -312,6 +315,41 @@ readable by every process on the host for as long as the command runs. A spawnin
 writes 32 bytes of OS randomness to a 0600 file beside `gateway.json` and tells the
 gateway the path. The internally extracted release reads that launcher-owned file; a
 bare release is not a second supported token-generation or lifecycle path.
+
+### Headless: `ouro run`
+
+`ouro run` is the same session `ouro new` starts, without a screen. It resolves the
+runtime identically — adopt the one running here, start one, or attach with
+`--addr`/`--token-file` — and then stdout carries exactly one of three things:
+
+```sh
+ouro run "what does this repo do?"              # the agent's answer, as prose
+ouro run "what does this repo do?" --json       # one result object
+ouro run "what does this repo do?" --stream-json  # one object per event, then the result
+```
+
+Under `--stream-json` each line is the gateway's own normalised event, unchanged — the
+same objects the TUI renders — followed by
+`{"type":"result","session_id":…,"turn_id":…,"status":…,"usage":…,"files_changed":[…],"approvals":…,"duration_ms":…}`.
+Progress, warnings, and the "runtime still running" line go to stderr, so none of the
+three can be corrupted by them. `--resume <session-id>` sends another turn into a session
+that already exists and prints only that turn.
+
+There is no approver at a pipe, so an approval request is answered `deny` with a reason
+saying so — or `approve` with `--approve-all`. It never waits for a human it does not
+have, and `--timeout` (default 600s) means a run always ends.
+
+The exit code is the part a script branches on: **0** completed, **1** failed, **2**
+interrupted, **3** lost (the turn's outcome was *not observed* — never rounded up to
+success), **4** timeout, **64** usage error or refusal.
+
+```yaml
+- name: ask the agent to review the diff
+  run: |
+    ouro run "review the changes on this branch and list anything risky" \
+      --provider claude --stream-json --timeout 900 > events.ndjson
+    jq -e 'select(.type == "result") | .status == "completed"' < events.ndjson
+```
 
 ### First run and configuration
 
