@@ -177,8 +177,20 @@ defmodule Ouroboros.Gateway.Conn do
   file must not do.
   """
   @spec result_frame(term(), term()) :: map()
-  def result_frame(id, value) do
-    %{"jsonrpc" => "2.0", "id" => id, "result" => Wire.to_json(value)}
+  def result_frame(id, value), do: result_frame(id, value, [])
+
+  @doc """
+  The same envelope, with the event-payload byte caps stated rather than configured.
+
+  Only `mix ouroboros.gateway.golden` passes them. A fixture has to pin the *shape* of an
+  excerpt — `_excerpt` beside `_bytes` — and pinning it at the 128 KiB production default
+  would make the contract file 128 KiB of one repeated character, which is a diff nobody
+  reviews. So the fixture shrinks the caps and keeps the envelope, and the cap arithmetic
+  itself is asserted where numbers belong, in `Ouroboros.Gateway.WireTest`.
+  """
+  @spec result_frame(term(), term(), keyword()) :: map()
+  def result_frame(id, value, wire_opts) do
+    %{"jsonrpc" => "2.0", "id" => id, "result" => Wire.to_json(value, wire_opts)}
   end
 
   @doc "The JSON-RPC envelope for an error, with optional `Wire`-encoded `data`."
@@ -198,8 +210,12 @@ defmodule Ouroboros.Gateway.Conn do
 
   @doc "The JSON-RPC envelope for a server notification, which carries no id."
   @spec notification_frame(String.t(), term()) :: map()
-  def notification_frame(method, params) do
-    %{"jsonrpc" => "2.0", "method" => method, "params" => Wire.to_json(params)}
+  def notification_frame(method, params), do: notification_frame(method, params, [])
+
+  @doc "The same envelope, with stated caps. See `result_frame/3` for who passes them."
+  @spec notification_frame(String.t(), term(), keyword()) :: map()
+  def notification_frame(method, params, wire_opts) do
+    %{"jsonrpc" => "2.0", "method" => method, "params" => Wire.to_json(params, wire_opts)}
   end
 
   @impl true

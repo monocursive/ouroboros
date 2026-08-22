@@ -65,6 +65,62 @@ defmodule Ouroboros.Gateway.GoldenTest do
              "Ouroboros.Interactive.Event"
   end
 
+  test "an excerpted leaf names itself and its true size, and spares the envelope" do
+    payload = fixture("interactive_event_excerpt_notification")["params"]["event"]["payload"]
+
+    # The marker a client has to learn: what arrived, and how much did not.
+    assert payload["diff"] == %{
+             "_excerpt" => String.duplicate("a", 48),
+             "_bytes" => 600
+           }
+
+    # Cut where a three-byte character straddles the cap. 46 bytes, not 48, because a
+    # client decoding this frame is owed valid UTF-8 rather than a dangling lead byte.
+    assert payload["note"]["_excerpt"] == "x" <> String.duplicate("☃", 15)
+    assert payload["note"]["_bytes"] == 601
+
+    # Below the never-excerpt floor, so the marker that would have replaced it — and cost
+    # more than it — never appears.
+    assert payload["path"] == "lib/ouroboros/gateway/wire.ex"
+
+    # Past the per-event budget. The size is the only thing left that is true about it.
+    assert payload["tail"] == %{"_excerpt" => "", "_bytes" => 700}
+
+    event = fixture("interactive_event_excerpt_notification")["params"]["event"]
+
+    assert event["sequence"] == 43
+    assert event["type"] == "file_change"
+    assert event["timestamp"] == "2026-01-01T00:00:00.000000Z"
+    assert event["session_id"] == "session-0000000000000000000001"
+  end
+
+  test "event_detail answers one bare event, whole, where the notification excerpted" do
+    detail = fixture("interactive_event_detail_result")["result"]
+
+    # Not an array and not wrapped: `replay` is the method that answers with a list, and a
+    # client that unwrapped this one the same way would find no event at all.
+    assert detail["_struct"] == "Ouroboros.Interactive.Event"
+    assert detail["sequence"] == 43
+
+    # The same event as the excerpt fixture, at the raised cap — which is the entire
+    # reason the method exists.
+    assert detail["payload"]["diff"] == String.duplicate("a", 600)
+    assert detail["payload"]["tail"] == String.duplicate("z", 700)
+
+    coding = fixture("coding_event_detail_result")["result"]
+
+    assert coding["_struct"] == "Ouroboros.Coding.Event"
+    assert coding["task_id"]
+    assert coding["payload"]["diff"] == String.duplicate("b", 600)
+  end
+
+  test "the two detail methods are advertised, so a client can feature-detect them" do
+    methods = fixture("hello_result")["result"]["methods"]
+
+    assert "interactive.event_detail" in methods
+    assert "coding.event_detail" in methods
+  end
+
   test "the hello fixture lists exactly the methods this build serves" do
     assert fixture("hello_result")["result"]["methods"] == Ouroboros.Gateway.Methods.names()
   end
