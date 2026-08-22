@@ -11,6 +11,14 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     "item/permissions/requestApproval"
   ]
 
+  # Extensions the Responses API accepts as image input. Anything else is a file the
+  # app-server has no input arm for; see `turn_input/1`.
+  @image_extensions ~w(.png .jpg .jpeg .gif .webp)
+
+  # One turn carries at most this many attachment items. The overflow is counted in the
+  # trailing text item rather than dropped in silence.
+  @max_attachment_items 64
+
   @impl true
   def name, do: :app_server
 
@@ -30,6 +38,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       follow_up: :managed,
       interrupt: :native,
       approvals: :native,
+      multimodal: :native,
       dynamic_model: :managed,
       dynamic_configuration: :managed
     )
@@ -388,7 +397,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   defp turn_params(runtime, turn) do
     %{
       "threadId" => runtime.provider_session_id,
-      "input" => [%{"type" => "text", "text" => TurnRequest.text(turn)}]
+      "input" => turn_input(turn)
     }
     |> maybe_put("model", turn_model(runtime, turn))
     |> maybe_put("effort", effort(turn.reasoning_effort || runtime.request.reasoning_effort))
@@ -400,6 +409,54 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     do: option(options, :model)
 
   defp turn_model(runtime, _turn), do: runtime.request.model
+
+  # `turn/start` takes `input: UserInput[]`, a tagged union. Its arms, verified against the
+  # schema this protocol's own generator emits —
+  # `codex app-server generate-json-schema --out <dir>` → `v2/TurnStartParams.json`,
+  # `$defs.UserInput` (codex-cli 0.147.0), the same union published at
+  # https://developers.openai.com/codex/app-server — are `text` (`text`, optional
+  # `text_elements`), `image` (`url`), `localImage` (`path`), `audio`, `localAudio`,
+  # `skill` (`name`,`path`) and `mention` (`name`,`path`). Only `type` plus the arm's own
+  # required field are mandatory.
+  #
+  # Images therefore travel as `localImage` with the workspace-canonicalised path the
+  # caller already authorised (`Ouroboros.Interactive.Task`; not re-validated here). No arm
+  # carries a non-image file, so those attachments are *named*, not sent: they become
+  # `@<path>` lines in a trailing text item, which tells the agent where the file is and
+  # leaves the reading to its own tools. Nothing is uploaded, and the docs say so.
+  defp turn_input(turn) do
+    attachments = Enum.filter(attachments(turn), &is_binary/1)
+    sent = Enum.take(attachments, @max_attachment_items)
+    dropped = length(attachments) - length(sent)
+    {images, files} = Enum.split_with(sent, &image_attachment?/1)
+
+    [%{"type" => "text", "text" => TurnRequest.text(turn)}] ++
+      Enum.map(images, &%{"type" => "localImage", "path" => &1}) ++
+      mention_input(files, dropped)
+  end
+
+  defp attachments(%{attachments: attachments}) when is_list(attachments), do: attachments
+  defp attachments(_turn), do: []
+
+  defp image_attachment?(path),
+    do: path |> Path.extname() |> String.downcase() |> Kernel.in(@image_extensions)
+
+  defp mention_input([], 0), do: []
+
+  defp mention_input(files, dropped) do
+    named =
+      case files do
+        [] -> []
+        _ -> ["Attached files (paths, not contents):" | Enum.map(files, &("@" <> &1))]
+      end
+
+    overflow =
+      if dropped > 0,
+        do: ["#{dropped} further attachments were not sent with this turn."],
+        else: []
+
+    [%{"type" => "text", "text" => Enum.join(named ++ overflow, "\n")}]
+  end
 
   # AskForApproval and SandboxMode serialize with serde kebab-case. The tagged
   # sandboxPolicy object is camelCase (`type: workspaceWrite`). Mixing those is a
