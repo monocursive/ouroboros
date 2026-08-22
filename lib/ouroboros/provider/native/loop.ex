@@ -693,7 +693,16 @@ defmodule Ouroboros.Provider.Native.Loop do
     :ok
   end
 
-  @doc false
+  @doc """
+  Builds the harness event for one loop event, redacted at this boundary.
+
+  `Jido.Harness.EventStore` redacts again before anything is journaled, so this is
+  belt and braces — but it is the same belt `Ouroboros.Provider.CodexAdapter` already
+  wears, and for the same reason: a `bash` result is a normal tool result that this
+  runtime puts on the wire, and a command that echoed `$ANTHROPIC_API_KEY` must not
+  reach a live subscriber in the clear on its way to a journal that would have caught
+  it. `Redaction.redact/1` covers this node's own sensitive environment values.
+  """
   @spec to_event(map(), atom(), String.t() | nil) :: Jido.Harness.Event.t()
   def to_event(event, provider, provider_session_id) do
     Jido.Harness.Event.new!(
@@ -702,7 +711,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       provider_session_id: provider_session_id,
       turn_id: event.turn_id,
       request_id: event.request_id,
-      payload: event.payload
+      payload: Jido.Harness.Redaction.redact(event.payload)
     )
   end
 

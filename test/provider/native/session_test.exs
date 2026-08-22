@@ -332,6 +332,37 @@ defmodule Ouroboros.Provider.Native.SessionTest do
     end
   end
 
+  describe "payload discipline" do
+    test "a tool result that echoed a credential is redacted before it is emitted", context do
+      System.put_env("OUROBOROS_NATIVE_SESSION_API_KEY", "sk-live-do-not-emit-me")
+      on_exit(fn -> System.delete_env("OUROBOROS_NATIVE_SESSION_API_KEY") end)
+
+      # `Jido.Harness.Redaction` caches this node's sensitive environment per process,
+      # and the session process is started below, after the variable is set.
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "bash",
+             input: %{"command" => "echo $OUROBOROS_NATIVE_SESSION_API_KEY"}
+           }}
+        ],
+        [{:text, "printed it"}, {:finish, :stop}]
+      ]
+
+      %{handle: handle} = open(context, script)
+      await_event(:provider_event)
+
+      Session.send(handle, TurnRequest.new!("print the key"), "turn-1")
+      events = collect_until(:turn_completed)
+
+      result = Enum.find(events, &(&1.type == :tool_result))
+      assert result.payload["output"] =~ "[REDACTED]"
+      refute inspect(Enum.map(events, & &1.payload)) =~ "sk-live-do-not-emit-me"
+    end
+  end
+
   describe "resume" do
     test "restores the conversation from the checkpoint after the process is killed", context do
       script = [

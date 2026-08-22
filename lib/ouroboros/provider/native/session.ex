@@ -338,14 +338,7 @@ defmodule Ouroboros.Provider.Native.Session do
   defp emit(state, event) do
     SessionAdapter.emit(
       state.context.owner,
-      Event.new!(
-        type: event.type,
-        provider: state.context.provider,
-        provider_session_id: state.provider_session_id,
-        turn_id: event.turn_id,
-        request_id: event.request_id,
-        payload: event.payload
-      )
+      Loop.to_event(event, state.context.provider, state.provider_session_id)
     )
   end
 
