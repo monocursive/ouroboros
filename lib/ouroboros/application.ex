@@ -119,6 +119,11 @@ defmodule Ouroboros.Application do
           Ouroboros.Orchestration.Store,
           Ouroboros.Control.Store,
           Ouroboros.Control.Grants,
+          # The permission engine sits with the other durable authority, above every
+          # session that consults it. If its store restarts, rest_for_one takes the
+          # sessions down with it rather than letting a live provider session keep
+          # answering approvals from a replacement empty rule set.
+          Ouroboros.Control.Permissions,
           release_runtime()
         ] ++
         workspace_children() ++

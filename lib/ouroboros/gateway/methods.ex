@@ -80,6 +80,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Cluster
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
+  alias Ouroboros.Control.Permissions
   alias Ouroboros.Gateway.Config, as: GatewayConfig
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State, as: InteractiveState
@@ -185,6 +186,10 @@ defmodule Ouroboros.Gateway.Methods do
     "upgrade.history" => %{scope: :read, timeout: @default_timeout},
     "signing.decisions" => %{scope: :read, timeout: @default_timeout},
     "grants.list" => %{scope: :read, timeout: @default_timeout},
+    # The permission engine is node-local like every other authority here, so these three
+    # route to the machine whose rules they describe. Reading is `read`; writing a rule
+    # widens or narrows what a session may do without a human present, so it is `operate`.
+    "permissions.list" => %{scope: :read, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
     # only after a signed roster tombstone is present and the machine is offline.
@@ -192,6 +197,8 @@ defmodule Ouroboros.Gateway.Methods do
     # Session ids are caller-owned and both planes reconcile the same immutable intent.
     # A ceiling can fire after durable creation, so never imply that minting a second id
     # is safe merely because the gateway stopped waiting.
+    "permissions.add" => %{scope: :operate, timeout: @default_timeout},
+    "permissions.remove" => %{scope: :operate, timeout: @default_timeout},
     "interactive.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "account.login.start" => %{scope: :operate, timeout: @default_timeout},
     "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
@@ -258,6 +265,28 @@ defmodule Ouroboros.Gateway.Methods do
 
   @approval_decisions %{"approve" => :approve, "deny" => :deny}
   @approval_scopes %{"once" => :once, "session" => :session}
+
+  # The permission engine's own vocabulary, spelled out for the same reason as the rest:
+  # a client string is matched against these terms, never converted into one.
+  @permission_scopes %{
+    "node" => :node,
+    "user" => :user,
+    "workspace" => :workspace,
+    "session" => :session
+  }
+
+  # What `permissions.add` may write. `:node` is operator configuration, read from
+  # `config :ouroboros, :permissions` and never authored over the wire. `:session` is a
+  # session's own "don't ask again" — it is written by answering an approval, and giving
+  # an operator a verb to mint one for a session they are not in would be a different
+  # thing wearing the same name.
+  @permission_rule_scopes %{"user" => :user, "workspace" => :workspace}
+
+  # Removal reaches one scope further, because cleaning up after a session that remembered
+  # something is a real operator need.
+  @permission_removable_scopes Map.put(@permission_rule_scopes, "session", :session)
+
+  @permission_decisions %{"allow" => :allow, "deny" => :deny, "ask" => :ask}
 
   # What a client may set when it starts a session or a coding run. Everything here is
   # durable, provider-neutral execution intent. Deliberately absent: `env`, `mcp_config`,
@@ -594,6 +623,47 @@ defmodule Ouroboros.Gateway.Methods do
       else
         unavailable("the effect grant authority is not running on this node")
       end
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("permissions.list", params) do
+    with :ok <- only_keys(params, ["scope", "workspace", "node"]),
+         {:ok, scope} <- permission_scope(params, "scope", @permission_scopes, :optional),
+         {:ok, workspace} <- fetch_optional_string(params, "workspace"),
+         {:ok, target} <- permissions_node(params) do
+      permissions_call(target, :list, [[scope: scope, workspace: workspace]])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # A rule written here decides tool calls with no human present, which is exactly why it
+  # is an `operate` verb and why the pattern is validated by the engine rather than here:
+  # `Ouroboros.Control.Permissions.Pattern` is the only definition of the language, and a
+  # second, laxer one at the edge would be a way past the first.
+  def invoke("permissions.add", params) do
+    with :ok <- only_keys(params, ["scope", "pattern", "decision", "workspace", "node"]),
+         {:ok, scope} <- permission_scope(params, "scope", @permission_rule_scopes, :required),
+         {:ok, decision} <- permission_scope(params, "decision", @permission_decisions, :required),
+         {:ok, pattern} <- fetch_string(params, "pattern"),
+         {:ok, workspace} <- fetch_optional_string(params, "workspace"),
+         {:ok, target} <- permissions_node(params) do
+      rule = %{scope: scope, decision: decision, pattern: pattern, workspace: workspace}
+      permissions_call(target, :add, [rule])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("permissions.remove", params) do
+    with :ok <- only_keys(params, ["scope", "id", "node"]),
+         {:ok, scope} <-
+           permission_scope(params, "scope", @permission_removable_scopes, :required),
+         {:ok, id} <- fetch_string(params, "id"),
+         {:ok, target} <- permissions_node(params) do
+      permissions_call(target, :remove, [scope, id])
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1358,6 +1428,46 @@ defmodule Ouroboros.Gateway.Methods do
       ~s({"decision": "approve"|"deny", "scope": "once"|"session", "reason": "..."})
   end
 
+  defp permission_scope(params, key, allowed, requirement) do
+    case {Map.get(params, key), requirement} do
+      {nil, :optional} -> {:ok, nil}
+      {value, _requirement} when is_binary(value) -> fetch_permission_term(key, allowed, value)
+      {_value, _requirement} -> {:invalid, permission_message(key, allowed)}
+    end
+  end
+
+  defp fetch_permission_term(key, allowed, value) do
+    case Map.fetch(allowed, value) do
+      {:ok, term} -> {:ok, term}
+      :error -> {:invalid, permission_message(key, allowed)}
+    end
+  end
+
+  defp permission_message(key, allowed) do
+    "params.#{key} must be one of " <>
+      (allowed |> Map.keys() |> Enum.sort() |> Enum.join(", "))
+  end
+
+  defp permissions_node(params) do
+    case Map.get(params, "node") do
+      nil -> {:ok, node()}
+      value -> option_value("node", :node, value)
+    end
+  end
+
+  # Node-local authority, queried where it lives. A remote answer is bounded by `:erpc`
+  # rather than by this module's ceiling, so an unreachable machine is reported as an
+  # unreachable machine instead of as a gateway timeout with no detail.
+  defp permissions_call(target, function, arguments) do
+    safe(fn ->
+      if target == node() do
+        reply(apply(Permissions, function, arguments))
+      else
+        reply(:erpc.call(target, Permissions, function, arguments, @fleet_query_timeout))
+      end
+    end)
+  end
+
   defp with_replay(params, plane, replay) do
     with :ok <- only_keys(params, ["id", "cursor", "limit", "node"]),
          {:ok, session} <- session_target(plane, params),
@@ -1646,6 +1756,18 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp reply({:error, :control_disabled_or_unavailable}),
     do: unavailable("the control plane is disabled or not running on this node")
+
+  defp reply({:error, {:permissions_unavailable, _detail}}),
+    do: unavailable("the permission engine is not running on this node")
+
+  defp reply({:error, :node_scope_is_operator_configuration}) do
+    {:error, code(:upstream_error),
+     "node-scope permission rules come from config :ouroboros, :permissions and are not written over the wire",
+     %{"reason" => "node_scope_is_operator_configuration"}}
+  end
+
+  defp reply({:error, {:unknown_permission_rule, id}}),
+    do: not_found("no permission rule #{id} on this node")
 
   defp reply({:error, {:signing_service_unavailable, _detail} = reason}),
     do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}

@@ -4,6 +4,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   @behaviour Ouroboros.Provider.Session.Dialect
 
   alias Jido.Harness.{Event, InteractionCapabilities, TurnRequest}
+  alias Ouroboros.Control.Permissions.Seam
 
   @approval_methods [
     "item/commandExecution/requestApproval",
@@ -47,6 +48,10 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   @impl true
   def command(request, context) do
+    # `approval_request/2` sees only a method and params, so the session this process
+    # speaks for is remembered here, in `Session.Jsonl.init/1`, where both are in hand.
+    _ = Seam.bind(request, context, name())
+
     path =
       option(request.provider_options, :cli_path) ||
         Map.get(context.config, :cli_path) ||
@@ -113,9 +118,16 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   @impl true
   def configure(_runtime, _changes), do: {:error, :unsupported}
 
+  # The one pre-tool seam the app server gives. `Ouroboros.Control.Permissions` answers
+  # first; only what it leaves as `:ask` becomes an approval the human sees.
   @impl true
-  def approval_request(method, params) when method in @approval_methods,
-    do: {:approval, approval_payload(method, params), %{params: params}}
+  def approval_request(method, params) when method in @approval_methods do
+    case Seam.decide(:app_server, method, params, approval_payload(method, params)) do
+      {:ask, payload} -> {:approval, payload, %{params: params, method: method}}
+      {:allow, _rule} -> {:result, %{"decision" => "accept"}}
+      {:deny, _rule} -> {:result, %{"decision" => "decline"}}
+    end
+  end
 
   def approval_request(_method, _params), do: :method_not_found
 

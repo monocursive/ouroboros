@@ -29,6 +29,25 @@ config :ouroboros,
   orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
   control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
+  permissions_storage: {Jido.Storage.ETS, table: :ouroboros_permissions},
+  # Operator-authored permission rules, the highest scope `Ouroboros.Control.Permissions`
+  # consults. Each entry is `{pattern, decision}` or `{pattern, decision, workspace}`;
+  # `decision` is `:allow`, `:deny`, or `:ask`. Empty means every tool call this runtime
+  # can intercept reaches a human, which is the safe thing for a default to mean.
+  #
+  #     permissions: [
+  #       {"Bash(git status *)", :allow},
+  #       {"Bash(rm *)", :deny},
+  #       {"WebFetch(domain:github.com)", :allow}
+  #     ]
+  permissions: [],
+  # Stored rules retained per node across the user, workspace, and session scopes. The
+  # bound refuses a new rule rather than evicting an old one: evicting a `deny` to make
+  # room for an `allow` would be a storage limit that widens authority.
+  permissions_limit: 500,
+  # Where permission decisions are recorded. The effect ledger is the answer; the key
+  # exists so a test can point one engine at a ledger it is allowed to take away.
+  permissions_ledger: Ouroboros.Agent.EffectLedger,
   effect_ledger_storage: {Jido.Storage.ETS, table: :ouroboros_effect_ledger},
   # Terminal entries retained per node. In-flight entries are never evicted, and every
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.

@@ -478,14 +478,14 @@ server, one document stream, and one diagnostics cache. Servers must run where t
 are, so a fleet has one pool per host and a session on machine B uses machine B's pool;
 every status entry names its `node()` for that reason.
 
-The subtree lives in the `:core` tree's operator-surface tail, downstream of cluster
-formation and of every plane and immediately above the Codex account boundary and the
-gateway. It owns no durable state and nothing rebuilds from it, so no session can be
-restarted by a language server dying — every plane starts above it. It is unconditional
-because it is lazy: no language server exists until a caller asks for one. The cost of
-that position is that a crash of the subtree itself also restarts the account boundary
-and the gateway, which is why it carries a deliberately generous restart intensity —
-language-server failures are states inside the pool, never crashes of it.
+The subtree is the last child of the `:core` tree, downstream of cluster formation, of
+every plane, of the Codex account boundary, and of the gateway. It owns no durable state
+and nothing rebuilds from it, so under `rest_for_one` its crash restarts nothing, and a
+crash upstream restarts only a pool that rebuilds itself on the next request; the gateway
+stays the only child a stranger can reach. It is unconditional because it is lazy: no
+language server exists until a caller asks for one. It still carries a generous restart
+intensity, because language-server failures are states inside the pool, never crashes
+of it.
 
 **Lifecycle.** A server is spawned on the first `acquire`, through the same
 `priv/provider-exec` wrapper every provider CLI crosses, so it runs as the user with
@@ -541,6 +541,42 @@ free. There is no installer — `ouro lsp install` is a later slice, and until i
 absent server is an install hint and nothing more. There is no rename, no code actions,
 no formatting, and no tree-sitter fallback for languages without a server. Language-server
 stderr is inherited by the runtime process rather than captured per server.
+### Permission plane
+
+`Ouroboros.Control.Permissions` is the second deny-by-default authority, and it answers a
+different question from grants: not what an *agent* may do to the cluster, but what a
+*provider* may do to this machine. It is consulted at the only two pre-tool seams this
+runtime has — `Dialect.ACP.approval_request/2` and `Dialect.Codex.approval_request/2` —
+before any `approval_requested` event is emitted.
+
+A rule is `{pattern, decision, scope}`. The pattern language is `Bash(<prefix> *)` with a
+word boundary, path globs for `Read`/`Edit`/`Write` canonicalised through
+`Workspace.Path`, `WebFetch(domain:…)`, `mcp__<server>__<tool>`, and `Tool(<name>)`;
+`Bash(command:…)` is refused, and `Tool(<name>:<param>=<value>)` may deny or ask but never
+allow. A compound command splits per sub-command with wrappers stripped and redirect
+targets evaluated as writes, and an `allow` must cover every part while a `deny` needs
+only one — the asymmetry that keeps a chained command from smuggling a part past an allow.
+
+Four scopes, `:node` (operator configuration) above `:user` above `:workspace` above
+`:session`, resolved as: any `deny`, then any `ask`, then `allow`, with scope breaking
+ties only inside one rank. Workspace rules are keyed by canonical root and stored in the
+node's data directory rather than in the repository, so a clone cannot ship rules that
+grant it permissions on the machine that clones it. Protected writes — `.git`,
+`.ouroboros`, the data directory, `~/.config/ouroboros` — are decided before any rule is
+read and no rule reaches them.
+
+Storage follows `Control.Grants`: node-local, checkpoint before acknowledgement, bounded,
+with `status/0`. The bound refuses a new rule rather than evicting an old one. An
+unreachable store answers `{:ask, :authority_unavailable}` for anything a stored rule
+could have allowed, while protected paths and configured denies still refuse, because
+those need only configuration and the request. Every rule-made allow and deny, and every
+human answer through `respond_approval`, is written to `Agent.EffectLedger` as a
+`:permission` effect — tool, mode, provider, decision, scope, actor, rule id, and a digest
+of the command line and paths, never their text. An `allow` whose ledger entry cannot be
+written is downgraded to `ask`.
+
+The engine's namespace rides the same `Ouroboros.Control.` prefix as grants, so the fast
+patch lane refuses an artifact that would replace the module deciding what code may do.
 
 ## Failure model
 
@@ -629,6 +665,22 @@ stderr is inherited by the runtime process rather than captured per server.
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
+- Permission rules decide what a provider is *asked* to do at the two seams where a
+  provider asks first, and nothing else. They are not an OS sandbox and not a substitute
+  for one. A vendor CLI that runs a tool without asking runs it; managed transports
+  (`claude`, `gemini`, `amp`, `grok`, `zai`, `codex exec`) have no approvals channel at
+  all, so no rule reaches them. Prefix matching is defeated by construction by command
+  substitution, `eval`, variable expansion, aliases, and `sh -c`: nothing is expanded, and
+  a rule matches the literal command line the provider reported. This is why the posture
+  is an allowlist plus protected paths rather than a denylist, and why argument-
+  constraining patterns are accepted but returned marked `fragile` rather than silently
+  trusted. There is no classifier; a classifier-backed `auto` mode is later work on top
+  of the same engine and never a replacement for rules.
+- The permission store is node-local and bounded like every other authority here. A
+  machine's rules do not replicate, and the bound refuses a new rule rather than evicting
+  an existing one — evicting a `deny` to admit an `allow` would be a storage limit that
+  widens authority. A failed rule write leaves the previous state standing in both
+  directions, for the reason revocation does.
 - Coding requests default to workspace write and prompt approval where the provider can
   enforce it; a provider that cannot is refused at creation rather than silently
   downgraded, and the downgrade has to be typed out (`sandbox_mode: :default`).

@@ -10,6 +10,7 @@ defmodule Ouroboros.Provider.Session.Jsonl do
   require Logger
 
   alias Jido.Harness.{ApprovalResponse, Event, ProcessEvent, Protocol.JSONL, TurnRequest}
+  alias Ouroboros.Control.Permissions.Seam
 
   def start_link({dialect, request, context}) when is_atom(dialect),
     do: GenServer.start_link(__MODULE__, {dialect, request, context})
@@ -131,6 +132,12 @@ defmodule Ouroboros.Provider.Session.Jsonl do
         reply =
           write(state, %{"id" => id, "result" => state.dialect.approval_reply(response, stash)})
 
+        # The human's answer joins the rule decisions in the ledger, and a session-scoped
+        # one becomes the rule that stops the next identical question (C1/I1). Best-effort
+        # on purpose: the answer has already reached the provider, and a failed audit
+        # write must not turn a delivered approval into an error the caller retries.
+        _ = Seam.answered(state.dialect.name(), Seam.decision_id(request_id), stash, response)
+
         {:reply, reply, %{state | approvals: approvals}}
     end
   end
@@ -218,6 +225,11 @@ defmodule Ouroboros.Provider.Session.Jsonl do
   @impl true
   def terminate(_reason, state) do
     _ = deny_pending_approvals(state)
+    # "Don't ask again for this session" ends when the session does. Forgetting them on a
+    # provider restart the operator did not ask for costs one repeated prompt; keeping
+    # them would let an answer outlive the conversation that produced it, and would leave
+    # the rule store growing with every session this node ever ran.
+    _ = Seam.forget_session()
     if state.process_id, do: state.context.process_manager.cancel_process(state.process_id)
     :ok
   rescue

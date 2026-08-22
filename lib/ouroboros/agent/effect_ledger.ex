@@ -43,7 +43,11 @@ defmodule Ouroboros.Agent.EffectLedger do
     send_message: [:agent],
     delegate: [:team],
     forge: [:module],
-    deploy: [:nodes]
+    deploy: [:nodes],
+    # A permission decision names the tool and the shape of the call, never the call.
+    # `fingerprint` is a digest of the command line, paths, and domains; the text of any
+    # of them is exactly the content this ledger exists to keep out.
+    permission: [:tool, :mode, :provider, :fingerprint]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -51,8 +55,15 @@ defmodule Ouroboros.Agent.EffectLedger do
     send_message: [:to, :from, :messages_received],
     delegate: [:team, :worker_id, :delegation_id, :status, :delivery],
     forge: [:artifact_id, :module, :epoch, :signer, :source_sha256, :nodes],
-    deploy: [:artifact_id, :module, :epoch, :nodes, :state]
+    deploy: [:artifact_id, :module, :epoch, :nodes, :state],
+    permission: [:decision, :scope, :actor, :rule_id]
   }
+
+  # Effect kinds this ledger records that are not grant-gated agent effects. A permission
+  # decision is not something an agent asks for; it is what `Ouroboros.Control.Permissions`
+  # answered on a session's behalf, and it belongs in the same durable history for the
+  # same reason — an approval nobody can account for later did not happen (I1).
+  @ledger_only_effects [:permission]
 
   defmodule Entry do
     @moduledoc "One durable, content-minimized agent-effect attempt and its outcome."
@@ -122,6 +133,22 @@ defmodule Ouroboros.Agent.EffectLedger do
 
   def record_denied(_attrs, _server), do: {:error, :invalid_effect_entry}
 
+  @doc """
+  Durably records one attempt that begins and ends in the same instant.
+
+  A permission decision has no window between admission and outcome to be ambiguous in,
+  so it is written once, terminal, rather than as a `:started` entry a settlement would
+  later have to find. Idempotent on `:id`, like the other two.
+  """
+  @spec record_settled(map(), server()) :: write_result()
+  def record_settled(attrs, server \\ __MODULE__)
+
+  def record_settled(attrs, server) when is_map(attrs) do
+    safe_call(server, {:record, :ok, attrs})
+  end
+
+  def record_settled(_attrs, _server), do: {:error, :invalid_effect_entry}
+
   @doc "Durably settles a previously started (or restart-ambiguous) attempt."
   @spec settle(String.t(), map(), server()) ::
           {:ok, Entry.t(), :updated | :existing} | {:error, term()}
@@ -179,6 +206,13 @@ defmodule Ouroboros.Agent.EffectLedger do
   @spec durability(server()) :: durability() | {:error, term()}
   def durability(server \\ __MODULE__), do: safe_call(server, :durability)
 
+  @doc """
+  Every effect kind this ledger records: the grant-gated agent effects plus the kinds the
+  runtime originates on a session's behalf.
+  """
+  @spec effects() :: [atom()]
+  def effects, do: Grants.effects() ++ @ledger_only_effects
+
   @doc false
   def checkpoint_key, do: @store_key
 
@@ -206,7 +240,8 @@ defmodule Ouroboros.Agent.EffectLedger do
   end
 
   @impl true
-  def handle_call({:record, status, attrs}, _from, state) when status in [:started, :denied] do
+  def handle_call({:record, status, attrs}, _from, state)
+      when status in [:started, :denied, :ok] do
     with {:ok, normalized} <- normalize_attrs(attrs),
          {:ok, reply, state} <- record(status, normalized, state) do
       {:reply, reply, state}
@@ -377,6 +412,7 @@ defmodule Ouroboros.Agent.EffectLedger do
 
   defp new_entry(status, attrs, sequence) do
     timestamp = now()
+    terminal? = status in @terminal_statuses
 
     %Entry{
       sequence: sequence,
@@ -389,10 +425,10 @@ defmodule Ouroboros.Agent.EffectLedger do
       authority: attrs.authority,
       cause: attrs.cause,
       status: status,
-      result: nil,
-      error: if(status == :denied, do: sanitize_error(attrs.error), else: nil),
+      result: if(terminal?, do: sanitize_result(attrs.effect, attrs.result), else: nil),
+      error: if(terminal?, do: sanitize_error(attrs.error), else: nil),
       started_at: timestamp,
-      settled_at: if(status == :denied, do: timestamp, else: nil),
+      settled_at: if(terminal?, do: timestamp, else: nil),
       origin_node: node()
     }
   end
@@ -411,7 +447,7 @@ defmodule Ouroboros.Agent.EffectLedger do
   defp normalize_attrs(attrs) do
     with id when is_binary(id) and id != "" <- Map.get(attrs, :id),
          effect when is_atom(effect) <- Map.get(attrs, :effect),
-         true <- effect in Grants.effects(),
+         true <- effect in effects(),
          principal when is_binary(principal) and principal != "" <- Map.get(attrs, :principal),
          attempt when is_map(attempt) <- Map.get(attrs, :attempt),
          authority when is_map(authority) <- Map.get(attrs, :authority),
@@ -425,6 +461,7 @@ defmodule Ouroboros.Agent.EffectLedger do
          attempt: sanitize_attempt(effect, attempt),
          authority: sanitize_authority(authority),
          cause: sanitize_cause(cause),
+         result: Map.get(attrs, :result),
          error: Map.get(attrs, :error)
        }}
     else
@@ -440,6 +477,7 @@ defmodule Ouroboros.Agent.EffectLedger do
       case status do
         :started -> entry.status in [:started, :ok, :failed, :ambiguous]
         :denied -> entry.status == :denied
+        :ok -> entry.status == :ok
       end
 
     compatible_status? and entry.effect == attrs.effect and entry.principal == attrs.principal and
@@ -553,7 +591,7 @@ defmodule Ouroboros.Agent.EffectLedger do
     with [] <- Map.keys(filters) -- allowed,
          principal when is_nil(principal) or is_binary(principal) <- Map.get(filters, :principal),
          effect when is_nil(effect) or is_atom(effect) <- Map.get(filters, :effect),
-         true <- is_nil(effect) or effect in Grants.effects(),
+         true <- is_nil(effect) or effect in effects(),
          status when is_nil(status) or status in @statuses <- Map.get(filters, :status),
          since when is_integer(since) and since >= 0 <- Map.get(filters, :since_sequence, 0),
          order when order in [:asc, :desc] <- Map.get(filters, :order, :desc),
@@ -697,7 +735,7 @@ defmodule Ouroboros.Agent.EffectLedger do
   defp valid_entry?(%Entry{} = entry) do
     entry.sequence >= 1 and entry.started_sequence >= 1 and
       entry.started_sequence <= entry.sequence and is_binary(entry.id) and entry.id != "" and
-      entry.effect in Grants.effects() and is_binary(entry.principal) and
+      entry.effect in effects() and is_binary(entry.principal) and
       is_map(entry.attempt) and is_map(entry.authority) and is_map(entry.cause) and
       entry.status in @statuses and is_binary(entry.started_at) and
       valid_status_shape?(entry) and is_atom(entry.origin_node)
