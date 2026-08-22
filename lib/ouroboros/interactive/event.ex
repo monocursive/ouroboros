@@ -45,6 +45,34 @@ defmodule Ouroboros.Interactive.Event do
     }
   end
 
+  @doc """
+  Builds an event Ouroboros itself observed, in the same durable shape and number space.
+
+  Almost every event here is a projection of a Harness one. A few facts are the runtime's
+  own and no provider will ever report them — that a session was resumed onto a fresh
+  Harness session being the first. Those carry an Ouroboros-native `type` and a sequence
+  drawn from the same strictly increasing series, so a replaying client sees one ordered
+  log and tells them apart only by reading the payload.
+  """
+  @spec from_runtime(String.t(), pos_integer(), atom(), map(), keyword()) :: t()
+  def from_runtime(session_id, sequence, type, payload, fields \\ [])
+      when is_binary(session_id) and is_integer(sequence) and sequence > 0 and is_atom(type) and
+             is_map(payload) and is_list(fields) do
+    %__MODULE__{
+      id: event_id(session_id, sequence),
+      session_id: session_id,
+      sequence: sequence,
+      type: type,
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+      payload: Jido.Harness.Redaction.redact(payload),
+      harness_session_id: Keyword.get(fields, :harness_session_id),
+      provider: Keyword.get(fields, :provider),
+      provider_session_id: Keyword.get(fields, :provider_session_id),
+      turn_id: Keyword.get(fields, :turn_id),
+      request_id: Keyword.get(fields, :request_id)
+    }
+  end
+
   defp event_id(session_id, sequence) do
     :sha256
     |> :crypto.hash(:erlang.term_to_binary({:ouroboros_interactive_event, session_id, sequence}))

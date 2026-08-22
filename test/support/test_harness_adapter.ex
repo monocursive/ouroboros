@@ -51,6 +51,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
   }
 
   @provider :ouroboros_test
+  @accepted_resume_ids_key :test_harness_adapter_accepted_resume_ids
 
   @impl true
   def spec do
@@ -61,7 +62,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
       capabilities:
         Capabilities.new!(
           streaming?: true,
-          resume?: true,
+          resume?: resumes?(),
           usage?: true,
           native_cancel?: true
         ),
@@ -77,6 +78,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
         :allowed_tools,
         :disallowed_tools
       ],
+      normalized_values: accepted_resume_values(),
       provider_options: []
     )
   end
@@ -102,6 +104,35 @@ defmodule Ouroboros.Test.HarnessAdapter do
             dynamic_configuration: :managed
           )
     }
+  end
+
+  @doc """
+  Declares which provider session ids this adapter will still answer to.
+
+  A resume is a session start that carries `provider_session_id`, so the honest way to
+  make this provider refuse one is to say which ids it still knows: the Harness session
+  manager validates the start request against exactly this list. `:any` — the default,
+  and what `reset_resume/0` restores — accepts every id, `[]` refuses every one, and
+  `:unsupported` withdraws the `resume?` capability altogether, which is a different
+  answer: the provider cannot resume at all rather than refusing this particular thread.
+  """
+  @spec accept_resume(:any | :unsupported | [String.t()]) :: :ok
+  def accept_resume(accepted) when accepted in [:any, :unsupported] or is_list(accepted),
+    do: Application.put_env(:ouroboros, @accepted_resume_ids_key, accepted)
+
+  @doc "Restores the default: every provider session id is accepted."
+  @spec reset_resume() :: :ok
+  def reset_resume, do: Application.delete_env(:ouroboros, @accepted_resume_ids_key)
+
+  defp accepted_resume_ids, do: Application.get_env(:ouroboros, @accepted_resume_ids_key, :any)
+
+  defp resumes?, do: accepted_resume_ids() != :unsupported
+
+  defp accepted_resume_values do
+    case accepted_resume_ids() do
+      ids when is_list(ids) -> %{provider_session_id: ids}
+      _every_id -> %{}
+    end
   end
 
   @impl true

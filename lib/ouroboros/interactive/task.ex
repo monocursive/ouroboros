@@ -199,9 +199,13 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, :ok, runtime}
   end
 
+  # A session the caller asked to end is not a session the runtime lost, so the Harness
+  # session going away after this is the answer, not a break to resume across. Settled
+  # whether or not the call itself succeeded: the intent is the same either way, and
+  # reviving a session someone asked to close would be the worse mistake.
   def handle_call(:close, _from, runtime) do
     reply = with_harness_session(runtime, &Session.close/1)
-    {:reply, reply, schedule_poll(runtime, 0)}
+    {:reply, reply, schedule_poll(settle_resume(runtime), 0)}
   end
 
   def handle_call(:kill, _from, %{session: session} = runtime)
@@ -211,7 +215,7 @@ defmodule Ouroboros.Interactive.Task do
 
   def handle_call(:kill, _from, runtime) do
     reply = with_harness_session(runtime, &Session.kill/1)
-    {:reply, reply, schedule_poll(runtime, 0)}
+    {:reply, reply, schedule_poll(settle_resume(runtime), 0)}
   end
 
   def handle_call(_message, _from, runtime),
@@ -283,7 +287,8 @@ defmodule Ouroboros.Interactive.Task do
       workspace_capability: capability,
       retry: no_retry(),
       terminal_observed_at: nil,
-      pending_steers: []
+      pending_steers: [],
+      resume_settled: false
     }
   end
 
@@ -292,7 +297,7 @@ defmodule Ouroboros.Interactive.Task do
   defp attach_or_start(%{session: %State{harness_session_id: id}} = runtime) when is_binary(id) do
     case safe_session_call(fn -> Session.info(id) end) do
       {:ok, %SessionInfo{}} -> runtime |> clear_retry() |> schedule_poll(0)
-      {:error, :not_found} -> lose(runtime, :harness_session_not_found)
+      {:error, :not_found} -> resume_or_lose(runtime, :harness_session_not_found)
       {:error, reason} -> retry(runtime, :harness_session_info_failed, reason)
     end
   end
@@ -375,14 +380,36 @@ defmodule Ouroboros.Interactive.Task do
 
     case safe_session_call(fn ->
            Session.replay(session.harness_session_id,
-             cursor: session.cursor,
+             cursor: harness_cursor(session),
              limit: @replay_limit
            )
          end) do
-      {:ok, [_ | _] = events} -> runtime |> clear_retry() |> persist_harness_events(events)
-      {:ok, []} -> refresh_session(runtime)
-      {:error, :not_found} -> lose(runtime, :harness_session_not_found)
-      {:error, reason} -> retry(runtime, :harness_session_replay_failed, reason)
+      {:ok, [_ | _] = events} ->
+        runtime |> clear_retry() |> persist_harness_events(rebase_sequences(session, events))
+
+      {:ok, []} ->
+        refresh_session(runtime)
+
+      {:error, :not_found} ->
+        resume_or_lose(runtime, :harness_session_not_found)
+
+      {:error, reason} ->
+        retry(runtime, :harness_session_replay_failed, reason)
+    end
+  end
+
+  # A resumed session polls a Harness session whose log starts at one again, while the
+  # Ouroboros sequence a client holds must keep climbing. `sequence_offset` is the
+  # durable distance between the two, so the harness-side cursor is the Ouroboros one
+  # minus the offset, and every replayed event is shifted back into the session's own
+  # number space before anything downstream — projection, event ids, the checkpoint —
+  # sees it. Both are identities until the first resume.
+  defp harness_cursor(%State{} = session), do: session.cursor - State.sequence_offset(session)
+
+  defp rebase_sequences(%State{} = session, events) do
+    case State.sequence_offset(session) do
+      0 -> events
+      offset -> Enum.map(events, &%{&1 | sequence: &1.sequence + offset})
     end
   end
 
@@ -497,11 +524,18 @@ defmodule Ouroboros.Interactive.Task do
         end
 
       {:error, :not_found} ->
-        lose(runtime, :harness_session_not_found)
+        resume_or_lose(runtime, :harness_session_not_found)
 
       {:error, reason} ->
         retry(runtime, :harness_session_info_failed, reason)
     end
+  end
+
+  defp harness_session_present?(runtime) do
+    match?(
+      {:ok, %SessionInfo{}},
+      safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end)
+    )
   end
 
   defp collect_turn_results(runtime) do
@@ -531,8 +565,16 @@ defmodule Ouroboros.Interactive.Task do
             {:error, :timeout} ->
               runtime
 
+            # `await` answers `:not_found` both for a turn this session never had and
+            # for a session that is no longer there. Only the first is a fact about the
+            # turn. If the session itself has gone, the diagnosis belongs to
+            # `refresh_session`, which resumes or loses it; relabelling every in-flight
+            # turn here would pre-empt that decision with a sentence about a Harness
+            # session rather than about what happened to the work.
             {:error, :not_found} ->
-              mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found)
+              if harness_session_present?(runtime),
+                do: mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found),
+                else: runtime
 
             {:error, reason} ->
               mark_turn_ambiguous(runtime, turn.id, {:harness_turn_await_failed, reason})
@@ -550,7 +592,7 @@ defmodule Ouroboros.Interactive.Task do
   defp mirrored_through_result?(runtime) do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
       {:ok, %SessionInfo{output_cursor: output_cursor}} ->
-        runtime.session.cursor >= output_cursor
+        harness_cursor(runtime.session) >= output_cursor
 
       _unavailable ->
         true
@@ -937,8 +979,18 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # An ambiguity already recorded is not relabelled by a later, less specific one: the
+  # first observation is the one this coordinator actually made. A turn finalised
+  # outcome-unknown at a resume would otherwise be rewritten on the next poll by the new
+  # Harness session's entirely correct "I have never heard of that turn" — a sentence
+  # about a session that did not run it. It also stops a permanently unresolvable turn
+  # from rewriting the whole session aggregate to disk every 25 ms to record the same
+  # reason it already holds.
   defp mark_turn_ambiguous(runtime, turn_id, reason) do
     case Map.fetch(runtime.session.turns, turn_id) do
+      {:ok, %{status: :ambiguous}} ->
+        runtime
+
       {:ok, turn} ->
         turn =
           turn
@@ -1229,6 +1281,110 @@ defmodule Ouroboros.Interactive.Task do
 
       {:error, runtime} ->
         schedule_poll(runtime, @poll_interval)
+    end
+  end
+
+  # Settled means this coordinator has nothing left to decide about resuming: it already
+  # attempted one, already explained why it could not, or was told to end the session.
+  defp settle_resume(runtime), do: %{runtime | resume_settled: true}
+
+  # A Harness session Harness no longer knows is not the same thing as a provider
+  # session that is gone. `provider_session_id` is durable, and every transport that
+  # declares it can be handed it again — `claude --resume`, Codex `thread/resume`, ACP
+  # `session/load`. So the answer to "Harness does not know this session" is to open a
+  # new one against the same provider session and keep going; `:lost` is what is left
+  # when there is nothing to resume with, or when the provider refuses.
+  #
+  # Bounded to one decision per coordinator incarnation — one attempt, or one refusal
+  # explained once. A provider that loses the session again ends the session honestly
+  # instead of spinning up a start loop, and a genuinely transient outage still gets a
+  # fresh decision the next time recovery restarts the coordinator.
+  defp resume_or_lose(%{resume_settled: true} = runtime, reason), do: lose(runtime, reason)
+
+  defp resume_or_lose(runtime, reason) do
+    runtime = settle_resume(runtime)
+
+    case State.resume_support(runtime.session) do
+      :ok ->
+        attempt_resume(runtime)
+
+      {:error, unsupported} ->
+        Logger.info(
+          "interactive session #{runtime.session.id} cannot be resumed " <>
+            "(#{inspect(unsupported)}); losing it"
+        )
+
+        lose(runtime, reason)
+    end
+  end
+
+  defp attempt_resume(runtime) do
+    session = runtime.session
+
+    case State.unrequestable_reason(session) do
+      nil ->
+        case safe_session_call(fn ->
+               Session.start(session.provider, State.request(session))
+             end) do
+          {:ok, harness_session_id} ->
+            adopt_resumed(runtime, harness_session_id, session.harness_session_id)
+
+          {:error, reason} ->
+            lose(runtime, {:resume_failed, reason})
+        end
+
+      unrequestable ->
+        lose(runtime, {:resume_failed, {:unrequestable_session_state, unrequestable}})
+    end
+  end
+
+  # What the resume does and does not restore, recorded where a client can read it: the
+  # journal and the turn ledger are Ouroboros's and survive intact; the conversation
+  # itself is the provider's and comes back only as far as the provider carries it. The
+  # turn that was in flight at the break is finalised outcome-unknown rather than
+  # retried — the provider may well have completed it, and nothing here can tell.
+  # The workspace lease is untouched: this coordinator has held it since admission and
+  # goes on holding it, exactly as it does across a restart.
+  defp adopt_resumed(runtime, harness_session_id, previous_harness_session_id) do
+    session = runtime.session
+    sequence = session.cursor + 1
+
+    event =
+      Event.from_runtime(
+        session.id,
+        sequence,
+        :status,
+        %{
+          "kind" => "resumed",
+          "provider_session_id" => session.provider_session_id,
+          "previous_harness_session_id" => previous_harness_session_id
+        },
+        harness_session_id: harness_session_id,
+        provider: session.provider,
+        provider_session_id: session.provider_session_id
+      )
+
+    resumed =
+      session
+      |> finalize_unresolved_turns({:session_resumed, :outcome_unknown})
+      |> Map.put(:harness_session_id, harness_session_id)
+      |> Map.put(:sequence_offset, sequence)
+      |> Map.put(:cursor, sequence)
+      |> Map.put(:resumes, State.resumes(session) + 1)
+      |> Map.put(:error, nil)
+      |> append_event(event)
+      |> State.touch()
+
+    case persist(runtime, resumed, [event]) do
+      {:ok, runtime} ->
+        runtime |> clear_retry() |> reply_all_terminal_turn_waiters() |> schedule_poll(0)
+
+      # A resume whose checkpoint was refused did not happen. Close the new Harness
+      # session rather than leave it running unreferenced; the attempt stays spent, so
+      # the next poll finds the old session still missing and loses honestly.
+      {:error, runtime} ->
+        _ = safe_session_call(fn -> Session.close(harness_session_id) end)
+        retry(runtime, :session_resume_checkpoint_failed, :storage_error)
     end
   end
 
