@@ -27,6 +27,14 @@ defmodule Ouroboros.Gateway.StreamingTest do
   # first-event latency past 5s before — the budget must absorb that without flaking.
   @receive_timeout 15_000
 
+  # Every ordinary frame fits here, and the caps under test are what keep it that way.
+  @buffer 1_048_576
+
+  # `event_detail` is the one method whose answer is deliberately larger than a
+  # notification — that is what it is for — so the reads that expect one say so rather
+  # than every read in this file carrying a buffer it never needs.
+  @detail_buffer 16 * 1_048_576
+
   setup context do
     File.chmod!(context.tmp_dir, 0o700)
     cleanup_sessions()
@@ -362,6 +370,181 @@ defmodule Ouroboros.Gateway.StreamingTest do
                  "cursor" => pruned["error"]["data"]["floor"]
                })["result"]
              )
+    end
+  end
+
+  describe "a payload too large to frame whole" do
+    # The shape the review named: one `file_change` diff of five megabytes, which used to
+    # cross the socket whole on the notification and again on every replay of the session.
+    @diff String.duplicate("d", 5_000_000)
+
+    test "the notification and the replay carry the same marker, not the same megabytes",
+         %{client: client} do
+      {ref, id} = start_session()
+
+      assert is_list(
+               call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
+             )
+
+      adapter = send_message(ref, "change a file")
+      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
+
+      # A 1 MiB read buffer is the assertion: before the cap this frame was five megabytes
+      # and `recv` would have failed rather than decoded.
+      frame = await_event(client, "interactive.event", "file_change")
+      event = frame["params"]["event"]
+
+      assert event["payload"]["diff"]["_bytes"] == 5_000_000
+      assert byte_size(event["payload"]["diff"]["_excerpt"]) == 131_072
+      assert String.starts_with?(@diff, event["payload"]["diff"]["_excerpt"])
+
+      # The envelope a client resyncs by survived the cap intact.
+      assert event["session_id"] == id
+      assert is_integer(event["sequence"])
+      assert event["timestamp"]
+      assert event["_struct"] == "Ouroboros.Interactive.Event"
+
+      sequence = event["sequence"]
+
+      # The other two paths to the same event. All three reach one encoder, so a client
+      # that resyncs sees exactly what it saw live.
+      replayed =
+        call(client, "interactive.replay", %{"id" => id, "cursor" => sequence - 1, "limit" => 1})[
+          "result"
+        ]
+
+      assert [%{"sequence" => ^sequence} = from_replay] = replayed
+      assert from_replay["payload"]["diff"] == event["payload"]["diff"]
+
+      assert :ok = HarnessAdapter.finish(adapter)
+      await_ingested(id, 0)
+
+      backlog =
+        call(client, "interactive.subscribe", %{"id" => id, "cursor" => sequence - 1})["result"]
+
+      assert [%{"sequence" => ^sequence} = from_backlog | _rest] = backlog
+      assert from_backlog["payload"]["diff"] == event["payload"]["diff"]
+    end
+
+    test "event_detail answers the whole leaf the excerpt only named", %{client: client} do
+      {ref, id} = start_session()
+
+      assert is_list(
+               call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
+             )
+
+      adapter = send_message(ref, "change a file")
+      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
+
+      sequence =
+        await_event(client, "interactive.event", "file_change")["params"]["event"]["sequence"]
+
+      detail =
+        call(
+          client,
+          "interactive.event_detail",
+          %{"id" => id, "sequence" => sequence},
+          @detail_buffer
+        )["result"]
+
+      # One event, bare — not the single-element array `replay` would have answered with.
+      assert detail["sequence"] == sequence
+      assert detail["session_id"] == id
+      assert detail["type"] == "file_change"
+      assert detail["_struct"] == "Ouroboros.Interactive.Event"
+
+      # Below `detail_leaf_bytes`, so the leaf arrives as the plane recorded it.
+      assert detail["payload"]["diff"] == @diff
+
+      assert :ok = HarnessAdapter.finish(adapter)
+    end
+
+    test "a sequence the session never reached is not found", %{client: client} do
+      {_ref, id} = start_session()
+
+      refused = call(client, "interactive.event_detail", %{"id" => id, "sequence" => 999_999})
+
+      assert refused["error"]["code"] == -32007
+
+      # A window of one starting inside a gap returns the *next* event that exists, and
+      # answering with an event nobody asked for would be a worse lie than not finding it.
+      assert refused["error"]["message"] =~ "999999"
+    end
+
+    test "a sequence below the retained floor is refused by naming the floor",
+         %{client: client} do
+      # `event_limit: 1` is the smallest retention the plane accepts, so the floor rises
+      # with every event and sequence 1 falls below it almost immediately.
+      {_ref, id} = start_session(event_limit: 1)
+
+      pruned = call(client, "interactive.event_detail", %{"id" => id, "sequence" => 1})
+
+      assert pruned["error"]["code"] == -32006
+      assert pruned["error"]["data"]["reason"] == "cursor_pruned"
+      assert pruned["error"]["data"]["floor"] > 0
+
+      # The same discriminator `replay` and `subscribe` answer with, because a client's
+      # resync path has to branch on one shape rather than three.
+      assert pruned["error"]["message"] =~ to_string(pruned["error"]["data"]["floor"])
+    end
+
+    test "a sequence that is not a positive integer never reaches a plane", %{client: client} do
+      {_ref, id} = start_session()
+
+      for sequence <- [0, -1, "3", nil] do
+        refused = call(client, "interactive.event_detail", %{"id" => id, "sequence" => sequence})
+
+        assert refused["error"]["code"] == -32602
+        assert refused["error"]["message"] =~ "params.sequence"
+      end
+
+      unknown =
+        call(client, "interactive.event_detail", %{"id" => id, "sequence" => 1, "limit" => 5})
+
+      assert unknown["error"]["code"] == -32602
+    end
+
+    test "the coding plane excerpts and details through the same code", %{client: client} do
+      {_ref, id} = start_coding_task()
+
+      assert is_list(call(client, "coding.subscribe", %{"id" => id, "cursor" => 0})["result"])
+
+      assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
+      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
+
+      event = await_event(client, "coding.event", "file_change")["params"]["event"]
+
+      assert event["payload"]["diff"]["_bytes"] == 5_000_000
+      assert byte_size(event["payload"]["diff"]["_excerpt"]) == 131_072
+      assert event["task_id"] == id
+      assert event["_struct"] == "Ouroboros.Coding.Event"
+
+      detail =
+        call(
+          client,
+          "coding.event_detail",
+          %{"id" => id, "sequence" => event["sequence"]},
+          @detail_buffer
+        )["result"]
+
+      assert detail["payload"]["diff"] == @diff
+      assert detail["task_id"] == id
+
+      assert :ok = HarnessAdapter.finish(adapter)
+    end
+
+    test "both detail methods are advertised, so a client can feature-detect them" do
+      # A fresh connection: `hello` is answered once, and the one this file's setup made is
+      # already past its handshake.
+      {:ok, second} =
+        :gen_tcp.connect({127, 0, 0, 1}, Listener.port(), [:binary, active: false], 1_000)
+
+      on_exit(fn -> :gen_tcp.close(second) end)
+
+      methods = hello(second)["result"]["methods"]
+
+      assert "interactive.event_detail" in methods
+      assert "coding.event_detail" in methods
     end
   end
 
@@ -861,7 +1044,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  defp call(client, method, params \\ %{}) do
+  defp call(client, method, params \\ %{}, buffer \\ @buffer) do
     id = System.unique_integer([:positive])
 
     :ok =
@@ -875,23 +1058,25 @@ defmodule Ouroboros.Gateway.StreamingTest do
         ?\n
       ])
 
-    await_response(client, id)
+    await_response(client, id, 200, buffer)
   end
 
   # Notifications interleave with responses on one socket, so a caller waiting for an
   # answer has to skip past the stream rather than mistake it for one.
-  defp await_response(client, id, attempts \\ 200)
-  defp await_response(_client, id, 0), do: flunk("no response for request #{inspect(id)}")
+  defp await_response(client, id, attempts \\ 200, buffer \\ @buffer)
 
-  defp await_response(client, id, attempts) do
-    case recv(client) do
+  defp await_response(_client, id, 0, _buffer),
+    do: flunk("no response for request #{inspect(id)}")
+
+  defp await_response(client, id, attempts, buffer) do
+    case recv(client, @receive_timeout, buffer) do
       %{"id" => ^id} = response -> response
-      _other -> await_response(client, id, attempts - 1)
+      _other -> await_response(client, id, attempts - 1, buffer)
     end
   end
 
-  defp recv(client, timeout \\ @receive_timeout) do
-    :ok = :inet.setopts(client, packet: :line, active: false, buffer: 1_048_576)
+  defp recv(client, timeout \\ @receive_timeout, buffer \\ @buffer) do
+    :ok = :inet.setopts(client, packet: :line, active: false, buffer: buffer)
 
     case :gen_tcp.recv(client, 0, timeout) do
       {:ok, line} -> JSON.decode!(String.trim_trailing(line, "\n"))

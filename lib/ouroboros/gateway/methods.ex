@@ -80,6 +80,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Cluster
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
+  alias Ouroboros.Gateway.Config, as: GatewayConfig
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State, as: InteractiveState
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
@@ -161,11 +162,16 @@ defmodule Ouroboros.Gateway.Methods do
     "interactive.list" => %{scope: :read, timeout: @default_timeout},
     "interactive.info" => %{scope: :read, timeout: @default_timeout},
     "interactive.replay" => %{scope: :read, timeout: @default_timeout},
+    # One event, whole. It is `replay` with a window of one — same plane call, same
+    # routing, same ceiling — so the only thing that makes it a separate method is the
+    # larger per-leaf byte cap it encodes the answer under.
+    "interactive.event_detail" => %{scope: :read, timeout: @default_timeout},
     "interactive.subscribe" => %{scope: :read, timeout: @default_timeout},
     "interactive.unsubscribe" => %{scope: :read, timeout: @default_timeout},
     "coding.list" => %{scope: :read, timeout: @default_timeout},
     "coding.info" => %{scope: :read, timeout: @default_timeout},
     "coding.replay" => %{scope: :read, timeout: @default_timeout},
+    "coding.event_detail" => %{scope: :read, timeout: @default_timeout},
     "coding.subscribe" => %{scope: :read, timeout: @default_timeout},
     "coding.unsubscribe" => %{scope: :read, timeout: @default_timeout},
     "teams.list" => %{scope: :read, timeout: @default_timeout},
@@ -506,6 +512,12 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
+  def invoke("interactive.event_detail", params) do
+    with_event_detail(params, :interactive, fn session, opts ->
+      InteractiveSession.replay(session, opts)
+    end)
+  end
+
   def invoke("coding.list", _params), do: safe(fn -> fleet_sessions(CodingSession) end)
 
   def invoke("coding.info", params) do
@@ -516,6 +528,12 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("coding.replay", params) do
     with_replay(params, :coding, fn session, opts -> CodingSession.replay(session, opts) end)
+  end
+
+  def invoke("coding.event_detail", params) do
+    with_event_detail(params, :coding, fn session, opts ->
+      CodingSession.replay(session, opts)
+    end)
   end
 
   def invoke("teams.list", _params), do: safe(fn -> {:ok, teams()} end)
@@ -1348,6 +1366,52 @@ defmodule Ouroboros.Gateway.Methods do
       safe(fn -> reply(replay.(session, cursor: cursor, limit: limit)) end)
     else
       {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # `replay` with a window of one. Both planes take an *exclusive* cursor
+  # ([interactive/task.ex:1419](../interactive/task.ex)), so the event at `sequence` is the
+  # one after `sequence - 1`, and the two refusals a client has to tell apart come out of
+  # that call unchanged: below the retained floor the plane answers `{:cursor_pruned,
+  # floor}` and the existing `reply/1` clause names the floor, while above the high-water
+  # mark it answers an empty window and this answers `-32007`.
+  #
+  # The `^sequence` match is not decoration. A window of one starting below a gap returns
+  # the *next* event that exists, and answering with an event the client did not ask for
+  # would be a worse lie than not finding it.
+  defp with_event_detail(params, plane, replay) do
+    with :ok <- only_keys(params, ["id", "sequence", "node"]),
+         {:ok, session} <- session_target(plane, params),
+         {:ok, sequence} <- fetch_sequence(params) do
+      safe(fn ->
+        case replay.(session, cursor: sequence - 1, limit: 1) do
+          {:ok, [%{sequence: ^sequence} = event]} -> {:ok, detail(event)}
+          {:ok, _window} -> not_found("that session retains no event at sequence #{sequence}")
+          other -> reply(other)
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # Encoded here rather than by the `Conn`, because this is the one answer that gets the
+  # larger per-leaf cap: the whole point of the method is to hand back the leaf a
+  # streamed event could only excerpt. What it returns is already a JSON tree, so the
+  # connection's own `Wire.to_json/1` walks plain strings and maps and leaves it alone.
+  defp detail(event) do
+    limits = GatewayConfig.event_limits()
+
+    Wire.to_json(event,
+      event_leaf_bytes: limits.detail_leaf_bytes,
+      event_payload_bytes: limits.detail_leaf_bytes
+    )
+  end
+
+  defp fetch_sequence(params) do
+    case Map.get(params, "sequence") do
+      sequence when is_integer(sequence) and sequence > 0 -> {:ok, sequence}
+      _other -> {:invalid, "params.sequence must be a positive integer"}
     end
   end
 

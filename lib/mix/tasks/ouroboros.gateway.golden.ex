@@ -31,6 +31,12 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   The pid in `runtime_status_result.json` is `:erlang.list_to_pid/1` of a literal, so it
   walks the real `Wire` pid path and still inspects identically everywhere.
 
+  `interactive_event_excerpt_notification.json` states its byte caps rather than taking the
+  128 KiB default, for the same reason: a fixture pinning the default would be 128 KiB of
+  one repeated character, and the thing a second implementation has to agree about is the
+  shape of the marker, not the size of the excerpt. The arithmetic behind the caps is
+  asserted in `Ouroboros.Gateway.WireTest`, where numbers belong.
+
   ## Byte stability
 
   Objects are written with their keys sorted and two-space indentation by the encoder in
@@ -97,6 +103,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"runtime_status_result", runtime_status_result()},
       {"interactive_event_notification", interactive_event_notification()},
       {"coding_event_notification", coding_event_notification()},
+      {"interactive_event_excerpt_notification", interactive_event_excerpt_notification()},
+      {"interactive_event_detail_result", interactive_event_detail_result()},
+      {"coding_event_detail_result", coding_event_detail_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
       {"stream_ended_notification", stream_ended_notification()},
       {"error_unauthenticated", error_unauthenticated()},
@@ -272,6 +281,81 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         harness_sequence: 31
       }
     })
+  end
+
+  # One `file_change` payload, four rules at once. The caps are stated at 48 and 96 bytes
+  # rather than left at the 128 KiB and 512 KiB defaults, so this file pins the *shape* —
+  # `_excerpt` beside `_bytes` — in bytes a reviewer can read:
+  #
+  #   * `diff` spends the per-leaf cap and names its true size.
+  #   * `note` is cut where a three-byte character straddles the boundary, so it retreats
+  #     to the last whole character and the excerpt is 46 bytes rather than 48. A client
+  #     decoding this frame is owed valid UTF-8.
+  #   * `path` is short enough that the marker map would cost more than the string, so it
+  #     is left whole even though the budget is already gone.
+  #   * `tail` arrives after the budget is spent: the excerpt is empty and `_bytes` is the
+  #     only thing left that is true about it.
+  #
+  # Every envelope field is untouched, because a client resyncs by `sequence`.
+  defp interactive_event_excerpt_notification do
+    Conn.notification_frame(
+      "interactive.event",
+      %{"id" => @session_id, "event" => excerpted_event()},
+      event_leaf_bytes: 48,
+      event_payload_bytes: 96
+    )
+  end
+
+  # The answer to `interactive.event_detail`: one event, bare — not an array and not
+  # wrapped, because `interactive.replay` is the method that answers with a list. It is the
+  # same event as the notification above, encoded under the raised `detail_leaf_bytes` cap
+  # that is the whole reason the method exists, so a reviewer can read the two files side
+  # by side and see the excerpts become the leaves they came from.
+  defp interactive_event_detail_result do
+    Conn.result_frame(7, excerpted_event(),
+      event_leaf_bytes: 8_388_608,
+      event_payload_bytes: 8_388_608
+    )
+  end
+
+  defp coding_event_detail_result do
+    Conn.result_frame(
+      8,
+      %CodingEvent{
+        id: "evt-0000000000000000000000004",
+        task_id: @task_id,
+        sequence: 18,
+        type: :file_change,
+        timestamp: @timestamp,
+        payload: %{"diff" => String.duplicate("b", 600)},
+        provider: :codex,
+        provider_session_id: "provider-0000000000000002",
+        harness_sequence: 32
+      },
+      event_leaf_bytes: 8_388_608,
+      event_payload_bytes: 8_388_608
+    )
+  end
+
+  defp excerpted_event do
+    %InteractiveEvent{
+      id: "evt-0000000000000000000000003",
+      session_id: @session_id,
+      sequence: 43,
+      type: :file_change,
+      timestamp: @timestamp,
+      payload: %{
+        "diff" => String.duplicate("a", 600),
+        "note" => "x" <> String.duplicate("☃", 200),
+        "path" => "lib/ouroboros/gateway/wire.ex",
+        "tail" => String.duplicate("z", 700)
+      },
+      harness_session_id: "harness-0000000000000000001",
+      provider: :claude_code,
+      provider_session_id: "provider-0000000000000001",
+      turn_id: "turn-0000000000000000000001",
+      request_id: nil
+    }
   end
 
   defp stream_lagged_notification do
