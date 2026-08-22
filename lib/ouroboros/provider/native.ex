@@ -105,7 +105,16 @@ defmodule Ouroboros.Provider.Native do
       capabilities:
         InteractionCapabilities.new!(
           transport: :native,
-          maturity: :experimental,
+          # Not a quality claim. `Jido.Harness.Session.Manager` refuses to *default* to
+          # an `:experimental` transport
+          # (`deps/jido_harness/lib/jido_harness/session/manager.ex:128`), and this is
+          # the provider's only transport — so `:experimental` would mean every caller
+          # had to pass `transport: :native` by hand or watch the session refuse to
+          # start, including `ouro new --provider native`. Choosing this provider *is*
+          # the explicit selection the flag exists to require. How new the loop is, and
+          # what it does not yet enforce, is stated in the README and the moduledoc,
+          # where it can be read rather than inferred from an enum.
+          maturity: :stable,
           process: :persistent,
           multi_turn: :native,
           follow_up: :managed,

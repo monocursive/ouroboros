@@ -95,6 +95,16 @@ defmodule Ouroboros.Provider.NativeTest do
                :sandbox_mode
              ]
     end
+
+    test "the only transport is selectable by default, so choosing the provider is enough" do
+      [transport] = Native.spec().session_transports
+
+      # `Jido.Harness.Session.Manager` refuses to default to an `:experimental`
+      # transport (`session/manager.ex:128`). Since this is the provider's only one,
+      # marking it experimental would make `provider: :native` refuse to start unless
+      # every caller also passed `transport: :native`.
+      assert transport.capabilities.maturity == :stable
+    end
   end
 
   describe "session_capabilities/2" do
