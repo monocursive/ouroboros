@@ -1229,3 +1229,68 @@ fn the_coding_home_carries_three_first_run_tips_until_the_operator_is_no_longer_
     let text = screen(&mut app).text();
     assert!(!text.contains("@ attaches a file"), "{text}");
 }
+
+/// `/fork` is the same call the menu makes, without the menu, and it is gated the same
+/// way.
+#[test]
+fn slash_fork_issues_the_call_directly_and_is_gated_the_same_way() {
+    let mut refused = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut refused);
+    type_text(&mut refused, "/fork");
+    refused.apply(key(KeyCode::Enter));
+    assert!(
+        refused
+            .drain()
+            .iter()
+            .all(|call| call.method != "interactive.fork"),
+        "nothing is sent to a gateway that does not serve it"
+    );
+    assert!(screen(&mut refused)
+        .text()
+        .contains("does not serve interactive.fork"));
+
+    let mut app = opened_serving("idle", steering_capabilities(), &["interactive.fork"]);
+    compose(&mut app);
+    type_text(&mut app, "/fork");
+    app.apply(key(KeyCode::Enter));
+
+    let fork = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.fork")
+        .expect("the fork is issued");
+    assert_eq!(fork.params["id"], "session-b3");
+}
+
+/// `/clear` clears the whole draft, chips and effort included: they are part of what
+/// would have been sent.
+#[test]
+fn clear_takes_the_chips_and_the_effort_with_the_words() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["src/lib.rs"]);
+
+    compose(&mut app);
+    type_text(&mut app, "/effort high");
+    app.apply(key(KeyCode::Enter));
+
+    mention(&mut app, "lib.rs");
+    assert_eq!(chips(&app).len(), 1);
+
+    // A slash command is only a command at the start of a line, so the mention's text has
+    // to go before `/clear` can be one.
+    if let Some(composer) = app.sessions.composer.as_mut() {
+        composer.editor.clear_text();
+    }
+
+    type_text(&mut app, "/clear");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(chips(&app).is_empty(), "the chips went with the words");
+    assert!(app
+        .sessions
+        .composer
+        .as_ref()
+        .and_then(|composer| composer.reasoning_effort)
+        .is_none());
+    assert_eq!(draft(&app), "");
+}

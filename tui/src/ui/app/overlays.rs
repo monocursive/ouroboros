@@ -738,9 +738,8 @@ impl App {
                 self.open_backtrack(None);
             }
             Command::Fork => {
-                let key = self.sessions.open.clone();
                 self.overlay = None;
-                self.open_backtrack(key);
+                self.fork_open_session();
             }
             // The palette teaches the verb rather than replacing it: both take an argument
             // the operator has to type anyway, and a second surface for choosing a model

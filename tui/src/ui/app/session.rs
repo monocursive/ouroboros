@@ -904,6 +904,20 @@ impl App {
             return;
         };
 
+        self.fork_session(plane, &id);
+    }
+
+    /// `/fork` and the palette's Fork row: the same call, without going through the menu.
+    pub(super) fn fork_open_session(&mut self) {
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform("open a session before forking it", NoticeKind::Info);
+            return;
+        };
+
+        self.fork_session(plane, &id);
+    }
+
+    fn fork_session(&mut self, plane: Plane, id: &str) {
         let method = "interactive.fork";
 
         if !self.hello.serves(method) {
@@ -914,13 +928,28 @@ impl App {
             return;
         }
 
-        let params = self.routed_session_params(plane, &id, json!({ "id": id }));
+        if !self.open_capabilities().fork.offered() {
+            let capabilities = self.open_capabilities();
+            let transport = capabilities
+                .transport
+                .as_deref()
+                .map(|transport| transport.to_string())
+                .unwrap_or_else(|| "this transport".to_string());
+
+            self.inform(
+                format!("{transport} cannot branch a session"),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let params = self.routed_session_params(plane, id, json!({ "id": id }));
 
         self.issue(Call::new(
             Tag::Action {
                 label: "fork",
                 plane,
-                id: id.clone(),
+                id: id.to_string(),
             },
             method,
             params,
@@ -1819,7 +1848,17 @@ impl App {
                 self.open_quit();
                 return true;
             }
-            "/clear" => return true,
+            // "clear this draft" means the draft: the chips and the per-turn effort are
+            // part of what would have been sent, so they go with the words.
+            "/clear" => {
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.attachments.clear();
+                    composer.reasoning_effort = None;
+                    composer.attachment_refusal = None;
+                }
+                self.remember_composer_history();
+                return true;
+            }
             _ => return false,
         };
 
