@@ -1,0 +1,1585 @@
+//! The whole UI as a state machine, with no I/O in it.
+//!
+//! ## Why this type does not hold a `Client`
+//!
+//! A TUI that awaits an RPC inside its event loop stops drawing for as long as the
+//! runtime takes to answer, and this runtime has methods with a 120s ceiling. So the App
+//! never calls: it *emits* [`Call`]s into a queue, the driver spawns a task per call, and
+//! the answer comes back as [`Msg::Answer`]. Every panel keeps its last good value and a
+//! `pending` flag, so a refresh in flight renders as the previous data with a spinner
+//! rather than as a blank pane.
+//!
+//! The same shape is what makes the UI testable without a socket: a test applies messages
+//! and reads the queue, which is how the approval modal's parameters and the resync
+//! arithmetic are pinned below and in `tests/ui.rs`.
+//!
+//! ## The refresh cadence, and the one method that is not on it
+//!
+//! Cheap list methods for the *visible* tab are polled every few seconds. Transcript data
+//! is never polled — that is what a subscription is for, and replaying on a timer would
+//! be asking the runtime to re-send history it already pushed. `runtime.providers` is the
+//! one list on a slow cadence: each provider probe shells out to check an installed
+//! executable ([methods.ex] `@provider_probe_timeout`), so polling it beside
+//! `runtime.status` would fork a process per provider every three seconds.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rand::TryRngCore;
+use serde_json::{json, Value};
+
+use crate::config::{Config, Defaults};
+use crate::fleet::Profile as FleetProfile;
+use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
+use crate::model::{
+    self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope,
+    CursorPruned, Event, EventType, Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo,
+    StartRequest, StartedRef,
+};
+use crate::proto::{ErrorCode, Hello, Notification, RpcError};
+use crate::runtime::LogRing;
+use crate::transport::ClientError;
+
+use super::editor::{CompletionCatalog, Editor, EditorAction};
+use super::transcript::{Note, Watch};
+use super::transcript_cells;
+use super::tree::{TreeState, TreeView};
+
+mod answers;
+mod home;
+mod keys;
+mod machines;
+mod overlays;
+mod session;
+mod settings;
+mod start;
+mod streaming;
+
+/// Internal state types shared between the modules above. Re-exported here so each
+/// module's `use super::*` reaches them without naming a sibling.
+use session::{
+    ComposerRestoreDisposition, PendingComposerReconciliation, PendingFirstMessage,
+    PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
+};
+
+pub use keys::LEADER_KEYS;
+pub use machines::{
+    AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,
+    MachineCandidate, MachineChoice, MachineForm, MachineReport, MachineSecurity, MachineSummary,
+    Machines, MenuItem,
+};
+pub use overlays::{
+    approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
+    AccountDialog, AccountFlow, Command, CommandPalette, Overlay, PromptKind, APPROVAL_CHOICES,
+    APPROVAL_ROWS, SANDBOX_ROWS,
+};
+pub use session::{Composer, ComposerVerb, SessionsTab};
+pub use settings::{Settings, SettingsField};
+pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
+
+/// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
+/// cadences below are counted in these frames so wall-clock meaning stays put.
+pub const TICK: Duration = Duration::from_millis(80);
+
+const STATUS_TICKS: u64 = 38; // ~3s
+const LIST_TICKS: u64 = 38; // ~3s
+const UPGRADE_TICKS: u64 = 63; // ~5s
+const DETAIL_TICKS: u64 = 125; // ~10s: `Mesh.state/1` is a whole agent's state tree
+const PROVIDER_TICKS: u64 = 750; // ~60s: each entry probes an executable
+const ACCOUNT_TICKS: u64 = 375; // ~30s; ~1s while a managed login is pending
+const ACCOUNT_LOGIN_TICKS: u64 = 13;
+const NOTICE_TICKS: u64 = 63;
+/// OpenCode waits two seconds after the leader key; this is the same window in ticks.
+const LEADER_TICKS: u64 = 25;
+/// Pi's double Ctrl+C quit: the second press has to arrive inside this window.
+const CTRL_C_QUIT_TICKS: u64 = 13;
+static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
+/// readiness is `:infinity` upstream. This leaves room for the answer rather than racing
+/// it, and it is the one call the transport's 20s default cannot serve.
+pub const START_TIMEOUT: Duration = Duration::from_secs(130);
+
+/// The gateway refuses a replay limit above 500.
+const REPLAY_LIMIT: u64 = 500;
+
+/// How many replay rounds one interruption may cost before the client stops asking. Past
+/// this the transcript keeps its visible gap, which is the honest end state: continuing
+/// would be a loop against a session whose history is moving faster than it can be read.
+const MAX_RESYNC_ROUNDS: u32 = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tab {
+    Dashboard,
+    Sessions,
+    Agents,
+    Teams,
+    Plans,
+    Upgrade,
+    Logs,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 7] = [
+        Tab::Dashboard,
+        Tab::Sessions,
+        Tab::Agents,
+        Tab::Teams,
+        Tab::Plans,
+        Tab::Upgrade,
+        Tab::Logs,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Sessions => "Sessions",
+            Self::Agents => "Agents",
+            Self::Teams => "Teams",
+            Self::Plans => "Plans/Control",
+            Self::Upgrade => "Upgrade",
+            Self::Logs => "Logs",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+}
+
+/// Whether this client started the runtime it is attached to. It decides what the quit
+/// dialog may offer and whether the Logs tab has anything to show.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    Spawned { pid: i32 },
+    Attached,
+}
+
+#[derive(Debug, Clone)]
+pub enum Connection {
+    Live,
+    /// The transport is retrying underneath; this is what the UI knows about it.
+    Lost {
+        reason: String,
+    },
+}
+
+/// What the driver does after the loop returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quit {
+    /// Leave the runtime running.
+    Detach,
+    /// `runtime.shutdown` when the gateway serves it, then SIGTERM, then SIGKILL.
+    Shutdown,
+    /// Attach mode: close the socket and nothing else.
+    Disconnect,
+    /// Stop this standalone runtime, create a fleet from the saved intent, then come back.
+    ApplyFleetIntent,
+}
+
+/// One request the driver should make. `Clone` because a confirmation dialog holds the
+/// call it will emit if the answer is yes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub tag: Tag,
+    pub method: String,
+    pub params: Value,
+    /// `None` uses the transport's default ceiling.
+    pub timeout: Option<Duration>,
+}
+
+impl Call {
+    pub fn new(tag: Tag, method: impl Into<String>, params: Value) -> Self {
+        Self {
+            tag,
+            method: method.into(),
+            params,
+            timeout: None,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+/// What an answer is an answer to. Also the in-flight key: one outstanding request per
+/// tag, so a slow runtime cannot make the UI queue a second copy of the same question.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Tag {
+    Account,
+    AccountLogin,
+    AccountCancel,
+    AccountLogout,
+    Status,
+    Providers,
+    Sessions(Plane),
+    Agents,
+    AgentState(String),
+    Teams,
+    TeamState(String),
+    Plans,
+    Plan(String),
+    ControlRuns,
+    ControlRun(String),
+    UpgradeStatus,
+    Rollouts,
+    History(String),
+    Signing,
+    Grants(String),
+    /// `control.submit`. The answer carries the id of a run that did not exist before.
+    ControlSubmit,
+    /// `control.cancel {id}`.
+    ControlCancel(String),
+    /// The single resync path: `subscribe` after a reconnect or a first open, `replay`
+    /// after a lag or a pruned cursor.
+    ///
+    /// `cursor` is the exclusive cursor the request carried. It is on the tag rather than
+    /// re-read from the watch when the answer lands, because live events can advance the
+    /// watch while the request is in flight, and the answer has to be interpreted against
+    /// the question that was asked.
+    Resync {
+        plane: Plane,
+        id: String,
+        cursor: u64,
+        subscribe: bool,
+    },
+    /// An operate verb. The label is what a failure names in the notice line.
+    Action {
+        label: &'static str,
+        plane: Plane,
+        id: String,
+    },
+    /// A composer mutation retains the exact draft and, for dispatched turns, its logical
+    /// id until the answer. Steer has no durable request id; retaining a pretend one would
+    /// make a lost acknowledgement look safely replayable when it is not.
+    ComposerAction {
+        label: &'static str,
+        verb: ComposerVerb,
+        plane: Plane,
+        id: String,
+        turn_id: Option<String>,
+        input: String,
+        reconciling: bool,
+        submission_sequence: u64,
+    },
+    /// One approval response, keyed by the runtime request id so parallel prompts cannot
+    /// collapse into one in-flight action.
+    Approval {
+        plane: Plane,
+        id: String,
+        request_id: String,
+    },
+    /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
+    /// answer carries the id of a session that did not exist when the request was made.
+    Start {
+        plane: Plane,
+        id: String,
+    },
+    /// The first message of a session this client just started.
+    FirstMessage {
+        plane: Plane,
+        id: String,
+        turn_id: String,
+        input: String,
+        submission_sequence: u64,
+    },
+}
+
+#[derive(Debug)]
+pub enum Msg {
+    Key(crossterm::event::KeyEvent),
+    /// Bracketed paste is a single edit, including any embedded newlines.
+    Paste(String),
+    /// A local, bounded index produced by the I/O driver for `@` completion.
+    WorkspaceFiles(Vec<String>),
+    Tick,
+    Notification(Notification),
+    Answer {
+        tag: Tag,
+        result: Result<Value, ClientError>,
+    },
+    /// The transport completed a fresh handshake after a lost connection.
+    Reconnected(Box<Hello>),
+    /// The supervised child exited on its own.
+    DaemonExited(String),
+    /// The transport's cumulative count of notifications it could not hand over.
+    NotificationsDropped(u64),
+    /// The terminal was resized; nothing to do but redraw.
+    Redraw,
+    /// The mouse wheel or a trackpad notch, in transcript rows. Negative is older.
+    Scroll(isize),
+    /// Text the I/O driver read back from `$VISUAL`/`$EDITOR`.
+    ExternalEditor(String),
+    /// Tailscale peers and SSH config hosts, gathered by the driver when Machines opens.
+    MachineCandidates {
+        candidates: Vec<MachineCandidate>,
+        local_machine: Option<String>,
+        local_host: Option<String>,
+    },
+    /// Result of a confirmed `fleet add` / prepare job the driver ran.
+    FleetJobFinished {
+        log: Vec<String>,
+        result: Result<String, String>,
+    },
+    /// The driver declined a second machine discovery scan; one is still running.
+    MachineScanPending,
+}
+
+/// A panel's value, its freshness, and whether a refresh is in flight.
+#[derive(Debug, Clone)]
+pub struct Loadable<T> {
+    pub value: Option<T>,
+    pub error: Option<String>,
+    pub pending: bool,
+    /// The tick at which a poll may next be issued.
+    pub next_tick: u64,
+}
+
+impl<T> Default for Loadable<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            error: None,
+            pending: false,
+            next_tick: 0,
+        }
+    }
+}
+
+impl<T> Loadable<T> {
+    fn due(&self, ticks: u64) -> bool {
+        !self.pending && ticks >= self.next_tick
+    }
+
+    fn started(&mut self) {
+        self.pending = true;
+    }
+
+    fn resolved(&mut self, ticks: u64, cadence: u64) {
+        self.pending = false;
+        self.next_tick = ticks + cadence;
+    }
+
+    pub fn ok(&mut self, value: T, ticks: u64, cadence: u64) {
+        self.value = Some(value);
+        self.error = None;
+        self.resolved(ticks, cadence);
+    }
+
+    pub fn failed(&mut self, error: String, ticks: u64, cadence: u64) {
+        self.error = Some(error);
+        self.resolved(ticks, cadence);
+    }
+
+    /// Forces the next poll, for `r`.
+    pub fn invalidate(&mut self) {
+        self.next_tick = 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pane {
+    #[default]
+    List,
+    Detail,
+}
+
+/// One row of a list pane, projected out of whatever the method answered.
+#[derive(Debug, Clone)]
+pub struct Row {
+    pub id: String,
+    pub label: String,
+    pub status: Option<String>,
+    pub raw: Value,
+}
+
+/// A list on the left and a value tree on the right — tabs 3 through 6, which differ only
+/// in which method fills the list and which fills the tree.
+#[derive(Debug)]
+pub struct Explorer {
+    pub rows: Loadable<Vec<Row>>,
+    pub selected: usize,
+    pub detail: Loadable<Value>,
+    pub tree: TreeState,
+    pub focus: Pane,
+    /// The id whose detail `detail` currently holds, so a selection change is detectable.
+    pub detail_of: Option<String>,
+}
+
+impl Default for Explorer {
+    fn default() -> Self {
+        Self {
+            rows: Loadable::default(),
+            selected: 0,
+            detail: Loadable::default(),
+            tree: TreeState::opened(),
+            focus: Pane::List,
+            detail_of: None,
+        }
+    }
+}
+
+impl Explorer {
+    pub fn current(&self) -> Option<&Row> {
+        self.rows.value.as_ref()?.get(self.selected)
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        let len = self.rows.value.as_ref().map(Vec::len).unwrap_or(0);
+
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+
+        self.selected = (self.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeSection {
+    Status,
+    Rollouts,
+    History,
+    Signing,
+    Grants,
+}
+
+impl UpgradeSection {
+    pub const ALL: [UpgradeSection; 5] = [
+        UpgradeSection::Status,
+        UpgradeSection::Rollouts,
+        UpgradeSection::History,
+        UpgradeSection::Signing,
+        UpgradeSection::Grants,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Status => "node executor",
+            Self::Rollouts => "rollouts",
+            Self::History => "module history",
+            Self::Signing => "signing decisions",
+            Self::Grants => "effect grants",
+        }
+    }
+
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::Status => "upgrade.status",
+            Self::Rollouts => "upgrade.rollouts",
+            Self::History => "upgrade.history",
+            Self::Signing => "signing.decisions",
+            Self::Grants => "grants.list",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct UpgradeTab {
+    pub section: usize,
+    pub status: Loadable<Value>,
+    pub rollouts: Loadable<Value>,
+    pub history: Loadable<Value>,
+    pub history_module: Option<String>,
+    pub signing: Loadable<Value>,
+    pub grants: Loadable<Value>,
+    pub grants_principal: Option<String>,
+    pub tree: TreeState,
+    pub focus: Pane,
+}
+
+impl Default for UpgradeTab {
+    fn default() -> Self {
+        Self {
+            section: 0,
+            status: Loadable::default(),
+            rollouts: Loadable::default(),
+            history: Loadable::default(),
+            history_module: None,
+            signing: Loadable::default(),
+            grants: Loadable::default(),
+            grants_principal: None,
+            // Open, like every other detail pane: a tree whose root is closed shows one
+            // line where the answer is.
+            tree: TreeState::opened(),
+            focus: Pane::default(),
+        }
+    }
+}
+
+impl UpgradeTab {
+    pub fn current(&self) -> UpgradeSection {
+        UpgradeSection::ALL[self.section.min(UpgradeSection::ALL.len() - 1)]
+    }
+
+    pub fn panel(&self, section: UpgradeSection) -> &Loadable<Value> {
+        match section {
+            UpgradeSection::Status => &self.status,
+            UpgradeSection::Rollouts => &self.rollouts,
+            UpgradeSection::History => &self.history,
+            UpgradeSection::Signing => &self.signing,
+            UpgradeSection::Grants => &self.grants,
+        }
+    }
+
+    fn panel_mut(&mut self, section: UpgradeSection) -> &mut Loadable<Value> {
+        match section {
+            UpgradeSection::Status => &mut self.status,
+            UpgradeSection::Rollouts => &mut self.rollouts,
+            UpgradeSection::History => &mut self.history,
+            UpgradeSection::Signing => &mut self.signing,
+            UpgradeSection::Grants => &mut self.grants,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug)]
+pub struct Notice {
+    pub text: String,
+    pub kind: NoticeKind,
+    pub until: u64,
+}
+
+/// The last seen sequence per watched session, shared with the reconnect hook.
+///
+/// The hook runs inside the transport's task, after a handshake this App did not witness,
+/// and it has to know where each subscription left off. A mutex around a small map is the
+/// whole coupling: the App writes cursors, the hook reads them, and the answers come back
+/// as ordinary [`Msg::Answer`]s so there is still one resync code path.
+#[derive(Debug, Clone, Default)]
+pub struct Cursors {
+    inner: Arc<Mutex<BTreeMap<(Plane, String), CursorRegistration>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CursorRegistration {
+    cursor: u64,
+    node: Option<String>,
+}
+
+impl Cursors {
+    pub fn set(&self, plane: Plane, id: &str, cursor: u64, node: Option<&str>) {
+        if let Ok(mut cursors) = self.inner.lock() {
+            cursors.insert(
+                (plane, id.to_string()),
+                CursorRegistration {
+                    cursor,
+                    node: node.map(str::to_string),
+                },
+            );
+        }
+    }
+
+    pub fn forget(&self, plane: Plane, id: &str) {
+        if let Ok(mut cursors) = self.inner.lock() {
+            cursors.remove(&(plane, id.to_string()));
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<(Plane, String, u64, Option<String>)> {
+        self.inner
+            .lock()
+            .map(|cursors| {
+                cursors
+                    .iter()
+                    .map(|((plane, id), registration)| {
+                        (
+                            *plane,
+                            id.clone(),
+                            registration.cursor,
+                            registration.node.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+pub struct App {
+    pub mode: Mode,
+    pub address: String,
+    pub hello: Hello,
+    pub connection: Connection,
+    pub tab: Tab,
+    pub ticks: u64,
+    pub account: Loadable<AccountState>,
+    pub status: Loadable<RuntimeStatus>,
+    pub providers: Loadable<Vec<ProviderEntry>>,
+    pub sessions: SessionsTab,
+    pub agents: Explorer,
+    pub teams: Explorer,
+    pub plans: Explorer,
+    pub control: Explorer,
+    /// Which of the two lists tab 5 is driving.
+    pub plans_on_control: bool,
+    pub upgrade: UpgradeTab,
+    pub logs: Option<LogRing>,
+    pub log_scroll: usize,
+    pub overlay: Option<Overlay>,
+    pub notice: Option<Notice>,
+    pub quit: Option<Quit>,
+    pub cursors: Cursors,
+    /// Where `ouro` was launched from, offered as the new-session workspace.
+    ///
+    /// A default rather than a decision: it is prefilled, visible, and editable, because
+    /// the directory a terminal happens to be sitting in is a good guess and a bad
+    /// assumption. The runtime resolves it, not this process — an `ouro` attached over an
+    /// SSH tunnel is naming a path on the *runtime's* filesystem.
+    pub launch_dir: Option<String>,
+    /// This client's preferences, as the file said them plus whatever the settings overlay
+    /// has changed since. Never a runtime fact, and labelled as such wherever it is drawn.
+    pub config: Config,
+    /// Where [`config`](Self::config) is read from and written to. `None` only when there
+    /// is nowhere to keep preferences at all, which the settings overlay says out loud.
+    pub config_path: Option<PathBuf>,
+    /// The data directory this client told the runtime to use, when it started one.
+    ///
+    /// `None` in attach mode on purpose: a client that did not spawn this runtime does not
+    /// know where that runtime keeps its files, and a local path printed under a remote
+    /// node would be a guess wearing a fact's clothes.
+    pub data_dir: Option<String>,
+    /// Non-secret membership metadata loaded by the launcher from this runtime's data
+    /// directory. The App remains a pure state machine: it never reads the profile itself.
+    pub fleet_profile: Option<FleetProfile>,
+    /// Whether this data directory holds the fleet CA key. Loaded by the launcher; the
+    /// App never stats the key file.
+    pub can_invite: bool,
+    /// Ask the driver to list Tailscale/SSH hosts. Set when Machines opens.
+    scan_machines_pending: bool,
+    /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
+    fleet_intent_pending: Option<FleetIntent>,
+    /// Restart-and-join plan. The driver writes the invitation path, then shuts down.
+    join_intent_pending: Option<JoinIntent>,
+    /// Confirmed add/prepare for a live fleet owner. The driver runs it.
+    fleet_job_pending: Option<FleetJob>,
+    /// Open Machines after a fleet-intent restart so the operator sees what happened.
+    pub open_machines_on_start: bool,
+    /// Progress from that restart's add, shown on the Add Done step.
+    pub resume_add_log: Vec<String>,
+    /// Enroll recipe from that restart's add, if the destination still needs a command.
+    pub resume_add_recipe: Option<String>,
+    /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
+    /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
+    /// advertise the binding only where it exists, because in every other terminal that
+    /// keystroke sends the message.
+    pub keyboard_enhanced: bool,
+    /// The first-class harness composer before a session exists.
+    pub home_draft: Editor,
+    pub home_pending: bool,
+    pub home_error: Option<String>,
+    completion_catalog: CompletionCatalog,
+    outbound: VecDeque<Call>,
+    in_flight: HashSet<Tag>,
+    dropped_seen: u64,
+    /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
+    /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
+    save_pending: bool,
+    /// The coding home's first prompt, held between `*.start` being issued and its answer
+    /// arriving. There is nothing to send it to until the session exists.
+    first_message: Option<PendingFirstMessage>,
+    /// A start launched from an existing composer (currently `/write`) has no modal to
+    /// retain its retry boundary. Keep it here until success or a definite refusal.
+    pending_background_start: Option<StartRequest>,
+    /// A URL the I/O driver should open in the operator's browser. Kept out of notices so
+    /// a managed login URL is never copied into logs by accident.
+    open_url_pending: Option<String>,
+    /// Tick at which a pending Ctrl+X leader chord expires.
+    pub leader_until: Option<u64>,
+    /// Tick at which a second Ctrl+C will open the quit dialog.
+    ctrl_c_until: Option<u64>,
+    /// Last agent message the I/O driver should copy to the clipboard.
+    copy_pending: Option<String>,
+    /// Current prompt text the I/O driver should open in `$VISUAL`/`$EDITOR`.
+    external_editor_pending: Option<String>,
+    /// Monotonic issue order for composer mutations. Outcome-unknown answers may arrive
+    /// out of order; reconciliation is sorted by this sequence, never by error arrival.
+    next_composer_submission_sequence: u64,
+    /// After ending a session chosen from the switcher, put the switcher back so several
+    /// dead rows can be cleared without reopening it each time.
+    resume_session_picker: bool,
+}
+
+impl App {
+    pub fn new(mode: Mode, address: String, hello: Hello, logs: Option<LogRing>) -> Self {
+        Self {
+            mode,
+            address,
+            hello,
+            connection: Connection::Live,
+            tab: Tab::Sessions,
+            ticks: 0,
+            account: Loadable::default(),
+            status: Loadable::default(),
+            providers: Loadable::default(),
+            sessions: SessionsTab::default(),
+            agents: Explorer::default(),
+            teams: Explorer::default(),
+            plans: Explorer::default(),
+            control: Explorer::default(),
+            plans_on_control: false,
+            upgrade: UpgradeTab::default(),
+            logs,
+            log_scroll: 0,
+            overlay: None,
+            notice: None,
+            quit: None,
+            cursors: Cursors::default(),
+            launch_dir: None,
+            config: Config::default(),
+            config_path: None,
+            data_dir: None,
+            fleet_profile: None,
+            can_invite: false,
+            scan_machines_pending: false,
+            fleet_intent_pending: None,
+            join_intent_pending: None,
+            fleet_job_pending: None,
+            open_machines_on_start: false,
+            resume_add_log: Vec::new(),
+            resume_add_recipe: None,
+            keyboard_enhanced: false,
+            home_draft: Editor::default(),
+            home_pending: false,
+            home_error: None,
+            completion_catalog: CompletionCatalog::default(),
+            outbound: VecDeque::new(),
+            in_flight: HashSet::new(),
+            dropped_seen: 0,
+            save_pending: false,
+            first_message: None,
+            pending_background_start: None,
+            open_url_pending: None,
+            leader_until: None,
+            ctrl_c_until: None,
+            copy_pending: None,
+            external_editor_pending: None,
+            next_composer_submission_sequence: 0,
+            resume_session_picker: false,
+        }
+    }
+
+    pub fn take_open_url(&mut self) -> Option<String> {
+        self.open_url_pending.take()
+    }
+
+    pub fn take_copy(&mut self) -> Option<String> {
+        self.copy_pending.take()
+    }
+
+    pub fn take_external_editor(&mut self) -> Option<String> {
+        self.external_editor_pending.take()
+    }
+
+    pub fn take_scan_machines(&mut self) -> bool {
+        std::mem::take(&mut self.scan_machines_pending)
+    }
+
+    pub fn take_fleet_intent(&mut self) -> Option<FleetIntent> {
+        self.fleet_intent_pending.take()
+    }
+
+    pub fn take_join_intent(&mut self) -> Option<JoinIntent> {
+        self.join_intent_pending.take()
+    }
+
+    pub fn fleet_plan_write_failed(&mut self, error: impl Into<String>) {
+        self.quit = None;
+        let error = error.into();
+        self.inform(error.clone(), NoticeKind::Error);
+        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+            if let Some(add) = machines.add.as_mut() {
+                add.pending = false;
+                add.step = AddStep::Confirm;
+                add.error = Some(error.clone());
+            }
+            if let Some(form) = machines.form.as_mut() {
+                form.pending = false;
+                form.step = AddStep::Confirm;
+                form.error = Some(error);
+            }
+        }
+    }
+
+    pub fn take_fleet_job(&mut self) -> Option<FleetJob> {
+        self.fleet_job_pending.take()
+    }
+
+    pub fn leader_pending(&self) -> bool {
+        self.leader_until.is_some()
+    }
+
+    pub fn chatgpt_connected(&self) -> bool {
+        self.account
+            .value
+            .as_ref()
+            .map(AccountState::connected)
+            .unwrap_or(false)
+    }
+
+    /// Whether Codex can be started without asking anyone to sign in: a connected ChatGPT
+    /// subscription, or an install the runtime says needs no OpenAI auth at all.
+    pub fn codex_usable(&self) -> bool {
+        self.account
+            .value
+            .as_ref()
+            .map(AccountState::usable)
+            .unwrap_or(false)
+    }
+
+    /// Whether the coding home can start its configured provider now. Codex keeps its
+    /// first-class managed sign-in gate; every other explicit provider owns its own auth
+    /// and must not be blocked by an unrelated OpenAI account state.
+    pub fn home_ready(&self) -> bool {
+        self.home_provider() != "codex" || self.codex_usable()
+    }
+
+    pub fn home_provider(&self) -> &str {
+        self.config.defaults.provider.as_deref().unwrap_or("codex")
+    }
+
+    /// Whether `account.read` has come back at all — with a state, or with a refusal.
+    ///
+    /// Not the same question as [`home_ready`](Self::home_ready): until this is true the
+    /// client does not yet know whether the home is ready, and it must not act as though
+    /// the answer were "no".
+    fn account_resolved(&self) -> bool {
+        self.account.value.is_some() || self.account.error.is_some()
+    }
+
+    /// Whether the visible home composer owns this key, or the global bindings do.
+    ///
+    /// The composer is on screen from the first frame and the caret is in it, so the first
+    /// thing typed has to land in the draft. Gating that on *readiness* meant the account
+    /// round trip decided where a keystroke went: type "quick fix" a moment too early and
+    /// the `q` opened the quit dialog. The gate is resolution instead — once the runtime
+    /// has answered, an unauthenticated home genuinely is a surface whose printable keys
+    /// belong to the shell, and it says so on screen.
+    fn home_owns_key(&self, code: crossterm::event::KeyCode) -> bool {
+        use crossterm::event::KeyCode;
+
+        self.home_ready()
+            || !self.home_draft.text().is_empty()
+            || !self.account_resolved()
+            || matches!(
+                code,
+                KeyCode::Char('/') | KeyCode::Enter | KeyCode::Backspace | KeyCode::Esc
+            )
+    }
+
+    pub fn home_workspace(&self) -> String {
+        self.default_workspace()
+    }
+
+    /// What the home composer should say about file access, and whether that is writable.
+    ///
+    /// Unset follows the plane: workspace write where the provider allows it. A stored
+    /// `read_only` is the opt-in for launching a session that cannot edit.
+    pub fn home_sandbox(&self) -> (&'static str, bool) {
+        match self.config.defaults.sandbox_mode() {
+            Some(mode) => (mode.label(), mode.writable()),
+            None => (SandboxMode::WorkspaceWrite.label(), true),
+        }
+    }
+
+    /// The open session's sandbox caption, if a session is open.
+    pub fn open_sandbox(&self) -> Option<(String, bool)> {
+        let value = self.sessions.open_info().and_then(|session| {
+            session
+                .raw
+                .get("options")
+                .and_then(|options| options.get("sandbox_mode"))
+        })?;
+
+        match value {
+            serde_json::Value::Null => Some(("provider default".to_string(), false)),
+            serde_json::Value::String(name) if !name.trim().is_empty() => {
+                let mode = SandboxMode::parse(name);
+                Some((
+                    mode.map(SandboxMode::label)
+                        .unwrap_or(name.as_str())
+                        .to_string(),
+                    mode.is_some_and(SandboxMode::writable),
+                ))
+            }
+            other => Some((crate::model::compact(other), false)),
+        }
+    }
+
+    /// The config this App wants written, once. Drained by the driver, which owns the
+    /// filesystem; see [`super::persist`].
+    pub fn take_config_save(&mut self) -> Option<Config> {
+        if !std::mem::take(&mut self.save_pending) {
+            return None;
+        }
+
+        Some(self.config.clone())
+    }
+
+    /// Everything the driver should send, in order. Draining is the only way a request
+    /// leaves this type.
+    pub fn drain(&mut self) -> Vec<Call> {
+        self.outbound.drain(..).collect()
+    }
+
+    /// Whether anything is queued, for a driver that wants to know without taking it.
+    pub fn has_outbound(&self) -> bool {
+        !self.outbound.is_empty()
+    }
+
+    /// Whether any question is still outstanding. The panels show this per-pane as a
+    /// spinner; a caller that has to wait for the whole tab to be answered — which in
+    /// practice means a test — asks here.
+    pub fn busy(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    /// Whether the open transcript is waiting for its first user-visible agent text.
+    ///
+    /// The local marker covers the narrow RPC-to-first-event gap. After that, the ordered
+    /// durable event ledger is authoritative. A lost connection or an unresolved replay
+    /// gap suppresses the animation rather than implying progress this client cannot see.
+    pub fn waiting_for_open_agent_reply(&self) -> bool {
+        if !matches!(self.connection, Connection::Live) {
+            return false;
+        }
+
+        let Some(key) = self.sessions.open.as_ref() else {
+            return false;
+        };
+        let Some(watch) = self.sessions.watches.get(key) else {
+            return false;
+        };
+
+        if watch.ended.is_some() {
+            return false;
+        }
+
+        if self.sessions.pending_replies.contains(key) {
+            return true;
+        }
+
+        !watch.resyncing && !watch.has_gap() && watch.waiting_for_reply()
+    }
+
+    /// Outcome-unknown turns which Enter must reconcile before submitting the open draft.
+    pub fn open_pending_reconciliation_count(&self) -> usize {
+        self.sessions
+            .open
+            .as_ref()
+            .and_then(|key| self.sessions.pending_reconciliations.get(key))
+            .map_or(0, VecDeque::len)
+    }
+
+    pub fn spawned(&self) -> bool {
+        matches!(self.mode, Mode::Spawned { .. })
+    }
+
+    /// A successful fleet list can still be partial when an older gateway only queries
+    /// currently connected owners. Keep a prior row only when the latest runtime.status
+    /// explicitly names that exact owner node as offline. This includes members learned
+    /// transitively over BEAM and absent from this machine's original invitation profile.
+    fn retain_offline_session_rows(
+        &mut self,
+        plane: Plane,
+        mut fresh: Vec<SessionInfo>,
+    ) -> Vec<SessionInfo> {
+        for session in &fresh {
+            self.sessions.hidden.remove(&(plane, session.id.clone()));
+        }
+
+        let offline_nodes: HashSet<&str> = self
+            .status
+            .value
+            .as_ref()
+            .and_then(|status| status.cluster.get("fleet"))
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|machine| machine.get("state").and_then(Value::as_str) == Some("offline"))
+            .filter_map(|machine| machine.get("node").and_then(Value::as_str))
+            .collect();
+
+        if offline_nodes.is_empty() {
+            return fresh;
+        }
+
+        let observed: HashSet<(String, String)> = fresh
+            .iter()
+            .filter_map(|session| {
+                session
+                    .node
+                    .as_ref()
+                    .map(|node| (session.id.clone(), node.clone()))
+            })
+            .collect();
+        let previous = match plane {
+            Plane::Interactive => self.sessions.interactive.value.as_ref(),
+            Plane::Coding => self.sessions.coding.value.as_ref(),
+        };
+
+        if let Some(previous) = previous {
+            fresh.extend(previous.iter().filter_map(|session| {
+                let node = session.node.as_deref()?;
+                if self.sessions.hidden.contains(&(plane, session.id.clone()))
+                    || !offline_nodes.contains(node)
+                    || observed.contains(&(session.id.clone(), node.to_string()))
+                {
+                    return None;
+                }
+
+                let mut retained = session.clone();
+                retained.last_known = true;
+                Some(retained)
+            }));
+        }
+
+        fresh
+    }
+
+    /// Adds the owner only when this reference is remote. An omitted node retains the
+    /// original local protocol; a remembered node makes every subsequent verb route to
+    /// the same owner that returned the reference.
+    fn routed_session_params(&self, plane: Plane, id: &str, mut params: Value) -> Value {
+        if let (Some(node), Some(fields)) =
+            (self.session_route_node(plane, id), params.as_object_mut())
+        {
+            fields.insert("node".into(), Value::String(node.to_string()));
+        }
+        params
+    }
+
+    fn session_route_node(&self, plane: Plane, id: &str) -> Option<&str> {
+        let owner = self.sessions.owner_node(plane, id)?;
+        let local = self
+            .status
+            .value
+            .as_ref()
+            .map(|status| status.node.as_str())
+            .filter(|node| !node.is_empty())
+            .unwrap_or(self.hello.node.as_str());
+        (owner != local).then_some(owner)
+    }
+
+    /// V1 stream notifications do not carry an owner node. Until that wire contract is
+    /// versioned, two explicit IDs on different machines cannot be distinguished safely.
+    /// Every outbound session path calls this before it can choose or omit a route.
+    fn refuse_owner_conflict(&mut self, plane: Plane, id: &str) -> bool {
+        let Some(owners) = self
+            .sessions
+            .owner_conflict(plane, id)
+            .map(|owners| owners.join(" and "))
+        else {
+            return false;
+        };
+
+        self.inform(
+            format!(
+                "session ID {id} belongs to {owners}; no request was sent. Explicit IDs must be fleet-unique (generated IDs already are); stop or restart one duplicate with a unique ID, then reconnect this TUI"
+            ),
+            NoticeKind::Error,
+        );
+        true
+    }
+
+    pub fn apply(&mut self, message: Msg) {
+        match message {
+            Msg::Key(key) => self.key(key),
+            Msg::Paste(text) => self.paste(&text),
+            Msg::WorkspaceFiles(files) => {
+                self.completion_catalog.set_files(files);
+                self.home_draft.update_completions(&self.completion_catalog);
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.editor.update_completions(&self.completion_catalog);
+                }
+            }
+            Msg::Tick => {
+                self.ticks += 1;
+                self.expire_notice();
+                self.expire_chords();
+                self.poll();
+            }
+            Msg::Redraw => {}
+            Msg::Scroll(delta) => self.scroll_view(delta),
+            Msg::Notification(notification) => self.notification(notification),
+            Msg::Answer { tag, result } => self.answer(tag, result),
+            Msg::Reconnected(hello) => {
+                self.connection = Connection::Live;
+                self.hello = *hello;
+                self.note_all_watches(Note::Reconnected);
+                self.inform(
+                    "the connection was re-established; resubscribing",
+                    NoticeKind::Warn,
+                );
+            }
+            Msg::DaemonExited(reason) => {
+                self.connection = Connection::Lost {
+                    reason: format!("the runtime exited: {reason}"),
+                };
+                self.inform(
+                    format!("the runtime this client started exited: {reason}"),
+                    NoticeKind::Error,
+                );
+            }
+            Msg::NotificationsDropped(total) => self.client_dropped(total),
+            Msg::ExternalEditor(text) => self.apply_external_editor(text),
+            Msg::MachineScanPending => {
+                self.inform("machine discovery is already running", NoticeKind::Info);
+            }
+            Msg::MachineCandidates {
+                candidates,
+                local_machine,
+                local_host,
+            } => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    machines.candidates = candidates;
+                    machines.local_machine = local_machine.clone();
+                    machines.local_host = local_host.clone();
+                    if let Some(add) = machines.add.as_mut() {
+                        if add.owner_machine.is_empty() {
+                            if let Some(name) = local_machine {
+                                add.owner_machine = name;
+                            }
+                        }
+                        if add.owner_host.is_empty() {
+                            if let Some(host) = local_host {
+                                add.owner_host = host;
+                            }
+                        }
+                    }
+                }
+            }
+            Msg::FleetJobFinished { log, result } => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    if let Some(add) = machines.add.as_mut() {
+                        add.pending = false;
+                        add.log = log.clone();
+                        match result.clone() {
+                            Ok(recipe) => {
+                                add.step = AddStep::Done;
+                                add.recipe = (!recipe.is_empty()).then_some(recipe);
+                                add.error = None;
+                            }
+                            Err(error) => {
+                                add.step = AddStep::Confirm;
+                                add.error = Some(error);
+                            }
+                        }
+                    } else if let Some(form) = machines.form.as_mut() {
+                        form.pending = false;
+                        form.log = log.clone();
+                        match result.clone() {
+                            Ok(recipe) => {
+                                form.step = AddStep::Done;
+                                form.recipe = (!recipe.is_empty()).then_some(recipe);
+                                form.error = None;
+                            }
+                            Err(error) => {
+                                form.step = AddStep::Confirm;
+                                form.error = Some(error);
+                            }
+                        }
+                    } else if let Some(report) = machines.report.as_mut() {
+                        report.pending = false;
+                        match result {
+                            Ok(recipe) => {
+                                let mut body = log.join("\n");
+                                if !recipe.is_empty() {
+                                    if !body.is_empty() {
+                                        body.push_str("\n\n");
+                                    }
+                                    body.push_str(&recipe);
+                                }
+                                report.body = body;
+                                report.copy = (!recipe.is_empty()).then_some(recipe);
+                            }
+                            Err(error) => {
+                                report.body = error;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ----- refresh -------------------------------------------------------------------
+
+    /// Issues the polls the visible tab is due for. Only the visible tab: a Dashboard
+    /// nobody is looking at is not a reason to keep a runtime answering.
+    fn poll(&mut self) {
+        // Account identity belongs to the shell, not a secondary operator panel. Keep it
+        // fresh on every surface, with a tighter cadence while a browser/device login is
+        // waiting for Codex's completion notification.
+        let account_cadence = if self
+            .account
+            .value
+            .as_ref()
+            .map(|account| account.login.status == "pending")
+            .unwrap_or(false)
+            || matches!(self.overlay, Some(Overlay::Account(_)))
+        {
+            ACCOUNT_LOGIN_TICKS
+        } else {
+            ACCOUNT_TICKS
+        };
+
+        self.issue_if_due(Tag::Account, "account.read", json!({}), account_cadence);
+
+        match self.tab {
+            Tab::Dashboard => {
+                self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+                self.issue_if_due(
+                    Tag::Providers,
+                    "runtime.providers",
+                    json!({}),
+                    PROVIDER_TICKS,
+                );
+            }
+            Tab::Sessions => {
+                self.issue_if_due(
+                    Tag::Sessions(Plane::Interactive),
+                    "interactive.list",
+                    json!({}),
+                    LIST_TICKS,
+                );
+                self.issue_if_due(
+                    Tag::Sessions(Plane::Coding),
+                    "coding.list",
+                    json!({}),
+                    LIST_TICKS,
+                );
+            }
+            Tab::Agents => {
+                self.issue_if_due(Tag::Agents, "agents.list", json!({}), LIST_TICKS);
+                self.poll_detail(Tab::Agents);
+            }
+            Tab::Teams => {
+                self.issue_if_due(Tag::Teams, "teams.list", json!({}), LIST_TICKS);
+                self.poll_detail(Tab::Teams);
+            }
+            Tab::Plans => {
+                self.issue_if_due(Tag::Plans, "plans.list", json!({}), LIST_TICKS);
+                self.issue_if_due(Tag::ControlRuns, "control.list", json!({}), LIST_TICKS);
+                self.poll_detail(Tab::Plans);
+            }
+            Tab::Upgrade => {
+                self.issue_if_due(
+                    Tag::UpgradeStatus,
+                    "upgrade.status",
+                    json!({}),
+                    UPGRADE_TICKS,
+                );
+                self.issue_if_due(Tag::Rollouts, "upgrade.rollouts", json!({}), UPGRADE_TICKS);
+                self.poll_upgrade_section();
+            }
+            // The ring is local. There is nothing to ask anyone for.
+            Tab::Logs => {}
+        }
+
+        // A remote session that lost only its stream keeps recovering even while the
+        // operator stays on the conversation. Machine status is the cheap, bounded signal
+        // that its owner has returned; it avoids hammering a known-offline node with
+        // subscribe calls.
+        if !self.sessions.recovering.is_empty()
+            || matches!(self.overlay, Some(Overlay::Machines(_)))
+        {
+            self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+        }
+    }
+
+    fn poll_detail(&mut self, tab: Tab) {
+        let requests: Vec<(Tag, &'static str, String)> = match tab {
+            Tab::Agents => self
+                .agents
+                .current()
+                .map(|row| {
+                    (
+                        Tag::AgentState(row.id.clone()),
+                        "agents.state",
+                        row.id.clone(),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            Tab::Teams => self
+                .teams
+                .current()
+                .map(|row| {
+                    (
+                        Tag::TeamState(row.id.clone()),
+                        "teams.state",
+                        row.id.clone(),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            Tab::Plans => {
+                let mut out = Vec::new();
+
+                if let Some(row) = self.plans.current() {
+                    out.push((Tag::Plan(row.id.clone()), "plans.get", row.id.clone()));
+                }
+
+                if let Some(row) = self.control.current() {
+                    out.push((
+                        Tag::ControlRun(row.id.clone()),
+                        "control.get",
+                        row.id.clone(),
+                    ));
+                }
+
+                out
+            }
+            _ => Vec::new(),
+        };
+
+        let mut due = Vec::new();
+
+        for (tag, method, id) in requests {
+            let ticks = self.ticks;
+
+            let explorer = match &tag {
+                Tag::AgentState(_) => &mut self.agents,
+                Tag::TeamState(_) => &mut self.teams,
+                Tag::Plan(_) => &mut self.plans,
+                Tag::ControlRun(_) => &mut self.control,
+                _ => continue,
+            };
+
+            // A selection that moved is fetched immediately; the same selection is
+            // refreshed on the slow cadence, because a state tree is not a cheap list.
+            if explorer.detail_of.as_deref() != Some(id.as_str()) {
+                explorer.detail.invalidate();
+                explorer.tree.reset();
+                explorer.detail_of = Some(id.clone());
+            }
+
+            if explorer.detail.due(ticks) {
+                explorer.detail.started();
+                due.push(Call::new(tag, method, json!({ "id": id })));
+            }
+        }
+
+        for call in due {
+            self.issue(call);
+        }
+    }
+
+    fn poll_upgrade_section(&mut self) {
+        let section = self.upgrade.current();
+
+        let (tag, method, params) = match section {
+            // Already polled unconditionally above.
+            UpgradeSection::Status | UpgradeSection::Rollouts => return,
+            UpgradeSection::History => {
+                let Some(module) = self.upgrade.history_module.clone() else {
+                    return;
+                };
+
+                (
+                    Tag::History(module.clone()),
+                    "upgrade.history",
+                    json!({ "module": module }),
+                )
+            }
+            UpgradeSection::Signing => (Tag::Signing, "signing.decisions", json!({})),
+            UpgradeSection::Grants => {
+                let Some(principal) = self.upgrade.grants_principal.clone() else {
+                    return;
+                };
+
+                (
+                    Tag::Grants(principal.clone()),
+                    "grants.list",
+                    json!({ "principal": principal }),
+                )
+            }
+        };
+
+        if !self.upgrade.panel(section).due(self.ticks) {
+            return;
+        }
+
+        self.upgrade.panel_mut(section).started();
+        self.issue(Call::new(tag, method, params));
+    }
+
+    fn issue_if_due(&mut self, tag: Tag, method: &str, params: Value, _cadence: u64) {
+        let due = match &tag {
+            Tag::Account => self.account.due(self.ticks),
+            Tag::Status => self.status.due(self.ticks),
+            Tag::Providers => self.providers.due(self.ticks),
+            Tag::Sessions(Plane::Interactive) => self.sessions.interactive.due(self.ticks),
+            Tag::Sessions(Plane::Coding) => self.sessions.coding.due(self.ticks),
+            Tag::Agents => self.agents.rows.due(self.ticks),
+            Tag::Teams => self.teams.rows.due(self.ticks),
+            Tag::Plans => self.plans.rows.due(self.ticks),
+            Tag::ControlRuns => self.control.rows.due(self.ticks),
+            Tag::UpgradeStatus => self.upgrade.status.due(self.ticks),
+            Tag::Rollouts => self.upgrade.rollouts.due(self.ticks),
+            _ => true,
+        };
+
+        if !due {
+            return;
+        }
+
+        match &tag {
+            Tag::Account => self.account.started(),
+            Tag::Status => self.status.started(),
+            Tag::Providers => self.providers.started(),
+            Tag::Sessions(Plane::Interactive) => self.sessions.interactive.started(),
+            Tag::Sessions(Plane::Coding) => self.sessions.coding.started(),
+            Tag::Agents => self.agents.rows.started(),
+            Tag::Teams => self.teams.rows.started(),
+            Tag::Plans => self.plans.rows.started(),
+            Tag::ControlRuns => self.control.rows.started(),
+            Tag::UpgradeStatus => self.upgrade.status.started(),
+            Tag::Rollouts => self.upgrade.rollouts.started(),
+            _ => {}
+        }
+
+        self.issue(Call::new(tag, method, params));
+    }
+
+    /// Queues a call unless the same question is already outstanding.
+    ///
+    /// `hello.methods` is the feature gate and the only one (§2.3), so a verb this build
+    /// does not serve is answered here rather than sent and refused. The answer is a real
+    /// `-32601` so the pane that wanted it says which method is missing, in the place the
+    /// data would have been — a client that discovered the gap by trying could not tell an
+    /// older gateway from a broken one.
+    fn issue(&mut self, call: Call) {
+        if !self.hello.serves(&call.method) {
+            let message = format!("this gateway does not serve {}", call.method);
+
+            self.answer(
+                call.tag,
+                Err(ClientError::Rpc(RpcError {
+                    code: ErrorCode::MethodNotFound,
+                    message,
+                    data: None,
+                })),
+            );
+
+            return;
+        }
+
+        if !self.in_flight.insert(call.tag.clone()) {
+            return;
+        }
+
+        self.outbound.push_back(call);
+    }
+
+    /// Forces every panel of the visible tab to refetch.
+    fn refresh(&mut self) {
+        match self.tab {
+            Tab::Dashboard => {
+                self.status.invalidate();
+                self.providers.invalidate();
+            }
+            Tab::Sessions => {
+                self.sessions.interactive.invalidate();
+                self.sessions.coding.invalidate();
+            }
+            Tab::Agents => {
+                self.agents.rows.invalidate();
+                self.agents.detail.invalidate();
+            }
+            Tab::Teams => {
+                self.teams.rows.invalidate();
+                self.teams.detail.invalidate();
+            }
+            Tab::Plans => {
+                self.plans.rows.invalidate();
+                self.plans.detail.invalidate();
+                self.control.rows.invalidate();
+                self.control.detail.invalidate();
+            }
+            Tab::Upgrade => {
+                self.upgrade.status.invalidate();
+                self.upgrade.rollouts.invalidate();
+                let section = self.upgrade.current();
+                self.upgrade.panel_mut(section).invalidate();
+            }
+            Tab::Logs => {}
+        }
+
+        self.poll();
+    }
+
+    // ----- notices -------------------------------------------------------------------
+
+    pub fn inform(&mut self, text: impl Into<String>, kind: NoticeKind) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            kind,
+            until: self.ticks + NOTICE_TICKS,
+        });
+    }
+
+    fn expire_notice(&mut self) {
+        if let Some(notice) = &self.notice {
+            if self.ticks >= notice.until {
+                self.notice = None;
+            }
+        }
+    }
+}
+
+/// Appends to a field that may not exist, answering whether there was one.
+fn push_into(field: Option<&mut String>, text: &str) -> bool {
+    match field {
+        Some(field) => {
+            field.push_str(text);
+            true
+        }
+        None => false,
+    }
+}
+
+/// A caller-owned turn id is the retry and concurrency boundary at the gateway. Prefer
+/// OS randomness; the timestamp/process/sequence fallback keeps the composer usable on a
+/// platform whose entropy source is temporarily unavailable without reusing an id inside
+/// this process.
+fn new_turn_id() -> String {
+    let mut bytes = [0_u8; 16];
+
+    if rand::rngs::OsRng.try_fill_bytes(&mut bytes).is_ok() {
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        return format!("ouro-{encoded}");
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let sequence = TURN_ID_FALLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+
+    format!("ouro-{}-{timestamp:x}-{sequence:x}", std::process::id())
+}
+
+fn value_usize(value: Option<&Value>) -> Option<usize> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
