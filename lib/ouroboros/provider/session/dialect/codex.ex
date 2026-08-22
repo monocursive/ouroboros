@@ -11,8 +11,9 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     "item/permissions/requestApproval"
   ]
 
-  # Extensions the Responses API accepts as image input. Anything else is a file the
-  # app-server has no input arm for; see `turn_input/1`.
+  # The `localImage` input arm carries a path, not a declared media type, so which
+  # attachments count as images is Ouroboros's own choice: these raster formats. Anything
+  # else is treated as a file, which the union has no arm for; see `turn_input/1`.
   @image_extensions ~w(.png .jpg .jpeg .gif .webp)
 
   # One turn carries at most this many attachment items. The overflow is counted in the

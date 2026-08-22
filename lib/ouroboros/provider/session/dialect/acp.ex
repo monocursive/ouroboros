@@ -311,7 +311,7 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   end
 
   # Line-wise, via the stdlib. A trailing newline is normalised away and no
-  # "\\ No newline at end of file" marker is emitted: the diff is for reading, not for
+  # "\ No newline at end of file" marker is emitted: the diff is for reading, not for
   # feeding back to `patch`.
   defp diff_lines(""), do: []
 
