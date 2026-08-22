@@ -1417,19 +1417,120 @@ The first `Esc` of the chord still does its ordinary job, including leaving an i
 session; the arm remembers which session it was pressed in, so the second `Esc` reopens
 that session with the menu rather than finding nothing to show.
 
-### `[keys]` — rebinding the chord
+### `[keys]` — keys are data (B8, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D4)
+
+Every chord this client binds is a **named action**, and every action can be rebound from
+`[keys]` in `config.toml` (`~/.config/ouroboros/config.toml` — the same file the rest of
+this section describes).
 
 ```toml
 [keys]
-backtrack = "esc esc"   # or "alt+up", or "off"
+backtrack   = "esc esc"     # or "alt+up", or "off"
+verbose     = "ctrl+b"      # was ctrl+o
+leader      = "ctrl+s"      # the leader; the verbs below follow whatever it is
+"leader.details" = "ctrl+s o"    # or just "o"
+"editor.kill_line" = "off"       # a key an operator does not want
 ```
 
-Rebindable on day one, and disableable. Claude Code #43717 is a hardcoded double-Escape
-that "cannot be rebound or disabled" and breaks zsh vi-mode for everyone who uses it; a
-chord that ships without its setting is that bug waiting to be filed. A value this build
-cannot read is reported as a config problem and treated as unset, never as `off` —
-silently disabling a key because a file had a typo in it is the same failure in the other
-direction. With `off`, `/backtrack` and the command palette still open the menu.
+Claude Code #43717 is a hardcoded double-Escape that "cannot be rebound or disabled" and
+breaks zsh vi-mode for everyone who uses it; a chord that ships without its setting is that
+bug waiting to be filed. `backtrack` was rebindable on day one and keeps its three
+documented spellings unchanged — they are all valid specs in the grammar below, so a file
+written for an older `ouro` resolves to exactly what it always did.
+
+**The key-spec grammar.** One chord is modifiers and a key joined by `+`: `ctrl`,
+`alt` (`opt`, `option`, `meta`), and `shift`, then `enter`, `esc`, `tab`, `backtab`,
+`backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, `up`, `down`,
+`left`, `right`, `space`, `f1`–`f24`, or a single character. Two chords separated by a
+space are a sequence (`"esc esc"`, `"ctrl+x d"`); more than two is refused. `"off"`
+(or `"none"`) removes the key. `shift` on a *letter* normalises away, because the letter's
+case already carries it and terminals disagree about reporting both — `N` and `n` stay two
+different leader verbs, and `shift+s` and `s` do not.
+
+**The actions.**
+
+| Scope | Action | Default |
+|---|---|---|
+| global | `send` | `enter` |
+| | `steer` | `alt+enter` |
+| | `newline` | `ctrl+j` |
+| | `queue_retract` | `up` |
+| | `paste_image` | `ctrl+v` |
+| | `editor` | `ctrl+g` |
+| | `interrupt` | `esc` |
+| | `backtrack` | `esc esc` |
+| | `cancel` | `ctrl+c` |
+| | `verbose` | `ctrl+o` |
+| | `plan_panel` | `ctrl+t` |
+| | `palette` | `ctrl+p` |
+| | `leader` | `ctrl+x` |
+| | `help` | `?` |
+| | `settings` | `,` |
+| | `quit` | `ctrl+q` |
+| | `quit_empty` | `ctrl+d` |
+| leader | `leader.new` | `n` |
+| | `leader.new_options` | `N` |
+| | `leader.sessions` | `l` |
+| | `leader.writable` | `w` |
+| | `leader.editor` | `e` |
+| | `leader.copy` | `y` |
+| | `leader.scrollback` | `[` |
+| | `leader.editor_view` | `v` |
+| | `leader.steer` | `s` |
+| | `leader.approval` | `a` |
+| | `leader.end` | `x` |
+| | `leader.details` | `d` |
+| | `leader.quit` | `q` |
+| | `leader.help` | `?` |
+| composer | `editor.word_back` | `alt+b` |
+| | `editor.word_forward` | `alt+f` |
+| | `editor.kill_word_back` | `ctrl+w` |
+| | `editor.kill_word_forward` | `alt+d` |
+| | `editor.kill_line` | `ctrl+k` |
+| | `editor.kill_to_start` | `ctrl+u` |
+| | `editor.yank` | `ctrl+y` |
+| | `editor.line_start` | `ctrl+a` |
+| | `editor.line_end` | `ctrl+e` |
+
+A **leader verb** is the single key pressed *after* `leader`, so rebinding `leader` moves
+all fourteen with it. Its spec is normally one bare chord (`"o"`); the long form
+`"ctrl+x o"` is accepted when its first chord is the current leader, because that is what
+the `?` panel shows an operator and it should mean what it looks like. A two-key spec whose
+first chord is *not* the leader is reported and ignored.
+
+**Conflicts are checked within a scope.** Two global actions on one key collide; a global
+chord and a composer motion on the same key do not, because the global handler claims the
+key first and always did. Where two actions in one scope want the same key, the later one
+(by action name, since the table is read in name order) is reported and **ignored** — the
+first keeps the key.
+
+**Nothing here can fail a start.** An unknown action name, an unreadable spec, a two-key
+leader verb, and a collision are each reported in a notice at startup and listed under
+`/keys`, and the offending line is *ignored*. The action keeps its default. It is never
+silently applied to something else, and never turned into `off` — quietly disabling a key
+because a file had a typo in it is the same failure in the other direction. A `[keys]` line
+whose value is not a string (`verbose = true`) is dropped and named rather than refusing
+the whole file.
+
+**The map is the authority, never a literal string** ([AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md)
+D14). The `?` panel, the footer's key hints, the `ctrl+x` which-key overlay, the command
+palette's shortcut column, the session rail, the first-run tips, and the approval snack bar
+all read the effective map, so a rebound key is what the UI shows. An action set to `"off"`
+loses its hint everywhere rather than being advertised as a key that does nothing — and
+keeps its `/` verb and its palette row, which is what `off` promises.
+
+**`/keys`** prints the effective map: every action, the key that reaches it, whether that
+key came from `config.toml` or from the defaults, and — first on the page, because it is
+why someone opened it — the lines of `[keys]` this build could not use.
+
+**What is not rebindable, and why.** The composer's *structure* — Backspace, Delete, the
+arrow keys, Home/End, Tab through a completion menu, and the characters themselves — is
+what a text field is, and this client does not offer to rebind it into something that is no
+longer one. Nor are the transcript's scroll aliases (`shift`/`ctrl` + arrows, PageUp/Down,
+the wheel), the tab digits `1`-`7` and Tab, the list navigation `j`/`k`/`h`/`l`, or the keys
+*inside* an overlay, which are that overlay's own discipline. Two leader aliases predate the
+map and are kept rather than silently removed: `ctrl+x g` beside `ctrl+x e`, and `ctrl+x o`
+beside `ctrl+x d`. They are not actions, so `/keys` does not list a second row for one verb.
 
 ### The footer
 
@@ -1456,12 +1557,56 @@ on it.
 | `? new here` | `onboarding.prompts_sent` in `config.toml` | until three prompts have been sent; outranks the leader and quit hints, which are also on `?` |
 | `2 approvals` | the approval requests this client holds unanswered | |
 | `42.5k tokens` | `usage.total_tokens` | a `· 34%` share is appended **only** where the runtime reports a context window. Nothing reports one today; `runtime.models` is where it is meant to arrive, and dividing by a client-side table of model windows would be a lie presented as a measurement |
-| `$0.42` | `usage.cost_usd` | `<$0.01` for a spend too small to show, never `$0.00` |
+| `$0.42` | `usage.cost_usd` | `<$0.01` for a spend too small to show, never `$0.00`. Turns `WARN` past `[budget] max_cost_usd` — see "Cost and usage" |
 | `esc interrupt` | conditional; see below | |
-| `ctrl+p commands`, `ctrl+x leader`, `ctrl+q quit` | this client | the last two are also on `?` and in the palette, so they yield first |
+| `ctrl+p commands`, `ctrl+x leader`, `ctrl+q quit` | this client | the chords come from the keymap, so a rebound key is what the row offers and an action set to `off` produces no hint at all. The last two are also on `?` and in the palette, so they yield first |
 
 The notice line keeps precedence: while a notice is showing it owns the whole row, folded
 onto one line, exactly as before.
+
+### Cost and usage (I2)
+
+`/cost` and `/usage` open one overlay, because they are one question. It states two
+accounts side by side, and they are allowed to disagree:
+
+- **As the runtime reports it** — `interactive.info`'s `usage`, folded by
+  `Interactive.State` over the whole session, including the part this client was never
+  connected for: input, output, cache-read, cache-creation and total tokens, the number of
+  turns that carried usage, and the cost. Every field is drawn only where the runtime
+  reported it. A provider that reports no cost is said to report none rather than shown as
+  `$0.00`, because a missing number and a free session are different facts. The context
+  window's `%` appears only where a window was reported, and nothing reports one today.
+- **As this transcript folds** — `Watch::usage()` over the `usage` events this client still
+  holds. It is labelled **PARTIAL** the moment the retained window stops covering the
+  session (a raised floor, which is what a `cursor_pruned` refusal leaves behind), because
+  a total built from a pruned window is a lower bound and printing it as a total would be a
+  measurement presented as a fact.
+
+The session picker and the session rail carry a compact `tokens · cost` cell for every row
+where the runtime reported one. `interactive.list` does not carry `usage` on every gateway
+and `coding.list` never will, so a row without it draws **nothing** rather than a zero. The
+rail's card is twenty columns wide: it drops the token count and keeps the cost when both
+do not fit, and drops the cell entirely when neither does — the footer's rule, because a
+half-drawn `42.5k · $0.4` is a fact rendered as noise.
+
+#### `[budget]` — a soft limit, and only a soft limit
+
+```toml
+[budget]
+max_cost_usd = 5.00     # absent, zero, or negative means no limit
+```
+
+When the session's **reported** cost crosses it, the footer's cost cell turns `WARN` and
+one notice says so, once per session. That is the whole of it.
+
+**This client never stops anything.** It has no authority to: a turn is the runtime's to
+run, and a client that paused, refused, or implied it had halted a session would be
+claiming a guarantee it cannot keep. Budgets that actually refuse work belong on the
+runtime side and are a later slice ([AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) I2 names
+`max_budget_usd` for the native agent and Claude's own flag through C2); until they land,
+`[budget]` is a number this client watches and reports against. A provider that reports no
+cost can never cross the limit, and the overlay says exactly that rather than leaving the
+row looking satisfied.
 
 ### Capability-driven chrome (B0, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D14/X1/X2)
 

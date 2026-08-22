@@ -497,8 +497,10 @@ interrupt` only while a turn is running on a transport that declared an interrup
 reported is left out rather than guessed, which is why a context percentage does not
 appear yet: no runtime reports a model's window.
 
-Two optional tables tune the chrome. Neither is on by default, and unknown values are
-reported and treated as unset rather than refused:
+Four optional tables tune the chrome — `[statusline]`, `[notifications]`, `[keys]`, and
+`[budget]`. None is on by default, and unknown values are reported and treated as unset
+rather than refused. `[keys]` and `[budget]` are described under
+[Terminal UI](#terminal-ui); the two that shape the chrome itself are:
 
 ```toml
 [statusline]
@@ -659,12 +661,45 @@ Three are the input grammar:
   steered. Two explicit keys, never one key whose meaning depends on timing.
 - `Esc` interrupts and keeps the queue; `Esc Esc` opens a menu over the last ten
   messages, offering "edit and resend as a new turn" everywhere and a fork where the
-  runtime serves one. The chord is rebindable and disableable from day one:
+  runtime serves one.
 
-  ```toml
-  [keys]
-  backtrack = "esc esc"   # or "alt+up", or "off"
-  ```
+**Every chord is data.** Each key this client binds is a named action, and any of them can
+be rebound — or turned off — from `~/.config/ouroboros/config.toml`:
+
+```toml
+[keys]
+backtrack        = "esc esc"   # or "alt+up", or "off"
+verbose          = "ctrl+b"    # was ctrl+o
+leader           = "ctrl+s"    # moves all fourteen leader verbs with it
+"leader.details" = "ctrl+s o"  # or just "o"
+"editor.kill_line" = "off"
+```
+
+A spec is modifiers and a key (`ctrl+o`, `alt+enter`), two of those separated by a space
+(`esc esc`, `ctrl+x d`), or `off`. An unknown action, an unreadable spec, or two actions
+claiming one key is reported in a notice at startup and **ignored** — the action keeps its
+default, and is never silently rebound to something else or silently disabled. `/keys`
+prints the effective map with the entries that came from the file marked and the lines that
+could not be used named first. The `?` panel, the footer hints, the `ctrl+x` overlay, the
+palette, and the session rail all read that map, so a rebound key is the key the client
+shows you. Claude Code #43717 — a double-Escape that "cannot be rebound or disabled" and
+breaks zsh vi-mode — is the bug this exists to not have.
+
+**What a session has spent.** `/cost` (or `/usage`) states the session's tokens and cost as
+the runtime folded them, beside the totals this client's own transcript adds up — labelled
+partial when the retained window no longer covers the whole session. The picker and the
+rail carry a compact `tokens · cost` cell for every session the runtime reported one for,
+and nothing at all for the ones it did not. A soft ceiling turns the footer's cost cell
+amber and says so once:
+
+```toml
+[budget]
+max_cost_usd = 5.00
+```
+
+It is a warning and nothing more: this client never stops a turn, and it says so where the
+number is drawn. Budgets that actually refuse work belong to the runtime and are not built
+yet.
 
 
 All of them are also in the command palette (`ctrl+p`), along with `/export [--json] [path]`,
