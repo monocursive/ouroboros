@@ -1905,6 +1905,7 @@ mod tests {
         assert_eq!(
             found,
             vec![
+                "coding_event_detail_result",
                 "coding_event_notification",
                 "error_cursor_pruned",
                 "error_invalid_request",
@@ -1914,12 +1915,47 @@ mod tests {
                 "error_unauthenticated",
                 "error_upstream_timeout_unknown",
                 "hello_result",
+                "interactive_event_detail_result",
+                "interactive_event_excerpt_notification",
                 "interactive_event_notification",
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
             ]
         );
+    }
+
+    #[test]
+    fn an_event_detail_result_decodes_as_one_bare_event_on_both_planes() {
+        for name in [
+            "interactive_event_detail_result",
+            "coding_event_detail_result",
+        ] {
+            let frame = fixture(name);
+            let event = Event::decode(&frame["result"]).expect("a bare event object");
+            assert_eq!(
+                Some(event.sequence),
+                frame["result"]["sequence"].as_u64(),
+                "{name} keeps its sequence"
+            );
+            assert!(
+                event.payload.get("diff").is_some(),
+                "{name} keeps its payload whole"
+            );
+        }
+    }
+
+    #[test]
+    fn an_excerpted_notification_keeps_the_wire_marker_as_data() {
+        // The gateway excerpts long payload strings into `{"_excerpt", "_bytes"}` maps
+        // (docs/TUI.md §2.7). The client must decode them as values it can render, never
+        // fail the event; rendering the marker is the transcript's job.
+        let frame = fixture("interactive_event_excerpt_notification");
+        let event = Event::decode(&frame["params"]["event"]).expect("an excerpted event decodes");
+        assert_eq!(event.payload["diff"]["_bytes"], 600);
+        assert_eq!(event.payload["note"]["_bytes"], 601);
+        assert_eq!(event.payload["tail"]["_excerpt"], "");
+        assert_eq!(event.payload["path"], "lib/ouroboros/gateway/wire.ex");
     }
 
     #[test]
