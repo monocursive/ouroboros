@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use crate::model::transcript::{PlanUpdate, PresentationEvent, RunStart, UsageReport};
 use crate::model::{Event, EventType, Plane};
 
 /// How many events one session's transcript keeps. Past this the oldest are dropped and
@@ -217,6 +218,63 @@ pub struct Watch {
     /// Rebuilt from the ordered event ledger after every absorb, so a late replay cannot
     /// move this state backwards by arriving after a newer live event.
     waiting_for_reply: bool,
+    /// Session-wide facts folded out of the ledger, for the chrome that has to state them.
+    derived: Derived,
+}
+
+/// What one session's ordered events add up to.
+///
+/// Rebuilt from the held events after every absorb rather than accumulated as they arrive:
+/// a replay overlaps by design, and a running total that counted the overlap twice would
+/// report tokens nobody spent.
+#[derive(Debug, Default)]
+struct Derived {
+    usage: UsageTotals,
+    queued: usize,
+    model: Option<String>,
+    plan: Option<PlanUpdate>,
+    /// Sequence of the `plan_updated` `plan` was parsed from, so an unchanged plan is not
+    /// re-parsed on every absorb.
+    plan_sequence: Option<u64>,
+    /// When the turn that is still running started, in epoch milliseconds.
+    active_turn_started: Option<i64>,
+}
+
+/// The session's token and cost bookkeeping, as reported.
+///
+/// `complete` is the honest half: once history has been pruned upstream or dropped by this
+/// window, the fold no longer sees every report, and every number below is a lower bound.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: Option<f64>,
+    /// How many `usage` events the total is made of. Zero means the provider reported none,
+    /// which is different from reporting zero.
+    pub reports: usize,
+    pub complete: bool,
+}
+
+impl UsageTotals {
+    pub fn is_empty(&self) -> bool {
+        self.reports == 0 && self.cost_usd.is_none()
+    }
+
+    fn fold(&mut self, report: &UsageReport) {
+        self.reports += 1;
+        self.input_tokens += report.input_tokens.unwrap_or(0);
+        self.output_tokens += report.output_tokens.unwrap_or(0);
+        self.cached_tokens += report.cached_tokens.unwrap_or(0);
+        self.total_tokens += report.total_tokens.unwrap_or_else(|| {
+            report.input_tokens.unwrap_or(0) + report.output_tokens.unwrap_or(0)
+        });
+
+        if let Some(cost) = report.cost_usd {
+            *self.cost_usd.get_or_insert(0.0) += cost;
+        }
+    }
 }
 
 impl Watch {
@@ -240,7 +298,56 @@ impl Watch {
             viewport_height: 0,
             undecodable: 0,
             waiting_for_reply: false,
+            derived: Derived::default(),
         }
+    }
+
+    /// Facts about the whole session that the chrome outside this transcript must state.
+    ///
+    /// These five accessors are the contract between the transcript and everything that
+    /// draws around it — the header, the footer, the composer's queue badge — so a pane can
+    /// render a model name, a token count, a queue depth, an elapsed turn, or the current
+    /// plan without reaching into the event ledger and re-deriving them differently. All
+    /// five are recomputed from the held events after every absorb and describe only what
+    /// this client still holds: [`UsageTotals::complete`] says when that is less than the
+    /// whole session.
+    pub fn usage(&self) -> UsageTotals {
+        self.derived.usage
+    }
+
+    /// How many turns the runtime is holding behind the running one, from the newest
+    /// `queue_changed`.
+    pub fn queue_len(&self) -> usize {
+        self.derived.queued
+    }
+
+    /// How long the turn that is still running has been running, in milliseconds.
+    ///
+    /// `None` when no turn is open, when the stream has ended, or when the runtime's
+    /// timestamp could not be read — never a zero standing in for "do not know".
+    pub fn active_turn_elapsed(&self) -> Option<i64> {
+        if self.ended.is_some() {
+            return None;
+        }
+
+        let started = self.derived.active_turn_started?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+
+        (now >= started).then_some(now - started)
+    }
+
+    /// The newest plan the provider published, whatever dialect it arrived in.
+    pub fn latest_plan(&self) -> Option<&PlanUpdate> {
+        self.derived.plan.as_ref()
+    }
+
+    /// The model this session is running, when a provider named one. Only Claude's
+    /// `run_started` carries it today, so `None` is the ordinary answer elsewhere.
+    pub fn model(&self) -> Option<&str> {
+        self.derived.model.as_deref()
     }
 
     /// The largest [`scroll`](Self::scroll) that still shows content, as of the last frame.
@@ -329,7 +436,7 @@ impl Watch {
 
         self.trim();
         self.recompute_cursor();
-        self.recompute_waiting_for_reply();
+        self.recompute_derived();
     }
 
     /// Records that history at or below `floor` will never arrive.
@@ -527,7 +634,12 @@ impl Watch {
         self.cursor = cursor;
     }
 
-    fn recompute_waiting_for_reply(&mut self) {
+    /// One ordered pass over the held ledger, producing everything derived from it.
+    ///
+    /// Reply-waiting, token totals, queue depth, model, plan, and the running turn's start
+    /// are all "what do these events add up to" questions, and answering them in one walk
+    /// keeps the cost of an absorb where it already was.
+    fn recompute_derived(&mut self) {
         #[derive(Debug, Default)]
         struct ReplyState {
             pending: bool,
@@ -536,8 +648,56 @@ impl Watch {
         }
 
         let mut turns: BTreeMap<String, ReplyState> = BTreeMap::new();
+        let mut usage = UsageTotals {
+            complete: self.floor == 0,
+            ..UsageTotals::default()
+        };
+        let mut queued = 0usize;
+        let mut model: Option<String> = None;
+        let mut plan_sequence: Option<u64> = None;
+        let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
 
         for event in self.events.values() {
+            match PresentationEvent::from_event(event) {
+                PresentationEvent::Usage(report) => usage.fold(&report),
+                PresentationEvent::QueueChanged { queued: depth } => queued = depth,
+                PresentationEvent::RunStarted(RunStart {
+                    model: Some(named), ..
+                }) => model = Some(named),
+                PresentationEvent::Plan(_) => plan_sequence = Some(event.sequence),
+                PresentationEvent::TurnStarted { turn_id, at } => {
+                    if let (Some(turn_id), Some(at)) = (turn_id, at) {
+                        turn_starts.insert(turn_id, at);
+                    }
+                }
+                PresentationEvent::TurnEnded { turn_id, .. } => {
+                    if let Some(turn_id) = turn_id {
+                        turn_starts.remove(&turn_id);
+                    } else {
+                        turn_starts.clear();
+                    }
+                }
+                // A finished run's own report is the only place Claude states a cost.
+                PresentationEvent::Lifecycle { .. } if event.kind == EventType::RunCompleted => {
+                    if let Some(cost) = event
+                        .payload
+                        .get("cost_usd")
+                        .or_else(|| event.payload.get("total_cost_usd"))
+                        .and_then(Value::as_f64)
+                    {
+                        *usage.cost_usd.get_or_insert(0.0) += cost;
+                    }
+                }
+                _ => {}
+            }
+
+            if matches!(
+                event.kind,
+                EventType::SessionClosed | EventType::SessionFailed | EventType::SessionCancelled
+            ) {
+                turn_starts.clear();
+            }
+
             let turn = event
                 .turn_id
                 .clone()
@@ -588,6 +748,20 @@ impl Watch {
         self.waiting_for_reply = turns
             .values()
             .any(|state| state.pending && !state.responded && !state.paused);
+        self.derived.usage = usage;
+        self.derived.queued = queued;
+        self.derived.model = model;
+        self.derived.active_turn_started = turn_starts.values().copied().max();
+
+        if self.derived.plan_sequence != plan_sequence {
+            self.derived.plan_sequence = plan_sequence;
+            self.derived.plan = plan_sequence
+                .and_then(|sequence| self.events.get(&sequence))
+                .and_then(|event| match PresentationEvent::from_event(event) {
+                    PresentationEvent::Plan(plan) => Some(plan),
+                    _ => None,
+                });
+        }
     }
 }
 
@@ -884,5 +1058,206 @@ mod tests {
             watch.entries().last(),
             Some(Entry::Ended("closed"))
         ));
+    }
+
+    fn typed(sequence: u64, kind: &str, payload: serde_json::Value) -> Event {
+        Event::decode(&json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": kind,
+            "timestamp": "2026-01-01T00:00:00.000000Z",
+            "turn_id": "turn-1",
+            "payload": payload
+        }))
+        .expect("an event")
+    }
+
+    /// A replay overlaps the live stream by design. Totals accumulated as events arrived
+    /// would count the overlap; these are folded out of the held ledger instead.
+    #[test]
+    fn usage_totals_survive_the_overlap_every_replay_produces() {
+        let mut watch = watch();
+        let reports = vec![
+            typed(
+                1,
+                "usage",
+                json!({"input_tokens": 100, "output_tokens": 10}),
+            ),
+            typed(2, "usage", json!({"input_tokens": 50, "output_tokens": 5})),
+        ];
+
+        watch.absorb(reports.clone());
+        let once = watch.usage();
+
+        // The same two events again, as a replay answer would deliver them.
+        watch.absorb(reports);
+
+        assert_eq!(
+            watch.usage(),
+            once,
+            "a replayed report is not a second report"
+        );
+        assert_eq!(once.reports, 2);
+        assert_eq!(once.input_tokens, 150);
+        assert_eq!(once.output_tokens, 15);
+        assert_eq!(
+            once.total_tokens, 165,
+            "derived when the provider sent no total"
+        );
+        assert!(once.complete);
+    }
+
+    /// Once history is gone the totals are a lower bound, and the accessor says so rather
+    /// than letting a footer present them as the session's whole cost.
+    #[test]
+    fn usage_totals_state_when_they_no_longer_cover_the_whole_session() {
+        let mut watch = watch();
+
+        watch.absorb(vec![typed(5, "usage", json!({"input_tokens": 100}))]);
+        assert!(watch.usage().complete);
+
+        watch.raise_floor(4);
+        watch.absorb(vec![typed(6, "usage", json!({"input_tokens": 1}))]);
+
+        assert!(
+            !watch.usage().complete,
+            "a pruned transcript cannot claim a complete total"
+        );
+    }
+
+    #[test]
+    fn a_run_completed_cost_reaches_the_total_because_nothing_else_reports_one() {
+        let mut watch = watch();
+
+        watch.absorb(vec![
+            typed(1, "usage", json!({"input_tokens": 10, "output_tokens": 2})),
+            typed(
+                2,
+                "run_completed",
+                json!({"cost_usd": 0.0125, "num_turns": 3}),
+            ),
+        ]);
+
+        assert_eq!(watch.usage().cost_usd, Some(0.0125));
+    }
+
+    #[test]
+    fn the_queue_depth_is_the_newest_one_the_runtime_reported() {
+        let mut watch = watch();
+
+        assert_eq!(watch.queue_len(), 0);
+
+        watch.absorb(vec![
+            typed(1, "queue_changed", json!({"queued_turns": 3})),
+            typed(2, "queue_changed", json!({"queued_turns": 1})),
+        ]);
+
+        assert_eq!(watch.queue_len(), 1);
+    }
+
+    /// Only `run_started` ever names a model, and only some providers send one.
+    #[test]
+    fn the_model_is_whatever_a_run_named_and_otherwise_nothing() {
+        let mut watch = watch();
+
+        watch.absorb(vec![typed(1, "session_ready", json!({"transport": "acp"}))]);
+        assert_eq!(watch.model(), None, "no provider named a model");
+
+        watch.absorb(vec![typed(
+            2,
+            "run_started",
+            json!({"model": "claude-sonnet-5", "tools": []}),
+        )]);
+        assert_eq!(watch.model(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn the_latest_plan_is_the_newest_one_in_whichever_dialect_it_arrived() {
+        let mut watch = watch();
+
+        assert!(watch.latest_plan().is_none());
+
+        watch.absorb(vec![typed(
+            1,
+            "plan_updated",
+            json!({"plan": [{"step": "first", "status": "pending"}]}),
+        )]);
+        assert_eq!(watch.latest_plan().map(|plan| plan.steps.len()), Some(1));
+
+        watch.absorb(vec![typed(
+            2,
+            "plan_updated",
+            json!({"entries": [
+                {"content": "first", "status": "completed"},
+                {"content": "second", "status": "in_progress"}
+            ]}),
+        )]);
+
+        let plan = watch.latest_plan().expect("the newest plan");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[1].text, "second");
+    }
+
+    /// The panel must not lose the plan when the agent stops working: a task list that
+    /// vanishes while idle is the documented Codex anti-pattern.
+    #[test]
+    fn the_latest_plan_survives_the_session_going_idle() {
+        let mut watch = watch();
+
+        watch.absorb(vec![
+            typed(1, "plan_updated", json!({"plan": [{"step": "ship it"}]})),
+            typed(2, "turn_completed", json!({})),
+            typed(3, "session_idle", json!({})),
+        ]);
+
+        assert_eq!(watch.latest_plan().map(|plan| plan.steps.len()), Some(1));
+    }
+
+    #[test]
+    fn an_elapsed_turn_is_reported_only_while_one_is_actually_running() {
+        let mut watch = watch();
+
+        assert_eq!(watch.active_turn_elapsed(), None);
+
+        // A start far in the past: the elapsed time is real wall-clock arithmetic, so this
+        // asserts the sign and the source rather than an exact figure.
+        watch.absorb(vec![typed(1, "turn_started", json!({}))]);
+        let elapsed = watch.active_turn_elapsed().expect("a running turn");
+        assert!(elapsed > 0, "{elapsed}");
+
+        watch.absorb(vec![typed(2, "turn_completed", json!({}))]);
+        assert_eq!(
+            watch.active_turn_elapsed(),
+            None,
+            "a finished turn is not still running"
+        );
+
+        watch.absorb(vec![typed(3, "turn_started", json!({}))]);
+        assert!(watch.active_turn_elapsed().is_some());
+        watch.end("closed".into());
+        assert_eq!(
+            watch.active_turn_elapsed(),
+            None,
+            "an ended stream has no running turn"
+        );
+    }
+
+    /// An event whose timestamp this build cannot read must produce no elapsed time rather
+    /// than one measured from the epoch.
+    #[test]
+    fn an_unreadable_timestamp_yields_no_elapsed_turn() {
+        let mut watch = watch();
+
+        watch.absorb(vec![Event::decode(&json!({
+            "id": "evt-1",
+            "sequence": 1,
+            "type": "turn_started",
+            "timestamp": "",
+            "turn_id": "turn-1",
+            "payload": {}
+        }))
+        .expect("an event")]);
+
+        assert_eq!(watch.active_turn_elapsed(), None);
     }
 }

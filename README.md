@@ -361,9 +361,14 @@ the managed ChatGPT sign-in gate, where Enter connects and `/` commands remain a
 an explicitly configured non-Codex provider is not blocked by an unrelated OpenAI account.
 Type what you want done and press Enter: an interactive session
 starts in the displayed requested workspace, the first message carries a stable logical
-turn ID, and the streaming transcript opens as a user/agent conversation. Lifecycle,
-provider, usage, and other normalized events stay behind `Ctrl-O` in the complete
-event-details view. The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` where the
+turn ID, and the streaming transcript opens as a user/agent conversation. Every one of the
+runtime's twenty-nine normalized event kinds is drawn: messages, reasoning, tool activity,
+diffs, plans, turn boundaries with the time each took, lifecycle markers, and — for anything
+this build does not model — one dim line naming the kind, so no event reaches the client and
+disappears. `Ctrl-O` redraws the same conversation with every collapsed cell expanded in
+place; `Ctrl-T` opens the plan panel, which stays visible while the agent is idle; and the
+complete normalized event ledger is `/details` (also `ctrl+x d`), which discards nothing.
+The composer is Unicode-safe and multiline (`Ctrl+J` everywhere; `Shift+Enter` where the
 terminal reports the kitty keyboard protocol, and the footer only advertises it there),
 normalizes bracketed paste, keeps bounded in-session history, completes local slash
 commands, and completes `@` mentions from a bounded index of the launch workspace. An

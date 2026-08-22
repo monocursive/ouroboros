@@ -972,19 +972,75 @@ The focused session opens as **Agent chat**. It renders durable `input_accepted`
 the user's message, collapses output deltas into the corresponding final agent message,
 correlates normalized tool calls/results into compact activity cells, and renders file
 changes and bounded unified-diff excerpts without interpreting them as execution authority.
-Lifecycle, provider stderr, usage, reasoning, and bookkeeping stay out of the reading path;
-`Ctrl-O` toggles the complete normalized event ledger without discarding anything. Gaps,
-pruning, lag, terminal state, approvals, and actual failures remain visible in chat because
-hiding them would make an incomplete or failed conversation look healthy. Approval request
-IDs remain presentation correlation only: a matching resolution replaces “Approval needed”
-with the approved/denied outcome while the raw pair remains in event details. Redraw work is
-bounded: chat projects the newest 128 entries and bounded per-cell excerpts, with an explicit
-omission marker; `Ctrl-O` still exposes every event retained by the local 5,000-event window.
+Gaps, pruning, lag, terminal state, approvals, and actual failures remain visible in chat
+because hiding them would make an incomplete or failed conversation look healthy. Approval
+request IDs remain presentation correlation only: a matching resolution replaces
+“Approval needed” with the approved/denied outcome while the raw pair remains in event
+details.
+
+**Every normalized event kind is presented; nothing reaches this projection and vanishes.**
+`PresentationEvent::from_event` matches all twenty-nine `Jido.Harness.Event` types
+exhaustively — adding one without a presentation is a compile error — and the single arm
+that draws nothing, `Hidden`, carries the reason it drew nothing.
+
+| Kind | Cell |
+|---|---|
+| `input_accepted` | the user's message, a steer note, or "[message not recorded]" when the ledger holds no words |
+| `output_text_delta` / `_final` | the agent message, deltas collapsed into their final |
+| `thinking_delta` | a reasoning cell, accumulated per turn, three-state (below) |
+| `tool_call` / `tool_result` | one activity cell correlated by `call_id` |
+| `command_output_delta` | a bounded tail of command output |
+| `file_change` | file rows and a bounded unified-diff excerpt |
+| `plan_updated` | a plan cell, and the `Ctrl-T` panel |
+| `turn_started` | no cell: its instant is what the turn's own end divider measures elapsed time from |
+| `turn_completed` / `_failed` / `_interrupted` | a turn divider stating the outcome and the elapsed time; failures and interruptions keep their own loud cell above it |
+| `run_started` | "run started · model · N tools", and the model in the session header — the only event that ever names one |
+| `run_completed`, `session_started` / `_ready` / `_idle` / `_closed`, `turn_queued` | one dim lifecycle line; a closed session is a rule across the transcript |
+| `run_failed` / `session_failed`, `run_cancelled` / `session_cancelled` | the error or interruption cell |
+| `approval_requested` / `_resolved` | the correlated approval cell |
+| `queue_changed` | the depth as one line when it changes, and `Watch::queue_len` for the composer chrome |
+| `usage` | folded into `Watch::usage`; the per-event line appears under `Ctrl-O` |
+| `provider_event`, and any kind a newer harness adds | one dim line naming the kind (and, for ACP, the `sessionUpdate` it wrapped) |
+
+The only hides are payloads that carried no content — an empty output delta, an empty
+reasoning delta, an empty command-output delta — and each names itself as the reason.
+
+**`Ctrl-O` is verbose, `Ctrl-T` is the plan, `/details` is the ledger.** `Ctrl-O` redraws
+the same conversation with every collapsible cell expanded in place (reasoning, tool
+results, command output, diffs, long messages) and back again — which is what the key means
+in Claude Code, Gemini CLI, Kiro, Pi, and Droid. `Ctrl-T` opens the plan/tasks panel above
+the composer, showing the newest plan with `◌ ● ✓` for pending / in progress / done; it
+stays drawn while the session is idle, because a task list that disappears with the spinner
+is the one thing every plan widget of 2026 was criticised for. The complete normalized
+event ledger is `/details`, `ctrl+x d`, or the palette, and still discards nothing.
+
+Reasoning has Crush's three states: collapsed to one header row (`◇ thinking · N lines`) by
+default, a tail of the last 200 lines with the earlier count named while it is still being
+written, and everything under `Ctrl-O`. Collapsed is the default deliberately — reasoning
+expanded by default in a long session buries the conversation it is about.
+
+`Ouroboros.Gateway.Wire` markers never reach the screen as JSON: `_excerpt` renders as its
+own prefix followed by "… (N bytes; full event via /details)", and `_opaque`, `_b64`, and
+`_truncated` render as short labels. An excerpted diff is marked as an excerpt, so its
+`+`/`-` counts are never read as a diffstat of the whole patch.
+
+Redraw work is bounded in every view: chat projects the newest 128 entries and bounded
+per-cell excerpts with an explicit omission marker, `Ctrl-O` raises the per-cell row ceiling
+to 2,000 rather than removing it, and `/details` exposes every event retained by the local
+5,000-event window.
+
+Everything drawn *around* the transcript reads five accessors on `Watch` rather than
+re-deriving the ledger differently: `usage()`, `queue_len()`, `active_turn_elapsed()`,
+`latest_plan()`, and `model()`. All five are recomputed from the held events in the walk
+that already ran after each absorb — a replay overlaps by design, and a total accumulated as
+events arrived would count the overlap twice — and `UsageTotals::complete` is false once
+pruning means the numbers are a lower bound.
 
 Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
 `Enter` send, `Ctrl-C` interrupt active turn (never the TUI), `a` approval modal,
-`s` steer, `Ctrl-O` chat/event details (`Ctrl-E` opens `$EDITOR`), `,` settings, `q` quit dialog, `?` help with the
-authoritative key map.
+`s` steer, `Ctrl-O` expand/collapse the conversation's cells, `Ctrl-T` plan panel,
+`/details` (or `ctrl+x d`) the event ledger, `Ctrl-E` opens `$EDITOR`, `,` settings,
+`q` quit dialog, `?` help with the authoritative key map.
 
 Corrections and additions found while building it, recorded rather than left to be
 rediscovered:

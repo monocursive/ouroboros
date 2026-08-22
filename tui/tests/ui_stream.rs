@@ -578,10 +578,15 @@ async fn a_notification_this_client_could_not_take_is_repaired_like_a_lag() {
     assert_eq!(watch.dropped, 3);
 
     // The interruption is old enough to have scrolled above the compact chat viewport;
-    // the complete ledger must retain it exactly.
+    // the complete ledger must retain it exactly. `Ctrl+O` expands the chat's own cells
+    // now, so the ledger is opened by its own chord (`ctrl+x d`, or `/details`).
     harness.app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('o'),
+        crossterm::event::KeyCode::Char('x'),
         crossterm::event::KeyModifiers::CONTROL,
+    )));
+    harness.app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::NONE,
     )));
     let screen = harness.screen(110, 24);
 

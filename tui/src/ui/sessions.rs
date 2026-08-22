@@ -2,9 +2,10 @@
 //!
 //! The transcript is assembled from `replay` plus the live subscription and nothing else —
 //! it is never polled. The default view projects those events into messages and compact
-//! tool/file/diff cells; `Ctrl-O` reveals the normalized ledger. Stream interruptions remain
-//! visible in both views: a reader who cannot see a hole reads a partial transcript as a
-//! complete one.
+//! tool/file/diff/thinking/plan cells; `Ctrl-O` redraws the same conversation with every
+//! collapsible cell expanded, `Ctrl-T` opens the plan panel, and `/details` (or `ctrl+x d`)
+//! reveals the normalized ledger. Stream interruptions remain visible in every view: a
+//! reader who cannot see a hole reads a partial transcript as a complete one.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -20,11 +21,15 @@ use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
 use super::transcript::{Entry, Watch};
-use super::transcript_cells;
+use super::transcript_cells::{self, Verbosity};
 
 // Projection is rebuilt on every draw, so bound the default conversation surface to a
-// useful recent suffix. The complete retained ledger remains available through Ctrl-O.
+// useful recent suffix. The complete retained ledger remains available through /details.
 const CHAT_ENTRY_WINDOW: usize = 128;
+
+/// Rows the plan panel may occupy above the composer, borders included. Past this it
+/// scrolls to its own tail rather than eating the conversation.
+const PLAN_PANEL_ROWS: u16 = 12;
 
 /// Progressive disclosure keeps the conversation usable before it keeps the ornament.
 /// The Figma workspace deliberately keeps all three surfaces on a tall, laptop-sized
@@ -584,16 +589,71 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         0
     };
 
+    let plan_height = plan_panel_height(app, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(composer_height)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(plan_height),
+            Constraint::Length(composer_height),
+        ])
         .split(area);
 
     transcript(frame, rows[0], app);
 
-    if composer_height > 0 {
-        composer(frame, rows[1], app, inline_context);
+    if plan_height > 0 {
+        plan_panel(frame, rows[1], app);
     }
+
+    if composer_height > 0 {
+        composer(frame, rows[2], app, inline_context);
+    }
+}
+
+/// How many rows the `Ctrl+T` plan panel wants, or zero when it is closed or has nothing.
+///
+/// The panel stays open across idle redraws — a task list that disappears the moment the
+/// agent stops working is the Codex #18920 anti-pattern — but it never takes the
+/// conversation's last rows on a short terminal.
+fn plan_panel_height(app: &App, area: Rect) -> u16 {
+    if !app.sessions.show_plan || area.height < 16 {
+        return 0;
+    }
+
+    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+        return 0;
+    };
+
+    // Heading, the explanation's first wrapped rows, one row per step, and the borders.
+    let body = 1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some());
+    body.saturating_add(2).min(PLAN_PANEL_ROWS)
+}
+
+fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::MUTED));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+    transcript_cells::render_plan(
+        &mut lines,
+        plan,
+        inner.width.max(8) as usize,
+        "Plan  ctrl+t",
+    );
+
+    // The newest rows are the ones being worked on, so a plan longer than the panel keeps
+    // its tail rather than its head.
+    let height = inner.height as usize;
+    let start = lines.len().saturating_sub(height);
+
+    frame.render_widget(Paragraph::new(lines[start..].to_vec()), inner);
 }
 
 fn home(frame: &mut Frame, area: Rect, app: &App) {
@@ -726,6 +786,11 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let ticks = app.ticks;
     let show_event_details = app.sessions.show_event_details;
+    let verbosity = if app.sessions.verbose_transcript {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Compact
+    };
     let header_height = if area.width >= 52 && area.height >= 12 {
         3
     } else {
@@ -745,7 +810,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut lines = if show_event_details {
         event_lines(entries, width)
     } else {
-        chat_lines(entries, width, ticks)
+        chat_lines(entries, width, ticks, verbosity)
     };
 
     if !show_event_details {
@@ -785,7 +850,14 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if header_height == 1 {
         frame.render_widget(
-            Paragraph::new(header(watch, &id, plane, ticks, show_event_details)),
+            Paragraph::new(header(
+                watch,
+                &id,
+                plane,
+                ticks,
+                show_event_details,
+                verbosity,
+            )),
             rows[0],
         );
     } else {
@@ -799,6 +871,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 title: &conversation_title,
                 provider: &conversation_provider,
                 show_event_details,
+                verbosity,
             },
         );
     }
@@ -837,6 +910,7 @@ struct ConversationHeader<'a> {
     title: &'a str,
     provider: &'a str,
     show_event_details: bool,
+    verbosity: Verbosity,
 }
 
 fn render_conversation_header(
@@ -882,9 +956,11 @@ fn render_conversation_header(
             Span::styled(stream, stream_style.add_modifier(Modifier::BOLD)),
             Span::styled(
                 if header.show_event_details {
-                    "  ^O CHAT"
+                    "  ^O VERBOSE"
+                } else if header.verbosity.verbose() {
+                    "  ^O COMPACT"
                 } else {
-                    "  ^O EVENTS"
+                    "  ^O VERBOSE"
                 },
                 theme::label(),
             ),
@@ -905,12 +981,19 @@ fn render_conversation_header(
             watch.cursor()
         )
     } else {
-        format!(
-            " {} · {} · {}",
-            header.plane,
+        // `run_started` is the only event that ever names a model, so a session whose
+        // provider never sent one shows the provider alone rather than an invented name.
+        let mut facts = vec![
+            header.plane.to_string(),
             super::tree::truncate(header.provider, 14),
-            compact_session_id(header.id, area.width.saturating_sub(24))
-        )
+        ];
+
+        if let Some(model) = watch.model() {
+            facts.push(super::tree::truncate(model, 24));
+        }
+
+        facts.push(compact_session_id(header.id, area.width.saturating_sub(24)));
+        format!(" {}", facts.join(" · "))
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(meta, theme::label()))),
@@ -931,11 +1014,19 @@ fn header(
     plane: Plane,
     tick: u64,
     show_event_details: bool,
+    verbosity: Verbosity,
 ) -> Line<'static> {
     if !show_event_details {
         let mut spans = vec![
             Span::styled(" Agent chat ", theme::heading()),
-            Span::styled("ctrl+o details ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                if verbosity.verbose() {
+                    "ctrl+o compact "
+                } else {
+                    "ctrl+o verbose "
+                },
+                Style::default().fg(theme::MUTED),
+            ),
         ];
 
         push_stream_state(&mut spans, watch, tick, false);
@@ -944,7 +1035,7 @@ fn header(
 
     let mut spans = vec![
         Span::styled(" Event details ", theme::heading()),
-        Span::styled("ctrl+o chat  ", Style::default().fg(theme::MUTED)),
+        Span::styled("/details chat  ", Style::default().fg(theme::MUTED)),
         Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
         Span::raw(format!("{id} ")),
         Span::styled(
@@ -1043,14 +1134,19 @@ fn push_event_entry(lines: &mut Vec<Line<'static>>, entry: Entry<'_>, width: usi
     }
 }
 
-fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize, tick: u64) -> Vec<Line<'static>> {
+fn chat_lines(
+    mut entries: Vec<Entry<'_>>,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) -> Vec<Line<'static>> {
     let omitted = entries.len().saturating_sub(CHAT_ENTRY_WINDOW);
     let visible = if omitted == 0 {
         entries
     } else {
         entries.split_off(omitted)
     };
-    let mut lines = transcript_cells::render_at(visible, width, tick);
+    let mut lines = transcript_cells::render_at(visible, width, tick, verbosity);
 
     if omitted == 0 {
         return lines;
@@ -1059,7 +1155,7 @@ fn chat_lines(mut entries: Vec<Entry<'_>>, width: usize, tick: u64) -> Vec<Line<
     let mut bounded = vec![
         divider(
             &format!(
-                "{omitted} earlier chat entries omitted here — Ctrl-O shows all retained events"
+                "{omitted} earlier chat entries omitted here — /details shows all retained events"
             ),
             width,
             theme::WARN,
@@ -1678,7 +1774,7 @@ mod tests {
             .map(|_| Entry::Ended("closed"))
             .collect();
 
-        let lines = chat_lines(entries, 160, 0);
+        let lines = chat_lines(entries, 160, 0, Verbosity::Compact);
 
         assert!(
             lines[0]
@@ -1687,7 +1783,41 @@ mod tests {
             "{}",
             lines[0]
         );
-        assert!(lines[0].to_string().contains("Ctrl-O"), "{}", lines[0]);
+        assert!(lines[0].to_string().contains("/details"), "{}", lines[0]);
+    }
+
+    /// The window is a redraw budget, not a retention policy: the ledger keeps everything
+    /// and the divider says how much this pane is not drawing.
+    #[test]
+    fn the_chat_window_still_bounds_the_newest_entries_it_projects() {
+        let events: Vec<Event> = (1..=(CHAT_ENTRY_WINDOW as u64 + 72))
+            .map(|sequence| {
+                Event::decode(&serde_json::json!({
+                    "id": format!("evt-{sequence}"),
+                    "sequence": sequence,
+                    "type": "output_text_final",
+                    "timestamp": "2026-01-01T00:00:00.000000Z",
+                    "turn_id": format!("turn-{sequence}"),
+                    "payload": { "text": format!("message-{sequence}") }
+                }))
+                .expect("an event")
+            })
+            .collect();
+        let entries: Vec<Entry<'_>> = events.iter().map(Entry::Event).collect();
+
+        let rendered = chat_lines(entries, 120, 0, Verbosity::Compact)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("72 earlier chat entries omitted here"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("message-72 "), "{rendered}");
+        assert!(rendered.contains("message-73"), "{rendered}");
+        assert!(rendered.contains("message-200"), "{rendered}");
     }
 
     #[test]

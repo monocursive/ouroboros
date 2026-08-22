@@ -335,6 +335,219 @@ fn session_rail_caps_visual_noise_and_keeps_the_complete_picker_available() {
     assert!(screen.contains("RUNTIME / CONTEXT"), "{}", screen.text());
 }
 
+/// A2/A5: the panel Ctrl+T opens, and the Codex-issue rule that it stays drawn while the
+/// session is idle rather than vanishing with the spinner.
+#[test]
+fn ctrl_t_opens_a_plan_panel_that_survives_the_session_going_idle() {
+    let mut app = with_open_session();
+
+    notify(
+        &mut app,
+        event_with(
+            1,
+            "plan_updated",
+            json!({
+                "explanation": "three steps",
+                "plan": [
+                    {"step": "read the failing test", "status": "completed"},
+                    {"step": "fix the projection", "status": "in_progress"},
+                    {"step": "run the suite", "status": "pending"}
+                ]
+            }),
+        ),
+    );
+
+    // The cell is in the conversation whether or not the panel is open.
+    let chat = render(&mut app, 120, 30);
+    assert!(chat.contains("read the failing test"), "{}", chat.text());
+
+    app.apply(ctrl('t'));
+    let panel = render(&mut app, 120, 30);
+
+    assert!(panel.contains("Plan  ctrl+t"), "{}", panel.text());
+    assert!(panel.contains("1/3 done"), "{}", panel.text());
+    assert!(
+        panel.contains("\u{2713} read the failing test"),
+        "{}",
+        panel.text()
+    );
+    assert!(
+        panel.contains("\u{25cf} fix the projection"),
+        "{}",
+        panel.text()
+    );
+    assert!(panel.contains("\u{25cc} run the suite"), "{}", panel.text());
+
+    // Idle is exactly when a reader wants to see what is left.
+    notify(&mut app, event_with(2, "turn_completed", json!({})));
+    notify(&mut app, event_with(3, "session_idle", json!({})));
+    let idle = render(&mut app, 120, 30);
+
+    assert!(idle.contains("Plan  ctrl+t"), "{}", idle.text());
+    assert!(idle.contains("\u{25cc} run the suite"), "{}", idle.text());
+
+    app.apply(ctrl('t'));
+    let closed = render(&mut app, 120, 30);
+    assert!(!closed.contains("Plan  ctrl+t"), "{}", closed.text());
+}
+
+/// D4: `Ctrl+O` expands this conversation's own cells. The normalized ledger is a
+/// different question with its own verbs, and both remain reachable.
+#[test]
+fn ctrl_o_expands_the_conversation_and_leaves_the_ledger_to_its_own_verb() {
+    let mut app = with_open_session();
+
+    let reasoning: String = (0..12).map(|line| format!("thought {line}\n")).collect();
+    notify(
+        &mut app,
+        event_with(1, "thinking_delta", json!({ "text": reasoning })),
+    );
+    notify(&mut app, event(2, "output_text_final", "the tests pass"));
+
+    let compact = render(&mut app, 120, 30);
+    assert!(
+        compact.contains("\u{25c7} thinking  12 lines"),
+        "{}",
+        compact.text()
+    );
+    assert!(compact.contains("ctrl+o expands"), "{}", compact.text());
+    assert!(!compact.contains("thought 11"), "{}", compact.text());
+
+    app.apply(ctrl('o'));
+    let verbose = render(&mut app, 120, 30);
+
+    assert!(verbose.contains("thought 11"), "{}", verbose.text());
+    assert!(
+        !verbose.contains("EVENT DETAILS"),
+        "ctrl+o expands the chat, it does not swap in the ledger:\n{}",
+        verbose.text()
+    );
+    assert!(verbose.contains("^O COMPACT"), "{}", verbose.text());
+
+    // And the ledger is still one chord away, from either verbosity.
+    apply_leader(&mut app, 'd');
+    let details = render(&mut app, 120, 30);
+    assert!(details.contains("EVENT DETAILS"), "{}", details.text());
+    assert!(details.contains("thinking_delta"), "{}", details.text());
+}
+
+/// X10: a finished turn had no terminator, so "did it finish?" was unanswerable.
+#[test]
+fn a_finished_turn_draws_a_divider_carrying_the_time_it_took() {
+    let mut app = with_open_session();
+
+    for (sequence, kind, timestamp) in [
+        (1u64, "turn_started", "2026-01-01T00:00:00.000000Z"),
+        (2, "turn_completed", "2026-01-01T00:04:07.000000Z"),
+    ] {
+        notify(
+            &mut app,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "interactive.event",
+                "params": {
+                    "id": "session-0000000000000000000001",
+                    "event": {
+                        "_struct": "Ouroboros.Interactive.Event",
+                        "id": format!("evt-{sequence}"),
+                        "session_id": "session-0000000000000000000001",
+                        "sequence": sequence,
+                        "type": kind,
+                        "turn_id": "turn-1",
+                        "timestamp": timestamp,
+                        "payload": {}
+                    }
+                }
+            }),
+        );
+    }
+
+    let screen = render(&mut app, 120, 24);
+    assert!(
+        screen.contains("turn complete \u{b7} 4m 07s"),
+        "{}",
+        screen.text()
+    );
+}
+
+/// The model is a session-header fact, and only `run_started` ever states one.
+#[test]
+fn the_conversation_header_names_the_model_the_run_reported() {
+    let mut app = with_open_session();
+
+    let before = render(&mut app, 120, 24);
+    assert!(
+        before.contains("interactive \u{b7} claude_code"),
+        "{}",
+        before.text()
+    );
+    assert!(!before.contains("claude-sonnet-5"), "{}", before.text());
+
+    notify(
+        &mut app,
+        event_with(
+            1,
+            "run_started",
+            json!({"model": "claude-sonnet-5", "tools": ["Read", "Edit"]}),
+        ),
+    );
+
+    let after = render(&mut app, 120, 24);
+    assert!(
+        after.contains("interactive \u{b7} claude_code \u{b7} claude-sonnet-5"),
+        "{}",
+        after.text()
+    );
+}
+
+/// The five accessors the chrome around the transcript reads, end to end from the wire.
+#[test]
+fn the_watch_exposes_usage_queue_plan_and_model_for_the_chrome_around_it() {
+    let mut app = with_open_session();
+
+    notify(
+        &mut app,
+        event_with(
+            1,
+            "run_started",
+            json!({"model": "gpt-5-codex", "tools": []}),
+        ),
+    );
+    notify(
+        &mut app,
+        event_with(
+            2,
+            "usage",
+            json!({"input_tokens": 21088, "output_tokens": 512, "total_tokens": 21600}),
+        ),
+    );
+    notify(
+        &mut app,
+        event_with(3, "queue_changed", json!({"queued_turns": 2})),
+    );
+    notify(
+        &mut app,
+        event_with(
+            4,
+            "plan_updated",
+            json!({"plan": [{"step": "ship", "status": "pending"}]}),
+        ),
+    );
+
+    let watch = open_watch(&app);
+    let usage = watch.usage();
+
+    assert_eq!(usage.input_tokens, 21_088);
+    assert_eq!(usage.output_tokens, 512);
+    assert_eq!(usage.total_tokens, 21_600);
+    assert_eq!(usage.reports, 1);
+    assert!(usage.complete);
+    assert_eq!(watch.queue_len(), 2);
+    assert_eq!(watch.model(), Some("gpt-5-codex"));
+    assert_eq!(watch.latest_plan().map(|plan| plan.steps.len()), Some(1));
+    assert_eq!(watch.active_turn_elapsed(), None, "no turn is running");
+}
+
 fn event(sequence: u64, kind: &str, text: &str) -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
@@ -1432,8 +1645,10 @@ fn the_transcript_renders_the_golden_interactive_event() {
         screen.text()
     );
 
-    // The complete event ledger remains one key away.
-    app.apply(ctrl('o'));
+    // The complete event ledger remains one chord away. `Ctrl+O` now expands the chat's
+    // own cells instead of swapping this view in, so the ledger is reached by `ctrl+x d`
+    // (equivalently `/details`), exactly as before that key changed meaning.
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 24);
     assert!(details.contains("EVENT DETAILS"), "{}", details.text());
     assert!(details.contains("output_text_final"), "{}", details.text());
@@ -1450,7 +1665,7 @@ fn the_transcript_renders_the_golden_interactive_event() {
 }
 
 #[test]
-fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
+fn agent_chat_keeps_protocol_noise_out_while_naming_every_event_it_received() {
     let mut app = with_open_session();
 
     notify(
@@ -1474,12 +1689,11 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
     assert!(chat.contains("AGENT"), "{}", chat.text());
     assert!(chat.contains("The tests are fixed."), "{}", chat.text());
 
+    // Wire spellings and bookkeeping stay out of the reading path.
     for hidden in [
         "session_started",
         "provider_event",
-        "internal provider diagnostic",
         "output_text_final",
-        "usage",
         "input_tokens=21088",
     ] {
         assert!(
@@ -1489,9 +1703,18 @@ fn agent_chat_hides_system_events_and_keeps_both_sides_of_the_conversation() {
         );
     }
 
-    // The details shortcut works even while the message composer owns printable keys.
+    // But the events themselves are named rather than dropped: a provider diagnostic the
+    // client cannot model is one dim line, not an invisible event.
+    assert!(chat.contains("session started"), "{}", chat.text());
+    assert!(
+        chat.contains("internal provider diagnostic"),
+        "{}",
+        chat.text()
+    );
+
+    // The details chord works even while the message composer owns printable keys.
     assert!(app.sessions.composer.is_some());
-    app.apply(ctrl('o'));
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 26);
     assert!(details.contains("session_started"), "{}", details.text());
     assert!(details.contains("provider_event"), "{}", details.text());
@@ -2519,7 +2742,7 @@ fn a_lag_divider_renders_with_the_hole_it_left() {
 
     // The technical resync cursor stays out of chat and remains visible in details.
     assert!(!screen.contains("cursor 2"), "{}", screen.text());
-    app.apply(ctrl('o'));
+    apply_leader(&mut app, 'd');
     let details = render(&mut app, 120, 24);
     assert!(details.contains("cursor 2"), "{}", details.text());
 

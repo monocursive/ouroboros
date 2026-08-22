@@ -135,8 +135,13 @@ pub struct SessionsTab {
     /// cursors stay registered while fleet status watches for the owner to return.
     pub(super) recovering: HashMap<(Plane, String), SessionRecovery>,
     /// The complete normalized event ledger is an operator detail, not the default chat.
-    /// It remains one key away and is never discarded from the watch.
+    /// It remains one command away (`/details`, `ctrl+x d`) and is never discarded.
     pub show_event_details: bool,
+    /// Whether every collapsible chat cell draws expanded in place. `Ctrl+O` — the key the
+    /// field settled on for "show more" — toggles this, not the raw ledger.
+    pub verbose_transcript: bool,
+    /// Whether the plan/tasks panel is drawn above the composer.
+    pub show_plan: bool,
     /// Per-session resync rounds since the last interruption, bounded.
     pub(super) rounds: HashMap<(Plane, String), u32>,
     /// Requests accepted by this client that have not produced their first lifecycle
@@ -473,6 +478,41 @@ impl App {
                 },
             );
         }
+    }
+
+    /// `Ctrl+O`: the same conversation, with every collapsible cell expanded.
+    ///
+    /// This is what the key means everywhere else in the field (Claude Code, Gemini, Kiro,
+    /// Pi, Droid all bind `Ctrl+O` to "show more"), and it is a different question from
+    /// "show me the normalized ledger", which keeps its own verb.
+    pub(super) fn toggle_verbose_transcript(&mut self) {
+        if self.tab != Tab::Sessions || self.sessions.open.is_none() {
+            self.inform(
+                "open a session before expanding its transcript",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        self.sessions.verbose_transcript = !self.sessions.verbose_transcript;
+
+        if let Some(watch) = self.sessions.open_watch_mut() {
+            // Expanding rewrites every cell's height, so a line-based offset taken against
+            // the compact layout no longer points at the rows it was taken from.
+            watch.follow = true;
+            watch.scroll = 0;
+        }
+    }
+
+    /// `Ctrl+T`: the plan panel. It stays open while the session is idle on purpose —
+    /// a task list that vanishes the moment the agent stops is Codex #18920.
+    pub(super) fn toggle_plan_panel(&mut self) {
+        if self.tab != Tab::Sessions || self.sessions.open.is_none() {
+            self.inform("open a session before showing its plan", NoticeKind::Info);
+            return;
+        }
+
+        self.sessions.show_plan = !self.sessions.show_plan;
     }
 
     pub(super) fn toggle_session_details(&mut self) {

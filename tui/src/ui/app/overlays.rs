@@ -190,7 +190,7 @@ impl Command {
             Self::NewSessionOptions => "ctrl+x N",
             Self::WriteAccess => "/write",
             Self::SwitchSession => "ctrl+x l",
-            Self::SessionDetails => "ctrl+o",
+            Self::SessionDetails => "ctrl+x d",
             Self::CopyLast => "ctrl+x y",
             Self::Interrupt => "esc",
             Self::Steer => "ctrl+x s",
