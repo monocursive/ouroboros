@@ -2770,4 +2770,364 @@ mod tests {
             "{agent_body:?}"
         );
     }
+
+    fn stamped(sequence: u64, kind: &str, timestamp: &str, payload: Value) -> Event {
+        Event::decode(&json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": kind,
+            "timestamp": timestamp,
+            "turn_id": "turn-1",
+            "payload": payload
+        }))
+        .expect("an event")
+    }
+
+    fn thinking(sequence: u64, lines: usize) -> Event {
+        let text: String = (0..lines).map(|line| format!("thought {line}\n")).collect();
+        event(sequence, "thinking_delta", json!({ "text": text }))
+    }
+
+    /// Crush's three states, and the reason the default is the first one: reasoning
+    /// expanded by default in a long session buries the conversation (R2 §10d).
+    #[test]
+    fn reasoning_collapses_to_a_header_tails_while_live_and_expands_under_ctrl_o() {
+        let reasoning = thinking(1, 500);
+        let answer = event(2, "output_text_final", json!({"text": "done"}));
+
+        // Still the newest thing in the transcript: the tail is what a reader watches.
+        let live = project(vec![Entry::Event(&reasoning)]);
+        let Cell::Thinking { lines, state, .. } = &live[0] else {
+            panic!("expected a reasoning cell, got {live:?}")
+        };
+        assert_eq!(*lines, 500);
+        assert_eq!(*state, ThinkingState::Tail);
+
+        let tail = plain(&render_cells(&live, 80));
+        assert!(tail.contains("\u{25c7} thinking  500 lines"), "{tail}");
+        assert!(tail.contains("300 earlier lines of reasoning"), "{tail}");
+        assert!(tail.contains("thought 499"), "{tail}");
+        assert!(
+            !tail.contains("thought 299"),
+            "the tail is the last 200: {tail}"
+        );
+
+        // Something followed it, so it folds to its header and nothing else.
+        let settled = project(vec![Entry::Event(&reasoning), Entry::Event(&answer)]);
+        let Cell::Thinking { state, .. } = &settled[0] else {
+            panic!("expected a reasoning cell")
+        };
+        assert_eq!(*state, ThinkingState::Collapsed);
+
+        let collapsed = plain(&render_cells(&settled, 80));
+        assert!(
+            collapsed.contains("\u{25c7} thinking  500 lines"),
+            "{collapsed}"
+        );
+        assert!(collapsed.contains("ctrl+o expands"), "{collapsed}");
+        assert!(!collapsed.contains("thought 499"), "{collapsed}");
+
+        // Ctrl+O: the whole thing, in place.
+        let full = plain(&render_cells_at(&settled, 80, 0, Verbosity::Verbose));
+        assert!(full.contains("thought 0"), "{full}");
+        assert!(full.contains("thought 499"), "{full}");
+        assert!(!full.contains("earlier lines of reasoning"), "{full}");
+    }
+
+    #[test]
+    fn consecutive_reasoning_deltas_accumulate_into_one_cell_per_turn() {
+        let first = event(1, "thinking_delta", json!({"text": "first\n"}));
+        let second = event(2, "thinking_delta", json!({"text": "second\n"}));
+        let cells = project(vec![Entry::Event(&first), Entry::Event(&second)]);
+
+        assert_eq!(cells.len(), 1, "{cells:?}");
+        let Cell::Thinking { text, .. } = &cells[0] else {
+            panic!("expected one reasoning cell")
+        };
+        assert_eq!(text, "first\nsecond\n");
+    }
+
+    /// X10: a finished turn had no terminator at all, so "did it finish?" was unanswerable.
+    #[test]
+    fn a_turn_boundary_divider_states_the_elapsed_time_it_measured() {
+        let started = stamped(1, "turn_started", "2026-08-14T00:00:00.000000Z", json!({}));
+        let text = stamped(
+            2,
+            "output_text_final",
+            "2026-08-14T00:02:00.000000Z",
+            json!({"text": "done"}),
+        );
+        let completed = stamped(
+            3,
+            "turn_completed",
+            "2026-08-14T00:04:07.000000Z",
+            json!({}),
+        );
+
+        let cells = project(vec![
+            Entry::Event(&started),
+            Entry::Event(&text),
+            Entry::Event(&completed),
+        ]);
+        let rendered = plain(&render_cells(&cells, 80));
+
+        assert!(
+            rendered.contains("turn complete \u{b7} 4m 07s"),
+            "{rendered}"
+        );
+    }
+
+    /// A turn whose start this window no longer holds gets a terminator and no duration —
+    /// never a duration measured from an instant nobody has.
+    #[test]
+    fn a_turn_end_without_its_start_says_nothing_about_duration() {
+        let completed = stamped(
+            9,
+            "turn_completed",
+            "2026-08-14T00:04:07.000000Z",
+            json!({}),
+        );
+        let rendered = plain(&render_cells(&project(vec![Entry::Event(&completed)]), 80));
+
+        assert!(rendered.contains("turn complete"), "{rendered}");
+        assert!(!rendered.contains("\u{b7} "), "{rendered}");
+    }
+
+    /// A failed or interrupted turn is still terminated, and still loud.
+    #[test]
+    fn a_failed_turn_keeps_its_error_cell_above_the_boundary() {
+        let started = stamped(1, "turn_started", "2026-08-14T00:00:00.000000Z", json!({}));
+        let failed = stamped(
+            2,
+            "turn_failed",
+            "2026-08-14T00:00:03.000000Z",
+            json!({"error": "the provider exited"}),
+        );
+
+        let rendered = plain(&render_cells(
+            &project(vec![Entry::Event(&started), Entry::Event(&failed)]),
+            80,
+        ));
+
+        assert!(rendered.contains("Agent error"), "{rendered}");
+        assert!(rendered.contains("the provider exited"), "{rendered}");
+        assert!(rendered.contains("turn failed \u{b7} 3s"), "{rendered}");
+    }
+
+    #[test]
+    fn elapsed_time_is_phrased_the_way_a_status_widget_phrases_it() {
+        assert_eq!(duration(840), "840ms");
+        assert_eq!(duration(9_400), "9s");
+        assert_eq!(duration(247_000), "4m 07s");
+        assert_eq!(duration(3_720_000), "1h 02m");
+    }
+
+    /// X12: `plan_updated` was journaled and dropped.
+    #[test]
+    fn a_plan_cell_draws_warp_glyphs_and_counts_what_is_done() {
+        let plan = event(
+            1,
+            "plan_updated",
+            json!({
+                "explanation": "three steps",
+                "plan": [
+                    {"step": "read the failing test", "status": "completed"},
+                    {"step": "fix the projection", "status": "in_progress"},
+                    {"step": "run the suite", "status": "pending"}
+                ]
+            }),
+        );
+
+        let cells = project(vec![Entry::Event(&plan)]);
+        assert!(matches!(cells[0], Cell::Plan(_)), "{cells:?}");
+
+        let rendered = plain(&render_cells(&cells, 80));
+        assert!(rendered.contains("1/3 done"), "{rendered}");
+        assert!(rendered.contains("three steps"), "{rendered}");
+        assert!(
+            rendered.contains("\u{2713} read the failing test"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\u{25cf} fix the projection"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("\u{25cc} run the suite"), "{rendered}");
+    }
+
+    #[test]
+    fn a_plan_step_whose_status_is_unknown_shows_the_word_the_provider_used() {
+        let plan = event(
+            1,
+            "plan_updated",
+            json!({"plan": [{"content": "verify", "status": "awaiting_review"}]}),
+        );
+        let rendered = plain(&render_cells(&project(vec![Entry::Event(&plan)]), 80));
+
+        assert!(
+            rendered.contains("? verify  (awaiting_review)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("0/1 done"), "{rendered}");
+    }
+
+    /// D2: nineteen kinds used to reach this projection and vanish. None of them may.
+    #[test]
+    fn the_kinds_that_used_to_be_dropped_now_reach_the_reading_path() {
+        let events = [
+            event(
+                1,
+                "run_started",
+                json!({"model": "claude-sonnet-5", "tools": ["Read", "Edit"]}),
+            ),
+            event(2, "session_ready", json!({"transport": "acp"})),
+            event(3, "queue_changed", json!({"queued_turns": 2})),
+            event(
+                4,
+                "provider_event",
+                json!({"kind": "acp_update", "update": {"sessionUpdate": "available_commands_update"}}),
+            ),
+            event(5, "session_idle", json!({})),
+        ];
+        let entries = events.iter().map(Entry::Event).collect();
+        let rendered = plain(&render_cells(&project(entries), 100));
+
+        assert!(
+            rendered.contains("run started \u{b7} claude-sonnet-5 \u{b7} 2 tools"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("session ready \u{b7} acp"), "{rendered}");
+        assert!(rendered.contains("2 follow-ups are queued"), "{rendered}");
+        assert!(
+            rendered.contains("provider event \u{b7} acp_update \u{b7} available_commands_update"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("session idle"), "{rendered}");
+    }
+
+    /// The queue depth is a running fact, not an event stream: repeating it unchanged would
+    /// put one line in the conversation per turn of a long queue.
+    #[test]
+    fn an_unchanged_queue_depth_is_not_restated() {
+        let events = [
+            event(1, "queue_changed", json!({"queued_turns": 1})),
+            event(2, "queue_changed", json!({"queued_turns": 1})),
+            event(3, "queue_changed", json!({"queued_turns": 0})),
+        ];
+        let entries = events.iter().map(Entry::Event).collect();
+        let rendered = plain(&render_cells(&project(entries), 100));
+
+        assert_eq!(
+            rendered.matches("1 follow-up is queued").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("The follow-up queue is empty"),
+            "{rendered}"
+        );
+    }
+
+    /// Token reports are the footer's business, not the conversation's — until a reader
+    /// asks for the bookkeeping.
+    #[test]
+    fn a_usage_report_appears_only_under_ctrl_o() {
+        let usage = event(
+            1,
+            "usage",
+            json!({"input_tokens": 21088, "output_tokens": 512, "total_tokens": 21600}),
+        );
+        let cells = project(vec![Entry::Event(&usage)]);
+
+        assert!(plain(&render_cells(&cells, 100)).trim().is_empty());
+
+        let verbose = plain(&render_cells_at(&cells, 100, 0, Verbosity::Verbose));
+        assert!(
+            verbose.contains("usage \u{b7} in 21088 \u{b7} out 512"),
+            "{verbose}"
+        );
+    }
+
+    /// The gateway will excerpt long string leaves. None of its markers may reach the
+    /// screen as JSON, in any projection that reads a leaf.
+    #[test]
+    fn wire_markers_never_render_as_json_in_a_tool_cell() {
+        let call = event(
+            1,
+            "tool_call",
+            json!({
+                "call_id": "c1",
+                "name": "bash",
+                "input": {"cmd": {"_excerpt": "rg --json 'fn '", "_bytes": 40_000}}
+            }),
+        );
+        let result = event(
+            2,
+            "tool_result",
+            json!({
+                "call_id": "c1",
+                "output": {"_excerpt": "lib/a.ex:1", "_bytes": 5_000_000}
+            }),
+        );
+
+        let rendered = plain(&render_cells(
+            &project(vec![Entry::Event(&call), Entry::Event(&result)]),
+            120,
+        ));
+
+        assert!(
+            rendered.contains("rg --json 'fn '\u{2026} (40000 bytes"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("lib/a.ex:1\u{2026} (5000000 bytes"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("_excerpt"), "{rendered}");
+        assert!(!rendered.contains("_bytes"), "{rendered}");
+    }
+
+    #[test]
+    fn an_opaque_or_binary_leaf_reads_as_a_short_label() {
+        let result = event(
+            1,
+            "tool_result",
+            json!({"call_id": "c1", "output": {"_opaque": "#Reference<0.1.2.3>"}}),
+        );
+        let rendered = plain(&render_cells(&project(vec![Entry::Event(&result)]), 120));
+
+        assert!(
+            rendered.contains("[not encodable: #Reference<0.1.2.3>]"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("_opaque"), "{rendered}");
+    }
+
+    /// Verbose is bounded too. `Ctrl+O` is "show me the rest", not "re-lay-out sixty-four
+    /// megabytes on every frame".
+    #[test]
+    fn verbose_expands_cells_in_place_and_still_bounds_them() {
+        let tool = Cell::Tool(ToolCell {
+            call_id: Some("c1".into()),
+            name: "read".into(),
+            input: json!({"path": "huge.log"}),
+            output: Some(Value::String(
+                (0..(VERBOSE_LINES + 500))
+                    .map(|n| format!("line {n}\n"))
+                    .collect(),
+            )),
+            state: ToolState::Completed,
+        });
+
+        let compact = render_cells(std::slice::from_ref(&tool), 80);
+        let verbose = render_cells_at(&[tool], 80, 0, Verbosity::Verbose);
+
+        assert!(verbose.len() > compact.len(), "verbose must show more");
+        assert!(
+            verbose.len() <= VERBOSE_LINES + 8,
+            "verbose is bounded: {}",
+            verbose.len()
+        );
+        assert!(plain(&verbose).contains("full result \u{b7} /details"));
+    }
 }

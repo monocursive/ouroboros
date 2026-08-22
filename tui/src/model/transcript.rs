@@ -1452,4 +1452,342 @@ mod tests {
             }
         );
     }
+
+    /// One representative payload per normalized kind, asserting that it presents. The list
+    /// is the twenty-nine `EventType` variants plus the `Other` arm; a kind added to the
+    /// model without a presentation fails here and in the compiler.
+    #[test]
+    fn every_normalized_kind_has_a_presentation_and_none_is_dropped() {
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "run_started",
+                json!({"model": "sonnet-5", "tools": ["read"]}),
+            ),
+            ("run_completed", json!({"num_turns": 3})),
+            ("run_failed", json!({"error": "the provider exited"})),
+            ("run_cancelled", json!({"reason": "cancelled"})),
+            ("session_started", json!({})),
+            ("session_ready", json!({"transport": "acp"})),
+            ("session_idle", json!({})),
+            ("session_closed", json!({"reason": "closed"})),
+            ("session_failed", json!({"error": "transport died"})),
+            ("session_cancelled", json!({"reason": "cancelled"})),
+            ("input_accepted", json!({"kind": "message", "text": "hi"})),
+            ("turn_queued", json!({})),
+            ("turn_started", json!({})),
+            ("output_text_delta", json!({"text": "part"})),
+            ("output_text_final", json!({"text": "answer"})),
+            ("thinking_delta", json!({"text": "considering"})),
+            ("command_output_delta", json!({"text": "building"})),
+            ("tool_call", json!({"call_id": "c1", "name": "read"})),
+            ("tool_result", json!({"call_id": "c1", "output": "ok"})),
+            ("file_change", json!({"changes": [{"path": "a.ex"}]})),
+            (
+                "plan_updated",
+                json!({"plan": [{"step": "write the test", "status": "pending"}]}),
+            ),
+            ("usage", json!({"input_tokens": 10, "output_tokens": 5})),
+            ("turn_completed", json!({})),
+            ("turn_failed", json!({"error": "boom"})),
+            ("turn_interrupted", json!({"reason": "esc"})),
+            ("approval_requested", json!({"command": "git status"})),
+            ("approval_resolved", json!({"decision": "approve"})),
+            ("queue_changed", json!({"queued_turns": 2})),
+            ("provider_event", json!({"kind": "acp_update"})),
+            ("a_kind_from_a_newer_harness", json!({"text": "something"})),
+        ];
+
+        assert_eq!(cases.len(), 30, "29 normalized kinds plus the unknown arm");
+
+        for (kind, payload) in cases {
+            let projected = PresentationEvent::from_event(&event(kind, payload));
+
+            assert!(
+                !matches!(projected, PresentationEvent::Hidden(_)),
+                "{kind} maps to a silent drop: {projected:?}"
+            );
+        }
+    }
+
+    /// The only hides are payloads that carried nothing, and each says which.
+    #[test]
+    fn an_empty_payload_hides_with_a_stated_reason_rather_than_by_default() {
+        for (kind, hidden) in [
+            ("output_text_final", Hidden::EmptyText),
+            ("thinking_delta", Hidden::EmptyThinking),
+            ("command_output_delta", Hidden::EmptyCommandOutput),
+        ] {
+            assert_eq!(
+                PresentationEvent::from_event(&event(kind, json!({"text": ""}))),
+                PresentationEvent::Hidden(hidden),
+                "{kind}"
+            );
+            assert!(!hidden.reason().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_turn_boundary_carries_the_timestamp_the_divider_measures_elapsed_time_from() {
+        let started = Event::decode(&json!({
+            "id": "evt-1",
+            "sequence": 1,
+            "type": "turn_started",
+            "timestamp": "2026-08-14T00:00:00.000000Z",
+            "turn_id": "turn-1",
+            "payload": {}
+        }))
+        .expect("a turn start");
+        let completed = Event::decode(&json!({
+            "id": "evt-2",
+            "sequence": 2,
+            "type": "turn_completed",
+            "timestamp": "2026-08-14T00:04:07.500000Z",
+            "turn_id": "turn-1",
+            "payload": {}
+        }))
+        .expect("a turn end");
+
+        let PresentationEvent::TurnStarted {
+            at: Some(start), ..
+        } = PresentationEvent::from_event(&started)
+        else {
+            panic!("expected a turn start with an instant")
+        };
+        let PresentationEvent::TurnEnded {
+            at: Some(end),
+            outcome,
+            ..
+        } = PresentationEvent::from_event(&completed)
+        else {
+            panic!("expected a turn end with an instant")
+        };
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(end - start, 247_500);
+    }
+
+    #[test]
+    fn iso_timestamps_parse_and_an_unreadable_one_yields_no_elapsed_time() {
+        assert_eq!(epoch_millis("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_millis("1970-01-01T00:00:00.250Z"), Some(250));
+        assert_eq!(
+            epoch_millis("2026-01-01T00:00:00.000000Z"),
+            Some(1_767_225_600_000)
+        );
+        // A leap day, and a non-UTC offset that names the same instant as its UTC form.
+        assert_eq!(
+            epoch_millis("2024-02-29T12:00:00Z"),
+            Some(1_709_208_000_000)
+        );
+        assert_eq!(
+            epoch_millis("2026-01-01T05:30:00+05:30"),
+            epoch_millis("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(epoch_millis(""), None);
+        assert_eq!(epoch_millis("not a timestamp"), None);
+        assert_eq!(epoch_millis("2026-13-01T00:00:00Z"), None);
+    }
+
+    /// Codex sends `{"explanation", "plan": [{"step", "status"}]}`; ACP forwards its `plan`
+    /// session update, whose entries are `{"content", "priority", "status"}`. Both are the
+    /// same plan to a reader, so both project to the same steps.
+    #[test]
+    fn both_plan_dialects_project_to_the_same_steps() {
+        let codex = event(
+            "plan_updated",
+            json!({
+                "explanation": "three steps",
+                "plan": [
+                    {"step": "read the failing test", "status": "completed"},
+                    {"step": "fix the projection", "status": "in_progress"},
+                    {"step": "run the suite", "status": "pending"}
+                ]
+            }),
+        );
+        let acp = event(
+            "plan_updated",
+            json!({
+                "sessionUpdate": "plan",
+                "entries": [
+                    {"content": "read the failing test", "priority": "high", "status": "completed"},
+                    {"content": "fix the projection", "priority": "high", "status": "in_progress"},
+                    {"content": "run the suite", "priority": "medium", "status": "pending"}
+                ]
+            }),
+        );
+
+        for (dialect, source) in [("codex", codex), ("acp", acp)] {
+            let PresentationEvent::Plan(plan) = PresentationEvent::from_event(&source) else {
+                panic!("{dialect}: expected a plan")
+            };
+
+            assert_eq!(plan.step_count, 3, "{dialect}");
+            assert_eq!(
+                plan.steps
+                    .iter()
+                    .map(|step| step.text.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "read the failing test",
+                    "fix the projection",
+                    "run the suite"
+                ],
+                "{dialect}"
+            );
+            assert_eq!(
+                plan.steps
+                    .iter()
+                    .map(|step| step.status.glyph())
+                    .collect::<Vec<_>>(),
+                ["\u{2713}", "\u{25cf}", "\u{25cc}"],
+                "{dialect}"
+            );
+        }
+    }
+
+    /// A status nobody modelled keeps the provider's own word. Reading "awaiting_review" as
+    /// "done" would report finished work that never happened.
+    #[test]
+    fn an_unknown_plan_status_is_kept_verbatim_rather_than_guessed() {
+        let plan = event(
+            "plan_updated",
+            json!({"plan": [{"step": "verify", "status": "awaiting_review"}]}),
+        );
+
+        let PresentationEvent::Plan(plan) = PresentationEvent::from_event(&plan) else {
+            panic!("expected a plan")
+        };
+
+        assert_eq!(
+            plan.steps[0].status,
+            PlanStatus::Other("awaiting_review".into())
+        );
+        assert_eq!(plan.steps[0].status.glyph(), "?");
+    }
+
+    #[test]
+    fn a_plan_longer_than_the_projection_ceiling_says_how_many_it_left_out() {
+        let steps: Vec<_> = (0..(PRESENTATION_PLAN_STEPS + 10))
+            .map(|index| json!({"step": format!("step {index}"), "status": "pending"}))
+            .collect();
+        let plan = event("plan_updated", json!({"plan": steps}));
+
+        let PresentationEvent::Plan(plan) = PresentationEvent::from_event(&plan) else {
+            panic!("expected a plan")
+        };
+
+        assert_eq!(plan.steps.len(), PRESENTATION_PLAN_STEPS);
+        assert_eq!(plan.step_count, PRESENTATION_PLAN_STEPS + 10);
+    }
+
+    #[test]
+    fn usage_reports_only_the_numbers_the_provider_sent() {
+        let PresentationEvent::Usage(usage) = PresentationEvent::from_event(&event(
+            "usage",
+            json!({"input_tokens": 21088, "output_tokens": 512, "total_tokens": 21600}),
+        )) else {
+            panic!("expected usage")
+        };
+
+        assert_eq!(usage.input_tokens, Some(21_088));
+        assert_eq!(usage.output_tokens, Some(512));
+        assert_eq!(usage.total_tokens, Some(21_600));
+        assert_eq!(
+            usage.cached_tokens, None,
+            "an unreported field stays absent"
+        );
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn run_started_carries_the_model_and_tool_count_the_header_states() {
+        let PresentationEvent::RunStarted(run) = PresentationEvent::from_event(&event(
+            "run_started",
+            json!({
+                "cwd": "/srv/project",
+                "model": "claude-sonnet-5",
+                "tools": ["Read", "Edit", "Bash"]
+            }),
+        )) else {
+            panic!("expected a run start")
+        };
+
+        assert_eq!(run.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(run.tool_count, 3);
+        assert_eq!(run.tools, ["Read", "Edit", "Bash"]);
+        assert_eq!(run.cwd.as_deref(), Some("/srv/project"));
+    }
+
+    /// An ACP escape-hatch event names the update type it wrapped, so "something happened
+    /// and this build does not model it" is still a line a reader can act on.
+    #[test]
+    fn a_provider_event_names_its_own_kind() {
+        assert_eq!(
+            PresentationEvent::from_event(&event(
+                "provider_event",
+                json!({"kind": "acp_update", "update": {"sessionUpdate": "current_mode_update"}})
+            )),
+            PresentationEvent::ProviderNote {
+                kind: "acp_update \u{b7} current_mode_update".into(),
+                detail: String::new(),
+            }
+        );
+    }
+
+    /// `Ouroboros.Gateway.Wire` replaces leaves it excerpts, cannot encode, or cut off with
+    /// small tagged objects. None of them may reach a transcript as JSON.
+    #[test]
+    fn wire_markers_render_as_labels_and_an_excerpt_keeps_its_prefix() {
+        assert_eq!(
+            wire_marker(&json!({"_excerpt": "the first bytes", "_bytes": 4096})).as_deref(),
+            Some("the first bytes\u{2026} (4096 bytes; full event via /details)")
+        );
+        assert_eq!(
+            wire_marker(&json!({"_excerpt": "no size given"})).as_deref(),
+            Some("no size given\u{2026} (full value; full event via /details)")
+        );
+        assert_eq!(
+            wire_marker(&json!({"_opaque": "#PID<0.101.0>"})).as_deref(),
+            Some("[not encodable: #PID<0.101.0>]")
+        );
+        assert_eq!(
+            wire_marker(&json!({"_b64": "3q2+7w=="})).as_deref(),
+            Some("[binary value; full event via /details]")
+        );
+        assert_eq!(
+            wire_marker(&json!({"_truncated": true})).as_deref(),
+            Some("[truncated; full event via /details]")
+        );
+        assert_eq!(wire_marker(&json!({"text": "ordinary"})), None);
+        assert_eq!(wire_marker(&json!("ordinary")), None);
+    }
+
+    #[test]
+    fn an_excerpted_text_leaf_reads_as_its_prefix_and_an_excerpted_diff_is_marked() {
+        let message = PresentationEvent::from_event(&event(
+            "output_text_final",
+            json!({"text": {"_excerpt": "The tests are", "_bytes": 90_000}}),
+        ));
+
+        assert!(
+            matches!(message, PresentationEvent::AgentText { ref text, .. }
+                if text == "The tests are\u{2026} (90000 bytes; full event via /details)"),
+            "{message:?}"
+        );
+
+        let PresentationEvent::FileUpdate(update) = PresentationEvent::from_event(&event(
+            "file_change",
+            json!({"diff": {"_excerpt": "--- a/lib/a.ex\n+++ b/lib/a.ex\n+new", "_bytes": 2_000_000}}),
+        )) else {
+            panic!("expected a file update")
+        };
+        let diff = update.diff.expect("an excerpted diff is still a diff");
+
+        assert!(diff.text.contains("2000000 bytes"), "{}", diff.text);
+        assert!(
+            diff.truncated,
+            "counts taken from an excerpt must be labelled as an excerpt"
+        );
+        assert_eq!(diff.path.as_deref(), Some("lib/a.ex"));
+    }
 }

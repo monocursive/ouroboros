@@ -1059,4 +1059,205 @@ mod tests {
             Some(Entry::Ended("closed"))
         ));
     }
+
+    fn typed(sequence: u64, kind: &str, payload: serde_json::Value) -> Event {
+        Event::decode(&json!({
+            "id": format!("evt-{sequence}"),
+            "sequence": sequence,
+            "type": kind,
+            "timestamp": "2026-01-01T00:00:00.000000Z",
+            "turn_id": "turn-1",
+            "payload": payload
+        }))
+        .expect("an event")
+    }
+
+    /// A replay overlaps the live stream by design. Totals accumulated as events arrived
+    /// would count the overlap; these are folded out of the held ledger instead.
+    #[test]
+    fn usage_totals_survive_the_overlap_every_replay_produces() {
+        let mut watch = watch();
+        let reports = vec![
+            typed(
+                1,
+                "usage",
+                json!({"input_tokens": 100, "output_tokens": 10}),
+            ),
+            typed(2, "usage", json!({"input_tokens": 50, "output_tokens": 5})),
+        ];
+
+        watch.absorb(reports.clone());
+        let once = watch.usage();
+
+        // The same two events again, as a replay answer would deliver them.
+        watch.absorb(reports);
+
+        assert_eq!(
+            watch.usage(),
+            once,
+            "a replayed report is not a second report"
+        );
+        assert_eq!(once.reports, 2);
+        assert_eq!(once.input_tokens, 150);
+        assert_eq!(once.output_tokens, 15);
+        assert_eq!(
+            once.total_tokens, 165,
+            "derived when the provider sent no total"
+        );
+        assert!(once.complete);
+    }
+
+    /// Once history is gone the totals are a lower bound, and the accessor says so rather
+    /// than letting a footer present them as the session's whole cost.
+    #[test]
+    fn usage_totals_state_when_they_no_longer_cover_the_whole_session() {
+        let mut watch = watch();
+
+        watch.absorb(vec![typed(5, "usage", json!({"input_tokens": 100}))]);
+        assert!(watch.usage().complete);
+
+        watch.raise_floor(4);
+        watch.absorb(vec![typed(6, "usage", json!({"input_tokens": 1}))]);
+
+        assert!(
+            !watch.usage().complete,
+            "a pruned transcript cannot claim a complete total"
+        );
+    }
+
+    #[test]
+    fn a_run_completed_cost_reaches_the_total_because_nothing_else_reports_one() {
+        let mut watch = watch();
+
+        watch.absorb(vec![
+            typed(1, "usage", json!({"input_tokens": 10, "output_tokens": 2})),
+            typed(
+                2,
+                "run_completed",
+                json!({"cost_usd": 0.0125, "num_turns": 3}),
+            ),
+        ]);
+
+        assert_eq!(watch.usage().cost_usd, Some(0.0125));
+    }
+
+    #[test]
+    fn the_queue_depth_is_the_newest_one_the_runtime_reported() {
+        let mut watch = watch();
+
+        assert_eq!(watch.queue_len(), 0);
+
+        watch.absorb(vec![
+            typed(1, "queue_changed", json!({"queued_turns": 3})),
+            typed(2, "queue_changed", json!({"queued_turns": 1})),
+        ]);
+
+        assert_eq!(watch.queue_len(), 1);
+    }
+
+    /// Only `run_started` ever names a model, and only some providers send one.
+    #[test]
+    fn the_model_is_whatever_a_run_named_and_otherwise_nothing() {
+        let mut watch = watch();
+
+        watch.absorb(vec![typed(1, "session_ready", json!({"transport": "acp"}))]);
+        assert_eq!(watch.model(), None, "no provider named a model");
+
+        watch.absorb(vec![typed(
+            2,
+            "run_started",
+            json!({"model": "claude-sonnet-5", "tools": []}),
+        )]);
+        assert_eq!(watch.model(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn the_latest_plan_is_the_newest_one_in_whichever_dialect_it_arrived() {
+        let mut watch = watch();
+
+        assert!(watch.latest_plan().is_none());
+
+        watch.absorb(vec![typed(
+            1,
+            "plan_updated",
+            json!({"plan": [{"step": "first", "status": "pending"}]}),
+        )]);
+        assert_eq!(watch.latest_plan().map(|plan| plan.steps.len()), Some(1));
+
+        watch.absorb(vec![typed(
+            2,
+            "plan_updated",
+            json!({"entries": [
+                {"content": "first", "status": "completed"},
+                {"content": "second", "status": "in_progress"}
+            ]}),
+        )]);
+
+        let plan = watch.latest_plan().expect("the newest plan");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[1].text, "second");
+    }
+
+    /// The panel must not lose the plan when the agent stops working: a task list that
+    /// vanishes while idle is the documented Codex anti-pattern.
+    #[test]
+    fn the_latest_plan_survives_the_session_going_idle() {
+        let mut watch = watch();
+
+        watch.absorb(vec![
+            typed(1, "plan_updated", json!({"plan": [{"step": "ship it"}]})),
+            typed(2, "turn_completed", json!({})),
+            typed(3, "session_idle", json!({})),
+        ]);
+
+        assert_eq!(watch.latest_plan().map(|plan| plan.steps.len()), Some(1));
+    }
+
+    #[test]
+    fn an_elapsed_turn_is_reported_only_while_one_is_actually_running() {
+        let mut watch = watch();
+
+        assert_eq!(watch.active_turn_elapsed(), None);
+
+        // A start far in the past: the elapsed time is real wall-clock arithmetic, so this
+        // asserts the sign and the source rather than an exact figure.
+        watch.absorb(vec![typed(1, "turn_started", json!({}))]);
+        let elapsed = watch.active_turn_elapsed().expect("a running turn");
+        assert!(elapsed > 0, "{elapsed}");
+
+        watch.absorb(vec![typed(2, "turn_completed", json!({}))]);
+        assert_eq!(
+            watch.active_turn_elapsed(),
+            None,
+            "a finished turn is not still running"
+        );
+
+        watch.absorb(vec![typed(3, "turn_started", json!({}))]);
+        assert!(watch.active_turn_elapsed().is_some());
+        watch.end("closed".into());
+        assert_eq!(
+            watch.active_turn_elapsed(),
+            None,
+            "an ended stream has no running turn"
+        );
+    }
+
+    /// An event whose timestamp this build cannot read must produce no elapsed time rather
+    /// than one measured from the epoch.
+    #[test]
+    fn an_unreadable_timestamp_yields_no_elapsed_turn() {
+        let mut watch = watch();
+
+        watch.absorb(vec![Event::decode(&json!({
+            "id": "evt-1",
+            "sequence": 1,
+            "type": "turn_started",
+            "timestamp": "",
+            "turn_id": "turn-1",
+            "payload": {}
+        }))
+        .expect("an event")]);
+
+        assert_eq!(watch.active_turn_elapsed(), None);
+    }
 }

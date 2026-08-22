@@ -1786,6 +1786,40 @@ mod tests {
         assert!(lines[0].to_string().contains("/details"), "{}", lines[0]);
     }
 
+    /// The window is a redraw budget, not a retention policy: the ledger keeps everything
+    /// and the divider says how much this pane is not drawing.
+    #[test]
+    fn the_chat_window_still_bounds_the_newest_entries_it_projects() {
+        let events: Vec<Event> = (1..=(CHAT_ENTRY_WINDOW as u64 + 72))
+            .map(|sequence| {
+                Event::decode(&serde_json::json!({
+                    "id": format!("evt-{sequence}"),
+                    "sequence": sequence,
+                    "type": "output_text_final",
+                    "timestamp": "2026-01-01T00:00:00.000000Z",
+                    "turn_id": format!("turn-{sequence}"),
+                    "payload": { "text": format!("message-{sequence}") }
+                }))
+                .expect("an event")
+            })
+            .collect();
+        let entries: Vec<Entry<'_>> = events.iter().map(Entry::Event).collect();
+
+        let rendered = chat_lines(entries, 120, 0, Verbosity::Compact)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("72 earlier chat entries omitted here"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("message-72 "), "{rendered}");
+        assert!(rendered.contains("message-73"), "{rendered}");
+        assert!(rendered.contains("message-200"), "{rendered}");
+    }
+
     #[test]
     fn visual_line_count_grows_with_newlines() {
         assert_eq!(visual_line_count("one line", 40), 1);
