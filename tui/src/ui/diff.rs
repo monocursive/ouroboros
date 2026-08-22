@@ -91,11 +91,14 @@ impl FileStatus {
 
     pub fn colour(self) -> ratatui::style::Color {
         match self {
-            Self::Added => theme::GOOD,
-            Self::Deleted => theme::BAD,
-            Self::Renamed => theme::ACCENT,
-            Self::Modified => theme::WARN,
-            Self::Binary => theme::MUTED,
+            // The diff channel rather than the availability channel: the daltonized
+            // palettes move exactly these two onto the blue/orange axis and leave "this
+            // plane is up" where it was.
+            Self::Added => theme::diff_added_colour(),
+            Self::Deleted => theme::diff_removed_colour(),
+            Self::Renamed => theme::accent(),
+            Self::Modified => theme::warn(),
+            Self::Binary => theme::muted(),
         }
     }
 }
@@ -647,7 +650,7 @@ pub fn render_file(lines: &mut Vec<Line<'static>>, file: &DiffFile, layout: Layo
             vec![Span::styled(
                 super::tree::truncate(&hunk_label(hunk), content_width + 1),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::DIM),
             )],
         ));
@@ -750,8 +753,8 @@ fn sign(kind: LineKind) -> &'static str {
 
 fn sign_style(kind: LineKind) -> Style {
     match kind {
-        LineKind::Added => Style::default().fg(theme::GOOD),
-        LineKind::Removed => Style::default().fg(theme::BAD),
+        LineKind::Added => theme::diff_added(),
+        LineKind::Removed => theme::diff_removed(),
         _ => theme::quiet(),
     }
 }
@@ -763,13 +766,15 @@ fn content_spans(line: &DiffLine, language: Language, width: usize) -> Vec<Vec<S
         LineKind::Context => code::highlight_source_line(&line.text, language),
         LineKind::Meta => vec![Span::styled(line.text.clone(), theme::quiet())],
         LineKind::Added | LineKind::Removed => {
-            let colour = if line.kind == LineKind::Added {
-                theme::GOOD
+            // The whole style, not the colour: without colour at all these two still have
+            // to differ, and `theme` is the one place that knows how.
+            let channel = if line.kind == LineKind::Added {
+                theme::diff_added()
             } else {
-                theme::BAD
+                theme::diff_removed()
             };
-            let base = Style::default().fg(colour).add_modifier(Modifier::DIM);
-            let strong = Style::default().fg(colour).add_modifier(Modifier::BOLD);
+            let base = channel.add_modifier(Modifier::DIM);
+            let strong = channel.add_modifier(Modifier::BOLD);
 
             match &line.emphasis {
                 Some(range) if range.end <= line.text.len() => {

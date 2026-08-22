@@ -83,7 +83,7 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(field("role", &blank(&app.hello.role)));
             lines.push(Line::from(Span::styled(
                 "waiting for runtime.status",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
     }
@@ -104,12 +104,12 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "?".into());
     let security_style = match summary.security {
         super::app::MachineSecurity::Standalone | super::app::MachineSecurity::Secure => {
-            Style::default().fg(theme::GOOD)
+            Style::default().fg(theme::good())
         }
         super::app::MachineSecurity::Insecure | super::app::MachineSecurity::Mismatch => {
-            Style::default().fg(theme::BAD)
+            Style::default().fg(theme::bad())
         }
-        super::app::MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+        super::app::MachineSecurity::Unknown => Style::default().fg(theme::warn()),
     };
 
     let mut lines = vec![
@@ -133,21 +133,21 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
             // Kept as a reassuring state, not an error: a laptop daemon is standalone by
             // default and the guided surface is where a second machine is added.
             "none — this runtime is not connected to other nodes",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         Some(_) => lines.push(Line::from(Span::styled(
             summary.recovery,
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ))),
         None => lines.push(Line::from(Span::styled(
             "waiting for live machine status",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
     }
 
     lines.push(Line::from(Span::styled(
         "Open /machines for guided setup and recovery",
-        Style::default().fg(theme::ACCENT),
+        Style::default().fg(theme::accent()),
     )));
 
     frame.render_widget(
@@ -183,7 +183,7 @@ fn availability(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "waiting for runtime.status",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block),
             area,
@@ -198,7 +198,7 @@ fn availability(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "the runtime reported no availability map",
-                Style::default().fg(theme::WARN),
+                Style::default().fg(theme::warn()),
             ))
             .block(block),
             area,
@@ -244,7 +244,7 @@ fn providers(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "probing providers",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block),
             area,
@@ -257,7 +257,7 @@ fn providers(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "this runtime serves no coding providers",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block),
             area,
@@ -287,35 +287,35 @@ fn providers(frame: &mut Frame, area: Rect, app: &App) {
                         }
                         .to_string(),
                         if probe.installed {
-                            Style::default().fg(theme::GOOD)
+                            Style::default().fg(theme::good())
                         } else {
-                            Style::default().fg(theme::MUTED)
+                            Style::default().fg(theme::muted())
                         },
                     ));
 
                     if probe.installed && !probe.compatible {
                         spans.push(Span::styled(
                             "  incompatible",
-                            Style::default().fg(theme::WARN),
+                            Style::default().fg(theme::warn()),
                         ));
                     }
 
                     spans.push(Span::styled(
                         format!("  auth {}", compact(&probe.authenticated)),
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::muted()),
                     ));
 
                     if let Some(version) = &probe.version {
                         spans.push(Span::styled(
                             format!("  {version}"),
-                            Style::default().fg(theme::MUTED),
+                            Style::default().fg(theme::muted()),
                         ));
                     }
                 }
                 // A probe that failed is not the same fact as a provider that is missing.
                 None => spans.push(Span::styled(
                     format!("probe failed: {}", compact(&entry.error)),
-                    Style::default().fg(theme::WARN),
+                    Style::default().fg(theme::warn()),
                 )),
             }
 

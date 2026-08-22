@@ -757,6 +757,10 @@ pub struct App {
     pub can_invite: bool,
     /// Ask the driver to list Tailscale/SSH hosts. Set when Machines opens.
     scan_machines_pending: bool,
+    /// Whether the "this is not the palette you asked for" sentence has been said. Once
+    /// per run rather than once per operator: the reason it is true is the terminal this
+    /// run was started in, and that can differ from the last one.
+    theme_hint_shown: bool,
     /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
     fleet_intent_pending: Option<FleetIntent>,
     /// Restart-and-join plan. The driver writes the invitation path, then shuts down.
@@ -935,6 +939,7 @@ impl App {
             fleet_profile: None,
             can_invite: false,
             scan_machines_pending: false,
+            theme_hint_shown: false,
             fleet_intent_pending: None,
             join_intent_pending: None,
             fleet_job_pending: None,
@@ -1114,6 +1119,78 @@ impl App {
         self.config.onboarding.prompts_sent += 1;
         self.save_pending = true;
         self.save_quiet = true;
+    }
+
+    /// `/theme`: the next palette in the cycle, live, and remembered.
+    ///
+    /// The preview *is* the switch. There is nothing useful to preview a palette in but the
+    /// screen already showing the conversation, and a modal that painted swatches would be
+    /// showing the operator six rectangles instead of their own transcript. Cycling back
+    /// round is one more `/theme`, and what is written to the file is whatever they stopped
+    /// on — so the preview is undoable by the same key that made it.
+    pub(super) fn cycle_theme(&mut self) {
+        self.switch_theme(self.config.theme.name().next());
+    }
+
+    /// `/theme <name>`.
+    pub(super) fn choose_theme(&mut self, name: &str) {
+        let Some(theme) = super::theme::ThemeName::parse(name) else {
+            self.inform(
+                format!(
+                    "no theme called {name:?}; this build has {}",
+                    super::theme::ThemeName::ALL
+                        .iter()
+                        .map(|theme| theme.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                NoticeKind::Error,
+            );
+            return;
+        };
+
+        self.switch_theme(theme);
+    }
+
+    fn switch_theme(&mut self, name: super::theme::ThemeName) {
+        super::switch_theme(name);
+
+        self.config.theme.name = Some(name.as_str().to_string());
+        self.save_pending = true;
+
+        // What is *drawing*, not what was asked for. Under `NO_COLOR` those are two
+        // different answers and the operator is owed both — a client that said "theme:
+        // light" while drawing in grey would be the silent swap this project refuses.
+        let drawing = super::theme::current().name;
+        let note = match drawing == name.as_str() {
+            true => format!("theme: {}", name.as_str()),
+            false => format!(
+                "theme: {} was saved, but {drawing} is what is drawing — {}",
+                name.as_str(),
+                super::theme_note()
+                    .unwrap_or_else(|| "this terminal is not being asked".to_string())
+            ),
+        };
+
+        self.inform(note, NoticeKind::Info);
+    }
+
+    /// Says once, on the first tick, that the palette drawing is not the one that was
+    /// asked for.
+    ///
+    /// The same shape as [`Self::hint_mouse_capture`] and for the same reason: the fact is
+    /// knowable only after a screen exists, and it is exactly the fact whose absence would
+    /// leave someone editing `config.toml` in a loop.
+    pub(super) fn hint_theme_resolution(&mut self) {
+        if self.theme_hint_shown {
+            return;
+        }
+
+        self.theme_hint_shown = true;
+
+        if let Some(note) = super::theme_note() {
+            self.inform(note, NoticeKind::Info);
+        }
     }
 
     /// Whether this operator is still new enough to be pointed at the keys.
@@ -1631,6 +1708,7 @@ impl App {
                 self.expire_notice();
                 self.expire_chords();
                 self.hint_mouse_capture();
+                self.hint_theme_resolution();
                 self.poll();
                 self.refresh_chrome();
                 // B3. A draft queued behind a request that failed, was refused, or simply

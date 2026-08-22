@@ -11,7 +11,7 @@
 //! what the whole block used to get. An unterminated fence is a block still streaming, so
 //! it is rendered as a block rather than abandoned to the prose path.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -281,21 +281,24 @@ enum Token {
 }
 
 fn token_style(token: Token) -> Style {
+    use super::theme;
+
     match token {
-        // The terminal's own palette, like the rest of this client: magenta keywords,
-        // green strings, gray comments, yellow numbers, blue calls and keys, cyan types.
+        // Every hue here comes from the active theme, so a code block in the light or
+        // daltonized palette is the same code block in that palette's colours rather than
+        // a rectangle of the dark one that survived the switch.
         Token::Text => Style::default(),
         Token::Keyword => Style::default()
-            .fg(Color::Magenta)
+            .fg(theme::code_keyword())
             .add_modifier(Modifier::BOLD),
-        Token::String => Style::default().fg(Color::Green),
+        Token::String => Style::default().fg(theme::code_string()),
         Token::Comment => Style::default()
-            .fg(super::theme::MUTED)
+            .fg(theme::code_comment())
             .add_modifier(Modifier::DIM | Modifier::ITALIC),
-        Token::Number => Style::default().fg(Color::Yellow),
-        Token::Function => Style::default().fg(Color::Blue),
-        Token::Type => Style::default().fg(super::theme::SYSTEM),
-        Token::Key => Style::default().fg(Color::Blue),
+        Token::Number => Style::default().fg(theme::code_number()),
+        Token::Function => Style::default().fg(theme::code_function()),
+        Token::Type => Style::default().fg(theme::code_type()),
+        Token::Key => Style::default().fg(theme::code_key()),
     }
 }
 
@@ -828,11 +831,11 @@ fn diff_lines(code: &str, width: usize, max_lines: usize) -> Vec<Line<'static>> 
         }
 
         let style = if source.starts_with('+') && !source.starts_with("+++") {
-            Style::default().fg(super::theme::GOOD)
+            Style::default().fg(super::theme::good())
         } else if source.starts_with('-') && !source.starts_with("---") {
-            Style::default().fg(super::theme::BAD)
+            Style::default().fg(super::theme::bad())
         } else if source.starts_with("@@") {
-            Style::default().fg(super::theme::SYSTEM)
+            Style::default().fg(super::theme::system())
         } else {
             token_style(Token::Comment)
         };
@@ -1333,10 +1336,10 @@ pub fn render_block(
         None => "code",
     };
     let border = Style::default()
-        .fg(theme::MUTED)
+        .fg(theme::muted())
         .add_modifier(Modifier::DIM);
     let label_style = Style::default()
-        .fg(theme::SYSTEM)
+        .fg(theme::system())
         .add_modifier(Modifier::BOLD);
 
     let heading = "┌─ ";
@@ -1405,7 +1408,7 @@ fn framed_row(content: Vec<Span<'static>>, width: usize, border: Style) -> Line<
 #[cfg(test)]
 mod tests {
     use crate::ui::theme;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
@@ -1523,17 +1526,17 @@ mod tests {
         );
 
         let keyword = styled(&lines[1].spans, "fn");
-        assert_eq!(keyword.style.fg, Some(Color::Magenta));
+        assert_eq!(keyword.style.fg, Some(theme::code_keyword()));
         assert!(keyword.style.add_modifier.contains(Modifier::BOLD));
 
         let call = styled(&lines[2].spans, "println!");
-        assert_eq!(call.style.fg, Some(Color::Blue));
+        assert_eq!(call.style.fg, Some(theme::code_function()));
 
         let body = styled(&lines[2].spans, "\"hi\"");
-        assert_eq!(body.style.fg, Some(Color::Green));
+        assert_eq!(body.style.fg, Some(theme::code_string()));
 
         let comment = styled(&lines[0].spans, "// greet");
-        assert_eq!(comment.style.fg, Some(theme::MUTED));
+        assert_eq!(comment.style.fg, Some(theme::muted()));
     }
 
     #[test]
@@ -1547,17 +1550,20 @@ mod tests {
 
         assert_eq!(
             styled(&lines[1].spans, "defmodule").style.fg,
-            Some(Color::Magenta)
+            Some(theme::code_keyword())
         );
         assert_eq!(
             styled(&lines[1].spans, "Greeter").style.fg,
-            Some(theme::SYSTEM)
+            Some(theme::system())
         );
         assert_eq!(
             styled(&lines[2].spans, ":world").style.fg,
-            Some(Color::Yellow)
+            Some(theme::code_number())
         );
-        assert_eq!(styled(&lines[0].spans, "# hi").style.fg, Some(theme::MUTED));
+        assert_eq!(
+            styled(&lines[0].spans, "# hi").style.fg,
+            Some(theme::muted())
+        );
     }
 
     #[test]
@@ -1571,11 +1577,11 @@ mod tests {
 
         assert_eq!(
             styled(&lines[0].spans, "\"\"\"first").style.fg,
-            Some(Color::Green)
+            Some(theme::code_string())
         );
         assert_eq!(
             styled(&lines[1].spans, "second\"\"\"").style.fg,
-            Some(Color::Green)
+            Some(theme::code_string())
         );
         assert_eq!(styled(&lines[2].spans, "x").style.fg, None);
     }
@@ -1584,15 +1590,18 @@ mod tests {
     fn c_block_comments_carry_across_lines() {
         let lines = highlight("/* one\ntwo */\nint x;", Language::C, 80, 64);
 
-        assert_eq!(styled(&lines[0].spans, "/*").style.fg, Some(theme::MUTED));
-        assert_eq!(styled(&lines[0].spans, "one").style.fg, Some(theme::MUTED));
+        assert_eq!(styled(&lines[0].spans, "/*").style.fg, Some(theme::muted()));
+        assert_eq!(
+            styled(&lines[0].spans, "one").style.fg,
+            Some(theme::muted())
+        );
         assert_eq!(
             styled(&lines[1].spans, "two */").style.fg,
-            Some(theme::MUTED)
+            Some(theme::muted())
         );
         assert_eq!(
             styled(&lines[2].spans, "int").style.fg,
-            Some(Color::Magenta)
+            Some(theme::code_keyword())
         );
     }
 
@@ -1607,16 +1616,19 @@ mod tests {
 
         assert_eq!(
             styled(&lines[0].spans, "\"name\"").style.fg,
-            Some(Color::Blue)
+            Some(theme::code_key())
         );
         assert_eq!(
             styled(&lines[0].spans, "\"ouro\"").style.fg,
-            Some(Color::Green)
+            Some(theme::code_string())
         );
-        assert_eq!(styled(&lines[0].spans, "3").style.fg, Some(Color::Yellow));
+        assert_eq!(
+            styled(&lines[0].spans, "3").style.fg,
+            Some(theme::code_number())
+        );
         assert_eq!(
             styled(&lines[0].spans, "true").style.fg,
-            Some(Color::Magenta)
+            Some(theme::code_keyword())
         );
     }
 
@@ -1629,8 +1641,14 @@ mod tests {
             64,
         );
 
-        assert_eq!(styled(&lines[0].spans, "name").style.fg, Some(Color::Blue));
-        assert_eq!(styled(&lines[1].spans, "home").style.fg, Some(Color::Blue));
+        assert_eq!(
+            styled(&lines[0].spans, "name").style.fg,
+            Some(theme::code_key())
+        );
+        assert_eq!(
+            styled(&lines[1].spans, "home").style.fg,
+            Some(theme::code_key())
+        );
         assert_eq!(styled(&lines[1].spans, "http").style.fg, None);
     }
 
@@ -1640,11 +1658,11 @@ mod tests {
 
         assert_eq!(
             styled(&lines[0].spans, "# rebuild").style.fg,
-            Some(theme::MUTED)
+            Some(theme::muted())
         );
         assert_eq!(
             styled(&lines[1].spans, "$TARGET").style.fg,
-            Some(theme::SYSTEM)
+            Some(theme::system())
         );
     }
 
@@ -1652,13 +1670,22 @@ mod tests {
     fn html_tags_and_attributes_colour() {
         let lines = highlight("<div class=\"box\">hi</div>", Language::Html, 80, 64);
 
-        assert_eq!(styled(&lines[0].spans, "<div").style.fg, Some(Color::Blue));
-        assert_eq!(styled(&lines[0].spans, "class").style.fg, Some(Color::Blue));
+        assert_eq!(
+            styled(&lines[0].spans, "<div").style.fg,
+            Some(theme::code_key())
+        );
+        assert_eq!(
+            styled(&lines[0].spans, "class").style.fg,
+            Some(theme::code_key())
+        );
         assert_eq!(
             styled(&lines[0].spans, "\"box\"").style.fg,
-            Some(Color::Green)
+            Some(theme::code_string())
         );
-        assert_eq!(styled(&lines[0].spans, "</div").style.fg, Some(Color::Blue));
+        assert_eq!(
+            styled(&lines[0].spans, "</div").style.fg,
+            Some(theme::code_key())
+        );
     }
 
     #[test]
@@ -1667,7 +1694,7 @@ mod tests {
 
         assert_eq!(
             styled(&lines[0].spans, "select").style.fg,
-            Some(Color::Magenta)
+            Some(theme::code_keyword())
         );
         assert_eq!(styled(&lines[0].spans, "users").style.fg, None);
     }
@@ -1676,8 +1703,11 @@ mod tests {
     fn diff_lines_take_add_remove_colours() {
         let lines = highlight("@@ -1 +1 @@\n-old\n+new", Language::Diff, 80, 64);
 
-        assert_eq!(styled(&lines[1].spans, "-old").style.fg, Some(theme::BAD));
-        assert_eq!(styled(&lines[2].spans, "+new").style.fg, Some(theme::GOOD));
+        assert_eq!(styled(&lines[1].spans, "-old").style.fg, Some(theme::bad()));
+        assert_eq!(
+            styled(&lines[2].spans, "+new").style.fg,
+            Some(theme::good())
+        );
     }
 
     #[test]
@@ -1686,9 +1716,12 @@ mod tests {
 
         assert_eq!(
             styled(&lines[0].spans, "\"x\"").style.fg,
-            Some(Color::Green)
+            Some(theme::code_string())
         );
-        assert_eq!(styled(&lines[0].spans, "42").style.fg, Some(Color::Yellow));
+        assert_eq!(
+            styled(&lines[0].spans, "42").style.fg,
+            Some(theme::code_number())
+        );
     }
 
     #[test]

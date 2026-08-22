@@ -26,7 +26,7 @@ use super::transcript_cells::{self, Verbosity};
 
 // Projection is rebuilt on every draw, so bound the default conversation surface to a
 // useful recent suffix. The complete retained ledger remains available through /details.
-const CHAT_ENTRY_WINDOW: usize = 128;
+pub const CHAT_ENTRY_WINDOW: usize = 128;
 
 /// Rows the plan panel may occupy above the composer, borders included. Past this it
 /// scrolls to its own tail rather than eating the conversation.
@@ -104,7 +104,7 @@ fn primary(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
 fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(theme::MUTED));
+        .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -124,16 +124,16 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(" SESSIONS", Style::default().add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!(" / {:02}", sessions.len()),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(" ctrl+x l ", theme::action()),
-                Span::styled("switch", Style::default().fg(theme::MUTED)),
+                Span::styled("switch", Style::default().fg(theme::muted())),
             ]),
             Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
         ]),
         rows[0],
@@ -187,14 +187,14 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         let provider = session.provider.as_deref().unwrap_or(session.plane.tag());
         let (signal, status) = session_signal(&session.status);
         let border_style = if selected {
-            Style::default().fg(theme::ACTION)
+            Style::default().fg(theme::action_colour())
         } else {
             match &session.status {
                 SessionStatus::Running | SessionStatus::Starting => {
-                    Style::default().fg(theme::SYSTEM)
+                    Style::default().fg(theme::system())
                 }
-                SessionStatus::Failed | SessionStatus::Lost => Style::default().fg(theme::BAD),
-                _ => Style::default().fg(theme::MUTED),
+                SessionStatus::Failed | SessionStatus::Lost => Style::default().fg(theme::bad()),
+                _ => Style::default().fg(theme::muted()),
             }
         };
         let card = Rect::new(
@@ -222,7 +222,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(session.status.as_str().to_uppercase(), status),
                     Span::styled(
                         format!(" · {}", super::tree::truncate(provider, 9)),
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::muted()),
                     ),
                 ]),
             ]),
@@ -235,11 +235,11 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     " No sessions yet",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
                 Line::from(Span::styled(
                     " Start in the composer",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
             ]),
             rows[1],
@@ -255,7 +255,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                         " +{:02} more · ctrl+x l",
                         sessions.len().saturating_sub(visible_count)
                     ),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ))),
                 Rect::new(rows[1].x, summary_y, rows[1].width, 1),
             );
@@ -264,13 +264,13 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
 
     let fleet = summary.fleet.as_deref().unwrap_or(summary.mode.as_str());
     let health_style = if summary.offline.unwrap_or(0) > 0 {
-        Style::default().fg(theme::WARN)
+        Style::default().fg(theme::warn())
     } else {
-        Style::default().fg(theme::GOOD)
+        Style::default().fg(theme::good())
     };
     let fleet_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             format!(
                 " FLEET / {} ",
@@ -295,7 +295,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     summary.connected,
                     summary.expected.unwrap_or(summary.connected)
                 ),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             Line::from(Span::styled(summary.mode.to_uppercase(), theme::label())),
         ]),
@@ -346,7 +346,7 @@ fn session_signal(status: &SessionStatus) -> (&'static str, Style) {
 fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme::MUTED));
+        .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -384,22 +384,25 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| ("○ NEW SESSION".to_string(), theme::action()));
     let (stream_label, stream_style) = if let Some(watch) = watch {
         if watch.resyncing {
-            ("RESTORING", Style::default().fg(theme::SYSTEM))
+            ("RESTORING", Style::default().fg(theme::system()))
         } else if watch.ended.is_some() {
-            ("ENDED", Style::default().fg(theme::MUTED))
+            ("ENDED", Style::default().fg(theme::muted()))
         } else if watch.follow {
-            ("STREAMING", Style::default().fg(theme::SYSTEM))
+            ("STREAMING", Style::default().fg(theme::system()))
         } else {
-            ("SCROLLED", Style::default().fg(theme::WARN))
+            ("SCROLLED", Style::default().fg(theme::warn()))
         }
     } else {
-        ("DETACHED", Style::default().fg(theme::MUTED))
+        ("DETACHED", Style::default().fg(theme::muted()))
     };
     let (link_label, link_style) = match &app.connection {
-        Connection::Live => ("LINK HEALTHY".to_string(), Style::default().fg(theme::GOOD)),
+        Connection::Live => (
+            "LINK HEALTHY".to_string(),
+            Style::default().fg(theme::good()),
+        ),
         Connection::Lost { reason } => (
             format!("LINK LOST · {}", super::tree::truncate(reason, 12)),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::bad()),
         ),
     };
     let event_count = watch.map(Watch::len).unwrap_or(0);
@@ -448,7 +451,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         frame,
         rows[2],
         " SIGIL / CONTEXT CHANNEL ",
-        theme::SYSTEM,
+        theme::system(),
         vec![
             Line::from(Span::styled(
                 format!(
@@ -462,7 +465,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
             )),
             Line::from(Span::styled(
                 format!("{event_count} events · {stream_label}"),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
         ],
     );
@@ -471,7 +474,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         frame,
         rows[4],
         " ACTIVE CONTEXT ",
-        theme::MUTED,
+        theme::muted(),
         vec![
             context_panel_value("PROVIDER", provider, panel_width, Style::default()),
             context_panel_value("WORKSPACE", workspace, panel_width, Style::default()),
@@ -480,7 +483,11 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
                 "FILES",
                 &sandbox,
                 panel_width,
-                Style::default().fg(if writable { theme::GOOD } else { theme::WARN }),
+                Style::default().fg(if writable {
+                    theme::good()
+                } else {
+                    theme::warn()
+                }),
             ),
             Line::from(Span::styled(session_label, session_style)),
         ],
@@ -490,7 +497,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         frame,
         rows[6],
         " EXECUTION TRACE ",
-        theme::MUTED,
+        theme::muted(),
         vec![
             context_panel_value(
                 "EVENTS",
@@ -523,7 +530,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         frame,
         rows[8],
         " BOUNDARIES ",
-        theme::MUTED,
+        theme::muted(),
         vec![
             context_panel_value("MODE", &summary.mode, panel_width, Style::default()),
             context_panel_value("MACHINE", &summary.machine, panel_width, Style::default()),
@@ -533,7 +540,11 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
                 "FILES",
                 &sandbox,
                 panel_width,
-                Style::default().fg(if writable { theme::GOOD } else { theme::WARN }),
+                Style::default().fg(if writable {
+                    theme::good()
+                } else {
+                    theme::warn()
+                }),
             ),
         ],
     );
@@ -541,7 +552,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             " HERMETIC CORE · LEGIBLE EDGE",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         rows[10],
     );
@@ -556,7 +567,7 @@ fn render_context_panel(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             title,
             Style::default().fg(colour).add_modifier(Modifier::BOLD),
@@ -667,7 +678,7 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme::MUTED));
+        .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -675,7 +686,7 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("QUEUE ", theme::label()),
         Span::styled(
             format!("{} durable · {} here", runtime, local.len()),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
         Span::styled(
             if local.is_empty() {
@@ -683,19 +694,19 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 "   ↑ takes the newest back".to_string()
             },
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
     ])];
 
     if runtime > 0 {
         lines.push(Line::from(vec![
-            Span::styled("  runtime  ", Style::default().fg(theme::GOOD)),
+            Span::styled("  runtime  ", Style::default().fg(theme::good())),
             Span::styled(
                 format!(
                     "{runtime} follow-up{} the runtime is holding; their text is durable there",
                     if runtime == 1 { "" } else { "s" }
                 ),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]));
     }
@@ -717,7 +728,7 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     format!("  +{carried} attached")
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]));
     }
@@ -725,7 +736,7 @@ fn queue_panel(frame: &mut Frame, area: Rect, app: &App) {
     if local.len() > QUEUE_ROWS as usize {
         lines.push(Line::from(Span::styled(
             format!("  +{} more here", local.len() - QUEUE_ROWS as usize),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 
@@ -764,14 +775,14 @@ fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str) {
             Span::styled(
                 label,
                 Style::default()
-                    .fg(theme::WARN)
+                    .fg(theme::warn())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 super::tree::truncate(subject, room),
-                Style::default().fg(theme::WARN),
+                Style::default().fg(theme::warn()),
             ),
-            Span::styled(hint, Style::default().fg(theme::MUTED)),
+            Span::styled(hint, Style::default().fg(theme::muted())),
         ])),
         area,
     );
@@ -803,7 +814,7 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme::MUTED));
+        .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -839,7 +850,7 @@ fn first_run_tips(app: &App) -> Vec<Line<'static>> {
         "esc interrupts the turn and keeps what is queued; ? lists every key",
     ]
     .into_iter()
-    .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::ACCENT))))
+    .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::accent()))))
     .collect()
 }
 
@@ -858,7 +869,7 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(Span::styled(
                 "Ready in this workspace",
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -878,11 +889,11 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
                         super::tree::truncate(&requested_workspace, 42)
                     )
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             Line::from(Span::styled(
                 app.machine_hint(),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
         ]
     } else {
@@ -890,18 +901,18 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(Span::styled(
                 "Connect ChatGPT to start coding",
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from("Use your existing ChatGPT subscription. No API key is required."),
             Line::from(Span::styled(
                 "Press Enter to connect, or type / for commands without signing in.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             Line::from(Span::styled(
                 app.machine_hint(),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
         ]
     };
@@ -969,13 +980,13 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     "select a session and press Enter to replay its history and follow it live",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
                     "nothing is subscribed until you open it, so an unopened session costs the \
                      runtime nothing",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
             ])
             .wrap(Wrap { trim: false }),
@@ -1107,7 +1118,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     "No messages yet."
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             inner,
         );
@@ -1199,7 +1210,7 @@ fn details_pane(
 
     if filtering {
         let mut spans = vec![
-            Span::styled("filter ", Style::default().fg(theme::MUTED)),
+            Span::styled("filter ", Style::default().fg(theme::muted())),
             Span::raw(app.details.filter.clone()),
         ];
 
@@ -1210,12 +1221,12 @@ fn details_pane(
             ));
             spans.push(Span::styled(
                 "  enter keeps it · esc clears it",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ));
         } else {
             spans.push(Span::styled(
                 format!("  {} row(s) · esc clears it", rows.len()),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ));
         }
 
@@ -1230,7 +1241,7 @@ fn details_pane(
                 } else {
                     "No retained event matches that filter."
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             split[1],
         );
@@ -1279,13 +1290,13 @@ fn render_conversation_header(
     );
 
     let (stream, stream_style) = if watch.resyncing {
-        ("RESTORING", Style::default().fg(theme::SYSTEM))
+        ("RESTORING", Style::default().fg(theme::system()))
     } else if watch.ended.is_some() {
-        ("ENDED", Style::default().fg(theme::MUTED))
+        ("ENDED", Style::default().fg(theme::muted()))
     } else if watch.follow {
-        ("FOLLOWING", Style::default().fg(theme::SYSTEM))
+        ("FOLLOWING", Style::default().fg(theme::system()))
     } else {
-        ("SCROLLED", Style::default().fg(theme::WARN))
+        ("SCROLLED", Style::default().fg(theme::warn()))
     };
     let action = if area.width >= 72 {
         Line::from(vec![
@@ -1339,7 +1350,7 @@ fn render_conversation_header(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         rows[2],
     );
@@ -1362,7 +1373,7 @@ fn header(
                 } else {
                     "ctrl+o verbose "
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ];
 
@@ -1374,33 +1385,33 @@ fn header(
         Span::styled(" Event details ", theme::heading()),
         // Not `/details`: inside the ledger `/` is the filter, so the chord is the way
         // back and naming the slash command here would name a key that does not work.
-        Span::styled("ctrl+x d chat  ", Style::default().fg(theme::MUTED)),
-        Span::styled(format!("{plane} "), Style::default().fg(theme::MUTED)),
+        Span::styled("ctrl+x d chat  ", Style::default().fg(theme::muted())),
+        Span::styled(format!("{plane} "), Style::default().fg(theme::muted())),
         Span::raw(format!("{id} ")),
         Span::styled(
             format!("cursor {} ", watch.cursor()),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
     ];
 
     if watch.floor() > 0 {
         spans.push(Span::styled(
             format!("floor {} ", watch.floor()),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ));
     }
 
     if watch.dropped > 0 {
         spans.push(Span::styled(
             format!("{} dropped ", watch.dropped),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ));
     }
 
     if watch.undecodable > 0 {
         spans.push(Span::styled(
             format!("{} undecodable ", watch.undecodable),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ));
     }
 
@@ -1421,19 +1432,19 @@ fn push_stream_state(spans: &mut Vec<Span<'static>>, watch: &Watch, tick: u64, t
                 },
                 theme::spinner(tick)
             ),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ));
     }
 
     if let Some(status) = &watch.ended {
         spans.push(Span::styled(
             format!("ended: {status} "),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
     } else if !watch.follow {
         spans.push(Span::styled(
             "scrolled back ",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
     }
 }
@@ -1462,7 +1473,7 @@ fn chat_lines(
                 "{omitted} earlier chat entries omitted here — /details shows all retained events"
             ),
             width,
-            theme::WARN,
+            theme::warn(),
         ),
         Line::from(""),
     ];
@@ -1514,9 +1525,9 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         .open_sandbox()
         .unwrap_or_else(|| ("unknown".to_string(), false));
     let sandbox_style = if sandbox_writable {
-        Style::default().fg(theme::GOOD)
+        Style::default().fg(theme::good())
     } else {
-        Style::default().fg(theme::WARN)
+        Style::default().fg(theme::warn())
     };
 
     let title = if inline_context {
@@ -1525,23 +1536,23 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
             Span::styled("· PROVIDER ", theme::label()),
             Span::raw(provider.to_string()),
             Span::styled("  ·  APPROVAL ", theme::label()),
-            Span::styled(approval, Style::default().fg(theme::WARN)),
+            Span::styled(approval, Style::default().fg(theme::warn())),
             Span::styled("  ·  FILES ", theme::label()),
             Span::styled(sandbox, sandbox_style),
-            Span::styled(format!("   {verb}"), Style::default().fg(theme::MUTED)),
+            Span::styled(format!("   {verb}"), Style::default().fg(theme::muted())),
         ])
     } else {
         Line::from(vec![
             Span::styled(" INSERT ", theme::action()),
-            Span::styled(format!("· {verb}"), Style::default().fg(theme::MUTED)),
+            Span::styled(format!("· {verb}"), Style::default().fg(theme::muted())),
         ])
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if active.is_some() {
-            theme::ACTION
+            theme::action_colour()
         } else {
-            theme::MUTED
+            theme::muted()
         }))
         .title(title);
     let inner = block.inner(area);
@@ -1573,7 +1584,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "This coding task takes no further input. ctrl+x x cancels it.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))),
             rows[0],
         );
@@ -1640,7 +1651,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             footer,
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         rows[2],
     );
@@ -1670,18 +1681,22 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         .unwrap_or("ask");
     let (sandbox, sandbox_writable) = app.home_sandbox();
     let sandbox_style = if sandbox_writable {
-        Style::default().fg(theme::GOOD)
+        Style::default().fg(theme::good())
     } else {
-        Style::default().fg(theme::WARN)
+        Style::default().fg(theme::warn())
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if ready { theme::ACTION } else { theme::MUTED }))
+        .border_style(Style::default().fg(if ready {
+            theme::action_colour()
+        } else {
+            theme::muted()
+        }))
         .title(Line::from(vec![
             Span::styled(" PROVIDER ", theme::label()),
             Span::raw(app.home_provider().to_string()),
             Span::styled("  ·  REQUESTED APPROVAL ", theme::label()),
-            Span::styled(permission.to_string(), Style::default().fg(theme::WARN)),
+            Span::styled(permission.to_string(), Style::default().fg(theme::warn())),
             Span::styled("  ·  FILES ", theme::label()),
             Span::styled(sandbox.to_string(), sandbox_style),
         ]));
@@ -1711,7 +1726,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Type / for commands or press Enter to connect ChatGPT",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))),
             rows[0],
         );
@@ -1720,7 +1735,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
     let footer = if let Some(error) = &app.home_error {
         Line::from(Span::styled(
             super::tree::truncate(error, inner.width.saturating_sub(1) as usize),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::bad()),
         ))
     } else if app.home_draft.completion().is_some() {
         Line::from(Span::styled(
@@ -1729,7 +1744,7 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
                 app.keyboard_enhanced,
                 "starts",
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))
     } else if ready {
         Line::from(Span::styled(
@@ -1738,12 +1753,12 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
                 app.keyboard_enhanced,
                 "starts",
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))
     } else {
         Line::from(Span::styled(
             "/ commands                                               Enter connects",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))
     };
     frame.render_widget(Paragraph::new(footer), rows[2]);
@@ -1830,7 +1845,7 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
         if let Some(effort) = composer.reasoning_effort {
             spans.push(Span::styled(
                 format!(" effort {} ", effort.as_str()),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ));
             spans.push(Span::raw(" "));
         }
@@ -1838,7 +1853,7 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
         if !composer.attachments.is_empty() {
             spans.push(Span::styled(
                 "backspace on an empty draft removes the last",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ));
         }
 
@@ -1848,7 +1863,7 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
     if let Some(refusal) = composer.attachment_refusal.as_deref() {
         lines.push(Line::from(Span::styled(
             super::tree::truncate(refusal, area.width.max(20) as usize),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     }
 
@@ -1915,8 +1930,8 @@ fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &s
     if editor.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("▌ ", Style::default().fg(theme::ACTION)),
-                Span::styled(placeholder.to_string(), Style::default().fg(theme::MUTED)),
+                Span::styled("▌ ", Style::default().fg(theme::action_colour())),
+                Span::styled(placeholder.to_string(), Style::default().fg(theme::muted())),
             ])),
             area,
         );
@@ -1941,7 +1956,7 @@ fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, placeholder: &s
                 "  "
             };
             Line::from(vec![
-                Span::styled(prefix, Style::default().fg(theme::ACTION)),
+                Span::styled(prefix, Style::default().fg(theme::action_colour())),
                 Span::raw(content),
             ])
         })
@@ -1996,7 +2011,7 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
                 if index == menu.selected {
                     theme::selected()
                 } else {
-                    Style::default().fg(theme::MUTED)
+                    Style::default().fg(theme::muted())
                 },
             ))
         })
@@ -2008,7 +2023,7 @@ fn render_completions(frame: &mut Frame, area: Rect, editor: &Editor) {
                 &format!("  +{hidden} more — keep typing to narrow, ↑↓ to move"),
                 area.width as usize,
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 

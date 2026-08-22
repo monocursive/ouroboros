@@ -22,7 +22,7 @@
 use std::collections::HashSet;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 use ratatui::Frame;
@@ -62,11 +62,11 @@ pub enum Marker {
 impl Marker {
     fn style(&self) -> Style {
         match self {
-            Self::Struct(_) => Style::default().fg(theme::ACCENT),
-            Self::Opaque => Style::default().fg(Color::Magenta),
-            Self::B64 => Style::default().fg(Color::Magenta),
-            Self::Truncated | Self::Excerpt { .. } => Style::default().fg(theme::WARN),
-            Self::Map | Self::List => Style::default().fg(theme::MUTED),
+            Self::Struct(_) => Style::default().fg(theme::accent()),
+            Self::Opaque => Style::default().fg(theme::opaque()),
+            Self::B64 => Style::default().fg(theme::opaque()),
+            Self::Truncated | Self::Excerpt { .. } => Style::default().fg(theme::warn()),
+            Self::Map | Self::List => Style::default().fg(theme::muted()),
             Self::Text | Self::Scalar => Style::default(),
         }
     }
@@ -245,7 +245,7 @@ pub fn line(row: &Row) -> Line<'static> {
         } else {
             "> ".to_string()
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
     ));
 
     spans.push(Span::styled(
@@ -257,7 +257,7 @@ pub fn line(row: &Row) -> Line<'static> {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!("«{name}»"),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ));
     }
 

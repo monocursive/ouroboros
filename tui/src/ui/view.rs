@@ -67,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(theme::MUTED));
+        .border_style(Style::default().fg(theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -132,16 +132,16 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let account = if visible_provider.is_some_and(|provider| provider != "codex") {
         Line::from(vec![
-            Span::styled("Provider ", Style::default().fg(theme::MUTED)),
+            Span::styled("Provider ", Style::default().fg(theme::muted())),
             Span::styled(
                 visible_provider.expect("checked provider"),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
         ])
     } else if visible_provider.is_none() {
         Line::from(Span::styled(
             "Provider unknown",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))
     } else if let Some(state) = &app.account.value {
         if let Some(identity) = &state.account {
@@ -155,40 +155,40 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
                 .map(|email| format!("  • {email}"))
                 .unwrap_or_default();
             Line::from(vec![
-                Span::styled(format!("ChatGPT{plan}"), Style::default().fg(theme::GOOD)),
-                Span::styled(identity, Style::default().fg(theme::MUTED)),
+                Span::styled(format!("ChatGPT{plan}"), Style::default().fg(theme::good())),
+                Span::styled(identity, Style::default().fg(theme::muted())),
             ])
         } else if state.requires_openai_auth == Some(false) {
             // An API-key install. There is no subscription to name and nothing to connect,
             // and "not connected" would read as a problem the operator has to go and fix.
             Line::from(vec![
-                Span::styled("Codex ready", Style::default().fg(theme::GOOD)),
+                Span::styled("Codex ready", Style::default().fg(theme::good())),
                 Span::styled(
                     "  • no ChatGPT sign-in needed",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ),
             ])
         } else {
             Line::from(Span::styled(
                 "ChatGPT not connected",
-                Style::default().fg(theme::WARN),
+                Style::default().fg(theme::warn()),
             ))
         }
     } else if app.account.pending {
         Line::from(Span::styled(
             format!("{} checking ChatGPT", theme::spinner(app.ticks)),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))
     } else {
         Line::from(Span::styled(
             "ChatGPT unavailable",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ))
     };
 
     let (ready_label, ready_style) = match &app.connection {
-        Connection::Live => ("LOCAL READY", Style::default().fg(theme::GOOD)),
-        Connection::Lost { .. } => ("LINK LOST", Style::default().fg(theme::BAD)),
+        Connection::Live => ("LOCAL READY", Style::default().fg(theme::good())),
+        Connection::Lost { .. } => ("LINK LOST", Style::default().fg(theme::bad())),
     };
     let mode_label = if app.tab == Tab::Sessions {
         "CODE".to_string()
@@ -246,7 +246,7 @@ fn shell_subtitle(context: &str, workspace: &str, budget: usize, app: &App) -> L
     };
     let mut spans = vec![
         Span::styled(lead.to_string(), theme::label()),
-        Span::styled(separator.to_string(), Style::default().fg(theme::MUTED)),
+        Span::styled(separator.to_string(), Style::default().fg(theme::muted())),
         Span::styled(context.to_string(), context_style),
     ];
 
@@ -255,11 +255,11 @@ fn shell_subtitle(context: &str, workspace: &str, budget: usize, app: &App) -> L
     if !workspace.is_empty() && room >= 12 {
         spans.push(Span::styled(
             separator.to_string(),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
         spans.push(Span::styled(
             super::tree::truncate(workspace, room),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
     }
 
@@ -269,9 +269,9 @@ fn shell_subtitle(context: &str, workspace: &str, budget: usize, app: &App) -> L
 fn status_line(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(notice) = &app.notice {
         let style = match notice.kind {
-            NoticeKind::Info => Style::default().fg(theme::ACCENT),
-            NoticeKind::Warn => Style::default().fg(theme::WARN),
-            NoticeKind::Error => Style::default().fg(theme::BAD),
+            NoticeKind::Info => Style::default().fg(theme::accent()),
+            NoticeKind::Warn => Style::default().fg(theme::warn()),
+            NoticeKind::Error => Style::default().fg(theme::bad()),
         };
 
         // The status line is one row, and a refusal that carried a remainder arrives with
@@ -321,7 +321,7 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
                     "● DISCONNECTED · {} · ctrl+p commands",
                     super::tree::truncate(reason, area.width.saturating_sub(39) as usize)
                 ),
-                Style::default().fg(theme::BAD),
+                Style::default().fg(theme::bad()),
             )),
             area,
         );
@@ -341,7 +341,7 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
 fn runtime_identity(app: &App) -> Vec<Segment> {
     match &app.connection {
         Connection::Live => vec![
-            Segment::new("● LIVE", Style::default().fg(theme::GOOD), 12),
+            Segment::new("● LIVE", Style::default().fg(theme::good()), 12),
             Segment::new(
                 format!(
                     "{} · {} · {}",
@@ -357,17 +357,17 @@ fn runtime_identity(app: &App) -> Vec<Segment> {
                     },
                     super::tree::truncate(&app.address, 22)
                 ),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
                 1,
             ),
         ],
         // A lost connection is the only fact on the row that matters, so both halves of
         // it outrank everything else.
         Connection::Lost { reason } => vec![
-            Segment::new("● DISCONNECTED", Style::default().fg(theme::BAD), 13),
+            Segment::new("● DISCONNECTED", Style::default().fg(theme::bad()), 13),
             Segment::new(
                 super::tree::truncate(reason, 27),
-                Style::default().fg(theme::BAD),
+                Style::default().fg(theme::bad()),
                 11,
             ),
         ],
@@ -393,7 +393,7 @@ impl Segment {
     }
 
     fn key(text: impl Into<String>) -> Self {
-        Self::new(text, Style::default().fg(theme::MUTED), 8)
+        Self::new(text, Style::default().fg(theme::muted()), 8)
     }
 }
 
@@ -493,7 +493,7 @@ fn join(segments: Vec<Segment>) -> Vec<Span<'static>> {
             spans.push(Span::styled(
                 SEPARATOR,
                 Style::default()
-                    .fg(theme::MUTED)
+                    .fg(theme::muted())
                     .add_modifier(Modifier::DIM),
             ));
         }
@@ -519,7 +519,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if let Some(model) = &facts.model {
         segments.push(Segment::new(
             super::tree::truncate(model, 28),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
             5,
         ));
     }
@@ -534,7 +534,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if let Some(sandbox) = &facts.sandbox_mode {
         segments.push(Segment::new(
             sandbox.replace('_', "-"),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
             6,
         ));
     }
@@ -549,7 +549,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         // running, and this is the key that stops it.
         segments.push(Segment::new(
             format!("{} Working{elapsed}", theme::spinner(app.ticks)),
-            Style::default().fg(theme::SYSTEM),
+            Style::default().fg(theme::system()),
             10,
         ));
     }
@@ -557,7 +557,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if let Some(queued) = facts.queued.filter(|queued| *queued > 0) {
         segments.push(Segment::new(
             format!("{queued} queued"),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
             4,
         ));
     }
@@ -569,7 +569,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
                 facts.approvals,
                 if facts.approvals == 1 { "" } else { "s" }
             ),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
             11,
         ));
     }
@@ -588,7 +588,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
 
             segments.push(Segment::new(
                 format!("{} tokens{share}", tokens(total)),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
                 3,
             ));
         }
@@ -596,7 +596,7 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
             segments.push(Segment::new(
                 money(cost),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
                 2,
             ));
         }
@@ -624,7 +624,7 @@ fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if app.interrupt_offered_for(facts) {
         keys.push(Segment::new(
             "esc interrupt",
-            Style::default().fg(theme::ACTION),
+            Style::default().fg(theme::action_colour()),
             10,
         ));
     }
@@ -637,7 +637,7 @@ fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     if app.onboarding() {
         keys.push(Segment::new(
             "? new here",
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
             1,
         ));
     }
@@ -645,12 +645,12 @@ fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     // Discoverable through `ctrl+p` and `?`; the first to yield when the row is tight.
     keys.push(Segment::new(
         "ctrl+x leader",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
         0,
     ));
     keys.push(Segment::new(
         "ctrl+q quit",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
         0,
     ));
     keys
@@ -666,11 +666,11 @@ fn mode_badge(approval_mode: Option<&str>) -> Option<(String, Style)> {
     let mode = approval_mode?;
 
     let (glyph, style) = match mode {
-        "prompt" => ("⏸", Style::default().fg(theme::GOOD)),
-        "auto_edit" => ("⏵⏵", Style::default().fg(theme::ACTION)),
-        "auto_approve" => ("✓", Style::default().fg(theme::WARN)),
+        "prompt" => ("⏸", Style::default().fg(theme::good())),
+        "auto_edit" => ("⏵⏵", Style::default().fg(theme::action_colour())),
+        "auto_approve" => ("✓", Style::default().fg(theme::warn())),
         // `default` and anything a later runtime adds: named, not glossed.
-        _stated => ("⏵", Style::default().fg(theme::MUTED)),
+        _stated => ("⏵", Style::default().fg(theme::muted())),
     };
 
     Some((format!("{glyph} {}", mode.replace('_', "-")), style))
@@ -804,17 +804,17 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
     let rows = state.rows();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
             Span::styled(" /diff ", theme::heading()),
-            Span::styled(state.scope_label(), Style::default().fg(theme::ACCENT)),
+            Span::styled(state.scope_label(), Style::default().fg(theme::accent())),
             Span::styled(
                 format!(
                     "  +{} −{} ",
                     rows.iter().map(|row| row.file.additions).sum::<usize>(),
                     rows.iter().map(|row| row.file.deletions).sum::<usize>()
                 ),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]));
 
@@ -830,7 +830,7 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
     if rows.is_empty() {
         body.push(Line::from(Span::styled(
             "No file changes reached this client in this scope.",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     } else if let Some(offset) = state.pager {
         let Some(open) = state.current() else {
@@ -843,7 +843,7 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
             ),
             Span::styled(
                 format!("+{} −{}", open.file.additions, open.file.deletions),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]));
         body.push(Line::from(""));
@@ -875,7 +875,7 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
             body.push(Line::from(vec![
                 Span::styled(
                     if selected { "› " } else { "  " },
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::accent()),
                 ),
                 Span::styled(
                     format!("{} ", row.file.status.mark()),
@@ -890,10 +890,10 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
                     },
                 ),
                 Span::raw("  "),
-                Span::styled(stats, Style::default().fg(theme::MUTED)),
+                Span::styled(stats, Style::default().fg(theme::muted())),
                 Span::styled(
                     if row.in_excerpt { "  in excerpt" } else { "" },
-                    Style::default().fg(theme::WARN),
+                    Style::default().fg(theme::warn()),
                 ),
             ]));
         }
@@ -922,8 +922,8 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
 
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled(keys, Style::default().fg(theme::MUTED))),
-            Line::from(Span::styled(scope, Style::default().fg(theme::MUTED))),
+            Line::from(Span::styled(keys, Style::default().fg(theme::muted()))),
+            Line::from(Span::styled(scope, Style::default().fg(theme::muted()))),
         ]),
         panes[1],
     );
@@ -951,9 +951,9 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
-            Span::styled(" ctrl+p commands", Style::default().fg(theme::MUTED)),
+            Span::styled(" ctrl+p commands", Style::default().fg(theme::muted())),
             Span::styled(format!(" · {} ", commands.len()), theme::quiet()),
         ]));
     let inner = block.inner(popup);
@@ -968,10 +968,10 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(theme::MUTED)),
+            Span::styled("↑↓", Style::default().fg(theme::muted())),
             Span::styled(
                 " navigate   enter select   esc close",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]))
         .alignment(Alignment::Right),
@@ -980,7 +980,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  search  ", Style::default().fg(theme::MUTED)),
+            Span::styled("  search  ", Style::default().fg(theme::muted())),
             Span::raw(if palette.query.is_empty() {
                 "type a command".to_string()
             } else {
@@ -1005,7 +1005,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
             lines.push(Line::from(Span::styled(
                 command.group(),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             )));
             previous_group = command.group();
@@ -1030,7 +1030,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
         } else {
             Line::from(vec![
                 Span::raw(row[..row.len().saturating_sub(command.shortcut().len())].to_string()),
-                Span::styled(command.shortcut(), Style::default().fg(theme::MUTED)),
+                Span::styled(command.shortcut(), Style::default().fg(theme::muted())),
             ])
         });
     }
@@ -1038,7 +1038,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("no command matches \"{}\"", palette.query.trim()),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 
@@ -1075,13 +1075,13 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
         lines.push(Line::from(Span::styled(
             format!("ChatGPT {plan}"),
             Style::default()
-                .fg(theme::GOOD)
+                .fg(theme::good())
                 .add_modifier(Modifier::BOLD),
         )));
         if let Some(email) = account.and_then(|account| account.email.as_deref()) {
             lines.push(Line::from(Span::styled(
                 email.to_string(),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         lines.push(Line::from(""));
@@ -1091,7 +1091,7 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Enter/Esc closes  ·  l disconnects",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     } else {
         lines.push(Line::from(Span::styled(
@@ -1113,7 +1113,7 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
                 Span::styled(
                     code.clone(),
                     Style::default()
-                        .fg(theme::WARN)
+                        .fg(theme::warn())
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
@@ -1127,25 +1127,25 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
                 Span::styled("Open  ", theme::label()),
                 Span::styled(
                     super::tree::truncate(url, ACCOUNT_INNER.saturating_sub(6)),
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::accent()),
                 ),
             ]));
             lines.push(Line::from(Span::styled(
                 "      press o to open it in a browser",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
 
         if dialog.url.is_none() && dialog.pending {
             lines.push(Line::from(Span::styled(
                 format!("{} preparing a secure sign-in", theme::spinner(app.ticks)),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             )));
         } else if dialog.pending {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("{} waiting for ChatGPT", theme::spinner(app.ticks)),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             )));
         }
 
@@ -1157,7 +1157,7 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Esc cancels. Ouroboros never receives or stores your token.",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 
@@ -1202,7 +1202,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
                 } else {
                     "No sessions yet. Esc closes; use New session from ctrl+p."
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block),
             popup,
@@ -1217,7 +1217,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
             let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", session.plane.tag()),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ),
                 Span::raw(super::tree::truncate(&session.id, 42)),
             ];
@@ -1227,12 +1227,12 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
                         "  ID conflict · {}",
                         super::tree::truncate(&owners.join(" + "), 46)
                     ),
-                    Style::default().fg(theme::BAD),
+                    Style::default().fg(theme::bad()),
                 ));
             } else if session.last_known {
                 spans.push(Span::styled(
                     format!("  last-known · owner offline · {}", session.status.as_str()),
-                    Style::default().fg(theme::WARN),
+                    Style::default().fg(theme::warn()),
                 ));
             } else {
                 spans.push(Span::styled(
@@ -1388,12 +1388,12 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 };
                 let style = match machine_summary.security {
                     MachineSecurity::Secure | MachineSecurity::Standalone => {
-                        Style::default().fg(theme::GOOD)
+                        Style::default().fg(theme::good())
                     }
                     MachineSecurity::Insecure | MachineSecurity::Mismatch => {
-                        Style::default().fg(theme::BAD)
+                        Style::default().fg(theme::bad())
                     }
-                    MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+                    MachineSecurity::Unknown => Style::default().fg(theme::warn()),
                 };
                 ("machines", value, style)
             }
@@ -1414,7 +1414,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 "",
                 "[ save ]".to_string(),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
         };
@@ -1422,7 +1422,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         let mut spans = vec![
             Span::styled(
                 if focused { "> " } else { "  " },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
             // A fixed label column keeps edited preferences scannable.
             Span::styled(format!("{label:<12}"), theme::label()),
@@ -1446,7 +1446,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             Line::from(Span::styled(
                 "Tab/arrows move · Enter opens Machines or advances · Enter on [ save ] writes \
                  the file · Esc closes",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             Line::from(Span::styled(
                 if settings.edited {
@@ -1454,7 +1454,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 } else {
                     ""
                 },
-                Style::default().fg(theme::WARN),
+                Style::default().fg(theme::warn()),
             )),
         ])
         .wrap(Wrap { trim: false }),
@@ -1526,9 +1526,9 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         None => summary.machine.clone(),
     };
     let security_style = match summary.security {
-        MachineSecurity::Standalone | MachineSecurity::Secure => Style::default().fg(theme::GOOD),
-        MachineSecurity::Insecure | MachineSecurity::Mismatch => Style::default().fg(theme::BAD),
-        MachineSecurity::Unknown => Style::default().fg(theme::WARN),
+        MachineSecurity::Standalone | MachineSecurity::Secure => Style::default().fg(theme::good()),
+        MachineSecurity::Insecure | MachineSecurity::Mismatch => Style::default().fg(theme::bad()),
+        MachineSecurity::Unknown => Style::default().fg(theme::warn()),
     };
     let mut facts = vec![
         Line::from(vec![
@@ -1546,13 +1546,13 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         Line::from(Span::styled(summary.recovery, theme::label())),
         Line::from(Span::styled(
             "Boundary: live provider work does not migrate after a full host loss.",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )),
     ];
     if !summary.offline_names.is_empty() {
         facts.push(Line::from(Span::styled(
             format!("Offline: {}", summary.offline_names.join(", ")),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     }
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), rows[0]);
@@ -1567,10 +1567,10 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         actions.push(Line::from(vec![
             Span::styled(
                 if focused { "> " } else { "  " },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
             Span::styled(format!("{:<28}", item.label(machines)), Style::default()),
-            Span::styled(item.hint(machines), Style::default().fg(theme::MUTED)),
+            Span::styled(item.hint(machines), Style::default().fg(theme::muted())),
         ]));
     }
     frame.render_widget(Paragraph::new(actions), rows[1]);
@@ -1584,7 +1584,7 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
         detail.push(Line::from(item.preview().to_string()));
         detail.push(Line::from(Span::styled(
             item.command(machines),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         )));
     }
     frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), rows[2]);
@@ -1592,7 +1592,7 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "↑↓ choose · Enter run · y copy CLI · r refresh · Esc close",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         rows[3],
     );
@@ -1610,7 +1610,7 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Tab moves · Enter reviews · Esc back",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Confirm => {
@@ -1671,7 +1671,7 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter run · y copy CLI · Esc back",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Working => {
@@ -1683,7 +1683,7 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
         AddStep::Done => {
             lines.push(Line::from(Span::styled(
                 "Done",
-                Style::default().fg(theme::GOOD),
+                Style::default().fg(theme::good()),
             )));
             for line in &form.log {
                 lines.push(Line::from(line.clone()));
@@ -1697,7 +1697,7 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter or Esc back to the menu · y copy result",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Method | AddStep::Pick => {}
@@ -1706,7 +1706,7 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             error.clone(),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::bad()),
         )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
@@ -1758,7 +1758,7 @@ fn form_field_row(form: &MachineForm, field: FormField, focused: bool) -> Line<'
     let mut spans = vec![
         Span::styled(
             if focused { "> " } else { "  " },
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
         Span::styled(format!("{label:<20}"), theme::label()),
         Span::raw(value),
@@ -1801,7 +1801,7 @@ fn machine_report(frame: &mut Frame, area: Rect, report: &MachineReport) {
         } else {
             "Enter or Esc back to the menu · y copy"
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
@@ -1838,7 +1838,7 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "↑↓ choose · Enter continue · Esc back",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Pick => {
@@ -1863,7 +1863,7 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "↑↓ choose · 1-9 jump · Enter continue · Esc back",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Form => {
@@ -1875,20 +1875,20 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "A Mac binary will not run on Linux. Leave dest. binary empty if that host already has matching ouro, or pass a Linux build.",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )));
             }
             if let Some(error) = &add.error {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     error.clone(),
-                    Style::default().fg(theme::BAD),
+                    Style::default().fg(theme::bad()),
                 )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Tab fields · Enter review · Esc back. Invitation contents stay off screen.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Confirm => {
@@ -1896,23 +1896,23 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             if standalone {
                 lines.push(Line::from(Span::styled(
                     "This Mac will restart once to become a fleet, then add the other machine.",
-                    Style::default().fg(theme::WARN),
+                    Style::default().fg(theme::warn()),
                 )));
             }
             lines.push(Line::from(Span::styled(
                 app.add_command_preview(),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             )));
             if let Some(error) = &add.error {
                 lines.push(Line::from(Span::styled(
                     error.clone(),
-                    Style::default().fg(theme::BAD),
+                    Style::default().fg(theme::bad()),
                 )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter runs this plan · y copy · Esc edit. No cookies are printed.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
         AddStep::Working => {
@@ -1921,7 +1921,7 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             for line in add.log.iter().rev().take(8).rev() {
                 lines.push(Line::from(Span::styled(
                     line.clone(),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )));
             }
         }
@@ -1935,14 +1935,14 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
                 for line in recipe.lines() {
                     lines.push(Line::from(Span::styled(
                         line.to_string(),
-                        Style::default().fg(theme::ACCENT),
+                        Style::default().fg(theme::accent()),
                     )));
                 }
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Enter/Esc close · y copy recipe. Provider sign-in is still on that machine.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )));
         }
     }
@@ -1954,7 +1954,7 @@ fn method_row(focused: bool, label: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             if focused { "> " } else { "  " },
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
         Span::raw(label.to_string()),
     ])
@@ -1973,7 +1973,7 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
     let mut spans = vec![
         Span::styled(
             if focused { "> " } else { "  " },
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
         Span::styled(format!("{label:<16}"), theme::label()),
         Span::raw(if value.is_empty() { "—" } else { value }.to_string()),
@@ -1995,7 +1995,7 @@ fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -
             } else {
                 "unset — stated per session".to_string()
             },
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         );
     };
 
@@ -2004,20 +2004,20 @@ fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -
     match choice {
         ProviderChoice::Unset => (
             format!("unset — stated per session {position}"),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
         ProviderChoice::Probed { name, ready: true } => (
             format!("{name} {position}"),
-            Style::default().fg(theme::GOOD),
+            Style::default().fg(theme::good()),
         ),
         ProviderChoice::Probed { name, ready: false } => (
             format!("{name} — no executable found {position}"),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
         // The config names it and the runtime does not. Said, rather than dropped.
         ProviderChoice::Unserved { name } => (
             format!("{name} — from the config file; this runtime does not report it {position}"),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ),
     }
 }
@@ -2026,7 +2026,7 @@ fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -
 /// A choice the runtime's own spec says this provider cannot take.
 fn unavailable_style() -> Style {
     Style::default()
-        .fg(theme::MUTED)
+        .fg(theme::muted())
         .add_modifier(Modifier::DIM)
 }
 
@@ -2105,7 +2105,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                     (
                         "machine",
                         format!("{selected} — no longer connected; start will be refused"),
-                        Style::default().fg(theme::WARN),
+                        Style::default().fg(theme::warn()),
                     )
                 }
             }
@@ -2160,7 +2160,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                     "[ start ]".to_string()
                 },
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
         };
@@ -2168,7 +2168,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
         let mut spans = vec![
             Span::styled(
                 if focused { "> " } else { "  " },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
             Span::styled(format!("{label:<11}"), theme::label()),
             Span::styled(value, style),
@@ -2197,7 +2197,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
             } else {
                 "Tab/arrows move · left/right change · Enter on [ start ] · Esc cancels"
             },
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ))),
         chunks[1],
     );
@@ -2213,7 +2213,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
             } else {
                 "this runtime serves no coding providers, so there is nothing to start"
             },
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     } else if dialog.request.machine.trim().is_empty()
         && !providers
@@ -2225,18 +2225,18 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
         // runtime is the authority on whether a session can start.
         footer.push(Line::from(Span::styled(
             "no executable was found for it — the runtime decides, not this probe",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     }
 
     if !dialog.request.machine.trim().is_empty() {
         footer.push(Line::from(Span::styled(
             "Connected checks reachability, not provider readiness. Install and sign in to the provider on that destination; fleet invites never copy credentials.",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
         footer.push(Line::from(Span::styled(
             "Workspace paths are resolved on that destination machine, not on this terminal.",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 
@@ -2252,7 +2252,7 @@ fn provider_cell(
         return (
             "provider",
             "none available".to_string(),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         );
     };
 
@@ -2265,7 +2265,7 @@ fn provider_cell(
                 "{} — readiness unknown on destination {position}",
                 entry.provider
             ),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         );
     }
 
@@ -2273,14 +2273,14 @@ fn provider_cell(
         return (
             "provider",
             format!("{} {position}", entry.provider),
-            Style::default().fg(theme::GOOD),
+            Style::default().fg(theme::good()),
         );
     }
 
     (
         "provider",
         format!("{} — not installed {position}", entry.provider),
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
     )
 }
 
@@ -2298,9 +2298,9 @@ fn refusal_lines(error: &str) -> Vec<Line<'static>> {
             Line::from(Span::styled(
                 line.to_string(),
                 if index == 0 {
-                    Style::default().fg(theme::BAD)
+                    Style::default().fg(theme::bad())
                 } else {
-                    Style::default().fg(theme::MUTED)
+                    Style::default().fg(theme::muted())
                 },
             ))
         })
@@ -2335,7 +2335,7 @@ fn text_or_hint(value: &str, hint: &str) -> String {
 
 fn hint_style(value: &str) -> Style {
     if value.is_empty() {
-        Style::default().fg(theme::MUTED)
+        Style::default().fg(theme::muted())
     } else {
         Style::default()
     }
@@ -2433,7 +2433,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
                 body.push(Line::from(vec![
                     Span::styled(
                         if index == 0 { "$ " } else { "  " },
-                        Style::default().fg(theme::ACCENT),
+                        Style::default().fg(theme::accent()),
                     ),
                     Span::styled(row.clone(), Style::default().add_modifier(Modifier::BOLD)),
                 ]));
@@ -2478,7 +2478,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         for (index, row) in rows.shown.iter().enumerate() {
             body.push(Line::from(vec![
                 Span::styled(if index == 0 { "· " } else { "  " }, theme::quiet()),
-                Span::styled(row.clone(), Style::default().fg(theme::WARN)),
+                Span::styled(row.clone(), Style::default().fg(theme::warn())),
             ]));
         }
         if rows.omitted > 0 {
@@ -2525,7 +2525,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::WARN))
+        .border_style(Style::default().fg(theme::warn()))
         .title(Span::styled(heading, theme::heading()));
     let inner_area = block.inner(popup);
     frame.render_widget(block, popup);
@@ -2675,11 +2675,11 @@ fn approval_diff_rows(
         ),
         Span::styled(
             format!("  +{}", diff.additions),
-            Style::default().fg(theme::GOOD),
+            Style::default().fg(theme::good()),
         ),
         Span::styled(
             format!(" -{}", diff.deletions),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::bad()),
         ),
     ];
 
@@ -2706,11 +2706,11 @@ fn approval_diff_rows(
 
     for line in diff.text.lines().take(shown) {
         let style = if line.starts_with('+') && !line.starts_with("+++") {
-            Style::default().fg(theme::GOOD)
+            Style::default().fg(theme::good())
         } else if line.starts_with('-') && !line.starts_with("---") {
-            Style::default().fg(theme::BAD)
+            Style::default().fg(theme::bad())
         } else if line.starts_with("@@") {
-            Style::default().fg(theme::ACCENT)
+            Style::default().fg(theme::accent())
         } else {
             theme::quiet()
         };
@@ -2819,7 +2819,7 @@ fn chooser(
 
     frame.render_widget(
         Paragraph::new(detail.to_string())
-            .style(Style::default().fg(theme::MUTED))
+            .style(Style::default().fg(theme::muted()))
             .wrap(Wrap { trim: false }),
         rows[0],
     );
@@ -2852,7 +2852,7 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme::ACCENT)),
+            Span::styled("> ", Style::default().fg(theme::accent())),
             Span::raw(buffer.to_string()),
             Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ])),
@@ -2880,19 +2880,19 @@ fn backtrack(
         } else {
             "enter edits and resends as a new turn · esc closes"
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
     ))];
 
     if fork_offered {
         lines.push(Line::from(Span::styled(
             "the fork is the runtime's: where the branch starts is the transport's decision",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )));
     }
 
     lines.push(Line::from(Span::styled(
         "nothing here removes an earlier turn; both verbs only add one",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::muted()),
     )));
     lines.push(Line::from(""));
 
@@ -2903,17 +2903,17 @@ fn backtrack(
         lines.push(Line::from(vec![
             Span::styled(
                 if selected { " \u{25b8} " } else { "   " },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
             Span::styled(
                 format!("#{sequence:<5} "),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
             Span::styled(
                 super::tree::truncate(&text.replace('\n', " "), width),
                 if selected {
                     Style::default()
-                        .fg(theme::ACCENT)
+                        .fg(theme::accent())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -2927,7 +2927,7 @@ fn backtrack(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
+        .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(" go back to a message ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -3074,7 +3074,7 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
+        .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(" ctrl+x ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -3083,7 +3083,7 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|(key, description)| {
             Line::from(vec![
-                Span::styled(format!(" {key:<4}"), Style::default().fg(theme::ACCENT)),
+                Span::styled(format!(" {key:<4}"), Style::default().fg(theme::accent())),
                 Span::raw(*description),
             ])
         })
@@ -3130,7 +3130,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
                 hidden - scroll,
                 if hidden - scroll == 1 { "" } else { "s" }
             ),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ));
 
         if hidden > scroll && visible.len() >= height && height > 0 {
@@ -3157,7 +3157,7 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
         }
 
         rows.push(Line::from(vec![
-            Span::styled(format!("{key:<15}"), Style::default().fg(theme::ACCENT)),
+            Span::styled(format!("{key:<15}"), Style::default().fg(theme::accent())),
             Span::raw(*description),
         ]));
     }
@@ -3168,7 +3168,7 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let commands: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
     for chunk in commands.chunks(8) {
         rows.push(Line::from(vec![
-            Span::styled(format!("{:<15}", ""), Style::default().fg(theme::ACCENT)),
+            Span::styled(format!("{:<15}", ""), Style::default().fg(theme::accent())),
             Span::raw(chunk.join("  ")),
         ]));
     }
@@ -3186,18 +3186,18 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
                     app.hello.node.clone()
                 }
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )),
         Line::from(Span::styled(
             "the token authenticates; it is not a sandbox",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )),
     ];
 
     if !app.hello.operates() {
         limits.push(Line::from(Span::styled(
             "this listener runs at scope `read`: every mutating verb is refused with -32003",
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )));
     }
 
@@ -3223,14 +3223,14 @@ pub fn panel_title(name: &str, pending: bool, error: Option<&String>, tick: u64)
     if pending {
         spans.push(Span::styled(
             format!("{} ", theme::spinner(tick)),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
     }
 
     if let Some(error) = error {
         spans.push(Span::styled(
             format!("[{}] ", super::tree::truncate(error, 60)),
-            Style::default().fg(theme::BAD),
+            Style::default().fg(theme::bad()),
         ));
     }
 
@@ -3242,9 +3242,9 @@ pub fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(if focused {
-            Style::default().fg(theme::ACCENT)
+            Style::default().fg(theme::accent())
         } else {
-            Style::default().fg(theme::MUTED)
+            Style::default().fg(theme::muted())
         })
         .title(title)
 }

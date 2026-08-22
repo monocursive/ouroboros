@@ -364,11 +364,11 @@ fn line(row: &Row) -> Line<'static> {
             let mut spans = vec![
                 Span::styled(
                     if *expanded { "v " } else { "> " },
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ),
                 Span::styled(
                     format!("{sequence:>6}  "),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ),
                 Span::styled(format!("{kind}  "), event_style(kind)),
             ];
@@ -376,14 +376,16 @@ fn line(row: &Row) -> Line<'static> {
             if *fetched {
                 spans.push(Span::styled(
                     "[whole]  ",
-                    Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(theme::good())
+                        .add_modifier(Modifier::DIM),
                 ));
             }
 
             if let Some(tag) = struct_tag {
                 spans.push(Span::styled(
                     format!("«{tag}»  "),
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::accent()),
                 ));
             }
 
@@ -399,7 +401,7 @@ fn line(row: &Row) -> Line<'static> {
         }
         Row::Divider(text) => Line::from(Span::styled(
             format!("──── {text}"),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         )),
     }
 }
@@ -409,19 +411,19 @@ fn line(row: &Row) -> Line<'static> {
 fn event_style(kind: &str) -> Style {
     match EventType::parse(kind) {
         EventType::ApprovalRequested => Style::default()
-            .fg(theme::WARN)
+            .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
         EventType::RunFailed
         | EventType::SessionFailed
         | EventType::TurnFailed
         | EventType::RunCancelled
         | EventType::SessionCancelled
-        | EventType::TurnInterrupted => Style::default().fg(theme::BAD),
+        | EventType::TurnInterrupted => Style::default().fg(theme::bad()),
         EventType::OutputTextFinal | EventType::OutputTextDelta => Style::default(),
         EventType::ToolCall | EventType::ToolResult | EventType::FileChange => {
-            Style::default().fg(theme::ACCENT)
+            Style::default().fg(theme::accent())
         }
-        _other => Style::default().fg(theme::MUTED),
+        _other => Style::default().fg(theme::muted()),
     }
 }
 

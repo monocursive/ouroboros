@@ -26,7 +26,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     "logs live with the spawner",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
@@ -34,7 +34,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
                      not stream the daemon's output. `ouro daemon` writes live application logs \
                      to runtime.log and bootstrap/VM/crash output to daemon.log in its data \
                      directory.",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 )),
             ])
             .block(block)
@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     if dropped > 0 {
         title.push(Span::styled(
             format!("{dropped} lines dropped by the ring "),
-            Style::default().fg(theme::WARN),
+            Style::default().fg(theme::warn()),
         ));
     }
 
@@ -69,7 +69,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "the runtime has printed nothing yet",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             )),
             inner,
         );
@@ -90,7 +90,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
                     // so stderr here is ordinary runtime logging, not a fault.
                     Style::default()
                 } else {
-                    Style::default().fg(theme::MUTED)
+                    Style::default().fg(theme::muted())
                 },
             ))
         })

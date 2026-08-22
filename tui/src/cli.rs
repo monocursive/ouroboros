@@ -32,6 +32,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub dev: bool,
 
+    /// Draw for a screen reader: labelled lines instead of boxes, static spinners,
+    /// numbered menus, spelled-out truncation markers, and a bell when the agent needs
+    /// you. Also settable as `[accessibility] screen_reader = true` in config.toml or
+    /// `OURO_SCREEN_READER=1`.
+    #[arg(long = "ax-screen-reader", global = true)]
+    pub ax_screen_reader: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

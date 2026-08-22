@@ -1020,7 +1020,7 @@ fn render_raw(lines: &mut Vec<Line<'static>>, cell: &Cell) {
                 for hunk in &file.hunks {
                     lines.push(Line::from(Span::styled(
                         super::diff::hunk_label(hunk),
-                        Style::default().fg(theme::ACCENT),
+                        Style::default().fg(theme::accent()),
                     )));
                     for line in &hunk.lines {
                         lines.push(Line::from(Span::styled(
@@ -1070,8 +1070,8 @@ fn raw_sign(kind: super::diff::LineKind) -> &'static str {
 
 fn raw_diff_style(kind: super::diff::LineKind) -> Style {
     match kind {
-        super::diff::LineKind::Added => Style::default().fg(theme::GOOD),
-        super::diff::LineKind::Removed => Style::default().fg(theme::BAD),
+        super::diff::LineKind::Added => theme::diff_added(),
+        super::diff::LineKind::Removed => theme::diff_removed(),
         _ => Style::default(),
     }
 }
@@ -1146,10 +1146,12 @@ pub fn render_plan(lines: &mut Vec<Line<'static>>, plan: &PlanUpdate, width: usi
 
     for step in &plan.steps {
         let style = match step.status {
-            PlanStatus::Done => Style::default().fg(theme::GOOD).add_modifier(Modifier::DIM),
-            PlanStatus::InProgress => Style::default().fg(theme::ACCENT),
+            PlanStatus::Done => Style::default()
+                .fg(theme::good())
+                .add_modifier(Modifier::DIM),
+            PlanStatus::InProgress => Style::default().fg(theme::accent()),
             PlanStatus::Pending => theme::quiet(),
-            PlanStatus::Other(_) => Style::default().fg(theme::WARN),
+            PlanStatus::Other(_) => Style::default().fg(theme::warn()),
         };
         let suffix = match &step.status {
             PlanStatus::Other(status) => format!("  ({status})"),
@@ -1207,7 +1209,7 @@ fn render_thinking(
                 ThinkingState::Collapsed => "  ctrl+o expands",
                 _ => "",
             },
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ),
     ]));
 
@@ -1689,7 +1691,7 @@ fn render_user_message(
         return;
     }
 
-    let border = Style::default().fg(theme::MUTED);
+    let border = Style::default().fg(theme::muted());
     let heading_width = "┌─ ▌ YOU ".width();
     lines.push(Line::from(vec![
         Span::styled("┌─ ", border),
@@ -1745,14 +1747,14 @@ fn render_agent_message(
 ) {
     let message_lines = verbosity.lines(MESSAGE_LINES);
     lines.push(Line::from(vec![
-        Span::styled("◆ ", Style::default().fg(theme::SYSTEM)),
+        Span::styled("◆ ", Style::default().fg(theme::system())),
         Span::styled(
             "AGENT",
             Style::default()
-                .fg(theme::SYSTEM)
+                .fg(theme::system())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" / RESPONSE", Style::default().fg(theme::SYSTEM)),
+        Span::styled(" / RESPONSE", Style::default().fg(theme::system())),
     ]));
 
     // Agent prose is Markdown. Everything about how it becomes styled rows — the block
@@ -1781,7 +1783,7 @@ fn render_agent_message(
             if let Some(last_line) = lines.last_mut() {
                 last_line
                     .spans
-                    .push(Span::styled(caret, Style::default().fg(theme::ACCENT)));
+                    .push(Span::styled(caret, Style::default().fg(theme::accent())));
             }
         }
     }
@@ -1793,13 +1795,13 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
     let (mark, mark_style) = match tool.state {
         ToolState::Running => (
             theme::spinner(tick).to_string(),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
-        ToolState::Completed => ("✓".to_string(), Style::default().fg(theme::GOOD)),
-        ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::BAD)),
+        ToolState::Completed => ("✓".to_string(), Style::default().fg(theme::good())),
+        ToolState::Failed => ("✗".to_string(), Style::default().fg(theme::bad())),
     };
     let name_style = match tool.state {
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Failed => Style::default().fg(theme::bad()),
         _ => Style::default(),
     };
     let summary = summarise(tool);
@@ -1844,7 +1846,7 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
         head.push(Span::styled(
             outcome,
             match tool.state {
-                ToolState::Failed => Style::default().fg(theme::BAD),
+                ToolState::Failed => Style::default().fg(theme::bad()),
                 _ => theme::quiet(),
             },
         ));
@@ -1853,7 +1855,7 @@ fn tool_head(tool: &ToolCell, width: usize, tick: u64) -> Vec<Span<'static>> {
         head.push(Span::styled(
             state_suffix,
             match tool.state {
-                ToolState::Failed => Style::default().fg(theme::BAD),
+                ToolState::Failed => Style::default().fg(theme::bad()),
                 _ => theme::quiet(),
             },
         ));
@@ -1888,7 +1890,7 @@ fn render_tool(
                     verbosity.lines(TOOL_OUTPUT_LINES),
                     &verbosity.provenance("result"),
                     if tool.state == ToolState::Failed {
-                        Style::default().fg(theme::BAD)
+                        Style::default().fg(theme::bad())
                     } else {
                         theme::quiet()
                     },
@@ -1899,9 +1901,9 @@ fn render_tool(
     }
 
     let border = match tool.state {
-        ToolState::Running => Style::default().fg(theme::SYSTEM),
-        ToolState::Completed => Style::default().fg(theme::GOOD),
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Running => Style::default().fg(theme::system()),
+        ToolState::Completed => Style::default().fg(theme::good()),
+        ToolState::Failed => Style::default().fg(theme::bad()),
     };
     lines.push(Line::from(Span::styled(
         format!("┌{}┐", "─".repeat(width.saturating_sub(2))),
@@ -1937,7 +1939,7 @@ fn render_tool_body(
     }
 
     let body = match tool.state {
-        ToolState::Failed => Style::default().fg(theme::BAD),
+        ToolState::Failed => Style::default().fg(theme::bad()),
         _ => theme::quiet(),
     };
     let content_width = width.saturating_sub(4).max(8);
@@ -2070,7 +2072,7 @@ fn render_exploration(
     let (mark, mark_style) = if running {
         (
             theme::spinner(tick).to_string(),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         )
     } else {
         ("•".to_string(), theme::quiet())
@@ -2081,7 +2083,7 @@ fn render_exploration(
         Span::styled(
             super::tree::truncate(&exploration_heading(group), width.saturating_sub(4).max(8)),
             if failed > 0 {
-                Style::default().fg(theme::WARN)
+                Style::default().fg(theme::warn())
             } else {
                 theme::quiet()
             },
@@ -2111,9 +2113,9 @@ fn render_exploration(
             Span::styled(
                 format!("{mark} "),
                 match call.state {
-                    ToolState::Failed => Style::default().fg(theme::BAD),
-                    ToolState::Completed => Style::default().fg(theme::GOOD),
-                    ToolState::Running => Style::default().fg(theme::ACCENT),
+                    ToolState::Failed => Style::default().fg(theme::bad()),
+                    ToolState::Completed => Style::default().fg(theme::good()),
+                    ToolState::Running => Style::default().fg(theme::accent()),
                 },
             ),
             Span::styled(
@@ -2307,7 +2309,7 @@ fn render_diff(
                 heading,
                 Style::default()
                     .fg(if cell.pending_approval {
-                        theme::WARN
+                        theme::warn()
                     } else {
                         file.status.colour()
                     })
@@ -2380,7 +2382,7 @@ fn render_diffstat(
         Span::styled("  ± ", theme::quiet()),
         Span::styled(
             super::diff::diffstat(files, additions, deletions, in_excerpt),
-            Style::default().fg(theme::SYSTEM),
+            Style::default().fg(theme::system()),
         ),
     ]));
 }
@@ -2441,7 +2443,7 @@ fn render_indented_text(
     if wrapped.len() > shown {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("… {omitted}"), Style::default().fg(theme::MUTED)),
+            Span::styled(format!("… {omitted}"), Style::default().fg(theme::muted())),
         ]));
     }
 }
@@ -3010,22 +3012,22 @@ fn file_mark(kind: Option<&str>) -> (&'static str, Color) {
     let kind = kind.unwrap_or("modified").to_ascii_lowercase();
 
     if kind.contains("add") || kind.contains("creat") {
-        ("A", theme::GOOD)
+        ("A", theme::good())
     } else if kind.contains("delet") || kind.contains("remov") {
-        ("D", theme::BAD)
+        ("D", theme::bad())
     } else if kind.contains("renam") || kind.contains("mov") {
-        ("R", theme::ACCENT)
+        ("R", theme::accent())
     } else {
-        ("M", theme::WARN)
+        ("M", theme::warn())
     }
 }
 
 fn colour(tone: Tone) -> Color {
     match tone {
-        Tone::Muted => theme::MUTED,
-        Tone::Success => theme::GOOD,
-        Tone::Warning => theme::WARN,
-        Tone::Error => theme::BAD,
+        Tone::Muted => theme::muted(),
+        Tone::Success => theme::good(),
+        Tone::Warning => theme::warn(),
+        Tone::Error => theme::bad(),
     }
 }
 
@@ -3949,7 +3951,7 @@ mod tests {
             .expect("the inline code");
 
         assert_eq!(code.content.as_ref(), "`mix test`");
-        assert_eq!(code.style.fg, Some(theme::SYSTEM));
+        assert_eq!(code.style.fg, Some(theme::system()));
     }
 
     #[test]

@@ -147,20 +147,30 @@ pub fn plain(rendered: &Rendered) -> String {
 
 /// How many rendered messages one thread keeps.
 ///
-/// Enough for a screenful of agent turns, so scrolling does not evict what is on it.
-const MEMO_ENTRIES: usize = 16;
+/// The conversation pane projects [`crate::ui::sessions::CHAT_ENTRY_WINDOW`] entries and
+/// re-renders every one of them on every frame, so the memo has to be able to hold a whole
+/// window's worth of prose or it evicts on the way round and hits nothing. Sixteen was a
+/// screenful and measured a 0% hit rate at five thousand entries; this is the window, with
+/// [`MEMO_BYTES`] still the real ceiling.
+const MEMO_ENTRIES: usize = 192;
 
 /// …and how much source text those entries may hold between them. A cap in bytes as well
 /// as in entries, because the cost of remembering a message is the message.
 const MEMO_BYTES: usize = 4 * 1024 * 1024;
 
-/// What a memo is filed under. The rows are a function of exactly these four things.
+/// What a memo is filed under. The rows are a function of exactly these five things.
+///
+/// `theme` is the palette generation: every span these rows carry was styled with the
+/// palette that was active when they were built, so a `/theme` switch has to miss. It is a
+/// counter rather than the palette itself because "which theme" is the theme module's
+/// business and "did it change" is all this needs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
     hash: u64,
     width: usize,
     max_lines: usize,
     streaming: bool,
+    theme: u64,
 }
 
 struct Memo {
@@ -189,6 +199,7 @@ pub fn render_cached(text: &str, width: usize, max_lines: usize, streaming: bool
         width,
         max_lines,
         streaming,
+        theme: theme::generation(),
     };
 
     let hit = MEMOS.with(|memos| {
@@ -1791,13 +1802,13 @@ Done.";
             .style
             .add_modifier
             .contains(Modifier::BOLD));
-        assert_eq!(find(&spans, "One").style.fg, Some(theme::SYSTEM));
+        assert_eq!(find(&spans, "One").style.fg, Some(theme::system()));
         assert!(find(&spans, "One")
             .style
             .add_modifier
             .contains(Modifier::UNDERLINED));
 
-        assert_eq!(find(&spans, "Two").style.fg, Some(theme::SYSTEM));
+        assert_eq!(find(&spans, "Two").style.fg, Some(theme::system()));
         assert!(!find(&spans, "Two")
             .style
             .add_modifier
@@ -1809,7 +1820,7 @@ Done.";
             .add_modifier
             .contains(Modifier::BOLD));
 
-        assert_eq!(find(&spans, "Five").style.fg, Some(theme::MUTED));
+        assert_eq!(find(&spans, "Five").style.fg, Some(theme::muted()));
 
         // Never a banner: one source line of heading is one rendered row.
         assert_eq!(
@@ -1843,7 +1854,7 @@ Done.";
 
         let code = find(&spans, "mix test");
         assert_eq!(code.content.as_ref(), "`mix test`");
-        assert_eq!(code.style.fg, Some(theme::SYSTEM));
+        assert_eq!(code.style.fg, Some(theme::system()));
     }
 
     #[test]
@@ -1853,7 +1864,7 @@ Done.";
         for needle in ["`one`", "`two`", "`three`"] {
             assert_eq!(
                 find(&spans, needle).style.fg,
-                Some(theme::SYSTEM),
+                Some(theme::system()),
                 "{needle} lost its channel"
             );
         }
@@ -1866,7 +1877,7 @@ Done.";
         for needle in ["`alpha", "delta`"] {
             assert_eq!(
                 find(&spans, needle).style.fg,
-                Some(theme::SYSTEM),
+                Some(theme::system()),
                 "{needle}"
             );
         }
@@ -1903,8 +1914,8 @@ Done.";
     fn a_task_list_draws_a_box_the_terminal_can_measure() {
         let spans = spans_of("- [ ] open\n- [x] shut\n", 40);
 
-        assert_eq!(find(&spans, "[ ] ").style.fg, Some(theme::MUTED));
-        assert_eq!(find(&spans, "[x] ").style.fg, Some(theme::GOOD));
+        assert_eq!(find(&spans, "[ ] ").style.fg, Some(theme::muted()));
+        assert_eq!(find(&spans, "[x] ").style.fg, Some(theme::good()));
     }
 
     #[test]
@@ -2019,7 +2030,7 @@ Done.";
         );
         assert_eq!(
             find(&spans, "(https://example.com/d)").style.fg,
-            Some(theme::MUTED)
+            Some(theme::muted())
         );
 
         let once = shown("See <https://example.com/d>.", 60);

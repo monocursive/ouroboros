@@ -132,7 +132,7 @@ fn list(
             .unwrap_or_else(|| "loading".to_string());
 
         frame.render_widget(
-            Paragraph::new(Span::styled(message, Style::default().fg(theme::MUTED)))
+            Paragraph::new(Span::styled(message, Style::default().fg(theme::muted())))
                 .block(block)
                 .wrap(Wrap { trim: false }),
             area,
@@ -145,7 +145,7 @@ fn list(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 format!("no {title} on this node"),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block)
             .wrap(Wrap { trim: false }),
@@ -163,7 +163,7 @@ fn list(
             if let Some(status) = &row.status {
                 spans.push(Span::styled(
                     format!("  {status}"),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ));
             }
 
@@ -212,7 +212,7 @@ fn detail(
                 } else {
                     "select a row"
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block)
             .wrap(Wrap { trim: false }),
@@ -271,7 +271,7 @@ fn upgrade(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if let Some(hint) = hint {
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(theme::MUTED)))
+            Paragraph::new(Span::styled(hint, Style::default().fg(theme::muted())))
                 .block(block)
                 .wrap(Wrap { trim: false }),
             columns[1],
@@ -288,7 +288,7 @@ fn upgrade(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     "loading"
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ))
             .block(block)
             .wrap(Wrap { trim: false }),
@@ -344,16 +344,16 @@ fn sections(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     // `hello.methods` is the feature gate and the only one (§2.3): a verb
                     // this build does not serve is shown as absent, not tried.
-                    Style::default().fg(theme::MUTED)
+                    Style::default().fg(theme::muted())
                 },
             )];
 
             if panel.error.is_some() {
-                spans.push(Span::styled("  !", Style::default().fg(theme::BAD)));
+                spans.push(Span::styled("  !", Style::default().fg(theme::bad())));
             } else if let Some(Value::Array(items)) = &panel.value {
                 spans.push(Span::styled(
                     format!("  {}", items.len()),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::muted()),
                 ));
             }
 

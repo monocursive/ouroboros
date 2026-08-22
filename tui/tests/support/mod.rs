@@ -252,6 +252,12 @@ impl Screen {
 
         self.colours[index][column]
     }
+
+    /// Every foreground colour in the frame, for a test whose claim is about all of them —
+    /// `NO_COLOR`, where the assertion is that not one cell was painted.
+    pub fn colours(&self) -> impl Iterator<Item = Color> + '_ {
+        self.colours.iter().flat_map(|row| row.iter().copied())
+    }
 }
 
 pub fn render(app: &mut App, width: u16, height: u16) -> Screen {
