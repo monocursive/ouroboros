@@ -239,19 +239,36 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn visible(&self) -> Vec<Command> {
-        Command::ALL
+    /// Every command whose label, group, or shortcut matches the query — before the
+    /// capability filter. [`App::palette_commands`] is what a caller draws or activates;
+    /// this is the half that does not need to know which session is open.
+    pub fn matching(&self, offered: &[Command]) -> Vec<Command> {
+        offered
             .iter()
             .copied()
             .filter(|command| command.matches(&self.query))
             .collect()
     }
+}
 
-    pub(super) fn first_match(&self) -> usize {
-        self.visible()
+impl App {
+    /// The palette's rows for the session that is actually open.
+    ///
+    /// B0/D14: a command that cannot work here is not listed. `Steer` is the live case —
+    /// `steer/3` is `{:error, :unsupported}` on every transport but `pi`'s — and the
+    /// approval entry goes the same way on a transport with no approvals channel.
+    pub fn palette_commands(&self, palette: &CommandPalette) -> Vec<Command> {
+        let offered = Command::ALL
             .iter()
-            .position(|command| command.matches(&self.query))
-            .unwrap_or(0)
+            .copied()
+            .filter(|command| match command {
+                Command::Steer => self.steer_offered(),
+                Command::Interrupt => self.open_capabilities().interrupt.offered(),
+                _always => true,
+            })
+            .collect::<Vec<_>>();
+
+        palette.matching(&offered)
     }
 }
 
@@ -560,9 +577,10 @@ impl App {
         }
 
         let selected_command = match self.overlay.as_ref() {
-            Some(Overlay::Commands(palette)) if matches!(key.code, KeyCode::Enter) => {
-                palette.visible().get(palette.selected).copied()
-            }
+            Some(Overlay::Commands(palette)) if matches!(key.code, KeyCode::Enter) => self
+                .palette_commands(palette)
+                .get(palette.selected)
+                .copied(),
             _ => None,
         };
 
@@ -571,23 +589,29 @@ impl App {
             return;
         }
 
+        let rows = match self.overlay.as_ref() {
+            Some(Overlay::Commands(palette)) => self.palette_commands(palette).len(),
+            _ => return,
+        };
+
         let Some(Overlay::Commands(palette)) = self.overlay.as_mut() else {
             return;
         };
 
         match key.code {
             KeyCode::Down => {
-                let len = palette.visible().len();
-                palette.selected = (palette.selected + 1).min(len.saturating_sub(1));
+                palette.selected = (palette.selected + 1).min(rows.saturating_sub(1));
             }
             KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
             KeyCode::Backspace => {
                 palette.query.pop();
-                palette.selected = palette.first_match();
+                // The visible list is already filtered to what matches, so the first row
+                // is the first match.
+                palette.selected = 0;
             }
             KeyCode::Char(c) if !ctrl => {
                 palette.query.push(c);
-                palette.selected = palette.first_match();
+                palette.selected = 0;
             }
             _ => {}
         }

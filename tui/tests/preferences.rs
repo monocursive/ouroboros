@@ -121,6 +121,7 @@ fn connected(defaults: Defaults) -> App {
             mouse_hint_shown: true,
         },
         terminal: config::Terminal::default(),
+        ..Config::default()
     };
 
     answer(

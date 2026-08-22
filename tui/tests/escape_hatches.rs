@@ -252,7 +252,7 @@ fn both_hatches_are_reachable_from_the_palette_as_well_as_the_leader() {
         };
 
         assert_eq!(
-            palette.visible(),
+            app.palette_commands(palette),
             vec![command],
             "{query:?} does not name exactly {command:?} in the palette"
         );

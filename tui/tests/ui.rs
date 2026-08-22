@@ -5445,7 +5445,9 @@ fn an_open_session_keeps_the_composer_focused_like_an_agent_tui() {
     );
 
     let screen = render(&mut app, 120, 30);
-    assert!(screen.contains("ctrl+x leader"), "{}", screen.text());
+    // A7 gave the footer facts to state, and they outrank the hints that are also on `?`
+    // and in the palette. `ctrl+p commands` is the one that is always there.
+    assert!(screen.contains("ctrl+p commands"), "{}", screen.text());
     assert!(screen.contains("esc abort"), "{}", screen.text());
     assert!(!screen.contains("Press i to write"), "{}", screen.text());
 }

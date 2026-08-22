@@ -55,7 +55,9 @@ pub mod explorer;
 pub mod export;
 pub mod logo;
 pub mod logs;
+pub mod notify;
 pub mod sessions;
+pub mod statusline;
 pub mod theme;
 pub mod transcript;
 pub mod transcript_cells;
@@ -74,9 +76,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyEventKind, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, BeginSynchronizedUpdate,
@@ -299,6 +301,9 @@ impl Screen {
                 .execute(EnableMouseCapture)
                 .context("enabling mouse capture")?;
         }
+        io::stdout()
+            .execute(EnableFocusChange)
+            .context("enabling focus reporting")?;
 
         // Asked rather than assumed, and only claimed where the terminal answered yes: the
         // composer advertises `Shift+Enter` for a newline, and in a terminal without this
@@ -345,6 +350,9 @@ impl Screen {
                 .execute(EnableMouseCapture)
                 .context("re-enabling mouse capture")?;
         }
+        io::stdout()
+            .execute(EnableFocusChange)
+            .context("re-enabling focus reporting")?;
 
         if matches!(supports_keyboard_enhancement(), Ok(true))
             && io::stdout()
@@ -377,9 +385,44 @@ fn restore() {
 
     let _ = disable_raw_mode();
     let _ = io::stdout()
-        .execute(DisableMouseCapture)
+        .execute(DisableFocusChange)
+        .and_then(|stdout| stdout.execute(DisableMouseCapture))
         .and_then(|stdout| stdout.execute(DisableBracketedPaste))
         .and_then(|stdout| stdout.execute(LeaveAlternateScreen));
+
+    // The window title this process set is this process's to put back.
+    notify::clear_title();
+}
+
+/// Writes the window title the App decided on, and rings for the notifications it armed.
+///
+/// Both are escape sequences straight to stdout rather than cells in a frame, so they are
+/// drained here beside the clipboard rather than drawn by [`view`].
+fn chrome_pending(app: &mut App) {
+    if let Some(title) = app.take_title() {
+        notify::set_title(&title);
+    }
+
+    for (channel, signal) in app.take_notifications() {
+        notify::emit(channel, signal);
+    }
+}
+
+/// Runs the `[statusline] command`, off the render loop.
+///
+/// One task per dispatch, and the App refuses to hand over a second request while one is
+/// outstanding, so a command slower than the debounce window cannot stack.
+fn statusline_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
+    let Some((command, payload)) = app.take_statusline_request() else {
+        return;
+    };
+
+    let sender = sender.clone();
+
+    tokio::spawn(async move {
+        let result = statusline::run(&command, &payload).await;
+        let _ = sender.send(Msg::StatusLine(result));
+    });
 }
 
 /// Draws one frame as a single atomic terminal update.
@@ -666,6 +709,16 @@ fn input(sender: mpsc::UnboundedSender<Msg>) {
                     return;
                 }
             }
+            Ok(Event::FocusGained) => {
+                if sender.send(Msg::Focus(true)).is_err() {
+                    return;
+                }
+            }
+            Ok(Event::FocusLost) => {
+                if sender.send(Msg::Focus(false)).is_err() {
+                    return;
+                }
+            }
             Ok(Event::Mouse(mouse)) => {
                 let delta = match mouse.kind {
                     MouseEventKind::ScrollUp => -3,
@@ -818,6 +871,10 @@ pub async fn run(
     // And so is whether the mouse was captured, which is the only condition under which the
     // selection hint is true. `None` means nothing was taken and there is nothing to say.
     app.mouse_hint = mouse_hint();
+    // What this terminal says it is, for resolving `[notifications] mode = "auto"`. Read
+    // here rather than in the App so that resolution stays a pure function of state a
+    // test can set, rather than of the process environment.
+    app.terminal = notify::Terminal::from_env();
 
     // The boot renderer and the harness share one alternate screen, but they do not share
     // one frame layout. Clear the physical terminal at the handoff so sparse areas of the
@@ -866,6 +923,8 @@ pub async fn run(
         persist(&mut app);
         open_pending_url(&mut app);
         copy_pending(&mut app);
+        chrome_pending(&mut app);
+        statusline_pending(&mut app, &sender);
         if app.take_scan_machines() {
             spawn_machine_scan(sender.clone());
         }
@@ -986,6 +1045,10 @@ pub async fn run(
             } else {
                 edited
             };
+
+            // `suspend` restored the terminal through the same path that empties the
+            // title on exit, so the next tick has to write it again.
+            app.forget_title();
 
             match result {
                 Ok(text) => app.apply(Msg::ExternalEditor(text)),
