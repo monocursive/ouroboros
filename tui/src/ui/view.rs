@@ -288,57 +288,26 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let runtime = match &app.connection {
-        Connection::Live => Line::from(vec![
-            Span::styled("● LIVE", Style::default().fg(theme::GOOD)),
-            Span::styled(
-                format!(
-                    "  {} · {} · {}",
-                    if app.spawned() {
-                        "OWN RUNTIME"
-                    } else {
-                        "ATTACHED"
-                    },
-                    if app.hello.scope.trim().is_empty() {
-                        "scope?"
-                    } else {
-                        app.hello.scope.trim()
-                    },
-                    super::tree::truncate(&app.address, 22)
-                ),
-                Style::default().fg(theme::MUTED),
-            ),
-        ]),
-        Connection::Lost { reason } => Line::from(vec![
-            Span::styled("● DISCONNECTED  ", Style::default().fg(theme::BAD)),
-            Span::styled(
-                super::tree::truncate(reason, 27),
-                Style::default().fg(theme::BAD),
-            ),
-        ]),
-    };
+    let mut left = runtime_identity(app);
+    left.extend(footer_facts(app));
     let keys = footer_keys(app);
 
     if area.width >= 112 {
-        // The keys keep their half of the row; the facts take what is left of the other
-        // half after the runtime identity, dropping the least important first. Sizing the
-        // runtime column from what Ratatui will actually draw is what stopped two
-        // attached local runtimes looking identical: a fixed 43-cell column clipped the
-        // last digit off ordinary five-digit loopback ports.
-        let keys_width = segments_width(&keys).min(area.width as usize / 2) as u16;
+        // One ranking across both columns, not a budget each. The two halves compete for
+        // the same row, so deciding independently is how a footer ends up with a `ctrl+q
+        // quit` hint and no model on it.
+        let (left, keys) = fit_pair(left, keys, area.width as usize);
+
+        // Sized from what Ratatui will actually draw. A fixed 43-cell column clipped the
+        // last digit off ordinary five-digit loopback ports, making two attached local
+        // runtimes look identical in the footer.
+        let keys_width = segments_width(&keys).min(area.width as usize) as u16;
         let columns =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(keys_width)]).split(area);
 
-        let facts_budget = (columns[0].width as usize).saturating_sub(runtime.width() + 3);
-        let mut spans = runtime.spans;
-        for span in join(fit(footer_facts(app), facts_budget)) {
-            spans.push(span);
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(spans)), columns[0]);
+        frame.render_widget(Paragraph::new(Line::from(join(left))), columns[0]);
         frame.render_widget(
-            Paragraph::new(Line::from(join(fit(keys, keys_width as usize))))
-                .alignment(Alignment::Right),
+            Paragraph::new(Line::from(join(keys))).alignment(Alignment::Right),
             columns[1],
         );
     } else if let Connection::Lost { reason } = &app.connection {
@@ -353,23 +322,51 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
             area,
         );
     } else {
-        // Narrow: the facts are the part that could not be read anywhere else, so they
-        // take the row first and the keys keep only what fits after them.
-        let mut segments = footer_facts(app);
-        let facts = segments.len();
-        segments.extend(keys);
+        // Narrow: one column, same ranking, and the runtime identity's detail is the
+        // first thing to yield — it is on the Dashboard and in the header, and the open
+        // session's facts are not anywhere else.
+        left.extend(keys);
+        frame.render_widget(
+            Paragraph::new(Line::from(join(fit(left, area.width as usize)))),
+            area,
+        );
+    }
+}
 
-        let mut kept = fit(segments, area.width as usize);
-        // A row of nothing but facts states what is happening and offers no way to act on
-        // it. `ctrl+p` is the one key that always leads somewhere, so it outranks the
-        // last fact when only one of them fits.
-        if kept.len() == facts && facts > 1 {
-            kept.pop();
-            kept.push(Segment::key("ctrl+p commands"));
-            kept = fit(kept, area.width as usize);
-        }
-
-        frame.render_widget(Paragraph::new(Line::from(join(kept))), area);
+/// `● LIVE` and the runtime it is live to, as two separately droppable facts.
+fn runtime_identity(app: &App) -> Vec<Segment> {
+    match &app.connection {
+        Connection::Live => vec![
+            Segment::new("● LIVE", Style::default().fg(theme::GOOD), 12),
+            Segment::new(
+                format!(
+                    "{} · {} · {}",
+                    if app.spawned() {
+                        "OWN RUNTIME"
+                    } else {
+                        "ATTACHED"
+                    },
+                    if app.hello.scope.trim().is_empty() {
+                        "scope?"
+                    } else {
+                        app.hello.scope.trim()
+                    },
+                    super::tree::truncate(&app.address, 22)
+                ),
+                Style::default().fg(theme::MUTED),
+                1,
+            ),
+        ],
+        // A lost connection is the only fact on the row that matters, so both halves of
+        // it outrank everything else.
+        Connection::Lost { reason } => vec![
+            Segment::new("● DISCONNECTED", Style::default().fg(theme::BAD), 13),
+            Segment::new(
+                super::tree::truncate(reason, 27),
+                Style::default().fg(theme::BAD),
+                11,
+            ),
+        ],
     }
 }
 
@@ -396,7 +393,9 @@ impl Segment {
     }
 }
 
-const SEPARATOR: &str = "  ·  ";
+/// Narrow on purpose. The header can afford `  ·  `; a footer carrying eight facts and
+/// four keys spends a fifth of an eighty-column row on separators at that width.
+const SEPARATOR: &str = " · ";
 
 fn segments_width(segments: &[Segment]) -> usize {
     use unicode_width::UnicodeWidthStr;
@@ -414,14 +413,8 @@ fn segments_width(segments: &[Segment]) -> usize {
 /// noise, and the footer's job is to be readable at a glance in a 96-column tmux pane.
 fn fit(mut segments: Vec<Segment>, budget: usize) -> Vec<Segment> {
     while segments.len() > 1 && segments_width(&segments) > budget {
-        let weakest = segments
-            .iter()
-            .enumerate()
-            .min_by_key(|(index, segment)| (segment.rank, std::cmp::Reverse(*index)))
-            .map(|(index, _)| index);
-
-        match weakest {
-            Some(index) => {
+        match weakest(&segments) {
+            Some((index, _rank)) => {
                 segments.remove(index);
             }
             None => break,
@@ -433,6 +426,59 @@ fn fit(mut segments: Vec<Segment>, budget: usize) -> Vec<Segment> {
     }
 
     segments
+}
+
+/// The gap the two columns keep between them when both are drawn.
+const COLUMN_GAP: usize = 3;
+
+/// Drops the globally weakest segment until the left column, the gap, and the right
+/// column all fit on one row.
+fn fit_pair(
+    mut left: Vec<Segment>,
+    mut keys: Vec<Segment>,
+    budget: usize,
+) -> (Vec<Segment>, Vec<Segment>) {
+    loop {
+        let width = segments_width(&left)
+            + segments_width(&keys)
+            + if left.is_empty() || keys.is_empty() {
+                0
+            } else {
+                COLUMN_GAP
+            };
+
+        if width <= budget || left.len() + keys.len() <= 1 {
+            break;
+        }
+
+        let from_left = weakest(&left);
+        let from_keys = weakest(&keys);
+
+        match (from_left, from_keys) {
+            (Some((index, rank)), Some((_, other))) if rank <= other => {
+                left.remove(index);
+            }
+            (_, Some((index, _))) => {
+                keys.remove(index);
+            }
+            (Some((index, _)), None) => {
+                left.remove(index);
+            }
+            (None, None) => break,
+        }
+    }
+
+    (left, keys)
+}
+
+/// The index of the segment to drop next, and its rank. Ties go to the later one, so a
+/// row shortens from its tail.
+fn weakest(segments: &[Segment]) -> Option<(usize, u8)> {
+    segments
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, segment)| (segment.rank, std::cmp::Reverse(*index)))
+        .map(|(index, segment)| (index, segment.rank))
 }
 
 fn join(segments: Vec<Segment>) -> Vec<Span<'static>> {
@@ -470,18 +516,23 @@ fn footer_facts(app: &App) -> Vec<Segment> {
         segments.push(Segment::new(
             super::tree::truncate(model, 28),
             Style::default().fg(theme::ACCENT),
-            3,
+            5,
         ));
     }
 
     if let Some((badge, style)) = mode_badge(facts.approval_mode.as_deref()) {
-        let sandbox = facts
-            .sandbox_mode
-            .as_deref()
-            .map(|mode| format!(" · {}", mode.replace('_', "-")))
-            .unwrap_or_default();
+        segments.push(Segment::new(badge, style, 9));
+    }
 
-        segments.push(Segment::new(format!("{badge}{sandbox}"), style, 9));
+    // Its own cell rather than a suffix on the badge: the two are separate statements —
+    // who is asked, and what can be written — and on a narrow row the first is the one
+    // that has to survive.
+    if let Some(sandbox) = &facts.sandbox_mode {
+        segments.push(Segment::new(
+            sandbox.replace('_', "-"),
+            Style::default().fg(theme::MUTED),
+            6,
+        ));
     }
 
     if facts.working {
@@ -490,10 +541,12 @@ fn footer_facts(app: &App) -> Vec<Segment> {
             .map(|elapsed| format!(" {}", duration(elapsed)))
             .unwrap_or_default();
 
+        // Ranked with `esc interrupt`, because they are one statement: something is
+        // running, and this is the key that stops it.
         segments.push(Segment::new(
             format!("{} Working{elapsed}", theme::spinner(app.ticks)),
             Style::default().fg(theme::SYSTEM),
-            7,
+            10,
         ));
     }
 
@@ -513,7 +566,7 @@ fn footer_facts(app: &App) -> Vec<Segment> {
                 if facts.approvals == 1 { "" } else { "s" }
             ),
             Style::default().fg(theme::WARN),
-            6,
+            11,
         ));
     }
 
@@ -532,7 +585,7 @@ fn footer_facts(app: &App) -> Vec<Segment> {
             segments.push(Segment::new(
                 format!("{} tokens{share}", tokens(total)),
                 Style::default().fg(theme::MUTED),
-                2,
+                3,
             ));
         }
 
@@ -540,7 +593,7 @@ fn footer_facts(app: &App) -> Vec<Segment> {
             segments.push(Segment::new(
                 money(cost),
                 Style::default().fg(theme::MUTED),
-                1,
+                2,
             ));
         }
     }
@@ -573,8 +626,17 @@ fn footer_keys(app: &App) -> Vec<Segment> {
     }
 
     keys.push(Segment::key("ctrl+p commands"));
-    keys.push(Segment::key("ctrl+x leader"));
-    keys.push(Segment::key("ctrl+q quit"));
+    // Discoverable through `ctrl+p` and `?`; the first to yield when the row is tight.
+    keys.push(Segment::new(
+        "ctrl+x leader",
+        Style::default().fg(theme::MUTED),
+        0,
+    ));
+    keys.push(Segment::new(
+        "ctrl+q quit",
+        Style::default().fg(theme::MUTED),
+        0,
+    ));
     keys
 }
 
