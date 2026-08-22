@@ -131,6 +131,9 @@ existing file) because nobody named a source there to have gotten wrong.
 | `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN` | unset | `1` additionally enables `runtime.shutdown` (spawner sets it; server operators generally don't) |
 | `OUROBOROS_GATEWAY_MAX_FRAME` | `1048576` | max inbound line bytes; oversized → typed error, connection closed |
 | `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection **outbound** frame cap (see §2.6). The inbound bound — requests accepted and not yet dispatched — is a fixed constant (64) in `Gateway.Conn`, not this variable: one name for two queues is a name an operator cannot reason about |
+| `OUROBOROS_GATEWAY_EVENT_LEAF_BYTES` | `131072` | most bytes one string inside an event `payload` may put on the wire; beyond it the string is excerpted (§2.7). Floor 1024 |
+| `OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES` | `524288` | most bytes *all* of one event's payload strings may put on the wire together, per event (§2.7). Floor 1024 |
+| `OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES` | `8388608` | the per-string cap `interactive.event_detail` / `coding.event_detail` encode under (§2.4). Floor 1024 |
 
 Two placement facts the implementation must respect:
 
@@ -286,9 +289,10 @@ reading.
 | `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0` |
 | `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default |
 | `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
+| `interactive.event_detail` `{id, sequence, node}` | The one event at `sequence`, whole — `replay` with `cursor: sequence - 1, limit: 1`, same owner routing and the same 15s ceiling. Answers a **bare event object**, not the single-element array `replay` would give. It exists because streamed and replayed events are byte-capped (§2.7), so this is where a client fetches the leaf an `_excerpt` named: the answer is encoded under `detail_leaf_bytes` (8 MiB) rather than `event_leaf_bytes` (128 KiB), and a leaf past even *that* carries the same `_excerpt` marker. Below the retained floor → `-32006` `{"reason": "cursor_pruned", "floor": N}`, the same shape `replay`/`subscribe` answer with; above the high-water mark, or inside a sequence gap, → `-32007` (a window of one starting in a gap returns the *next* event that exists, and answering with an event nobody asked for would be a worse lie than not finding it) |
 | `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
 | `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
-| `coding.info/replay/subscribe/unsubscribe` | `CodingSession` equivalents (`{:ouroboros_coding_event, id, event}`) |
+| `coding.info/replay/subscribe/unsubscribe/event_detail` | `CodingSession` equivalents (`{:ouroboros_coding_event, id, event}`); `coding.event_detail` `{id, sequence, node}` is the coding-plane twin of the row above, refusals and all |
 | `teams.list` | `Team.Store.list/0`, projected as in `status/0` |
 | `teams.state` `{id}` | `Team.state/1` via `Team.whereis/1` |
 | `plans.list` / `plans.get` `{id}` | `Orchestration.Scheduler.list/0` / `Scheduler.get/2` (server is the *first* arg with a default; bare `:not_found` → `-32007`) |
@@ -365,6 +369,13 @@ emitted as notification `interactive.event` / `coding.event` with params
 field is `task_id`, not `session_id`). Both event structs carry `sequence` —
 the resync cursor.
 
+**Event payloads are byte-capped, and the three paths to an event share one cap.**
+A live notification, a `replay` result, and a `subscribe` backlog all reach the same
+event-struct clause in `Gateway.Wire`, so a leaf too large to frame arrives as
+`{"_excerpt": …, "_bytes": N}` on all three or on none — they cannot drift. The rule and
+the marker are in §2.7; `interactive.event_detail` (§2.4) is where a client asks for the
+leaf itself. The two `stream.*` control frames carry no event and are unaffected.
+
 The four subscription verbs are answered **by the `Conn` process itself**, not by a
 dispatch task, because both planes register `self()` as the subscriber. The cost is
 stated rather than hidden: those calls block the connection for as long as the plane's
@@ -405,7 +416,11 @@ A connection may hold at most 64 subscriptions.
 
 ### 2.6 Backpressure (non-negotiable)
 
-The Conn keeps one outbound queue. Frames are two classes:
+The Conn keeps one outbound queue, counted in **frames**. How large one frame gets is a
+separate bound and lives in §2.7 — a thousand-frame queue says nothing about a single
+five-megabyte diff, which is why both exist.
+
+Frames are two classes:
 
 - **Responses and the two stream control notifications** — never dropped. The hard cap
   is `OUROBOROS_GATEWAY_QUEUE_LIMIT` plus 72, which is exactly the number of responses
@@ -462,7 +477,54 @@ So `Gateway.Wire` implements its own recursive walk, replacing at the leaf:
 3. atoms → strings; tuples → lists; map keys → strings; non-UTF-8 binaries →
    `{"_b64": …}`; depth cap 32 and node-count cap (protects the Conn from
    pathological state trees) → `{"_truncated": true}` beyond either.
-4. `JSON.encode!/1` (stdlib — Elixir 1.20/OTP 29, no new dep).
+4. a string inside an **event `payload`** longer than its cap →
+   `{"_excerpt": <the first bytes>, "_bytes": <full size>}`.
+5. `JSON.encode!/1` (stdlib — Elixir 1.20/OTP 29, no new dep).
+
+**The byte cap on event payloads.** Depth and node counts do not bound bytes: fifty
+thousand nodes is a cheap tree, and one node holding a five-megabyte diff is not. That
+node used to be framed whole on every notification and again on every replay of the same
+session. The rule, whole:
+
+> Each string leaf inside an event `payload` may put at most `event_leaf_bytes`
+> (128 KiB) on the wire, and one event's payload strings at most
+> `event_payload_bytes` (512 KiB) between them. The cap for a leaf is whichever of the
+> two is smaller when it is reached — the per-leaf cap, or what is left of the per-event
+> budget. A leaf over its cap becomes `{"_excerpt": prefix, "_bytes": full_size}`. The
+> budget starts over at each event, so a 500-event replay gives every event its own.
+
+Three things the rule deliberately does not do:
+
+- **The envelope is never excerpted** — `type`, `sequence`, `timestamp`, the `*_id`
+  fields, `provider`. A client indexes and resyncs by them, and an excerpted `sequence`
+  would break the protocol rather than bound it.
+- **A string of ≤512 bytes is never excerpted**, because the marker map replacing it
+  would be larger than the string. So a payload of tens of thousands of *short* strings
+  is bounded by the node cap, exactly as it was before — this cap is aimed at the leaf
+  that is large by itself, which is the shape a diff, a tool result, and a file read all
+  have.
+- **Nothing outside an event payload changed.** `runtime.status`, `agents.state`, and
+  every error's `data` are bounded by depth and node count alone, as before.
+
+The excerpt is cut at a UTF-8 boundary — `binary_part/3` can land inside a multi-byte
+character and a client decoding a frame is owed valid UTF-8, so the cut retreats to the
+last whole character (never more than three bytes). A non-UTF-8 binary over its cap keeps
+the `_b64` spelling it already had and gains the same `_bytes` key; the budget counts
+*source* bytes retained, and base64 costs four wire bytes for every three of them.
+
+`interactive_event_excerpt_notification.json` pins the marker's shape for the Rust side,
+and `interactive_event_detail_result.json` / `coding_event_detail_result.json` pin what
+`event_detail` answers with. The excerpt fixture states 48- and 96-byte caps rather than
+the 128 KiB default so the contract file stays a diff a person can read; the arithmetic
+is asserted in `Ouroboros.Gateway.WireTest`.
+
+**Honest limit on `detail_leaf_bytes`.** Its 8 MiB default is the client's *entire*
+inbound line ceiling (`DEFAULT_MAX_LINE`, [tui/src/transport.rs:54](../tui/src/transport.rs)),
+so an event whose payload actually approaches the cap produces a frame the current client
+cannot read — the envelope and JSON escaping push it past 8 MiB and the line is truncated
+rather than decoded. The cap bounds the server's memory and the socket honestly; it does
+not promise the client can take delivery of the largest thing it permits. Raising one
+without the other buys nothing.
 
 This transform is exactly why a forged `Ouroboros.Capability.*` agent's novel
 state renders in the TUI the moment it exists: everything is a tree of
@@ -559,7 +621,17 @@ and clustering keeps the existing posture.
   malformed JSON −32700 answered not crashed; oversized frame; scope_denied on
   operate methods under read scope; shutdown refused without the extra flag.
 - **Wire:** golden encoding of nasty terms — pids in nested maps, improper-ish
-  tuples, structs, non-UTF-8 binaries, atom keys.
+  tuples, structs, non-UTF-8 binaries, atom keys. Plus the event-payload byte cap
+  (§2.7): a 5 MB leaf excerpted with its true size named, the envelope untouched, an
+  excerpt cut inside a multi-byte character retreating to a whole one, the per-event
+  budget spent exactly and restarted at the next event, a short string left alone, and
+  every non-event term unchanged.
+- **Streaming, end to end:** a real 5 MB `file_change` on both planes — the live
+  notification, the `replay` result, and the `subscribe` backlog carry the identical
+  marker (one cap, three paths); `event_detail` answers the same event whole; a sequence
+  above the high-water mark is `-32007`; one below the retained floor is `-32006` naming
+  the floor; a non-positive-integer `sequence` and an unknown param are `-32602`; a fresh
+  `hello` lists both new methods.
 - **Integration (real TCP, ephemeral port):** hello→status; subscribe→ live
   event notifications from a real interactive session (deterministic test adapter) and
   from a real coding task; lag: the connection's writer is suspended so frames pile up
@@ -585,8 +657,12 @@ and clustering keeps the existing posture.
 - **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
   `test/support/gateway_golden/*.json` from static, deterministic terms — no clock, no
   random ids, no live plane, so a regeneration on another machine writes the same bytes.
-  Thirteen frames: `hello_result`, `runtime_status_result`,
+  Sixteen frames: `hello_result`, `runtime_status_result`,
   `interactive_event_notification`, `coding_event_notification`,
+  `interactive_event_excerpt_notification` (the `_excerpt`/`_bytes` marker, at stated
+  48/96-byte caps so the file is a diff a person can read),
+  `interactive_event_detail_result` and `coding_event_detail_result` (one bare event, not
+  an array, encoded under `detail_leaf_bytes`),
   `stream_lagged_notification`, `stream_ended_notification`, and the error frames
   `error_unauthenticated` (−32001), `error_protocol_mismatch` (−32002),
   `error_scope_denied` (−32003), `error_upstream_timeout_unknown` (−32005 with
@@ -1061,6 +1137,25 @@ S4 ≈ 1.5–2k mixed (includes greenfield CI across four targets). Each slice i
 independently mergeable and leaves main releasable.
 
 ## 6. Deferred (recorded so they're chosen, not forgotten)
+
+**The client does not yet know what `_excerpt` means.** The server-side cap and both
+`event_detail` methods landed together (§2.4, §2.7); teaching
+[tui/src/model/transcript.rs](../tui/src/model/transcript.rs) to render an excerpt as
+truncated text with a "fetch the rest" affordance — and wiring `Ctrl+O` details to
+`interactive.event_detail` (A9) — is a later slice. Until then the marker map renders as
+compact JSON, and the interim cost is worth stating exactly rather than rounding off.
+
+The 128 KiB per-leaf default was chosen against the client's own presentation ceilings in
+[tui/src/model/transcript.rs](../tui/src/model/transcript.rs): `PRESENTATION_TEXT_BYTES`
+and `PRESENTATION_VALUE_BYTES` are 64 KiB and `PRESENTATION_DIFF_BYTES` is 128 KiB — so
+the server cap sits *above* the first two and exactly *at* the third. Content the client
+was going to render in full still arrives in full, and nothing that was previously visible
+became invisible. What changed is the far end: a payload past the cap used to arrive whole
+and be trimmed client-side with "… diff truncated; full diff is available in event
+details", and now arrives as a marker the client renders as JSON instead. That is a worse
+cell for exactly the payloads this cap exists for, until the client learns the marker —
+and it is the trade taken deliberately, because the alternative was five megabytes crossing
+the socket on every notification and every replay to be thrown away on arrival.
 
 `agents.start` behind a spec allowlist; a read-only web dashboard reusing the
 same gateway; multi-cluster attach
