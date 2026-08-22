@@ -1097,8 +1097,10 @@ machine, created lazily on the first delegation, durable through the same checkp
 other team uses, and listed by `teams.list` like any other. Its id embeds `node()`, because
 a team id becomes a coordinator id in the cluster-wide mesh namespace and a digest naming
 only the directory would collide with the same directory on another machine. One worker per
-conversation, which is what makes a second delegation from the same session queue behind
-the first rather than fan out.
+conversation, which serialises that conversation's delegations: a team accepts one active
+delegation per worker, so while a child is running a second delegation from the same session
+is **refused** with `{:worker_busy, worker_id, delegation_id}` rather than queued. One
+conversation, one child at a time, and the refusal names the child holding the slot.
 
 **A delegation is a coding task with a parent, not a sub-conversation.** The child runs on
 the coding plane with its own id, its own transcript, and its own durable record; what

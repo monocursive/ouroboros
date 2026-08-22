@@ -235,6 +235,30 @@ defmodule Ouroboros.Gateway.SessionDelegationTest do
       retire_session(id)
     end
 
+    test "a second delegation while a child is running is refused, naming the busy one",
+         %{id: id, workspace: workspace} do
+      start_session(id, workspace)
+
+      assert {:ok, first} =
+               Methods.invoke("interactive.delegate", %{"id" => id, "objective" => "first"})
+
+      # One worker per conversation, and a team accepts one active delegation per worker.
+      # So this is a refusal, not a queue — and it names the child holding the slot.
+      assert {:error, -32_006, _message, data} =
+               Methods.invoke("interactive.delegate", %{"id" => id, "objective" => "second"})
+
+      assert ["delegation_failed", ["worker_busy", worker_id, busy_delegation_id]] = data
+      assert worker_id == "#{node()}:session:#{id}"
+      assert busy_delegation_id == first.delegation_id
+
+      # And nothing half-recorded: one delegation, one transcript row.
+      assert {:ok, session} = Methods.invoke("interactive.info", %{"id" => id})
+      assert map_size(session.delegations) == 1
+
+      cleanup_delegation(first)
+      retire_session(id)
+    end
+
     test "a terminal session cannot delegate", %{id: id, workspace: workspace} do
       start_session(id, workspace)
       assert {:ok, _closed} = Methods.invoke("interactive.close", %{"id" => id})

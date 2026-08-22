@@ -190,7 +190,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   end
 
   describe "the worktree start option" do
-    test "it is on both planes' allowlists and reaches worktree_requested", %{workspace: root} do
+    test "it reaches worktree_requested on the interactive plane", %{workspace: root} do
       id = unique_id("gateway-worktree")
 
       assert {:ok, _result} =
@@ -206,6 +206,29 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert session.worktree == nil
 
       retire_session(id)
+    end
+
+    # `false` rather than `true` on purpose: what is under test is that the *option*
+    # travels and lands on the durable field, not that `git worktree add` works — that is
+    # `test/workspace_worktree_test.exs`, and provisioning one here would need a real
+    # repository and would make this a slow test of somebody else's component.
+    test "it reaches worktree_requested on the coding plane", %{workspace: root} do
+      id = unique_id("gateway-worktree-coding")
+
+      assert {:ok, _result} =
+               Methods.invoke("coding.start", %{
+                 "id" => id,
+                 "objective" => "check the worktree option travels",
+                 "provider" => Atom.to_string(@provider),
+                 "workspace" => root,
+                 "worktree" => false
+               })
+
+      assert {:ok, task} = Methods.invoke("coding.info", %{"id" => id})
+      assert task.worktree_requested == false
+      assert task.worktree == nil
+
+      retire_coding_task(id)
     end
 
     test "a non-boolean worktree is a parameter error naming the field" do
@@ -447,6 +470,27 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       {:ok, session} ->
         _ = Store.put(%{session | status: :cancelled})
         _ = Store.delete(id)
+
+      _absent ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp retire_coding_task(id) do
+    case Ouroboros.Coding.Task.whereis(id) do
+      pid when is_pid(pid) ->
+        DynamicSupervisor.terminate_child(Ouroboros.Coding.TaskSupervisor, pid)
+
+      _absent ->
+        :ok
+    end
+
+    case Ouroboros.Coding.Store.get(id) do
+      {:ok, task} ->
+        _ = Ouroboros.Coding.Store.put(%{task | status: :cancelled})
+        _ = Ouroboros.Coding.Store.delete(id)
 
       _absent ->
         :ok
