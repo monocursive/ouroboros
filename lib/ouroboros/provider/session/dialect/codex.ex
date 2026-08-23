@@ -142,6 +142,110 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   @spec fork_option() :: {atom(), term()}
   def fork_option, do: {:fork, true}
 
+  @doc """
+  The frame that folds this thread's context, for a runtime that can route one here.
+
+  **Nothing calls this yet, and no capability claims otherwise.** `interactive.compact`
+  reaches `Ouroboros.Interactive.Task`, which gates compaction on
+  `native_transport(session, :compact)` and refuses every other transport with
+  `{:unsupported_on_transport, …}` — only a native session hands this runtime the
+  conversation to fold. There is no `compact` key in `InteractionCapabilities` and none
+  in `Ouroboros.Provider`'s public capability set, so a Codex session correctly reports
+  no compaction today and this function changes nothing about that.
+
+  It exists because the app server's half is knowable and now pinned:
+  `thread/compact/start` takes `{threadId}` and answers `{}`
+  (`v2/ThreadCompactStartParams.json`, codex-cli 0.147.0). Routing to it is one clause in
+  `Task.handle_call({:compact, focus})` — beside the `native_transport/2` call, a branch
+  that asks the session transport for this frame instead — plus a `:compact` derived
+  capability in `Ouroboros.Provider` so the refusal stays declaration-shaped. Both are
+  another agent's files this wave, so this is the half that could land honestly.
+
+  `focus` has nowhere to go: the app server takes no focus argument, so a runtime that
+  wires this up must refuse a focused compaction on this transport rather than quietly
+  compact without it.
+  """
+  @spec compact_request(runtime :: map()) :: {:request, String.t(), map()} | {:error, term()}
+  def compact_request(%{provider_session_id: thread_id}) when is_binary(thread_id),
+    do: {:request, "thread/compact/start", %{"threadId" => thread_id}}
+
+  def compact_request(_runtime), do: {:error, :session_not_open}
+
+  @doc """
+  The frame that asks the app server which models it offers, and the reader for its answer.
+
+  **Not wired to `runtime.models`, and deliberately.** That method answers from
+  `Ouroboros.Models.list/0` — a packaged `llm_db` snapshot, keyed by a static
+  provider-to-catalogue table, with `source: "llm_db"` stated in the reply. It is a
+  process-free read of a local catalogue. `model/list` is the opposite: it needs a live
+  `codex app-server` on the other end of a thread, and its answer is what *this account*
+  may use, including whether each model is hidden, its service tiers, and its supported
+  reasoning efforts — things no static catalogue knows.
+
+  Bridging them honestly needs a seam that does not exist: `Models.provider_models/1`
+  has no hook for a transport to contribute rows, and folding live rows into a reply
+  labelled `source: "llm_db"` would misdescribe where they came from. The seam worth
+  building is a per-provider one — a `models/1` on the adapter, consulted when a session
+  is open, with its own `source` — rather than a special case inside `runtime.models`.
+
+  `limit` and `includeHidden` are sent only when stated, because the schema's own
+  defaults are the server's to choose (`v2/ModelListParams.json`, codex-cli 0.147.0).
+  """
+  @spec model_list_request(keyword()) :: {:request, String.t(), map()}
+  def model_list_request(options \\ []) do
+    params =
+      %{}
+      |> maybe_put("limit", Keyword.get(options, :limit))
+      |> maybe_put("cursor", Keyword.get(options, :cursor))
+
+    params =
+      case Keyword.get(options, :include_hidden) do
+        hidden when is_boolean(hidden) -> Map.put(params, "includeHidden", hidden)
+        _unstated -> params
+      end
+
+    {:request, "model/list", params}
+  end
+
+  @doc """
+  Reads a `model/list` result into the rows a picker needs.
+
+  The rows are under `data`, not `models` — `ModelListResponse` requires exactly that key,
+  and the live app server answers with it. Every field but `id` is dropped when absent
+  rather than shown as `nil`, so a row is what the server said and not a shape padded out
+  to look complete. `next_cursor` is echoed so a caller can page.
+  """
+  @spec models(map()) :: %{models: [map()], next_cursor: String.t() | nil}
+  def models(result) when is_map(result) do
+    rows =
+      case result["data"] do
+        list when is_list(list) -> Enum.flat_map(list, &model_row/1)
+        _absent -> []
+      end
+
+    %{models: rows, next_cursor: result["nextCursor"]}
+  end
+
+  def models(_result), do: %{models: [], next_cursor: nil}
+
+  defp model_row(%{"id" => id} = model) when is_binary(id) do
+    [
+      %{
+        id: id,
+        model: model["model"],
+        display_name: model["displayName"],
+        description: model["description"],
+        default: model["isDefault"] == true,
+        hidden: model["hidden"] == true,
+        default_reasoning_effort: model["defaultReasoningEffort"],
+        input_modalities: model["inputModalities"] || []
+      }
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    ]
+  end
+
+  defp model_row(_model), do: []
+
   # Three ways to open, and the request says which. `thread/fork` branches a thread's
   # history into a new thread id, taking `threadId` and optional `lastTurnId`/`ephemeral`
   # (https://developers.openai.com/codex/app-server, verified 2026-08-22); the fork
@@ -343,6 +447,15 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     end
   end
 
+  # The app server folding its own context. Surfaced as what it is rather than imitated:
+  # this runtime never saw the conversation and has nothing to say about what was kept.
+  # `thread/compacted` is the notification the schema marks deprecated in favour of the
+  # `contextCompaction` item (see `map_item_completed/3`); both are read so a server on
+  # either side of that change is understood.
+  def handle_notification("thread/compacted", params, raw, _runtime) do
+    [{:emit_event, event(:provider_event, compaction_payload(params["turnId"]), raw)}]
+  end
+
   def handle_notification("thread/started", params, _raw, runtime) do
     [{:assign, %{provider_session_id: thread_id(params) || runtime.provider_session_id}}]
   end
@@ -472,6 +585,9 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       type when type in ["fileChange", "file_change"] ->
         [event(:file_change, %{"changes" => item["changes"], "status" => item["status"]}, raw)]
 
+      type when type in ["contextCompaction", "context_compaction"] ->
+        [event(:provider_event, compaction_payload(nil), raw)]
+
       _other ->
         [event(:provider_event, %{"item_type" => item["type"] || "unknown"}, raw)]
     end
@@ -526,6 +642,15 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       },
       raw
     )
+  end
+
+  # `source: "provider"` is the load-bearing field: it says this runtime was told a
+  # compaction happened, not that it performed one. `interactive.context` reports what a
+  # session can honestly say, and for every non-native transport that is what its events
+  # carried — so a compaction it never ran must not look like one it did.
+  defp compaction_payload(turn_id) do
+    %{"kind" => "context_compacted", "source" => "provider", "turn_id" => turn_id}
+    |> reject_nils()
   end
 
   defp approval_payload(method, params) do

@@ -94,6 +94,22 @@ defmodule Ouroboros.Test.CodexSchema do
     end
   end
 
+  defp check!("minLength", minimum, value, _schema, _root, path) when is_binary(value) do
+    unless String.length(value) >= minimum do
+      raise "#{path}: #{inspect(value)} is shorter than #{minimum}"
+    end
+  end
+
+  defp check!("minLength", _minimum, _value, _schema, _root, _path), do: :ok
+
+  defp check!("maxLength", maximum, value, _schema, _root, path) when is_binary(value) do
+    unless String.length(value) <= maximum do
+      raise "#{path}: #{inspect(value)} is longer than #{maximum}"
+    end
+  end
+
+  defp check!("maxLength", _maximum, _value, _schema, _root, _path), do: :ok
+
   defp check!("enum", allowed, value, _schema, _root, path) do
     unless value in allowed do
       raise "#{path}: #{inspect(value)} is not one of #{inspect(allowed)}"

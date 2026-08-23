@@ -110,6 +110,24 @@ defmodule Ouroboros.Provider.CodexSessionTest do
       ;;
   """
 
+  # The app server folding its own context, in both spellings: the `thread/compacted`
+  # notification the schema marks deprecated, and the `contextCompaction` item that
+  # replaces it.
+  @compaction_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      echo '{"id":3,"result":{"turn":{"id":"turn-prov-1","status":"inProgress"}}}'
+      echo '{"method":"thread/compacted","params":{"threadId":"thread-1","turnId":"turn-prov-1"}}'
+      echo '{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"item-9"}}}'
+      echo '{"method":"turn/completed","params":{"turn":{"id":"turn-prov-1","status":"completed"}}}'
+      ;;
+  """
+
   @unknown_method_cases """
     *'"method":"initialize"'*)
       echo '{"id":1,"result":{"userAgent":"fake"}}'
@@ -482,6 +500,46 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     refusal = Enum.find(logged(executable), &(&1["id"] == 42))
     assert refusal["error"]["message"] =~ "serves no app-server methods"
 
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "steer is declared on app-server only, and the exec fallback is left as it was" do
+    [app_server, exec] = CodexAdapter.spec().session_transports
+
+    assert app_server.name == :app_server
+    assert app_server.capabilities.steer == :native
+
+    assert Jido.Harness.InteractionCapabilities.supported?(app_server.capabilities, :steer)
+
+    # `codex exec --json` has no channel to steer down and gains nothing here.
+    assert exec.name == :exec_jsonl_resume
+    assert exec.capabilities.steer == false
+
+    # And what a client actually reads — `options.capabilities.steer` — says the same,
+    # which is the gate that offers Alt+Enter.
+    assert Ouroboros.Provider.session_capabilities(:codex, :app_server).steer == :native
+    assert Ouroboros.Provider.session_capabilities(:codex, :exec_jsonl_resume).steer == false
+  end
+
+  test "the app server's own compaction is reported as the provider's, never as this runtime's" do
+    executable = fake_app_server(@compaction_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("keep going"), "turn-1")
+
+    compacted = await_event(:provider_event)
+    assert compacted.payload["kind"] == "context_compacted"
+    assert compacted.payload["source"] == "provider"
+    assert compacted.payload["turn_id"] == "turn-prov-1"
+
+    # The `contextCompaction` item is the shape that replaces the notification; both are
+    # read, and neither claims this runtime folded anything.
+    item = await_event(:provider_event)
+    assert item.payload["kind"] == "context_compacted"
+    assert item.payload["source"] == "provider"
+
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
     assert :ok = CodexSession.close(handle)
   end
 
