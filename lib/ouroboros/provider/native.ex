@@ -20,16 +20,23 @@ defmodule Ouroboros.Provider.Native do
     * **Path containment is enforced.** Every tool path is canonicalized with
       `Ouroboros.Workspace.Path` and refused outside the session workspace or its
       declared `add_dirs`.
-    * **`sandbox_mode: :read_only` is enforced** by refusing `write`, `edit`, and *any*
-      `bash` command. There is no OS sandbox yet (§7 Track C5), so a shell cannot be
-      made read-only by containing it; the only honest read-only shell is no shell.
-    * **`:unrestricted` is not offered.** Declaring a sandbox mode this runtime cannot
-      enforce would be a promise no code keeps, so `normalized_values.sandbox_mode`
-      lists only `:default`, `:read_only`, and `:workspace_write`.
-    * **There is no OS sandbox.** `workspace_write` is the tools' own path checks, not
-      Seatbelt or bubblewrap. A `bash` command can still reach the network and can still
-      write outside the workspace through a program this runtime does not inspect.
-      Approvals, rules, and the ledger are the containment until C5 lands.
+    * **`sandbox_mode: :read_only` is enforced** by refusing `write` and `edit`, and —
+      since C5 — by running `bash` inside the node's OS sandbox. Where the node has no
+      sandbox backend `bash` is still refused outright, because a shell that cannot be
+      made read-only under a read-only label is a lie about the label.
+    * **`:unrestricted` is not offered.** `normalized_values.sandbox_mode` lists only
+      `:default`, `:read_only`, and `:workspace_write`. C5 gave this provider a sandbox
+      to relax, not a reason to offer a mode that turns everything off;
+      `Ouroboros.Provider.Native.Sandbox` understands `:unrestricted` so nothing breaks
+      if the vocabulary widens, but until someone decides that on purpose the answer to
+      "let it out" is a human, not a flag.
+    * **The OS sandbox is what the node has.** `Ouroboros.Provider.Native.Sandbox`
+      detects macOS `sandbox-exec` or Linux `bwrap`; `ProviderStatus.details["sandbox"]`
+      names which, or `none`. On `none`, `workspace_write` is still only the tools' own
+      path checks: a `bash` command can reach the network and write outside the
+      workspace through a program this runtime does not inspect, and approvals, rules
+      and the ledger are the containment. There is no seccomp filter and no domain
+      allowlist on any backend.
     * **No LSP, MCP, hooks, or compaction yet.** Those are D3–D5 and E2; this slice is
       the loop, its tools, its approvals, and its checkpoint.
   """
@@ -44,6 +51,7 @@ defmodule Ouroboros.Provider.Native do
   alias Jido.Harness.SessionTransportSpec
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Model
+  alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Session
 
   @provider :native
@@ -155,6 +163,7 @@ defmodule Ouroboros.Provider.Native do
     credentials = Model.credential_report()
     authenticated? = Enum.any?(credentials, & &1.present)
     available? = Model.available?()
+    sandbox = Sandbox.detect()
 
     {:ok,
      ProviderStatus.new!(
@@ -171,8 +180,12 @@ defmodule Ouroboros.Provider.Native do
          "model_env" => Model.model_env(),
          "model" => Model.configured_model(),
          "credentials" => Enum.map(credentials, &Map.new(&1, fn {k, v} -> {to_string(k), v} end)),
-         "sandbox" => "none",
-         "enforced" => "workspace path containment; read_only refuses write/edit/bash"
+         # The one capability a client needs to stop guessing: the footer may say "no OS
+         # sandbox" for a native session only when this says `none`. A string naming the
+         # backend, never a boolean — "sandboxed" is not a fact, "sandbox-exec" is.
+         "sandbox" => Sandbox.label(sandbox),
+         "sandbox_notes" => sandbox.notes,
+         "enforced" => enforced(sandbox)
        }
      )}
   end
@@ -188,6 +201,20 @@ defmodule Ouroboros.Provider.Native do
   def run(%RunRequest{} = request, context) do
     Loop.run_stream(request, context)
   end
+
+  defp enforced(%{backend: :none}),
+    do:
+      "workspace path containment; read_only refuses write/edit/bash; no OS sandbox on " <>
+        "this node, so a bash command is bounded by approvals and rules alone"
+
+  defp enforced(sandbox),
+    do:
+      "workspace path containment; read_only refuses write/edit and runs bash under " <>
+        Sandbox.label(sandbox) <>
+        "; workspace_write runs bash under " <>
+        Sandbox.label(sandbox) <>
+        " with the workspace and declared roots writable, .git/.ouroboros/data dir/user " <>
+        "config read-only, and the network denied"
 
   defp version do
     case Application.spec(:ouroboros, :vsn) do

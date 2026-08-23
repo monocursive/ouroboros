@@ -58,8 +58,11 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
   describe "a tool call is recorded before it runs" do
     test "the entry is already durable at the instant the tool is observably running",
          context do
-      marker = Path.join(context.root, "marker")
-      gate = Path.join(context.root, "gate")
+      # Inside the workspace: under the OS sandbox (C5) a `bash` in `workspace_write` may
+      # write nowhere else, and a marker the command could not write would read as a tool
+      # that never ran.
+      marker = Path.join(context.root, "workspace/marker")
+      gate = Path.join(context.root, "workspace/gate")
 
       command =
         "printf started > #{marker}; while [ ! -f #{gate} ]; do sleep 0.02; done; echo released"

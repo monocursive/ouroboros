@@ -188,7 +188,9 @@ defmodule Ouroboros.Provider.NativeTest do
       assert status.provider == :native
       assert status.executable == "in-process"
       assert status.details["model_env"] == "OUROBOROS_NATIVE_MODEL"
-      assert status.details["sandbox"] == "none"
+
+      assert status.details["sandbox"] ==
+               Ouroboros.Provider.Native.Sandbox.label(Ouroboros.Provider.Native.Sandbox.detect())
 
       credentials = status.details["credentials"]
       assert is_list(credentials)
@@ -205,10 +207,26 @@ defmodule Ouroboros.Provider.NativeTest do
       end
     end
 
-    test "reports the sandbox honestly" do
+    # C5. `sandbox` names the backend this node actually has, so a client footer may say
+    # "no OS sandbox" for a native session only when it reads `none` — never inferred,
+    # never a boolean, and never a claim the node cannot back.
+    test "names the OS sandbox backend this node has, or none" do
+      detection = Ouroboros.Provider.Native.Sandbox.detect()
       assert {:ok, status} = Native.status(%{})
-      assert status.details["sandbox"] == "none"
-      assert status.details["enforced"] =~ "read_only refuses write/edit/bash"
+
+      assert status.details["sandbox"] == Ouroboros.Provider.Native.Sandbox.label(detection)
+      assert status.details["sandbox"] in ["sandbox-exec", "bwrap", "none"]
+      assert status.details["sandbox_notes"] == detection.notes
+
+      case detection.backend do
+        :none ->
+          assert status.details["enforced"] =~ "read_only refuses write/edit/bash"
+          assert status.details["enforced"] =~ "no OS sandbox on this node"
+
+        _present ->
+          assert status.details["enforced"] =~ "runs bash under #{status.details["sandbox"]}"
+          assert status.details["enforced"] =~ "the network denied"
+      end
     end
   end
 

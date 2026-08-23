@@ -288,7 +288,7 @@ reading.
 | method | maps to |
 |---|---|
 | `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
-| `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task |
+| `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task. The `native` entry's `details` carries **`sandbox`** (C5) — `"sandbox-exec"`, `"bwrap"`, or `"none"`, the OS sandbox backend the owning node actually detected — plus `sandbox_notes` (why, including Apple's deprecation of `sandbox-exec` and bubblewrap's missing seccomp) and `enforced`, a sentence naming what each mode holds. It is a string and never a boolean: "sandboxed" is not a fact, `"sandbox-exec"` is. **A footer may say "no OS sandbox" for a native session only when this reads `none`** — never inferred from the provider's name, and never from the absence of the key, which means "this runtime did not say" |
 | `runtime.models` | `Ouroboros.Models.list/0` — what `llm_db`'s packaged snapshot knows about the models each configured provider draws from, so a client can turn a session's `usage.total_tokens` and `options.model` into a context percentage and a cost. One row per provider: `provider`, `catalog` (the `llm_db` provider id, `null` where none applies), `default` (only what the node configured in `session_defaults`/`request_defaults` — never a model chosen here), `model_option` (whether the adapter normalizes `:model` at all), `total`, and up to `limit` (40) models newest-first, each `{id, name, context_window, max_output_tokens, release_date, pricing}`. `pricing` is the four token rates normalised to one million tokens (`input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok`) plus `currency`, or `null` where the snapshot priced nothing; per-call tool pricing is deliberately excluded because it cannot be derived from a token count. Not a claim a listed model will work — only the vendor CLI's account knows that — and not pricing this runtime verifies: it is the vendor's public list price as of `epoch`. Which vendor's catalogue a CLI draws from has no declaration anywhere, so the mapping is Ouroboros's own reading and a node may correct it with `config :ouroboros, model_catalogs: %{amp: :anthropic}` |
 | `account.read` `{}` | `CodexAppServer.read/1` — Codex account identity plus managed-login state. Every account result is projected through an explicit key allowlist inside the provider process (`account.type`/`email`/`planType`, `requiresOpenaiAuth`, and the four-field `login` map), so "no token crosses the gateway" is a property of this module, not of Codex's current response shape. Sign-in URLs and device codes never appear here — they exist only in `account.login.start`'s operate-scoped reply |
 | `agents.list` | `Mesh.list_agents/0` |
@@ -402,6 +402,18 @@ branching a session — so it is derived beside the declared ten from the dialec
 transport must carry `:provider_session_id`, the adapter must declare `resume?`). The whole
 map is `null` when neither the provider nor the transport resolves — an absent claim rather
 than a false one.
+
+**`sandbox` is not one of the eleven, and a client must not read it as absent-means-no.**
+C5 gives the OS sandbox backend a name — `"sandbox-exec"`, `"bwrap"`, `"none"` — but the
+name lives on `runtime.providers`' `details.sandbox` for the *node*, not on a session's
+`options.capabilities`, because `Ouroboros.Provider.session_capabilities/2` derives its map
+from the provider spec alone and a sandbox is a property of the machine the session's owner
+node is running on. A footer showing the backend per session reads
+`runtime.providers` for the session's provider, on the session's node. Making it a twelfth
+capability key is one addition to `Ouroboros.Provider`'s `@derived_capability_keys` plus a
+derivation beside `fork_capability/3`; until that lands, a client that finds no `sandbox`
+key in `options.capabilities` has learned nothing about the sandbox — the tri-state rule,
+unchanged.
 
 `usage` is what the provider said the session spent: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_creation_tokens`, `total_tokens`, `cost_usd`,
@@ -1842,7 +1854,7 @@ on it.
 | `OWN RUNTIME · operate · 127.0.0.1:4560` | spawn mode, `hello.scope`, the address | the first thing to yield: it is on the Dashboard and in the header |
 | model | `interactive.info` `options.model`, else the transcript's `run_started.model` | absent where neither said |
 | `⏸ prompt` / `⏵⏵ auto-edit` / `✓ auto-approve` / `⏵ default` | `options.approval_mode` | absent where the start omitted it — the plane's default then applies, and this client does not know what it is |
-| `workspace-write` | `options.sandbox_mode` | its own cell, so the mode survives a narrow row without it |
+| `workspace-write` | `options.sandbox_mode` | its own cell, so the mode survives a narrow row without it. For a **native** session the mode alone does not say whether an OS sandbox is holding it: append the backend from `runtime.providers`' `details.sandbox` for `native` on that session's node — `workspace-write · sandbox-exec`, or `workspace-write · no OS sandbox` where it reads `none`. Say "no OS sandbox" only on that reading, never on the absence of the field |
 | `⠙ Working 4m 07s` | the session status plus the newest unterminated `turn_started`'s timestamp | Codex's format; ranked with `esc interrupt`, because they are one statement |
 | `3 queued` | the newest `queue_changed`'s `queued_turns` | absent, not zero, where no such event has been seen. The composer's own panel adds what is queued *locally* — see "Queue and steer" |
 | `? new here` | `onboarding.prompts_sent` in `config.toml` | until three prompts have been sent; outranks the leader and quit hints, which are also on `?` |

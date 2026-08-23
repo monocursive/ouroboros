@@ -508,16 +508,24 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert Bitwise.band(mode, 0o777) == 0o600
     end
 
-    test "is refused entirely under read_only, and says why", %{
-      read_only: read_only,
-      session_dir: session_dir
-    } do
+    # C5: read_only runs inside the OS sandbox where the node has one, and keeps the old
+    # refusal where it does not. Both halves are asserted, on whichever node this runs.
+    # The escapes themselves live in `Ouroboros.Provider.Native.SandboxTest`.
+    test "runs under read_only only inside an OS sandbox, and is refused where there is none",
+         %{read_only: read_only, session_dir: session_dir} do
       context = %{scope: read_only, session_dir: session_dir, reads: %{}}
       result = run(Ouroboros.Provider.Native.Tools.Bash, %{"command" => "echo hi"}, context)
 
-      assert result.is_error
-      assert result.output =~ "read_only"
-      assert result.output =~ "no OS sandbox"
+      case Ouroboros.Provider.Native.Sandbox.detect().backend do
+        :none ->
+          assert result.is_error
+          assert result.output =~ "read_only"
+          assert result.output =~ "no OS sandbox backend"
+
+        _present ->
+          refute result.is_error
+          assert result.output =~ "hi"
+      end
     end
 
     test "clamps a timeout above the documented maximum", %{context: context} do
