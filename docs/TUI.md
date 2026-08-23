@@ -494,6 +494,69 @@ that admits it, so a number here would be one the runtime did not yet have. A cl
 wants "ledger #N" resolves the reference; a client that only wants to link out uses the
 id.
 
+**A native subagent reports as `provider_event` with `kind: "subagent"` (G3).** The child is
+a session of its own but not a *rail* of its own: it lives inside the parent's interactive
+session, so a client draws it as a child row under the parent's `agent` tool call rather
+than as a second entry anywhere. Three phases, all on the parent's stream:
+
+```json
+{"type": "provider_event",
+ "turn_id": "turn-7",
+ "payload": {"kind": "subagent", "phase": "spawned",
+             "task_id": "sub-9f3c1a2b-Kx7…", "description": "ledger writers",
+             "provider_session_id": "native-9f3c-…", "workspace": "/repo",
+             "worktree": false, "tools": ["read", "grep", "glob"],
+             "background": false, "depth": 1,
+             "max_turns": 8, "deadline_ms": 300000}}
+
+{"type": "provider_event",
+ "payload": {"kind": "subagent", "phase": "progress", "task_id": "sub-9f3c…",
+             "description": "ledger writers", "provider_session_id": "native-9f3c-…",
+             "turns": 2, "tool_calls": 5, "files_changed": 0}}
+
+{"type": "provider_event",
+ "payload": {"kind": "subagent", "phase": "settled", "task_id": "sub-9f3c…",
+             "description": "ledger writers", "provider_session_id": "native-9f3c-…",
+             "status": "completed", "turns": 3, "tool_calls": 5,
+             "files_changed": 2, "files": ["lib/a.ex", "lib/b.ex"],
+             "input_tokens": 12043, "output_tokens": 388, "cost_usd": 0.0041,
+             "approvals_denied": 0, "summary_bytes": 812}}
+```
+
+`status` is one of `completed`, `failed`, `stopped`, `timed_out`. `error` is present only
+when there is one; `cost_usd` is **absent rather than zero** when the child's model could
+not be priced; `worktree` is present as an object (`path`, `root`, `base_commit`,
+`repository`, `retired`) only when the child had one, and `retired` is `"kept"` for a
+worktree left on disk because it holds uncommitted work — a client should show that path,
+because it is where the work is. `files` is capped at 50 entries while `files_changed`
+counts all of them, and a child emits at most 64 `progress` events.
+
+A **foreground** child's events carry the parent's `turn_id`; a **background** child's
+`progress` and `settled` arrive with `turn_id: null`, because the turn that spawned it has
+ended and the work is still the session's. The `agent` `tool_result` carries the same
+summary as text, bounded to 16 KiB, so a client that draws nothing special still shows a
+useful row.
+
+**An approval a child raises arrives as an ordinary `approval_requested` of the parent
+session**, with the parent's own `request_id`, the child's original `kind`
+(`command`/`file_change`/`tool`/`question`), and one added key:
+
+```json
+{"type": "approval_requested", "request_id": "napp_…",
+ "payload": {"kind": "file_change", "paths": ["/repo/lib/b.ex"], "reason": "…",
+             "subagent": {"task_id": "sub-9f3c…", "description": "ledger writers",
+                          "provider_session_id": "native-9f3c-…"}}}
+```
+
+Answering it is `interactive.respond_approval` as always. A client that has never heard of
+subagents renders the modal it already has; one that has can label it with the child.
+
+**A child's spend arrives as an ordinary `usage` event with `subagent_task_id` on it**, and
+deliberately **without** `context_used`/`context_window`: a running cost should include the
+child, and a context meter must not, because the child's request size is a fact about the
+child's window. A footer that sums `usage` stays correct; one that reads the meter is
+untouched.
+
 `ledger_ref` is **absent** rather than null when there is no entry to name — a `tool_call`
 for a tool the session does not have (nothing was admitted, nothing ran), an
 `approval_resolved` the runtime produced itself on a restart or a deadline rather than

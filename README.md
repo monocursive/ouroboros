@@ -338,7 +338,7 @@ Ouroboros.provider_status(:native)    # which key variables are set — names, n
 
 #### Tools
 
-Thirteen, in the order the model sees them:
+Fifteen, in the order the model sees them:
 
 | Tool | What it does, and where it stops |
 |---|---|
@@ -353,10 +353,96 @@ Thirteen, in the order the model sees them:
 | `web_fetch` | GET, `http`/`https` only, 1 MiB, 15 seconds, HTML converted to text. **A redirect to another host is reported and not followed** — the new host was never put to the permission engine. |
 | `code_intel` | The nine LSP navigation operations plus `diagnostics` and a preview-then-apply `rename`. See below. |
 | `ask_user` | Asks the operator a question mid-turn and blocks for the answer, on the same channel as an approval, so any client that renders an approval modal can carry it. |
+| `agent` | Spawns a child session with its own context window and returns a bounded summary. See below. |
+| `agent_result` | Collects a background child by its `task_id`, waiting at most 60 s. |
 | `skill` | Agent Skills: `SKILL.md` under `<workspace>/.agents/skills/*/` and `~/.config/ouroboros/skills/*/`. Names and descriptions go into the tool's own description, bounded to the smaller of 2% of the context window and 8,000 characters; bodies load on call. |
 | `plan` | Replaces the whole plan and emits `plan_updated`. `todo` is an alias, not a second tool. |
 
 Plus every tool an MCP server on this node advertises — see below.
+
+#### Subagents
+
+A search that reads forty files costs forty files' worth of context, and the session that
+ordered it only wanted the answer. `agent` spawns a **child native session** — its own
+conversation, its own context window, its own checkpoint directory — and returns a
+summary.
+
+```
+agent(prompt: "Find every place that writes to the effect ledger and say which module
+                owns each one. Report file:line and nothing else.",
+      description: "ledger writers",
+      tools: ["read", "grep", "glob"],
+      max_turns: 8)
+```
+
+A child is **not** a second interactive session and not a delegated coding task: no rail
+row, no coordinator, no second workspace lease. It lives inside the parent's interactive
+session, its progress arrives as `provider_event`s of the parent with `kind: "subagent"`,
+and its `tool_result` is the summary.
+
+**A child can never be more permissive than its parent**, and the tool has no parameter
+that could make one. `approval_mode` and `sandbox_mode` are the parent's resolved values;
+a planning parent gets a planning child; the tool set is the *intersection* of what the
+call asked for with what the parent actually has, so naming a tool the parent was denied
+buys nothing; `add_dirs` are inherited only when there is no worktree.
+
+| Bound | Value |
+|---|---|
+| Nesting depth | 2 — a child may spawn children, a grandchild may not. A session at the cap is shown no `agent` and no `agent_result`, and a call it invents is refused by name. |
+| Running children per session | 4. A fifth is **refused, not queued**, with a message saying to collect one first: a queue would block the parent's turn on work it cannot see. |
+| Tracked children per session | 32, running and settled-uncollected together. |
+| Model round-trips per child | `max_turns`, 12 by default, 30 at most. |
+| Wall clock per child | 300 s by default, 900 s at most, `provider_options["subagent_deadline_ms"]`. A child that hits it is stopped and reports `timed_out` with what it had done. |
+| Summary | 16 KiB, of which at most 12 KiB is the child's own final message. |
+| Progress events per child | 64. |
+
+**Approvals.** A foreground child's approval is put on the *parent's* channel: the parent
+mints its own `request_id`, emits the child's payload with a `subagent` key naming which
+child is asking, and hands the answer back to the child. Any client that already renders
+an approval modal carries it with no change. Nesting chains the same way.
+
+**Background children.** `background: true` returns a `task_id` immediately and
+`agent_result` collects it. The child then outlives the turn that spawned it — and with
+it the loop process that is the only thing able to reach a person. A background child is
+therefore **refused at spawn** unless it cannot ask: either the session runs in
+`auto_approve`, or the child's tools are all read-only (`read`, `grep`, `glob`, `ls`,
+`plan`, `skill`). The refusal names both fixes. A background child is stopped when the
+**session** closes, not when the turn ends; after that its task id is gone and
+`agent_result` says so rather than inventing a result.
+
+**Worktrees.** `worktree: true` provisions a `git worktree` of the workspace for the child
+(see [Worktrees](#worktrees)). A node that cannot lease one refuses the call and says why
+— a model that asked for isolation and silently got the parent's tree would make edits it
+believes are contained. A worktree holding uncommitted work when the child ends is **kept**
+and its path is in the summary.
+
+**Cost and accountability.** The child's tokens fold into the parent's `usage` events and
+its turn totals, so `/cost` stays true; the fold deliberately carries no context meter,
+because the child's request size is a fact about the child's window. Every one of the
+child's tool calls is its own effect-ledger entry under the parent's session and
+principal, with `authority.constraints.subagent_parent` naming the parent provider session
+and a cause of `native.subagent.tool_call`.
+
+**Where the transcript is.** The child's full conversation is at
+`<data_dir>/native/<child-provider-session-id>/conversation.json`, exactly like any other
+native session's, and the spawn and settle events carry that id so a client can open it.
+Nothing prunes it: it is kept until an operator removes the data directory.
+
+**Honest limits.** A child gets one turn — its `max_turns` bounds the model round-trips
+inside that turn, and there is no way to send it a second prompt. Steering reaches the
+parent, not the child. A `provider_options["subagent_model"]` lets an operator point
+children at a cheaper model; without it a child uses the parent's. `agent` is unavailable
+in one-shot runs (`ouro run`, the coding plane) because there is no session process to own
+a child, and it says so.
+
+The largest limit is not this feature's own. Worktrees live under `<data_dir>/worktrees`,
+and the permission engine protects `<data_dir>/**` from every write with a rule no rule can
+overrule — so on a node with a data directory configured, which is every release, a session
+running inside a worktree can write nothing at all. That is true of `worktree: true`
+everywhere in this runtime, not only here; a subagent asking for one today gets real
+isolation and a read-only tree. It is pinned by a test named after it in
+`test/provider/native/subagent_test.exs` so that it stays visible until either the worktree
+root moves out of the data directory or the protected list exempts it.
 
 #### MCP servers
 
