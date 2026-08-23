@@ -1960,6 +1960,15 @@ New-only is against what the server said about the file *before* the edit, read 
 call that announced it. Diagnostics identity is a signature the runtime computes, so the
 client and the runtime cannot disagree about what "the same diagnostic" means.
 
+**What the pool admits.** A language server runs with a workspace root as its working
+directory, so the pool admits a file only under a root it trusts: the roots in
+`:workspace_allowed_roots` (`OUROBOROS_WORKSPACE_ROOTS`), plus the workspace of every
+interactive session this node holds. A session's workspace is already where this node runs an
+agent with a shell, so a language server there adds nothing the session lacks; any other root
+named over the wire — `code_intel.request` with `workspace: "/"` — is refused as
+`outside_workspace`. On a node that configured no roots, code intelligence therefore follows
+the sessions and nothing else, and deleting a session withdraws its admission.
+
 ### What does not get this yet
 
 - **Claude sessions the approval bridge does not attach to.** `auto_edit` and

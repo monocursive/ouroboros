@@ -136,6 +136,22 @@ defmodule Ouroboros.InteractiveSession do
     |> Enum.map(&State.summary/1)
   end
 
+  @doc """
+  The workspaces of the sessions this node holds, for the code-intelligence admission.
+
+  `Ouroboros.CodeIntel.Registry` admits a file under one of these beside the configured
+  `:workspace_allowed_roots`: a session's workspace is already where this node runs an
+  agent with a shell. Deleting the session withdraws the admission.
+  """
+  @spec workspaces() :: [Path.t()]
+  def workspaces do
+    Store.list()
+    |> Enum.filter(&(&1.node == node()))
+    |> Enum.map(& &1.workspace)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+  end
+
   @doc "Atomically subscribes the caller and returns events after an exclusive cursor."
   def subscribe(session, opts \\ []) do
     with :ok <- validate_options(opts, [:cursor]) do

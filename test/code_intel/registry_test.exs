@@ -280,4 +280,84 @@ defmodule Ouroboros.CodeIntel.RegistryTest do
              "language_server.sh"
            ]
   end
+
+  ## admission — configured roots, plus the workspaces of the sessions this node holds
+
+  defmodule HeldWorkspaces do
+    @moduledoc false
+    def workspaces, do: Application.get_env(:ouroboros, :registry_test_held_workspaces, [])
+  end
+
+  defmodule StoreNotRunning do
+    @moduledoc false
+    def workspaces, do: exit({:noproc, {GenServer, :call, [Ouroboros.Interactive.Store, :list]}})
+  end
+
+  defp hold_sessions(source, workspaces) do
+    previous_source = Application.get_env(:ouroboros, :code_intel_session_source)
+    previous_held = Application.get_env(:ouroboros, :registry_test_held_workspaces)
+    Application.put_env(:ouroboros, :code_intel_session_source, source)
+    Application.put_env(:ouroboros, :registry_test_held_workspaces, workspaces)
+    # The node configured no roots: the default, where the lease manager is off.
+    Application.put_env(:ouroboros, :workspace_allowed_roots, [])
+
+    on_exit(fn ->
+      restore(:code_intel_session_source, previous_source)
+      restore(:registry_test_held_workspaces, previous_held)
+    end)
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  test "the default session source is the interactive store, which answers without a session" do
+    Code.ensure_loaded!(Ouroboros.InteractiveSession)
+    assert function_exported?(Ouroboros.InteractiveSession, :workspaces, 0)
+    assert is_list(Ouroboros.InteractiveSession.workspaces())
+  end
+
+  test "a workspace a session on this node holds is admitted with no configured root",
+       context do
+    hold_sessions(HeldWorkspaces, [context.workspace])
+    file = write(context.workspace, "lib/thing.ex")
+
+    # `no_project_root` is the answer of a walk that happened: the file was admitted and the
+    # workspace searched for a marker. An unadmitted file never gets that far.
+    assert {:error, {:no_project_root, :elixir, ["mix.exs"]}} = Registry.resolve(file)
+
+    assert {:error, {:no_project_root, :elixir, ["mix.exs"]}} =
+             Registry.resolve(file, workspace_root: context.workspace)
+  end
+
+  test "a root no session holds stays refused, explicit or not", context do
+    hold_sessions(HeldWorkspaces, [])
+    file = write(context.workspace, "lib/thing.ex")
+
+    assert {:error, {:outside_workspace, _path}} = Registry.resolve(file)
+    # Naming a root is not holding a session in it; `/` in particular admits nothing.
+    assert {:error, {:outside_workspace, "/"}} = Registry.resolve(file, workspace_root: "/")
+
+    assert {:error, {:outside_workspace, _path}} =
+             Registry.resolve(file, workspace_root: context.workspace)
+  end
+
+  test "a session holding one workspace admits nothing beside it", context do
+    held = Path.join(context.workspace, "held")
+    File.mkdir_p!(held)
+    hold_sessions(HeldWorkspaces, [held])
+
+    inside = write(context.workspace, "held/lib/thing.ex")
+    beside = write(context.workspace, "beside/lib/thing.ex")
+
+    assert {:error, {:no_project_root, :elixir, ["mix.exs"]}} = Registry.resolve(inside)
+    assert {:error, {:outside_workspace, _path}} = Registry.resolve(beside)
+  end
+
+  test "a session store that is not running admits nothing extra and raises nothing",
+       context do
+    hold_sessions(StoreNotRunning, [])
+    file = write(context.workspace, "lib/thing.ex")
+
+    assert {:error, {:outside_workspace, _path}} = Registry.resolve(file)
+  end
 end

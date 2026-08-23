@@ -366,7 +366,11 @@ defmodule Ouroboros.CodeIntel.Registry do
   # come from a gateway caller — `code_intel.request` names the session's workspace — and a
   # boundary chosen by a caller that admitted itself would be no boundary at all: naming
   # `/` would turn the containment check below into "is this path absolute". So an explicit
-  # root is held to the same admission as an implicit one and is refused outside it.
+  # root is held to the same admission as an implicit one and is refused outside it. What
+  # admits a root is `admitted_roots/0` below: the configured list, plus the workspace of
+  # every session this node holds — which is how a node that configured no roots (the
+  # default, where the lease manager is off and a session may start anywhere) still has
+  # code intelligence for exactly the directories it is already running agents in.
   defp workspace_root(file, opts) do
     case Keyword.get(opts, :workspace_root) do
       root when is_binary(root) and root != "" ->
@@ -394,14 +398,33 @@ defmodule Ouroboros.CodeIntel.Registry do
   end
 
   defp admitted_roots do
-    :ouroboros
-    |> Application.get_env(:workspace_allowed_roots, [])
+    (configured_roots() ++ session_roots())
     |> Enum.flat_map(fn root ->
       case WorkspacePath.canonicalize(root) do
         {:ok, canonical} -> [canonical]
         {:error, _reason} -> []
       end
     end)
+    |> Enum.uniq()
+  end
+
+  defp configured_roots, do: Application.get_env(:ouroboros, :workspace_allowed_roots, [])
+
+  # A session's workspace is where this node already runs an agent with a shell, so a
+  # language server with that directory as its cwd adds no capability the session lacks.
+  # The source is a module with `workspaces/0` so a test can hold sessions without starting
+  # any; the default asks the interactive store for the sessions this node holds. A store
+  # that is not running (a bare registry test, a node booting) admits nothing extra.
+  defp session_roots do
+    source =
+      Application.get_env(:ouroboros, :code_intel_session_source, Ouroboros.InteractiveSession)
+
+    try do
+      source.workspaces()
+    catch
+      :exit, _reason -> []
+    end
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
   end
 
   defp project_root(file, workspace_root, definition, opts) do

@@ -112,10 +112,11 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
     end
   end
 
-  # The pool admits a file only under a root it was told about. A session's workspace was
-  # admitted by the lease that started it, so the native agent names it on every call —
-  # without this, a node that configured no `:workspace_allowed_roots` (the default) would
-  # answer `{:outside_workspace, _}` for every path and no diagnostic would ever appear.
+  # The pool admits a file only under a root it trusts — the configured list plus the
+  # workspace of every session this node holds — so the native agent names its own on every
+  # call: a relative path or a file the pool has never seen is then placed under the right
+  # root, and a node that configured no `:workspace_allowed_roots` (the default) still
+  # answers for the directory this session is running in.
   defp pool_opts(opts) do
     case Keyword.get(opts, :root) do
       root when is_binary(root) and root != "" -> [workspace_root: root]
