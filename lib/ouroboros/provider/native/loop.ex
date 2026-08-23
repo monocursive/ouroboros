@@ -35,9 +35,37 @@ defmodule Ouroboros.Provider.Native.Loop do
   one tool. The doom-loop guard stops a turn on the third identical `(name, input)`
   call — OpenCode's rule, and the cheapest defence against a model that has found a
   loop it likes. Each bound fails the turn by name rather than running out quietly.
+
+  ## The ledger (I1)
+
+  Every tool this loop is admitted to run gets one `:tool_call` entry in
+  `Ouroboros.Agent.EffectLedger`, checkpointed **before the tool runs** and settled after
+  with its status, duration, and output size. This is the same hard gate `workspace.exec`
+  makes for the one command an operator typed: **a ledger that cannot record the call
+  refuses it**, and the model is told so in a tool result it can read. A tool call nobody
+  can account for afterwards is exactly what the entry exists to prevent, so "best effort
+  telemetry" is not an option here.
+
+  The entry names identities and never contents: the tool, the call id, the session and
+  turn, the permission decision that admitted it, and a `subject` — the paths a file tool
+  would touch, a SHA-256 digest of a `bash` command line, the host `web_fetch` would
+  reach, the server and tool behind an `mcp__server__tool` name.
+
+  Every dispatch that reached the gate writes exactly one entry, whichever way the gate
+  answered: admitted calls open `:started`, refusals (a rule, a hook, an unanswered
+  deadline, an interrupt while the question was on screen) are written terminal as
+  `:denied`. That is what lets the `tool_call` event carry its `ledger_ref` before the
+  answer is known — the reference names an entry that will exist on every path but one,
+  and that one is the ledger being unreachable, which is also the one case where the tool
+  is refused and says why.
+
+  A tool the session does not have is not gated, does not run, and gets no entry; its
+  `tool_call` event carries no `ledger_ref`, which is the honest way to say that nothing
+  was admitted.
   """
 
   alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Instructions
@@ -332,37 +360,53 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
+  # The lookup is first so a tool this session does not have never claims a ledger
+  # reference it will not have an entry for. Everything past it is gated, and everything
+  # gated is recorded.
   defp dispatch(state, call) do
-    emit(state, :tool_call, %{
-      "name" => call.name,
-      "call_id" => call.id,
-      "input" => call.input
-    })
-
     case Tools.lookup(call.name, state.allowed_tools, state.disallowed_tools) do
       {:error, :unknown_tool} ->
+        emit_tool_call(state, call, nil)
         {:continue, tool_result(state, call, unknown_tool(call.name, state))}
 
       {:ok, module} ->
-        case gate(state, call) do
-          {:allow, state, call, classified, hook_context} ->
+        # Classified once, here, and handed to the gate: re-deriving it would run
+        # `code_intel`'s rename preview a second time for nothing.
+        classified = Tools.classify(call.name, call.input, state.scope)
+        effect_id = tool_effect_id(state, call)
+        emit_tool_call(state, call, effect_id)
+
+        gated(state, call, module, classified, effect_id)
+    end
+  end
+
+  defp gated(state, call, module, classified, effect_id) do
+    case gate(state, call, classified) do
+      {:allow, state, call, classified, hook_context, authority} ->
+        case open_tool_effect(state, call, classified, effect_id, authority) do
+          :ok ->
             # `ask_user` is answered on the approval channel rather than in the tool
             # task: it has to block on a human, and the approval path is the only thing
             # in this provider that can. See `Native.Tools.AskUser`.
             if Tools.interactive?(module),
-              do: ask_question(state, call, hook_context),
-              else: execute(state, call, module, classified, hook_context)
+              do: ask_question(state, call, hook_context, effect_id),
+              else: execute(state, call, module, classified, hook_context, effect_id)
 
-          {:deny, state, message} ->
-            {:continue, tool_result(state, call, %{output: message, is_error: true})}
-
-          {:interrupted, state} ->
-            {:interrupted, state}
+          {:error, reason} ->
+            {:continue, tool_result(state, call, unrecordable(call, reason))}
         end
+
+      {:deny, state, message, classified, authority} ->
+        refuse_tool_effect(state, call, classified, effect_id, authority)
+        {:continue, tool_result(state, call, %{output: message, is_error: true})}
+
+      {:interrupted, state, classified} ->
+        refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
+        {:interrupted, state}
     end
   end
 
-  defp execute(state, call, module, classified, hook_context) do
+  defp execute(state, call, module, classified, hook_context, effect_id) do
     context = %{
       scope: state.scope,
       session_dir: state.session_dir,
@@ -374,7 +418,15 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = snapshot_before(state, classified.write_paths)
     baselines = CodeIntel.baseline(classified.write_paths, root: state.scope.root)
 
+    started = System.monotonic_time(:millisecond)
     result = Tools.execute(module, call.input, context, state.tool_timeout_ms)
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    # Settled before the result is broadcast, and against the tool's own output rather
+    # than the annotated one: diagnostics and hook context are this runtime talking, and
+    # counting them as the tool's bytes would misreport what ran.
+    settle_tool_effect(state, effect_id, result, elapsed)
+
     state = %{state | reads: Map.merge(state.reads, Map.get(result, :reads, %{}))}
 
     changes = Map.get(result, :changes, [])
@@ -579,78 +631,99 @@ defmodule Ouroboros.Provider.Native.Loop do
   # construction rather than by convention: on a denial no hook is invoked at all.
   # `updatedInput` is put back through the engine before it is used, so a hook cannot
   # launder a denied command through a rewrite.
-  defp gate(state, call) do
-    classified = Tools.classify(call.name, call.input, state.scope)
-
+  #
+  # The gate also carries the *authority* out with its answer — which decision admitted or
+  # refused the call, at what scope, by whom, and the id of the `:permission` entry that
+  # recorded it. That is what the `:tool_call` ledger entry is written against, and it is
+  # threaded rather than re-derived because only the branch that decided knows.
+  defp gate(state, call, classified) do
     case Permissions.evaluate(permission_request(state, classified)) do
       {:allow, rule} ->
-        record(state, :approve, :once, :rule, rule)
-        hooked(state, call, classified, :allow, nil)
+        authority =
+          authority(
+            :allow,
+            "rule",
+            :once,
+            :rule,
+            rule,
+            record(state, :approve, :once, :rule, rule)
+          )
+
+        hooked(state, call, classified, :allow, nil, authority)
 
       {:deny, rule} ->
-        record(state, :deny, :once, :rule, rule)
-        {:deny, state, Permissions.deny_message(call.name, rule)}
+        {:deny, state, Permissions.deny_message(call.name, rule), classified,
+         authority(:deny, "rule", :once, :rule, rule, record(state, :deny, :once, :rule, rule))}
 
       {:ask, reason} ->
-        hooked(state, call, classified, :ask, reason)
+        hooked(state, call, classified, :ask, reason, nil)
     end
   end
 
-  defp hooked(state, call, classified, verdict, reason) do
+  defp hooked(state, call, classified, verdict, reason, authority) do
     if Hooks.any?(state.hooks, :pre_tool_use, classified.tool) do
       case Hooks.pre_tool_use(state.hooks, classified.tool, call.input, hook_base(state)) do
         {:deny, hook_reason} ->
-          record(state, :deny, :once, :rule, {:hook, :pre_tool_use})
+          ref = {:hook, :pre_tool_use}
 
           {:deny, state,
-           "Refused: a PreToolUse hook denied this #{classified.tool} call: " <> hook_reason}
+           "Refused: a PreToolUse hook denied this #{classified.tool} call: " <> hook_reason,
+           classified,
+           authority(:deny, "hook", :once, :rule, ref, record(state, :deny, :once, :rule, ref))}
 
         # A hook's `ask` outranks the *mode*, not just the rule: `auto_approve` swallowing
         # it would make the decision meaningless in the mode people actually run.
         {:ask, hook_reason, input, context} ->
-          revise(state, call, classified, input, :ask_human, hook_reason, context)
+          revise(state, call, classified, input, :ask_human, hook_reason, context, authority)
 
         # A hook that said `allow` resolves an engine `ask`. It can, because it is either
         # the operator's own user-scope hook or a repository hook the operator trusted —
         # the same two authorities a rule answers to. It can never resolve a `deny`,
         # because on a denial no hook was invoked at all.
         {:allow, input, context} ->
-          revise(state, call, classified, input, :allow, reason, context)
+          revise(state, call, classified, input, :allow, reason, context, hook_allowed(authority))
 
         # Silence is not consent. A hook that only annotated or rewrote leaves the
         # engine's verdict exactly where it was.
         {:none, input, context} ->
-          revise(state, call, classified, input, verdict, reason, context)
+          revise(state, call, classified, input, verdict, reason, context, authority)
       end
     else
-      proceed(state, call, classified, verdict, reason, [])
+      proceed(state, call, classified, verdict, reason, [], authority)
     end
   end
 
   # A hook that rewrote the input hands back a different call, so the engine sees the
   # call that will actually run and not the one the model proposed.
-  defp revise(state, call, classified, input, verdict, reason, context) do
+  defp revise(state, call, classified, input, verdict, reason, context, authority) do
     if input == call.input do
       # Unchanged arguments keep the classification already computed: re-deriving it
       # would run `code_intel`'s rename preview a second time for nothing.
-      proceed(state, call, classified, verdict, reason, context)
+      proceed(state, call, classified, verdict, reason, context, authority)
     else
       call = %{call | input: input}
       classified = Tools.classify(call.name, input, state.scope)
 
       case Permissions.evaluate(permission_request(state, classified)) do
         {:deny, rule} ->
-          record(state, :deny, :once, :rule, rule)
-
           {:deny, state,
            "Refused: a PreToolUse hook rewrote this call's arguments and " <>
-             Permissions.deny_message(call.name, rule)}
+             Permissions.deny_message(call.name, rule), classified,
+           authority(:deny, "rule", :once, :rule, rule, record(state, :deny, :once, :rule, rule))}
 
         {:allow, _rule} ->
-          proceed(state, call, classified, verdict, reason, context)
+          proceed(state, call, classified, verdict, reason, context, authority)
 
         {:ask, engine_reason} ->
-          proceed(state, call, classified, narrow(verdict), reason || engine_reason, context)
+          proceed(
+            state,
+            call,
+            classified,
+            narrow(verdict),
+            reason || engine_reason,
+            context,
+            authority
+          )
       end
     end
   end
@@ -660,13 +733,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp narrow(:ask_human), do: :ask_human
   defp narrow(_allow_or_ask), do: :ask
 
-  defp proceed(state, call, classified, :allow, _reason, context),
-    do: {:allow, state, call, classified, context}
+  defp proceed(state, call, classified, :allow, _reason, context, authority),
+    do: {:allow, state, call, classified, context, authority}
 
-  defp proceed(state, call, classified, :ask_human, reason, context),
+  defp proceed(state, call, classified, :ask_human, reason, context, _authority),
     do: ask(state, call, classified, reason || :no_engine, context)
 
-  defp proceed(state, call, classified, :ask, reason, context),
+  defp proceed(state, call, classified, :ask, reason, context, _authority),
     do: decide(state, call, classified, reason || :no_engine, context)
 
   # What `:ask` means before a rule engine exists. A tool with no effect outside this
@@ -676,19 +749,47 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp decide(state, call, classified, reason, context) do
     cond do
       classified.mode == :read ->
-        {:allow, state, call, classified, context}
+        {:allow, state, call, classified, context,
+         authority(:allow, "read", :once, :runtime, {:mode, :read}, nil)}
 
       MapSet.member?(state.session_grants, grant_key(classified)) ->
-        record(state, :approve, :session, :human, {:session_grant, classified.tool})
-        {:allow, state, call, classified, context}
+        ref = {:session_grant, classified.tool}
+
+        {:allow, state, call, classified, context,
+         authority(
+           :allow,
+           "session_grant",
+           :session,
+           :human,
+           ref,
+           record(state, :approve, :session, :human, ref)
+         )}
 
       state.approval_mode == :auto_approve ->
-        record(state, :approve, :once, :rule, {:mode, :auto_approve})
-        {:allow, state, call, classified, context}
+        ref = {:mode, :auto_approve}
+
+        {:allow, state, call, classified, context,
+         authority(
+           :allow,
+           "mode",
+           :once,
+           :rule,
+           ref,
+           record(state, :approve, :once, :rule, ref)
+         )}
 
       state.approval_mode == :auto_edit and auto_editable?(state, classified) ->
-        record(state, :approve, :once, :rule, {:mode, :auto_edit})
-        {:allow, state, call, classified, context}
+        ref = {:mode, :auto_edit}
+
+        {:allow, state, call, classified, context,
+         authority(
+           :allow,
+           "mode",
+           :once,
+           :rule,
+           ref,
+           record(state, :approve, :once, :rule, ref)
+         )}
 
       true ->
         ask(state, call, classified, reason, context)
@@ -752,32 +853,57 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = grant(state, classified, response.scope)
-        record(state, :approve, response.scope, :human, nil)
-        {:allow, state, call, classified, context}
+
+        {:allow, state, call, classified, context,
+         authority(
+           :allow,
+           "human",
+           response.scope,
+           :human,
+           nil,
+           record(state, :approve, response.scope, :human, nil),
+           request_id
+         )}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
-        record(state, :deny, response.scope, :human, nil)
-
         {:deny, state,
          "Refused: the operator denied this #{classified.tool} call" <>
-           reason_suffix(response.reason) <> "."}
+           reason_suffix(response.reason) <> ".", classified,
+         authority(
+           :deny,
+           "human",
+           response.scope,
+           :human,
+           nil,
+           record(state, :deny, response.scope, :human, nil),
+           request_id
+         )}
 
       {:native_approval, _other_id, _response} ->
         wait_for_approval(state, call, request_id, classified, context, deadline)
 
       :native_interrupt ->
-        {:interrupted, %{state | interrupted?: true}}
+        {:interrupted, %{state | interrupted?: true}, classified}
 
       {:native_steer, text} ->
         state = %{state | steer: state.steer ++ [text]}
         wait_for_approval(state, call, request_id, classified, context, deadline)
     after
       remaining ->
-        record(state, :deny, :once, :rule, {:timeout, state.approval_timeout_ms})
+        ref = {:timeout, state.approval_timeout_ms}
 
         {:deny, state,
          "Refused: nobody answered the approval request within " <>
-           "#{state.approval_timeout_ms} ms, so it was denied."}
+           "#{state.approval_timeout_ms} ms, so it was denied.", classified,
+         authority(
+           :deny,
+           "timeout",
+           :once,
+           :rule,
+           ref,
+           record(state, :deny, :once, :rule, ref),
+           request_id
+         )}
     end
   end
 
@@ -787,9 +913,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   # `respond_approval` verb, the same wait, with `kind: "question"` so a client that has
   # learned about questions can render a picker and one that has not still shows a modal
   # whose approve-with-a-reason is the answer.
-  defp ask_question(state, call, hook_context) do
+  defp ask_question(state, call, hook_context, effect_id) do
     case AskUser.question(call.input) do
       {:error, :empty_question} ->
+        settle_tool_effect(state, effect_id, :failed, 0, 0)
+
         {:continue,
          tool_result(state, call, %{
            output: "ask_user needs a `question`. Nothing was asked.",
@@ -813,28 +941,31 @@ defmodule Ouroboros.Provider.Native.Loop do
           request_id,
           payload,
           hook_context,
+          effect_id,
           deadline(state.approval_timeout_ms)
         )
     end
   end
 
-  defp wait_for_answer(state, call, request_id, payload, hook_context, deadline) do
+  defp wait_for_answer(state, call, request_id, payload, hook_context, effect_id, deadline) do
     remaining = remaining(deadline)
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         result = payload |> AskUser.answer(response) |> Tools.normalize_result_of()
+        settle_tool_effect(state, effect_id, result, nil)
         {:continue, tool_result(state, call, append_context(result, hook_context))}
 
       {:native_approval, _other_id, _response} ->
-        wait_for_answer(state, call, request_id, payload, hook_context, deadline)
+        wait_for_answer(state, call, request_id, payload, hook_context, effect_id, deadline)
 
       :native_interrupt ->
+        settle_tool_effect(state, effect_id, :refused, nil, 0)
         {:interrupted, %{state | interrupted?: true}}
 
       {:native_steer, text} ->
         state = %{state | steer: state.steer ++ [text]}
-        wait_for_answer(state, call, request_id, payload, hook_context, deadline)
+        wait_for_answer(state, call, request_id, payload, hook_context, effect_id, deadline)
     after
       remaining ->
         result =
@@ -842,6 +973,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           |> AskUser.unanswered(state.approval_timeout_ms)
           |> Tools.normalize_result_of()
 
+        settle_tool_effect(state, effect_id, :timed_out, state.approval_timeout_ms, 0)
         {:continue, tool_result(state, call, append_context(result, hook_context))}
     end
   end
@@ -862,22 +994,25 @@ defmodule Ouroboros.Provider.Native.Loop do
     {classified.tool, classified.command, Enum.sort(classified.paths)}
   end
 
+  # Returns the id of the `:permission` entry this decision was written under, or `nil`
+  # when there was no engine to write it into. A `:tool_call` entry links to that id
+  # rather than restating the decision, so the two records cannot drift.
   defp record(state, decision, scope, actor, rule_ref) do
     decision_id =
       "ndec_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-    _ =
-      Permissions.record(decision_id, %{
-        decision: decision,
-        scope: scope,
-        actor: actor,
-        rule_ref: rule_ref,
-        reason: nil,
-        session_id: state.session_id,
-        provider: :native
-      })
-
-    :ok
+    case Permissions.record(decision_id, %{
+           decision: decision,
+           scope: scope,
+           actor: actor,
+           rule_ref: rule_ref,
+           reason: nil,
+           session_id: state.session_id,
+           provider: :native
+         }) do
+      :ok -> decision_id
+      {:error, _no_engine_or_refused} -> nil
+    end
   end
 
   defp permission_request(state, classified) do
@@ -913,6 +1048,231 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp reason_suffix(nil), do: ""
   defp reason_suffix(""), do: ""
   defp reason_suffix(reason), do: ": #{reason}"
+
+  # ---------------------------------------------------------------- the ledger (I1)
+
+  # What admitted or refused one tool call, in the shape `EffectLedger`'s `authority` map
+  # takes. `reason` names the *kind* of authority in one word a reader can scan a ledger
+  # by; `constraints` carries the rest, bounded and content-free.
+  defp authority(decision, reason, scope, actor, rule_ref, permission_entry_id, request_id \\ nil) do
+    %{
+      decision: decision,
+      reason: reason,
+      constraints:
+        reject_nils(%{
+          scope: scope,
+          actor: actor,
+          rule_id: rule_id(rule_ref),
+          request_id: request_id
+        }),
+      permission_entry_id: permission_entry_id
+    }
+  end
+
+  # A hook that resolved an engine `ask` is its own authority: it is either the operator's
+  # user-scope hook or a repository hook they trusted. Nothing records it as a permission
+  # decision today, so the entry says who admitted it and links no `:permission` id rather
+  # than borrowing the engine's.
+  defp hook_allowed(_authority),
+    do: authority(:allow, "hook", :once, :hook, {:hook, :pre_tool_use}, nil)
+
+  defp interrupted_authority,
+    do: authority(:deny, "interrupted", :once, :runtime, {:interrupted, :approval_wait}, nil)
+
+  defp rule_id(nil), do: nil
+  defp rule_id(%{id: id}) when is_binary(id), do: id
+  defp rule_id(rule) when is_binary(rule), do: rule
+  defp rule_id({tag, value}) when is_atom(tag) and is_atom(value), do: "#{tag}:#{value}"
+  defp rule_id({tag, value}) when is_atom(tag), do: "#{tag}:#{inspect(value)}"
+  defp rule_id(rule), do: inspect(rule)
+
+  # Embeds `node()` for the same reason every other id in this runtime does: an effect id
+  # is read across a fleet, and a VM-local integer alone collides with the same one
+  # allocated on another machine.
+  defp tool_effect_id(state, call) do
+    digest =
+      :sha256
+      |> :crypto.hash(
+        :erlang.term_to_binary(
+          {node(), state.session_id, state.provider_session_id, state.turn_id, call.id,
+           System.system_time(:nanosecond), System.unique_integer([:positive, :monotonic])}
+        )
+      )
+      |> Base.encode16(case: :lower)
+
+    "tool-" <> binary_slice(digest, 0, 32)
+  end
+
+  # Exactly the two parameters `ledger.get` takes, so a client resolves the row it drew
+  # without a second vocabulary to translate. The sequence is deliberately absent: it is
+  # minted by the write, and this reference is emitted before the write so the row and the
+  # entry cannot get out of order.
+  defp ledger_ref(effect_id), do: %{"node" => Atom.to_string(node()), "id" => effect_id}
+
+  defp emit_tool_call(state, call, effect_id) do
+    emit(
+      state,
+      :tool_call,
+      reject_nils(%{
+        "name" => call.name,
+        "call_id" => call.id,
+        "input" => call.input,
+        "ledger_ref" => effect_id && ledger_ref(effect_id)
+      })
+    )
+  end
+
+  # Checkpoint before run, and a hard gate rather than best effort: the whole claim a
+  # `:tool_call` entry makes is that the call is accountable afterwards, and a call whose
+  # attempt could not be written down is not.
+  defp open_tool_effect(state, call, classified, effect_id, authority) do
+    case safe_ledger(fn ->
+           EffectLedger.record_started(
+             tool_effect_attrs(state, call, classified, effect_id, authority)
+           )
+         end) do
+      {:ok, _entry, _disposition} -> :ok
+      other -> {:error, other}
+    end
+  end
+
+  # A refusal is terminal the instant it is decided, so it is written as one entry rather
+  # than as a start nothing would ever settle. Best effort, and deliberately: the call is
+  # already refused, and failing to record a refusal cannot make it run.
+  defp refuse_tool_effect(state, call, classified, effect_id, authority) do
+    attrs =
+      state
+      |> tool_effect_attrs(call, classified, effect_id, authority)
+      |> Map.put(:result, %{status: :refused})
+      |> Map.put(:error, {:tool_call_refused, authority.reason})
+
+    _ = safe_ledger(fn -> EffectLedger.record_denied(attrs) end)
+    :ok
+  end
+
+  defp tool_effect_attrs(state, call, classified, effect_id, authority) do
+    %{
+      id: effect_id,
+      effect: :tool_call,
+      principal: principal(state),
+      attempt:
+        reject_nils(%{
+          session_id: state.session_id,
+          turn_id: state.turn_id,
+          call_id: call.id,
+          tool: classified.tool,
+          provider: :native,
+          subject: tool_subject(classified),
+          node: node(),
+          permission_entry_id: authority.permission_entry_id
+        }),
+      authority: Map.delete(authority, :permission_entry_id),
+      cause: %{signal_type: "native.tool_call", signal_id: effect_id}
+    }
+  end
+
+  # What the call is *about*, in identities. Paths and hostnames name things; a command
+  # line and a tool's arguments are contents, so the command is a digest and the arguments
+  # never appear at all.
+  defp tool_subject(classified) do
+    %{}
+    |> put_subject(:paths, Enum.filter(classified.paths, &is_binary/1))
+    |> put_subject(:command_sha256, command_digest(classified.command))
+    |> put_subject(:hosts, Map.get(classified, :domains, []))
+    |> Map.merge(mcp_subject(classified.tool))
+  end
+
+  defp put_subject(subject, _key, nil), do: subject
+  defp put_subject(subject, _key, []), do: subject
+  defp put_subject(subject, key, value), do: Map.put(subject, key, value)
+
+  defp command_digest(command) when is_binary(command),
+    do: :sha256 |> :crypto.hash(command) |> Base.encode16(case: :lower)
+
+  defp command_digest(_command), do: nil
+
+  # `mcp__server__tool` is the one name whose *shape* carries two identities. Splitting it
+  # here means a ledger reader can ask "what did this session do through the linear
+  # server" without parsing tool names, and it costs nothing when D4's MCP tools are not
+  # loaded — an ordinary tool name simply has no `mcp__` prefix.
+  defp mcp_subject("mcp__" <> rest) do
+    case String.split(rest, "__", parts: 2) do
+      [server, tool] when server != "" and tool != "" -> %{mcp_server: server, mcp_tool: tool}
+      _unsplittable -> %{}
+    end
+  end
+
+  defp mcp_subject(_tool), do: %{}
+
+  # Settled against the tool's own result. `:timed_out` is inferred from the wall clock
+  # rather than from the runner's message: `Tools.execute/4` reports a killed tool as an
+  # ordinary error result, so elapsed time is the only structural evidence there is, and
+  # the inference is stated here rather than presented as something the runner said.
+  defp settle_tool_effect(state, effect_id, result, elapsed) when is_map(result) do
+    bytes = byte_size(to_string(Map.get(result, :output, "")))
+
+    status =
+      cond do
+        not Map.get(result, :is_error, false) -> :completed
+        timed_out?(state, elapsed) -> :timed_out
+        true -> :failed
+      end
+
+    settle_tool_effect(state, effect_id, status, elapsed, bytes)
+  end
+
+  defp settle_tool_effect(_state, effect_id, status, elapsed, bytes) do
+    outcome = %{
+      status: if(status == :completed, do: :ok, else: :failed),
+      result: reject_nils(%{status: status, duration_ms: duration(elapsed), output_bytes: bytes})
+    }
+
+    outcome =
+      if status == :completed,
+        do: outcome,
+        else: Map.put(outcome, :error, {:tool_call_not_completed, status})
+
+    _ = safe_ledger(fn -> EffectLedger.settle(effect_id, outcome) end)
+    :ok
+  end
+
+  defp timed_out?(%{tool_timeout_ms: limit}, elapsed)
+       when is_integer(limit) and is_integer(elapsed),
+       do: elapsed >= limit
+
+  defp timed_out?(_state, _elapsed), do: false
+
+  defp duration(elapsed) when is_integer(elapsed) and elapsed >= 0, do: elapsed
+  defp duration(_elapsed), do: nil
+
+  # What the model is told when the ledger could not record the call. Legible on purpose:
+  # a refusal the model cannot distinguish from a tool failure is one it will retry.
+  defp unrecordable(call, reason) do
+    %{
+      output:
+        "Refused: the effect ledger could not record this `#{call.name}` call before it " <>
+          "ran, so it did not run. A tool call nobody can account for afterwards is what " <>
+          "that ledger exists to prevent. Ask the operator to check the runtime's effect " <>
+          "ledger (#{inspect(reason)}).",
+      is_error: true
+    }
+  end
+
+  defp principal(%{session_id: session_id}) when is_binary(session_id) and session_id != "",
+    do: "session:" <> session_id
+
+  defp principal(%{provider_session_id: id}) when is_binary(id) and id != "",
+    do: "native:" <> id
+
+  defp principal(_state), do: "native"
+
+  defp safe_ledger(fun) do
+    fun.()
+  rescue
+    error -> {:error, {:effect_ledger_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:effect_ledger_failure, kind, inspect(reason)}}
+  end
 
   # ---------------------------------------------------------------- control
 
