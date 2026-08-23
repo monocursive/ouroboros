@@ -916,12 +916,15 @@ workspace and refuses if it escapes. A `resource_link` with any other scheme, an
 content block whose capability was advertised `false`, is `-32602` naming the type rather
 than being dropped — a block the handshake said would not be read is not one to read.
 
-*A `session/new` carrying `mcpServers` is not silently ignored.* The session starts, and the
-servers are reported as **not applied**. The gateway has no parameter to carry them for any
-transport today; the brief for this slice expected ACP-transport sessions to be the
-exception, and they are not — `Dialect.ACP` can put `mcpServers` on its own `session/new`,
-but Ouroboros's own API refuses `mcp_config` before the dialect is reached
-([task_state.ex](../lib/ouroboros/coding/task_state.ex), AGENT_EXPERIENCE F4/D4).
+*A `session/new` carrying `mcpServers` is not silently ignored.* The session starts, and an
+`agent_message_chunk` names the servers and says they were **not applied** — in the
+transcript the person is reading, not only on stderr. It follows the `session/new` result
+rather than preceding it, because a `session/update` names a session the editor may only
+have learned about from that answer. The gateway has no parameter to carry them for any
+transport today: `Dialect.ACP` can put `mcpServers` on its own `session/new`, but
+Ouroboros's own API refuses `mcp_config` before any dialect is reached
+([task_state.ex](../lib/ouroboros/coding/task_state.ex), AGENT_EXPERIENCE F4/D4), so an
+ACP-transport session is no exception.
 
 *The editor's own services are acknowledged and unused.* An ACP client may offer
 `fs/read_text_file`, `fs/write_text_file` and `terminal/*` so the agent can work through the
