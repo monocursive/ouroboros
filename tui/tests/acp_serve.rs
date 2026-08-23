@@ -778,9 +778,20 @@ async fn an_approval_becomes_a_permission_request_and_the_editors_answer_reaches
     harness.prompt(2, "run the tests").await;
 
     let session = harness.session.clone();
+
+    // The call the question is about, announced first — exactly the order the runtime
+    // emits them in.
+    harness
+        .event(
+            1,
+            "tool_call",
+            json!({"call_id": "b1", "name": "bash", "input": {"command": "cargo test"}}),
+        )
+        .await;
+
     let frames = harness
         .event_for(
-            1,
+            2,
             "approval_requested",
             json!({
                 "kind": "command",
@@ -799,6 +810,10 @@ async fn an_approval_becomes_a_permission_request_and_the_editors_answer_reaches
     assert_eq!(request["params"]["sessionId"], session);
     assert_eq!(request["params"]["toolCall"]["kind"], "execute");
     assert_eq!(request["params"]["toolCall"]["title"], "bash: cargo test");
+    // The question attaches to the row the editor already drew, rather than inventing a
+    // second one: the runtime's approval payload names a tool but not its call id, and the
+    // call it is about is the one in flight.
+    assert_eq!(request["params"]["toolCall"]["toolCallId"], "b1");
 
     let kinds: Vec<&str> = request["params"]["options"]
         .as_array()

@@ -1717,6 +1717,20 @@ impl Agent {
 
         let (options, answers) = permission_options(&event.payload);
 
+        // Which tool call this is about. The runtime raises the question *between* the
+        // `tool_call` event and the tool running, and its payload's `tool_call` object
+        // carries a name and a command but no call id — so the session's most recent call
+        // is the one being asked about, and naming it is what makes the editor attach the
+        // question to the row it already drew instead of inventing a second one. A
+        // question or a plan exit has no tool call at all, and gets a minted id.
+        let last_tool = self
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.last_tool.clone());
+        let call_id = permission_call_id(&event.payload)
+            .or(last_tool)
+            .unwrap_or_else(|| self.mint_tool_id(session_id, event.sequence));
+
         self.outbound += 1;
         let id = json!(format!("ouro-permission-{}", self.outbound));
 
@@ -1735,7 +1749,7 @@ impl Agent {
             "method": "session/request_permission",
             "params": {
                 "sessionId": session_id,
-                "toolCall": permission_tool_call(&event.payload),
+                "toolCall": permission_tool_call(&event.payload, &call_id),
                 "options": options,
             }
         })]
@@ -2276,14 +2290,17 @@ fn tool_locations(payload: &Value) -> Vec<Value> {
 }
 
 /// The `toolCall` an editor renders above the permission options.
-fn permission_tool_call(payload: &Value) -> Value {
+///
+/// A `ToolCallUpdate` rather than a `ToolCall`, which is what the schema asks for here:
+/// only `toolCallId` is required, and the rest is what makes the question readable.
+fn permission_tool_call(payload: &Value, call_id: &str) -> Value {
     let call = payload.get("tool_call").unwrap_or(payload);
     let name = text(call, &["name", "tool_name", "tool"])
         .or_else(|| text(payload, &["header"]))
         .unwrap_or_else(|| "this action".to_string());
 
     let mut object = Map::new();
-    object.insert("toolCallId".into(), json!(permission_call_id(payload)));
+    object.insert("toolCallId".into(), json!(call_id));
     object.insert("title".into(), json!(permission_title(payload, &name)));
     object.insert("kind".into(), json!(tool_kind(&name, payload)));
     object.insert("status".into(), json!("pending"));
@@ -2307,12 +2324,15 @@ fn permission_tool_call(payload: &Value) -> Value {
     Value::Object(object)
 }
 
-fn permission_call_id(payload: &Value) -> String {
+/// The call id the approval payload named, where it named one. Today's runtime does not —
+/// `Ouroboros.Provider.Native.Loop`'s `tool_call` object is `{name, command, cwd}` and the
+/// Codex dialect's is its own shape — so this is the arm that keeps working the day one
+/// starts to.
+fn permission_call_id(payload: &Value) -> Option<String> {
     text(
         payload.get("tool_call").unwrap_or(payload),
         &["call_id", "tool_call_id", "toolCallId", "id"],
     )
-    .unwrap_or_else(|| "ouro-permission".to_string())
 }
 
 /// The sentence the person reads. A plan exit and a question carry their own; a tool call
