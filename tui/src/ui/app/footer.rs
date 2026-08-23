@@ -39,6 +39,15 @@ pub struct SessionFacts {
     pub model: Option<String>,
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
+    /// B2. Whether this session is planning: read-only, and holding its terminal event at
+    /// the end of a planning turn to ask whether to build the plan.
+    ///
+    /// Three sources, newest first: the `plan_exit` provider event, the `configured`
+    /// status event, and `options.plan` on the session row. The first two are live and the
+    /// third is a snapshot, so an event that has spoken since the last list wins — and a
+    /// runtime that has said nothing at all leaves this `false`, because the badge claims
+    /// the session *is* planning and silence must not raise it.
+    pub plan: bool,
     pub capabilities: Capabilities,
     pub usage: Option<SessionUsage>,
     /// Whether a turn is running. The runtime's own status, not an inference from the
@@ -282,6 +291,9 @@ impl App {
                 .or_else(|| watch.and_then(transcript_model)),
             approval_mode: info.and_then(|info| info.approval_mode.clone()),
             sandbox_mode: info.and_then(|info| info.sandbox_mode.clone()),
+            plan: watch
+                .and_then(|watch| watch.planning())
+                .unwrap_or_else(|| info.is_some_and(|info| info.plan)),
             capabilities: info
                 .map(|info| info.capabilities.clone())
                 .unwrap_or_default(),

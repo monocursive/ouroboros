@@ -110,6 +110,15 @@ pub enum Command {
         #[arg(long)]
         worktree: bool,
 
+        /// Start the session planning (B2): it reads and reasons but edits nothing, and
+        /// at the end of a planning turn it asks whether to build the plan.
+        ///
+        /// The only way to reach plan mode on a transport that carries the posture on
+        /// every launch — Claude refuses a mid-life change — so this is not merely a
+        /// shortcut for `/plan on` once the session is open.
+        #[arg(long)]
+        plan: bool,
+
         /// Print the session id and exit instead of opening the terminal UI.
         #[arg(long)]
         print: bool,
@@ -142,6 +151,17 @@ pub enum Command {
         /// used.
         #[arg(long, value_name = "PATH")]
         token_file: Option<PathBuf>,
+    },
+
+    /// The MCP servers this runtime runs for the native agent, and the files that declare
+    /// them (D4).
+    ///
+    /// `list` reads the runtime. `add` and `remove` edit a JSON file and never touch the
+    /// socket: there is no `mcp.add` on the wire, because a server definition is a command
+    /// line that runs on somebody's machine and is never authored over a socket.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
     },
 
     /// Start a runtime, print how to reach it, and leave it running.
@@ -360,6 +380,108 @@ pub enum HookCommand {
 /// [`crate::config::resolve_start`] against the same `[defaults]`; `--addr`/`--token-file`
 /// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
 /// Nothing here is a second way to say something the other two commands already say.
+/// D4. The three things an operator does with MCP servers.
+///
+/// `list` is a read of the runtime and starts nothing, like `ouro agents`. `add` and
+/// `remove` edit the Claude-compatible `mcp.json` the runtime's loader reads and never
+/// open a socket at all.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Every MCP server this runtime runs, and every entry its loader refused.
+    List {
+        /// The node to ask. Omitted, this runtime's own — a server runs where its session
+        /// runs, so a fleet asks the machine the work is on.
+        #[arg(long, value_name = "NODE")]
+        node: Option<String>,
+
+        /// Also report what is *configured* for this workspace but not started, and every
+        /// entry the loader refused. Without it the answer is only what is running.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// The runtime's own answer as one JSON object, unchanged.
+        #[arg(long)]
+        json: bool,
+
+        /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+
+        /// A file holding the gateway token. Omitted, the token beside gateway.json is
+        /// used.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+    },
+
+    /// Declare a server in `mcp.json`. No runtime is contacted and nothing is started.
+    Add {
+        /// `[A-Za-z0-9_-]{1,64}`, and no `__`: a tool reaches the model as
+        /// `mcp__<server>__<tool>` and is split on the first `__`.
+        name: String,
+
+        /// The program to run. Required unless `--url` is given.
+        #[arg(long, value_name = "PROGRAM")]
+        command: Option<String>,
+
+        /// An HTTP/SSE endpoint. Written to the file as a valid Claude Code definition,
+        /// and refused by this runtime as `unsupported_transport`: this build speaks
+        /// stdio only, and says so rather than dropping the entry.
+        #[arg(long, value_name = "URL", conflicts_with = "command")]
+        url: Option<String>,
+
+        /// One argument. Repeat for more; order is kept.
+        ///
+        /// `allow_hyphen_values` because an MCP server's arguments are overwhelmingly
+        /// flags — `--arg --stdio` is the common case, not the exotic one — and a parser
+        /// that read the value as a second option would make this unusable for the servers
+        /// people actually run.
+        #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
+        args: Vec<String>,
+
+        /// One `KEY=VALUE`. Repeat for more. **Values are written and never printed
+        /// back** — not by this command, and not by the runtime, which puts only a count
+        /// on the wire.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// The directory the server runs in.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+
+        /// `user` writes `~/.config/ouroboros/mcp.json`; `workspace` writes
+        /// `<workspace>/.ouroboros/mcp.json`, which the runtime reads only for a workspace
+        /// it has been told to trust.
+        #[arg(long, value_name = "SCOPE", default_value = "user")]
+        scope: String,
+
+        /// Which workspace, for `--scope workspace`. Omitted, the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// Replace a definition already recorded under this name. Without it a name
+        /// already present with different bytes is refused.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the check that `--command` resolves on PATH or is an existing file. The
+        /// check only ever warns — the file may be written on one machine for a session
+        /// that runs on another.
+        #[arg(long)]
+        no_check: bool,
+    },
+
+    /// Remove a server from `mcp.json`.
+    Remove {
+        name: String,
+
+        #[arg(long, value_name = "SCOPE", default_value = "user")]
+        scope: String,
+
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// The prompt to run.
@@ -428,6 +550,16 @@ pub struct RunArgs {
     /// waits for one.
     #[arg(long)]
     pub approve_all: bool,
+
+    /// Start the session planning (B2): it reads and reasons but edits nothing, and the
+    /// plan it produced is reported in the result object as `plan`.
+    ///
+    /// The plan-exit question is answered `keep_planning`, **including under
+    /// `--approve-all`**: nobody is at the keyboard, and a headless run that granted
+    /// itself `auto_edit` would turn "plan this" into "do this" with no one to object.
+    /// The session is left planning, so `ouro --continue` opens it where it was.
+    #[arg(long)]
+    pub plan: bool,
 
     /// Seconds before the turn is interrupted and reported as `timeout` (exit 4).
     #[arg(long, value_name = "SECS", default_value_t = 600)]
@@ -694,6 +826,121 @@ mod tests {
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied()))
             .expect("a parseable command line")
+    }
+
+    /// B2. `--plan` is a plain boolean on both surfaces, with no flag it fights.
+    #[test]
+    fn plan_is_a_boolean_on_new_and_on_run() {
+        let Some(Command::New { plan, .. }) = parse(&["new", "--plan"]).command else {
+            panic!("`ouro new --plan` must parse as New");
+        };
+        assert!(plan);
+
+        let Some(Command::New { plan, .. }) = parse(&["new"]).command else {
+            panic!("`ouro new` must parse");
+        };
+        assert!(!plan, "an unasked-for plan is not a plan");
+
+        let Some(Command::Run(args)) = parse(&["run", "hi", "--plan"]).command else {
+            panic!("`ouro run --plan` must parse as Run");
+        };
+        assert!(args.plan);
+
+        // Deliberately compatible with --approve-all: the two say different things, and
+        // the plan-exit answer stays `keep_planning` under both.
+        let Some(Command::Run(args)) = parse(&["run", "hi", "--plan", "--approve-all"]).command
+        else {
+            panic!("`ouro run --plan --approve-all` must parse");
+        };
+        assert!(args.plan && args.approve_all);
+    }
+
+    /// D4. An MCP server's arguments are overwhelmingly flags, so `--arg --stdio` has to
+    /// reach the file as the argument `--stdio` rather than being read as an option.
+    ///
+    /// Pinned because the first live run of this command failed on exactly that.
+    #[test]
+    fn mcp_add_takes_hyphenated_arguments() {
+        let Some(Command::Mcp {
+            command:
+                McpCommand::Add {
+                    name,
+                    command,
+                    args,
+                    env,
+                    scope,
+                    ..
+                },
+        }) = parse(&[
+            "mcp",
+            "add",
+            "fake",
+            "--command",
+            "/bin/cat",
+            "--arg",
+            "--stdio",
+            "--arg",
+            "-v",
+            "--env",
+            "TOKEN=x",
+        ])
+        .command
+        else {
+            panic!("`ouro mcp add` must parse");
+        };
+
+        assert_eq!(name, "fake");
+        assert_eq!(command.as_deref(), Some("/bin/cat"));
+        assert_eq!(args, vec!["--stdio".to_string(), "-v".to_string()]);
+        assert_eq!(env, vec!["TOKEN=x".to_string()]);
+        assert_eq!(scope, "user", "the default scope is the user file");
+    }
+
+    /// `--command` and `--url` are two transports, and naming both is refused by the
+    /// parser rather than by the file writer.
+    #[test]
+    fn mcp_add_refuses_two_transports() {
+        assert!(Cli::try_parse_from([
+            "ouro",
+            "mcp",
+            "add",
+            "fake",
+            "--command",
+            "/bin/cat",
+            "--url",
+            "https://example.invalid"
+        ])
+        .is_err());
+    }
+
+    /// `ouro mcp list` is a read with the same three flags every read-only subcommand has.
+    #[test]
+    fn mcp_list_carries_the_node_and_the_workspace() {
+        let Some(Command::Mcp {
+            command:
+                McpCommand::List {
+                    node,
+                    workspace,
+                    json,
+                    ..
+                },
+        }) = parse(&[
+            "mcp",
+            "list",
+            "--node",
+            "ouroboros@golden",
+            "--workspace",
+            "/srv/repo",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("`ouro mcp list` must parse");
+        };
+
+        assert_eq!(node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(workspace, Some(PathBuf::from("/srv/repo")));
+        assert!(json);
     }
 
     #[test]

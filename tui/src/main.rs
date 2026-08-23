@@ -32,11 +32,12 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, RunArgs,
-    ServiceCommand, SessionsCommand, SyncCommand,
+    AcpArgs, Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, McpCommand,
+    RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
+use ouro::mcp_cli;
 use ouro::model::{ApprovalMode, Plane, SandboxMode, StartError, StartRequest, StartedRef};
 use ouro::proto::Hello;
 use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
@@ -165,6 +166,7 @@ async fn run(cli: Cli) -> Result<()> {
             message,
             machine,
             worktree,
+            plan,
             print,
         }) => {
             new_session(
@@ -179,8 +181,11 @@ async fn run(cli: Cli) -> Result<()> {
                     machine,
                 },
                 message,
-                worktree,
-                print,
+                NewSessionFlags {
+                    worktree,
+                    plan,
+                    print,
+                },
             )
             .await
         }
@@ -197,6 +202,7 @@ async fn run(cli: Cli) -> Result<()> {
             token_file,
             print,
         }) => attach_remote(&paths, cli.dev, addr, token_file, print, config).await,
+        Some(Command::Mcp { command }) => mcp_command(&paths, command).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
@@ -340,6 +346,19 @@ async fn attach_local_with(
     .await
 }
 
+/// The three booleans `ouro new` carries that are not start *parameters*: two are start
+/// intent the gateway takes as options, and the third decides whether a terminal opens at
+/// all. Bundled because they travel together and a function signature is not a place to
+/// keep a list of flags.
+struct NewSessionFlags {
+    /// D7. Provision a `git worktree` under the data directory before the lease is taken.
+    worktree: bool,
+    /// B2. Start the session planning: it reads and reasons but edits nothing.
+    plan: bool,
+    /// Print the session id and exit instead of opening the terminal UI.
+    print: bool,
+}
+
 /// `ouro new`: state every choice, start the session, and attach to it.
 ///
 /// The validation is [`StartRequest`]'s — the same code the `n` dialog runs — so a
@@ -353,9 +372,10 @@ async fn new_session(
     config: Loaded,
     flags: StartFlags,
     message: Option<String>,
-    worktree: bool,
-    print: bool,
+    start: NewSessionFlags,
 ) -> Result<()> {
+    let print = start.print;
+
     paths.ensure_private_data_dir()?;
 
     let resolved = config::resolve_start(&flags, &config.config.defaults)
@@ -389,7 +409,8 @@ async fn new_session(
             })?),
         },
         objective: String::new(),
-        worktree,
+        worktree: start.worktree,
+        plan: start.plan,
     };
 
     // Mint the durable identity before the mutation. If the reply disappears after the
@@ -800,6 +821,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
                 start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
             },
             prompt,
+            args.plan,
         )
         .map_err(|refusal| refusal.to_string())
     };
@@ -2208,6 +2230,141 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
 /// Read-only and one-shot: two list calls, the same grouping the rail draws, and out. It
 /// deliberately starts no runtime — a command whose whole job is to answer "is anything
 /// waiting on me" must not answer it by creating something to wait on — so an unreachable
+/// D4. `ouro mcp`: one read of the runtime, and two edits of a file.
+///
+/// The split is the point. `list` attaches to a runtime and starts none, exactly as
+/// `agents_page` does and for the same reason. `add`/`remove` never open a socket at all:
+/// there is no `mcp.add` on the wire, because a server definition is a command line that
+/// runs on somebody's machine and is never authored over one. They edit the same
+/// Claude-compatible `mcp.json` the runtime's loader reads, and the runtime picks the
+/// change up on its own terms.
+async fn mcp_command(paths: &Paths, command: McpCommand) -> Result<()> {
+    match command {
+        McpCommand::List {
+            node,
+            workspace,
+            json,
+            addr,
+            token_file,
+        } => mcp_list(paths, node, workspace, json, addr, token_file).await,
+
+        McpCommand::Add {
+            name,
+            command,
+            url,
+            args,
+            env,
+            cwd,
+            scope,
+            workspace,
+            force,
+            no_check,
+        } => {
+            let scope = mcp_scope(&scope)?;
+            let workspace = mcp_workspace(scope, workspace)?;
+            let path = mcp_cli::path(scope, workspace.as_deref())?;
+
+            let definition = mcp_cli::Definition {
+                name,
+                command,
+                url,
+                args,
+                env,
+                cwd,
+            };
+
+            let mut out = std::io::stdout().lock();
+            mcp_cli::add(&path, scope, &definition, force, !no_check, &mut out)
+        }
+
+        McpCommand::Remove {
+            name,
+            scope,
+            workspace,
+        } => {
+            let scope = mcp_scope(&scope)?;
+            let workspace = mcp_workspace(scope, workspace)?;
+            let path = mcp_cli::path(scope, workspace.as_deref())?;
+
+            let mut out = std::io::stdout().lock();
+            mcp_cli::remove(&path, &name, &mut out)
+        }
+    }
+}
+
+fn mcp_scope(name: &str) -> Result<mcp_cli::Scope> {
+    mcp_cli::Scope::parse(name)
+        .ok_or_else(|| anyhow!("--scope takes user or workspace, not {name:?}"))
+}
+
+/// A workspace scope with no `--workspace` means the directory this command was typed in,
+/// which is the only place an operator could have meant.
+fn mcp_workspace(scope: mcp_cli::Scope, workspace: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if scope != mcp_cli::Scope::Workspace {
+        return Ok(None);
+    }
+
+    match workspace {
+        Some(path) => Ok(Some(workspace_argument(path)?.into())),
+        None => Ok(Some(
+            std::env::current_dir().context("resolving the current directory")?,
+        )),
+    }
+}
+
+/// `ouro mcp list`: `mcp.list` over the gateway, printed once.
+///
+/// Read-only and one-shot, and it deliberately starts no runtime: a command whose whole
+/// job is to say what is running must not answer by creating something to run.
+async fn mcp_list(
+    paths: &Paths,
+    node: Option<String>,
+    workspace: Option<PathBuf>,
+    json_output: bool,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<()> {
+    // A relative `--workspace` is resolved here, where the operator is standing. Sent
+    // unresolved it would be resolved against the *runtime's* working directory, which for
+    // a spawned daemon is a release root nobody ever stood in.
+    let workspace = match workspace {
+        Some(path) => Some(PathBuf::from(workspace_argument(path)?)),
+        None => None,
+    };
+
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let Connected { client, hello, .. } = attach_with(address, token, false, hook).await?;
+
+    if !hello.serves("mcp.list") {
+        client.stop().await;
+        return Err(anyhow!(
+            "this gateway does not serve mcp.list; the runtime is older than this client"
+        ));
+    }
+
+    let answer = client
+        .call(
+            "mcp.list",
+            mcp_cli::list_params(node.as_deref(), workspace.as_deref()),
+        )
+        .await
+        .context("calling mcp.list")?;
+
+    client.stop().await;
+
+    if json_output {
+        println!("{}", mcp_cli::render_json(&answer));
+    } else {
+        print!(
+            "{}",
+            mcp_cli::render(&ouro::model::McpList::decode(&answer))
+        );
+    }
+
+    Ok(())
+}
+
 /// runtime is an error rather than a cold start.
 async fn agents_page(
     paths: &Paths,
@@ -3236,6 +3393,7 @@ mod tests {
             sandbox_mode: None,
             objective: String::new(),
             worktree: false,
+            plan: false,
         }
     }
 

@@ -389,6 +389,14 @@ config :ouroboros, :mcp_servers, %{
 }
 ```
 
+`ouro mcp add github --command npx --arg -y --arg @modelcontextprotocol/server-github
+--env GITHUB_TOKEN=… ` writes the user file for you (`--scope workspace` writes the other
+one), `ouro mcp remove` takes an entry out, and `ouro mcp list` — or `/mcp` in the TUI —
+shows what this node is actually running, including every entry the loader refused and
+why. There is deliberately no `mcp.add` on the wire: a definition is a command line that
+runs on somebody's machine, so it is written to a file rather than authored over a socket.
+Neither surface ever prints an environment value back; a server's environment is a count.
+
 Every tool the server advertises reaches the model as `mcp__<server>__<tool>` — Claude
 Code's convention, which the permission rule language already understands, so a rule
 somebody wrote for another agent means the same thing here. A call is evaluated by
@@ -553,6 +561,15 @@ would otherwise put the session back to the mode it was started in. An explicit
 everywhere else. A plan exit the session applies is folded back into the plane's record,
 so `interactive.info` reports the approval and sandbox modes the session actually runs
 under; the `plan_exit` event carries the same facts for a client watching the stream.
+
+From `ouro`: **`--plan`** on `ouro new` and `ouro run` starts a session planning, and
+**`/plan on|off`** moves an open one (Claude can only be told at start and says so). A
+planning session wears a `PLANNING` badge and a composer that says it is read-only. The
+plan-exit question gets its own modal — the three answers in the runtime's own words, the
+plan, and an optional "what to do first" prompt. `ouro run --plan` answers it
+`keep_planning` even under `--approve-all`, because nobody is at the keyboard and
+`auto_edit` would reconfigure the session rather than answer an approval; the plan comes
+back in the result object as `plan`.
 
 Claude gets its own: `provider_options: %{plan: true}` becomes `--permission-mode plan`,
 applying **from the next turn** because `claude --print` runs one process per turn.

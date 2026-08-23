@@ -757,6 +757,15 @@ pub struct SessionInfo {
     /// not have.
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
+    /// B2. `options.plan` — whether this session is planning: read-only, holding its
+    /// terminal event at the end of a planning turn to ask whether to build the plan.
+    ///
+    /// A plain `bool` rather than an `Option<bool>` on purpose, and it is the one option
+    /// here that is: an older gateway omits the key, and "this runtime never told me it was
+    /// planning" and "this session is not planning" are the same fact for a client that
+    /// must decide whether to draw a `PLANNING` badge. The badge claims the session *is*
+    /// planning, so silence must not raise it.
+    pub plan: bool,
     /// What the transport this session selected can actually do (B0/D14).
     pub capabilities: Capabilities,
     /// What the provider reported spending, folded by the runtime.
@@ -849,6 +858,10 @@ impl SessionInfo {
             model: option("model"),
             approval_mode: option("approval_mode"),
             sandbox_mode: option("sandbox_mode"),
+            plan: options
+                .and_then(|options| options.get("plan"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             capabilities: Capabilities::decode(
                 options.and_then(|options| options.get("capabilities")),
             ),
@@ -1934,6 +1947,14 @@ pub struct StartRequest {
     /// or `1` is `-32602` — and an unasked-for `false` on every start would be this client
     /// stating a default the plane already has.
     pub worktree: bool,
+    /// B2. Start the session planning: read-only, and holding its terminal event at the
+    /// end of a planning turn to ask whether to build the plan.
+    ///
+    /// Sent only when true, for the same reason `worktree` is. It is the one way to reach
+    /// plan mode on a transport that carries the posture on every launch — Claude refuses
+    /// a mid-life change as `at_start_only` — so `--plan` is not merely a shortcut for
+    /// `/plan on` after the fact.
+    pub plan: bool,
 }
 
 impl StartRequest {
@@ -1948,6 +1969,7 @@ impl StartRequest {
             sandbox_mode: None,
             objective: String::new(),
             worktree: false,
+            plan: false,
         }
     }
 
@@ -2024,6 +2046,10 @@ impl StartRequest {
 
         if self.worktree {
             params.insert("worktree".into(), Value::Bool(true));
+        }
+
+        if self.plan {
+            params.insert("plan".into(), Value::Bool(true));
         }
 
         Ok(Value::Object(params))
@@ -2111,8 +2137,8 @@ impl StartedRef {
 /// The exact `params` for one approval answer without a reason.
 ///
 /// Built here rather than at the call site so the allowlist the gateway enforces —
-/// `decision` in `approve|deny`, `scope` in `once|session`, and nothing else, because
-/// `provider_options` is deliberately not accepted — is stated once, in a type, instead of
+/// `decision` in `approve|deny`, `scope` in `once|session`, plus the one `provider_options`
+/// shape [`respond_approval_params_with_plan`] adds — is stated once, in a type, instead of
 /// being spelled into a `json!` literal that a later edit could widen.
 pub fn respond_approval_params(
     session_id: &str,
@@ -2147,6 +2173,126 @@ pub fn respond_approval_params_with_reason(
         "request_id": request_id,
         "response": response,
     })
+}
+
+/// B2. The three answers a `plan_exit` approval admits, in the order the modal lists them.
+///
+/// These are `optionId`s, not labels: `Provider.Native.Session`'s `@plan_exit_options`
+/// spells them `auto_edit` / `prompt` / `keep_planning`, and the gateway matches the
+/// `provider_options["choice"]` a client sends against exactly those three literals
+/// (`Gateway.Methods` `@plan_exit_choices`). The *names* a person reads come from the
+/// payload's own `options` rows and are never derived from this enum — a modal that
+/// invented its own wording for a vendor's option would be describing a button that does
+/// something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlanChoice {
+    /// Leave plan mode into `auto_edit`: edits inside the workspace apply without asking.
+    AutoEdit,
+    /// Leave plan mode into `prompt`: every write and command is put to the operator.
+    Prompt,
+    /// Stay planning. Nothing is reconfigured, which is what makes the label true.
+    KeepPlanning,
+}
+
+impl PlanChoice {
+    /// The `optionId`s this build knows, in the payload's own order.
+    pub const ALL: [Self; 3] = [Self::AutoEdit, Self::Prompt, Self::KeepPlanning];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoEdit => "auto_edit",
+            Self::Prompt => "prompt",
+            Self::KeepPlanning => "keep_planning",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "auto_edit" => Some(Self::AutoEdit),
+            "prompt" => Some(Self::Prompt),
+            "keep_planning" => Some(Self::KeepPlanning),
+            _unknown => None,
+        }
+    }
+
+    /// The four-way answer this choice degrades to on a gateway that refuses
+    /// `provider_options`.
+    ///
+    /// Not a guess: `Provider.Native.Session.plan_exit_choice/1` falls back to exactly this
+    /// mapping when no explicit `choice` reached it — a deny is `keep_planning`, an
+    /// approve-for-the-session is `auto_edit`, and an approve-once is `prompt`. So the
+    /// fallback answer settles the session the same way the explicit one does; what is lost
+    /// is the follow-up prompt, which is why the client says so once rather than silently
+    /// dropping it.
+    pub fn decision(self) -> (ApprovalDecision, ApprovalScope) {
+        match self {
+            Self::AutoEdit => (ApprovalDecision::Approve, ApprovalScope::Session),
+            Self::Prompt => (ApprovalDecision::Approve, ApprovalScope::Once),
+            Self::KeepPlanning => (ApprovalDecision::Deny, ApprovalScope::Once),
+        }
+    }
+}
+
+/// At most this many bytes of follow-up prompt, because that is the gateway's own ceiling
+/// (`Gateway.Methods` `@max_follow_up_bytes`). Clipped here so an over-long draft is
+/// bounded by the composer that produced it rather than refused by a round trip.
+pub const MAX_PLAN_FOLLOW_UP_BYTES: usize = 32 * 1024;
+
+/// B2. One plan-exit answer: the explicit `choice`, and the prompt to run once the session
+/// has left plan mode.
+///
+/// `provider_options` is admitted by the gateway in exactly one shape — `{choice?,
+/// follow_up?}` — and anything else under that key is refused outright, so this builds that
+/// shape and nothing else. `decision`/`scope` are still sent and still mean what they mean:
+/// a runtime that reads the explicit choice and one that falls back to the four-way answer
+/// settle the same way.
+pub fn respond_approval_params_with_plan(
+    session_id: &str,
+    request_id: &str,
+    choice: PlanChoice,
+    follow_up: Option<&str>,
+) -> Value {
+    let (decision, scope) = choice.decision();
+    let mut params = respond_approval_params(session_id, request_id, decision, scope);
+
+    let mut options = serde_json::Map::new();
+    options.insert("choice".into(), Value::String(choice.as_str().to_string()));
+
+    // A blank follow-up is *absent*, not an empty string: the runtime trims and drops a
+    // blank one anyway, and omitting the key keeps these params byte-identical to an answer
+    // from a client that never offered a composer.
+    if let Some(text) = follow_up.map(str::trim).filter(|text| !text.is_empty()) {
+        options.insert(
+            "follow_up".into(),
+            Value::String(clip_utf8(text, MAX_PLAN_FOLLOW_UP_BYTES)),
+        );
+    }
+
+    params["response"]["provider_options"] = Value::Object(options);
+    params
+}
+
+/// One follow-up draft, bounded to what the gateway will accept.
+///
+/// Applied where the operator's text is *stored* as well as where it is sent, so the
+/// modal shows the bytes that will actually cross the wire rather than a draft it will
+/// silently shorten later.
+pub fn clip_plan_follow_up(text: &str) -> String {
+    clip_utf8(text.trim(), MAX_PLAN_FOLLOW_UP_BYTES)
+}
+
+/// Truncates on a character boundary, so a clipped follow-up is still UTF-8.
+fn clip_utf8(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    text[..end].to_string()
 }
 
 /// One `@`-mention, carried to the gateway as a path rather than as substituted text.
@@ -2327,6 +2473,221 @@ pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
         "decision": "allow",
         "workspace": workspace,
     })
+}
+
+/// D4. What `mcp.list` answers, for one node.
+///
+/// Decoded tolerantly out of the raw tree for the reason [`SessionInfo`] is: this is a
+/// status projection whose keys the runtime is free to extend, and a strict struct would be
+/// the one place this client refuses to show an operator their MCP servers because the
+/// runtime described them more fully than it used to.
+///
+/// **`refusals` is the load-bearing half.** An entry the loader read and rejected is the
+/// only thing that distinguishes "my `mcp.json` was ignored" from "my `mcp.json` was read
+/// and found wanting", so it is a first-class list here and a first-class section in every
+/// rendering, never folded into an error count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpList {
+    /// Whether this node runs MCP for the native agent at all. `false` is a posture, not a
+    /// failure: the servers list is then empty because nothing was started, not because
+    /// nothing was configured.
+    pub enabled: bool,
+    /// Whether the pool supervises the servers it started.
+    pub supervised: bool,
+    pub node: Option<String>,
+    /// The MCP protocol version this build speaks.
+    pub protocol_version: Option<String>,
+    /// The transports this build implements — `["stdio"]` today, which is exactly why a
+    /// `url` entry is refused rather than attempted.
+    pub transports: Vec<String>,
+    pub servers: Vec<McpServer>,
+    pub refusals: Vec<McpRefusal>,
+}
+
+/// One MCP server, as the node holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpServer {
+    pub name: String,
+    /// `configured` (declared, never started), `starting`, `ready`, or `broken`. Kept as
+    /// the runtime's own string: an unknown fifth state renders as itself rather than being
+    /// folded into one of the four this build happens to know.
+    pub state: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    /// `node`, `user`, or `workspace` — which of the three files declared it.
+    pub scope: Option<String>,
+    /// The file it was read from, where there was one. Absent for node-scope servers,
+    /// which come from the runtime's own configuration and not from a file.
+    pub source: Option<String>,
+    pub workspace: Option<String>,
+    pub transport: Option<String>,
+    /// How many tools it advertises, and their `mcp__server__tool` names.
+    pub tools: u64,
+    pub tool_names: Vec<String>,
+    /// **How many environment variables it carries — never their names, never their
+    /// values.** The runtime does not put them on the wire and this client has nowhere to
+    /// get them from; the count is the whole fact.
+    pub env_count: u64,
+    pub restarts: u64,
+    pub claims: u64,
+    pub uptime_ms: Option<u64>,
+    pub idle_ms: Option<u64>,
+    /// Why it is broken, in the runtime's words. Present only in the `broken` state.
+    pub broken_reason: Option<String>,
+    pub broken_until_ms: Option<u64>,
+}
+
+impl McpServer {
+    pub fn broken(&self) -> bool {
+        self.state.as_deref() == Some("broken")
+    }
+}
+
+/// One entry the loader read and refused, with the typed reason it refused it for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpRefusal {
+    /// The name the entry gave itself, where it gave a usable one.
+    pub name: Option<String>,
+    /// `unsupported_transport`, `invalid_name`, `missing_command`, `untrusted_workspace`,
+    /// … — kept verbatim, because an unknown reason is still a reason worth showing.
+    pub reason: Option<String>,
+    /// The runtime's own sentence about this refusal.
+    pub detail: Option<String>,
+    pub scope: Option<String>,
+    pub workspace: Option<String>,
+}
+
+/// At most this many rows out of one answer, matching [`native::MAX_ROWS`].
+const MAX_MCP_ROWS: usize = native::MAX_ROWS;
+
+impl McpList {
+    pub fn decode(value: &Value) -> Self {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|found| !found.is_empty())
+                .map(str::to_string)
+        };
+
+        Self {
+            enabled: value
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            supervised: value
+                .get("supervised")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            node: text("node"),
+            protocol_version: text("protocol_version"),
+            transports: strings(value.get("transports")),
+            servers: value
+                .get("servers")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_MCP_ROWS)
+                        .filter_map(McpServer::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            refusals: value
+                .get("refusals")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_MCP_ROWS)
+                        .map(McpRefusal::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// How many of the listed servers are broken — the one count worth leading with.
+    pub fn broken(&self) -> usize {
+        self.servers.iter().filter(|server| server.broken()).count()
+    }
+}
+
+impl McpServer {
+    /// `None` for a row with no usable name: a server this client cannot name is a row it
+    /// cannot honestly address, and dropping it is better than showing a blank one.
+    fn decode(value: &Value) -> Option<Self> {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|found| !found.is_empty())
+                .map(str::to_string)
+        };
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Some(Self {
+            name: text("name")?,
+            state: text("state"),
+            command: text("command"),
+            args: strings(value.get("args")),
+            cwd: text("cwd"),
+            scope: text("scope"),
+            source: text("source"),
+            workspace: text("workspace"),
+            transport: text("transport"),
+            tools: number("tools").unwrap_or(0),
+            tool_names: strings(value.get("tool_names")),
+            env_count: number("env_count").unwrap_or(0),
+            restarts: number("restarts").unwrap_or(0),
+            claims: number("claims").unwrap_or(0),
+            uptime_ms: number("uptime_ms"),
+            idle_ms: number("idle_ms"),
+            broken_reason: text("broken_reason"),
+            broken_until_ms: number("broken_until_ms"),
+        })
+    }
+}
+
+impl McpRefusal {
+    fn decode(value: &Value) -> Self {
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|found| !found.is_empty())
+                .map(str::to_string)
+        };
+
+        Self {
+            name: text("name"),
+            reason: text("reason"),
+            detail: text("detail"),
+            scope: text("scope"),
+            workspace: text("workspace"),
+        }
+    }
+}
+
+/// A bounded list of nonempty strings out of a JSON array, or an empty one.
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(MAX_MCP_ROWS)
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|found| !found.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2644,6 +3005,96 @@ mod tests {
         assert_eq!(refusal["name"], "remote");
     }
 
+    /// D4. The same fixture through the typed decode, which is what `/mcp` and
+    /// `ouro mcp list` actually render from.
+    ///
+    /// The three server states in the fixture are the three a person has to be able to
+    /// tell apart — `ready` is running, `broken` has a reason, and `configured` was
+    /// declared and never started — and a decode that folded any pair together would make
+    /// the overlay claim a server is working when it is not.
+    #[test]
+    fn the_mcp_list_fixture_decodes_into_the_typed_model() {
+        let list = McpList::decode(&fixture("mcp_list_result")["result"]);
+
+        assert!(list.enabled);
+        assert!(list.supervised);
+        assert_eq!(list.node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(list.protocol_version.as_deref(), Some("2026-07-28"));
+        assert_eq!(list.transports, vec!["stdio".to_string()]);
+        assert_eq!(list.servers.len(), 3);
+        assert_eq!(list.broken(), 1);
+
+        let ready = &list.servers[0];
+        assert_eq!(ready.name, "fake");
+        assert_eq!(ready.state.as_deref(), Some("ready"));
+        assert_eq!(ready.transport.as_deref(), Some("stdio"));
+        assert_eq!(ready.scope.as_deref(), Some("node"));
+        assert_eq!(ready.tools, 2);
+        assert_eq!(
+            ready.tool_names,
+            vec!["mcp__fake__echo".to_string(), "mcp__fake__add".to_string()]
+        );
+        // The count, and only the count. There is no field on this type that could hold a
+        // name or a value, which is the point.
+        assert_eq!(ready.env_count, 1);
+        assert!(!ready.broken());
+        assert_eq!(ready.broken_reason, None);
+
+        let broken = &list.servers[1];
+        assert!(broken.broken());
+        assert_eq!(broken.restarts, 4);
+        assert_eq!(
+            broken.broken_reason.as_deref(),
+            Some("{:restart_limit, {:server_exited, 1}}"),
+            "a broken server says why, in the runtime's own words"
+        );
+        assert_eq!(
+            broken.source.as_deref(),
+            Some("/home/operator/.config/ouroboros/mcp.json")
+        );
+
+        // Declared and never started: no uptime, no tools, and that is not a failure.
+        let configured = &list.servers[2];
+        assert_eq!(configured.state.as_deref(), Some("configured"));
+        assert_eq!(configured.uptime_ms, None);
+        assert_eq!(configured.tools, 0);
+        assert_eq!(configured.scope.as_deref(), Some("workspace"));
+
+        assert_eq!(list.refusals.len(), 1);
+        let refused = &list.refusals[0];
+        assert_eq!(refused.name.as_deref(), Some("remote"));
+        assert_eq!(refused.reason.as_deref(), Some("unsupported_transport"));
+        assert!(
+            refused
+                .detail
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
+            "a refusal carries the sentence that explains it"
+        );
+    }
+
+    /// An answer from a gateway that never heard of MCP decodes to "nothing here", not to
+    /// a panic and not to a fabricated server.
+    #[test]
+    fn an_empty_mcp_answer_decodes_to_a_disabled_list() {
+        let empty = McpList::decode(&serde_json::json!({}));
+
+        assert!(!empty.enabled);
+        assert!(empty.servers.is_empty());
+        assert!(empty.refusals.is_empty());
+        assert_eq!(empty.broken(), 0);
+
+        // A server row with no name cannot be addressed, so it is dropped rather than
+        // rendered blank.
+        let nameless = McpList::decode(&serde_json::json!({
+            "enabled": true,
+            "servers": [{"state": "ready"}, {"name": "real", "state": "ready"}],
+        }));
+
+        assert_eq!(nameless.servers.len(), 1);
+        assert_eq!(nameless.servers[0].name, "real");
+    }
+
     /// The three fixtures this slice added, decoded for the fields a client branches on.
     /// Named here rather than only listed above, because "accounted for" has to mean
     /// something was read out of the bytes.
@@ -2781,8 +3232,112 @@ mod tests {
         assert_eq!(
             params["response"].as_object().expect("an object").len(),
             2,
-            "provider_options is deliberately not accepted by the gateway"
+            "an ordinary answer names no provider_options at all"
         );
+    }
+
+    /// B2. The exact params for each of the three plan-exit choices.
+    ///
+    /// Byte-exact rather than field-spotted: `decision`/`scope` are what an older gateway
+    /// settles on and `provider_options.choice` is what a current one reads, and the two
+    /// have to agree or the same button means two different things depending on which
+    /// runtime answered.
+    #[test]
+    fn each_plan_choice_sends_the_answer_the_runtime_folds_it_back_to() {
+        let expected = [
+            (PlanChoice::AutoEdit, "approve", "session", "auto_edit"),
+            (PlanChoice::Prompt, "approve", "once", "prompt"),
+            (PlanChoice::KeepPlanning, "deny", "once", "keep_planning"),
+        ];
+
+        for (choice, decision, scope, id) in expected {
+            let params =
+                respond_approval_params_with_plan("session-1", "plan_exit_x", choice, None);
+
+            assert_eq!(
+                params,
+                serde_json::json!({
+                    "id": "session-1",
+                    "request_id": "plan_exit_x",
+                    "response": {
+                        "decision": decision,
+                        "scope": scope,
+                        "provider_options": {"choice": id},
+                    },
+                }),
+                "{id}"
+            );
+        }
+    }
+
+    /// A follow-up rides along under the one key the gateway admits, and a blank one is
+    /// absent rather than an empty string.
+    #[test]
+    fn a_plan_follow_up_is_carried_verbatim_and_a_blank_one_is_omitted() {
+        let carried = respond_approval_params_with_plan(
+            "session-1",
+            "plan_exit_x",
+            PlanChoice::Prompt,
+            Some("  start with the parser  "),
+        );
+
+        assert_eq!(
+            carried["response"]["provider_options"],
+            serde_json::json!({"choice": "prompt", "follow_up": "start with the parser"}),
+        );
+
+        for blank in ["", "   ", "\n\t "] {
+            let params = respond_approval_params_with_plan(
+                "session-1",
+                "plan_exit_x",
+                PlanChoice::Prompt,
+                Some(blank),
+            );
+
+            assert_eq!(
+                params["response"]["provider_options"],
+                serde_json::json!({"choice": "prompt"}),
+                "a blank follow-up is not a follow-up ({blank:?})"
+            );
+        }
+    }
+
+    /// The gateway refuses a follow-up over 32 KiB outright, so the client clips rather
+    /// than losing the whole answer — and clips on a character boundary, because a
+    /// truncated multi-byte character is not a string the gateway would accept either.
+    #[test]
+    fn an_over_long_plan_follow_up_is_clipped_on_a_character_boundary() {
+        // A 3-byte character repeated past the ceiling: a naive byte truncation lands
+        // mid-character on exactly this input.
+        let long = "→".repeat(MAX_PLAN_FOLLOW_UP_BYTES);
+        let params = respond_approval_params_with_plan(
+            "session-1",
+            "plan_exit_x",
+            PlanChoice::AutoEdit,
+            Some(&long),
+        );
+
+        let sent = params["response"]["provider_options"]["follow_up"]
+            .as_str()
+            .expect("a follow-up");
+
+        assert!(sent.len() <= MAX_PLAN_FOLLOW_UP_BYTES, "{}", sent.len());
+        assert!(
+            sent.chars().all(|found| found == '→'),
+            "no partial character survives the clip"
+        );
+    }
+
+    /// Every choice this build offers is one the gateway's own enum admits, spelled the
+    /// same way.
+    #[test]
+    fn the_plan_choices_round_trip_through_their_wire_names() {
+        for choice in PlanChoice::ALL {
+            assert_eq!(PlanChoice::parse(choice.as_str()), Some(choice));
+        }
+
+        assert_eq!(PlanChoice::parse("allow_always"), None);
+        assert_eq!(PlanChoice::parse(""), None);
     }
 
     #[test]

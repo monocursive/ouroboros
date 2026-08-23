@@ -19,6 +19,7 @@ pub mod hook;
 pub mod images;
 pub mod keymap;
 pub mod ledger_cli;
+pub mod mcp_cli;
 pub mod mcp_serve;
 pub mod model;
 pub mod proto;

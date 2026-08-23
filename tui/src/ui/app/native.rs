@@ -786,6 +786,71 @@ impl App {
         ));
     }
 
+    /// D4. `/mcp`: what MCP servers this session's node runs, and what its loader refused.
+    ///
+    /// Routed to the node the *session* runs on, because a server runs where its session
+    /// does — `mcp.list` is a bounded `:erpc` for exactly that reason. With no session
+    /// open the answer is this runtime's own node, which is the honest default: there is
+    /// no other machine to mean.
+    ///
+    /// `workspace` is sent where the session names one, and it is what makes the answer
+    /// complete: without it the reply is only the servers already *running*, and the
+    /// entries this node configured-but-never-started — and every entry the loader
+    /// refused — are missing. Those refusals are the only way to tell "my mcp.json was
+    /// ignored" from "my mcp.json was read and rejected".
+    pub(super) fn open_mcp(&mut self) {
+        let method = "mcp.list";
+
+        if !self.hello.serves(method) {
+            self.inform(
+                format!("this gateway does not serve {method}"),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let session = self.sessions.open_info();
+        let node = session.and_then(|session| session.node.clone());
+        let workspace = session.and_then(|session| session.workspace.clone());
+
+        let mut params = serde_json::Map::new();
+
+        if let Some(node) = node
+            .as_deref()
+            .map(str::trim)
+            .filter(|node| !node.is_empty())
+        {
+            params.insert("node".into(), Value::String(node.to_string()));
+        }
+
+        if let Some(workspace) = workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|workspace| !workspace.is_empty())
+        {
+            params.insert("workspace".into(), Value::String(workspace.to_string()));
+        }
+
+        self.issue(Call::new(
+            Tag::McpList { node },
+            method,
+            Value::Object(params),
+        ));
+    }
+
+    pub(super) fn mcp_read(&mut self, node: Option<String>, value: &Value) {
+        self.overlay = Some(Overlay::Mcp {
+            node: node.or_else(|| {
+                value
+                    .get("node")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            list: Box::new(crate::model::McpList::decode(value)),
+            choice: 0,
+        });
+    }
+
     /// The same read without the overlay, for the `Ctrl+T` panel.
     pub(super) fn read_delegations(&mut self) {
         let Some((plane, id)) = self.sessions.open.clone() else {

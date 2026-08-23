@@ -37,8 +37,8 @@ use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
-    Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
-    SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
+    Capabilities, CursorPruned, Effort, Event, EventType, PlanChoice, Plane, ProviderEntry,
+    RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -313,6 +313,36 @@ pub enum Tag {
         plane: Plane,
         id: String,
         request_id: String,
+    },
+    /// B2. One plan-exit answer, which carries an explicit `provider_options.choice` and
+    /// therefore has one failure mode an ordinary approval does not: a gateway too old to
+    /// admit that key refuses the whole call.
+    ///
+    /// The choice and the follow-up ride on the tag so the answer can be resent without
+    /// `provider_options` when that happens. The retry is not a guess — `PlanChoice`'s
+    /// `decision()` is the same fallback the runtime applies — but the follow-up cannot
+    /// survive it, which is why the retry says so once.
+    PlanExit {
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: PlanChoice,
+        /// Whether the refused attempt carried a follow-up, so the fallback notice can say
+        /// whether anything was actually lost.
+        had_follow_up: bool,
+    },
+    /// D4. `mcp.list`, routed to the node the open session runs on.
+    McpList {
+        node: Option<String>,
+    },
+    /// B2. `interactive.configure {plan}`. Its own tag rather than [`Tag::Action`] because
+    /// its refusal is the interesting part: plan mode is not a Harness configuration key,
+    /// and the runtime's typed `at_start_only` answer names the thing to do instead —
+    /// which the generic renderer buries inside compact JSON.
+    PlanMode {
+        plane: Plane,
+        id: String,
+        want: bool,
     },
     /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
     /// answer carries the id of a session that did not exist when the request was made.
@@ -798,6 +828,14 @@ pub struct App {
     pub logs: Option<LogRing>,
     pub log_scroll: usize,
     pub overlay: Option<Overlay>,
+    /// B2. Whether this gateway has already refused a plan-exit answer's
+    /// `provider_options`, and so must be answered with `decision`/`scope` alone.
+    ///
+    /// Latched rather than probed: the refusal arrives as a bare `-32602` with a generic
+    /// sentence, indistinguishable from a malformed answer, so the only honest way to
+    /// learn it is to try once and remember. Reset never — a gateway does not grow the
+    /// key mid-connection, and a reconnect builds a new `App`.
+    pub plan_options_refused: bool,
     pub notice: Option<Notice>,
     pub quit: Option<Quit>,
     pub cursors: Cursors,
@@ -1030,6 +1068,7 @@ impl App {
             logs,
             log_scroll: 0,
             overlay: None,
+            plan_options_refused: false,
             notice: None,
             quit: None,
             cursors: Cursors::default(),
@@ -1728,6 +1767,25 @@ impl App {
     }
 
     /// The open session's sandbox caption, if a session is open.
+    /// B2. Whether the open session is planning, from the same three sources the badge
+    /// uses: a live event first, and the session row's `options.plan` where none has
+    /// spoken.
+    pub fn open_planning(&self) -> bool {
+        let Some((plane, id)) = self.sessions.open.as_ref() else {
+            return false;
+        };
+
+        self.sessions
+            .watches
+            .get(&(*plane, id.clone()))
+            .and_then(|watch| watch.planning())
+            .unwrap_or_else(|| {
+                self.sessions
+                    .open_info()
+                    .is_some_and(|session| session.plan)
+            })
+    }
+
     pub fn open_sandbox(&self) -> Option<(String, bool)> {
         let value = self.sessions.open_info().and_then(|session| {
             session

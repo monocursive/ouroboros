@@ -166,9 +166,10 @@ impl App {
                 approval_mode: self.config.defaults.approval_mode(),
                 sandbox_mode: self.config.defaults.sandbox_mode(),
                 objective: String::new(),
-                // The quick start is the shortest path there is; a worktree is a choice,
-                // and it is made in the `n` dialog or on the command line.
+                // The quick start is the shortest path there is; a worktree and plan mode
+                // are choices, and they are made in the `n` dialog or on the command line.
                 worktree: false,
+                plan: false,
             });
 
         let params = match request.params() {
@@ -324,6 +325,9 @@ impl App {
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
             objective: String::new(),
             worktree: false,
+            // `/write` is the verb for "let it edit"; starting it planning would be the
+            // opposite of what was asked for.
+            plan: false,
         };
 
         let params = match request.params() {

@@ -334,7 +334,7 @@ reading.
 | `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Steering injects into the running turn and is not durably keyed by the plane: Harness mints the request id inside its worker, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
 | `interactive.configure` `{id, approval_mode?, sandbox_mode?, model?, reasoning_effort?}` | `InteractiveSession.configure/2` — moves an open session's posture instead of making the operator start a second one. Exactly four fields, a strict subset of `interactive.start`'s: everything else there is immutable start intent. Validated against what the *transport* declares (`Ouroboros.Provider.session_configuration/3`): the option list a start is held to, the adapter's `normalized_values` allowlists, and the two questions only a mid-session change raises — `dynamic_configuration`, and `dynamic_model` for a change naming a model. The reply is `{options, applies, changed}`, where `applies` is **`"now"` only where the transport carries the change to a live provider process** (`dynamic_configuration: :native`, which today is `pi` alone) and **`"next_turn"` everywhere else**, because a managed transport re-executes the CLI per turn and the Codex app server rebuilds its policy in `turn_params/2` — the turn already running keeps the policy it started under. A footer that renders `"next_turn"` as immediate is stating something this runtime did not do. Refusals: `["unconfigurable_session", {reason, …}]` with `reason` one of `no_dynamic_configuration` (ACP), `no_dynamic_model`, `option_not_configurable`, `value_not_accepted`, `unknown_provider`, `unknown_session_transport`; and the same `["unsupported_approval_mode", …]` X1 refusal `interactive.start` gives, because a session moved into a mode that asks nobody is exactly as broken as one started in it. The change is durable in `State` (so a resume rebuilds the request from the options the session is actually running with) and is a runtime-native `status` event with `kind: "configured"`, the changed keys, and `applies`. **`plan` is deliberately not a fifth field** — see the row below `plan` (B2) is the fifth field and takes its own path: it is not a Harness configuration key, so a native session is told directly (`applies: now`), Claude can only be started planning (`plan: true` on `interactive.start`; a mid-life change is refused as `at_start_only`), and every other transport refuses by declaration. A plan exit the native session applies is folded back into the record, so `interactive.info` reports the posture the session runs under. |
 | plan mode (B2) — **not on the wire yet** | Plan mode is declared by `Ouroboros.Provider.plan_mode/2` and applied per transport, but it is *not* an `interactive.configure` key and cannot become one on the pinned harness: `Jido.Harness.Session.RequestValidator.normalize_configuration/1` refuses any key outside `model`/`reasoning_effort`/`approval_mode`/`sandbox_mode` before the transport is consulted, and `SessionRequest`'s `approval_mode` is a four-member `Zoi.enum` with no room for `:plan`. Adding the field here would advertise a key the next call rejects. Today it is reachable as `Ouroboros.Provider.Native.Session.plan_mode/2` (the same registry-by-name seam `compact`/`handoff`/`rewind` use) and as `provider_options: %{plan: true}` at start. Per transport: **native** `applies: now`, settable any time, durable across a resume; **claude** `applies: next_turn`, settable at start via `provider_options` (`--permission-mode plan`), because `claude --print` runs one process per turn; **codex** refused with `reason: pending` — the dialect could carry a planning posture and slice C3 has not wired one; **everything else** refused with `["unsupported_configuration", {provider, transport, field: "plan", reason: "transport_cannot_plan", message}]`, never accepted and ignored |
-| the plan-exit approval | A planning turn that produced a plan holds its terminal event and emits an ordinary `approval_requested` with `kind: "plan_exit"`, the plan (`plan_source` of `"plan_tool"` or `"message"`), and three `options`: `auto_edit` / `prompt` / `keep_planning`, carrying ACP `kind`s `allow_always` / `allow_once` / `reject_once`. Held rather than emitted-then-asked because `Jido.Harness.Session.Lifecycle` denies any approval whose turn is no longer the worker's active one. **The three-choice modal is a follow-up client slice:** today's approval overlay renders the four fixed answers (approve/deny × once/session) and only *decorates* a row with a provider option's `name` when its `kind` maps ([view.rs `approval_answers`](../tui/src/ui/view.rs)); an option it cannot map is shown as a note, not as a row it may send. The `kind`s above are chosen so that the existing modal still reaches all three answers — approve+session → `auto_edit`, approve+once → `prompt`, deny → `keep_planning` — and a plan-aware client sends `optionId` back in the response's `provider_options["choice"]`. **A follow-up prompt needs one gateway change first:** `structured_approval/1` accepts only `decision`/`scope`/`reason`, so `provider_options` (and therefore `follow_up`) cannot cross the wire yet |
+| the plan-exit approval | A planning turn that produced a plan holds its terminal event and emits an ordinary `approval_requested` with `kind: "plan_exit"`, the plan (`plan_source` of `"plan_tool"` or `"message"`), and three `options`: `auto_edit` / `prompt` / `keep_planning`, carrying ACP `kind`s `allow_always` / `allow_once` / `reject_once`. Held rather than emitted-then-asked because `Jido.Harness.Session.Lifecycle` denies any approval whose turn is no longer the worker's active one. **The three-choice modal has landed** ([view.rs `plan_exit`](../tui/src/ui/view.rs), §3): a `plan_exit` question gets its own modal whose rows are the payload's own `options` — each row's words are that option's `name` and each row sends that option's `optionId` in `provider_options["choice"]` — plus the optional `follow_up` composer. The `kind`s above still matter, because they are what a client that has *never heard of plan mode* falls back to: the ordinary four-answer overlay reaches all three answers through them (approve+session → `auto_edit`, approve+once → `prompt`, deny → `keep_planning`), and that is also the mapping `plan_exit_choice/1` applies when no explicit `choice` reached it. So a client that sends `provider_options` to a gateway too old to admit it can resend `decision`/`scope` alone and settle the session identically — losing only the follow-up, which the TUI says out loud once |
 | `interactive.rename` `{id, title}` | `InteractiveSession.rename/2` — a durable session title. Trimmed, at most **120 graphemes**, and **refused** (never silently stripped) if it contains a control character, because it is drawn into one line of every `interactive.list` row. Allowed on a terminal session: a finished conversation is exactly what someone is trying to find again. A session nobody has named takes an auto-title from the first accepted user input — the prompt's first line, at most 60 graphemes with an ellipsis, stored as `title_source: "auto"`. A rename sets `title_source: "human"`, which nothing this runtime does overwrites; an auto-title writes only where nothing has named the session, so a second prompt never renames a conversation the first one described |
 | `interactive.fork` `{id, fork_id?}` | `InteractiveSession.fork/2` — a **new** session carrying the parent's provider session and history. The parent is not sent a turn, interrupted, or closed; the only thing written to it is `forks`. Answers in `interactive.start`'s shape (`{id, node, outcome, ready, error}`) with the same 120s ceiling and the same `outcome: unknown` admission, and `fork_id` is caller-owned for the same reason a start's `id` is. What makes the child a fork comes from a declaration, never from this table: the Codex app-server dialect's own `fork_option/0` turns into `thread/fork {threadId}` instead of `thread/resume`; a run adapter either exports `fork_option/0` or appears in `Ouroboros.Provider`'s evidenced module table (`claude`, `zai`, `grok` — `--resume <id>` plus the boolean `--fork-session`). ACP is refused by capability: neither bundled agent publishes a branch verb and `session/load` continues rather than copies. `pi` is refused too, although it declares `:fork_session`, because there the option is `--fork <session-name>` and its validator rejects it alongside `provider_session_id`. `options.capabilities.fork` is `"native"`/`false` from the same derivation. Refused with `["unforkable_session", {reason, …}]` for `no_provider_session_id` (the provider has not named a session to branch), `transport_cannot_fork`, `unknown_provider`, `unknown_session_transport`. **Honest limit:** workspace admission is unchanged, so forking a live session that holds an exclusive lease is refused by the lease (`workspace_conflict`); a fork of a `read_only` or finished session admits. Worktrees (AGENT_EXPERIENCE D7) are the fix, not a weaker lease |
 | `interactive.compact` `{id, focus?, node}` | `InteractiveSession.compact/2` (D9) — folds an open session's conversation *now*, optionally focused, and answers with the same report the automatic path produces: `trigger` (`"manual"`), `turn`, `archived_messages`, `archive_id`, `elided_tool_results`, `summary_tokens`, `before_tokens`, `after_tokens`, `summarised`. **Native only, and refused by capability everywhere else** with `["unsupported_on_transport", {transport, verb, provider, message}]`: only there does this runtime hold the conversation to fold, and a summary invented for a transcript Ouroboros never had would be a claim nothing supports. A vendor's own compaction is surfaced as an event when it reports one, never imitated. A `native` session whose transport is not up is a *different* refusal, `["native_transport_unavailable", {verb, reason, message}]`, because that one is worth retrying and a capability refusal is not. Also refused mid-turn (`busy`) and after two folds in three turns (`compaction_thrashing`, the permanent latch — the operator's own `/compact` is exempt because they were told what happened). The ceiling is **120s**, not 15: a compaction that has to summarise makes one model call on the session's own model |
@@ -820,21 +820,40 @@ ouro --continue [--or-new] [--workspace PATH]
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
 ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
-         [--message TEXT] [--machine NAME] [--print]
+         [--message TEXT] [--machine NAME] [--worktree] [--plan] [--print]
                       start an interactive session, then attach focused on it;
                       provider/workspace/approval resolve flag first, then the
                       config file's [defaults]; only a provider neither names
-                      is refused, naming both places
+                      is refused, naming both places. --plan (B2) starts it
+                      planning: it reads and reasons but edits nothing, and at
+                      the end of a planning turn asks whether to build the plan
 ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--machine NAME] [--resume SESSION-ID]
-         [--continue [--or-new]]
+         [--continue [--or-new]] [--plan]
          [--json | --stream-json] [--approve-all] [--timeout SECS] [-v]
          [--addr HOST:PORT] [--token-file PATH]
                       headless: run one prompt, stream the normalised events,
                       exit with a documented code. No alternate screen, ever.
                       --continue resolves the same session `ouro --continue`
                       would open and sends the prompt into it; refused with
-                      --resume, which names one instead of looking one up
+                      --resume, which names one instead of looking one up.
+                      --plan (B2) starts it planning and reports the plan in
+                      the result object as `plan`; the plan-exit question is
+                      answered keep_planning, including under --approve-all
+ouro mcp list [--node NODE] [--workspace PATH] [--json]
+         [--addr HOST:PORT] [--token-file PATH]
+                      every MCP server this runtime runs for the native agent
+                      and every entry its loader refused; reads a runtime that
+                      is already up and never starts one. --workspace is what
+                      makes the answer complete: without it the reply is only
+                      what is already running
+ouro mcp add NAME (--command PROGRAM | --url URL) [--arg ARG]... [--env K=V]...
+         [--cwd PATH] [--scope user|workspace] [--workspace PATH]
+         [--force] [--no-check]
+                      declare a server in mcp.json. No runtime is contacted:
+                      there is no mcp.add on the wire, because a definition is
+                      a command line that runs on somebody's machine
+ouro mcp remove NAME [--scope user|workspace] [--workspace PATH]
 ouro stop             graceful stop of the locally spawned daemon
 ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
@@ -2069,6 +2088,122 @@ stay cheap.
 command whose whole job is to answer "is anything waiting on me" must not answer it by
 creating something to wait on. Its counts can differ from the rail's by the approvals the
 rail is holding on an open stream, which `ouro agents` does not have.
+
+### Plan mode, from the client (B2)
+
+Four surfaces, and the honesty rule they share is that **not one of them infers the
+posture**. Plan mode is not a Harness configuration key — the native transport applies it
+now, Claude can only be told at start because it carries the posture as `provider_options`
+on every launch, and every other transport refuses by declaration — so which of those
+applies is the runtime's to say, and the client renders what it says.
+
+**`/plan`, `/plan on`, `/plan off`** send `interactive.configure {plan}`. The bare verb
+toggles against the posture the operator can actually see; asking for the posture the
+session is already in is answered locally rather than as a round trip; and an argument that
+is neither `on` nor `off` is refused rather than guessed at, because `off` and `of` must
+not mean the same thing when one of them turns write access back on. The runtime's typed
+`["unsupported_configuration", {field: "plan", reason: "at_start_only", message}]` is
+rendered as its own sentence — the one that names starting a new session with `--plan` —
+rather than as a field of a compact JSON blob.
+
+**The `PLANNING` badge** reads three sources, newest first: the `plan_exit` provider event,
+the `configured` status event's `changed.plan`, and `options.plan` on the session row. The
+first two are live and the third is a snapshot, so an event that has spoken since the last
+list wins. A runtime that has said nothing leaves the badge down — it claims the session
+*is* planning, and silence must not raise it. The plan-exit event is read for its `plan`
+posture and not its `choice`: a reconfiguration the runtime could not carry out reports
+`plan: true` with `applied: false`, and reading the choice would take the badge down on a
+session still planning. The badge outranks the approval mode in the footer because it
+supersedes it — a planning session writes nothing whatever its approval mode says — and
+the composer hint says the session is read-only and names `/plan off` rather than `/write`.
+
+**The plan-exit modal** is its own modal, not the four-answer one decorated. Its rows are
+the payload's `options`: each row's words are that option's `name` and each row sends that
+option's `optionId` in `provider_options.choice`. An option whose id this build cannot map
+is named in a note and never drawn as a row. The runtime's `question` is quoted verbatim —
+it is the only place the *consequences* of each answer are stated — and a plan the model
+wrote in prose is labelled as prose rather than passed off as a step list. `tab`/`r` opens
+the follow-up composer ("what to do first"), which is optional and says so; `ctrl+o` raises
+the step and message ceilings the way it raises a diff's. In screen-reader mode every row
+is numbered text and the number picks it.
+
+*The fallback.* A gateway too old to admit `provider_options` collapses every
+`structured_approval/1` failure into one `-32602` with a generic sentence, so "this build
+does not know that key" and "that answer was malformed" arrive identically. The client
+sends the explicit choice, and on the first `-32602` resends with `decision`/`scope` alone
+— which reaches the same three answers, because that is the fallback the runtime itself
+applies — latches the gateway as unable to take a choice, and says so once, naming the
+follow-up as dropped when there was one.
+
+**`ouro new --plan` and `ouro run --plan`** put `plan: true` in `interactive.start`'s
+params, only when true, for the same reason `--worktree` does. `ouro run --plan` answers
+the plan-exit question `keep_planning` **including under `--approve-all`**: those are
+different powers, and the plan-exit question is not an approval but a reconfiguration —
+`auto_edit` moves the session's approval mode and sandbox for every turn after this one,
+and a headless run that granted itself that would turn "plan this" into "do this" with
+nobody there to object. The session is left planning, so `ouro --continue` opens it where
+it was, and the plan reaches the result object:
+
+```json
+{"type": "result", …, "plan": {"source": "plan_tool", "steps": ["…", "…"]}}
+{"type": "result", …, "plan": {"source": "message", "message": "…"}}
+```
+
+Two shapes because the runtime produces two and they are not the same artifact. The key is
+**absent** where no plan was made, so a script tests for it rather than interpreting an
+empty object, and the step list is bounded at 64.
+
+### `ouro mcp` and `/mcp` (D4)
+
+`mcp.list` is the read, and it is the only half that touches the socket. `/mcp` asks the
+node the *session* runs on — a server runs where its session runs — and sends the session's
+workspace, which is what makes the answer complete: without it the reply is only the
+servers already **running**, and the configured-but-never-started entries and every entry
+the loader **refused** are missing. Those refusals are the only way to tell "my `mcp.json`
+was ignored" from "my `mcp.json` was read and found wanting", so both the overlay and
+`ouro mcp list` give them their own section with their typed reason. `enabled: false` is a
+posture, not an error; `configured` is a server declared and never started, and is not
+drawn as a failure; `broken` carries `broken_reason` in the runtime's own words. An
+environment appears as `env_count` and there is no field on either surface that could hold
+a name or a value.
+
+**`ouro mcp add` and `remove` never open a socket.** There is no `mcp.add` on the wire, by
+design: a server definition is a command line that runs on somebody's machine and is never
+authored over one. They edit the same Claude-compatible JSON the runtime's loader reads —
+
+```json
+{"mcpServers": {"fake": {"command": "./bin/fake", "args": ["--stdio"],
+                         "env": {"TOKEN": "…"}}}}
+```
+
+— at `~/.config/ouroboros/mcp.json` (`--scope user`, the default) or
+`<workspace>/.ouroboros/mcp.json` (`--scope workspace`), written through a temp file and a
+rename with the directory `0700` and the file `0600`. The node scope is deliberately not
+writable here: it is the operator's `config :ouroboros, :mcp_servers`, which lives in the
+runtime's own configuration and wins over both files.
+
+Four things these two will not do. They **never print an environment value back** — the
+runtime puts `env_count` on the wire and never `env`, and a CLI that echoed the token it
+had just been handed would undo that at the last step. They **never silently replace a
+definition**: a name already present with different bytes is refused and names `--force`,
+and an identical one is a no-op. They **never replace a file they could not parse**. And
+they **do not pretend a `url` entry will work**: it is written, because it is a valid
+Claude Code definition and this build is not the file's only reader, and the command says
+the runtime will refuse it as `unsupported_transport` because this slice implements stdio
+only.
+
+The name rule is the loader's own, transcribed rather than approximated —
+`[A-Za-z0-9_-]{1,64}` and no `__`, because a tool reaches the model as
+`mcp__<server>__<tool>` and is split on the first `__` — and it is checked where the
+operator types it rather than discovered three commands later in a status listing. The
+`--command` check **warns and writes**; it never refuses, because the file may legitimately
+be written on one machine for a session that runs on another. `--no-check` skips it.
+
+*One honest divergence.* This client resolves the user file through `XDG_CONFIG_HOME`, as
+it does every other config path; the runtime resolves it from `System.user_home()` and does
+not read that variable. They agree whenever the variable is unset or points at
+`$HOME/.config`, and `ouro mcp add` says so out loud when they do not, rather than writing
+a file nothing will read.
 
 ### Worktrees (D7)
 

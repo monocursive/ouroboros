@@ -583,7 +583,13 @@ fn usage_report(payload: &Value) -> UsageReport {
 /// Codex sends `{"explanation", "plan": [{"step", "status"}]}`
 /// (`Ouroboros.Provider.Session.Dialect.Codex`); ACP forwards its `plan` session update
 /// verbatim, whose entries are `{"content", "priority", "status"}`.
-fn plan_update(payload: &Value) -> PlanUpdate {
+///
+/// Reachable from the crate because a `plan_exit` approval's `payload.plan` is *the same
+/// `plan_updated` payload*, held back by the native session and attached to the question
+/// (B2). The plan-exit modal decodes it through this function rather than through a second
+/// reader, so the steps a person approves are byte-for-byte the steps the `Ctrl-T` panel
+/// showed them.
+pub(crate) fn plan_update(payload: &Value) -> PlanUpdate {
     let entries = first_value(payload, &["plan", "entries", "steps", "todos", "tasks"])
         .and_then(Value::as_array);
     let step_count = entries.map(Vec::len).unwrap_or(0);

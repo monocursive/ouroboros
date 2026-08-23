@@ -81,6 +81,7 @@ fn start_plan(prompt: &str) -> Plan {
         sandbox_mode: None,
         objective: String::new(),
         worktree: false,
+        plan: false,
     };
 
     let params = request.params().expect("a validated start request");
@@ -90,6 +91,60 @@ fn start_plan(prompt: &str) -> Plan {
         params,
         prompt: prompt.to_string(),
     }
+}
+
+/// B2. The same start with `--plan`, so the params a planning run sends are exercised
+/// rather than described.
+fn planning_start(prompt: &str) -> Plan {
+    let request = StartRequest {
+        id: SESSION.to_string(),
+        plane: Plane::Interactive,
+        provider: "native".into(),
+        machine: String::new(),
+        workspace: "/w".into(),
+        approval_mode: None,
+        sandbox_mode: None,
+        objective: String::new(),
+        worktree: false,
+        plan: true,
+    };
+
+    let params = request.params().expect("a validated start request");
+
+    Plan::Start {
+        request,
+        params,
+        prompt: prompt.to_string(),
+    }
+}
+
+/// `Provider.Native.Session.plan_exit_payload/1`, as a headless run receives it.
+fn plan_exit_event(sequence: u64, request_id: &str) -> Value {
+    let mut approval = event(
+        sequence,
+        "approval_requested",
+        Some(TURN),
+        json!({
+            "kind": "plan_exit",
+            "header": "Plan ready",
+            "question": "This session has been planning. Ready to build it?",
+            "plan_source": "plan_tool",
+            "plan": {
+                "plan": [
+                    {"step": "read the existing greeter", "status": "completed"},
+                    {"step": "add a name argument", "status": "pending"}
+                ]
+            },
+            "options": [
+                {"optionId": "auto_edit", "name": "Yes, auto-accept edits", "kind": "allow_always"},
+                {"optionId": "prompt", "name": "Yes, manual approvals", "kind": "allow_once"},
+                {"optionId": "keep_planning", "name": "No, keep planning", "kind": "reject_once"}
+            ]
+        }),
+    );
+
+    approval["request_id"] = Value::String(request_id.to_string());
+    approval
 }
 
 fn options(output: Output) -> Options {
@@ -197,11 +252,16 @@ where
 /// The handshake plus the two calls every start does, answered as the gateway answers
 /// them. Leaves the peer ready to notify events.
 async fn accept_start(peer: &mut Peer, backlog: Value) {
+    accept_start_of(peer, backlog, "codex", "do the thing").await;
+}
+
+/// The same, for a start this file makes with a different provider or prompt.
+async fn accept_start_of(peer: &mut Peer, backlog: Value, provider: &str, prompt: &str) {
     peer.hello(SERVES).await;
 
     let start = peer.request_for("interactive.start").await;
     assert_eq!(start["params"]["id"], SESSION);
-    assert_eq!(start["params"]["provider"], "codex");
+    assert_eq!(start["params"]["provider"], provider);
     peer.result(
         &start["id"],
         json!({ "id": SESSION, "outcome": "created", "ready": true }),
@@ -214,7 +274,7 @@ async fn accept_start(peer: &mut Peer, backlog: Value) {
 
     let send = peer.request_for("interactive.send_message").await;
     assert_eq!(send["params"]["turn_id"], TURN);
-    assert_eq!(send["params"]["input"], "do the thing");
+    assert_eq!(send["params"]["input"], prompt);
     peer.result(&send["id"], json!({ "id": TURN, "status": "running" }))
         .await;
 }
@@ -520,6 +580,287 @@ async fn plain_output_falls_back_to_the_collapsed_deltas_when_no_final_arrives()
     .await;
 
     assert_eq!(ran.out, "only deltas\n");
+}
+
+// ----- plan mode (B2) ---------------------------------------------------------------------
+
+/// `--plan` puts exactly one extra option on the start.
+#[test]
+fn a_planning_start_asks_for_plan_mode_and_nothing_else() {
+    let Plan::Start { params, .. } = planning_start("plan a greeter") else {
+        panic!("a start plan");
+    };
+
+    assert_eq!(
+        params,
+        json!({
+            "id": SESSION,
+            "provider": "native",
+            "workspace": "/w",
+            "plan": true,
+        }),
+    );
+
+    // And a run without it says nothing about plan mode at all, rather than sending the
+    // plane a default it already has.
+    let Plan::Start { params, .. } = start_plan("do the thing") else {
+        panic!("a start plan");
+    };
+
+    assert!(params.get("plan").is_none(), "{params}");
+}
+
+/// The whole contract of `ouro run --plan`: the question is answered `keep_planning`, the
+/// plan reaches the result object, and the session is left planning.
+#[tokio::test]
+async fn a_planning_run_answers_keep_planning_and_reports_the_plan() {
+    let ran = run_against(
+        planning_start("plan a greeter"),
+        options(Output::Json),
+        |mut peer| {
+            tokio::spawn(async move {
+                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({ "id": SESSION, "event": plan_exit_event(1, "plan_exit_abc") }),
+                )
+                .await;
+
+                let answer = peer.request_for("interactive.respond_approval").await;
+
+                // Byte-exact: this is the one answer a headless run may give here.
+                assert_eq!(
+                    answer["params"],
+                    json!({
+                        "id": SESSION,
+                        "request_id": "plan_exit_abc",
+                        "response": {
+                            "decision": "deny",
+                            "scope": "once",
+                            "actor": "headless",
+                            "provider_options": {"choice": "keep_planning"},
+                        },
+                    }),
+                    "{}",
+                    answer["params"]
+                );
+
+                peer.result(&answer["id"], json!({})).await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({
+                        "id": SESSION,
+                        "event": event(2, "turn_completed", Some(TURN), json!({}))
+                    }),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+
+    let report = ran.report();
+    assert_eq!(report.status, Status::Completed);
+
+    let result = ran.objects().last().expect("a result").clone();
+
+    assert_eq!(
+        result["plan"],
+        json!({
+            "source": "plan_tool",
+            "steps": ["read the existing greeter", "add a name argument"],
+        }),
+        "{result}"
+    );
+
+    assert!(
+        ran.err.contains("keep_planning") && ran.err.contains("left"),
+        "the decision this command made for the operator is said out loud: {}",
+        ran.err
+    );
+}
+
+/// `--approve-all` answers the *approvals* a run raises. It does not reconfigure the
+/// session, and the plan-exit question is a reconfiguration.
+#[tokio::test]
+async fn approve_all_does_not_grant_a_headless_run_auto_edit() {
+    let mut options = options(Output::Json);
+    options.approve_all = true;
+
+    let ran = run_against(planning_start("plan a greeter"), options, |mut peer| {
+        tokio::spawn(async move {
+            accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+
+            peer.notify(
+                "interactive.event",
+                json!({ "id": SESSION, "event": plan_exit_event(1, "plan_exit_abc") }),
+            )
+            .await;
+
+            let answer = peer.request_for("interactive.respond_approval").await;
+
+            assert_eq!(
+                answer["params"]["response"]["provider_options"]["choice"], "keep_planning",
+                "--approve-all must not silently take auto_edit"
+            );
+            assert_eq!(answer["params"]["response"]["decision"], "deny");
+
+            peer.result(&answer["id"], json!({})).await;
+
+            peer.notify(
+                "interactive.event",
+                json!({
+                    "id": SESSION,
+                    "event": event(2, "turn_completed", Some(TURN), json!({}))
+                }),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+}
+
+/// A gateway that refuses `provider_options` gets the four-way answer instead, carrying
+/// `keep_planning` as the `reason` the runtime matches on.
+#[tokio::test]
+async fn a_planning_run_falls_back_where_provider_options_are_refused() {
+    let ran = run_against(
+        planning_start("plan a greeter"),
+        options(Output::Json),
+        |mut peer| {
+            tokio::spawn(async move {
+                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({ "id": SESSION, "event": plan_exit_event(1, "plan_exit_abc") }),
+                )
+                .await;
+
+                let first = peer.request_for("interactive.respond_approval").await;
+                assert!(first["params"]["response"]["provider_options"].is_object());
+
+                peer.error(
+                    &first["id"],
+                    -32602,
+                    "params.response must be approve, deny, or an object",
+                    None,
+                )
+                .await;
+
+                let second = peer.request_for("interactive.respond_approval").await;
+
+                assert_eq!(
+                    second["params"]["response"],
+                    json!({
+                        "decision": "deny",
+                        "scope": "once",
+                        "reason": "keep_planning",
+                        "actor": "headless",
+                    }),
+                    "the fallback names the choice in the one field an older gateway reads"
+                );
+
+                peer.result(&second["id"], json!({})).await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({
+                        "id": SESSION,
+                        "event": event(2, "turn_completed", Some(TURN), json!({}))
+                    }),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+}
+
+/// A plan written in prose reaches the result labelled as prose, not as an empty step
+/// list.
+#[tokio::test]
+async fn a_plan_from_the_final_message_is_reported_as_a_message() {
+    let ran = run_against(
+        planning_start("plan a greeter"),
+        options(Output::Json),
+        |mut peer| {
+            tokio::spawn(async move {
+                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+
+                let mut approval = plan_exit_event(1, "plan_exit_abc");
+                approval["payload"]["plan_source"] = json!("message");
+                approval["payload"]
+                    .as_object_mut()
+                    .expect("a payload")
+                    .remove("plan");
+                approval["payload"]["message"] = json!("I would start with the greeter.");
+
+                peer.notify(
+                    "interactive.event",
+                    json!({ "id": SESSION, "event": approval }),
+                )
+                .await;
+
+                let answer = peer.request_for("interactive.respond_approval").await;
+                peer.result(&answer["id"], json!({})).await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({
+                        "id": SESSION,
+                        "event": event(2, "turn_completed", Some(TURN), json!({}))
+                    }),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+
+    let result = ran.objects().last().expect("a result").clone();
+
+    assert_eq!(
+        result["plan"],
+        json!({
+            "source": "message",
+            "message": "I would start with the greeter.",
+        }),
+        "{result}"
+    );
+}
+
+/// A run that was not planning carries no `plan` key at all, so a script can test for it.
+#[tokio::test]
+async fn a_run_with_no_plan_omits_the_key_rather_than_reporting_an_empty_one() {
+    let ran = run_against(
+        start_plan("do the thing"),
+        options(Output::Json),
+        |mut peer| {
+            tokio::spawn(async move {
+                accept_start(&mut peer, json!([])).await;
+
+                peer.notify(
+                    "interactive.event",
+                    json!({
+                        "id": SESSION,
+                        "event": event(1, "turn_completed", Some(TURN), json!({}))
+                    }),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+
+    let result = ran.objects().last().expect("a result").clone();
+    assert!(result.get("plan").is_none(), "{result}");
 }
 
 // ----- approvals ------------------------------------------------------------------------

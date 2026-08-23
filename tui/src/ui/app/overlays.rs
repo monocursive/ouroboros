@@ -17,6 +17,18 @@ pub enum PromptKind {
         choice: usize,
         reason: Option<String>,
     },
+    /// B2. Editing the optional follow-up prompt on a plan-exit modal already on screen —
+    /// "what to do first" once the session has left plan mode. The same shape
+    /// [`PromptKind::ApprovalReason`] has, and for the same reason: abandoning the prompt
+    /// must return to the chooser with the answer intact rather than dropping a question
+    /// the provider is still blocked on.
+    PlanFollowUp {
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: usize,
+        follow_up: Option<String>,
+    },
 }
 
 /// How many rows an approval-mode cycler has: the four the schema declares, plus the
@@ -142,10 +154,15 @@ pub enum Command {
     Delegations,
     /// A10: cycle the palette. The one command that was reachable only as a verb.
     Theme,
+    /// B2: toggle plan mode on the open session. `/plan on|off` names the posture it
+    /// wants; the bare verb toggles whatever the session is in now.
+    Plan,
+    /// D4: the MCP servers this session's node runs, and the entries it refused.
+    Mcp,
 }
 
 impl Command {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 45] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -189,6 +206,8 @@ impl Command {
         Self::Delegate,
         Self::Delegations,
         Self::Theme,
+        Self::Plan,
+        Self::Mcp,
     ];
 
     pub fn group(self) -> &'static str {
@@ -223,6 +242,7 @@ impl Command {
             | Self::Delegate
             | Self::Delegations
             | Self::Theme
+            | Self::Plan
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -273,6 +293,8 @@ impl Command {
             Self::Delegate => "Delegate work to a coding task",
             Self::Delegations => "Show this conversation's delegations",
             Self::Theme => "Cycle the colour theme",
+            Self::Plan => "Plan without editing anything",
+            Self::Mcp => "Show this node's MCP servers",
         }
     }
 
@@ -326,6 +348,8 @@ impl Command {
             Self::Delegate => "/delegate",
             Self::Delegations => "/delegations",
             Self::Theme => "/theme",
+            Self::Plan => "/plan",
+            Self::Mcp => "/mcp",
         }
     }
 
@@ -396,6 +420,13 @@ impl App {
                 Command::Interrupt => self.open_capabilities().interrupt.offered(),
                 Command::Fork => self.fork_offered(),
                 Command::Model => self.hello.serves("interactive.configure"),
+                // B2/D4. Same rule: a control the runtime cannot serve is not offered.
+                // `/plan` additionally needs a session to be about — the posture belongs
+                // to one conversation, not to the client.
+                Command::Plan => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.configure")
+                }
+                Command::Mcp => self.hello.serves("mcp.list"),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
                 // drawn.
@@ -514,6 +545,20 @@ pub enum Overlay {
         /// `ctrl+o` inside the modal: draw the diff at its full retained length instead of
         /// the pane-height budget.
         expanded: bool,
+        /// B2, plan exits only: what to do first once the session has left plan mode.
+        ///
+        /// Optional by construction — the runtime treats a blank one as absent and emits
+        /// the held terminal event instead of starting a turn — so an operator who just
+        /// wants out of plan mode presses `Enter` and is done.
+        follow_up: Option<String>,
+    },
+    /// D4. The MCP servers one node runs for the native agent, and the entries its loader
+    /// refused. Read fresh every time it opens: a server's state is exactly the thing that
+    /// changes while nobody is looking.
+    Mcp {
+        node: Option<String>,
+        list: Box<crate::model::McpList>,
+        choice: usize,
     },
     Confirm {
         title: String,
@@ -869,13 +914,22 @@ impl App {
                 reason,
                 rule,
                 expanded,
+                detail,
+                follow_up,
                 ..
             } => {
-                let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+                // B2. A plan exit's rows are the payload's own three options; every other
+                // approval's are the four fixed answers plus the durable fifth.
+                let planning = detail.plan.is_some();
+                let rows = match detail.plan.as_ref() {
+                    Some(plan) => plan.choices.len(),
+                    None => APPROVAL_CHOICES.len() + usize::from(rule.is_some()),
+                };
+                let last = rows.saturating_sub(1);
 
                 match key.code {
                     KeyCode::Esc => self.overlay = None,
-                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(rows - 1),
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     // A10, as above: the number on the row is the key that picks it.
                     KeyCode::Char(digit)
@@ -893,6 +947,27 @@ impl App {
                     // Claude Code offers the comment field on `Tab` from the answer row;
                     // this client has always offered it on `r`. Both, because `r` is what
                     // the modal's own hint says and `Tab` is what a reader arrives with.
+                    // B2. On a plan exit the same two keys open the follow-up composer
+                    // instead of the reason field: `respond_approval` carries a plan exit's
+                    // `reason` only as a fallback way of naming the choice, so offering it
+                    // here would be offering a second, weaker way to say what the selected
+                    // row already says.
+                    KeyCode::Char('r') | KeyCode::Tab if planning => {
+                        let kind = PromptKind::PlanFollowUp {
+                            plane: *plane,
+                            id: id.clone(),
+                            request_id: request_id.clone(),
+                            choice: *choice,
+                            follow_up: follow_up.clone(),
+                        };
+                        let buffer = follow_up.clone().unwrap_or_default();
+                        self.overlay = Some(Overlay::Prompt {
+                            kind,
+                            label: "what to do first — enter attaches it, an empty line keeps none"
+                                .to_string(),
+                            buffer,
+                        });
+                    }
                     KeyCode::Char('r') | KeyCode::Tab => {
                         let kind = PromptKind::ApprovalReason {
                             plane: *plane,
@@ -1012,6 +1087,20 @@ impl App {
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     KeyCode::Enter => self.open_delegation_child(),
+                    _ => {}
+                }
+            }
+            // D4. A reading overlay: there is no `mcp.add` on the wire, by design, so
+            // there is nothing here to press Enter on. `r` re-reads, because a server's
+            // state is exactly the thing that changes while it is on screen.
+            Overlay::Mcp { list, choice, .. } => {
+                let last = (list.servers.len() + list.refusals.len()).saturating_sub(1);
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    KeyCode::Char('r') => self.open_mcp(),
                     _ => {}
                 }
             }
@@ -1256,6 +1345,16 @@ impl App {
                 self.overlay = None;
                 self.cycle_theme();
             }
+            // B2. The palette row toggles, because the palette has nowhere to type
+            // `on`/`off`; the slash verb takes both.
+            Command::Plan => {
+                self.overlay = None;
+                self.configure_plan(None);
+            }
+            Command::Mcp => {
+                self.overlay = None;
+                self.open_mcp();
+            }
             Command::ShowDiff => {
                 self.overlay = None;
                 let Some(watch) = self.sessions.open_watch() else {
@@ -1392,6 +1491,65 @@ impl App {
         }
     }
 
+    /// B2. Sends one plan-exit answer, with the explicit choice where this gateway takes
+    /// one and without it where a previous call proved it does not.
+    ///
+    /// The latch matters because the refusal is not distinguishable after the fact: an
+    /// older gateway collapses every `structured_approval/1` failure into one `-32602` with
+    /// a generic sentence, so "this build does not know `provider_options`" and "that
+    /// answer was malformed" arrive identically. Retrying once per session and remembering
+    /// the outcome is the only way to tell them apart without asking a person to.
+    pub(super) fn submit_plan_exit(
+        &mut self,
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: PlanChoice,
+        follow_up: Option<String>,
+    ) {
+        let marked = self
+            .sessions
+            .watches
+            .get_mut(&(plane, id.clone()))
+            .is_some_and(|watch| watch.mark_approval_response(&request_id));
+
+        if !marked {
+            return;
+        }
+
+        let follow_up = follow_up.filter(|text| !text.trim().is_empty());
+        let explicit = !self.plan_options_refused;
+
+        let answer = if explicit {
+            model::respond_approval_params_with_plan(&id, &request_id, choice, follow_up.as_deref())
+        } else {
+            let (decision, scope) = choice.decision();
+            model::respond_approval_params(&id, &request_id, decision, scope)
+        };
+
+        let params = self.routed_session_params(plane, &id, answer);
+
+        // A call sent *without* the explicit choice is an ordinary approval as far as the
+        // answer handler is concerned: there is nothing left to fall back to.
+        let tag = if explicit {
+            Tag::PlanExit {
+                plane,
+                id: id.clone(),
+                request_id: request_id.clone(),
+                choice,
+                had_follow_up: follow_up.is_some(),
+            }
+        } else {
+            Tag::Approval {
+                plane,
+                id: id.clone(),
+                request_id: request_id.clone(),
+            }
+        };
+
+        self.issue(Call::new(tag, plane.method("respond_approval"), params));
+    }
+
     fn submit_approval(&mut self) {
         let Some(Overlay::Approval {
             plane,
@@ -1400,6 +1558,8 @@ impl App {
             choice,
             reason,
             rule,
+            detail,
+            follow_up,
             ..
         }) = self.overlay.take()
         else {
@@ -1407,6 +1567,17 @@ impl App {
         };
 
         if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        // B2. A plan exit answers on its own path: three rows, an explicit `choice`, and a
+        // follow-up prompt the four-way answer has nowhere to put.
+        if let Some(plan) = detail.plan.as_ref() {
+            let Some(option) = plan.choices.get(choice).or_else(|| plan.choices.first()) else {
+                return;
+            };
+
+            self.submit_plan_exit(plane, id, request_id, option.choice, follow_up);
             return;
         }
 
@@ -1494,7 +1665,26 @@ impl App {
                 reason,
             } => {
                 let attached = if value.is_empty() { None } else { Some(value) };
-                self.open_approval_with(plane, id, request_id, choice, attached.or(reason));
+                self.open_approval_with(plane, id, request_id, choice, attached.or(reason), None);
+                return;
+            }
+            PromptKind::PlanFollowUp {
+                plane,
+                id,
+                request_id,
+                choice,
+                follow_up,
+            } => {
+                // A cleared prompt clears the follow-up: "I changed my mind about running
+                // something first" has to be expressible, and the only way to say it is an
+                // empty line replacing the old text rather than falling back to it.
+                let attached = if value.is_empty() {
+                    None
+                } else {
+                    Some(model::clip_plan_follow_up(&value))
+                };
+                let _ = follow_up;
+                self.open_approval_with(plane, id, request_id, choice, None, attached);
                 return;
             }
             PromptKind::ControlObjective => {
@@ -1536,7 +1726,18 @@ impl App {
                         reason,
                     },
                 ..
-            }) => self.open_approval_with(plane, id, request_id, choice, reason),
+            }) => self.open_approval_with(plane, id, request_id, choice, reason, None),
+            Some(Overlay::Prompt {
+                kind:
+                    PromptKind::PlanFollowUp {
+                        plane,
+                        id,
+                        request_id,
+                        choice,
+                        follow_up,
+                    },
+                ..
+            }) => self.open_approval_with(plane, id, request_id, choice, None, follow_up),
             _ => self.overlay = None,
         }
     }

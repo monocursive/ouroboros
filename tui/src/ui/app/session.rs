@@ -1276,6 +1276,81 @@ impl App {
         );
     }
 
+    /// B2. `/plan`, `/plan on`, `/plan off`: `interactive.configure {plan}`.
+    ///
+    /// `None` toggles whatever the session is in now, which is what the palette row and
+    /// the bare verb send. The posture is read from the same three sources the badge uses,
+    /// so a toggle acts on what the operator can see rather than on a stale list.
+    ///
+    /// **This client does not predict the answer.** Plan mode is not a Harness
+    /// configuration key: the native transport applies it now, Claude refuses a mid-life
+    /// change because it carries the posture on every launch, and every other transport
+    /// refuses by declaration. Which of those applies is the runtime's to say, so the
+    /// refusal is rendered as data when it arrives instead of being second-guessed here.
+    pub(super) fn configure_plan(&mut self, want: Option<bool>) {
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform("open a session before asking it to plan", NoticeKind::Info);
+            return;
+        };
+
+        if plane != Plane::Interactive {
+            self.inform(
+                format!("{id} is a coding task; plan mode is a conversation's posture"),
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let method = "interactive.configure";
+
+        if !self.hello.serves(method) {
+            self.inform(
+                format!(
+                    "this gateway does not serve {method}, so plan mode cannot be changed \
+                     on a running session; start a new one with --plan"
+                ),
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        let planning = self.open_planning();
+        let want = want.unwrap_or(!planning);
+
+        if want == planning {
+            self.inform(
+                if want {
+                    format!("{id} is already planning; /plan off leaves plan mode")
+                } else {
+                    format!("{id} is not planning; /plan on enters plan mode")
+                },
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let params = self.routed_session_params(plane, &id, json!({ "id": id, "plan": want }));
+
+        self.issue(Call::new(
+            Tag::PlanMode {
+                plane,
+                id: id.clone(),
+                want,
+            },
+            method,
+            params,
+        ));
+
+        self.inform(
+            if want {
+                format!("asking {id} to plan — it will stop editing anything")
+            } else {
+                format!("asking {id} to leave plan mode")
+            },
+            NoticeKind::Info,
+        );
+    }
+
     /// `/model <name>`: `interactive.configure`, where the gateway serves it.
     ///
     /// The method is behind the `hello.methods` gate like every other verb. A gateway that
@@ -2092,6 +2167,24 @@ impl App {
             return true;
         }
 
+        // B2. `/plan on` and `/plan off` name the posture; anything else after the verb is
+        // refused rather than guessed at, because "off" and "of" must not mean the same
+        // thing when one of them turns a session's write access back on.
+        if let Some(argument) = slash_arg(trimmed, "/plan") {
+            match argument.to_ascii_lowercase().as_str() {
+                // `slash_arg` answers the bare verb with an empty argument, which is the
+                // toggle. (`/plans` does not reach here: it needs a space after `/plan`.)
+                "" => self.configure_plan(None),
+                "on" => self.configure_plan(Some(true)),
+                "off" => self.configure_plan(Some(false)),
+                other => self.inform(
+                    format!("/plan takes on or off, not {other:?}; bare /plan toggles"),
+                    NoticeKind::Info,
+                ),
+            }
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),
@@ -2109,6 +2202,8 @@ impl App {
             "/rewind" => Some(Command::Rewind),
             "/delegate" => Some(Command::Delegate),
             "/delegations" => Some(Command::Delegations),
+            "/plan" => Some(Command::Plan),
+            "/mcp" => Some(Command::Mcp),
             "/editor" => Some(Command::ExternalEditor),
             "/close" => Some(Command::CloseSession),
             "/options" => Some(Command::NewSessionOptions),
