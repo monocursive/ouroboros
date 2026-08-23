@@ -150,7 +150,18 @@ config :ouroboros,
     #   [%{language: :elixir, extensions: [".ex"], root_markers: ["mix.exs"],
     #      candidates: [%{server_id: "expert", command: "expert", args: []}]}]
     servers: []
-  ]
+  ],
+  # MCP servers the native agent may call (D4). Same posture as `:code_intel` above and
+  # for the same reason — somebody else's program on the end of a pipe — so everything
+  # here is a bound and `Ouroboros.Provider.Native.Mcp.Config` refuses a value that would
+  # remove one. Empty by default: nothing is spawned that an operator did not name.
+  mcp: [enabled: true],
+  # Node-scope server definitions, in the Claude-compatible shape and highest precedence
+  # of the three sources (node, then `~/.config/ouroboros/mcp.json`, then a *trusted*
+  # workspace's `.ouroboros/mcp.json`):
+  #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
+  #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
+  mcp_servers: %{}
 
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its

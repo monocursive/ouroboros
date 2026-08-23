@@ -1,0 +1,85 @@
+{
+  "id": 12,
+  "jsonrpc": "2.0",
+  "result": {
+    "enabled": true,
+    "node": "ouroboros@golden",
+    "protocol_version": "2026-07-28",
+    "refusals": [
+      {
+        "detail": "`url` names an HTTP/SSE server; this client speaks stdio only",
+        "name": "remote",
+        "reason": "unsupported_transport",
+        "scope": "user",
+        "workspace": "/srv/repo"
+      }
+    ],
+    "servers": [
+      {
+        "args": [
+          "--stdio"
+        ],
+        "broken_reason": null,
+        "broken_until_ms": null,
+        "claims": 1,
+        "command": "/usr/bin/fake-mcp",
+        "cwd": null,
+        "env_count": 1,
+        "idle_ms": 1000,
+        "name": "fake",
+        "restarts": 0,
+        "scope": "node",
+        "source": null,
+        "state": "ready",
+        "tool_names": [
+          "mcp__fake__echo",
+          "mcp__fake__add"
+        ],
+        "tools": 2,
+        "transport": "stdio",
+        "uptime_ms": 61000,
+        "workspace": "/srv/repo"
+      },
+      {
+        "args": [],
+        "broken_reason": "{:restart_limit, {:server_exited, 1}}",
+        "broken_until_ms": 288000,
+        "claims": 0,
+        "command": "flaky-mcp",
+        "cwd": null,
+        "env_count": 0,
+        "idle_ms": 12000,
+        "name": "flaky",
+        "restarts": 4,
+        "scope": "user",
+        "source": "/home/operator/.config/ouroboros/mcp.json",
+        "state": "broken",
+        "tool_names": [],
+        "tools": 0,
+        "transport": "stdio",
+        "uptime_ms": 12000,
+        "workspace": "/srv/repo"
+      },
+      {
+        "args": [],
+        "claims": 0,
+        "command": "./bin/notes-mcp",
+        "cwd": null,
+        "env_count": 0,
+        "name": "notes",
+        "restarts": 0,
+        "scope": "workspace",
+        "source": "/srv/repo/.ouroboros/mcp.json",
+        "state": "configured",
+        "tool_names": [],
+        "tools": 0,
+        "transport": "stdio",
+        "workspace": "/srv/repo"
+      }
+    ],
+    "supervised": true,
+    "transports": [
+      "stdio"
+    ]
+  }
+}

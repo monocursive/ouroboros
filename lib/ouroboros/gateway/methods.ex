@@ -92,6 +92,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
   alias Ouroboros.Provider.CodexAppServer
+  alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
   alias Ouroboros.Upgrade.NodeExecutor
@@ -256,6 +257,18 @@ defmodule Ouroboros.Gateway.Methods do
     "ledger.list" => %{scope: :read, timeout: @default_timeout},
     "ledger.get" => %{scope: :read, timeout: @default_timeout},
     "ledger.export" => %{scope: :read, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # D4. MCP servers on the wire.
+    #
+    # `:read` for the same reason `runtime.lsp.status` is: this projects what a node's
+    # pool already holds and starts nothing. Node-routed, because an MCP server runs
+    # where its session runs — the pool is keyed by workspace and lives on the machine
+    # that owns it — so a fleet answer is one call per machine, not a merged view this
+    # node could invent. There is no `mcp.add`: a server definition is code that runs on
+    # somebody's machine, and it is declared in node configuration or in a file an
+    # operator wrote, never authored over a socket.
+    # ---------------------------------------------------------------------------------
+    "mcp.list" => %{scope: :read, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
@@ -655,6 +668,13 @@ defmodule Ouroboros.Gateway.Methods do
          {"line", {:optional, 0}, :non_negative_integer, "0-based, as the protocol reports it"},
          {"character", {:optional, 0}, :non_negative_integer, "0-based"},
          {"query", :optional, :string, "for the two symbol searches"},
+         @authority_node
+       ]},
+    "mcp.list" =>
+      {:closed,
+       [
+         {"workspace", :optional, :string,
+          "narrow the answer to the servers claimed by sessions in this workspace; every workspace by default"},
          @authority_node
        ]},
     "code_intel.diagnostics" =>
@@ -1233,6 +1253,24 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, id} <- fetch_string(params, "id"),
          {:ok, target} <- permissions_node(params) do
       permissions_call(target, :remove, [scope, id])
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D4 — MCP servers on the wire
+  # ---------------------------------------------------------------------------
+
+  # `workspace` is optional and narrows nothing on the running servers: it adds the ones
+  # this node has *configured* for that workspace but has not started, together with the
+  # entries it refused and why, which is the only way an operator can tell "my mcp.json
+  # was ignored" from "my mcp.json was read and rejected".
+  def invoke("mcp.list", params) do
+    with :ok <- only_keys(params, ["workspace", "node"]),
+         {:ok, workspace} <- fetch_optional_string(params, "workspace"),
+         {:ok, target} <- permissions_node(params) do
+      mcp_call(target, workspaces: List.wrap(workspace))
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -2429,6 +2467,21 @@ defmodule Ouroboros.Gateway.Methods do
         reply(apply(Permissions, function, arguments))
       else
         reply(:erpc.call(target, Permissions, function, arguments, @fleet_query_timeout))
+      end
+    end)
+  end
+
+  # Same posture as `permissions_call/3` and `code_intel_call/3`, and for the same
+  # reason: an MCP server runs on the machine whose session asked for it, so a session
+  # on another host is described by that host's pool or not at all.
+  # `Ouroboros.Provider.Native.Mcp.status/1` raises nothing and blocks on nothing without
+  # a deadline, so what crosses `:erpc` is always an ordinary map.
+  defp mcp_call(target, opts) do
+    safe(fn ->
+      if target == node() do
+        {:ok, Mcp.status(opts)}
+      else
+        {:ok, :erpc.call(target, Mcp, :status, [opts], @fleet_query_timeout)}
       end
     end)
   end

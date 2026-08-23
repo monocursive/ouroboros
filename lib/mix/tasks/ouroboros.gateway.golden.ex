@@ -118,6 +118,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"interactive_event_detail_result", interactive_event_detail_result()},
       {"coding_event_detail_result", coding_event_detail_result()},
       {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
+      {"mcp_list_result", mcp_list_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
@@ -451,6 +452,90 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       truncated: 0,
       counts: %{error: 1, warning: 0, information: 0, hint: 0, unknown: 0},
       items: Enum.map([@diagnostic], &Map.put(&1, :signature, Diagnostics.signature(&1)))
+    })
+  end
+
+  # D4. Every state a client has to render at once: a running server with its tools, one
+  # this node marked broken, one it has configured but never started, and a refusal that
+  # is not a server at all. `env_count` is here rather than an `env` map because that is
+  # the whole rule — an MCP server's environment is a secret carrier and only its size
+  # ever leaves this node. A row for a server that has never run carries no `uptime_ms`,
+  # `idle_ms`, or `broken_*`, because it has none; a client must read a server row as
+  # open and key on `state`.
+  defp mcp_list_result do
+    Conn.result_frame(12, %{
+      node: :ouroboros@golden,
+      enabled: true,
+      supervised: true,
+      protocol_version: "2026-07-28",
+      transports: [:stdio],
+      servers: [
+        %{
+          name: "fake",
+          workspace: "/srv/repo",
+          state: :ready,
+          scope: :node,
+          source: nil,
+          command: "/usr/bin/fake-mcp",
+          args: ["--stdio"],
+          cwd: nil,
+          transport: :stdio,
+          env_count: 1,
+          tools: 2,
+          tool_names: ["mcp__fake__echo", "mcp__fake__add"],
+          restarts: 0,
+          claims: 1,
+          uptime_ms: 61_000,
+          idle_ms: 1_000,
+          broken_reason: nil,
+          broken_until_ms: nil
+        },
+        %{
+          name: "flaky",
+          workspace: "/srv/repo",
+          state: :broken,
+          scope: :user,
+          source: "/home/operator/.config/ouroboros/mcp.json",
+          command: "flaky-mcp",
+          args: [],
+          cwd: nil,
+          transport: :stdio,
+          env_count: 0,
+          tools: 0,
+          tool_names: [],
+          restarts: 4,
+          claims: 0,
+          uptime_ms: 12_000,
+          idle_ms: 12_000,
+          broken_reason: "{:restart_limit, {:server_exited, 1}}",
+          broken_until_ms: 288_000
+        },
+        %{
+          name: "notes",
+          workspace: "/srv/repo",
+          state: :configured,
+          scope: :workspace,
+          source: "/srv/repo/.ouroboros/mcp.json",
+          command: "./bin/notes-mcp",
+          args: [],
+          cwd: nil,
+          transport: :stdio,
+          env_count: 0,
+          tools: 0,
+          tool_names: [],
+          restarts: 0,
+          claims: 0
+        }
+      ],
+      refusals: [
+        %{
+          name: "remote",
+          workspace: "/srv/repo",
+          scope: :user,
+          reason: :unsupported_transport,
+          detail: "`url` names an HTTP/SSE server; this client speaks stdio only"
+        }
+      ]
     })
   end
 

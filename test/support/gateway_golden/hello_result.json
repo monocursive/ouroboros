@@ -63,6 +63,7 @@
       "ledger.export",
       "ledger.get",
       "ledger.list",
+      "mcp.list",
       "permissions.add",
       "permissions.list",
       "permissions.remove",

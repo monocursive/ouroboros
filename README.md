@@ -341,6 +341,79 @@ Thirteen, in the order the model sees them:
 | `skill` | Agent Skills: `SKILL.md` under `<workspace>/.agents/skills/*/` and `~/.config/ouroboros/skills/*/`. Names and descriptions go into the tool's own description, bounded to the smaller of 2% of the context window and 8,000 characters; bodies load on call. |
 | `plan` | Replaces the whole plan and emits `plan_updated`. `todo` is an alias, not a second tool. |
 
+Plus every tool an MCP server on this node advertises — see below.
+
+#### MCP servers
+
+Ouroboros already *serves* MCP: `ouro mcp-serve` is the permission prompt a bridged
+Claude session calls. The native agent is the other half — it **calls** somebody else's
+MCP server over stdio and puts that server's tools in front of the model.
+
+A server is declared in one of three places, and a name declared twice keeps the
+strongest scope's definition:
+
+| Scope | Where | Precedence |
+|---|---|---|
+| node | `config :ouroboros, :mcp_servers` | highest — operator configuration |
+| user | `~/.config/ouroboros/mcp.json` | middle |
+| workspace | `<workspace>/.ouroboros/mcp.json` | lowest, **and requires workspace trust** |
+
+The file shape is Claude Code's, unchanged, so an `mcp.json` you already have works as
+it is:
+
+```json
+{"mcpServers": {"github": {"command": "npx",
+                           "args": ["-y", "@modelcontextprotocol/server-github"],
+                           "env": {"GITHUB_TOKEN": "…"}}}}
+```
+
+```elixir
+config :ouroboros, :mcp_servers, %{
+  "github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
+                env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}
+}
+```
+
+Every tool the server advertises reaches the model as `mcp__<server>__<tool>` — Claude
+Code's convention, which the permission rule language already understands, so a rule
+somebody wrote for another agent means the same thing here. A call is evaluated by
+`Ouroboros.Control.Permissions` as `mode: :execute` under that full name, appears as an
+ordinary `tool_call`/`tool_result` pair with the server named, and can be narrowed with
+`allowed_tools`/`disallowed_tools` per tool rather than per server. A server name may not
+contain `__`, because the name is split on the first one.
+
+`mcp.list` on the gateway (`ouro`'s `:read` scope) shows what a node is really running:
+each server's state — `configured`, `starting`, `ready`, `broken` — its tool names,
+restarts, claims, and every entry the loader *refused*, with the reason. A server's
+environment appears there as a count and never as values.
+
+**The bounds.** Handshake — `initialize`, `initialized`, and every page of `tools/list`
+together — 15 s; one `tools/call` 60 s; one result 100 KB (≈25k tokens), truncated with a
+visible `… +N bytes`; 200 tools per server, 20 servers per node, 20 `tools/list` pages,
+32 requests in flight, 4 MB per JSON-RPC frame. A server that dies is restarted with
+backoff three times and then marked `broken` for five minutes, answering every call
+immediately rather than respawning. A server with no session holding it stops after ten
+minutes idle, and the last session that claimed it releasing its claim stops it at once.
+Each is `config :ouroboros, :mcp, …`; none may be set to `:infinity`.
+
+**Schemas.** A tool's JSON Schema is sent to the model when it is at most 4 kB and the
+session's MCP schema total is under 32 kB. Past either bound the tool is *still listed*,
+with an open `{"type": "object"}` schema and a sentence saying the schema was withheld
+and that the server validates arguments. The budget was measured rather than assumed:
+the `everything`, `git` and `filesystem` reference servers cost 2.9 / 4.6 / 5.1 kB for
+their whole tool set, so two or three ordinary servers cost about what one of the
+thirteen tools above costs. Note that MCP has no per-tool schema request — `tools/list`
+returns them all — so what is deferred is what reaches the *model's context*, not a
+fetch.
+
+**What this does not do.** **stdio only**: a `url` server (or `"type": "http"` / `"sse"`)
+is refused as `unsupported_transport` and named in `mcp.list`, never silently skipped.
+**No OAuth** — there is no authorization flow at all, so a server that needs one is a
+server this client cannot use. **No `resources/*` or `prompts/*`** yet. **No `ouro mcp
+add`**: servers are configured by file or by node config, and there is deliberately no
+gateway verb for writing one, because a server definition is code that runs on somebody's
+machine.
+
 #### Hooks
 
 `ouroboros.toml` in the workspace and `~/.config/ouroboros/hooks.toml` for the user,
@@ -519,8 +592,18 @@ transcript it never had would be a claim with nothing behind it.
   being reached on the strength of the first one's rule.
 - **A `bash` command's effects are not checkpointed and cannot be rewound.** Rewind says
   so, by turn, before it acts.
-- **No MCP yet.** No MCP servers; the native agent's tools are its own and the
-  permission engine's.
+- **MCP is stdio only, and has no OAuth.** A `url` server is refused by name with
+  `unsupported_transport` rather than ignored, and there is no authorization flow at
+  all, so a server that needs one cannot be used here. `resources/*` and `prompts/*` are
+  not wired to anything yet. There is no `ouro mcp add`: a server is declared in node
+  configuration or in a file an operator owns.
+- **A repository's MCP servers need the same trust its hooks do.**
+  `<workspace>/.ouroboros/mcp.json` is read only for a trusted workspace, for the reason
+  above it: an `mcp.json` in a repository is a command that runs on every machine that
+  clones it. Untrusted is not silent — `mcp.list` says how many entries were declined.
+- **An MCP server's arguments are the model's, unchecked.** This client validates
+  nothing about them; the server owns its schema and refuses what it does not like. What
+  *is* checked first is the permission engine, on the full `mcp__server__tool` name.
 - **The context meter is native-only for now.** Vendor providers report `usage` but
   nothing maps their window yet, so their footer shows tokens without a percentage.
 - **Compaction summaries cost a model call.** One per compaction, on the session's own

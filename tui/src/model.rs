@@ -2579,11 +2579,37 @@ mod tests {
                 "interactive_event_notification",
                 "ledger_export_result",
                 "ledger_list_result",
+                "mcp_list_result",
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
             ]
         );
+    }
+
+    /// D4's `mcp.list`: what a client reads to draw a node's MCP servers — the state
+    /// discriminator, the prefixed tool names, a refusal's typed reason, and the one fact
+    /// about a server's environment that is allowed on the wire (a count, never a value).
+    #[test]
+    fn the_mcp_list_fixture_carries_what_a_client_reads() {
+        let list = &fixture("mcp_list_result")["result"];
+
+        assert_eq!(list["enabled"], true);
+        assert_eq!(list["protocol_version"], "2026-07-28");
+
+        let server = &list["servers"][0];
+        assert_eq!(server["state"], "ready");
+        assert_eq!(server["transport"], "stdio");
+        assert_eq!(server["tool_names"][0], "mcp__fake__echo");
+        assert!(server["env_count"].is_u64(), "{server}");
+        assert!(
+            server.get("env").is_none(),
+            "an environment value never reaches the wire"
+        );
+
+        let refusal = &list["refusals"][0];
+        assert_eq!(refusal["reason"], "unsupported_transport");
+        assert_eq!(refusal["name"], "remote");
     }
 
     /// The three fixtures this slice added, decoded for the fields a client branches on.
