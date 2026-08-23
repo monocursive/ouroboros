@@ -115,6 +115,13 @@ jobs:
       contents: write
 
     steps:
+      # The tree is needed for dist/release.pub. The signature published beside the
+      # checksums is only worth something if it can be checked against a key that did
+      # *not* come from the release, so the key of record is the committed one — the same
+      # bytes `ouro update` compiles into itself — and this job verifies its own output
+      # against it before publishing anything.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: ouro-*
@@ -138,6 +145,72 @@ jobs:
           done
           (cd dist && sha256sum ouro-* > SHA256SUMS)
 
+      # From Ubuntu's own archive rather than a downloaded binary, so this step does not
+      # itself become an unverified download in the middle of a signing pipeline.
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+          minisign -v
+
+      # Fails closed twice over: no secret, or a dist/release.pub that was never
+      # provisioned, and the release does not happen. An unsigned release published as
+      # though it were a signed one is worse than no release, because every downstream
+      # check is written on the assumption that the signature exists.
+      - name: Sign SHA256SUMS with the release key
+        env:
+          OURO_RELEASE_SIGNING_KEY: ${{ secrets.OURO_RELEASE_SIGNING_KEY }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${OURO_RELEASE_SIGNING_KEY}" ]]; then
+            echo "the repository secret OURO_RELEASE_SIGNING_KEY is not set" >&2
+            echo "generate a key pair with 'minisign -G -W -p dist/release.pub -s ouro-release.key'," >&2
+            echo "commit the public half, and store the secret half in that secret." >&2
+            echo "See docs/DISTRIBUTION.md. Refusing to publish an unsigned release." >&2
+            exit 1
+          fi
+
+          public=$(sed -e '/^[[:space:]]*#/d' \
+                       -e '/^[[:space:]]*untrusted comment:/d' \
+                       -e '/^[[:space:]]*$/d' \
+                       dist/release.pub | head -n 1)
+
+          if [[ -z "${public}" ]]; then
+            echo "dist/release.pub carries no key: it is still the unprovisioned placeholder." >&2
+            echo "A signature nobody can check against a committed key is not a signature." >&2
+            echo "See docs/DISTRIBUTION.md. Refusing to publish." >&2
+            exit 1
+          fi
+
+          key=$(mktemp -d)
+          chmod 700 "${key}"
+          trap 'rm -rf "${key}"' EXIT
+          printf '%s\n' "${OURO_RELEASE_SIGNING_KEY}" > "${key}/ouro-release.key"
+          chmod 600 "${key}/ouro-release.key"
+
+          # `-W` keys carry no password, so this never prompts; </dev/null makes a
+          # password-protected key fail immediately instead of hanging the job.
+          # The trusted comment is covered by a second signature, so `ouro update` can
+          # print it after verifying — which is why the tag goes in it.
+          minisign -S \
+            -s "${key}/ouro-release.key" \
+            -m dist/SHA256SUMS \
+            -t "ouroboros ${TAG} SHA256SUMS" \
+            < /dev/null
+
+          test -f dist/SHA256SUMS.minisig
+
+          # The same check a user's machine will run, run here first: this catches a
+          # secret that does not belong to the committed public key, which is otherwise
+          # only discovered by whoever downloads the release.
+          minisign -V -P "${public}" -x dist/SHA256SUMS.minisig -m dist/SHA256SUMS
+
+          echo "signed dist/SHA256SUMS and verified it against the committed dist/release.pub"
+
       - name: Publish one immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,7 +224,14 @@ jobs:
             echo "publish a new application version and tag instead" >&2
             exit 1
           fi
-          gh release create "$TAG" dist/* \
+          # Named explicitly rather than dist/*: the release must carry the binaries, the
+          # checksums, and the signature, and must NOT carry dist/release.pub. A public
+          # key downloaded from the same place as the signature it checks proves nothing;
+          # the key of record is the one in the repository and in the binary.
+          gh release create "$TAG" \
+            dist/ouro-* \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.minisig \
             --verify-tag \
             --generate-notes \
             --title "Ouroboros ${TAG}"
