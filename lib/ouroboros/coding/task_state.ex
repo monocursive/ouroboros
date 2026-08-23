@@ -83,6 +83,15 @@ defmodule Ouroboros.Coding.TaskState do
     :skip_git_repo_check,
     :skills,
     :skills_dirs,
+    # G3. The two halves of subagent policy an operator may state at a start: which model
+    # children run on, and how long one may run. Both are durable for the reason every
+    # option here is — a resumed session must spawn children the way it was configured to
+    # — and both are refused for every provider but `native`, whose adapter spec is the
+    # only one that lists them. A child's depth, parent and task id are deliberately *not*
+    # here: this runtime sets them when it opens a child, and a request that could name
+    # them would be a request that could forge a lineage.
+    :subagent_deadline_ms,
+    :subagent_model,
     :thinking,
     :title,
     :visibility,

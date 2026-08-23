@@ -104,7 +104,20 @@ defmodule Ouroboros.Provider.Native do
       # no fifth member; `provider_options` is the one channel a start can carry it on.
       # Mid-session it moves through `Native.Session.plan_mode/2`, which is a live process
       # call rather than a request field. `Ouroboros.Provider.plan_mode/2` declares both.
-      provider_options: [:max_iterations, :tool_timeout_ms, :event_limit, :plan]
+      #
+      # G3's two are here for the same reason and are deliberately the *only* two a caller
+      # may set: `subagent_model` points children at a cheaper model than the parent's, and
+      # `subagent_deadline_ms` bounds how long one may run. The rest of a child's shape —
+      # its depth, its parent, its task id — is set by this runtime when it opens the child
+      # and would be a way to forge a lineage if a request could name it.
+      provider_options: [
+        :max_iterations,
+        :tool_timeout_ms,
+        :event_limit,
+        :plan,
+        :subagent_model,
+        :subagent_deadline_ms
+      ]
     )
   end
 
