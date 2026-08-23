@@ -2171,7 +2171,7 @@ pub fn respond_approval_params_with_reason(
 /// payload's own `options` rows and are never derived from this enum — a modal that
 /// invented its own wording for a vendor's option would be describing a button that does
 /// something else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlanChoice {
     /// Leave plan mode into `auto_edit`: edits inside the workspace apply without asking.
     AutoEdit,
@@ -2257,6 +2257,15 @@ pub fn respond_approval_params_with_plan(
 
     params["response"]["provider_options"] = Value::Object(options);
     params
+}
+
+/// One follow-up draft, bounded to what the gateway will accept.
+///
+/// Applied where the operator's text is *stored* as well as where it is sent, so the
+/// modal shows the bytes that will actually cross the wire rather than a draft it will
+/// silently shorten later.
+pub fn clip_plan_follow_up(text: &str) -> String {
+    clip_utf8(text.trim(), MAX_PLAN_FOLLOW_UP_BYTES)
 }
 
 /// Truncates on a character boundary, so a clipped follow-up is still UTF-8.

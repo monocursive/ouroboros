@@ -642,12 +642,12 @@ impl App {
             return;
         }
 
-        self.open_approval_with(plane, id, String::new(), 0, None);
+        self.open_approval_with(plane, id, String::new(), 0, None, None);
     }
 
-    /// Opens (or reopens after a reason prompt) the chooser for the watch's pending
-    /// approval. The request is peeked afresh so the subject is always the live one;
-    /// `request_id` must still be pending, or nothing opens.
+    /// Opens (or reopens after a reason or follow-up prompt) the chooser for the watch's
+    /// pending approval. The request is peeked afresh so the subject is always the live
+    /// one; `request_id` must still be pending, or nothing opens.
     pub(super) fn open_approval_with(
         &mut self,
         plane: Plane,
@@ -655,6 +655,7 @@ impl App {
         request_id: String,
         choice: usize,
         reason: Option<String>,
+        follow_up: Option<String>,
     ) {
         let Some(watch) = self.sessions.watches.get(&(plane, id.clone())) else {
             return;
@@ -676,20 +677,26 @@ impl App {
 
         // The reason prompt reopens this modal, and the fifth row may not exist the second
         // time — a rule can stop being offerable between the two, and a cursor left past
-        // the last row would answer something the reader never selected.
-        let rows = APPROVAL_CHOICES.len() + usize::from(rule.is_some());
+        // the last row would answer something the reader never selected. B2: a plan exit
+        // has its own row count entirely, because its rows are the payload's three options
+        // and not the four fixed answers.
+        let rows = match detail.plan.as_ref() {
+            Some(plan) => plan.choices.len(),
+            None => APPROVAL_CHOICES.len() + usize::from(rule.is_some()),
+        };
 
         self.overlay = Some(Overlay::Approval {
             plane,
             id,
             request_id,
             subject,
-            choice: choice.min(rows - 1),
+            choice: choice.min(rows.saturating_sub(1)),
             reason,
             detail: Box::new(detail),
             rule,
             rule_absent,
             expanded: false,
+            follow_up,
         });
     }
 

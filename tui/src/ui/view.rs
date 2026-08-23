@@ -21,7 +21,9 @@ use super::app::{
 use super::editor::COMMANDS;
 use super::theme;
 use super::transcript::ApprovalDetail;
+use super::transcript_cells::wrap_limited;
 use crate::keymap::{Action, Scope};
+use crate::model::transcript::PlanStatus;
 use crate::model::{Plane, ProviderEntry};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -885,6 +887,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             rule,
             rule_absent,
             expanded,
+            follow_up,
             ..
         } => approval(
             frame,
@@ -898,6 +901,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
                 rule_absent: *rule_absent,
                 choice: *choice,
                 expanded: *expanded,
+                follow_up: follow_up.as_deref(),
             },
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
@@ -2582,7 +2586,21 @@ struct ApprovalModal<'a> {
     rule_absent: Option<&'static str>,
     choice: usize,
     expanded: bool,
+    /// B2, plan exits only: the prompt to run once the session has left plan mode.
+    follow_up: Option<&'a str>,
 }
+
+/// How many plan steps the modal draws before it says how many it left out. `ctrl+o`
+/// raises it to [`PLAN_EXIT_STEPS_EXPANDED`], the same way it raises the diff ceiling.
+const PLAN_EXIT_STEPS_SHOWN: usize = 12;
+const PLAN_EXIT_STEPS_EXPANDED: usize = 64;
+
+/// How many rows the prose form of a plan takes before it is cut.
+const PLAN_EXIT_MESSAGE_ROWS: usize = 8;
+const PLAN_EXIT_MESSAGE_ROWS_EXPANDED: usize = 48;
+
+/// How many rows the follow-up draft takes on the modal.
+const PLAN_EXIT_FOLLOW_UP_ROWS: usize = 3;
 
 /// How many rows the command may take before it is cut. Two, and it says how much it cut.
 const APPROVAL_COMMAND_ROWS: usize = 2;
@@ -2617,6 +2635,14 @@ const APPROVAL_DIFF_EXPANDED: usize = 400;
 /// Warp's rule for the diff — expanded while the approval is pending — is the default
 /// here, bounded by the rows the popup can spare; `ctrl+o` raises the ceiling in place.
 fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+    // B2. A plan exit is a different question with different answers, so it gets its own
+    // modal rather than a decorated version of this one: the four fixed rows would offer a
+    // fourth answer the payload never named, and the plan itself has nowhere to go here.
+    if modal.detail.plan.is_some() {
+        plan_exit(frame, area, modal);
+        return;
+    }
+
     let detail = modal.detail;
     let answers = approval_answers(&modal);
     let width_percent = if area.width < 100 { 100 } else { 78 };
@@ -2740,6 +2766,249 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
         .border_style(Style::default().fg(theme::warn()))
+        .title(Span::styled(heading, theme::heading()));
+    let inner_area = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(answers.len() as u16)])
+        .split(inner_area);
+
+    frame.render_widget(Paragraph::new(body), rows[0]);
+
+    let items: Vec<ListItem> = answers
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| ListItem::new(Line::from(access::numbered(index, &label))))
+        .collect();
+    let mut state = ListState::default().with_selected(Some(modal.choice));
+
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(theme::selected()),
+        rows[1],
+        &mut state,
+    );
+}
+
+/// B2. The plan-exit modal: the plan, the three answers in the runtime's own words, and
+/// the optional prompt to run first.
+///
+/// The honesty rules here, in one place:
+///
+/// * **The rows are the payload's `options`, not this build's idea of them.** Each row's
+///   words come from the option's `name` and each row sends that option's `optionId`. An
+///   option whose id this build cannot map is listed as a note and never as a row.
+/// * **The question is quoted, not paraphrased.** The runtime's `question` is the only
+///   place the *consequences* of each answer are stated — which edits apply without
+///   asking, and which still stop — and this client does not know them independently.
+/// * **A plan written in prose is labelled as prose.** `plan_source` distinguishes a
+///   structured step list from a final message, and passing the second off as the first
+///   would make the exit look better-founded than it is.
+/// * **The follow-up is optional and says so.** Answering with an empty one is the
+///   ordinary path: the runtime emits the held terminal event and the turn is over.
+fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+    let detail = modal.detail;
+    let Some(plan) = detail.plan.as_ref() else {
+        return;
+    };
+
+    let width_percent = if area.width < 100 { 100 } else { 78 };
+    let inner = inner_width(area, width_percent).max(20);
+
+    let mut body: Vec<Line<'static>> = Vec::new();
+
+    body.push(Line::from(vec![
+        Span::styled("request ", theme::quiet()),
+        Span::raw(super::tree::truncate(
+            modal.request_id,
+            inner.saturating_sub(10),
+        )),
+    ]));
+    body.push(Line::from(Span::styled(
+        super::tree::truncate(modal.id, inner),
+        theme::quiet(),
+    )));
+
+    // The runtime's own question, verbatim and wrapped. Its `·` lines describe what each
+    // answer does; the rows below carry the same options' names.
+    if let Some(question) = &plan.question {
+        body.push(Line::from(""));
+        for line in question.lines() {
+            for row in wrap_limited(line, inner.saturating_sub(2).max(8), 4) {
+                body.push(Line::from(Span::raw(row)));
+            }
+        }
+    }
+
+    body.push(Line::from(""));
+
+    let source = match plan.source.as_deref() {
+        Some("plan_tool") => "from the plan tool",
+        Some("message") => "from the final message, not the plan tool",
+        // A third source this build has not heard of: named, not guessed at.
+        Some(other) => {
+            body.push(Line::from(vec![
+                Span::styled("PLAN  ", theme::heading()),
+                Span::styled(format!("(source: {other})"), theme::quiet()),
+            ]));
+            ""
+        }
+        None => "",
+    };
+
+    if !source.is_empty() {
+        body.push(Line::from(vec![
+            Span::styled("PLAN  ", theme::heading()),
+            Span::styled(format!("({source})"), theme::quiet()),
+        ]));
+    }
+
+    if !plan.steps.is_empty() {
+        let ceiling = if modal.expanded {
+            PLAN_EXIT_STEPS_EXPANDED
+        } else {
+            PLAN_EXIT_STEPS_SHOWN
+        };
+
+        for step in plan.steps.iter().take(ceiling) {
+            let style = match step.status {
+                PlanStatus::Done => Style::default()
+                    .fg(theme::good())
+                    .add_modifier(Modifier::DIM),
+                PlanStatus::InProgress => Style::default().fg(theme::accent()),
+                PlanStatus::Pending => theme::quiet(),
+                PlanStatus::Other(_) => Style::default().fg(theme::warn()),
+            };
+            let suffix = match &step.status {
+                PlanStatus::Other(status) => format!("  ({status})"),
+                _ => String::new(),
+            };
+            let text = format!("{}{suffix}", step.text.replace('\n', " "));
+
+            body.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{} ", step.status.glyph()), style),
+                Span::styled(
+                    super::tree::truncate(&text, inner.saturating_sub(6).max(8)),
+                    Style::default(),
+                ),
+            ]));
+        }
+
+        let hidden = plan.omitted_steps() + plan.steps.len().saturating_sub(ceiling);
+
+        if hidden > 0 {
+            body.push(Line::from(Span::styled(
+                format!("  … {hidden} more step(s) · ctrl+o shows more"),
+                theme::quiet(),
+            )));
+        }
+    }
+
+    if let Some(message) = &plan.message {
+        let rows = wrap_rows(
+            message,
+            inner.saturating_sub(2).max(8),
+            if modal.expanded {
+                PLAN_EXIT_MESSAGE_ROWS_EXPANDED
+            } else {
+                PLAN_EXIT_MESSAGE_ROWS
+            },
+        );
+
+        for row in &rows.shown {
+            body.push(Line::from(vec![Span::raw("  "), Span::raw(row.clone())]));
+        }
+
+        if rows.omitted > 0 {
+            body.push(Line::from(Span::styled(
+                format!("  … {} more line(s) · ctrl+o shows more", rows.omitted),
+                theme::quiet(),
+            )));
+        }
+    }
+
+    if plan.steps.is_empty() && plan.message.is_none() {
+        body.push(Line::from(Span::styled(
+            "  the runtime attached no plan to this question",
+            theme::quiet(),
+        )));
+    }
+
+    // The follow-up composer line. Present whether or not anything is drafted, because an
+    // operator who does not know the field exists cannot use it.
+    body.push(Line::from(""));
+
+    match modal
+        .follow_up
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => {
+            let rows = wrap_rows(
+                text,
+                inner.saturating_sub(4).max(8),
+                PLAN_EXIT_FOLLOW_UP_ROWS,
+            );
+
+            body.push(Line::from(Span::styled(
+                "FIRST, DO THIS",
+                Style::default().fg(theme::accent()),
+            )));
+
+            for row in &rows.shown {
+                body.push(Line::from(vec![Span::raw("  "), Span::raw(row.clone())]));
+            }
+
+            if rows.omitted > 0 {
+                body.push(Line::from(Span::styled(
+                    format!("  … {} more line(s)", rows.omitted),
+                    theme::quiet(),
+                )));
+            }
+        }
+        None => body.push(Line::from(Span::styled(
+            "no follow-up prompt — tab or r writes one, and it is optional",
+            theme::quiet(),
+        ))),
+    }
+
+    for name in &plan.unmapped {
+        body.push(Line::from(Span::styled(
+            format!("this build cannot send the option {name}; it is not offered as a row"),
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    body.push(Line::from(Span::styled(
+        if modal.expanded {
+            "enter answers · tab or r write what to do first · ctrl+o shows less · esc closes"
+        } else {
+            "enter answers · tab or r write what to do first · ctrl+o shows more · esc closes"
+        },
+        theme::quiet(),
+    )));
+
+    let answers: Vec<String> = plan
+        .choices
+        .iter()
+        .map(|option| format!("{}  ({})", option.name, option.choice.as_str()))
+        .collect();
+
+    let heading = match &plan.header {
+        Some(header) => format!(" {} ", header.to_ascii_lowercase()),
+        None => " plan ready ".to_string(),
+    };
+
+    let height = (body.len() + answers.len() + 2).min(area.height as usize) as u16;
+    let popup = centered(area, width_percent, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(heading, theme::heading()));
     let inner_area = block.inner(popup);
     frame.render_widget(block, popup);

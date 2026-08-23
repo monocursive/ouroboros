@@ -34,8 +34,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::model::transcript::{Diff, PlanUpdate, PresentationEvent, RunStart, UsageReport};
-use crate::model::{ApprovalDecision, ApprovalScope, Event, EventType, Plane};
+use crate::model::transcript::{
+    self, Diff, PlanStep, PlanUpdate, PresentationEvent, RunStart, UsageReport,
+};
+use crate::model::{ApprovalDecision, ApprovalScope, Event, EventType, PlanChoice, Plane};
 
 /// How many events one session's transcript keeps. Past this the oldest are dropped and
 /// the floor rises, which is visible rather than silent.
@@ -136,6 +138,126 @@ const APPROVAL_LOCATIONS: usize = 8;
 /// How many array entries are searched for a diff before giving up.
 const APPROVAL_DIFF_CANDIDATES: usize = 8;
 
+/// How many plan steps the plan-exit modal will draw before saying how many it left out.
+///
+/// The projection above it already bounds the list; this is the modal's own ceiling, so a
+/// hundred-step plan cannot push the three answers off the bottom of the screen.
+const PLAN_EXIT_STEPS: usize = 32;
+
+/// B2. One `plan_exit` question, read out of the payload once.
+///
+/// Present only where `payload.kind` is exactly `"plan_exit"`. Everything else about the
+/// approval — its options, its request id, the modal it opens — is the ordinary machinery;
+/// this is the extra the question carries, and its absence is what makes an ordinary
+/// approval render the ordinary way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanExit {
+    /// The runtime's own heading (`"Plan ready"`).
+    pub header: Option<String>,
+    /// The runtime's own question, including the three sentences describing the choices.
+    /// Shown verbatim rather than re-worded: it is the only place the *consequences* of
+    /// each answer are stated, and this client does not know them independently.
+    pub question: Option<String>,
+    /// `plan_tool` or `message` — whether the model used the plan tool or wrote prose.
+    /// Labelled rather than hidden, because a plan read out of a final message is a
+    /// weaker artifact than a structured one and the modal should not pass it off as a
+    /// step list.
+    pub source: Option<String>,
+    /// The steps, where the turn produced them through the plan tool.
+    pub steps: Vec<PlanStep>,
+    /// How many steps the runtime sent, which may exceed `steps.len()`.
+    pub step_count: usize,
+    /// The final message, where the model planned in prose instead.
+    pub message: Option<String>,
+    /// The three answers, in the payload's own order, each with the vendor's own words.
+    pub choices: Vec<PlanOption>,
+    /// Options the payload offered that this build cannot map onto a choice it knows how
+    /// to send. Named in a note, never drawn as a row: a row that sent something other
+    /// than what it said would be the one mistake here that cannot be undone.
+    pub unmapped: Vec<String>,
+}
+
+/// One plan-exit answer as a row: the wire choice, and the vendor's words for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanOption {
+    pub choice: PlanChoice,
+    pub name: String,
+}
+
+impl PlanExit {
+    /// `None` for any approval that is not a plan exit, and for a plan exit whose options
+    /// this build could not map onto a single known choice — which would be a modal with
+    /// no answer it could honestly send, and is better rendered as the ordinary four.
+    fn decode(payload: &Value) -> Option<Self> {
+        if json_nonempty_str(payload, "kind").as_deref() != Some("plan_exit") {
+            return None;
+        }
+
+        let mut choices = Vec::new();
+        let mut unmapped = Vec::new();
+
+        for option in payload
+            .get("options")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .take(APPROVAL_OPTIONS)
+        {
+            let name = json_nonempty_str(option, "name")
+                .or_else(|| json_nonempty_str(option, "label"))
+                .unwrap_or_default();
+
+            let id = json_nonempty_str(option, "optionId")
+                .or_else(|| json_nonempty_str(option, "option_id"));
+
+            match id.as_deref().and_then(PlanChoice::parse) {
+                Some(choice) if !name.is_empty() => choices.push(PlanOption { choice, name }),
+                // A named option whose id this build does not know, or one with no name to
+                // put on a row. Either way it is reported, not offered.
+                _unknown => {
+                    if let Some(id) = id.filter(|_| !name.is_empty()) {
+                        unmapped.push(format!("{name} ({id})"));
+                    } else if !name.is_empty() {
+                        unmapped.push(name);
+                    }
+                }
+            }
+        }
+
+        if choices.is_empty() {
+            return None;
+        }
+
+        let plan = payload.get("plan").map(transcript::plan_update);
+
+        Some(Self {
+            header: json_nonempty_str(payload, "header"),
+            question: json_nonempty_str(payload, "question"),
+            source: json_nonempty_str(payload, "plan_source"),
+            steps: plan
+                .as_ref()
+                .map(|plan| {
+                    plan.steps
+                        .iter()
+                        .take(PLAN_EXIT_STEPS)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            step_count: plan.as_ref().map(|plan| plan.step_count).unwrap_or(0),
+            message: json_nonempty_str(payload, "message"),
+            choices,
+            unmapped,
+        })
+    }
+
+    /// How many steps were sent but not drawn.
+    pub fn omitted_steps(&self) -> usize {
+        self.step_count.saturating_sub(self.steps.len())
+    }
+}
+
 /// One answer the provider itself offered, as ACP spells them.
 ///
 /// The `optionId` is kept even though `interactive.respond_approval` refuses
@@ -205,6 +327,9 @@ pub struct ApprovalDetail {
     /// ACP `{"type": "diff", path, oldText, newText}` content blocks, which carry whole
     /// file bodies rather than a patch. Named rather than diffed — see [`ApprovalEdit`].
     pub edits: Vec<ApprovalEdit>,
+    /// B2. Present only for a `plan_exit` question, and the thing the dedicated modal
+    /// branches on. `None` is every other approval this runtime raises.
+    pub plan: Option<PlanExit>,
 }
 
 /// One ACP diff content block, described rather than rendered as a patch.
@@ -231,6 +356,14 @@ impl ApprovalRequest {
     /// A sandbox escalation should read as `git commit … — writes to .git`, not as the
     /// raw JSON blob of `tool_call`.
     pub fn subject(&self) -> String {
+        // B2. A plan exit names no command and no tool, so the generic fallback would
+        // render the whole payload as JSON in the snack bar. Its own header is the
+        // sentence a person needs there.
+        if json_nonempty_str(&self.payload, "kind").as_deref() == Some("plan_exit") {
+            return json_nonempty_str(&self.payload, "header")
+                .unwrap_or_else(|| "plan ready — build it, or keep planning".to_string());
+        }
+
         let command = approval_command(&self.payload);
         let reason = json_nonempty_str(&self.payload, "reason");
 
@@ -270,6 +403,7 @@ impl ApprovalRequest {
             diff,
             diff_excerpted,
             edits: call.map(approval_edits).unwrap_or_default(),
+            plan: PlanExit::decode(payload),
         }
     }
 }

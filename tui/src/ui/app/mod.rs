@@ -37,8 +37,8 @@ use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
-    Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
-    SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
+    Capabilities, CursorPruned, Effort, Event, EventType, PlanChoice, Plane, ProviderEntry,
+    RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -313,6 +313,23 @@ pub enum Tag {
         plane: Plane,
         id: String,
         request_id: String,
+    },
+    /// B2. One plan-exit answer, which carries an explicit `provider_options.choice` and
+    /// therefore has one failure mode an ordinary approval does not: a gateway too old to
+    /// admit that key refuses the whole call.
+    ///
+    /// The choice and the follow-up ride on the tag so the answer can be resent without
+    /// `provider_options` when that happens. The retry is not a guess — `PlanChoice`'s
+    /// `decision()` is the same fallback the runtime applies — but the follow-up cannot
+    /// survive it, which is why the retry says so once.
+    PlanExit {
+        plane: Plane,
+        id: String,
+        request_id: String,
+        choice: PlanChoice,
+        /// Whether the refused attempt carried a follow-up, so the fallback notice can say
+        /// whether anything was actually lost.
+        had_follow_up: bool,
     },
     /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
     /// answer carries the id of a session that did not exist when the request was made.
@@ -798,6 +815,14 @@ pub struct App {
     pub logs: Option<LogRing>,
     pub log_scroll: usize,
     pub overlay: Option<Overlay>,
+    /// B2. Whether this gateway has already refused a plan-exit answer's
+    /// `provider_options`, and so must be answered with `decision`/`scope` alone.
+    ///
+    /// Latched rather than probed: the refusal arrives as a bare `-32602` with a generic
+    /// sentence, indistinguishable from a malformed answer, so the only honest way to
+    /// learn it is to try once and remember. Reset never — a gateway does not grow the
+    /// key mid-connection, and a reconnect builds a new `App`.
+    pub plan_options_refused: bool,
     pub notice: Option<Notice>,
     pub quit: Option<Quit>,
     pub cursors: Cursors,
@@ -1030,6 +1055,7 @@ impl App {
             logs,
             log_scroll: 0,
             overlay: None,
+            plan_options_refused: false,
             notice: None,
             quit: None,
             cursors: Cursors::default(),

@@ -491,6 +491,57 @@ impl App {
                     self.action_failed("respond_approval", plane, &id, error);
                 }
             },
+            // B2. The same answer, sent with an explicit `provider_options.choice`. The
+            // one extra outcome is a gateway that does not admit that key at all.
+            Tag::PlanExit {
+                plane,
+                id,
+                request_id,
+                choice,
+                had_follow_up,
+            } => match result {
+                Ok(_value) => self.inform(
+                    format!("plan exit answered {} for {id}", choice.as_str()),
+                    NoticeKind::Info,
+                ),
+                Err(error) => {
+                    // Clear the in-flight mark first either way: the answer did not land,
+                    // and a retry has to be able to mark it again.
+                    if let Some(watch) = self.sessions.watches.get_mut(&(plane, id.clone())) {
+                        watch.retry_approval_response(&request_id);
+                    }
+
+                    let refused_options = matches!(
+                        &error,
+                        ClientError::Rpc(rpc) if rpc.code == ErrorCode::InvalidParams
+                    ) && !self.plan_options_refused;
+
+                    if !refused_options {
+                        self.action_failed("respond_approval", plane, &id, error);
+                        return;
+                    }
+
+                    // Once, and said out loud. The fallback still reaches the same three
+                    // answers — `PlanChoice::decision` is the mapping the runtime itself
+                    // falls back to — so what is lost is the follow-up and nothing else.
+                    self.plan_options_refused = true;
+                    self.inform(
+                        if had_follow_up {
+                            "this gateway does not take a plan-exit choice; answering with \
+                             approve/deny alone, which reaches the same three answers — the \
+                             follow-up prompt was dropped, so send it as an ordinary message"
+                                .to_string()
+                        } else {
+                            "this gateway does not take a plan-exit choice; answering with \
+                             approve/deny alone, which reaches the same three answers"
+                                .to_string()
+                        },
+                        NoticeKind::Warn,
+                    );
+
+                    self.submit_plan_exit(plane, id, request_id, choice, None);
+                }
+            },
             Tag::Start { plane, id } => match result {
                 Ok(value) => match StartedRef::decode(&value) {
                     Some(started) if started.id == id => {
