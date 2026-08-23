@@ -110,6 +110,7 @@ defmodule Ouroboros.Provider.Native.ContextTest do
 
     test "tool order is Tools.modules/0's order, not a sort" do
       {:ok, context} = Context.build(cwd: "/tmp", instructions: false)
+
       assert Enum.map(context.tools, & &1.name) ==
                Enum.map(Ouroboros.Provider.Native.Tools.modules(), & &1.name())
     end
