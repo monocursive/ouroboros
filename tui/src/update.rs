@@ -224,6 +224,20 @@ pub fn release_public_key() -> Option<PublicKey> {
     PublicKey::parse(RELEASE_PUBLIC_KEY_SOURCE).ok()
 }
 
+/// Distinguishes "no key was provisioned" from "a key was provisioned and is broken".
+///
+/// Both refuse, and both refuse with the same exit code, because the consequence is
+/// identical: nothing can be verified. But they send a person to different places — one
+/// to the provisioning procedure, one to a build that is wrong — and a refusal that names
+/// the wrong problem costs somebody an afternoon.
+fn key_is_present_but_unusable() -> Option<String> {
+    key_line(RELEASE_PUBLIC_KEY_SOURCE)?;
+
+    PublicKey::parse(RELEASE_PUBLIC_KEY_SOURCE)
+        .err()
+        .map(|error| format!("{error:#}"))
+}
+
 // ---------------------------------------------------------------------------------
 // Platform
 // ---------------------------------------------------------------------------------
@@ -1513,6 +1527,17 @@ fn scratch_directory() -> Result<PathBuf> {
 /// The entry point `main` calls: prints the page on stdout, the refusal on stderr, and
 /// carries the exit code out as an error the way `ouro run` does.
 pub fn main(options: &Options) -> Result<()> {
+    if let Some(problem) = key_is_present_but_unusable() {
+        eprintln!(
+            "ouro update: the release public key compiled into this binary is unusable: \
+             {problem}.\nThat is a broken build rather than a missing key — dist/release.pub \
+             holds something, and it is not a minisign Ed25519 public key. Nothing was \
+             downloaded and nothing was verified."
+        );
+
+        return Err(Exit::NO_KEY.into());
+    }
+
     let key = release_public_key();
     let mut out = std::io::stdout();
 
@@ -2030,6 +2055,25 @@ mod tests {
                 "nothing is reported before the key is checked"
             );
         }
+    }
+
+    /// The committed tree is unprovisioned, so this must report *no* problem: a build
+    /// that confused "unprovisioned" with "corrupt" would send every reader to the wrong
+    /// page.
+    #[test]
+    fn an_unprovisioned_key_is_not_reported_as_a_broken_one() {
+        match key_line(RELEASE_PUBLIC_KEY_SOURCE) {
+            None => assert_eq!(key_is_present_but_unusable(), None),
+            Some(_) => assert_eq!(
+                key_is_present_but_unusable(),
+                None,
+                "a provisioned dist/release.pub must parse"
+            ),
+        }
+
+        // And a file that holds something unparseable is reported as broken, not absent.
+        assert!(PublicKey::parse("untrusted comment: x\nnot base64 at all!!\n").is_err());
+        assert!(key_line("untrusted comment: x\nnot base64 at all!!\n").is_some());
     }
 
     #[test]
