@@ -268,6 +268,26 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  def handle_call({:respond_approval, _request_id, response}, _from, runtime)
+      when not is_map(response),
+      do: {:reply, {:error, :invalid_approval_response}, runtime}
+
+  def handle_call({:respond_approval, _request_id, response}, _from, runtime)
+      when not is_map_key(response, :decision),
+      do: {:reply, {:error, :invalid_approval_response}, runtime}
+
+  def handle_call({:respond_approval, _request_id, %{decision: decision}}, _from, runtime)
+      when decision not in [:approve, :deny],
+      do: {:reply, {:error, :invalid_approval_response}, runtime}
+
+  def handle_call(
+        {:respond_approval, _request_id, %{scope: scope}},
+        _from,
+        runtime
+      )
+      when scope not in [:once, :session],
+      do: {:reply, {:error, :invalid_approval_response}, runtime}
+
   # Routed ahead of the Harness clause, and only for an id this coordinator minted. A
   # request id the Harness owns is not in this map and falls through to the clause below
   # untouched, which is what keeps the existing modal working for Codex and ACP.
@@ -834,12 +854,13 @@ defmodule Ouroboros.Interactive.Task do
     runtime = %{runtime | pending_steers: pending_steers}
 
     session =
-      Enum.reduce(projected, reconciled, fn event, session ->
+      projected
+      |> Enum.reduce(reconciled, fn event, session ->
         session
         |> Map.put(:cursor, event.sequence)
         |> maybe_provider_session(event.provider_session_id)
-        |> append_event(event)
       end)
+      |> append_events(projected)
       |> apply_turn_event_statuses(projected)
       |> apply_plan_exits(projected)
       |> mark_gap_ambiguities(projected)
@@ -1838,16 +1859,16 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) do
       {:error, {:session_not_configurable, session.status}, runtime}
     else
-      # B2/C4. Two keys are not Harness configuration fields — the pinned `SessionRequest`
-      # refuses a fifth — so they are split off here and go around `Session.configure/2`:
-      # `plan` to the native session, where `Provider.plan_mode/2` says the transport can
-      # be told mid-life, and `mode` to the session's own transport, where
-      # `Provider.session_mode/2` says the agent published a vocabulary to name. Everything
-      # else takes the path it always took.
+      # B2/C4. `plan` and `mode` are not Harness configuration fields: each mutates a
+      # different live surface. One call may target exactly one surface, because no
+      # transaction spans the native session, an agent's own mode, and Harness
+      # configuration. Refusing a mixed request before the first mutation is the only
+      # outcome in which an error can still mean "nothing changed".
       {plan, rest} = Map.pop(changes, :plan)
       {mode, rest} = Map.pop(rest, :mode)
 
-      with {:ok, rest, applies} <- configuration_changes(session, rest, plan, mode),
+      with :ok <- one_configuration_surface(plan, mode, rest),
+           {:ok, rest, applies} <- configuration_changes(session, rest, plan, mode),
            :ok <- apply_plan(runtime, plan),
            :ok <- apply_mode(runtime, mode),
            :ok <- apply_rest(runtime, rest) do
@@ -1855,6 +1876,28 @@ defmodule Ouroboros.Interactive.Task do
       else
         {:error, reason} -> {:error, reason, runtime}
       end
+    end
+  end
+
+  defp one_configuration_surface(plan, mode, rest) do
+    surfaces =
+      []
+      |> then(fn surfaces -> if is_nil(plan), do: surfaces, else: [:plan | surfaces] end)
+      |> then(fn surfaces -> if is_nil(mode), do: surfaces, else: [:mode | surfaces] end)
+      |> then(fn surfaces -> if rest == %{}, do: surfaces, else: [:session | surfaces] end)
+
+    if length(surfaces) <= 1 do
+      :ok
+    else
+      {:error,
+       {:invalid_configuration,
+        %{
+          reason: :mixed_surfaces,
+          surfaces: Enum.sort(surfaces),
+          message:
+            "plan, agent mode, and session options change different live surfaces; " <>
+              "configure one surface per call so a refusal cannot leave a partial change"
+        }}}
     end
   end
 
@@ -2188,18 +2231,20 @@ defmodule Ouroboros.Interactive.Task do
            Map.put(plan_from(existing, session, objective, workspace, provider), :existing, true)}
 
         :error ->
-          {:ok,
-           %{
-             id: id,
-             team_id: Team.workspace_team_id(workspace),
-             worker_id: delegation_worker_id(session),
-             workspace: workspace,
-             provider: provider,
-             coding_node: node(),
-             parent: %{plane: :interactive, id: session.id},
-             objective_digest: digest_text(objective),
-             existing: false
-           }}
+          with :ok <- delegation_capacity(session) do
+            {:ok,
+             %{
+               id: id,
+               team_id: Team.workspace_team_id(workspace),
+               worker_id: delegation_worker_id(session),
+               workspace: workspace,
+               provider: provider,
+               coding_node: node(),
+               parent: %{plane: :interactive, id: session.id},
+               objective_digest: digest_text(objective),
+               existing: false
+             }}
+          end
       end
     end
   end
@@ -2233,12 +2278,15 @@ defmodule Ouroboros.Interactive.Task do
         {:error,
          {:invalid_objective, %{reason: :too_long, limit: @max_delegation_objective_bytes}}}
 
-      map_size(State.delegations(session)) >= State.max_delegations() ->
-        {:error, {:delegation_limit_reached, %{limit: State.max_delegations()}}}
-
       true ->
         :ok
     end
+  end
+
+  defp delegation_capacity(session) do
+    if map_size(State.delegations(session)) < State.max_delegations(),
+      do: :ok,
+      else: {:error, {:delegation_limit_reached, %{limit: State.max_delegations()}}}
   end
 
   defp validate_delegation_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
@@ -2702,28 +2750,94 @@ defmodule Ouroboros.Interactive.Task do
 
   # ---------------------------------------------------------------- handoff (D9)
 
-  # The packet is written and the child is named here; the child session is started by the
-  # caller. `open_child: false` is load-bearing — a transport process opened here would
-  # inherit this session's harness owner, and the worker adopts the `provider_session_id`
-  # of any adapter event it receives, so the orphan's readiness event would rename *this*
-  # session's provider session to the child's.
+  # The packet and the child's durable session intent are written here; the child
+  # coordinator is started by the caller. Reserving the intent before replying makes the
+  # caller-owned id a real reconciliation key: a retry reuses the packet's provider
+  # session id instead of writing a second packet and conflicting with the first child.
+  # `open_child: false` remains load-bearing — a transport process opened here would
+  # inherit this session's harness owner and could rename the parent.
   defp handoff_plan(runtime, prompt, id) do
     session = runtime.session
 
     with {:ok, id} <- validate_fork_id(id),
-         {:ok, prompt} <- validate_handoff_prompt(prompt),
-         {:ok, pid} <- native_transport(session, :handoff),
-         {:ok, result} <-
-           safe_session_call(fn -> NativeSession.handoff(pid, prompt, open_child: false) end) do
-      {:ok, handoff_start_options(session, id, result.provider_session_id)}
+         {:ok, prompt} <- validate_handoff_prompt(prompt) do
+      case existing_handoff_options(session, id) do
+        {:ok, opts} ->
+          {:ok, opts}
+
+        :not_found ->
+          with {:ok, pid} <- native_transport(session, :handoff),
+               {:ok, result} <-
+                 safe_session_call(fn ->
+                   NativeSession.handoff(pid, prompt, open_child: false)
+                 end),
+               opts = handoff_start_options(session, id, result.provider_session_id),
+               {:ok, opts} <- reserve_handoff(session, opts) do
+            {:ok, opts}
+          else
+            {:error, reason} -> {:error, handoff_error(reason)}
+            other -> {:error, {:handoff_refused, durable(other)}}
+          end
+
+        {:error, reason} ->
+          {:error, handoff_error(reason)}
+      end
     else
       {:error, reason} -> {:error, handoff_error(reason)}
-      other -> {:error, {:handoff_refused, durable(other)}}
     end
   end
 
+  defp reserve_handoff(parent, opts) do
+    id = Keyword.fetch!(opts, :id)
+
+    with {:ok, child} <- State.new(id, opts) do
+      case Store.create(child) do
+        :ok -> {:ok, opts}
+        {:error, :already_exists} -> existing_handoff_options(parent, id)
+        {:error, reason} -> {:error, {:handoff_checkpoint_failed, reason}}
+      end
+    end
+  end
+
+  defp existing_handoff_options(parent, id) do
+    case Store.get(id) do
+      {:ok, %State{} = child} ->
+        if State.handed_off_from(child) == parent.id do
+          {:ok, stored_handoff_start_options(child)}
+        else
+          {:error,
+           {:handoff_id_conflict,
+            %{id: id, handed_off_from: State.handed_off_from(child), expected: parent.id}}}
+        end
+
+      :not_found ->
+        :not_found
+
+      {:error, reason} ->
+        {:error, {:handoff_checkpoint_unavailable, reason}}
+    end
+  end
+
+  defp stored_handoff_start_options(%State{} = child) do
+    child.options
+    |> Map.to_list()
+    |> Keyword.merge(
+      id: child.id,
+      provider: child.provider,
+      workspace: child.workspace,
+      workspace_mode: child.workspace_mode,
+      event_limit: child.event_limit,
+      handed_off_from: State.handed_off_from(child)
+    )
+  end
+
   defp handoff_error({tag, _detail} = reason)
-       when tag in [:unsupported_on_transport, :native_transport_unavailable, :invalid_fork_id],
+       when tag in [
+              :unsupported_on_transport,
+              :native_transport_unavailable,
+              :invalid_fork_id,
+              :handoff_id_conflict
+            ],
        do: reason
 
   defp handoff_error(:invalid_fork_id), do: :invalid_handoff_id
@@ -2951,9 +3065,11 @@ defmodule Ouroboros.Interactive.Task do
     |> schedule_retire()
   end
 
-  defp append_event(session, event) do
-    events = session.events ++ [event]
-    overflow = max(length(events) - session.event_limit, 0)
+  defp append_event(session, event), do: append_events(session, [event])
+
+  defp append_events(session, new_events) do
+    events = session.events ++ new_events
+    overflow = max(length(session.events) + length(new_events) - session.event_limit, 0)
     {discarded, events} = Enum.split(events, overflow)
 
     floor =

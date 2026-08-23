@@ -373,6 +373,43 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert subagent_events(events, "spawned") == []
     end
 
+    test "settled uncollected children do not consume the running limit", context do
+      %{handle: handle} =
+        open(
+          context,
+          [[{:text, "unused"}, {:finish, :stop}]],
+          [[{:text, "unused"}, {:finish, :stop}]]
+        )
+
+      child = spawn(fn -> receive do: (_message -> :ok) end)
+      assert :ok = GenServer.call(handle, {:subagent_track, "settled-child", child, %{}})
+
+      summary = %{
+        task_id: "settled-child",
+        description: "finished",
+        provider_session_id: "native-test-child",
+        status: :completed,
+        turns: 1,
+        tool_calls: 0,
+        files_changed_count: 0,
+        files_changed: [],
+        usage: %{input: 1, output: 1, cost: nil},
+        approvals_denied: 0,
+        text: "done",
+        error: nil,
+        worktree: nil
+      }
+
+      send(handle, {:subagent, "settled-child", {:settled, summary}})
+
+      assert_receive {:session_adapter_event,
+                      %{type: :provider_event, payload: %{"phase" => "settled"}}},
+                     5_000
+
+      assert %{running: 0, tracked: 1} = GenServer.call(handle, :subagent_counts)
+      send(child, :stop)
+    end
+
     test "a child inherits its parent's posture and can never widen it" do
       parent = %{
         depth: 0,

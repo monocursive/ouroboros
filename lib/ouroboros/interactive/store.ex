@@ -1,11 +1,12 @@
 defmodule Ouroboros.Interactive.Store do
-  @moduledoc "Serialized, atomic persistence for interactive session state."
+  @moduledoc "Serialized, per-session atomic persistence for interactive session state."
 
   use GenServer
 
   alias Ouroboros.Interactive.State
 
   @store_key {:ouroboros, :interactive_sessions, 1}
+  @index_version 2
 
   @type recoverable :: %{
           id: String.t(),
@@ -73,8 +74,13 @@ defmodule Ouroboros.Interactive.Store do
         :not_found ->
           {:ok, %{adapter: adapter, opts: adapter_opts, key: key, sessions: %{}}}
 
+        {:ok, %{version: @index_version, ids: ids}} ->
+          load_index(ids, adapter, adapter_opts, key)
+
+        # Version 1 stored every session under one checkpoint. Load and migrate it once;
+        # subsequent event checkpoints rewrite only the session that changed.
         {:ok, sessions} when is_map(sessions) ->
-          load_sessions(sessions, adapter, adapter_opts, key)
+          load_legacy_sessions(sessions, adapter, adapter_opts, key)
 
         {:ok, _invalid} ->
           {:stop, :invalid_interactive_checkpoint}
@@ -94,9 +100,32 @@ defmodule Ouroboros.Interactive.Store do
   @impl true
   def handle_call({:create, %State{} = session}, _from, state) do
     cond do
-      not State.valid?(session) -> {:reply, {:error, :invalid_interactive_session}, state}
-      Map.has_key?(state.sessions, session.id) -> {:reply, {:error, :already_exists}, state}
-      true -> persist(Map.put(state.sessions, session.id, session), state)
+      not State.valid?(session) ->
+        {:reply, {:error, :invalid_interactive_session}, state}
+
+      Map.has_key?(state.sessions, session.id) ->
+        {:reply, {:error, :already_exists}, state}
+
+      true ->
+        sessions = Map.put(state.sessions, session.id, session)
+
+        case put_session(session, state) do
+          :ok ->
+            case put_index(sessions, state) do
+              :ok ->
+                {:reply, :ok, %{state | sessions: sessions}}
+
+              {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+                {:stop, ambiguity, {:error, ambiguity}, state}
+
+              {:error, reason} ->
+                _ = delete_session_checkpoint(session.id, state)
+                {:reply, {:error, reason}, state}
+            end
+
+          {:error, reason} ->
+            persistence_error(reason, state)
+        end
     end
   end
 
@@ -104,9 +133,33 @@ defmodule Ouroboros.Interactive.Store do
   # builds another request, so a session that stopped being requestable mid-run can still
   # record the honest ending it just decided. Creation stays on the strict gate.
   def handle_call({:put, %State{} = session}, _from, state) do
-    if State.storable?(session),
-      do: persist(Map.put(state.sessions, session.id, session), state),
-      else: {:reply, {:error, :invalid_interactive_session}, state}
+    if State.storable?(session) do
+      sessions = Map.put(state.sessions, session.id, session)
+      new? = not Map.has_key?(state.sessions, session.id)
+
+      case put_session(session, state) do
+        :ok when not new? ->
+          {:reply, :ok, %{state | sessions: sessions}}
+
+        :ok ->
+          case put_index(sessions, state) do
+            :ok ->
+              {:reply, :ok, %{state | sessions: sessions}}
+
+            {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+              {:stop, ambiguity, {:error, ambiguity}, state}
+
+            {:error, reason} ->
+              _ = delete_session_checkpoint(session.id, state)
+              {:reply, {:error, reason}, state}
+          end
+
+        {:error, reason} ->
+          persistence_error(reason, state)
+      end
+    else
+      {:reply, {:error, :invalid_interactive_session}, state}
+    end
   end
 
   def handle_call({:get, id}, _from, state) do
@@ -135,7 +188,16 @@ defmodule Ouroboros.Interactive.Store do
 
       {:ok, session} ->
         if State.terminal?(session) do
-          persist(Map.delete(state.sessions, id), state)
+          sessions = Map.delete(state.sessions, id)
+
+          case put_index(sessions, state) do
+            :ok ->
+              _ = delete_session_checkpoint(id, state)
+              {:reply, :ok, %{state | sessions: sessions}}
+
+            {:error, reason} ->
+              persistence_error(reason, state)
+          end
         else
           {:reply, {:error, {:session_not_terminal, session.status}}, state}
         end
@@ -152,39 +214,105 @@ defmodule Ouroboros.Interactive.Store do
 
       expired ->
         ids = Enum.map(expired, &elem(&1, 0))
-        persist(Map.drop(state.sessions, ids), state, {:ok, ids})
+        sessions = Map.drop(state.sessions, ids)
+
+        case put_index(sessions, state) do
+          :ok ->
+            Enum.each(ids, &delete_session_checkpoint(&1, state))
+            {:reply, {:ok, ids}, %{state | sessions: sessions}}
+
+          {:error, reason} ->
+            persistence_error(reason, state)
+        end
     end
   end
 
-  # Load checks the shape of the checkpoint, not the runnability of what is in it: one
-  # session written by a newer build must not be able to stop every session from
-  # loading — this process is the head of a `rest_for_one` tree. A session that cannot
-  # build a request is failed by name when it tries; see `Interactive.Task`.
-  defp load_sessions(sessions, adapter, adapter_opts, key) do
-    if Enum.all?(sessions, fn {id, session} ->
-         is_binary(id) and match?(%State{id: ^id}, session) and State.loadable?(session)
-       end) do
-      {:ok, %{adapter: adapter, opts: adapter_opts, key: key, sessions: sessions}}
+  # Load checks shape, not runnability: one unrequestable session must not veto its peers.
+  defp load_legacy_sessions(sessions, adapter, adapter_opts, key) do
+    if valid_sessions?(sessions) do
+      state = %{adapter: adapter, opts: adapter_opts, key: key, sessions: sessions}
+
+      with :ok <- put_all_sessions(sessions, state),
+           :ok <- put_index(sessions, state) do
+        {:ok, state}
+      else
+        {:error, reason} -> {:stop, {:interactive_checkpoint_migration_failed, reason}}
+      end
     else
       {:stop, :invalid_interactive_checkpoint}
     end
   end
 
-  defp persist(sessions, state, reply \\ :ok) do
-    case adapter_call(state.adapter, :put_checkpoint, [state.key, sessions, state.opts]) do
-      :ok ->
-        {:reply, reply, %{state | sessions: sessions}}
+  defp load_index(ids, adapter, adapter_opts, key) when is_list(ids) do
+    if ids == Enum.uniq(ids) and Enum.all?(ids, &is_binary/1) do
+      state = %{adapter: adapter, opts: adapter_opts, key: key, sessions: %{}}
 
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
+      Enum.reduce_while(ids, {:ok, %{}}, fn id, {:ok, sessions} ->
+        case adapter_call(adapter, :get_checkpoint, [session_key(key, id), adapter_opts]) do
+          {:ok, %{^id => %State{id: ^id} = session}} ->
+            if State.loadable?(session),
+              do: {:cont, {:ok, Map.put(sessions, id, session)}},
+              else: {:halt, {:error, :invalid_interactive_checkpoint}}
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+          {:error, reason} ->
+            {:halt, {:error, {:interactive_checkpoint_unreadable, id, reason}}}
 
-      other ->
-        {:reply, {:error, {:invalid_storage_response, other}}, state}
+          _missing_or_invalid ->
+            {:halt, {:error, :invalid_interactive_checkpoint}}
+        end
+      end)
+      |> case do
+        {:ok, sessions} -> {:ok, %{state | sessions: sessions}}
+        {:error, reason} -> {:stop, reason}
+      end
+    else
+      {:stop, :invalid_interactive_checkpoint}
     end
   end
+
+  defp load_index(_ids, _adapter, _adapter_opts, _key),
+    do: {:stop, :invalid_interactive_checkpoint}
+
+  defp valid_sessions?(sessions) do
+    Enum.all?(sessions, fn {id, session} ->
+      is_binary(id) and match?(%State{id: ^id}, session) and State.loadable?(session)
+    end)
+  end
+
+  defp put_all_sessions(sessions, state) do
+    Enum.reduce_while(sessions, :ok, fn {_id, session}, :ok ->
+      case put_session(session, state) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp put_session(%State{id: id} = session, state),
+    do: put_checkpoint(session_key(state.key, id), %{id => session}, state)
+
+  defp put_index(sessions, state) do
+    ids = sessions |> Map.keys() |> Enum.sort()
+    put_checkpoint(state.key, %{version: @index_version, ids: ids}, state)
+  end
+
+  defp put_checkpoint(key, value, state) do
+    case adapter_call(state.adapter, :put_checkpoint, [key, value, state.opts]) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:invalid_storage_response, other}}
+    end
+  end
+
+  defp delete_session_checkpoint(id, state),
+    do: adapter_call(state.adapter, :delete_checkpoint, [session_key(state.key, id), state.opts])
+
+  defp session_key(key, id), do: {key, :session, @index_version, id}
+
+  defp persistence_error({:commit_outcome_unknown, _reason} = ambiguity, state),
+    do: {:stop, ambiguity, {:error, ambiguity}, state}
+
+  defp persistence_error(reason, state), do: {:reply, {:error, reason}, state}
 
   defp recoverable(%State{} = session) do
     %{

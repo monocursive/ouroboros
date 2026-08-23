@@ -7,6 +7,7 @@ defmodule Ouroboros.InteractiveSession do
   reattachment, and node-aware routing.
   """
 
+  alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.Team
   alias Ouroboros.Workspace.Exec
@@ -652,11 +653,15 @@ defmodule Ouroboros.InteractiveSession do
   @spec rename(session(), String.t()) :: {:ok, State.t()} | {:error, term()}
   def rename(session, title), do: call(session, {:rename, title})
 
-  @doc "Responds to a normalized provider approval request."
+  @doc "Validates and responds to a provider approval request."
   def respond_approval(session, request_id, response) do
-    if is_binary(request_id) and String.trim(request_id) != "",
-      do: call(session, {:respond_approval, request_id, response}),
-      else: {:error, :invalid_request_id}
+    if is_binary(request_id) and String.trim(request_id) != "" do
+      with {:ok, response} <- normalize_approval_response(response) do
+        call(session, {:respond_approval, request_id, response})
+      end
+    else
+      {:error, :invalid_request_id}
+    end
   end
 
   @doc """
@@ -956,6 +961,52 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   defp validate_turn_id(_id), do: {:error, :invalid_turn_id}
+
+  defp normalize_approval_response(response) do
+    base =
+      if is_map(response),
+        do: Map.take(response, [:decision, :scope, :reason, :provider_options]),
+        else: response
+
+    with :ok <- validate_approval_extensions(response),
+         {:ok, validated} <- ApprovalResponse.new(base) do
+      extensions =
+        if is_map(response), do: Map.take(response, [:actor, :rule_id]), else: %{}
+
+      {:ok, validated |> Map.from_struct() |> Map.merge(extensions)}
+    else
+      {:error, reason} -> {:error, {:invalid_approval_response, reason}}
+    end
+  end
+
+  defp validate_approval_extensions(response) when is_map(response) do
+    allowed = [:decision, :scope, :reason, :provider_options, :actor, :rule_id]
+
+    cond do
+      unknown = Enum.find(Map.keys(response), &(&1 not in allowed)) ->
+        {:error, {:unknown_field, unknown}}
+
+      Map.get(response, :actor, :human) not in [
+        :human,
+        :headless,
+        :automation,
+        "human",
+        "headless",
+        "automation"
+      ] ->
+        {:error, {:invalid_actor, Map.get(response, :actor)}}
+
+      not is_nil(Map.get(response, :rule_id)) and
+          (not is_binary(Map.get(response, :rule_id)) or Map.get(response, :rule_id) == "") ->
+        {:error, {:invalid_rule_id, Map.get(response, :rule_id)}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_approval_extensions(response) when response in [:approve, :deny], do: :ok
+  defp validate_approval_extensions(response), do: {:error, {:invalid_response, response}}
 
   defp canonical_workspace(workspace) do
     case Ouroboros.Workspace.Path.canonicalize(workspace) do

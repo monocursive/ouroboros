@@ -18,7 +18,7 @@ defmodule Ouroboros.Gateway.SessionDelegationTest do
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskState
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Interactive.{Store, Task}
+  alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Team
   alias Ouroboros.Test.HarnessAdapter
@@ -232,6 +232,49 @@ defmodule Ouroboros.Gateway.SessionDelegationTest do
       assert Enum.count(events, &(&1.type == :delegation)) == 1
 
       cleanup_delegation(first)
+      retire_session(id)
+    end
+
+    test "an existing delegation id remains idempotent at the session limit",
+         %{id: id, workspace: workspace} do
+      start_session(id, workspace)
+
+      if pid = Task.whereis(id) do
+        assert :ok =
+                 DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
+      end
+
+      assert {:ok, session} = Store.get(id)
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      existing_id = "capacity-existing"
+
+      full =
+        Enum.reduce(1..State.max_delegations(), session, fn index, state ->
+          delegation_id = if index == 1, do: existing_id, else: "capacity-#{index}"
+
+          {:ok, state} =
+            State.put_delegation(state, %{
+              id: delegation_id,
+              team_id: "team-capacity",
+              task_id: "task-#{index}",
+              task_node: node(),
+              objective_digest: "digest-#{index}",
+              status: :started,
+              result_digest: nil,
+              created_at: now,
+              updated_at: now
+            })
+
+          state
+        end)
+
+      assert :ok = Store.put(full)
+
+      assert {:ok, result} =
+               InteractiveSession.delegate(id, "retry the existing delegation", id: existing_id)
+
+      assert result.delegation_id == existing_id
+      assert result.status == :existing
       retire_session(id)
     end
 

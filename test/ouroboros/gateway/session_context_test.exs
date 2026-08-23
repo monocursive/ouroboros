@@ -349,6 +349,24 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       retire_session(id)
     end
 
+    test "mixed configuration surfaces are refused before plan mode changes", context do
+      id = unique_id("native-config-atomic")
+      session = start_native(id, context, compaction_script())
+
+      assert {:ok, info} = InteractiveSession.info(session)
+      handle = Ouroboros.Provider.Native.Session.whereis(info.provider_session_id)
+      assert is_pid(handle)
+
+      assert {:error, {:invalid_configuration, details}} =
+               InteractiveSession.configure(session, %{plan: true, mode: "bogus"})
+
+      assert details.reason == :mixed_surfaces
+      assert {:ok, %{plan: false}} = Ouroboros.Provider.Native.Session.plan_state(handle)
+      assert {:ok, %{options: %{plan: false}}} = InteractiveSession.info(session)
+
+      retire_session(id)
+    end
+
     test "handoff answers in interactive.start's shape and links both halves", context do
       id = unique_id("native-handoff")
       child_id = unique_id("native-handoff-child")
@@ -357,12 +375,13 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
       await_turn(session)
 
-      assert {:ok, result} =
-               Methods.invoke("interactive.handoff", %{
-                 "id" => id,
-                 "prompt" => "carry on from here",
-                 "handoff_id" => child_id
-               })
+      params = %{
+        "id" => id,
+        "prompt" => "carry on from here",
+        "handoff_id" => child_id
+      }
+
+      assert {:ok, result} = Methods.invoke("interactive.handoff", params)
 
       assert result["id"] == child_id
       assert result["outcome"] == "created"
@@ -373,6 +392,12 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert {:ok, child} = Methods.invoke("interactive.info", %{"id" => child_id})
       assert child.handed_off_from == id
       assert is_binary(child.provider_session_id)
+
+      assert {:ok, retried} = Methods.invoke("interactive.handoff", params)
+      assert retried["id"] == child_id
+
+      assert {:ok, same_child} = Methods.invoke("interactive.info", %{"id" => child_id})
+      assert same_child.provider_session_id == child.provider_session_id
 
       assert {:ok, parent_context} = Methods.invoke("interactive.context", %{"id" => id})
       assert parent_context.handed_off_to == child.provider_session_id

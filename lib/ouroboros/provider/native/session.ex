@@ -343,6 +343,9 @@ defmodule Ouroboros.Provider.Native.Session do
         # loop, because a background child outlives the turn that spawned it and the loop
         # does not. Closing the session stops every one of them.
         subagents: %{},
+        # A child can settle before the loop's tracking call reaches this process. These
+        # bounded tombstones preserve that ordering fact until the corresponding track.
+        settled_subagents: MapSet.new(),
         # ---- hooks (D5's three lifecycle events) ----
         hooks: Hooks.load(scope.root),
         # `SessionStart`'s `additionalContext`, held until the first turn's prompt and
@@ -511,11 +514,20 @@ defmodule Ouroboros.Provider.Native.Session do
       {:reply, {:error, :subagent_table_full}, state}
     else
       monitor = Process.monitor(pid)
+      settled? = MapSet.member?(state.settled_subagents, task_id)
+
+      entry = %{
+        pid: pid,
+        monitor: monitor,
+        meta: meta,
+        status: if(settled?, do: :settled, else: :running)
+      }
 
       {:reply, :ok,
        %{
          state
-         | subagents: Map.put(state.subagents, task_id, %{pid: pid, monitor: monitor, meta: meta})
+         | subagents: Map.put(state.subagents, task_id, entry),
+           settled_subagents: MapSet.delete(state.settled_subagents, task_id)
        }}
     end
   end
@@ -530,12 +542,13 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call({:subagent_release, task_id}, _from, state),
     do: {:reply, :ok, forget_subagent(state, task_id)}
 
-  # `running` is what the four-at-once cap counts; `tracked` includes the settled ones a
-  # background collection has not picked up yet. Both are answered from live processes
-  # rather than from a status this table would have to keep in step with the child's own.
+  # `running` is what the four-at-once cap counts; `tracked` includes settled children
+  # whose processes deliberately stay alive until `agent_result` collects them.
   def handle_call(:subagent_counts, _from, state) do
     running =
-      Enum.count(state.subagents, fn {_task_id, entry} -> Process.alive?(entry.pid) end)
+      Enum.count(state.subagents, fn {_task_id, entry} ->
+        entry.status == :running and Process.alive?(entry.pid)
+      end)
 
     {:reply, %{running: running, tracked: map_size(state.subagents)}, state}
   end
@@ -545,17 +558,23 @@ defmodule Ouroboros.Provider.Native.Session do
     # ended because the plan-exit question was still open would be waiting on a session
     # that no longer exists.
     state = state |> release_held_terminal() |> stop_loop() |> stop_subagents("session closed")
-    _ = checkpoint(state)
-    _ = session_end(state, "closed")
 
-    emit(state, %{
-      type: :session_closed,
-      payload: %{"reason" => "closed"},
-      turn_id: nil,
-      request_id: nil
-    })
+    case checkpoint(state) do
+      :ok ->
+        _ = session_end(state, "closed")
 
-    {:stop, :normal, :ok, state}
+        emit(state, %{
+          type: :session_closed,
+          payload: %{"reason" => "closed"},
+          turn_id: nil,
+          request_id: nil
+        })
+
+        {:stop, :normal, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:checkpoint_failed, reason}}, state}
+    end
   end
 
   # The loop calls this synchronously, immediately before it emits the terminal turn
@@ -570,8 +589,10 @@ defmodule Ouroboros.Provider.Native.Session do
         rules_loaded: Map.get(snapshot, :rules_loaded, state.rules_loaded)
     }
 
-    _ = checkpoint(state)
-    {:reply, :ok, state}
+    case checkpoint(state) do
+      :ok -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:checkpoint, _stale_turn_id, _snapshot}, _from, state),
@@ -591,11 +612,21 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call({:rewind, to_turn, what}, _from, state) do
     case rewind_files(state, to_turn, what) do
       {:ok, outcome} ->
-        {state, truncated} = rewind_conversation(state, to_turn, what)
-        outcome = Map.put(outcome, :messages, truncated)
+        case rewind_conversation(state, to_turn, what) do
+          {:ok, state, truncated} ->
+            outcome = Map.put(outcome, :messages, truncated)
+            announce(state, to_turn, what, outcome)
+            {:reply, {:ok, outcome}, state}
 
-        announce(state, to_turn, what, outcome)
-        {:reply, {:ok, outcome}, state}
+          {:error, state, reason} ->
+            outcome =
+              outcome
+              |> Map.put(:messages, length(state.messages))
+              |> Map.put(:checkpoint_error, reason)
+
+            announce(state, to_turn, what, outcome)
+            {:reply, {:error, {:rewind_checkpoint_failed, reason, outcome}}, state}
+        end
 
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -690,9 +721,9 @@ defmodule Ouroboros.Provider.Native.Session do
   # A settled background child stays in the table until somebody collects it: the summary
   # lives in its own process, and forgetting the entry here would make `agent_result`
   # answer "no such task" about a child that finished a second ago.
-  def handle_info({:subagent, _task_id, {:settled, summary}}, state) do
+  def handle_info({:subagent, task_id, {:settled, summary}}, state) do
     emit(state, subagent_event(Subagent.settled_payload(summary)))
-    {:noreply, state}
+    {:noreply, mark_subagent_settled(state, task_id)}
   end
 
   # An approval a background child raised reaches nobody here, and this process must not
@@ -709,6 +740,8 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp forget_subagent(state, task_id) do
+    state = %{state | settled_subagents: MapSet.delete(state.settled_subagents, task_id)}
+
     case Map.fetch(state.subagents, task_id) do
       {:ok, entry} ->
         Process.demonitor(entry.monitor, [:flush])
@@ -716,6 +749,21 @@ defmodule Ouroboros.Provider.Native.Session do
 
       :error ->
         state
+    end
+  end
+
+  defp mark_subagent_settled(state, task_id) do
+    case Map.fetch(state.subagents, task_id) do
+      {:ok, entry} ->
+        put_in(state.subagents[task_id], %{entry | status: :settled})
+
+      :error ->
+        tombstones =
+          if MapSet.size(state.settled_subagents) < AgentTool.max_tracked(),
+            do: MapSet.put(state.settled_subagents, task_id),
+            else: state.settled_subagents
+
+        %{state | settled_subagents: tombstones}
     end
   end
 
@@ -1023,21 +1071,25 @@ defmodule Ouroboros.Provider.Native.Session do
   defp rewind_files(state, to_turn, _files_or_both),
     do: Checkpoint.restore_files(state.session_dir, to_turn)
 
-  defp rewind_conversation(state, _to_turn, :files), do: {state, length(state.messages)}
+  defp rewind_conversation(state, _to_turn, :files),
+    do: {:ok, state, length(state.messages)}
 
   defp rewind_conversation(state, to_turn, _conversation_or_both) do
     case Checkpoint.message_count_at(state.session_dir, to_turn) do
       {:ok, count} when count <= length(state.messages) ->
         state = %{state | messages: Enum.take(state.messages, count)}
-        _ = checkpoint(state)
-        {state, count}
+
+        case checkpoint(state) do
+          :ok -> {:ok, state, count}
+          {:error, reason} -> {:error, state, reason}
+        end
 
       # A count this session cannot honour — a turn id it never recorded, or a
       # conversation already shorter than the mark — leaves the transcript alone. A
       # rewind that truncated to a number it could not justify would lose messages the
       # manifest never claimed to cover.
       _unusable ->
-        {state, length(state.messages)}
+        {:ok, state, length(state.messages)}
     end
   end
 

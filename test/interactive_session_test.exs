@@ -231,6 +231,9 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:error, :invalid_turn_id} = InteractiveSession.interrupt(ref, 123)
     assert {:error, :invalid_request_id} = InteractiveSession.respond_approval(ref, "", :allow)
 
+    assert {:error, {:invalid_approval_response, _reason}} =
+             InteractiveSession.respond_approval(ref, "valid-request", :allow)
+
     assert {:error, :invalid_subscriber} =
              InteractiveSession.local_call(id, {:subscribe, :no_pid, 0})
 
@@ -458,7 +461,9 @@ defmodule Ouroboros.InteractiveSessionTest do
 
       if Agent.get_and_update(controller, fn count ->
            {count, count + 1}
-         end) == 0 do
+         end) < 2 do
+        # Version 2 creates the per-session checkpoint and then the bounded index. The
+        # outage begins after both pieces of the create are durable.
         apply(fallback, :put_checkpoint, [key, value, fallback_opts])
       else
         {:error, :disk_full}
@@ -1044,6 +1049,32 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert {:stop, :invalid_interactive_checkpoint} =
              Store.init(storage: {StorageFixture, response: {:ok, %{id => corrupt}}})
+  end
+
+  test "store checkpoints each session separately from the bounded index", %{id: id} do
+    table = String.to_atom("interactive_store_#{System.unique_integer([:positive])}")
+    name = String.to_atom("interactive_store_server_#{System.unique_integer([:positive])}")
+    key = {:interactive_store_test, id}
+
+    start_supervised!({Store, name: name, storage: {Jido.Storage.ETS, table: table}, key: key})
+
+    first_id = id <> "-first"
+    second_id = id <> "-second"
+    assert {:ok, first} = State.new(first_id, provider: @provider, workspace: File.cwd!())
+    assert {:ok, second} = State.new(second_id, provider: @provider, workspace: File.cwd!())
+    assert :ok = Store.create(first, name)
+    assert :ok = Store.create(second, name)
+
+    assert {:ok, %{version: 2, ids: ids}} =
+             Jido.Storage.ETS.get_checkpoint(key, table: table)
+
+    assert ids == Enum.sort([first_id, second_id])
+
+    assert {:ok, %{^first_id => ^first}} =
+             Jido.Storage.ETS.get_checkpoint({key, :session, 2, first_id}, table: table)
+
+    assert {:ok, %{^second_id => ^second}} =
+             Jido.Storage.ETS.get_checkpoint({key, :session, 2, second_id}, table: table)
   end
 
   test "routes an interactive session through a real OS peer", %{id: id} do

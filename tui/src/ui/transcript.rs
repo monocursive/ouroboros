@@ -921,13 +921,12 @@ impl Watch {
     /// event already held is dropped rather than duplicated.
     pub fn absorb(&mut self, events: Vec<Event>) {
         for event in events {
-            self.note_approval(&event);
-            self.note_planning(&event);
             self.events.insert(event.sequence, event);
         }
 
         self.trim();
         self.recompute_cursor();
+        self.recompute_interactive_state();
         self.recompute_derived();
     }
 
@@ -1196,56 +1195,64 @@ impl Watch {
         self.planning
     }
 
-    /// The two events that report a change of planning posture, both of them the
-    /// runtime's own.
+    /// Rebuilds order-sensitive interactive state from the ordered ledger.
     ///
-    /// `status {kind: "configured"}` carries `changed`, the keys a `interactive.configure`
-    /// actually moved — read from there rather than from the reply, because the reply is
-    /// seen only by the client that made the call and this has to be true for a second
-    /// terminal watching the same session. `provider_event {kind: "plan_exit"}` carries
-    /// `plan`, the posture the session runs under *after* the answer was applied, which is
-    /// the one that matters: a refused reconfiguration reports `plan: true` and
-    /// `applied: false`, and a client that read the choice instead of the posture would
-    /// take the badge down on a session still planning.
-    fn note_planning(&mut self, event: &Event) {
-        let payload = &event.payload;
-        let kind = json_nonempty_str(payload, "kind");
+    /// Live notifications and replay responses are not ordered against each other. Folding
+    /// these fields as batches arrive can therefore apply an older request after its newer
+    /// resolution. The `BTreeMap` is the authority: replay overlap is idempotent, and one
+    /// ordered pass makes approval and planning state independent of arrival order.
+    fn recompute_interactive_state(&mut self) {
+        let mut planning = None;
+        let mut pending = BTreeMap::new();
 
-        match (event.kind.clone(), kind.as_deref()) {
-            (EventType::ProviderEvent, Some("plan_exit")) => {
-                if let Some(planning) = payload.get("plan").and_then(Value::as_bool) {
-                    self.planning = Some(planning);
+        for event in self.events.values() {
+            let payload = &event.payload;
+            let kind = json_nonempty_str(payload, "kind");
+
+            match (&event.kind, kind.as_deref()) {
+                (EventType::ProviderEvent, Some("plan_exit")) => {
+                    if let Some(value) = payload.get("plan").and_then(Value::as_bool) {
+                        planning = Some(value);
+                    }
                 }
-            }
-            (EventType::Other(ref other), Some("configured")) if other == "status" => {
-                if let Some(planning) = payload.pointer("/changed/plan").and_then(Value::as_bool) {
-                    self.planning = Some(planning);
+                (EventType::Other(other), Some("configured")) if other == "status" => {
+                    if let Some(value) = payload.pointer("/changed/plan").and_then(Value::as_bool) {
+                        planning = Some(value);
+                    }
                 }
+                _other => {}
             }
-            _other => {}
-        }
-    }
 
-    fn note_approval(&mut self, event: &Event) {
-        let Some(request_id) = event.request_id.clone() else {
-            return;
-        };
+            let Some(request_id) = event.request_id.clone() else {
+                continue;
+            };
 
-        match event.kind {
-            EventType::ApprovalRequested => {
-                self.pending_approvals.insert(
-                    event.sequence,
-                    ApprovalRequest {
-                        request_id,
-                        sequence: event.sequence,
-                        turn_id: event.turn_id.clone(),
-                        payload: event.payload.clone(),
-                    },
-                );
+            match &event.kind {
+                EventType::ApprovalRequested => {
+                    pending.insert(
+                        event.sequence,
+                        ApprovalRequest {
+                            request_id,
+                            sequence: event.sequence,
+                            turn_id: event.turn_id.clone(),
+                            payload: event.payload.clone(),
+                        },
+                    );
+                }
+                EventType::ApprovalResolved => {
+                    pending.retain(|_, request| request.request_id != request_id);
+                }
+                _other => {}
             }
-            EventType::ApprovalResolved => self.resolve_approval(&request_id),
-            _ => {}
         }
+
+        self.planning = planning;
+        self.pending_approvals = pending;
+        self.approval_responses_in_flight.retain(|request_id| {
+            self.pending_approvals
+                .values()
+                .any(|request| &request.request_id == request_id)
+        });
     }
 
     /// Drops the oldest events past the window, raising the floor by exactly as much as
@@ -1261,13 +1268,6 @@ impl Watch {
         }
 
         self.notes.retain(|sequence, _| *sequence > self.floor);
-        self.pending_approvals
-            .retain(|sequence, _| *sequence > self.floor);
-        self.approval_responses_in_flight.retain(|request_id| {
-            self.pending_approvals
-                .values()
-                .any(|request| &request.request_id == request_id)
-        });
     }
 
     fn recompute_cursor(&mut self) {
@@ -1739,6 +1739,29 @@ mod tests {
         .expect("a resolution")]);
 
         assert!(watch.next_approval().is_none());
+    }
+
+    #[test]
+    fn a_replayed_request_cannot_resurrect_a_newer_resolution() {
+        let mut watch = watch();
+        let resolved = Event::decode(&json!({
+            "id": "evt-3",
+            "sequence": 3,
+            "type": "approval_resolved",
+            "timestamp": "t",
+            "request_id": "req-a",
+            "payload": {}
+        }))
+        .expect("a resolution");
+
+        watch.absorb(vec![event(1), resolved]);
+        assert!(watch.next_approval().is_none());
+
+        // The request was the lost frame and arrives later from replay. Folding by arrival
+        // would revive it; folding the ordered ledger sees the resolution after it.
+        watch.absorb(vec![approval(2, "req-a")]);
+        assert!(watch.next_approval().is_none());
+        assert_eq!(watch.cursor(), 3);
     }
 
     #[test]

@@ -522,6 +522,48 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert NativeModelScript.call_count(agent) == 1
     end
 
+    test "an interrupt received during model streaming prevents its tool calls", context do
+      test = self()
+      path = Path.join(context.workspace, "lib/after_interrupt.ex")
+
+      delayed =
+        Stream.resource(
+          fn -> :waiting end,
+          fn
+            :waiting ->
+              send(test, :model_waiting)
+
+              receive do
+                :release_model ->
+                  {[
+                     {:tool_call,
+                      %{
+                        id: "late-write",
+                        name: "write",
+                        input: %{"path" => path, "content" => "should not run"}
+                      }}
+                   ], :done}
+              end
+
+            :done ->
+              {:halt, :done}
+          end,
+          fn _state -> :ok end
+        )
+
+      {loop, _agent} = start_loop(context, [delayed])
+      pid = run(loop)
+
+      assert_receive :model_waiting, 5_000
+      send(pid, :native_interrupt)
+      send(pid, :release_model)
+
+      events = collect()
+      assert List.last(types(events)) == :turn_interrupted
+      refute find(events, :tool_call)
+      refute File.exists?(path)
+    end
+
     test "an interrupt while an approval is pending stops the turn", context do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
@@ -532,6 +574,24 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       events = collect()
       assert List.last(types(events)) == :turn_interrupted
       refute File.exists?(Path.join(context.workspace, "lib/new.ex"))
+    end
+  end
+
+  describe "conversation checkpoints" do
+    test "a failed checkpoint fails the turn instead of acknowledging completion", context do
+      {loop, _agent} =
+        start_loop(
+          context,
+          [[{:text, "done"}, {:finish, :stop}]],
+          checkpoint: fn _snapshot -> {:error, :disk_full} end
+        )
+
+      run(loop)
+      events = collect()
+
+      refute find(events, :turn_completed)
+      assert find(events, :turn_failed).payload["reason"] == "checkpoint_error"
+      assert find(events, :turn_failed).payload["error"] =~ "disk_full"
     end
   end
 

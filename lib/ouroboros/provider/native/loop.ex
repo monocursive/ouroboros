@@ -261,15 +261,21 @@ defmodule Ouroboros.Provider.Native.Loop do
       true ->
         case call_model(state) do
           {:ok, state, text, calls} ->
-            state = append_assistant(state, text, calls)
+            state = drain_control(state)
 
-            if calls == [] do
-              complete(state, iteration)
+            if state.interrupted? do
+              interrupted(state)
             else
-              case run_tools(state, calls) do
-                {:continue, state} -> iterate(apply_steer(state), iteration + 1)
-                {:interrupted, state} -> interrupted(state)
-                {:failed, state, message, reason} -> fail(state, message, reason)
+              state = append_assistant(state, text, calls)
+
+              if calls == [] do
+                complete(state, iteration)
+              else
+                case run_tools(state, calls) do
+                  {:continue, state} -> iterate(apply_steer(state), iteration + 1)
+                  {:interrupted, state} -> interrupted(state)
+                  {:failed, state, message, reason} -> fail(state, message, reason)
+                end
               end
             end
 
@@ -1798,28 +1804,63 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- terminals
 
   defp complete(state, iterations) do
-    state = state |> run_checks() |> settle()
+    state = run_checks(state)
 
-    emit(state, :turn_completed, %{
-      "status" => "completed",
-      "iterations" => iterations,
-      "input_tokens" => state.usage.input,
-      "output_tokens" => state.usage.output,
-      "cost_usd" => Float.round(state.usage.cost, 6)
-    })
+    case settle(state) do
+      {:ok, state} ->
+        emit(state, :turn_completed, %{
+          "status" => "completed",
+          "iterations" => iterations,
+          "input_tokens" => state.usage.input,
+          "output_tokens" => state.usage.output,
+          "cost_usd" => Float.round(state.usage.cost, 6)
+        })
 
-    {:ok, state}
+        {:ok, state}
+
+      {:error, state, reason} ->
+        checkpoint_failed(state, reason)
+    end
   end
 
   defp interrupted(state) do
-    state = %{state | interrupted?: true} |> settle()
-    emit(state, :turn_interrupted, %{"reason" => "interrupted"})
-    {:ok, state}
+    state = %{state | interrupted?: true}
+
+    case settle(state) do
+      {:ok, state} ->
+        emit(state, :turn_interrupted, %{"reason" => "interrupted"})
+        {:ok, state}
+
+      {:error, state, reason} ->
+        checkpoint_failed(state, reason)
+    end
   end
 
   defp fail(state, message, reason) do
-    state = settle(state)
-    emit(state, :turn_failed, %{"error" => message, "reason" => reason})
+    case settle(state) do
+      {:ok, state} ->
+        emit(state, :turn_failed, %{"error" => message, "reason" => reason})
+        {:ok, state}
+
+      {:error, state, checkpoint_reason} ->
+        emit(state, :turn_failed, %{
+          "error" =>
+            message <>
+              "; conversation checkpoint failed: " <> inspect(checkpoint_reason, limit: 6),
+          "reason" => reason,
+          "checkpoint_error" => inspect(checkpoint_reason, limit: 6)
+        })
+
+        {:ok, state}
+    end
+  end
+
+  defp checkpoint_failed(state, reason) do
+    emit(state, :turn_failed, %{
+      "error" => "conversation checkpoint failed: #{inspect(reason, limit: 6)}",
+      "reason" => "checkpoint_error"
+    })
+
     {:ok, state}
   end
 
@@ -1830,8 +1871,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp settle(state) do
     state = record_turn_files(state)
     state = inject(state, Hooks.notify(state.hooks, :stop, hook_base(state)))
-    persist(state)
-    state
+
+    case persist(state) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, state, reason}
+    end
   end
 
   # `[checks]` — a project-declared typecheck or lint — runs once per turn, and only when
@@ -1922,8 +1966,6 @@ defmodule Ouroboros.Provider.Native.Loop do
       session_grants: state.session_grants,
       rules_loaded: state.rules_loaded
     })
-
-    :ok
   end
 
   # ---------------------------------------------------------------- helpers
