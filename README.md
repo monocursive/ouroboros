@@ -464,6 +464,18 @@ it is used.
 whatever failed becomes context for the next model step — the CLI typecheck/lint
 fallback OpenCode recommends over an LSP integration.
 
+Three events happen outside a turn and are dispatched by the session rather than the
+loop. **`SessionStart`** fires when a session opens, carrying `source` of `"startup"` or
+`"resume"`; its `additionalContext` joins the *first turn's prompt* rather than the
+system prompt, whose fingerprint a session-scoped instruction would move on every turn
+after it. **`SessionEnd`** fires on close or on the transport going away, with `reason`,
+detached so it never holds a closing session open. **`PreCompact`** fires before the
+conversation is folded, with `trigger` (`"manual"`/`"automatic"`) and the operator's
+`custom_instructions`; it is the only event besides `PreToolUse` that can stop
+something — `exit 2` refuses the compaction with its stderr as the reason, and nothing is
+dropped. All three are bounded at ten seconds per hook on top of whatever the hook
+declared, because each of them runs while something else is waiting.
+
 #### Checkpoints and rewind
 
 Every `write`, `edit`, `apply_patch` and language-server rename snapshots the file's
@@ -513,6 +525,42 @@ commands; `:auto_approve` asks for nothing. `steer` delivers a message at the ne
 boundary of a running turn, which no other provider here supports. A turn stops after
 the current tool on interrupt, at `max_iterations` (50 by default), and on the third
 identical tool call.
+
+**Plan mode.** A session can be told to plan rather than build:
+`Ouroboros.Provider.Native.Session.plan_mode(pid, true)`, or
+`provider_options: %{plan: true}` at start. While it is on, `sandbox_mode` is forced to
+`:read_only` and what it displaced is remembered; every write and every command is
+refused by the permission layer *before the rule engine is asked*, with a message that
+names planning and says to record the plan instead — a rule that would have allowed the
+write does not un-plan the session. The system prompt gains a `## Plan mode` block
+telling the model to explore, record the plan with `plan`, and stop. The tool list is
+deliberately **not** shortened: the loop resolves a call against the same
+`disallowed_tools` it builds the list from, so a hidden tool would come back as "not a
+tool in this session" rather than as a refusal that explains itself.
+
+When a planning turn ends with a plan — a `plan_updated` with steps, or the final
+message when the model ignored the tool — the session holds the turn open and raises a
+**plan-exit approval** on the ordinary approval channel: *Yes, auto-accept edits* / *Yes,
+manual approvals* / *No, keep planning*. The chosen answer configures the session (plan
+off, `approval_mode` set, sandbox restored); a follow-up prompt sent with the answer runs
+as the rest of that same turn, so the work continues under the turn the plan ran under.
+
+The posture is durable beside the conversation, so a resumed session comes back planning —
+and so does the answer: the `approval_mode` a plan exit chose outlives a restart that
+would otherwise put the session back to the mode it was started in. An explicit
+`interactive.configure` supersedes it, which keeps that verb the authority it is
+everywhere else. **Honest gap:** `interactive.info` still reports the mode the *plane*
+recorded, because the plan exit reconfigures the provider directly rather than through
+`interactive.configure`; the session's own `turn_started` and the `plan_exit` event state
+what the session is actually running under.
+
+Claude gets its own: `provider_options: %{plan: true}` becomes `--permission-mode plan`,
+applying **from the next turn** because `claude --print` runs one process per turn.
+Codex is refused as *pending* — its dialect could carry a planning posture and nothing
+wires one yet — and every other provider is refused by name rather than accepted and
+ignored. `Ouroboros.Provider.plan_mode/2` is the declaration; it is deliberately not an
+`interactive.configure` key, because the pinned harness normalizes a configuration
+against a literal four-key list and would reject a fifth one call later.
 
 **What it reads from the project.** `AGENTS.md` in the workspace, then every `AGENTS.md`
 above it up to the filesystem root, with `CLAUDE.md` as the fallback name at each level,

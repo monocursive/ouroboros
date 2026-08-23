@@ -66,6 +66,30 @@ defmodule Ouroboros.Provider.Native.Hooks do
     * **any other exit code** — logged and ignored. A hook that is broken must not be
       able to stop work; only one that says `deny` may.
 
+  ## The three lifecycle events
+
+  `SessionStart`, `SessionEnd` and `PreCompact` are dispatched by
+  `Ouroboros.Provider.Native.Session` rather than by the turn loop, because none of them
+  happens inside a turn:
+
+    * **`SessionStart`** runs once, when the transport initialises — including on a
+      resume, which it names in `source` (`"startup"` / `"resume"`, Claude Code's own
+      vocabulary). Its `additionalContext` is appended to the *first turn's prompt*, not
+      to the system prompt: an instruction in the prefix would change the prefix
+      fingerprint and cost the cache on every turn after it.
+    * **`SessionEnd`** runs on close or on the transport terminating, with `reason`. It is
+      fire-and-forget and detached onto a task supervisor: a session that is going away
+      has nowhere to put an answer, and a hook that blocked here would hold a terminating
+      process open.
+    * **`PreCompact`** runs before the conversation is folded, with `trigger`
+      (`"manual"` / `"automatic"`) and the operator's `custom_instructions`. It is the
+      second event in this contract that can **stop** something: `exit 2` refuses the
+      compaction and its stderr becomes the reason, exactly as `PreToolUse`'s does. The
+      session keeps its whole conversation and says why.
+
+  All three are bounded at ten seconds per hook on top of whatever the hook declared,
+  because each of them runs while something else is waiting.
+
   ## Ordering against the permission engine
 
   `PreToolUse` hooks run **after** `Ouroboros.Control.Permissions`. A rule that denied is
@@ -86,6 +110,12 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   @default_timeout_ms 60_000
   @max_timeout_ms 600_000
+  # The three lifecycle events run while something else is waiting — a session opening, a
+  # session closing, a compaction about to start — so they get a ceiling of their own on
+  # top of whatever the hook declared. A minute is the right default for a `PreToolUse`
+  # vet script; it is not the right default for the time between `interactive.start` and a
+  # usable session.
+  @lifecycle_timeout_ms 10_000
   @max_output_bytes 256 * 1024
   @max_context_bytes 8 * 1024
   @max_hooks 50
@@ -274,18 +304,93 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   `UserPromptSubmit`, `Stop`, `SessionStart`, `SessionEnd`, `PreCompact`,
   `Notification`, `FileChanged`. A `deny` from one of these is recorded as context, not
-  as a block: only `PreToolUse` has something to stop.
+  as a block: only `PreToolUse` and `PreCompact` have something to stop, and `PreCompact`
+  has `pre_compact/2` for it.
+
+  `opts` may carry `:timeout_ms`, a ceiling applied to every hook in the chain *in
+  addition to* its own declared timeout. The lifecycle events use it: a session must not
+  wait a minute to open because somebody wrote a slow `SessionStart` hook, and the
+  operator's own `timeout_ms` is still honoured when it is the smaller of the two.
   """
-  @spec notify(t(), atom(), map()) :: [String.t()]
-  def notify(%__MODULE__{} = config, event, base) do
+  @spec notify(t(), atom(), map(), keyword()) :: [String.t()]
+  def notify(config, event, base, opts \\ [])
+
+  def notify(%__MODULE__{} = config, event, base, opts) do
+    ceiling = Keyword.get(opts, :timeout_ms)
+
     config
     |> matching(event, nil)
     |> Enum.flat_map(fn hook ->
       payload = Map.put(base, "hook_event_name", @event_names[event] || to_string(event))
 
-      case invoke(hook, payload) do
+      case invoke(hook, payload, ceiling) do
         {:deny, reason} -> ["A #{@event_names[event]} hook reported: #{reason}"]
         {:ok, answer} -> answer.context
+      end
+    end)
+  end
+
+  @doc """
+  Runs the `SessionStart` hooks and returns the context they want the session to open
+  with.
+
+  `source` is Claude Code's own vocabulary for why the session started — `"startup"` for
+  a fresh one, `"resume"` for one restored from a checkpoint — so a hook written for
+  Claude Code reads the field it already reads. The strings come back bounded exactly as
+  every other hook's `additionalContext` is, and the caller decides where they land; the
+  native session appends them to the first turn's prompt, which is the only place a
+  session-scoped instruction can reach a model without changing the cached prefix.
+
+  Bounded at ten seconds per hook, because this runs while a session is
+  opening and an operator waiting on `interactive.start` is not waiting on their own
+  script.
+  """
+  @spec session_start(t(), map()) :: [String.t()]
+  def session_start(%__MODULE__{} = config, base),
+    do: notify(config, :session_start, base, timeout_ms: @lifecycle_timeout_ms)
+
+  @doc """
+  Runs the `SessionEnd` hooks and discards whatever they say.
+
+  Fire-and-forget by contract: the session is going away, so there is nothing left for
+  `additionalContext` to be appended to, and a hook that blocked here would hold a
+  terminating process open. The return value is `:ok` in every case — including the case
+  where a hook failed, which is logged by `invoke/3` and nothing else.
+
+  The caller is expected to detach this onto a task supervisor. `run/2` on the way out of
+  `terminate/2` would make a slow script into a slow shutdown.
+  """
+  @spec session_end(t(), map()) :: :ok
+  def session_end(%__MODULE__{} = config, base) do
+    _ = notify(config, :session_end, base, timeout_ms: @lifecycle_timeout_ms)
+    :ok
+  end
+
+  @doc """
+  Runs the `PreCompact` hooks and returns whether the compaction may proceed.
+
+      :ok                     nothing objected; `context` is empty or advisory
+      {:deny, reason}         a hook exited 2, and `reason` is its stderr
+
+  This is the `PreToolUse` contract applied to the one other thing in this provider worth
+  stopping. A compaction is not undoable — the conversation it folds is summarised and the
+  originals go to an archive — so a repository that wants to say "not while a migration is
+  half-written" needs the same `exit 2` it already uses for a tool.
+
+  The first denial stops the chain, exactly as `pre_tool_use/4`'s does. Anything a hook
+  printed on a non-denying run is returned as context so the session can put it in the
+  event that names the compaction.
+  """
+  @spec pre_compact(t(), map()) :: {:ok, [String.t()]} | {:deny, String.t()}
+  def pre_compact(%__MODULE__{} = config, base) do
+    payload = Map.put(base, "hook_event_name", @event_names.pre_compact)
+
+    config
+    |> matching(:pre_compact, nil)
+    |> Enum.reduce_while({:ok, []}, fn hook, {:ok, context} ->
+      case invoke(hook, payload, @lifecycle_timeout_ms) do
+        {:deny, reason} -> {:halt, {:deny, reason}}
+        {:ok, answer} -> {:cont, {:ok, context ++ answer.context}}
       end
     end)
   end
@@ -362,13 +467,13 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   # ---------------------------------------------------------------- invoking
 
-  defp invoke(hook, payload) do
+  defp invoke(hook, payload, ceiling \\ nil) do
     stdin = encode(payload)
 
     case Exec.run_shell(hook.command,
            cd: hook.cwd,
            stdin: stdin,
-           timeout_ms: hook.timeout_ms,
+           timeout_ms: bounded(hook.timeout_ms, ceiling),
            max_bytes: @max_output_bytes
          ) do
       {:ok, %{timed_out?: true}} ->
@@ -396,6 +501,15 @@ defmodule Ouroboros.Provider.Native.Hooks do
         {:ok, empty()}
     end
   end
+
+  # The smaller of what the operator declared and what the caller can wait for. Never the
+  # larger: a ceiling that a hook's own `timeout_ms` could raise would not be one.
+  defp bounded(declared, nil), do: declared
+
+  defp bounded(declared, ceiling) when is_integer(ceiling) and ceiling > 0,
+    do: min(declared, ceiling)
+
+  defp bounded(declared, _unusable), do: declared
 
   defp empty, do: %{decision: nil, updated_input: nil, context: []}
 

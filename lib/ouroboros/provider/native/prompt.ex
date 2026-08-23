@@ -12,6 +12,12 @@ defmodule Ouroboros.Provider.Native.Prompt do
   it verified and to name what it did not. That is the sentence the rest of this
   runtime's honesty claims rest on, so it lives in the prompt where the model reads it.
 
+  One block is conditional: a session in plan mode (B2) gets a `## Plan mode` section that
+  states the task — explore, record the plan with the `plan` tool, stop — because a model
+  handed a read-only posture and no instruction discovers it one refused tool at a time.
+  It is part of the cached prefix like everything else here, which is why leaving plan
+  mode rebuilds the prefix: the session is a different session to the model afterwards.
+
   ## The envelope
 
   A caller's `system_prompt` is not concatenated raw. It goes through
@@ -88,7 +94,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
     directory. A path containing `..` is refused outright — give the absolute path.
 
     #{posture(sandbox_mode, approval_mode)}
-
+    #{plan_section(approval_mode)}
     ## Rules
 
     1. **Read before you edit.** `edit` refuses a file this session has not read, and
@@ -150,6 +156,47 @@ defmodule Ouroboros.Provider.Native.Prompt do
     """
     |> String.trim()
   end
+
+  # B2. The instruction block that makes plan mode a *task* rather than a series of
+  # refusals. Without it a model in a read-only session spends the turn discovering, one
+  # denied tool at a time, that it cannot work — which is the behaviour every vendor's
+  # plan mode had before it grew a prompt.
+  #
+  # It is deliberately short and ends with "stop": the exit approval is what turns the
+  # plan into work, and a model that kept going would be answering a question the operator
+  # has not been asked yet.
+  defp plan_section(:plan) do
+    """
+
+    ## Plan mode
+
+    This session is **planning**. Investigate as much as you need, then produce a plan and
+    stop. Do not try to make the change.
+
+    1. Read the code the task touches. A plan written from memory is a guess with numbered
+       steps, and this session exists so that it is not one.
+    2. Record the plan with the `plan` tool — every step, in order, replacing the whole
+       plan each time. That is the form the operator reviews.
+    3. Say in a few lines what you found, what the plan assumes, and what you are unsure
+       about. Name the alternative you rejected and why, if there was one.
+    4. Then stop. Do not ask for permission to start; the operator is asked automatically
+       when your turn ends, and they choose whether the work runs with edits auto-accepted,
+       with each change approved by hand, or not yet.
+
+    `write`, `edit`, `apply_patch`, `bash` and the writing `code_intel` operations are
+    refused for the whole of this mode, whatever a permission rule says. If the task turns
+    out to need no change, say that instead of planning one.
+    """
+    |> String.trim_trailing()
+    |> Kernel.<>("\n")
+  end
+
+  defp plan_section(_other), do: ""
+
+  defp approvals(:plan),
+    do:
+      " Nothing runs that would change anything: this session is read-only until the " <>
+        "operator answers the plan-exit question at the end of the turn."
 
   defp approvals(:auto_approve),
     do: " Tools run without asking; the operator sees every call in the transcript."

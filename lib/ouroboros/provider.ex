@@ -1482,6 +1482,131 @@ defmodule Ouroboros.Provider do
   defp transport_list(_unresolvable, _adapter_list), do: []
 
   @doc """
+  Whether a provider can be put into plan mode, how it is asked, and when it takes hold.
+
+      {:ok, %{applies: :now | :next_turn,
+              settable: :any_time | :at_start,
+              via: :native_session | :provider_options}}
+      {:error, {:unsupported_configuration, %{provider:, transport:, field: :plan,
+                                              reason:, message:}}}
+
+  ## Why plan mode is not an `interactive.configure` key
+
+  It cannot be one on the pinned harness. `Jido.Harness.Session.RequestValidator`
+  normalizes a configuration against a literal four-key list — `model`,
+  `reasoning_effort`, `approval_mode`, `sandbox_mode`
+  (`deps/jido_harness/lib/jido_harness/session/request_validator.ex:7`) — and refuses
+  anything else *before* the transport is consulted, and `SessionRequest`'s
+  `approval_mode` is a four-member `Zoi.enum` with no room for `:plan`
+  (`.../session/request.ex:4`). Adding `:plan` to `@configuration_fields` here would
+  advertise a key that the very next call rejects, which is the failure this module's
+  whole docstring exists to prevent. So plan mode is declared here, applied through the
+  channel each transport can actually carry it on, and `@configuration_fields` stays at
+  four.
+
+  ## The two transports that can carry it
+
+    * **`:native`** — `Ouroboros.Provider.Native.Session.plan_mode/2`, which reaches a live
+      session process by name the same way `compact`, `handoff` and `rewind` do. `:now`,
+      any time, and durable across a resume. A start may also ask with
+      `provider_options: %{plan: true}`.
+    * **`:claude`** — `provider_options: %{plan: true}` on the session request or on one
+      turn's, which `Ouroboros.Provider.ClaudeAdapter` turns into
+      `--permission-mode plan`. `:next_turn`, because `claude --print` runs one process
+      per turn: the turn already executing keeps the argv it started with.
+
+  Everything else is refused by name. **Codex is refused with `:pending` rather than
+  `:unsupported`**: `Ouroboros.Provider.Session.Dialect.Codex` rebuilds approval and
+  sandbox policy per turn in `turn_params/2` and could carry a planning posture, but that
+  dialect is slice C3's and nothing has been wired there — so this says "not yet", which
+  is a different claim from "cannot", and a session started expecting it is still refused
+  rather than quietly run without it.
+  """
+  @spec plan_mode(term(), atom() | nil) :: {:ok, map()} | {:error, term()}
+  def plan_mode(provider, transport \\ nil) do
+    with {:ok, spec} <- plan_spec(provider),
+         {:ok, declared} <- plan_transport(spec, provider, transport) do
+      case plan_support(provider) do
+        nil -> {:error, unplannable(spec, declared, plan_refusal(spec.provider))}
+        support -> {:ok, support}
+      end
+    end
+  end
+
+  # Read from this runtime's own two modules rather than from a declaration upstream: no
+  # `AdapterSpec` has a field for "can this provider be told to plan", and inventing one in
+  # a pinned dependency's struct is not available. Keyed on the provider a spec resolves
+  # to, so a node that repoints `:claude` at a different adapter does not inherit the
+  # claim — `plan_adapter?/1` checks the module too.
+  defp plan_support(provider) do
+    case {provider, Registry.lookup(provider)} do
+      {:native, {:ok, Ouroboros.Provider.Native}} ->
+        %{applies: :now, settable: :any_time, via: :native_session}
+
+      {:claude, {:ok, Ouroboros.Provider.ClaudeAdapter}} ->
+        %{applies: :next_turn, settable: :at_start, via: :provider_options}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp plan_refusal(:codex),
+    do:
+      {:pending,
+       "codex rebuilds its approval and sandbox policy per turn and could carry a " <>
+         "planning posture, but nothing in `Ouroboros.Provider.Session.Dialect.Codex` " <>
+         "wires one yet (slice C3). Plan mode is refused rather than silently ignored."}
+
+  defp plan_refusal(provider),
+    do:
+      {:transport_cannot_plan,
+       "#{inspect(provider)} declares no way to be told to plan. Plan mode is a " <>
+         "read-only posture with an exit approval attached, and a provider that cannot " <>
+         "be told about either would run the work while a client showed a planning " <>
+         "label. Use `sandbox_mode: :read_only` for a session that must not write."}
+
+  defp unplannable(spec, declared, {reason, message}) do
+    {:unsupported_configuration,
+     %{
+       provider: spec.provider,
+       transport: declared.name,
+       field: :plan,
+       reason: reason,
+       message: message
+     }}
+  end
+
+  defp plan_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error,
+         {:unsupported_configuration,
+          %{provider: provider, field: :plan, reason: :unknown_provider}}}
+    end
+  end
+
+  defp plan_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unsupported_configuration,
+          %{
+            provider: provider,
+            transport: transport,
+            field: :plan,
+            reason: :unknown_session_transport
+          }}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  @doc """
   Returns the options a *running* session may still be changed to, and when it takes hold.
 
   Validated against exactly what `safety_options/3` validates a start against — the
