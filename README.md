@@ -589,6 +589,24 @@ protocol, and denies every approval with a message saying it was not given a run
 because deny is what every failure here means. It is hidden from `--help` for the same
 reason.
 
+### Is anything waiting on me: `ouro agents`
+
+The Sessions rail's grouping, printed once and exited — for a terminal without a tty, for
+a pipe, and for the thirty seconds where opening a UI to ask the question is thirty
+seconds too many.
+
+```sh
+ouro agents           # needs input, then working, then done, across every fleet node
+ouro agents --json    # the same, with the counts and the runtime's own rows
+```
+
+Every group is named even when it is empty: "nothing needs you" is the answer this command
+exists to give, and a page that omitted the heading would leave you wondering whether it
+had looked. It starts no runtime — a command whose whole job is to tell you what is
+waiting must not answer by creating something to wait on — and it subscribes to nothing,
+so a session's group is a fact the runtime declared rather than something this command
+watched for.
+
 ### Headless: `ouro run`
 
 `ouro run` is the same session `ouro new` starts, without a screen. It resolves the
@@ -878,8 +896,10 @@ Three are the input grammar:
 - `Alt+Enter` steers the running turn, on the transports whose runtime says they can be
   steered. Two explicit keys, never one key whose meaning depends on timing.
 - `Esc` interrupts and keeps the queue; `Esc Esc` opens a menu over the last ten
-  messages, offering "edit and resend as a new turn" everywhere and a fork where the
-  runtime serves one.
+  messages, offering "edit and resend as a new turn" everywhere, a fork where the runtime
+  serves one, and a rewind where the session's own transport keeps the checkpoints one
+  restores from. The first two only add a turn; the third is the one that undoes, and the
+  menu says so.
 
 **Every chord is data.** Each key this client binds is a named action, and any of them can
 be rebound — or turned off — from `~/.config/ouroboros/config.toml`:
@@ -926,6 +946,35 @@ object per line — `0600`, refusing to overwrite, under this runtime's data dir
 directory when this client did not start that runtime and so does not know it — unless you
 name a path. The notice says how many events went in and whether anything had already
 been dropped, because an export that looked complete and was not would be worse than none.
+`/theme` is there too, cycling the palette exactly as the verb does.
+
+**Managing the conversation itself.** Five verbs, and each is offered only where the runtime
+serves it *and* this session's transport can honour it — a key that is drawn and always fails
+is worse than one that is not drawn, and the refusal names which of the two gates was closed.
+
+- `/compact [focus]` folds the conversation now and prints what was archived, what was
+  elided, and the tokens before and after. Native sessions only: only there does this
+  runtime hold the conversation to fold, and a summary invented for a transcript it never
+  had would be a claim nothing supports.
+- `/handoff <prompt>` starts a fresh session seeded with a packet *about* this one — the
+  five-heading summary, the files it touched, the open plan, and whatever you typed — and
+  opens the child. The parent keeps running; ending it is your decision.
+- `/context` states what fills the window: where the numbers came from, how full it is,
+  every fold so far, the archives, and the instruction files loaded and dropped. It answers
+  for every provider, and for the ones that only report `usage` it says it is reporting a
+  subset rather than drawing the missing rows as zeroes.
+- `/rewind` lists the turns you can return to, with what each of them **cannot** put back —
+  the shell commands that ran in it, and the files with no snapshot — stated before you
+  choose, not after. Then a three-way choice of conversation, files, or both, and a note
+  naming every file it restored and every one it skipped. `Esc Esc` offers it too.
+- `/delegate <objective>` hands a piece of work to a coding task with this conversation as
+  its parent. `ctrl+t` lists the children beside the plan and `/delegations` opens one.
+
+**`!cmd` runs a command yourself**, in this session's workspace on its owner node — the
+composer says exactly that before you press Enter, because it is the one thing about `!` you
+cannot see on screen. It is not a tool: no model asked for it, and it runs only where the
+session is already at `auto_approve` or a permission rule allows it. A refusal stays on the
+composer with the exact rule that would have worked, and `ctrl+x r` saves it.
 
 **Approvals.** When a provider asks permission, the modal shows what is being approved: the
 kind, the exact command with its working directory, the diff — expanded while the answer is
@@ -1110,10 +1159,16 @@ configured by hand should add it to `:workspace_allowed_roots`, and a session th
 for a worktree without it is refused with a message naming the fix rather than failing
 mysteriously at the lease.
 
-`worktree: true` is a runtime option today. The gateway verb and the `ouro` flag that
-would let a terminal ask for one are a separate slice, so from the TUI this is not yet
-reachable — `Ouroboros.InteractiveSession.start/1` and `Ouroboros.CodingSession.start/2`
-are.
+A terminal can ask for one: `ouro new --worktree`, or the worktree row in the `n` dialog.
+Both put `worktree: true` in `interactive.start`'s params and nothing else — the option is
+a strict boolean, and a start that said `false` every time would be the client stating a
+default the plane already has. `ouro run` has no such flag on purpose: a one-shot prompt
+that provisioned a worktree would leave one behind for a session nobody is going to reopen.
+
+The session header, the rail and the context panel then wear `⎇` with the branch — or the
+short base commit, since the runtime runs `git worktree add --detach` and there is no
+branch to name. Once the worktree has been retired the badge says so rather than showing a
+live branch for a directory that may no longer be there.
 
 ## Agent mesh
 

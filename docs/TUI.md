@@ -293,6 +293,7 @@ reading.
 | `interactive.event_detail` `{id, sequence, node}` | The one event at `sequence`, whole — `replay` with `cursor: sequence - 1, limit: 1`, same owner routing and the same 15s ceiling. Answers a **bare event object**, not the single-element array `replay` would give. It exists because streamed and replayed events are byte-capped (§2.7), so this is where a client fetches the leaf an `_excerpt` named: the answer is encoded under `detail_leaf_bytes` (8 MiB) rather than `event_leaf_bytes` (128 KiB), and a leaf past even *that* carries the same `_excerpt` marker. Below the retained floor → `-32006` `{"reason": "cursor_pruned", "floor": N}`, the same shape `replay`/`subscribe` answer with; above the high-water mark, or inside a sequence gap, → `-32007` (a window of one starting in a gap returns the *next* event that exists, and answering with an event nobody asked for would be a worse lie than not finding it) |
 | `interactive.context` `{id, node}` | `InteractiveSession.context/1` (D9) — what a session can honestly say about its own context window, and `source` says which of two answers you are reading. `"native"` is a `native` session reporting facts it counted itself: `prefix_fingerprint` (the cached prefix's digest, which rotates only where `configure` or a compaction changed it), `context_window`, `context_used` (the last request's size as the *provider* counted it, `0` until a turn has spent one), `compact_at`, `keep_recent_tokens`, `messages`, `compaction_thrashing`, `compactions` (the full report per fold), `archive_ids` (ids only — the archive bodies are the conversation that was just folded away, and returning them would undo the fold), `instruction_files`, `instruction_files_dropped`, `instruction_bytes`, `tools`, `handed_off_to`. `"usage"` is every other transport, carrying only what its `usage` events reported — `context_window` and `context_used` where the provider named them and `null` where it did not, plus `total_tokens`, `model`, `provider_session_id` and `transport`. Never a guess and never a padded shape: a provider that reported no window reports none, and the absent keys are absent rather than `null` |
 | `interactive.delegations` `{id, node}` | `InteractiveSession.delegations/1` (G1) — this conversation's delegations, oldest first. Each row is `delegation_id`, `team_id`, `task_id`, `task_node`, `plane` (always `"coding"`), `objective_digest`, `status`, `result_digest`, `created_at`, `updated_at`, and `source`. The session's own copy of a status is a hint that follows the team's record — a terminal note the parent was not running to receive is simply missing from it — so this reads the team that owns the delegation and says `source: "team"`; where that team is not reachable it answers from the session's copy and says `source: "session"` rather than pretending the two are the same thing |
+| `interactive.rewind_points` `{id, node}` | `InteractiveSession.rewind_points/1` (D6) — the turns this session can be returned to, oldest first, in the shape a menu renders: `turn_id`, `at`, `files`, `paths` (the first twenty), `commands`, `restorable` (how many of `files` still have prior content in the checkpoint store), `dropped_turns`. `commands` and the gap between `restorable` and `files` are the two facts that make a turn only *partly* undoable, and they are handed back **before** anything is chosen for exactly that reason. Native only, refused by the same two shapes `compact` uses |
 | `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
 | `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
 | `coding.info/replay/subscribe/unsubscribe/event_detail` | `CodingSession` equivalents (`{:ouroboros_coding_event, id, event}`); `coding.event_detail` `{id, sequence, node}` is the coding-plane twin of the row above, refusals and all |
@@ -322,6 +323,7 @@ reading.
 | `interactive.rename` `{id, title}` | `InteractiveSession.rename/2` — a durable session title. Trimmed, at most **120 graphemes**, and **refused** (never silently stripped) if it contains a control character, because it is drawn into one line of every `interactive.list` row. Allowed on a terminal session: a finished conversation is exactly what someone is trying to find again. A session nobody has named takes an auto-title from the first accepted user input — the prompt's first line, at most 60 graphemes with an ellipsis, stored as `title_source: "auto"`. A rename sets `title_source: "human"`, which nothing this runtime does overwrites; an auto-title writes only where nothing has named the session, so a second prompt never renames a conversation the first one described |
 | `interactive.fork` `{id, fork_id?}` | `InteractiveSession.fork/2` — a **new** session carrying the parent's provider session and history. The parent is not sent a turn, interrupted, or closed; the only thing written to it is `forks`. Answers in `interactive.start`'s shape (`{id, node, outcome, ready, error}`) with the same 120s ceiling and the same `outcome: unknown` admission, and `fork_id` is caller-owned for the same reason a start's `id` is. What makes the child a fork comes from a declaration, never from this table: the Codex app-server dialect's own `fork_option/0` turns into `thread/fork {threadId}` instead of `thread/resume`; a run adapter either exports `fork_option/0` or appears in `Ouroboros.Provider`'s evidenced module table (`claude`, `zai`, `grok` — `--resume <id>` plus the boolean `--fork-session`). ACP is refused by capability: neither bundled agent publishes a branch verb and `session/load` continues rather than copies. `pi` is refused too, although it declares `:fork_session`, because there the option is `--fork <session-name>` and its validator rejects it alongside `provider_session_id`. `options.capabilities.fork` is `"native"`/`false` from the same derivation. Refused with `["unforkable_session", {reason, …}]` for `no_provider_session_id` (the provider has not named a session to branch), `transport_cannot_fork`, `unknown_provider`, `unknown_session_transport`. **Honest limit:** workspace admission is unchanged, so forking a live session that holds an exclusive lease is refused by the lease (`workspace_conflict`); a fork of a `read_only` or finished session admits. Worktrees (AGENT_EXPERIENCE D7) are the fix, not a weaker lease |
 | `interactive.compact` `{id, focus?, node}` | `InteractiveSession.compact/2` (D9) — folds an open session's conversation *now*, optionally focused, and answers with the same report the automatic path produces: `trigger` (`"manual"`), `turn`, `archived_messages`, `archive_id`, `elided_tool_results`, `summary_tokens`, `before_tokens`, `after_tokens`, `summarised`. **Native only, and refused by capability everywhere else** with `["unsupported_on_transport", {transport, verb, provider, message}]`: only there does this runtime hold the conversation to fold, and a summary invented for a transcript Ouroboros never had would be a claim nothing supports. A vendor's own compaction is surfaced as an event when it reports one, never imitated. A `native` session whose transport is not up is a *different* refusal, `["native_transport_unavailable", {verb, reason, message}]`, because that one is worth retrying and a capability refusal is not. Also refused mid-turn (`busy`) and after two folds in three turns (`compaction_thrashing`, the permanent latch — the operator's own `/compact` is exempt because they were told what happened). The ceiling is **120s**, not 15: a compaction that has to summarise makes one model call on the session's own model |
+| `interactive.rewind` `{id, to_turn, what?, node}` | `InteractiveSession.rewind/3` (D6) — returns the session to `to_turn`, undoing everything after it. `what` is `files`, `conversation`, or `both` (the default). The answer is `restored` (each entry a `path` and whether it was rewritten or `deleted`), **`unrestorable`** — each entry naming a path, or a whole turn and the shell commands that ran in it, with the reason — `turns` (the ids being undone) and `messages` (what the conversation was truncated to). `unrestorable` is the point of the return value: the two lists together account for every file the manifest says was touched, and Claude Code #18516 is the rewind that silently restored fewer. Native only, refused by the same two shapes `compact` uses, and the ceiling is **120s**. **Honest limit:** the parameter contract admits a turn id *or* a 1-based ordinal, but `InteractiveSession.rewind/3` guards `is_integer`, so a binary `to_turn` is refused with `["invalid_rewind", …]` before it reaches the session — clients send the ordinal `rewind_points` hands them |
 | `interactive.handoff` `{id, prompt?, handoff_id?, node}` | `InteractiveSession.handoff/3` (D9) — a **new** session seeded with a curated packet rather than a folded conversation: the five-heading summary, every file the parent touched with its hash as of now, the open plan, and whatever the operator typed as `prompt`. Answers in `interactive.start`'s shape with the same 120s ceiling and the same `outcome: unknown` admission, and `handoff_id` is caller-owned for the same reason `fork_id` is. The child carries `handed_off_from` — held apart from `forked_from` because the two are different claims, a fork carrying the parent's conversation and a handoff carrying a packet *about* it — and the parent records `handed_off_to`, which `interactive.context` surfaces. The parent is not interrupted and not closed: a handoff is not a close, and ending the parent is the operator's decision. Native only, refused by the same two shapes `compact` uses; a `prompt` that forges the `<ouroboros-runtime>` delimiters is `["invalid_handoff_prompt", {reason: "reserved_delimiter"}]` rather than escaped. **Honest limit:** workspace admission is unchanged, so handing off from a live session holding an exclusive lease is refused by the lease exactly as a fork is — starting the parent with `worktree: true` is the composable fix |
 | `interactive.delegate` `{id, objective, delegation_id?, provider?, workspace?, node}` | `InteractiveSession.delegate/3` (G1) — a **coding task with a parent**, not a sub-conversation. The child runs on the coding plane with its own id, its own transcript and its own durable record; what makes it this session's is `parent: {plane: "interactive", id}` on that record, which is durable, immutable, and in the coding plane's idempotency fingerprint. The team is the workspace's *default* one — one per canonical workspace root per node, id `<node>:workspace-team:<digest>`, created lazily, durable through the same checkpoint every other team uses, and listed by `teams.list` like any other — and one worker per conversation, which serialises a conversation's delegations: `Team.Server` accepts one active delegation per worker, so while a child is running a second delegation from the same session is **refused** — `["delegation_failed", {"worker_busy", worker_id, delegation_id}]` — rather than queued or fanned out. One conversation, one child at a time, and the operator is told which child is holding the slot. `workspace` and `provider` default to the conversation's own. The reply is `{delegation_id, team_id, task_id, task_node, plane, status}`. The parent's transcript gains a runtime-native `delegation` event with `status: "started"` and a second one carrying the terminal status and a bounded `result_digest` when the child ends — a digest, never the result, because that is the child's own record. Ceiling **90s** and `outcome: unknown`: this verb may make two 60s-bounded team calls, and a ceiling that fires cannot prove the child was not created, which is why `delegation_id` is caller-owned and a repeat under it answers with the same delegation rather than a second one. Refusals: `["session_not_delegable", {status}]`, `["invalid_objective", …]`, `["delegation_limit_reached", {limit}]` (100 per conversation, refused rather than evicting — dropping the oldest would lose the link to a child that is still running) |
 | `workspace.exec` `{id, command, node}` | `InteractiveSession.exec/2` (B7) — one command through `/bin/sh -c` in the session's admitted workspace on its owner node, as **the operator's explicit act**. Not a tool: no model asks for it, no provider is told about it, and it is permitted only where the session's effective `approval_mode` is `auto_approve` or `Control.Permissions.evaluate/1` answers `{:allow, _}` for `tool: "bash"` with that command under the session principal. Everything else — an unreadable rule store included — is `["shell_refused", {reason, session_id, workspace, approval_mode, denied_by, suggested_rule, message}]`, where `suggested_rule` is the pattern in the engine's own language that `permissions.add` would take verbatim. Recorded in the effect ledger as an `:operator_shell` effect **before** it runs, carrying the command's digest and working directory and never its text, and settled after; a ledger that cannot record refuses the command, because a command nobody can account for afterwards is exactly what this verb exists not to be. Output is bounded at 30 KiB inline (20 KiB head, 10 KiB tail, the middle elided) with the whole of it spilled to a `0600` file under the session's data directory and named in the reply. The reply is `{effect_id, command_digest, cwd, exit_status, timed_out, duration_ms, output, output_bytes, excerpt, spilled, spill_error}`. The command appears on the session's own log as a runtime-native `provider_event` `kind: "operator_shell"` `{command_digest, exit_status, output_excerpt}`, and the next turn's `<ouroboros-runtime>` envelope carries the last **three** commands' excerpts, 512 bytes each, redacted and stripped of control characters. Ceiling **10 min**, the same number the runner stops at, because a lower one would kill the gateway task while the command kept running and leave an entry nobody settles. **Honest limit:** a process that detaches from its own group can outlive the timeout — the timeout terminates the shell this runtime started |
@@ -1431,9 +1433,148 @@ It offers two verbs and states which one `Enter` is *before* it is pressed:
   the tail, and which one a session gets is decided on the other side of the wire. The
   menu says that in as many words.
 
+- **rewind** (`r`, where `interactive.rewind_points` is served **and** the session's
+  declared transport is `native`): leaves this menu for the rewind's own, because a
+  rewind states what it cannot restore before it acts and there is no room for that
+  here. It is named last of the three, and the menu says why — the other two only *add*
+  a turn, and this is the one that undoes.
+
 The first `Esc` of the chord still does its ordinary job, including leaving an idle
 session; the arm remembers which session it was pressed in, so the second `Esc` reopens
 that session with the menu rather than finding nothing to show.
+
+### The native context verbs (D9, D6)
+
+Four verbs only a `native` session can honour, and one that answers for every transport.
+All five are gated twice and refused *locally*: `hello.methods` decides whether this
+gateway serves the verb, and `options.capabilities.transport` decides whether this
+conversation can. A key that is drawn and always fails is worse than a key that is not
+drawn, so a session on a managed or ACP transport does not get `/compact` in its palette,
+its `/` menu, or its backtrack menu — and the sentence names which of the two gates was
+closed. An **undeclared** transport is treated as offerable, because hiding a verb on a
+gateway's silence would be this client inventing a ceiling.
+
+Two refusal shapes are told apart, because only one of them is worth retrying:
+`["unsupported_on_transport", …]` is permanent for this session, and
+`["native_transport_unavailable", …]` means the transport is not up right now.
+
+| Verb | Call | What the client draws |
+|---|---|---|
+| `/compact [focus]` | `interactive.compact {id, focus?}` | the report as a transcript block — what was archived, what was elided, the tokens before and after, the archive id — then a fresh `interactive.context`, because a fold resets `context_used` and rotates the prefix fingerprint, and an *inferred* meter would be a number nobody measured |
+| `/handoff <prompt>` | `interactive.handoff {id, prompt?, handoff_id}` | opens the child the moment the runtime names it, whether `ready` is true or `outcome` is `unknown`, and says which of the two happened. `handoff_id` is caller-owned for the same reason `fork_id` is. The child's header carries `handed off from <parent>` |
+| `/context` | `interactive.context {id}` | an overlay whose first line is `source`, because that decides what the rest of it means. Native: the prefix fingerprint, a `context_used / context_window` bar, the compactions, the archive ids, the instruction files loaded and dropped. Every other transport: the subset its own `usage` events reported, **labelled as a subset**, with the native headings absent rather than empty |
+| `/rewind` | `interactive.rewind_points {id}`, then `interactive.rewind {id, to_turn, what}` | two screens, on purpose |
+
+**The rewind menu says what it cannot restore before the choice, not after.** Every row
+carries its own warning — not only the highlighted one — naming the shell commands that
+ran in that turn (whose effects were never checkpointed) and the files with no snapshot.
+`Enter` moves to the three-way chooser, which repeats the warning on the screen where the
+choice is actually made, and only the second `Enter` sends anything. The answer's
+`restored` and `unrestorable` lists are drawn as a block, restored first and never
+merged, because the second list is the one that needs acting on.
+
+**`to_turn` is the turn's 1-based position, not its id.** `interactive.rewind`'s parameter
+contract admits either, but `InteractiveSession.rewind/3` guards `is_integer`, so a turn
+id is refused as `invalid_rewind` before it reaches the session. The position is exactly
+what the menu already knows, having just been handed the list it indexes into.
+
+The footer's `%` divides `context_used`, never the session's cumulative `total_tokens` —
+a long conversation crosses its own window many times over, and a percentage built from
+the total would read 340% for a session that had compacted twice and was nowhere near
+full. It prefers what `/context` reported for the open session over the row's own
+`usage`, because a `list` row's usage is reduced by the runtime to tokens and cost and
+carries no window at all.
+
+### `!cmd` — the operator's own shell (B7)
+
+A draft beginning with `!` is claimed by the composer, beside the slash verbs, and sent
+to `workspace.exec {id, command}`. It is never a turn.
+
+**The composer says where it will run before Enter is pressed**, every time: not here,
+but on the session's owner node, in the workspace the agent is editing. That is the one
+thing about `!` a person cannot infer from the screen.
+
+The reply is drawn as a block — the exit status (a non-zero exit is a *result*, not a
+fault), the elapsed time, the output's head and tail, and the spill path where the output
+did not fit inline. The runtime also writes a `provider_event` of kind `operator_shell`
+for the same command, and the two are **deduped by `command_digest`**: the reply's block
+wins because it carries the elapsed time, the spill path and the command's own text, none
+of which the ledger records. Where this client has only the event — a second `ouro`
+watching, or a session reopened after a restart — the event is drawn, and it names the
+digest rather than inventing the command line the ledger deliberately does not keep.
+
+A refusal stays **on the composer**, not in the notice row: a one-key action that expires
+in four seconds is not an action anyone can take. `["shell_refused", …]` renders the
+runtime's own message, the rule that denied it where one did, and the engine's own
+`suggested_rule`. `ctrl+x r` writes that rule with `permissions.add`, scoped to the
+session's workspace — offered only where the engine suggested one, this gateway serves
+`permissions.add`, and the session names a workspace, and naming the missing half where
+it does not. Every other refusal shape reaches the ordinary renderer and grows no
+permissions offer.
+
+### Delegation and the fleet (G1, G2)
+
+`/delegate <objective>` sends `interactive.delegate {id, objective, delegation_id}` with a
+caller-owned id, and shows a `delegating…` chip while the 90-second call is in flight. The
+runtime's `delegation` events — its own event type, not a wrapped `provider_event` — are
+drawn as blocks in the parent's transcript: one when the child starts, one carrying the
+terminal status and a bounded `result_digest`. A digest, never the result: the child's own
+transcript is the record of what it did.
+
+`ctrl+t` reads `interactive.delegations` and lists the children beside the plan;
+`/delegations` opens the same list as a surface with a cursor, where `Enter` opens the
+child's transcript **on the coding plane** — a delegation is a coding task with a parent,
+not a sub-conversation, and there is no way to message it from the parent's composer. Each
+row says whether its status came from the team (`source: "team"`) or from the
+conversation's own remembered copy (`source: "session"`), because a parent that was not
+running when its child finished holds a stale one.
+
+**The rail groups every node's sessions by what they need**, in this order:
+
+| Group | What lands in it |
+|---|---|
+| **needs input** | a pending approval this client is holding, `awaiting_approval`, or an idle *conversation* — which is waiting for its next prompt, and that prompt is a person's |
+| **working** | `running`, `starting`, `closing`, and an idle coding task, which has nobody to prompt it |
+| **done** | every terminal status |
+
+The group comes from **declared state and nothing else**. A row whose owner went offline
+keeps whichever group its last complete observation put it in, and keeps the `last-known`
+mark the rail already had: "we cannot see it right now" is a fact about the observation,
+not a claim that it needs you, and a client that promoted every unreachable session to the
+top would make the top of the list meaningless.
+
+Each card names its machine — dropped whole rather than clipped where the card is too
+narrow — and a delegated coding task is drawn under the conversation that started it,
+indented, with a tree glyph in place of the status signal. **Only within a group:** the
+two orderings answer different questions, and where they disagree the triage one wins.
+
+The footer states the fleet's own `N waiting · N working` beside the open session's
+approvals. The picker (`ctrl+x l`) labels every row with its group and its node, `Space`
+peeks the last thing that agent said without leaving the list, and `r` opens that session
+with the cursor in its composer. A peek at a session this client never subscribed to says
+so rather than showing an empty box — it reads the transcript already held and never opens
+a subscription, because a cheap key that changed what the runtime is streaming would not
+stay cheap.
+
+`ouro agents` prints the same grouping once, plain or `--json`, and starts no runtime: a
+command whose whole job is to answer "is anything waiting on me" must not answer it by
+creating something to wait on. Its counts can differ from the rail's by the approvals the
+rail is holding on an open stream, which `ouro agents` does not have.
+
+### Worktrees (D7)
+
+`ouro new --worktree` and the `n` dialog's toggle put `worktree: true` in
+`interactive.start`'s params — **only when true**, because the gateway's option is a
+strict boolean and an unasked-for `false` on every start would be this client stating a
+default the plane already has. `ouro run` has no such flag: a one-shot prompt that
+provisioned a worktree would leave one behind for a session nobody is going to reopen.
+
+The header, the rail and the context panel wear `⎇ <branch>`, falling back to the short
+base commit because the runtime runs `git worktree add --detach` and there is no branch to
+name. A **retired** worktree — removed on close, or kept because it still held uncommitted
+work — says so rather than showing a live branch for a directory that may no longer be
+there. A session without one draws nothing at all: a row reading "WORKTREE no" would be
+narrating a default.
 
 ### `[keys]` — keys are data (B8, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D4)
 
