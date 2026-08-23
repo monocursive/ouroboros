@@ -38,14 +38,21 @@ defmodule Ouroboros.Provider.CodexAppServerTest do
     end
 
     # The gateway is its only caller, so the gateway may start after it. The only other
-    # child allowed downstream is the code-intelligence pool: it owns nothing durable —
-    # language servers are respawned lazily — so a crash of the account boundary or the
-    # gateway costs it nothing it cannot rebuild, and its own crash restarts nothing.
-    # Anything else appearing here would be a durable owner placed downstream of a child
-    # whose crash it now depends on.
+    # children allowed downstream are the two lazy pools of somebody else's programs —
+    # the code-intelligence pool and the MCP subtree. Neither owns anything durable
+    # (language servers and MCP servers are respawned on demand), so a crash of the
+    # account boundary or the gateway costs them nothing they cannot rebuild, and their
+    # own crashes restart nothing. Anything else appearing here would be a durable owner
+    # placed downstream of a child whose crash it now depends on.
     assert start_order
            |> Enum.drop(codex + 1)
-           |> Enum.all?(&(&1 in [Ouroboros.Gateway, Ouroboros.CodeIntel.Supervisor]))
+           |> Enum.all?(
+             &(&1 in [
+                 Ouroboros.Gateway,
+                 Ouroboros.CodeIntel.Supervisor,
+                 Ouroboros.Provider.Native.Mcp.Supervisor
+               ])
+           )
   end
 
   test "initializes once, reads the account, and follows a managed device-code login" do

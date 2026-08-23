@@ -230,9 +230,18 @@ defmodule Ouroboros.Application do
     # stranger can reach; what follows it owns nothing durable. `CodeIntel.Supervisor`
     # still carries a generous restart intensity, because language-server failures are
     # states inside the pool, never crashes of it.
+    #
+    # D4's MCP subtree is last for exactly the same reasons, and it is the same kind of
+    # thing: somebody else's program on the end of a pipe, spawned lazily, owning nothing
+    # any plane rebuilds from. It runs only on `:core`, because that is where the native
+    # provider's sessions run and an MCP server with no session to serve is a child
+    # nobody asked for. Downstream of the language-server pool because it is the newer
+    # and less load-bearing of the two, and because nothing in either depends on the
+    # other.
     children ++
       [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++
-      gateway_children() ++ [Ouroboros.CodeIntel.Supervisor]
+      gateway_children() ++
+      [Ouroboros.CodeIntel.Supervisor, Ouroboros.Provider.Native.Mcp.Supervisor]
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data
