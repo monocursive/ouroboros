@@ -136,7 +136,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | D1 | landed | `Ouroboros.Provider.Native` on ReqLLM (not `Jido.AI.Agent` — its runtime executes tools itself); approvals at the tool boundary; native steer; checkpoint before the terminal event; **no live model run yet** |
 | D2 | landed | grep/glob/ls/`web_fetch`/`ask_user`/V4A `apply_patch`/skills/`todo` |
 | D3 | landed | AGENTS.md hierarchy with lazy `paths:` rules, cache-stable prefix + fingerprint, meter → `usage.context_window`, compaction that refuses rather than lose its archive, handoff; client `/compact [focus]` (report as a block, then a re-measured meter), `/handoff <prompt>` (opens the child), `/context` (a scrollable page whose first line is `source`), all gated on `hello.methods` **and** `capabilities.transport == "native"`; the footer `%` is now `context_used / context_window`, not cumulative spend |
-| D4 | pending | MCP client for the native agent |
+| D4 | landed | `Ouroboros.Provider.Native.Mcp`: a bounded stdio MCP client (one 15 s handshake budget including paginated `tools/list`, 60 s calls, 100 KB results with a visible truncation marker, restart cap then `broken`, idle stop, killed with the session that claimed it); tools appear as `mcp__<server>__<tool>` through one seam in the registry and go through `Permissions` like any other tool; servers by name from node config, `~/.config/ouroboros/mcp.json`, and a trust-gated `<workspace>/.ouroboros/mcp.json`; `mcp.list` on the wire; a real `mcp__fake__echo` round trip proven in events. stdio only — `url` servers are refused by name (`unsupported_transport`); no OAuth, no `resources/*`/`prompts/*`, no `ouro mcp add` yet |
 | D5 | landed | hooks (seven events wired; `SessionStart/End`, `PreCompact` declared, not wired) |
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire); client `/rewind` as a menu with per-row warnings then a three-way `what` chooser, `Esc Esc` offers `r` where checkpoints exist; the facade now admits turn-id strings, not only ordinals |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
@@ -183,7 +183,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 9 | Work visibility | 1 | 3 (every kind rendered, plan panel, diff review, details tree, delegation rows, context page, operator-shell cells) |
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
 | 11 | Sandboxing / isolation | 1 | 2 (worktrees on both planes; no OS sandbox) |
-| 12 | MCP & tool ecosystem | 0 | 1 (Ouroboros *serves* MCP to Claude; no native MCP client; hooks and skills landed) |
+| 12 | MCP & tool ecosystem | 0 | 2 (native agent consumes stdio MCP servers by name with bounds and permissions; Ouroboros also *serves* MCP to Claude; hooks and skills landed; no HTTP/OAuth, no `ouro mcp add`) |
 | 13 | LSP / semantic navigation | 0 | 3 (pool, native tool, the wire, MCP tools and a post-edit hook for Claude — live-verified end to end; no `@symbol` input or structural index yet) |
 | 14 | Git-native flow | 0 | 1 (worktrees) |
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway) |
@@ -229,6 +229,11 @@ what a user of `ouro` on `review-fixes` gets today.
   pool never held; an error whose range moved).
 - Codex sessions get no post-edit hook; bridged Claude sessions at `auto_edit` /
   `auto_approve` get neither the MCP tools nor the hook.
+- The MCP client speaks stdio only and validates no arguments (the server owns its
+  schema); a `url` server is refused by name, never silently dropped. MCP tool names are
+  absent from the cached system-prompt tool list (the loop rebuilds the specs before every
+  model call, so the model still receives them), and a hallucinated `mcp__*` name reaches
+  the permission engine before the in-band refusal names the real servers.
 - Client halves of B7/G1/G2 were verified against the scripted `App` harness and the
   corpus, plus `ouro agents`/`ouro ledger` against a live scratch daemon — not the
   interactive screens against a live socket. The delegations panel and the `/context`
