@@ -5,6 +5,7 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
 
   alias Jido.Harness.{ApprovalResponse, Event, InteractionCapabilities, TurnRequest}
   alias Ouroboros.Control.Permissions.Seam
+  alias Ouroboros.Provider.Session.Diff
 
   # Bounds on what one ACP update may turn into. The wire applies no byte cap of its own
   # (a payload crosses the socket whole on every replay), so the dialect is where an
@@ -13,12 +14,6 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   @max_commands 64
   @max_modes 32
   @max_label_chars 200
-
-  # Either side of one edit above this and the diff is replaced by a note. `oldText` and
-  # `newText` are whole file bodies; a line-wise diff of two 50 MB buffers is not a thing
-  # to compute inside a session process, let alone to broadcast.
-  @max_diff_bytes 1_048_576
-  @diff_context 3
 
   @impl true
   def name, do: :acp
@@ -70,13 +65,18 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   def envelope(%{"jsonrpc" => _} = message), do: message
   def envelope(message), do: Map.put(message, "jsonrpc", "2.0")
 
+  # C4. Declared `true` because `service_request/3` and `Session.Service` serve them: a
+  # client capability is a promise to answer, and one declared without a handler turns
+  # every agent that believes it into a session that hangs on its first read. The two
+  # halves land together or not at all — `test/provider/session_acp_test.exs` asserts
+  # exactly that pairing so the declaration cannot outrun the code again.
   @impl true
   def initialize_params(_request) do
     %{
       "protocolVersion" => 1,
       "clientCapabilities" => %{
-        "fs" => %{"readTextFile" => false, "writeTextFile" => false},
-        "terminal" => false
+        "fs" => %{"readTextFile" => true, "writeTextFile" => true},
+        "terminal" => true
       },
       "clientInfo" => %{
         "name" => "ouroboros",
@@ -110,16 +110,29 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   app-server dialect has nothing to say here. `Session.Jsonl` calls this when a dialect
   exports it, so the modes an ACP agent offers reach the client next to the ready event
   instead of being dropped with the rest of the open result.
+
+  The ids are also *kept*, in the transport's own state, because they are the vocabulary
+  `session/set_mode` has to be checked against. An agent's mode ids are its own invention;
+  the only honest way to accept one from a client is to hold it to the list the agent just
+  published, so a mode nobody announced is refused here rather than sent and hoped for.
   """
-  @spec session_opened(term(), map()) :: [{:emit, atom(), map(), keyword()}]
+  @spec session_opened(term(), map()) :: [{:emit, atom(), map(), keyword()} | {:assign, map()}]
   def session_opened(result, _state) when is_map(result) do
     case modes_payload(result["modes"]) do
-      nil -> []
-      payload -> [{:emit, :provider_event, payload, []}]
+      nil ->
+        []
+
+      payload ->
+        [{:emit, :provider_event, payload, []}, {:assign, %{available_modes: mode_ids(payload)}}]
     end
   end
 
   def session_opened(_result, _state), do: []
+
+  defp mode_ids(%{"modes" => modes}) when is_list(modes),
+    do: Enum.flat_map(modes, fn %{"id" => id} -> [id] end)
+
+  defp mode_ids(_payload), do: []
 
   @impl true
   def start_turn(turn, _turn_id, runtime) do
@@ -153,10 +166,73 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   # So this refuses, and the refusal is structural rather than special-cased: the ACP
   # transport declares no `dynamic_configuration` and no `configuration_options`, so
   # `Ouroboros.Provider.session_configuration/3` and the Harness worker both refuse
-  # before reaching here. Wiring `session/set_mode` needs a mode vocabulary on the wire
-  # (Track C4), not a heuristic here.
+  # before reaching here.
+  #
+  # C4 adds the one honest way to move an ACP session's posture, and it is a different
+  # key: `mode`, carrying the agent's *own* mode id, validated against the `availableModes`
+  # that same agent published on `session/new`. It travels through `ask/3` rather than
+  # here, because a mode change is a correlated round trip whose answer matters and this
+  # callback's contract is a local `:ok`.
   @impl true
   def configure(_runtime, _changes), do: {:error, :unsupported}
+
+  # ── the runtime's own round trips ─────────────────────────────────────────────────
+
+  # `session/set_mode` takes `{sessionId, modeId}` and answers `{}`
+  # (https://agentclientprotocol.com/protocol/session-modes, v1). The id is checked
+  # against what the agent announced rather than sent hopefully: `availableModes` is the
+  # whole vocabulary, and a client asking for a mode outside it is asking for something
+  # this session cannot have.
+  @impl true
+  def ask(:set_mode, %{mode: mode}, runtime) when is_binary(mode) do
+    available = Map.get(runtime, :available_modes) || []
+
+    cond do
+      not is_binary(runtime.provider_session_id) ->
+        {:error, :session_not_open}
+
+      available == [] ->
+        {:error,
+         {:unsupported_configuration,
+          %{
+            field: :mode,
+            reason: :no_modes_announced,
+            message:
+              "this ACP agent announced no `availableModes` when the session opened, so it " <>
+                "has no mode vocabulary to set. Modes are the agent's own; Ouroboros will " <>
+                "not invent one."
+          }}}
+
+      mode not in available ->
+        {:error,
+         {:unsupported_configuration,
+          %{
+            field: :mode,
+            reason: :unknown_mode,
+            mode: mode,
+            modes: available,
+            message:
+              "this ACP agent announced #{inspect(available)}; #{inspect(mode)} is not one of " <>
+                "them and is refused rather than sent."
+          }}}
+
+      true ->
+        {:request, "session/set_mode",
+         %{"sessionId" => runtime.provider_session_id, "modeId" => mode}}
+    end
+  end
+
+  def ask(:set_mode, _args, _runtime), do: {:error, {:invalid_configuration, %{field: :mode}}}
+
+  # ACP publishes no compaction verb and no account-scoped model list. Both refuse by
+  # name rather than by a catch-all, so a verb added to the runtime cannot be silently
+  # swallowed here.
+  def ask(verb, _args, _runtime) when verb in [:compact, :models], do: {:error, :unsupported}
+  def ask(_verb, _args, _runtime), do: {:error, :unsupported}
+
+  @impl true
+  def answer(:set_mode, _result, _runtime), do: :ok
+  def answer(_verb, result, _runtime), do: result
 
   # The one pre-tool seam ACP gives. `Ouroboros.Control.Permissions` answers first; only
   # what it leaves as `:ask` becomes an approval the human sees.
@@ -175,6 +251,66 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   end
 
   def approval_request(_method, _params), do: :method_not_found
+
+  # ── the services the client serves ───────────────────────────────────────────────
+  #
+  # C4. The other direction of ACP: the agent calling Ouroboros. Every one of these is
+  # checked against the session this process speaks for before it becomes work — an agent
+  # naming another session's id is asking about a conversation it is not in — and the
+  # params are normalised here so `Session.Service` never has to read two spellings of a
+  # field. What each one is then judged as is that module's table.
+  @impl true
+  def service_request(method, params, runtime) do
+    with {:service, operation, args} <- service_plan(method, params) do
+      if session_matches?(params, runtime),
+        do: {:service, operation, args},
+        else: {:service, :unknown_session, %{}}
+    end
+  end
+
+  defp service_plan("fs/read_text_file", params) do
+    {:service, :fs_read,
+     %{
+       path: params["path"],
+       line: integer_or_nil(params["line"]),
+       limit: integer_or_nil(params["limit"])
+     }}
+  end
+
+  defp service_plan("fs/write_text_file", params),
+    do: {:service, :fs_write, %{path: params["path"], content: params["content"]}}
+
+  defp service_plan("terminal/create", params) do
+    {:service, :terminal_create,
+     %{
+       command: params["command"],
+       args: params["args"],
+       env: params["env"],
+       cwd: params["cwd"],
+       output_byte_limit: integer_or_nil(params["outputByteLimit"] || params["output_byte_limit"])
+     }}
+  end
+
+  defp service_plan("terminal/output", params), do: terminal_plan(:terminal_output, params)
+  defp service_plan("terminal/wait_for_exit", params), do: terminal_plan(:terminal_wait, params)
+  defp service_plan("terminal/kill", params), do: terminal_plan(:terminal_kill, params)
+  defp service_plan("terminal/release", params), do: terminal_plan(:terminal_release, params)
+  defp service_plan(_method, _params), do: :method_not_found
+
+  defp terminal_plan(operation, params),
+    do: {:service, operation, %{terminal_id: params["terminalId"] || params["terminal_id"]}}
+
+  # An absent `sessionId` is accepted: the agent is talking down its own connection, which
+  # serves exactly one session, and some agents omit it. A *wrong* one is not.
+  defp session_matches?(params, runtime) do
+    case params["sessionId"] || params["session_id"] do
+      nil -> true
+      id -> id == runtime.provider_session_id
+    end
+  end
+
+  defp integer_or_nil(value) when is_integer(value), do: value
+  defp integer_or_nil(_value), do: nil
 
   defp seam_response(decision, reason) do
     %ApprovalResponse{decision: decision, scope: :once, reason: reason, provider_options: %{}}
@@ -306,116 +442,16 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
 
   # The item-level `file_change` shape the client already parses: it reads `path` and the
   # +/- counts out of the unified text, so the diff has to be a real one with
-  # `--- a/<path>` / `+++ b/<path>` headers, not a summary.
-  defp file_change(%{"path" => path} = block) when is_binary(path) do
-    old = block["oldText"]
-    new = block["newText"]
-
-    [
-      %{
-        "path" => path,
-        "kind" => change_kind(old, new),
-        "diff" => unified_diff(path, text_or_empty(old), text_or_empty(new))
-      }
-    ]
-  end
+  # `--- a/<path>` / `+++ b/<path>` headers rather than a summary. `Session.Diff` renders
+  # it, because `Session.Service` must produce the same bytes for a write this runtime
+  # performed on the agent's behalf and the two must not drift.
+  defp file_change(%{"path" => path} = block) when is_binary(path),
+    do: [Diff.change(path, block["oldText"], block["newText"])]
 
   defp file_change(_block), do: []
 
-  # ACP spells a new file as a null `oldText`.
-  defp change_kind(nil, _new), do: "add"
-  defp change_kind(_old, nil), do: "delete"
-  defp change_kind(_old, _new), do: "update"
-
   defp change_status(%{"status" => status}) when is_binary(status), do: status
   defp change_status(_update), do: "completed"
-
-  defp text_or_empty(text) when is_binary(text), do: text
-  defp text_or_empty(_other), do: ""
-
-  defp unified_diff(path, old, new) do
-    header = "--- a/#{path}\n+++ b/#{path}\n"
-
-    if byte_size(old) > @max_diff_bytes or byte_size(new) > @max_diff_bytes do
-      header <> "@@ truncated: #{byte_size(old) + byte_size(new)} bytes @@\n"
-    else
-      header <> hunks(diff_lines(old), diff_lines(new))
-    end
-  end
-
-  # Line-wise, via the stdlib. A trailing newline is normalised away and no
-  # "\ No newline at end of file" marker is emitted: the diff is for reading, not for
-  # feeding back to `patch`.
-  defp diff_lines(""), do: []
-
-  defp diff_lines(text) do
-    lines = String.split(text, "\n")
-    if List.last(lines) == "", do: Enum.drop(lines, -1), else: lines
-  end
-
-  defp hunks(old_lines, new_lines) do
-    rows =
-      old_lines
-      |> List.myers_difference(new_lines)
-      |> numbered_rows()
-
-    rows
-    |> hunk_ranges()
-    |> Enum.map_join(fn {from, to} -> render_hunk(Enum.slice(rows, from..to//1)) end)
-  end
-
-  defp numbered_rows(operations) do
-    {rows, _old_line, _new_line} =
-      Enum.reduce(operations, {[], 1, 1}, fn {tag, lines}, accumulator ->
-        Enum.reduce(lines, accumulator, fn line, {rows, old_line, new_line} ->
-          case tag do
-            :eq -> {[{:eq, line, old_line, new_line} | rows], old_line + 1, new_line + 1}
-            :del -> {[{:del, line, old_line, new_line} | rows], old_line + 1, new_line}
-            :ins -> {[{:ins, line, old_line, new_line} | rows], old_line, new_line + 1}
-          end
-        end)
-      end)
-
-    Enum.reverse(rows)
-  end
-
-  defp hunk_ranges(rows) do
-    total = length(rows)
-
-    rows
-    |> Enum.with_index()
-    |> Enum.filter(fn {{tag, _line, _old, _new}, _index} -> tag != :eq end)
-    |> Enum.map(fn {_row, index} ->
-      {max(index - @diff_context, 0), min(index + @diff_context, total - 1)}
-    end)
-    |> Enum.reduce([], fn
-      {from, to}, [{previous_from, previous_to} | rest] when from <= previous_to + 1 ->
-        [{previous_from, max(previous_to, to)} | rest]
-
-      range, ranges ->
-        [range | ranges]
-    end)
-    |> Enum.reverse()
-  end
-
-  defp render_hunk(rows) do
-    old_rows = Enum.filter(rows, fn {tag, _line, _old, _new} -> tag in [:eq, :del] end)
-    new_rows = Enum.filter(rows, fn {tag, _line, _old, _new} -> tag in [:eq, :ins] end)
-
-    header =
-      "@@ -#{hunk_start(old_rows, :old)},#{length(old_rows)} " <>
-        "+#{hunk_start(new_rows, :new)},#{length(new_rows)} @@\n"
-
-    header <> Enum.map_join(rows, fn {tag, line, _old, _new} -> marker(tag) <> line <> "\n" end)
-  end
-
-  defp hunk_start([], _side), do: 0
-  defp hunk_start([{_tag, _line, old, _new} | _rest], :old), do: old
-  defp hunk_start([{_tag, _line, _old, new} | _rest], :new), do: new
-
-  defp marker(:eq), do: " "
-  defp marker(:del), do: "-"
-  defp marker(:ins), do: "+"
 
   # Names and one-line descriptions only. A command's `input.hint` is the agent's own
   # prompt-completion detail and nothing here renders it yet.
