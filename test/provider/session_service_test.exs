@@ -665,7 +665,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
 
   # create → wait_for_exit → output → release, each step triggered by the client's answer
   # to the one before it, so the whole lifecycle is one scripted conversation.
-  defp terminal_cases(command, options \\ []) do
+  defp terminal_cases(command, options) do
     create =
       %{"sessionId" => "sess-1", "command" => command}
       |> then(fn params ->

@@ -169,7 +169,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
       end
     end
 
-    test "the eleven declared keys are present for every bundled provider and Wire-safe" do
+    test "the twelve declared keys are present for every bundled provider and Wire-safe" do
       expected =
         Enum.sort([
           :transport,
@@ -182,10 +182,12 @@ defmodule Ouroboros.ProviderCapabilityTest do
           :multimodal,
           :dynamic_model,
           :dynamic_configuration,
-          # Not an `InteractionCapabilities` field: the harness has no notion of branching
-          # a session, so this one is derived from the dialect or the adapter's own
-          # provider-option list. It still has to be in the map a client reads.
-          :fork
+          # Not `InteractionCapabilities` fields: the harness has no notion of branching a
+          # session and none of folding one, so these two are derived from the dialect or
+          # the adapter's own provider-option list. They still have to be in the map a
+          # client reads.
+          :fork,
+          :compact
         ])
 
       assert Enum.sort(Provider.capability_keys()) == expected
@@ -195,7 +197,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
         assert capabilities |> Map.keys() |> Enum.sort() == expected
 
         for {key, value} <- Map.delete(capabilities, :transport) do
-          assert value in [:native, :managed, :process, :persistent, :per_turn, false],
+          assert value in [:native, :provider, :managed, :process, :persistent, :per_turn, false],
                  "#{provider} #{key} is #{inspect(value)}"
         end
 
@@ -217,9 +219,9 @@ defmodule Ouroboros.ProviderCapabilityTest do
         declared = Map.from_struct(dialect.capabilities())
         resolved = Provider.session_capabilities(provider)
 
-        # `:fork` is derived beside the declared set rather than read from it, so it is
-        # compared against the declaration that produces it instead.
-        for {key, value} <- Map.delete(resolved, :fork), key != :transport do
+        # `:fork` and `:compact` are derived beside the declared set rather than read from
+        # it, so they are compared against the declarations that produce them instead.
+        for {key, value} <- Map.drop(resolved, [:fork, :compact]), key != :transport do
           assert Map.fetch!(declared, key) == value
         end
       end
@@ -487,6 +489,37 @@ defmodule Ouroboros.ProviderCapabilityTest do
                      Provider.session_fork_options(provider)
         end
       end
+    end
+
+    test "every bundled provider's compact answer names who would do the folding" do
+      # C4. `:native` is this runtime holding the conversation; `:provider` is the Codex
+      # app server folding its own thread on `thread/compact/start`. Everything else
+      # neither hands its conversation over nor publishes a fold, and `interactive.compact`
+      # refuses there by capability rather than inventing a summary.
+      expected = %{
+        native: :native,
+        codex: :provider,
+        claude: false,
+        zai: false,
+        grok: false,
+        gemini: false,
+        amp: false,
+        opencode: false,
+        kimi: false,
+        pi: false
+      }
+
+      for {provider, compact} <- expected do
+        assert Provider.session_capabilities(provider).compact == compact,
+               "#{provider}: expected compact #{inspect(compact)}"
+
+        assert Provider.session_compact(provider) == compact
+      end
+
+      # The `:provider` answer is the dialect's own declaration, not a table here.
+      assert Dialect.Codex.compact_option() == {:compact, :provider}
+      refute function_exported?(Dialect.ACP, :compact_option, 0)
+      assert Provider.session_compact(:nothing_by_this_name) == false
     end
 
     test "Claude's fork is `--fork-session` beside `--resume`, and the argv proves it" do

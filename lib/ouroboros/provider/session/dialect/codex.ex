@@ -143,6 +143,17 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   def fork_option, do: {:fork, true}
 
   @doc """
+  This dialect's declaration that the *provider* can fold its own thread.
+
+  Read by `Ouroboros.Provider.compact_capability/1`, which is what
+  `Ouroboros.Interactive.Task` branches on. The value names who does the work: `:provider`,
+  never `:native` — the app server summarises its own thread and this runtime only asks,
+  so the report it produces says so instead of borrowing the native path's token counts.
+  """
+  @spec compact_option() :: {atom(), atom()}
+  def compact_option, do: {:compact, :provider}
+
+  @doc """
   The frame that folds this thread's context, for a runtime that can route one here.
 
   **Nothing calls this yet, and no capability claims otherwise.** `interactive.compact`

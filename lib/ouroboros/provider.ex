@@ -66,10 +66,11 @@ defmodule Ouroboros.Provider do
     :dynamic_configuration
   ]
 
-  # Not an `InteractionCapabilities` field: the harness has no notion of forking a session,
-  # so `:fork` is derived beside the declared set from the dialect or from the adapter
-  # table below. Listed here so the public shape stays one map with one docstring.
-  @derived_capability_keys [:fork]
+  # Not `InteractionCapabilities` fields: the harness has no notion of forking a session
+  # and none of folding one, so `:fork` and `:compact` are derived beside the declared set
+  # — from the dialect, or from the adapter table below. Listed here so the public shape
+  # stays one map with one docstring.
+  @derived_capability_keys [:fork, :compact]
 
   # Run adapters whose `provider_options.fork_session` is a **boolean** that branches the
   # session named by `provider_session_id`, rather than something else wearing the same
@@ -1350,8 +1351,56 @@ defmodule Ouroboros.Provider do
       @capability_keys
       |> Map.new(&{&1, Map.get(capabilities, &1, false)})
       |> Map.put(:fork, fork_capability(provider, spec, declared))
+      |> Map.put(:compact, compact_capability(declared))
     else
       _unresolvable -> nil
+    end
+  end
+
+  @doc """
+  Whether a session's conversation can be folded, and by whom.
+
+  Three answers, and the difference between the first two is the whole point.
+
+    * `:native` — this runtime holds the conversation, so it does the summarising and the
+      report carries real token counts. `Ouroboros.Provider.Native.Session.compact/2`.
+    * `:provider` — the provider folds its own thread and this runtime asks it to. Today
+      that is the Codex app server's `thread/compact/start`, declared by
+      `Dialect.Codex.compact_option/0`. The report says which side did the work and does
+      **not** borrow the native path's numbers, because nothing here measured them.
+    * `false` — the transport neither hands its conversation over nor offers a verb, and
+      `interactive.compact` refuses by capability. A summary invented for a transcript
+      Ouroboros never had would be a claim nothing supports.
+
+  Derived from the dialect for the same reason `:fork` is: where this runtime owns the
+  wire, only the dialect knows whether the protocol has the frame. A provider or transport
+  that does not resolve is `false` — this module does not claim a verb for a transport it
+  has never seen.
+  """
+  @spec session_compact(term(), atom() | nil) :: :native | :provider | false
+  def session_compact(provider, transport \\ nil) do
+    with {:ok, spec} <- Registry.spec(provider),
+         declared when not is_nil(declared) <- selected_transport(spec, transport) do
+      compact_capability(declared)
+    else
+      _unresolvable -> false
+    end
+  end
+
+  defp compact_capability(declared) do
+    cond do
+      Session.capabilities(declared).transport == :native -> :native
+      match?({:compact, _how}, dialect_compact_option(declared)) -> :provider
+      true -> false
+    end
+  end
+
+  defp dialect_compact_option(%{adapter: adapter}) do
+    with dialect when not is_nil(dialect) <- Session.dialect(adapter),
+         true <- function_exported?(dialect, :compact_option, 0) do
+      dialect.compact_option()
+    else
+      _no_dialect_compact -> nil
     end
   end
 
