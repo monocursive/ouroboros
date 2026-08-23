@@ -14,8 +14,24 @@ defmodule Ouroboros.Provider.Session.DialectTest do
       caps = module.capabilities()
       assert caps.approvals == :native
       assert caps.interrupt == :native
-      assert module.steer(%{}, %{prompt: "x"}, "req") == {:error, :unsupported}
     end
+
+    # Steering is the one interaction the two dialects no longer answer alike, so each
+    # one's refusal is asserted by name rather than through a shared loop. ACP has no
+    # steer verb at all and says so; the app server has `turn/steer` but its
+    # `expectedTurnId` is a precondition, so a runtime with no open thread is refused
+    # here rather than on the wire.
+    assert Dialect.ACP.capabilities().steer == false
+    assert Dialect.ACP.steer(%{}, %{prompt: "x"}, "req") == {:error, :unsupported}
+
+    assert Dialect.Codex.capabilities().steer == :native
+    assert Dialect.Codex.steer(%{}, %{prompt: "x"}, "req") == {:error, :session_not_open}
+
+    assert Dialect.Codex.steer(
+             %{provider_session_id: "thread-1", provider_turn_id: nil},
+             %{prompt: "x"},
+             "req"
+           ) == {:error, :no_active_turn}
 
     # `configure` is where the two dialects genuinely differ, so the completeness test
     # asserts each one's own answer rather than a shared refusal. The app server rebuilds

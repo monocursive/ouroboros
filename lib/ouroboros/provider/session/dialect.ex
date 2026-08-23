@@ -46,7 +46,14 @@ defmodule Ouroboros.Provider.Session.Dialect do
               {:request, String.t(), map()} | {:error, term()}
   @callback interrupt(runtime()) :: interrupt()
   @callback close_signal(runtime()) :: interrupt()
-  @callback steer(runtime(), TurnRequest.t(), String.t()) :: :ok | {:error, term()}
+  # `:ok` is a dialect that has already said everything it needs to. `{:request, …}` hands
+  # the frame back to `Session.Jsonl` instead of writing it here, and that is the only
+  # correct shape for a steer whose answer matters: the id comes from the session's own
+  # counter and the response is correlated, where a dialect writing its own frame would
+  # have to invent an id the session does not know it spent. `handle_rpc/3` then sees
+  # `{:steer, request_id}`.
+  @callback steer(runtime(), TurnRequest.t(), String.t()) ::
+              :ok | {:request, String.t(), map()} | {:error, term()}
   @callback configure(runtime(), map()) :: :ok | {:error, term()}
   @callback approval_request(String.t(), map()) :: approval()
   @callback approval_reply(ApprovalResponse.t(), map()) :: map()

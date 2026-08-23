@@ -142,8 +142,23 @@ defmodule Ouroboros.Provider.Session.Jsonl do
     end
   end
 
-  def handle_call({:steer, request, request_id}, _from, state),
-    do: {:reply, state.dialect.steer(state, request, request_id), state}
+  # A dialect that answers `{:request, …}` is steering over a correlated JSON-RPC call, so
+  # the id has to come from this process's counter and be recorded in `pending` — the
+  # dialect cannot do either, because the state it was handed is discarded on reply. That
+  # is why the frame comes back here rather than being written there: an id spent behind
+  # this process's back would be reused by the next `turn/start`.
+  def handle_call({:steer, request, request_id}, _from, state) do
+    case state.dialect.steer(state, request, request_id) do
+      {:request, method, params} ->
+        case request(state, method, params, {:steer, request_id}) do
+          {:ok, state} -> {:reply, :ok, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      other ->
+        {:reply, other, state}
+    end
+  end
 
   # A dialect that accepts a change is stating that the *request* it builds turns from
   # here on, so the runtime's own copy of the request has to move with it — the Harness

@@ -42,6 +42,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       process: :persistent,
       multi_turn: :native,
       follow_up: :managed,
+      steer: :native,
       interrupt: :native,
       approvals: :native,
       multimodal: :native,
@@ -144,8 +145,32 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   def close_signal(_runtime), do: :skip
 
+  # `turn/steer` takes `threadId`, `expectedTurnId` and the same `input: UserInput[]` union
+  # `turn/start` takes (`v2/TurnSteerParams.json`, codex-cli 0.147.0, committed under
+  # `test/support/codex_schema/`), so a steer carries text and images exactly as a turn
+  # does — `turn_input/1` builds both and there is no second rendering to drift.
+  #
+  # `expectedTurnId` is a *precondition*, not a label: the schema says the request fails
+  # when it does not match the currently active turn. So a steer with no provider turn id
+  # in hand is refused here by name rather than sent with a guess and failed on the wire.
+  # `Jido.Harness.SessionWorker` already refuses a steer with no active turn
+  # (`{:error, :no_active_turn}`); this is the same refusal one layer down, for the window
+  # where the harness still has a turn and the app server has already ended it.
   @impl true
-  def steer(_runtime, _request, _request_id), do: {:error, :unsupported}
+  def steer(%{provider_session_id: thread_id, provider_turn_id: turn_id}, turn, _request_id)
+      when is_binary(thread_id) and is_binary(turn_id) do
+    {:request, "turn/steer",
+     %{
+       "threadId" => thread_id,
+       "expectedTurnId" => turn_id,
+       "input" => turn_input(turn)
+     }}
+  end
+
+  def steer(%{provider_session_id: thread_id}, _turn, _request_id) when is_binary(thread_id),
+    do: {:error, :no_active_turn}
+
+  def steer(_runtime, _turn, _request_id), do: {:error, :session_not_open}
 
   # An app-server thread has no "set these options" method: `turn/start` carries model,
   # effort, approval policy and sandbox policy on every turn, rebuilt from the session
@@ -276,6 +301,24 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   end
 
   def handle_rpc({:interrupt, _turn_id}, _message, _runtime), do: []
+
+  # `TurnSteerResponse` is `{turnId}` — the turn the steered input joined. A steer that
+  # failed its `expectedTurnId` precondition is the case worth saying out loud: the turn
+  # ended between the harness's check and this frame, so the human's words went nowhere
+  # and a silent `:ok` would have claimed otherwise.
+  def handle_rpc({:steer, request_id}, message, runtime) do
+    case rpc_result(message) do
+      {:ok, result} ->
+        [{:assign, %{provider_turn_id: steer_turn_id(result) || runtime.provider_turn_id}}]
+
+      {:error, reason} ->
+        [
+          {:emit, :provider_event,
+           %{"kind" => "steer_failed", "error" => error_text(reason) || inspect(reason)},
+           [request_id: request_id]}
+        ]
+    end
+  end
 
   def handle_rpc(pending, message, _runtime) do
     [
@@ -590,6 +633,11 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   defp turn_id(%{"turn" => %{"id" => id}}) when is_binary(id), do: id
   defp turn_id(%{"id" => id}) when is_binary(id), do: id
   defp turn_id(_), do: nil
+
+  # `turn/steer` answers with a bare `turnId` rather than the `turn` object every other
+  # result carries, so it gets its own reader instead of a looser `turn_id/1`.
+  defp steer_turn_id(%{"turnId" => id}) when is_binary(id), do: id
+  defp steer_turn_id(result), do: turn_id(result)
 
   defp item_type(%{"type" => type}) when is_binary(type), do: type
   defp item_type(_item), do: "unknown"
