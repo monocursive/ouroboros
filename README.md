@@ -724,6 +724,19 @@ the provider takes one, through whichever clipboard tool the machine has, and fa
 through to an ordinary text paste otherwise. `/effort low|medium|high` sets the reasoning
 effort of the next turn only.
 
+An image in the conversation is drawn as one labelled row: `▣ [image 1280×720 png ·
+.ouroboros/images/image-7.png]`. The terminal is asked once, at startup, which graphics
+protocol it speaks — kitty graphics with the protocol's own query rather than a guess from
+`TERM`, iTerm2's inline images by an allowlist of terminals documented to implement the
+escape (it has no query), sixel from DA1 — and **this build draws the placeholder either
+way**: the encoders are written and tested, the placement pass that puts pixels on the
+screen is not, and shipping the unverified half is exactly the claim a terminal client
+should not make. Sizing is bounded to 40 rows and the pane width with the aspect kept,
+nothing over 16 MiB is read, `--ax-screen-reader` always gets the placeholder, and
+`/export` carries images by path and never as bytes. A path outside the session workspace
+is shown as text and **never opened** — not even to find out how big it is. `ctrl+x i`
+hands the newest one to `$OPENER`, `open`, or `xdg-open`.
+
 `,` opens settings: the runtime's facts as it reports them, and this client's own
 defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand
 in for `ouro new` flags. They live in `~/.config/ouroboros/config.toml`
