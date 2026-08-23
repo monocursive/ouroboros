@@ -1,0 +1,29 @@
+untrusted comment: Ouroboros release signing key — NOT PROVISIONED
+# This repository has no release signing key yet, and this file says so rather than
+# carrying a key nobody holds the private half of. `ouro update` reads this file at
+# compile time (tui/src/update.rs, include_str!) and every path through the command
+# refuses while it is in this state; scripts/install.sh says the same thing out loud
+# before it falls back to the checksum-only check.
+#
+# To provision one — see docs/DISTRIBUTION.md for the whole procedure:
+#
+#   minisign -G -W -p dist/release.pub -s ouro-release.key
+#
+#   `-W` writes the secret key without a password, which is what a non-interactive CI
+#   signer needs. The secret key is then a secret in the deployment's own store:
+#   put the *contents* of ouro-release.key in the GitHub Actions repository secret
+#   OURO_RELEASE_SIGNING_KEY, keep an offline copy somewhere a laptop failure cannot
+#   reach, and delete the working copy. Commit the regenerated dist/release.pub —
+#   including the key id minisign writes into its comment line, which is how a person
+#   can tell two keys apart by eye and how `ouro update` names the key it trusted.
+#
+# A provisioned file is exactly the two lines minisign writes: a comment line, then one
+# base64 line holding 42 bytes —
+#
+#   [0..2]   signature algorithm, the ASCII bytes "Ed"
+#   [2..10]  key id, 8 bytes (minisign prints it as the reversed-byte hex of these)
+#   [10..42] the Ed25519 public key, 32 bytes
+#
+# Lines beginning with `#` are this project's annotation, not part of minisign's format.
+# Both readers skip them, and both take the first line that is neither a comment nor the
+# `untrusted comment:` header as the key. There is no such line below, on purpose.

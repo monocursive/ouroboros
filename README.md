@@ -2653,18 +2653,51 @@ start and follow sessions anywhere in the connected fleet.
 
 ### Install the same binary
 
-Tagged builds publish one self-contained asset for each supported macOS/Linux architecture
-plus `SHA256SUMS` on the repository's Releases page. Download both files, verify the
-matching checksum, then put the asset somewhere on `PATH` on every machine:
+Tagged builds publish one self-contained asset for each supported macOS/Linux
+architecture, a `SHA256SUMS` manifest, and `SHA256SUMS.minisig` — a detached Ed25519
+(minisign) signature over that manifest, made by a key whose public half is committed at
+`dist/release.pub` and compiled into `ouro` itself.
+
+**Nothing below works yet, and the reason is stated rather than hidden.** No release
+signing key has been generated (`dist/release.pub` is committed *unprovisioned*), the
+configured remote is not a public release host, and no tag has ever run the release
+workflow. Every command here refuses with that reason instead of half-working. Until then,
+build on each target platform with `make ouro` and copy `tui/target/release/ouro`.
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) has the whole picture: what CI produces, how
+the key is managed, and what each check is worth.
+
+```sh
+# One line, once a release host is configured (see docs/DISTRIBUTION.md):
+curl -fsSL <base-url>/install.sh | sh
+
+# Or from a checkout, against any release directory or mirror:
+sh scripts/install.sh --from <url-or-directory>          # --dry-run to see the plan
+```
+
+`install.sh` detects your OS and CPU, always checks the asset's SHA-256 against
+`SHA256SUMS`, verifies the minisign signature when `minisign` is installed, installs to
+`~/.local/bin` (`OURO_INSTALL_DIR` to change it), and never runs `sudo`. When it cannot
+check the signature it says which of the three prerequisites is missing and states that
+what remains is a corruption check — because a checksum fetched from the same place as
+the binary is not a security check.
+
+Homebrew, once a tap exists (`dist/homebrew/ouro.rb` is the formula template):
+
+```sh
+brew tap <owner>/ouroboros && brew install ouro
+```
+
+By hand, which is what the one-liner does:
 
 ```sh
 ASSET=ouro-VERSION-aarch64-apple-darwin   # choose the one for this OS/CPU
 
-# Linux
-grep "  ${ASSET}$" SHA256SUMS | sha256sum -c -
+# The check that is worth something: the project's offline key signed this manifest.
+minisign -V -p dist/release.pub -m SHA256SUMS
 
-# macOS
-grep "  ${ASSET}$" SHA256SUMS | shasum -a 256 -c -
+# And then the manifest's authority extends to the binary.
+grep "  ${ASSET}$" SHA256SUMS | sha256sum -c -    # Linux
+grep "  ${ASSET}$" SHA256SUMS | shasum -a 256 -c -  # macOS
 
 mkdir -p ~/.local/bin
 install -m 0755 "$ASSET" ~/.local/bin/ouro
@@ -2676,6 +2709,25 @@ grep -q 'HOME/.local/bin' ~/.zshrc 2>/dev/null || \
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+### Staying current
+
+```sh
+ouro update --check      # exit 10 if a newer release exists, 0 if not
+ouro update              # verify the signature, then the digest, then replace atomically
+```
+
+`ouro update` verifies the release signature against the key compiled into the binary,
+checks the download's SHA-256 against that *signed* manifest, and renames the verified
+file over the installed one — `rename(2)` is atomic and the running process keeps the
+inode it started from, so a failure at any earlier point leaves your binary untouched. A
+build without a release public key **refuses every path, including `--check`**: a version
+number it cannot authenticate is not a fact worth reporting. It never asks for root, and
+it refuses to replace a Homebrew- or Nix-owned binary, naming that package manager's
+upgrade command instead. `--from <url|dir>` uses a mirror or a directory you staged
+yourself; `--allow-downgrade` is required to go backwards. There is no `--channel`: this
+project publishes one tag stream, and a `stable`/`nightly` flag would be a scheme invented
+at the CLI rather than one followed.
+
 Use assets from the same tag across the fleet. CPU architecture may differ, but remote
 placement requires the same Ouroboros version, OTP release, and fleet protocol revision;
 `ouro fleet doctor` names a mismatch and the runtime refuses to place paid/write-capable
@@ -2684,13 +2736,11 @@ work there until the machine is upgraded.
 The current Linux artifacts are native Ubuntu 24.04 GNU builds, not static binaries;
 use Ubuntu 24.04 or a distribution with a compatible glibc, or run `make ouro` on an
 older target. The current macOS workflow has no Developer ID/notarization credentials,
-so its artifacts are checksum-verifiable but unsigned. After verifying the official
-checksum, Gatekeeper may require `xattr -d com.apple.quarantine ./ouro-*` before the
-first run. The release workflow says this plainly until signing is actually configured.
-
-Until the first tagged workflow has run, build the binary on each target platform with
-`make ouro` and copy `tui/target/release/ouro`; the release workflow is intentionally
-marked unproven in source rather than implying an artifact already exists.
+so its artifacts are signature- and checksum-verifiable but not notarized: a minisign
+signature satisfies a person, not Gatekeeper. After verifying, Gatekeeper may require
+`xattr -d com.apple.quarantine ./ouro-*` before the first run — which is what
+`install.sh` does for you, after its own checks pass. The release workflow says this
+plainly until Apple signing is actually configured.
 
 The machines need private, mutually reachable names or addresses. Tailscale is the
 easiest first setup; private DNS or private IPv4 addresses work too. On every machine:

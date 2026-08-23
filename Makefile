@@ -12,7 +12,7 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist
+.PHONY: help dev test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -24,6 +24,7 @@ help:
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
 	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
 	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
+	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -49,6 +50,16 @@ test:
 bench-local:
 	@echo "==> bench-local: the local eval corpus (no model key, no network, no docker)"
 	./bench/local/run.sh
+
+# Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
+# tools `make test` must not require. The install.sh half needs only `sh` and a sha256
+# tool and would be safe there; the release.yml half needs a YAML parser (python3 with
+# PyYAML, or ruby), and a release whose four native runners fail because one of them lacks
+# PyYAML is a worse outcome than a check somebody has to type. See docs/DISTRIBUTION.md §7.
+dist-check:
+	@echo "==> dist-check: install.sh against a local fixture release, then release.yml"
+	sh scripts/test-install.sh
+	sh scripts/check-release-workflow.sh
 
 # The fixtures are the seam between two toolchains that cannot call each other's tests, so
 # a regeneration that changes bytes is a protocol change and has to be committed as one.

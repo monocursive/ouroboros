@@ -225,6 +225,24 @@ pub enum Command {
         path: PathBuf,
     },
 
+    /// Replace this binary with a signed release, or refuse and say why.
+    ///
+    /// Every path through this command needs the release public key compiled in from
+    /// `dist/release.pub`: the Ed25519 signature over `SHA256SUMS` is the only thing that
+    /// makes a download trustworthy, and a checksum fetched from the same place as the
+    /// binary proves nothing on its own. A build without that key refuses rather than
+    /// installing something it cannot check.
+    ///
+    /// Exit codes: 0 up to date or updated; 10 (`--check`) an update exists; 11 no
+    /// release key in this build; 12 verification failed; 13 refused as a downgrade;
+    /// 14 the installed binary is not this command's to replace; 15 nothing could be
+    /// fetched; 16 no asset for this platform.
+    ///
+    /// There is no `--channel`: this project publishes one tag stream and no
+    /// stable/nightly split exists to follow. `docs/DISTRIBUTION.md` says what would have
+    /// to change first.
+    Update(UpdateArgs),
+
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
 }
@@ -256,6 +274,28 @@ pub struct LedgerArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+/// `ouro update`'s flags.
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Print the running and published versions and exit 0 or 10. Downloads the signed
+    /// manifest and verifies it — an unverifiable version number is not an answer — but
+    /// fetches no asset and replaces nothing.
+    #[arg(long)]
+    pub check: bool,
+
+    /// A mirror: the URL or directory holding `ouro-<version>-<triple>`, `SHA256SUMS`,
+    /// and `SHA256SUMS.minisig`. `https://`, `http://`, `file:///`, or a path. The
+    /// signature is checked exactly the same way wherever the bytes came from, which is
+    /// what makes a mirror safe to use at all.
+    #[arg(long, value_name = "URL")]
+    pub from: Option<String>,
+
+    /// Install a release older than the running binary. Refused without this, because a
+    /// rollback is a thing to mean rather than a thing to be handed.
+    #[arg(long)]
+    pub allow_downgrade: bool,
 }
 
 /// The vendor hook events this build answers. One so far.

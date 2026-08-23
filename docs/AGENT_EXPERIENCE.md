@@ -163,7 +163,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | I1 | landed | `tool_call` entries for the native agent, checkpointed before the tool runs (a ledger that cannot record stops the tool) and settled with `completed\|failed\|refused\|timed_out`, content-minimised subjects (paths, a command digest, hosts, the MCP server and tool); `approval` entries for every human answer on every provider, written before the answer is forwarded, with `actor` (`human`, or `headless` — `ouro run` now names itself), `scope`, `rule_id`; `ledger_ref` `{node, id}` on `tool_call` and `approval_resolved` events; fair retention across kinds so a flood of tool calls cannot evict the only forge. Landing it exposed that the Claude bridge had been calling `Permissions.record/2` with the wrong shape since C2 — no bridged decision had ever reached the ledger; fixed the same day with a test against the real engine |
 | I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
 | I3 | landed | `ledger.{list,get,export}` (`fleet: true` fans out over bounded `:erpc`, merges by `{node, sequence}`, names the nodes that did not answer); `ledger.export` is JSONL with `hash(n) = sha256(hash(n-1) ‖ line(n))` over a canonical encoding — client-verifiable, not tamper-evident storage; `ouro ledger [--fleet] [--since N] [--json]` |
-| J1–J5 | pending | distribution |
+| J1–J3 | landed (unexercised in CI) | `release.yml` signs `SHA256SUMS` with a minisign-compatible Ed25519 key from a CI secret and verifies its own signature before publishing; `dist/release.pub` is committed **unprovisioned** on purpose (a key nobody can sign with is worse than no key) and every reader treats that as "no key"; `ouro update [--check] [--from] [--allow-downgrade]` verifies the signature (both minisign forms, the global signature over the trusted comment too), then the digest, then replaces the binary atomically (write beside, fsync, rename), refusing with a documented exit code for each failure — **a build without a release key refuses even `--check`**; no HTTP crate (`curl`/`wget` with bounds and proxy discipline); `scripts/install.sh` (sha256 always, minisign when present and says so when absent, `~/.local/bin`, no sudo); Homebrew template + filler; `docs/DISTRIBUTION.md`; 54 structural checks on the workflow. Nothing has run in CI; the minisign verifier is cross-checked against an independent test signer, not yet against `minisign` itself; no key rotation story; no Windows; no channels |
 
 ### Scorecard now
 
@@ -193,11 +193,11 @@ what a user of `ouro` on `review-fixes` gets today.
 | 19 | Background handoff + remote attach | 2 | 2 |
 | 20 | Cross-machine / fleet coordination | 2 | 3 (fleet ledger queries; triage across nodes in the rail, the picker, and `ouro agents`) |
 | 21 | Programmability | 1 | 2 (hooks, skills, `ouro run --json`, MCP server; no ACP agent mode yet) |
-| 22 | Install / update / auth | 1 | 1 |
+| 22 | Install / update / auth | 1 | 2 (a signed self-update and an installer exist and refuse correctly, but no release has been cut with them and no key is provisioned; auth unchanged) |
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **52** |
+| | **Total / 75** | **23** | **53** |
 
 ### Honest limits added this wave
 

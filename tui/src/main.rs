@@ -61,10 +61,16 @@ async fn main() -> ExitCode {
         // stream it chose, so nothing is printed here.
         Err(error) => match error.downcast_ref::<ouro::run::Exit>() {
             Some(exit) => ExitCode::from(exit.code()),
-            None => {
-                eprintln!("ouro: {error:#}");
-                ExitCode::FAILURE
-            }
+            // `ouro update` documents its own codes for the same reason `ouro run` does:
+            // a script that branches on "an update is available" needs a number, not a
+            // sentence. It has already printed whichever of the two it had to.
+            None => match error.downcast_ref::<ouro::update::Exit>() {
+                Some(exit) => ExitCode::from(exit.code()),
+                None => {
+                    eprintln!("ouro: {error:#}");
+                    ExitCode::FAILURE
+                }
+            },
         },
     }
 }
@@ -209,6 +215,11 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::HoldRuntimeRecoveryLock { path }) => {
             runtime::hold_runtime_recovery_lock(&path)
         }
+        Some(Command::Update(args)) => ouro::update::main(&ouro::update::Options {
+            check: args.check,
+            from: args.from,
+            allow_downgrade: args.allow_downgrade,
+        }),
         Some(Command::Version) => {
             print!("{}", version());
             Ok(())

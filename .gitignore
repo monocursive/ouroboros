@@ -32,5 +32,9 @@ ouroboros-*.tar
 /tui/target/
 
 # Where `make dist` names a built client for the platform it can run on. The artifact of
-# record is the one a tagged build uploads, not a copy somebody made locally.
-/dist/
+# record is the one a tagged build uploads, not a copy somebody made locally. The two
+# things under dist/ that are *source* rather than output — the release signing public
+# key `ouro update` compiles in, and the Homebrew formula template — are kept.
+/dist/*
+!/dist/release.pub
+!/dist/homebrew/
