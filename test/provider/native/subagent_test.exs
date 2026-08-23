@@ -37,12 +37,15 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     data_dir = Path.join(root, "data")
     File.mkdir_p!(data_dir)
 
-    previous = %{
-      native_data_dir: Application.get_env(:ouroboros, :native_data_dir),
-      native_model_module: Application.get_env(:ouroboros, :native_model_module),
-      data_dir: Application.get_env(:ouroboros, :data_dir),
-      roots: Application.get_env(:ouroboros, :workspace_allowed_roots)
-    }
+    # Keyed by the real application keys, because `restore/2` puts them back by the key it
+    # is given: a friendlier name here would leave `:workspace_allowed_roots` pointing at a
+    # directory this test is about to delete, and the next module to restart the
+    # application would fail to start at all.
+    previous =
+      Map.new(
+        [:native_data_dir, :native_model_module, :data_dir, :workspace_allowed_roots],
+        &{&1, Application.get_env(:ouroboros, &1)}
+      )
 
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
