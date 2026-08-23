@@ -86,6 +86,8 @@ pub enum Action {
     LeaderCopy,
     LeaderScrollback,
     LeaderEditorView,
+    /// A11. Hand the newest image in this conversation to the system opener.
+    LeaderOpenImage,
     LeaderSteer,
     LeaderApproval,
     /// B7. Save the permission rule a refused `!` command's refusal named.
@@ -108,7 +110,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 41] = [
+    pub const ALL: [Action; 42] = [
         Self::Send,
         Self::Steer,
         Self::Newline,
@@ -134,6 +136,7 @@ impl Action {
         Self::LeaderCopy,
         Self::LeaderScrollback,
         Self::LeaderEditorView,
+        Self::LeaderOpenImage,
         Self::LeaderSteer,
         Self::LeaderApproval,
         Self::LeaderShellRule,
@@ -180,6 +183,7 @@ impl Action {
             Self::LeaderCopy => "leader.copy",
             Self::LeaderScrollback => "leader.scrollback",
             Self::LeaderEditorView => "leader.editor_view",
+            Self::LeaderOpenImage => "leader.open_image",
             Self::LeaderSteer => "leader.steer",
             Self::LeaderApproval => "leader.approval",
             Self::LeaderShellRule => "leader.shell_rule",
@@ -216,6 +220,7 @@ impl Action {
             | Self::LeaderCopy
             | Self::LeaderScrollback
             | Self::LeaderEditorView
+            | Self::LeaderOpenImage
             | Self::LeaderSteer
             | Self::LeaderApproval
             | Self::LeaderShellRule
@@ -265,6 +270,7 @@ impl Action {
             Self::LeaderCopy => "y",
             Self::LeaderScrollback => "[",
             Self::LeaderEditorView => "v",
+            Self::LeaderOpenImage => "i",
             Self::LeaderSteer => "s",
             Self::LeaderApproval => "a",
             Self::LeaderShellRule => "r",
@@ -312,6 +318,7 @@ impl Action {
             Self::LeaderCopy => "copy last message",
             Self::LeaderScrollback => "transcript to scrollback",
             Self::LeaderEditorView => "transcript in $EDITOR",
+            Self::LeaderOpenImage => "newest image in the system viewer",
             Self::LeaderSteer => "steer",
             Self::LeaderApproval => "approval",
             Self::LeaderShellRule => "save the rule a refused ! command named",

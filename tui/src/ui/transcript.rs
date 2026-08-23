@@ -72,6 +72,20 @@ pub enum Note {
     Local {
         block: crate::ui::transcript_cells::Block,
     },
+    /// A11. An image that entered the conversation here.
+    ///
+    /// Client-side for the same reason a `/compact` report is, and for one more: the
+    /// runtime's `input_accepted` carries the prompt's `text` and nothing else
+    /// (`Interactive.Task.enrich_chat_input/2`), so the attachments a turn was sent with
+    /// are simply not in the ledger. Drawing them from the composer's own record is
+    /// therefore the only honest way to show them at all — and it is honest, because it is
+    /// this client reporting what it itself sent, not a claim about what the runtime saw.
+    ///
+    /// The consequence is stated rather than hidden: these do **not** survive a reconnect
+    /// or a replay from the ledger, because there is nothing in the ledger to replay.
+    Image {
+        cell: crate::ui::transcript_cells::ImageCell,
+    },
 }
 
 impl Note {
@@ -86,6 +100,7 @@ impl Note {
             Self::ClientDropped => "this client could not take some event frames here".to_string(),
             Self::Reconnected => "the connection was re-established here".to_string(),
             Self::Local { block } => block.text(),
+            Self::Image { cell } => cell.label(),
         }
     }
 }
@@ -819,6 +834,21 @@ impl Watch {
     /// without bound.
     pub fn local_note(&mut self, block: crate::ui::transcript_cells::Block) {
         self.note(Note::Local { block }, self.newest());
+    }
+
+    /// A11. Records an image the composer just sent, where the conversation is now.
+    pub fn image_note(&mut self, cell: crate::ui::transcript_cells::ImageCell) {
+        self.note(Note::Image { cell }, self.newest());
+    }
+
+    /// A11. The most recently recorded image in this conversation, by the path it was
+    /// named with. `None` where none was sent — and where the notes have rolled past it,
+    /// which is the same bound every other note lives under.
+    pub fn newest_image(&self) -> Option<String> {
+        self.notes.values().rev().find_map(|note| match note {
+            Note::Image { cell } => Some(cell.named.clone()),
+            _otherwise => None,
+        })
     }
 
     pub fn end(&mut self, status: String) {

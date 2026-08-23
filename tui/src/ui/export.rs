@@ -335,6 +335,16 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
             }
             out.push('\n');
         }
+        // A11. **By path, and only by path.** An export is a text file someone shares, and
+        // a base64 payload embedded in it would be megabytes of unreadable noise in a
+        // document whose whole point is that it can be read and diffed. The same label the
+        // pane draws is written here — dimensions, format, path, and the reason where
+        // there is one — because that is exactly the information a reader needs to go and
+        // find the picture.
+        Cell::Image(image) => {
+            label(out, &image.label());
+            out.push('\n');
+        }
         Cell::Diff(cell) => {
             // The counts are the parse's, exactly as on screen. `Diff::additions` — the
             // provider's own claim — is reported beside them only when the two disagree,

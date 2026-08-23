@@ -1241,6 +1241,72 @@ pub fn persist(app: &mut App) {
     }
 }
 
+/// A11. Hands a local file to whatever this desktop opens files with.
+///
+/// `$OPENER` first, so an operator who wants `feh` or `imv` says so once; then the
+/// platform's own — `open`, `xdg-open`, `start`. Spawned and not waited on: an image viewer
+/// is a window the operator closes when they are done, and a TUI that blocked on it would
+/// be a frozen terminal behind a picture.
+///
+/// The App has already resolved the path through the workspace rule, so this function's
+/// only job is the process. It still refuses a path that stopped existing between the
+/// keystroke and here, because spawning an opener on a name that is no longer a file is a
+/// worse error message than this one.
+fn open_pending_path(app: &mut App) {
+    let Some(path) = app.take_open_path() else {
+        return;
+    };
+
+    if !path.is_file() {
+        app.inform(
+            format!("{} is no longer a file; it was not opened", path.display()),
+            app::NoticeKind::Warn,
+        );
+        return;
+    }
+
+    let opener = env::var("OPENER")
+        .ok()
+        .map(|opener| opener.trim().to_string())
+        .filter(|opener| !opener.is_empty());
+
+    let result = match opener {
+        // Through `sh -c` with the path as `$1`, the same indirection `$EDITOR` uses, so
+        // an `OPENER` that is a command *with arguments* works and a path with a space in
+        // it still arrives as one argument.
+        Some(opener) => ProcessCommand::new("sh")
+            .arg("-c")
+            .arg(format!("{opener} \"$1\""))
+            .arg("ouro-opener")
+            .arg(&path)
+            .spawn(),
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                ProcessCommand::new("open").arg(&path).spawn()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                ProcessCommand::new("xdg-open").arg(&path).spawn()
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "this platform has no configured opener; set $OPENER",
+                ))
+            }
+        }
+    };
+
+    if let Err(error) = result {
+        app.inform(
+            format!("could not open {}: {error}", path.display()),
+            app::NoticeKind::Error,
+        );
+    }
+}
+
 fn open_pending_url(app: &mut App) {
     let Some(url) = app.take_open_url() else {
         return;
@@ -1383,6 +1449,7 @@ pub async fn run(
         // settings overlay closing.
         persist(&mut app);
         open_pending_url(&mut app);
+        open_pending_path(&mut app);
         copy_pending(&mut app);
         clipboard_pending(&mut app, &sender);
         chrome_pending(&mut app);

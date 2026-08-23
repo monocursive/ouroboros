@@ -579,6 +579,110 @@ fn within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+/// Whether a name ends in an extension one of these formats uses.
+///
+/// A name, not a file: this is what lets a path an event mentioned be recognised as an
+/// image without opening it, which is the order the path rule requires — recognise, then
+/// check containment, then read.
+pub fn format_of(named: &str) -> Option<Format> {
+    let extension = Path::new(named.trim())
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "png" => Some(Format::Png),
+        "jpg" | "jpeg" => Some(Format::Jpeg),
+        "gif" => Some(Format::Gif),
+        "webp" => Some(Format::Webp),
+        _other => None,
+    }
+}
+
+/// What a transcript can honestly say about one image path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Described {
+    /// The header, where the file was inside the workspace and readable.
+    pub header: Option<Header>,
+    /// Why there is no header, where there is none. `None` when there is one.
+    pub note: Option<String>,
+    /// The canonical local path, where the rule allowed one. Absent for a file on another
+    /// machine, a path outside the workspace, or one this client refused to open.
+    pub path: Option<PathBuf>,
+}
+
+/// Reads at most [`HEADER_BYTES`] of a named image, if the path rule allows it.
+///
+/// The one function in this module that touches a file, and it does so only after
+/// [`inside_workspace`] has answered. Every failure is a *sentence*, not an absence: a
+/// placeholder that said nothing about why it was a placeholder would leave an operator
+/// wondering whether the picture was missing or the client was broken.
+pub fn describe(workspace: Option<&Path>, named: &str) -> Described {
+    let refuse = |note: &str| Described {
+        header: None,
+        note: Some(note.to_string()),
+        path: None,
+    };
+
+    let Some(workspace) = workspace else {
+        return refuse("no workspace for this session; not read");
+    };
+
+    let Some(path) = inside_workspace(workspace, named) else {
+        // One sentence for two cases on purpose. A path outside the workspace and a path
+        // that is not on this machine are both "this client will not open it", and telling
+        // the two apart would mean probing outside the workspace to find out.
+        return refuse("not readable inside this workspace; not read");
+    };
+
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return refuse("could not be read");
+    };
+
+    if metadata.len() > MAX_BYTES {
+        return Described {
+            header: None,
+            note: Some(format!(
+                "{} bytes, over this client's {} MiB ceiling; not read",
+                metadata.len(),
+                MAX_BYTES / (1024 * 1024)
+            )),
+            path: Some(path),
+        };
+    }
+
+    let mut prefix = vec![0u8; HEADER_BYTES.min(metadata.len() as usize)];
+
+    {
+        use std::io::Read;
+
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            return refuse("could not be opened");
+        };
+
+        if file.read_exact(&mut prefix).is_err() {
+            return Described {
+                header: None,
+                note: Some("could not be read".to_string()),
+                path: Some(path),
+            };
+        }
+    }
+
+    match header(&prefix) {
+        Some(header) => Described {
+            header: Some(header),
+            note: None,
+            path: Some(path),
+        },
+        None => Described {
+            header: None,
+            note: Some("not a format this client reads".to_string()),
+            path: Some(path),
+        },
+    }
+}
+
 /// The label a placeholder draws, and the one a screen reader hears.
 ///
 /// States what is known and nothing else: a file whose header could not be read gets no
@@ -1164,6 +1268,88 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn a_name_is_recognised_as_an_image_without_opening_anything() {
+        assert_eq!(format_of("shot.PNG"), Some(Format::Png));
+        assert_eq!(
+            format_of(".ouroboros/images/image-1.png"),
+            Some(Format::Png)
+        );
+        assert_eq!(format_of("a.jpg"), Some(Format::Jpeg));
+        assert_eq!(format_of("a.jpeg"), Some(Format::Jpeg));
+        assert_eq!(format_of("a.gif"), Some(Format::Gif));
+        assert_eq!(format_of("a.webp"), Some(Format::Webp));
+
+        for named in [
+            "notes.md",
+            "Makefile",
+            "",
+            "png",
+            "a.png.txt",
+            "a.svg",
+            "a.bmp",
+        ] {
+            assert_eq!(format_of(named), None, "{named}");
+        }
+    }
+
+    #[test]
+    fn describing_an_image_says_why_wherever_it_cannot_say_how_big() {
+        let root = std::env::temp_dir().join(format!("ouro-describe-{}", std::process::id()));
+        let inside = root.join(".ouroboros/images");
+        std::fs::create_dir_all(&inside).expect("a scratch workspace");
+        std::fs::write(inside.join("shot.png"), png_bytes(800, 600)).expect("a scratch png");
+        std::fs::write(inside.join("notes.txt"), b"not a picture").expect("a scratch file");
+
+        let described = describe(Some(&root), ".ouroboros/images/shot.png");
+        assert_eq!(
+            described.header,
+            Some(Header {
+                format: Format::Png,
+                width: 800,
+                height: 600
+            })
+        );
+        assert_eq!(described.note, None);
+        assert!(described.path.is_some());
+
+        // Every other outcome is a sentence rather than a silence.
+        for (named, needle) in [
+            ("/etc/passwd", "not readable inside this workspace"),
+            ("../escaped.png", "not readable inside this workspace"),
+            (
+                ".ouroboros/images/gone.png",
+                "not readable inside this workspace",
+            ),
+            (
+                ".ouroboros/images/notes.txt",
+                "not a format this client reads",
+            ),
+        ] {
+            let described = describe(Some(&root), named);
+            assert_eq!(described.header, None, "{named}");
+            assert!(
+                described
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains(needle)),
+                "{named}: {:?}",
+                described.note
+            );
+        }
+
+        // A session whose workspace is on another machine has no local file to read, and
+        // says that rather than reporting a size it invented.
+        let described = describe(None, ".ouroboros/images/shot.png");
+        assert_eq!(described.header, None);
+        assert!(described
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("no workspace")));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // -----------------------------------------------------------------------------------

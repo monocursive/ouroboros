@@ -924,6 +924,8 @@ pub struct App {
     scrollback_dump_pending: Option<String>,
     /// The transcript the I/O driver should open in `$VISUAL`/`$EDITOR`, read-only.
     transcript_view_pending: Option<String>,
+    /// A11. A local image the operator asked the system opener for.
+    open_path_pending: Option<std::path::PathBuf>,
     /// What to tell this operator about the mouse this client captured, or `None` when it
     /// captured nothing. Set by the driver once the terminal is taken over, because whether
     /// the capture actually happened is a fact about the terminal and not about this state
@@ -1073,6 +1075,7 @@ impl App {
             external_editor_pending: None,
             scrollback_dump_pending: None,
             transcript_view_pending: None,
+            open_path_pending: None,
             mouse_hint: None,
             terminal_width: 0,
             next_composer_submission_sequence: 0,
@@ -1527,6 +1530,65 @@ impl App {
     pub(super) fn view_transcript(&mut self) {
         self.overlay = None;
         self.transcript_view_pending = self.transcript_export();
+    }
+
+    /// A11. Hands the newest image in this conversation to the system opener.
+    ///
+    /// *Newest*, because the transcript has no cell cursor to point at one — there is no
+    /// selection in this pane and inventing one for this key would be a larger change than
+    /// the key is worth. So the affordance is honest about its scope, and says which file
+    /// it opened rather than opening something silently.
+    ///
+    /// The path handed over is the one [`crate::images::describe`] resolved, which means it
+    /// has already passed the workspace rule. A path this client refused to read is a path
+    /// it refuses to open: the two are the same decision, and an opener is a *more*
+    /// dangerous way to touch a file than a header read.
+    pub(super) fn open_newest_image(&mut self) {
+        self.overlay = None;
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform(
+                "there is no open conversation to find an image in",
+                NoticeKind::Warn,
+            );
+            return;
+        };
+
+        let named = self
+            .sessions
+            .watches
+            .get(&(plane, id))
+            .and_then(super::transcript::Watch::newest_image);
+
+        let Some(named) = named else {
+            self.inform("this conversation has no image in it", NoticeKind::Warn);
+            return;
+        };
+
+        let workspace = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.workspace.clone())
+            .map(std::path::PathBuf::from);
+
+        match crate::images::describe(workspace.as_deref(), &named).path {
+            Some(path) => {
+                self.inform(format!("opening {named}"), NoticeKind::Info);
+                self.open_path_pending = Some(path);
+            }
+            // The same sentence the placeholder already carries. A file on another
+            // machine, or one outside the workspace, is not one this terminal opens.
+            None => self.inform(
+                format!("{named} is not readable inside this workspace; not opened"),
+                NoticeKind::Warn,
+            ),
+        }
+    }
+
+    /// The file the App asked to have handed to the system opener. Drained by the driver,
+    /// which owns every process this client spawns.
+    pub fn take_open_path(&mut self) -> Option<std::path::PathBuf> {
+        self.open_path_pending.take()
     }
 
     /// Says once, and only where it is true, that this client took the mouse.
