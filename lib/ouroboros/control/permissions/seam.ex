@@ -27,8 +27,12 @@ defmodule Ouroboros.Control.Permissions.Seam do
   and `locations`; the command line is in `rawInput.command` and the paths in `locations`.
   Codex names the shape in the method: `item/commandExecution/requestApproval` carries
   `command` and `cwd`, `item/fileChange/requestApproval` carries changed paths, and
-  `item/permissions/requestApproval` carries a `grantRoot`. Both are mapped onto the one
-  request shape `Ouroboros.Control.Permissions.evaluate/1` takes.
+  `item/permissions/requestApproval` carries a `permissions` profile whose
+  `fileSystem.entries` are the paths being asked for — each a literal path, a glob, or a
+  named special location — beside the legacy `fileSystem.read`/`fileSystem.write` arrays
+  the schema marks as going away in `entries`' favour (`PermissionsRequestApprovalParams`,
+  codex-cli 0.147.0). Both providers are mapped onto the one request shape
+  `Ouroboros.Control.Permissions.evaluate/1` takes.
 
   ## What the seam does with the answer
 
@@ -312,11 +316,46 @@ defmodule Ouroboros.Control.Permissions.Seam do
     |> Enum.uniq()
   end
 
+  # A permissions escalation asks for paths, so the engine has to see them: evaluating it
+  # with none meant no `Read`/`Edit` rule could ever match the one request that most needs
+  # deciding. A glob is passed through as itself — `Pattern` reads globs — while a named
+  # special location (`project_roots`, `tmpdir`) is deliberately *not* resolved to a path
+  # here, because guessing which directory the app server meant would hand the engine a
+  # target nothing verified.
+  defp codex_paths("item/permissions/requestApproval", params) do
+    file_system = get_in(params, ["permissions", "fileSystem"]) || %{}
+
+    entries =
+      case file_system["entries"] do
+        list when is_list(list) -> Enum.map(list, &permission_entry_path/1)
+        _absent -> []
+      end
+
+    legacy =
+      Enum.flat_map(["read", "write"], fn access ->
+        case file_system[access] do
+          list when is_list(list) -> list
+          _absent -> []
+        end
+      end)
+
+    (entries ++ legacy ++ [params["cwd"]])
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
+
   defp codex_paths(_method, params) do
     [params["grantRoot"], params["path"]]
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
   end
+
+  defp permission_entry_path(%{"path" => %{"type" => "path", "path" => path}}), do: path
+
+  defp permission_entry_path(%{"path" => %{"type" => "glob_pattern", "pattern" => pattern}}),
+    do: pattern
+
+  defp permission_entry_path(_entry), do: nil
 
   defp text(value) when is_binary(value), do: value
   defp text(value) when is_list(value), do: Enum.map_join(value, " ", &to_string/1)

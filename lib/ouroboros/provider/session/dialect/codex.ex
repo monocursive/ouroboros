@@ -1,5 +1,42 @@
 defmodule Ouroboros.Provider.Session.Dialect.Codex do
-  @moduledoc false
+  @moduledoc """
+  Wire mapping for the Codex app server.
+
+  Every method, parameter and enum here is taken from the schema the protocol's own
+  generator emits — `codex app-server generate-json-schema --out <dir>`, codex-cli
+  0.147.0 — and the files it produced for the methods this dialect speaks are committed
+  verbatim under `test/support/codex_schema/`, so the tests check frames against the
+  schema rather than against a literal they also wrote.
+
+  ## How an approval answer becomes two durable facts
+
+  One human answer has to move two policies, or the "don't ask again" it offers is only
+  half true. `scope: :session` on a command approval therefore does both:
+
+    * **Codex's own policy** — this dialect's reply. When the request carried a
+      `proposedExecpolicyAmendment`, the reply is
+      `{"decision": {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": [...]}}}`,
+      which amends the app server's execpolicy so commands matching that argv prefix stop
+      being asked about. With no proposal in the request the reply is `acceptForSession`,
+      which fills the app server's session approval cache with this one command instead.
+    * **This runtime's own policy** — `Ouroboros.Control.Permissions.Seam.answered/4`,
+      reached from `Session.Jsonl` on the same reply. It writes a `:session`-scope C1 rule
+      through `Permissions.remember/4`, so the next identical request is answered by the
+      engine and never reaches a human. That path is transport-neutral and shared with
+      ACP; nothing about it is Codex-specific, which is why this dialect does not write
+      rules itself.
+
+  The two are deliberately the same scope and expire together: `Seam.forget_session/0`
+  drops the rule when this transport terminates, and the app server's amendment and cache
+  die with the thread. The C1 rule is derived from the command by `Permissions.suggest/1`
+  (`Bash(git status *)`) while the amendment is the prefix Codex proposed
+  (`["git", "status"]`) — two spellings of the same intent, each in the language of the
+  policy it is written into.
+
+  Only a human's answer can reach either. A rule that already says yes replies `accept`,
+  the narrowest grant that answers the question, because widening a provider's own policy
+  is not something a rule may do on a human's behalf.
+  """
 
   @behaviour Ouroboros.Provider.Session.Dialect
 
@@ -24,6 +61,20 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   # What `turn_params/2` rebuilds from the session request on every turn, and therefore
   # exactly what a mid-session configuration change can move here.
   @configurable_fields [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
+
+  # An execpolicy amendment is an argv prefix. These bounds are what a prefix plausibly
+  # is; a proposal outside them is refused rather than trimmed, because a trimmed prefix
+  # allows strictly more than the one the app server offered.
+  @max_amendment_tokens 32
+  @max_amendment_token_bytes 256
+
+  # How many filesystem entries a permissions escalation shows in the modal. The rest are
+  # counted in `not_shown` rather than dropped without saying so.
+  @max_permission_entries 32
+
+  # `PermissionsRequestApprovalResponse` requires `permissions`, so a refusal is not an
+  # absent field but an empty `GrantedPermissionProfile`: every optional grant withheld.
+  @no_permissions %{"permissions" => %{}}
 
   @impl true
   def name, do: :app_server
@@ -192,22 +243,43 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   # The one pre-tool seam the app server gives. `Ouroboros.Control.Permissions` answers
   # first; only what it leaves as `:ask` becomes an approval the human sees.
+  #
+  # A rule's own yes grants the *narrowest* thing that answers the question: `accept` for
+  # this one command, and a `turn`-scoped grant for a permissions request. Widening the
+  # provider's own policy is something only a human's "don't ask again" may do, so neither
+  # `acceptForSession` nor an execpolicy amendment is reachable from here.
   @impl true
   def approval_request(method, params) when method in @approval_methods do
     case Seam.decide(:app_server, method, params, approval_payload(method, params)) do
       {:ask, payload} -> {:approval, payload, %{params: params, method: method}}
-      {:allow, _rule} -> {:result, %{"decision" => "accept"}}
-      {:deny, _rule} -> {:result, %{"decision" => "decline"}}
+      {:allow, _rule} -> {:result, allow_result(method, params)}
+      {:deny, _rule} -> {:result, deny_result(method)}
     end
   end
 
   def approval_request(_method, _params), do: :method_not_found
 
+  # Two request families with two different answer shapes, so the stash's method decides
+  # which one is spoken. `item/permissions/requestApproval` answers with a granted
+  # profile and a grant scope; the command and file-change families answer with a
+  # `decision`. Replying `{"decision": …}` to a permissions request is not a near miss —
+  # `PermissionsRequestApprovalResponse` requires `permissions`, so it is a frame the app
+  # server has no field to read.
   @impl true
-  def approval_reply(response, _stash), do: %{"decision" => decision(response)}
+  def approval_reply(response, stash) do
+    case Map.get(stash, :method) do
+      "item/permissions/requestApproval" -> permissions_reply(response, stash)
+      _command_or_file_change -> %{"decision" => decision(response, stash)}
+    end
+  end
 
   @impl true
-  def deny_reply(_stash), do: %{"decision" => "decline"}
+  def deny_reply(stash) do
+    case Map.get(stash, :method) do
+      "item/permissions/requestApproval" -> @no_permissions
+      _command_or_file_change -> %{"decision" => "decline"}
+    end
+  end
 
   @impl true
   def handle_notification("turn/started", params, _raw, runtime) do
@@ -466,8 +538,139 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       |> reject_nils()
 
     %{"tool_call" => tool_call, "reason" => reason, "kind" => approval_kind(method)}
+    |> maybe_put("execpolicy_amendment", amendment(params))
+    |> maybe_put("permissions", permissions_summary(method, params))
     |> reject_nils()
   end
+
+  # `proposedExecpolicyAmendment` is the app server's own offer: the argv prefix that,
+  # amended into its execpolicy, would stop it asking about commands like this one. It is
+  # already the prefix rather than the command — `["git", "status"]`, not the whole line —
+  # so passing it through is the content-minimised choice as well as the faithful one.
+  #
+  # Advertised **only when the request carries one**, because the extra answer it unlocks
+  # is one this transport can honour only when there is an amendment to send. A malformed
+  # or oversized proposal is not truncated to fit: a shortened prefix is a *wider* rule
+  # than the one proposed, so it is dropped and the answer falls back to `acceptForSession`.
+  defp amendment(params) when is_map(params) do
+    case params["proposedExecpolicyAmendment"] do
+      tokens when is_list(tokens) and tokens != [] -> bounded_amendment(tokens)
+      _absent -> nil
+    end
+  end
+
+  defp amendment(_params), do: nil
+
+  defp bounded_amendment(tokens) do
+    if length(tokens) <= @max_amendment_tokens and
+         Enum.all?(tokens, &(is_binary(&1) and byte_size(&1) <= @max_amendment_token_bytes)) do
+      tokens
+    end
+  end
+
+  # What the escalation actually asks for, in the shape a modal can render: which paths
+  # at which access, and whether the sandbox's network is being opened. Bounded, and the
+  # count of what did not fit is stated rather than dropped in silence.
+  defp permissions_summary("item/permissions/requestApproval", params) do
+    profile = params["permissions"] || %{}
+    filesystem = profile["fileSystem"] || %{}
+    requested = filesystem_entries(filesystem)
+    sent = Enum.take(requested, @max_permission_entries)
+
+    %{
+      "filesystem" => sent,
+      "network" => get_in(profile, ["network", "enabled"]),
+      "not_shown" => length(requested) - length(sent)
+    }
+    |> reject_nils()
+  end
+
+  defp permissions_summary(_method, _params), do: nil
+
+  # `entries` is the current shape; `read`/`write` are the arrays the schema marks as
+  # going away in its favour. Both are read, so an app server on either side of that
+  # change is rendered rather than shown an empty list.
+  defp filesystem_entries(filesystem) do
+    entries =
+      case filesystem["entries"] do
+        list when is_list(list) -> Enum.map(list, &filesystem_entry/1)
+        _absent -> []
+      end
+
+    legacy =
+      Enum.flat_map(["read", "write"], fn access ->
+        case filesystem[access] do
+          list when is_list(list) ->
+            for path <- list, is_binary(path), do: %{"access" => access, "path" => path}
+
+          _absent ->
+            []
+        end
+      end)
+
+    Enum.reject(entries ++ legacy, &is_nil/1)
+  end
+
+  defp filesystem_entry(%{"access" => access, "path" => path}) when is_binary(access) do
+    case permission_path(path) do
+      nil -> nil
+      rendered -> %{"access" => access, "path" => rendered}
+    end
+  end
+
+  defp filesystem_entry(_entry), do: nil
+
+  # `FileSystemPath` is a union of a literal path, a glob, and a named special location.
+  # A special location is rendered as its own name rather than resolved: this runtime does
+  # not know what the app server means by `project_roots`, and inventing a path for the
+  # modal would put a directory in front of a human that nothing had verified.
+  defp permission_path(%{"type" => "path", "path" => path}) when is_binary(path), do: path
+
+  defp permission_path(%{"type" => "glob_pattern", "pattern" => pattern})
+       when is_binary(pattern),
+       do: pattern
+
+  defp permission_path(%{"type" => "special", "value" => %{"kind" => kind}})
+       when is_binary(kind),
+       do: "<" <> kind <> ">"
+
+  defp permission_path(path) when is_binary(path), do: path
+  defp permission_path(_path), do: nil
+
+  # A rule's yes, in each family's own narrowest shape.
+  defp allow_result("item/permissions/requestApproval", params),
+    do: %{"permissions" => requested_profile(params), "scope" => "turn"}
+
+  defp allow_result(_method, _params), do: %{"decision" => "accept"}
+
+  defp deny_result("item/permissions/requestApproval"), do: @no_permissions
+  defp deny_result(_method), do: %{"decision" => "decline"}
+
+  # Approving a permissions request grants exactly the profile that was requested and
+  # nothing beside it, at the narrowest grant scope that answers the question Ouroboros
+  # was asked: `PermissionGrantScope` is `turn | session`, which is the same distinction
+  # `ApprovalResponse.scope` already draws between `:once` and `:session`, so the two map
+  # one to one and neither widens the other.
+  defp permissions_reply(%{decision: :approve} = response, stash) do
+    %{
+      "permissions" => requested_profile(Map.get(stash, :params) || %{}),
+      "scope" => grant_scope(response)
+    }
+  end
+
+  defp permissions_reply(_response, _stash), do: @no_permissions
+
+  defp grant_scope(%{scope: :session}), do: "session"
+  defp grant_scope(_response), do: "turn"
+
+  defp requested_profile(params) when is_map(params) do
+    case params["permissions"] do
+      %{} = profile -> profile
+      _absent -> %{}
+    end
+  end
+
+  defp requested_profile(_params), do: %{}
 
   defp approval_name("item/fileChange/requestApproval"), do: "file_change"
   defp approval_name("item/permissions/requestApproval"), do: "permissions"
@@ -486,9 +689,28 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     end
   end
 
-  defp decision(%{decision: :approve, scope: :session}), do: "acceptForSession"
-  defp decision(%{decision: :approve}), do: "accept"
-  defp decision(%{decision: :deny}), do: "decline"
+  # "Don't ask again" is the one answer that may move a policy, and the app server offers
+  # two ways to spell it. `acceptForSession` fills its session approval cache with *this*
+  # command; `acceptWithExecpolicyAmendment` amends its execpolicy with the prefix it
+  # proposed, so commands like this one stop being asked about at all. The second is only
+  # reachable when the request proposed an amendment, which is the whole reason
+  # `approval_payload/2` advertises it only then.
+  #
+  # Both halves land on one answer. This one moves Codex's own policy; the C1 rule that
+  # stops *this runtime* asking is written by `Permissions.Seam.answered/4` from the same
+  # `scope: :session`, transport-neutrally, for ACP and the app server alike. A session
+  # rule and a session-scoped amendment also expire together — `Seam.forget_session/0`
+  # drops the rule when this transport terminates, and the app server's cache dies with
+  # the thread — so neither outlives the conversation the human answered in.
+  defp decision(%{decision: :approve, scope: :session}, stash) do
+    case amendment(Map.get(stash, :params) || %{}) do
+      nil -> "acceptForSession"
+      tokens -> %{"acceptWithExecpolicyAmendment" => %{"execpolicy_amendment" => tokens}}
+    end
+  end
+
+  defp decision(%{decision: :approve}, _stash), do: "accept"
+  defp decision(%{decision: :deny}, _stash), do: "decline"
 
   defp thread_params(request) do
     %{"cwd" => Path.expand(request.cwd)}
