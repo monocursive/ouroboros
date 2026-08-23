@@ -908,6 +908,51 @@ success), **4** timeout, **64** usage error or refusal.
     jq -e 'select(.type == "result") | .status == "completed"' < events.ndjson
 ```
 
+### Use Ouroboros from Zed, JetBrains, or Neovim: `ouro acp`
+
+`ouro acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) version 1 as
+an *agent* on stdio, which is how editors host Claude Code, Gemini CLI and the rest. Point
+your editor at it and you get an Ouroboros session inside the editor — the same durable
+session `ouro` and `ouro run` drive, on the same runtime, with the same approvals, the same
+permission rules and the same effect ledger. Attach to it from the terminal mid-turn and
+both surfaces show the same transcript, because there is only one session.
+
+Zed and JetBrains AI Assistant both register custom agents under an `agent_servers` map —
+Zed in `settings.json`, JetBrains in `~/.jetbrains/acp.json`. For anything else, see your
+editor's ACP agent configuration; the command is this binary and the argument is `acp`.
+
+```jsonc
+// Zed settings.json
+{
+  "agent_servers": {
+    "Ouroboros": {
+      "type": "custom",
+      "command": "/usr/local/bin/ouro",
+      "args": ["acp", "--provider", "native"],
+      "env": {}
+    }
+  }
+}
+```
+
+`--provider` is required — a flag here or `defaults.provider` in the config file — because
+letting an editor's default decide which vendor runs your code is not a choice this client
+makes for you. The editor sends the workspace as `cwd`; `--workspace` is only a fallback for
+a client that sends none. `--approval-mode` sets the posture every session starts in, and
+the editor's own mode picker moves it afterwards wherever the transport accepts a change.
+
+What the editor gets: streamed text and thinking, tool calls with ACP's own `kind` taxonomy
+and the files they touch, diffs as tool-call content, the plan, mode changes, and permission
+prompts carrying the runtime's own option labels — including plan mode's three answers.
+What it does **not** get, stated rather than implied: no `session/load` (sessions retain a
+bounded event window, and ACP requires replaying a whole conversation before answering); no
+image, audio or embedded-context prompt blocks (the runtime takes text and workspace file
+paths, never inline bytes); and MCP servers named in `session/new` are reported as not
+applied rather than dropped in silence. The editor's own `fs/*` and `terminal/*` services
+are acknowledged and unused — Ouroboros does its file and process work inside the runtime,
+behind its workspace lease, sandbox and permission engine. [docs/TUI.md §3.1](docs/TUI.md)
+has the full event → `session/update` mapping table.
+
 ### First run and configuration
 
 On a tty, `ouro` boots inside the UI: the extract/start/publish sequence renders as
