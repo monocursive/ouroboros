@@ -157,7 +157,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | G4 | pending | visible agent-to-agent messaging |
 | G5 | pending | orchestration UI |
 | H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified**. `files_changed` counts every `file_change` plus the target of a well-known write tool once its result was not an error — Claude's harness adapter emits no `file_change`, so a Claude edit used to finish as `[]` |
-| H2 | pending | `ouro acp` |
+| H2 | landed | `ouro acp`: ouroboros as an Agent Client Protocol agent on stdio (schema v1.21.0): `initialize` claims only what is true (`loadSession: false` — retention is bounded and ACP wants the whole conversation; no image/audio prompts — the runtime takes attachment *paths*; no MCP over the wire — `interactive.start` has no `mcp_config`), `session/new` → `interactive.start` with modes derived from the same gates `interactive.configure` applies (plan only where settable any time), `session/prompt` streamed as `agent_message_chunk`/`agent_thought_chunk`/`tool_call`/`tool_call_update` (with file-change content and locations)/`plan`/`current_mode_update`, `session/request_permission` from `approval_requested` with the runtime's own option rows passed through (plan-exit `optionId` → `provider_options.choice`), `session/cancel` → interrupt, `session/set_mode` → configure, resync from `run.rs`'s discipline, bounded everything, EOF interrupts and says so; 34 tests; **live-driven** by hand against a scratch daemon including an approval round trip (which found a placeholder `toolCallId` and fixed it). Not served: `session/load`, `usage_update` (no honest context size), ACP `diff` blocks (only a unified patch is retained); approval↔tool-call correlation is positional; a Zed `agent_servers` snippet documented |
 | H3 | landed | `mix ouroboros.protocol.docs` generates `docs/PROTOCOL.md` (18 bands, 81 methods with scope, ceiling, a parameter table, the pinned fixture, and the errors it can answer) from `Methods.table/0`, a new declared `@params` contract, and the golden fixtures; an 11-test drift suite includes an AST check that `@params` equals what the validators enforce and a check that TUI.md §2.4 catalogues every method (it found the two rewind verbs missing; closed the same day); `make protocol-docs`; no thin clients yet |
 | H4 | pending | HTTP/SSE |
 | I1 | landed | `tool_call` entries for the native agent, checkpointed before the tool runs (a ledger that cannot record stops the tool) and settled with `completed\|failed\|refused\|timed_out`, content-minimised subjects (paths, a command digest, hosts, the MCP server and tool); `approval` entries for every human answer on every provider, written before the answer is forwarded, with `actor` (`human`, or `headless` — `ouro run` now names itself), `scope`, `rule_id`; `ledger_ref` `{node, id}` on `tool_call` and `approval_resolved` events; fair retention across kinds so a flood of tool calls cannot evict the only forge. Landing it exposed that the Claude bridge had been calling `Permissions.record/2` with the wrong shape since C2 — no bridged decision had ever reached the ledger; fixed the same day with a test against the real engine |
@@ -192,12 +192,12 @@ what a user of `ouro` on `review-fixes` gets today.
 | 18 | In-session parallelism | 1 | 2 (delegation on the wire and in the rail; a delegation is a coding task with a parent, not a sub-conversation — G3 pending) |
 | 19 | Background handoff + remote attach | 2 | 2 |
 | 20 | Cross-machine / fleet coordination | 2 | 3 (fleet ledger queries; triage across nodes in the rail, the picker, and `ouro agents`) |
-| 21 | Programmability | 1 | 2 (hooks, skills, `ouro run --json`, MCP server; no ACP agent mode yet) |
+| 21 | Programmability | 1 | 3 (hooks, skills, `ouro run --json`, MCP server, generated protocol reference, and `ouro acp` so editors drive it as an agent) |
 | 22 | Install / update / auth | 1 | 2 (a signed self-update and an installer exist and refuse correctly, but no release has been cut with them and no key is provisioned; auth unchanged) |
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **53** |
+| | **Total / 75** | **23** | **54** |
 
 ### Honest limits added this wave
 

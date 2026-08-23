@@ -182,6 +182,18 @@ pub enum Command {
         command: FleetCommand,
     },
 
+    /// Serve one Ouroboros session to an editor over the Agent Client Protocol.
+    ///
+    /// Not typed at a prompt: an ACP client — Zed, JetBrains, a Neovim or VS Code plugin —
+    /// spawns this process and speaks newline-framed JSON-RPC to its stdio, so stdout is a
+    /// protocol and carries nothing else. `--provider` is required because letting an
+    /// editor's default decide which vendor runs your code is not a choice this client
+    /// makes for you; `--workspace` is only a fallback for a client that sends no `cwd`.
+    ///
+    /// Register it with your editor's ACP agent configuration (Zed and JetBrains both use
+    /// an `agent_servers` map): the command is this binary and the argument is `acp`.
+    Acp(Box<AcpArgs>),
+
     /// Run the packaged runtime in the foreground for a generated user service.
     #[command(hide = true)]
     ServiceRun,
@@ -245,6 +257,42 @@ pub enum Command {
 
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+}
+
+/// `ouro acp`'s flags, in one struct so the dispatch stays one line.
+///
+/// The start options are `ouro new`'s, resolved by the same
+/// [`crate::config::resolve_start`] against the same `[defaults]`; `--addr`/`--token-file`
+/// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
+#[derive(Debug, Args)]
+pub struct AcpArgs {
+    /// A provider this runtime serves. Omitted, the config file's `defaults.provider` is
+    /// used, and with neither this refuses rather than letting the editor decide.
+    #[arg(long, value_name = "NAME")]
+    pub provider: Option<String>,
+
+    /// The directory a session works in when the editor's `session/new` names no `cwd`.
+    /// An editor that speaks ACP always sends one, so this is a fallback and not an
+    /// override: the editor knows which project the person opened.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+
+    /// One of: default, prompt, auto_edit, auto_approve. The posture every session this
+    /// agent starts begins in; the editor moves it afterwards with `session/set_mode`.
+    #[arg(long, value_name = "MODE")]
+    pub approval_mode: Option<String>,
+
+    /// One of: default, read_only, workspace_write, unrestricted.
+    #[arg(long, value_name = "MODE")]
+    pub sandbox_mode: Option<String>,
+
+    /// Where the gateway listens. Omitted, a local runtime is adopted or started.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
 }
 
 /// `ouro ledger`'s flags. Sequences are minted per node, so `--since` is per node too.

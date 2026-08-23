@@ -865,6 +865,13 @@ ouro fleet doctor     actionable profile/network/runtime/service checks
 ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery
 ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
+ouro acp [--provider NAME] [--workspace PATH] [--approval-mode MODE]
+         [--sandbox-mode MODE] [--addr HOST:PORT] [--token-file PATH]
+                      an Agent Client Protocol agent on stdio, spawned by an
+                      editor (Zed, JetBrains, Neovim, …) rather than typed at a
+                      prompt: stdout is the protocol and carries nothing else.
+                      --provider is required (flag or [defaults]); --workspace is
+                      only the fallback for a client that sends no `cwd`
 ouro mcp-serve        hidden. An MCP server on stdio, spawned by a vendor CLI, not
                       by a person: the permission prompt for a transport that has
                       none of its own, plus three code-intelligence tools
@@ -876,6 +883,177 @@ ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
 ```
+
+#### `ouro acp` — Ouroboros inside an editor (`src/acp_serve.rs`, H2)
+
+The [Agent Client Protocol](https://agentclientprotocol.com) version 1 is how Zed,
+JetBrains AI Assistant, four Neovim plugins, Emacs, VS Code, Obsidian and Qt Creator host a
+coding agent: newline-framed JSON-RPC 2.0 over the agent process's stdio, with the *editor*
+as the JSON-RPC client and the agent as the server. `ouro acp` is that server, and nothing
+underneath changes — `session/new` is an `interactive.start`, `session/prompt` is an
+`interactive.send_message`, and the session the editor drives is the same durable session
+`ouro` and `ouro run` drive, on the same gateway, with the same approvals and the same
+ledger. Attach to it from the TUI mid-turn and both surfaces show the same transcript.
+
+Ouroboros is already an ACP *client* — `Ouroboros.Provider.Session.Dialect.ACP` speaks this
+protocol *to* Gemini CLI, OpenCode and Kimi. This module is the other end of the same wire.
+Where the two disagree the published schema wins; the shapes here were checked against
+`schema-v1.21.0` rather than against that module.
+
+*What `initialize` advertises, and why each claim is true.*
+
+| claim | value | why |
+|---|---|---|
+| `protocolVersion` | `1` | the integer the spec and `Dialect.ACP` both send |
+| `agentCapabilities.loadSession` | `false` | an agent that advertises it MUST replay the *whole* conversation as `session/update` before answering. Sessions retain a bounded event window and answer `cursor_pruned` below it, so a replay could be a prefix the editor cannot tell from the whole. There is no `--session` for the same reason |
+| `promptCapabilities.image` / `.audio` / `.embeddedContext` | `false` | `interactive.send_message` takes a string or a closed `{prompt, attachments, reasoning_effort}` object whose attachments are **paths inside the session's leased workspace**. It takes no inline bytes at all, so honouring an image block would mean writing a file into the operator's workspace behind their back |
+| `mcpCapabilities.http` / `.sse` | `false` | `interactive.start`'s option allowlist has no `mcp_config` key — deliberately absent (`Gateway.Methods` `@start_options`), because an inline server command inside a durable checkpoint is an execution vector |
+| `authMethods` | `[]` | authentication is the vendor CLI's or the runtime's, settled before this process starts; there is nothing for the editor to log into |
+
+`text` and `resource_link` need no capability flag and are both served: a `file://` resource
+link becomes an `attachments` path, which the session canonicalises against its own
+workspace and refuses if it escapes. A `resource_link` with any other scheme, and any
+content block whose capability was advertised `false`, is `-32602` naming the type rather
+than being dropped — a block the handshake said would not be read is not one to read.
+
+*A `session/new` carrying `mcpServers` is not silently ignored.* The session starts, and an
+`agent_message_chunk` names the servers and says they were **not applied** — in the
+transcript the person is reading, not only on stderr. It follows the `session/new` result
+rather than preceding it, because a `session/update` names a session the editor may only
+have learned about from that answer. The gateway has no parameter to carry them for any
+transport today: `Dialect.ACP` can put `mcpServers` on its own `session/new`, but
+Ouroboros's own API refuses `mcp_config` before any dialect is reached
+([task_state.ex](../lib/ouroboros/coding/task_state.ex), AGENT_EXPERIENCE F4/D4), so an
+ACP-transport session is no exception.
+
+*The editor's own services are acknowledged and unused.* An ACP client may offer
+`fs/read_text_file`, `fs/write_text_file` and `terminal/*` so the agent can work through the
+editor's buffers. Ouroboros does its file and process work in the runtime, behind its own
+workspace lease, OS sandbox and permission engine; routing a tool through the editor would
+move it outside all three. So the capabilities the editor declares are recorded — they are
+part of the handshake — and never called, and the editor learns what changed on disk from
+`tool_call_update` content instead. `$/cancel_request` is likewise unhandled: the only
+long-lived request this agent answers is `session/prompt`, and `session/cancel` is the verb
+for that.
+
+*The mapping.* One gateway event in, zero or more `session/update` notifications out.
+
+| gateway event | `session/update` | notes |
+|---|---|---|
+| `output_text_delta` | `agent_message_chunk` | `{content: {type: "text", text}}` |
+| `output_text_final` | `agent_message_chunk`, **only when no delta was streamed since the last final** | several managed transports emit only a final; a provider that streams would otherwise have its message rendered twice |
+| `thinking_delta` | `agent_thought_chunk` | |
+| `tool_call` | `tool_call` | `toolCallId` from `call_id`; `kind` from the tool's name against ACP's ten-value taxonomy (`read`/`edit`/`delete`/`move`/`search`/`execute`/`think`/`fetch`/`switch_mode`/`other`), never a guess — an unknown name is `other`; `title` is the tool plus the path/command/query it names; `locations` from every path in the input; `rawInput` verbatim; `status: "in_progress"` |
+| `tool_result` | `tool_call_update` | `status` `completed`/`failed` from `is_error` or the payload's own status; `rawOutput` verbatim and a text `content` block beside it. A result for a call this bridge never announced gets its `tool_call` announced first, rather than referring to an id the editor has not seen |
+| `file_change` | `tool_call_update` on the call that produced it | `content` and `locations`; where there is no tool call in flight, an `edit`-kind `tool_call` is announced first |
+| `plan_updated` | `plan` | `entries` with all three fields ACP requires — `content`, `priority` (default `medium`), `status` — from either shape the runtime delivers (Codex `{plan: [{step, status}]}`, ACP `{entries: [{content, priority, status}]}`) |
+| `status` `kind: "configured"` | `current_mode_update` | `interactive.configure`'s own event; `plan: true` in `changed` reads as mode `plan` |
+| `provider_event` `kind: "plan_exit"` | `current_mode_update` | **only when the payload's `applied` is true.** A plan exit the session could not carry out announces nothing |
+| `provider_event` `kind: "mode"` | `current_mode_update` | an ACP-transport session forwarding another agent's own mode |
+| `provider_event` `kind: "available_commands"` | `available_commands_update` | names and descriptions |
+| `approval_requested` | `session/request_permission` (a request, not an update) | see below |
+| `turn_completed` | resolves `session/prompt` | `stopReason` `end_turn`, or `max_turn_requests`/`max_tokens`/`refusal`/`cancelled` where the payload named one |
+| `turn_interrupted`, `session_cancelled` | resolves `session/prompt` | `stopReason: "cancelled"` |
+| `turn_failed`, `session_failed`, `session_closed`, `stream.ended` | resolves `session/prompt` **as a JSON-RPC error** | ACP has no `failed` stop reason, and reporting `end_turn` for a turn that broke would be a lie. The one exception is a turn the editor cancelled: the spec is explicit that a cancelled prompt answers `cancelled` and never an error, so a failure after a `session/cancel` still resolves as the cancellation |
+| everything else | — | `turn_started`, `input_accepted`, `queue_changed`, `usage` and the rest have no ACP update this bridge can state honestly |
+
+**`usage_update` is deliberately not sent.** ACP's shape requires `used` *and* `size` — the
+context window — and `size` would have to come from `runtime.models` for the session's exact
+model, which this bridge does not read. A window size it guessed would be a percentage the
+editor draws as fact.
+
+*Approvals.* An `approval_requested` becomes a `session/request_permission` naming the tool
+call currently in flight, so the editor attaches the question to the row it already drew
+rather than inventing a second one. Where the runtime supplies its own `options` they travel
+through **unchanged** — a plan exit's three answers
+(`Ouroboros.Provider.Native.Session` `@plan_exit_options`) and, on an ACP-transport session,
+the hosted agent's own rows — so the person reads the labels the runtime wrote. Otherwise
+the four standard rows are offered. The editor's answer becomes one
+`interactive.respond_approval`:
+
+| what the editor picked | what the runtime is sent |
+|---|---|
+| a row with `kind: allow_once` | `{decision: approve, scope: once}` |
+| `allow_always` | `{decision: approve, scope: session}` — which also writes the session-scoped C1 rule |
+| `reject_once` / `reject_always` | `{decision: deny, scope: once \| session}` |
+| a plan-exit `optionId` | `provider_options: {choice: "<optionId>"}` beside the decision, so the runtime applies exactly what was picked instead of inferring it; `keep_planning` is sent as a `deny` |
+| an `ask_user` question's answer | `{decision: approve, scope: once, reason: "<the option's text>"}`, which is where `Tools.AskUser` reads the answer from now that `provider_options` is narrowed to `{choice, follow_up}` |
+| `{"outcome": "cancelled"}`, an error response, or an `optionId` this agent never offered | `{decision: deny, scope: once}` — fail closed |
+
+`actor` is omitted, so the runtime's ledger records `human`, which is what an editor's
+answer is. At most 8 questions may be outstanding, matching the runtime's own bound.
+
+*Modes.* `session/new`'s `modes` is derived from what `interactive.configure` would accept
+for that session, read from `interactive.info`'s `options.capabilities` — never guessed, and
+a refusal that happens anyway is relayed to the editor verbatim rather than swallowed:
+
+| mode id | offered when | maps to |
+|---|---|---|
+| `plan` | the provider's plan mode is `settable: :any_time` (`Ouroboros.Provider.plan_mode/2` — `native` today; `claude` is at-start-only and `codex` is `:pending`), **or** the session is already planning, so there is always a way out | `interactive.configure {plan: true}` |
+| `prompt` | `capabilities.dynamic_configuration` is truthy **and** `capabilities.approvals` is truthy — a managed transport with no approvals channel answers `["unsupported_approval_mode", …]`, so it is not offered one | `{approval_mode: "prompt"}` |
+| `auto_edit`, `auto_approve`, `default` | `capabilities.dynamic_configuration` is truthy | `{approval_mode: …}` |
+
+The ACP transport declares no `dynamic_configuration` at all
+([acp.ex](../lib/ouroboros/provider/session/dialect/acp.ex): mode ids there are the hosted
+agent's own invention and Ouroboros will not guess a mapping), so an ACP-transport session
+is advertised **no modes** and `session/set_mode` is refused before it reaches the gateway.
+Leaving `plan` for an approval mode sends `{approval_mode, plan: false}` in one call, so the
+session is never briefly planning under a mode that says otherwise — and `plan: false` is
+sent only where the session was planning, because a key the transport would refuse is not
+one to send on a hunch. `session/new` also drops its whole `modes` block rather than name a
+`currentModeId` it did not advertise; a `null` `approval_mode` (the plane omitted an
+unenforceable default) reads as `default`, which is exactly what that mode means.
+
+*One connection, and the same resync discipline as `ouro run`.* One gateway connection for
+the process's lifetime, with reconnect off for the reason `ouro run` turns it off: a silent
+re-handshake would drop every session's subscription and leave the editor watching a stream
+that is never coming back. Each session subscribes from its own cursor; an out-of-order
+event is held until the gap under it is repaired by `interactive.replay {limit: 500}`, and a
+`stream.lagged` frame replays from the contiguous high-water mark. `session/new` awaits
+`interactive.start` inline under the same 130s ceiling `ouro run` uses, which is the one
+place the loop blocks; a notification dropped in that window is repaired by the same replay,
+because a hole is a hole whatever caused it.
+
+*Bounded and fail-closed.* At most 32 sessions, 8 outstanding permission questions, 10 000
+held out-of-order events per session, 512 remembered tool-call ids, a 4 MiB frame ceiling,
+and a 128 KiB cap on one text chunk. `initialize` must be first; anything before it is
+`-32600`. An unknown method is `-32601`, a frame that is neither a request nor a response is
+`-32600`, a line that is not JSON is `-32700` — and none of the three ends the connection. A
+frame over the ceiling does end it, because a reader that could not bound a frame can no
+longer find where the next one starts.
+
+*stdin EOF.* Closing the editor interrupts every in-flight turn, says so in a last
+`agent_message_chunk` naming the session id (`ouro` attaches to it — the turn is the
+runtime's, not this process's), resolves the outstanding prompts as `cancelled`, and exits
+0. The order matters: the sentence goes out before the prompt resolves, because an editor
+that has seen the result may stop rendering updates for that turn.
+
+*What is not served, and why.* `session/load` (bounded retention, above). `authenticate`
+(nothing is advertised to authenticate with). `terminal/*` and `fs/*` as a *client* (above).
+Subagent tool calls have no ACP kind — ACP 1.2 has no standard one, as the Claude Code
+adapter also notes — so a delegation appears as an `other`-kind tool call.
+
+*Registering it with an editor.* Zed and JetBrains AI Assistant both use an `agent_servers`
+map — Zed in `settings.json`, JetBrains in `~/.jetbrains/acp.json`. Other clients differ;
+see your editor's ACP agent configuration.
+
+```jsonc
+// Zed settings.json
+{
+  "agent_servers": {
+    "Ouroboros": {
+      "type": "custom",
+      "command": "/usr/local/bin/ouro",
+      "args": ["acp", "--provider", "native"],
+      "env": {}
+    }
+  }
+}
+```
+
+Set `OUROBOROS_ACP_VERBOSE=1` in `env` for progress on stderr, which is where an editor puts
+an agent's log. `--addr`/`--token-file` attach to a runtime this client did not start; with
+neither, one is adopted or started exactly as `ouro run` does, and left running afterwards.
 
 #### `ouro mcp-serve` — the approval bridge (`src/mcp_serve.rs`)
 
