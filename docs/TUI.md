@@ -759,6 +759,11 @@ process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
 
 ```
 ouro                  spawn (or adopt via gateway.json) + attach UI
+ouro --continue [--or-new] [--workspace PATH]
+                      open the most recent session whose workspace is this
+                      directory, on any fleet machine, instead of the rail;
+                      with nothing to continue this refuses rather than
+                      starting one, and --or-new lands on the composer instead
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
 ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
@@ -769,10 +774,14 @@ ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       is refused, naming both places
 ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--machine NAME] [--resume SESSION-ID]
+         [--continue [--or-new]]
          [--json | --stream-json] [--approve-all] [--timeout SECS] [-v]
          [--addr HOST:PORT] [--token-file PATH]
                       headless: run one prompt, stream the normalised events,
-                      exit with a documented code. No alternate screen, ever
+                      exit with a documented code. No alternate screen, ever.
+                      --continue resolves the same session `ouro --continue`
+                      would open and sends the prompt into it; refused with
+                      --resume, which names one instead of looking one up
 ouro stop             graceful stop of the locally spawned daemon
 ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
@@ -946,6 +955,69 @@ warns that the normal `ouroboros-dev` isolation is disabled and a release runtim
 that same directory may be adopted. The override is neither rewritten nor refused;
 operators who want isolation with an explicit root should name a dedicated dev
 directory.
+
+#### `--continue` — the last session for this workspace (F2, `src/continuation.rs`)
+
+`ouro --continue` opens it; `ouro run --continue "…"` sends a prompt into it. Both resolve
+the same way, through one function over rows the gateway already answered.
+
+*The rule, exactly.*
+
+1. **Which directory.** `--workspace` if it was typed, otherwise the working directory,
+   made absolute the same way `ouro new` makes a workspace absolute
+   (`runtime::resolve_workspace`). Its canonical form is kept beside it where this
+   filesystem has one, so `/tmp/p` and `/private/tmp/p` are the same directory rather than
+   two strings. Both spellings are tidied — a trailing `/` or `/.` is dropped, because
+   `ouro run` with no `--workspace` sends `<cwd>/.` and a raw comparison would fail to find
+   the session it had itself started.
+2. **Which rows.** One `interactive.list` call. That method is `read` scope and the gateway
+   **fans it out over `:erpc` to every connected, compatible fleet machine** before
+   answering (`Gateway.Methods.fleet_sessions/1`), so **rows from other nodes are
+   included** — that is what makes "on any machine" true, and this client contacts no
+   machine itself. A gateway that does not serve the method, or that refuses the call, is a
+   **failure**, never an empty answer: "we could not look" must not become `--or-new`'s new
+   session.
+3. **Which of them are eligible.** Rows whose `workspace` names that directory, minus the
+   ones whose `status` is terminal (`closed`/`completed`/`failed`/`cancelled`/`lost`) —
+   `ouro run --resume` refuses a terminal session outright, so opening one and being
+   rejected would be a worse way to learn the same thing. An **unrecognised** status is not
+   terminal and stays eligible. The rows carry no separate "resumable" flag to consult:
+   `options.capabilities` describes what the *transport* can do, not whether a closed
+   conversation may be reopened. A row retained as `last_known` (its owner offline) is not
+   excluded — trying is how you find out whether the machine came back, and the gateway
+   refuses in its own words if it did not.
+4. **Which one wins.** The newest by **`updated_at`** — `Interactive.State.touch/1` writes
+   it as a fixed-width UTC ISO-8601 string, so lexical order is chronological order.
+   Deliberately **not** `cursor`, which counts one session's own events and would rank a
+   chatty session from last week above the one abandoned ten minutes ago. Ties fall to
+   `created_at`, then `id`, so the answer does not depend on list order.
+
+*With nothing to continue*, both surfaces **refuse** and neither calls `interactive.start`:
+`ouro run --continue` exits **64** with the reason on stderr, and `ouro --continue` tears
+the boot screen back down with the same sentence. The reason names which of three things
+happened — the sessions here have ended, this fleet has no sessions at all, or none of the
+ones it has were opened on this directory. `--or-new` is the only thing that turns a
+no-match into a start, and it **says so** on stderr (`--or-new: starting a new session
+instead`) rather than letting a created session read as a continued one. In the UI it lands
+on the home composer with the same sentence as a notice.
+
+*Start options.* `--continue` accepts `--workspace` (it names where to look) and, with
+`--or-new`, the options that would configure the session it may create. Without `--or-new`,
+`--provider`/`--approval-mode`/`--sandbox-mode`/`--machine` are **refused by name** rather
+than ignored, for the reason `--resume` refuses them: the session being resumed was
+configured when it was created. `--continue` with `--resume` is refused by clap — one names
+a session, the other looks one up.
+
+*What is said out loud.* `ouro run --continue` prints `continuing <id> (<title>) on <node>,
+last active <timestamp>` on **stderr** before the turn — unconditionally, not only under
+`-v`, because this client chose which session out of several and a caller who cannot check
+that is being asked to trust a guess. `--resume` prints nothing, because there was nothing
+to choose.
+
+*Limit, stated.* The workspace comparison is **lexical**. A row's `workspace` is a path on
+its own machine, and canonicalising it here would resolve another host's symlinks against
+this filesystem; two fleet machines that reach the same project by different absolute paths
+are therefore two workspaces to `--continue`.
 
 #### `ouro run` — the headless surface (`src/run.rs`)
 

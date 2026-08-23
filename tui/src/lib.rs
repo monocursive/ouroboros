@@ -11,6 +11,7 @@ pub mod agents;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
+pub mod continuation;
 pub mod fleet;
 pub mod fleet_add;
 pub mod hook;
