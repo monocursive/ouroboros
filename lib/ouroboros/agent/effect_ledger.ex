@@ -24,6 +24,27 @@ defmodule Ouroboros.Agent.EffectLedger do
   Retention bounds terminal history while retaining every `:started` entry. Queries are
   independently bounded so a caller cannot copy the entire ledger out of its owner by
   accident.
+
+  ## Retention is fair across kinds, not first-come
+
+  I1 put two high-volume kinds in here — a `:tool_call` for every tool the native agent
+  runs, and an `:approval` for every human answer — beside kinds a node produces a handful
+  of times in its life. A single global "keep the newest N" would let one long turn's four
+  hundred tool calls evict the only `:forge` this machine ever ran, which is the opposite
+  of what a durable record is for.
+
+  So eviction is max-min fair by effect kind: every kind present keeps its newest
+  `retention_limit / kinds present` terminal entries before any kind keeps a second batch,
+  and whatever slots are left over go to the newest entries overall. The total is still
+  exactly `retention_limit`, so nothing about the checkpoint's size or the export's bounds
+  changes; what changes is *which* entries a flood is allowed to push out. A `:started`
+  entry is never evicted, as before.
+
+  The limit itself stays at 1,000 (`config :ouroboros, :effect_ledger_limit`) rather than
+  being raised for the new kinds. A larger number is a larger object to serialize and fsync
+  on every single write, and every tool call already costs two of those; an operator who
+  wants a longer native history raises the number knowingly rather than paying for it by
+  default.
   """
 
   use GenServer
@@ -52,7 +73,35 @@ defmodule Ouroboros.Agent.EffectLedger do
     # `command_digest` is a digest of the command line and `cwd` is the directory it ran
     # in; the command text is exactly the content this ledger exists to keep out, and a
     # `cd` a reader cannot see is worth less than a command they could replay.
-    operator_shell: [:session_id, :command_digest, :cwd, :node, :rule_id]
+    operator_shell: [:session_id, :command_digest, :cwd, :node, :rule_id],
+    # I1. One tool call the native agent was admitted to make, checkpointed before the
+    # tool runs. `subject` is what the call is *about* — the paths it names, a digest of
+    # the command line, the hosts it would reach, the MCP server and tool behind an
+    # `mcp__*` name — and never what any of them contain. `sanitize_subject/1` below is
+    # what makes that true here rather than at the call site's discretion.
+    tool_call: [
+      :session_id,
+      :turn_id,
+      :call_id,
+      :tool,
+      :provider,
+      :subject,
+      :node,
+      :permission_entry_id
+    ],
+    # I1. One *human* answer to an approval question, on any provider. The engine's own
+    # verdicts are `:permission` entries and stay there; this kind is for the answers a
+    # person gave, which are the only ones nobody can reconstruct from the rules
+    # afterwards. `permission_entry_id` links the two when both exist.
+    approval: [
+      :session_id,
+      :request_id,
+      :tool,
+      :provider,
+      :subject,
+      :node,
+      :permission_entry_id
+    ]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -62,8 +111,21 @@ defmodule Ouroboros.Agent.EffectLedger do
     forge: [:artifact_id, :module, :epoch, :signer, :source_sha256, :nodes],
     deploy: [:artifact_id, :module, :epoch, :nodes, :state],
     permission: [:decision, :scope, :actor, :rule_id],
-    operator_shell: [:exit_status, :duration_ms, :output_bytes, :spilled, :timed_out]
+    operator_shell: [:exit_status, :duration_ms, :output_bytes, :spilled, :timed_out],
+    tool_call: [:status, :duration_ms, :output_bytes],
+    approval: [:decision, :scope, :actor, :rule_id, :origin]
   }
+
+  # The whole vocabulary a `tool_call` outcome may use. `:refused` is a call the runtime
+  # never started; `:timed_out` is one the tool runner killed at `tool_timeout_ms`.
+  @tool_call_statuses [:completed, :failed, :refused, :timed_out]
+
+  # How much of a subject the ledger will hold. Paths and hostnames are identities, not
+  # contents, but an unbounded list of them is still an unbounded write.
+  @subject_paths 16
+  @subject_hosts 8
+  @subject_value_chars 512
+  @subject_name_chars 128
 
   # Effect kinds this ledger records that are not grant-gated agent effects. A permission
   # decision is not something an agent asks for; it is what `Ouroboros.Control.Permissions`
@@ -73,7 +135,12 @@ defmodule Ouroboros.Agent.EffectLedger do
   # this ledger a *person* asked for directly rather than an agent, and the whole claim
   # `workspace.exec` makes — that a command run through the runtime is accountable
   # afterwards — is this entry existing before the command did.
-  @ledger_only_effects [:permission, :operator_shell]
+  #
+  # `:tool_call` and `:approval` (I1) extend that claim from the one command an operator
+  # typed to every tool the native agent runs and every approval a person answered on any
+  # provider. Same discipline in both directions: the entry exists before the tool does,
+  # and a ledger that cannot record refuses the call.
+  @ledger_only_effects [:permission, :operator_shell, :tool_call, :approval]
 
   defmodule Entry do
     @moduledoc "One durable, content-minimized agent-effect attempt and its outcome."
@@ -223,6 +290,17 @@ defmodule Ouroboros.Agent.EffectLedger do
   @doc "The statuses `list/2` accepts as a filter."
   @spec statuses() :: [Entry.status()]
   def statuses, do: @statuses
+
+  @doc """
+  The vocabulary a `:tool_call` result's `status` is recorded with.
+
+  Distinct from `statuses/0`, which is the *entry* lifecycle every kind shares. This one
+  says what happened to the tool: it ran (`:completed`), it ran and reported an error
+  (`:failed`), the runtime never started it (`:refused`), or the tool runner killed it at
+  its timeout (`:timed_out`).
+  """
+  @spec tool_call_statuses() :: [atom()]
+  def tool_call_statuses, do: @tool_call_statuses
 
   @type durability :: :ephemeral_checkpoint | :durable_checkpoint | :synced_checkpoint
 
@@ -513,8 +591,53 @@ defmodule Ouroboros.Agent.EffectLedger do
       entry.error == settled.error
   end
 
-  defp sanitize_attempt(effect, attempt),
-    do: Map.take(attempt, Map.fetch!(@attempt_fields, effect))
+  defp sanitize_attempt(effect, attempt) do
+    attempt = Map.take(attempt, Map.fetch!(@attempt_fields, effect))
+
+    case Map.fetch(attempt, :subject) do
+      {:ok, subject} -> Map.put(attempt, :subject, sanitize_subject(subject))
+      :error -> attempt
+    end
+  end
+
+  # What a tool call or an approval was *about*, reduced to identities. A caller hands this
+  # in already minimized — the loop knows which of a tool's arguments are paths and which
+  # are contents — and this is the second gate that makes the claim structural: a key this
+  # ledger does not name is dropped, a digest that is not a digest is dropped rather than
+  # stored as the text somebody passed by mistake, and every list and string is bounded.
+  defp sanitize_subject(subject) when is_map(subject) and not is_struct(subject) do
+    %{}
+    |> put_if(:paths, subject_list(Map.get(subject, :paths), @subject_paths))
+    |> put_if(:command_sha256, subject_digest(Map.get(subject, :command_sha256)))
+    |> put_if(:hosts, subject_list(Map.get(subject, :hosts), @subject_hosts))
+    |> put_if(:mcp_server, subject_name(Map.get(subject, :mcp_server)))
+    |> put_if(:mcp_tool, subject_name(Map.get(subject, :mcp_tool)))
+  end
+
+  defp sanitize_subject(_subject), do: %{}
+
+  defp subject_list(values, limit) when is_list(values) do
+    case values
+         |> Enum.filter(&is_binary/1)
+         |> Enum.take(limit)
+         |> Enum.map(&String.slice(&1, 0, @subject_value_chars)) do
+      [] -> nil
+      bounded -> bounded
+    end
+  end
+
+  defp subject_list(_values, _limit), do: nil
+
+  defp subject_digest(<<digest::binary-size(64)>>) do
+    if String.match?(digest, ~r/\A[0-9a-f]{64}\z/), do: digest, else: nil
+  end
+
+  defp subject_digest(_value), do: nil
+
+  defp subject_name(value) when is_binary(value) and value != "",
+    do: String.slice(value, 0, @subject_name_chars)
+
+  defp subject_name(_value), do: nil
 
   defp sanitize_authority(authority) do
     %{}
@@ -547,14 +670,22 @@ defmodule Ouroboros.Agent.EffectLedger do
   defp sanitize_result(effect, result) when is_map(result) and not is_struct(result) do
     summary = Map.take(result, Map.fetch!(@result_fields, effect))
 
-    if effect == :delegate and Map.has_key?(result, :result) do
-      Map.put(summary, :result_fingerprint, fingerprint(Map.fetch!(result, :result)))
-    else
-      summary
-    end
+    refine_result(effect, summary, result)
   end
 
   defp sanitize_result(_effect, result), do: %{value_fingerprint: fingerprint(result)}
+
+  defp refine_result(:delegate, summary, %{result: value}),
+    do: Map.put(summary, :result_fingerprint, fingerprint(value))
+
+  # A `:tool_call` status is a closed vocabulary, so a client can branch on it. A value
+  # outside it is dropped rather than coerced: "the runtime recorded no status" is a fact,
+  # and "failed" invented for it would be a claim.
+  defp refine_result(:tool_call, %{status: status} = summary, _result)
+       when status not in @tool_call_statuses,
+       do: Map.delete(summary, :status)
+
+  defp refine_result(_effect, summary, _result), do: summary
 
   defp sanitize_error(nil), do: nil
 
@@ -598,8 +729,36 @@ defmodule Ouroboros.Agent.EffectLedger do
     entries = Enum.sort_by(entries, & &1.sequence, :desc)
     {unfinished, terminal} = Enum.split_with(entries, &(&1.status == :started))
 
-    (unfinished ++ Enum.take(terminal, retention_limit))
+    (unfinished ++ retain_terminal(terminal, retention_limit))
     |> Enum.sort_by(& &1.sequence, :desc)
+  end
+
+  # Max-min fair across effect kinds. Every kind present keeps its newest `quota` entries
+  # first, then the slots nobody claimed go to the newest entries overall. The total is
+  # still `retention_limit`; what this buys is that one turn's four hundred `:tool_call`
+  # entries cannot evict the only `:forge` this node ever ran. `terminal` arrives sorted
+  # newest-first and `Enum.group_by/2` preserves that order within each group, so "newest
+  # `quota`" is `Enum.take/2`.
+  defp retain_terminal(terminal, retention_limit) when length(terminal) <= retention_limit,
+    do: terminal
+
+  defp retain_terminal(terminal, retention_limit) do
+    by_kind = Enum.group_by(terminal, & &1.effect)
+    quota = div(retention_limit, map_size(by_kind))
+
+    kept = Enum.flat_map(by_kind, fn {_kind, entries} -> Enum.take(entries, quota) end)
+
+    case retention_limit - length(kept) do
+      spare when spare > 0 ->
+        kept ++
+          (by_kind
+           |> Enum.flat_map(fn {_kind, entries} -> Enum.drop(entries, quota) end)
+           |> Enum.sort_by(& &1.sequence, :desc)
+           |> Enum.take(spare))
+
+      _full ->
+        kept
+    end
   end
 
   defp normalize_query(filters) when is_list(filters) do

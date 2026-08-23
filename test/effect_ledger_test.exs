@@ -308,6 +308,206 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end
   end
 
+  describe "the :tool_call and :approval effect kinds (I1)" do
+    test "both are ledger-only kinds nobody can be granted" do
+      assert :tool_call in EffectLedger.effects()
+      assert :approval in EffectLedger.effects()
+      refute :tool_call in Ouroboros.Control.Grants.effects()
+      refute :approval in Ouroboros.Control.Grants.effects()
+      assert EffectLedger.tool_call_statuses() == [:completed, :failed, :refused, :timed_out]
+    end
+
+    test "a subject keeps identities, drops everything else, and bounds what it keeps" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_started(
+                 %{
+                   id: "tool-1",
+                   effect: :tool_call,
+                   principal: "session:s1",
+                   attempt: %{
+                     session_id: "s1",
+                     turn_id: "t1",
+                     call_id: "c1",
+                     tool: "bash",
+                     provider: :native,
+                     node: node(),
+                     permission_entry_id: "ndec_1",
+                     # Everything below is what a careless caller might hand in.
+                     input: @secret,
+                     subject: %{
+                       paths: Enum.map(1..40, &"lib/#{&1}.ex") ++ [:not_a_path],
+                       command_sha256: String.duplicate("a", 64),
+                       hosts: ["example.com"],
+                       mcp_server: "linear",
+                       mcp_tool: "create_issue",
+                       command: @secret,
+                       contents: @secret
+                     }
+                   },
+                   authority: %{decision: :allow, reason: "rule"},
+                   cause: %{signal_id: "tool-1", signal_type: "native.tool_call"}
+                 },
+                 ledger
+               )
+
+      refute Map.has_key?(entry.attempt, :input)
+      assert entry.attempt.permission_entry_id == "ndec_1"
+
+      # Bounded at sixteen paths, non-strings dropped, and no key this ledger does not name.
+      assert length(entry.attempt.subject.paths) == 16
+
+      assert Map.keys(entry.attempt.subject) |> Enum.sort() ==
+               [:command_sha256, :hosts, :mcp_server, :mcp_tool, :paths]
+
+      refute inspect(entry) =~ "objective"
+    end
+
+    test "a command digest that is not a digest is dropped rather than stored" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_started(
+                 %{
+                   id: "tool-2",
+                   effect: :tool_call,
+                   principal: "session:s1",
+                   attempt: %{tool: "bash", subject: %{command_sha256: "rm -rf /"}},
+                   authority: %{decision: :allow},
+                   cause: %{signal_id: "tool-2"}
+                 },
+                 ledger
+               )
+
+      assert entry.attempt.subject == %{}
+      refute inspect(entry) =~ "rm -rf"
+    end
+
+    test "an outcome status outside the vocabulary is dropped, not coerced" do
+      ledger = start_ledger!()
+
+      base = %{
+        id: "tool-3",
+        effect: :tool_call,
+        principal: "session:s1",
+        attempt: %{tool: "read"},
+        authority: %{decision: :allow},
+        cause: %{signal_id: "tool-3"}
+      }
+
+      assert {:ok, _started, :created} = EffectLedger.record_started(base, ledger)
+
+      assert {:ok, settled, :updated} =
+               EffectLedger.settle(
+                 "tool-3",
+                 %{status: :ok, result: %{status: :whatever, duration_ms: 4, output_bytes: 9}},
+                 ledger
+               )
+
+      refute Map.has_key?(settled.result, :status)
+      assert settled.result == %{duration_ms: 4, output_bytes: 9}
+    end
+
+    test "an approval records what a person decided and never what they typed" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_settled(
+                 %{
+                   id: "approval-1",
+                   effect: :approval,
+                   principal: "session:s1",
+                   attempt: %{
+                     session_id: "s1",
+                     request_id: "req-1",
+                     tool: "bash",
+                     provider: :codex,
+                     node: node(),
+                     subject: %{command_sha256: String.duplicate("b", 64)},
+                     reason: @secret
+                   },
+                   authority: %{decision: :allow, reason: "human"},
+                   cause: %{signal_id: "req-1", signal_type: "interactive.respond_approval"},
+                   result: %{
+                     decision: :allow,
+                     scope: :session,
+                     actor: :human,
+                     rule_id: "rule-1",
+                     origin: "provider",
+                     note: @secret
+                   }
+                 },
+                 ledger
+               )
+
+      assert entry.status == :ok
+      refute Map.has_key?(entry.attempt, :reason)
+
+      assert entry.result == %{
+               decision: :allow,
+               scope: :session,
+               actor: :human,
+               rule_id: "rule-1",
+               origin: "provider"
+             }
+
+      refute inspect(entry) =~ "objective"
+    end
+  end
+
+  describe "retention is fair across effect kinds (I1)" do
+    test "a flood of tool calls cannot evict the only forge this node ever ran" do
+      ledger = start_ledger!(retention_limit: 10)
+
+      assert {:ok, _forge, :created} =
+               EffectLedger.record_denied(attrs("denied-forge", :forge, %{module: A}), ledger)
+
+      for number <- 1..200 do
+        assert {:ok, _entry, :created} =
+                 EffectLedger.record_denied(
+                   %{
+                     id: "denied-tool-#{number}",
+                     effect: :tool_call,
+                     principal: "session:s1",
+                     attempt: %{tool: "read", call_id: "c#{number}"},
+                     authority: %{decision: :deny},
+                     cause: %{signal_id: "tool-#{number}"},
+                     result: %{status: :refused}
+                   },
+                   ledger
+                 )
+      end
+
+      assert {:ok, retained} = EffectLedger.list([limit: 100], ledger)
+      assert length(retained) == 10
+
+      assert Enum.any?(retained, &(&1.id == "denied-forge")),
+             "a high-volume kind evicted a rare one"
+
+      # The rest of the budget is the flood's, newest first.
+      assert length(Enum.filter(retained, &(&1.effect == :tool_call))) == 9
+      assert Enum.any?(retained, &(&1.id == "denied-tool-200"))
+      refute Enum.any?(retained, &(&1.id == "denied-tool-1"))
+    end
+
+    test "one kind alone still gets the whole budget" do
+      ledger = start_ledger!(retention_limit: 5)
+
+      for number <- 1..12 do
+        assert {:ok, _entry, :created} =
+                 EffectLedger.record_denied(
+                   attrs("denied-#{number}", :stop_agent, %{agent: "a#{number}"}),
+                   ledger
+                 )
+      end
+
+      assert {:ok, retained} = EffectLedger.list([limit: 100], ledger)
+      assert length(retained) == 5
+      assert Enum.map(retained, & &1.id) |> Enum.sort() |> List.first() == "denied-10"
+    end
+  end
+
   defp attrs(id, effect, attempt) do
     %{
       id: id,
