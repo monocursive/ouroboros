@@ -1073,8 +1073,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   # user-scope hook or a repository hook they trusted. Nothing records it as a permission
   # decision today, so the entry says who admitted it and links no `:permission` id rather
   # than borrowing the engine's.
-  defp hook_allowed(_authority),
+  #
+  # A hook that agreed with an engine `allow` resolved nothing, and the entry keeps saying
+  # the rule admitted the call — which is what happened.
+  defp hook_allowed(nil),
     do: authority(:allow, "hook", :once, :hook, {:hook, :pre_tool_use}, nil)
+
+  defp hook_allowed(authority), do: authority
 
   defp interrupted_authority,
     do: authority(:deny, "interrupted", :once, :runtime, {:interrupted, :approval_wait}, nil)
