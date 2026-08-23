@@ -1996,6 +1996,44 @@ principal, effect, status, or sequence cursor, and resolve one stable ID with
 `Ouroboros.effect/1`. An effect-ledger restart marks unfinished attempts `:ambiguous`
 rather than claiming they failed or silently starting them again.
 
+### What "accountable afterwards" now covers
+
+The ledger started as a record of the six things an *agent* can ask the runtime to do.
+Four more kinds have joined it since, and each is there because the same sentence applies:
+a thing nobody can account for later did not happen.
+
+| Kind | Written when | Carries |
+|---|---|---|
+| `:permission` | the rule engine reached an `allow` or a `deny` | the tool, the mode, the provider, a fingerprint of the call, the decision |
+| `:operator_shell` | before a `workspace.exec` command runs | a digest of the command, the working directory, the rule that permitted it |
+| `:tool_call` | **before** the native agent runs a tool | the tool, the call and turn ids, the decision that admitted it, and a **subject** — the paths a file tool touches, a SHA-256 digest of a `bash` command, the host `web_fetch` reaches, the server and tool behind an `mcp__server__tool` name. Settled after with `completed`/`failed`/`refused`/`timed_out`, the elapsed time, and the output size |
+| `:approval` | when a *person* answers an approval, on any provider, **before** the answer is forwarded | the request id, the tool, the same subject, and the answer: `decision`, `scope`, `actor`, and the `rule_id` if the answer wrote one |
+
+Two of those are hard gates and two are not, and the difference is deliberate.
+A `:tool_call` and an `:operator_shell` that cannot be recorded **do not run** — the model
+gets a legible refusal naming the ledger, which is the entire point of writing the entry
+before the work rather than after it. An `:approval` that cannot be recorded is still
+forwarded: refusing to deliver an answer the operator has already given would strand a
+tool call on a provider waiting for exactly one reply, so the cheaper failure there is the
+missing row, and it is missing visibly rather than silently.
+
+Nothing in either new kind is contents. The ledger itself enforces that rather than
+trusting its callers: a `subject` key it does not name is dropped, a `command_sha256` that
+is not a 64-character digest is dropped rather than stored as whatever text was passed by
+mistake, and the paths and hosts it does keep are bounded in both count and length.
+
+Because a native turn can make hundreds of tool calls while a node forges a capability
+perhaps twice in its life, retention is **max-min fair across kinds**: every kind present
+keeps its newest `limit / kinds` terminal entries before any kind keeps a second batch,
+and the slots nobody claimed go to the newest entries overall. The total is still
+`:ouroboros, :effect_ledger_limit` (1,000), so a busy session cannot push the rare rows
+out of the record.
+
+Events name their entry. A native `tool_call` event and every `approval_resolved` carry
+`ledger_ref: {node, id}` — exactly the two parameters `ledger.get` takes — so a client can
+draw the row and resolve it without a second vocabulary. A `tool_call` with no reference
+is a tool the session does not have: nothing was admitted, so there is nothing to name.
+
 ### Reading it, and reading every machine's
 
 From a terminal, the same query is `ouro ledger`:
@@ -2065,10 +2103,21 @@ agent forged cannot patch the authority that decided it could forge.
   an unacknowledged revocation has not happened.
 - **The durable ledger is node-local and bounded.** Production uses a synced checkpoint;
   development/test uses ETS. Terminal history is capped by
-  `:ouroboros, :effect_ledger_limit` (1,000 by default), while in-flight attempts are
-  never evicted. This is not a replicated audit service, and the atomic checkpoint is
-  not an append-only external log. `last_effects` and `state.forged` remain short-lived
-  agent-local projections; the ledger deliberately cannot restore a forged BEAM.
+  `:ouroboros, :effect_ledger_limit` (1,000 by default) and shared fairly across kinds,
+  while in-flight attempts are never evicted. This is not a replicated audit service, and
+  the atomic checkpoint is not an append-only external log. `last_effects` and
+  `state.forged` remain short-lived agent-local projections; the ledger deliberately
+  cannot restore a forged BEAM.
+- **A busy native session outruns 1,000 entries, and then the oldest of its own tool
+  calls are gone.** Fair retention protects the *rare* kinds from the flood; it does not
+  make the flood's own history unbounded. A machine that needs a long native trail raises
+  `:effect_ledger_limit` knowingly — the cost is a larger object serialized and fsynced on
+  every write, and a tool call already costs two of those.
+- **A `:tool_call` names the Harness session, not the Ouroboros one.** The native loop
+  records the principal its permission requests already use, so `:tool_call` and
+  `:permission` rows correlate with each other; an `:approval` row is written by the
+  session coordinator and names the Ouroboros session id. `interactive.info`'s
+  `harness_session_id` is the bridge between the two.
 
 ## Code intelligence
 

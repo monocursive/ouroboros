@@ -181,6 +181,76 @@ defmodule Ouroboros.Gateway.LedgerTest do
              first.hash
   end
 
+  test "the kind filter names I1's two new kinds, and answers only them", context do
+    assert {:error, -32_602, message} = Methods.invoke("ledger.list", %{"effect" => "tool_calls"})
+    assert message =~ "tool_call"
+    assert message =~ "approval"
+
+    call =
+      record!(context.principal, "effect-#{context.principal}-tool", %{
+        effect: :tool_call,
+        attempt: %{
+          tool: "bash",
+          call_id: "c1",
+          subject: %{command_sha256: String.duplicate("c", 64)}
+        },
+        result: %{status: :completed, duration_ms: 3, output_bytes: 12}
+      })
+
+    approval =
+      record!(context.principal, "effect-#{context.principal}-approval", %{
+        effect: :approval,
+        attempt: %{tool: "bash", request_id: "req-1"},
+        result: %{decision: :allow, scope: :once, actor: :human, origin: "provider"}
+      })
+
+    assert {:ok, %{entries: [^call]}} =
+             Methods.invoke("ledger.list", %{
+               "principal" => context.principal,
+               "effect" => "tool_call"
+             })
+
+    assert {:ok, %{entries: [^approval]}} =
+             Methods.invoke("ledger.list", %{
+               "principal" => context.principal,
+               "effect" => "approval"
+             })
+
+    assert {:ok, resolved} = Methods.invoke("ledger.get", %{"id" => call.id})
+    assert resolved.attempt.subject.command_sha256 == String.duplicate("c", 64)
+  end
+
+  test "the export chain still verifies with the new kinds in it", context do
+    record!(context.principal, "effect-#{context.principal}-c1", %{
+      effect: :tool_call,
+      attempt: %{tool: "read", subject: %{paths: ["lib/a.ex"]}},
+      result: %{status: :completed, duration_ms: 1, output_bytes: 4}
+    })
+
+    record!(context.principal, "effect-#{context.principal}-c2", %{
+      effect: :approval,
+      attempt: %{tool: "bash", request_id: "req-2"},
+      result: %{decision: :allow, scope: :session, actor: :headless, origin: "external"}
+    })
+
+    assert {:ok, export} = Methods.invoke("ledger.export", %{})
+
+    head =
+      Enum.reduce(export.lines, export.seed, fn line, previous ->
+        assert line.previous == previous
+        decoded = JSON.decode!(line.line)
+        assert decoded["id"] == line.id
+
+        :sha256 |> :crypto.hash([previous, line.line]) |> Base.encode16(case: :lower)
+      end)
+
+    assert export.head == head
+
+    kinds = export.lines |> Enum.map(&JSON.decode!(&1.line)["effect"]) |> Enum.uniq()
+    assert "tool_call" in kinds
+    assert "approval" in kinds
+  end
+
   test "export pages forward from a sequence", context do
     first = record!(context.principal, "effect-#{context.principal}-p1")
 
