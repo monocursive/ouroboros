@@ -2282,6 +2282,22 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 ),
                 None => ("files", dialog.sandbox_label(), Style::default()),
             },
+            // D7. Two gates, and the row says which one is closed. A gateway that does
+            // not serve `interactive.start`'s worktree option cannot honour the toggle,
+            // and a toggle silently ignored is worse than none.
+            NewField::Worktree => (
+                "worktree",
+                if dialog.request.worktree {
+                    "yes — its own git worktree, so two sessions can share a repository".to_string()
+                } else {
+                    "no — the workspace itself, which takes an exclusive lease".to_string()
+                },
+                if dialog.request.worktree {
+                    Style::default().fg(theme::accent())
+                } else {
+                    Style::default()
+                },
+            ),
             NewField::Start => (
                 "",
                 if dialog.pending {

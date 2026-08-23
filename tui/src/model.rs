@@ -1895,6 +1895,13 @@ pub struct StartRequest {
     pub sandbox_mode: Option<SandboxMode>,
     /// Required on the coding plane, refused on the interactive one.
     pub objective: String,
+    /// D7. Run in a `git worktree` under the runtime's data directory instead of the
+    /// workspace itself, so two sessions on one repository do not fight over its lease.
+    ///
+    /// Sent only when true. The gateway's `worktree` option is a strict boolean — `"true"`
+    /// or `1` is `-32602` — and an unasked-for `false` on every start would be this client
+    /// stating a default the plane already has.
+    pub worktree: bool,
 }
 
 impl StartRequest {
@@ -1908,6 +1915,7 @@ impl StartRequest {
             approval_mode: None,
             sandbox_mode: None,
             objective: String::new(),
+            worktree: false,
         }
     }
 
@@ -1980,6 +1988,10 @@ impl StartRequest {
                 "sandbox_mode".into(),
                 Value::String(mode.as_str().to_string()),
             );
+        }
+
+        if self.worktree {
+            params.insert("worktree".into(), Value::Bool(true));
         }
 
         Ok(Value::Object(params))

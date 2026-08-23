@@ -257,12 +257,27 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         let content = block.inner(card);
         frame.render_widget(block, card);
         let marker = if selected { "▌" } else { signal };
+        // D7. Dropped whole where the card cannot hold it, the same rule the node label
+        // and the usage cell below follow.
+        let badge = worktree_badge(session)
+            .filter(|badge| badge.width() + label.width() + 4 <= content.width as usize);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(format!("{marker} "), border_style),
-                    Span::styled(label, title_style),
-                ]),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(format!("{marker} "), border_style),
+                        Span::styled(label, title_style),
+                    ];
+
+                    if let Some(badge) = badge {
+                        spans.push(Span::styled(
+                            format!(" {badge}"),
+                            Style::default().fg(theme::accent()),
+                        ));
+                    }
+
+                    spans
+                }),
                 Line::from({
                     let head = session.status.as_str().to_uppercase();
                     let named = format!(" · {}", super::tree::truncate(provider, 9));
@@ -504,12 +519,17 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     let event_count = watch.map(Watch::len).unwrap_or(0);
     let cursor = watch.map(Watch::cursor).unwrap_or(0);
     let dropped = watch.map(|watch| watch.dropped).unwrap_or(0);
+    // D7. The worktree row costs the ACTIVE CONTEXT panel one row, and only where there
+    // is one: a panel sized for a row it is not drawing would leave a blank line under
+    // every ordinary session.
+    let worktree_row = worktree_line(session, inner.width.saturating_sub(2));
+
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(5),
         Constraint::Length(1),
-        Constraint::Length(7),
+        Constraint::Length(7 + u16::from(worktree_row.is_some())),
         Constraint::Length(1),
         Constraint::Length(7),
         Constraint::Length(1),
@@ -586,7 +606,12 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
                 }),
             ),
             Line::from(Span::styled(session_label, session_style)),
-        ],
+        ]
+        .into_iter()
+        // Only where there is one. A row saying "WORKTREE no" on every ordinary session
+        // would be this client narrating a default.
+        .chain(worktree_row)
+        .collect(),
     );
 
     render_context_panel(
@@ -891,6 +916,41 @@ fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str, hint: &st
 /// The panel stays open across idle redraws — a task list that disappears the moment the
 /// agent stops working is the Codex #18920 anti-pattern — but it never takes the
 /// conversation's last rows on a short terminal.
+/// D7. The `⎇ worktree` badge, as one context-panel row.
+///
+/// The branch where `git worktree add` made one, and the short base commit where it ran
+/// `--detach` and there is no branch to name. A retired worktree — removed on close, or
+/// kept because it still held uncommitted work — says so instead of showing a live branch
+/// for a directory that may no longer be there.
+fn worktree_line(session: Option<&SessionInfo>, width: u16) -> Option<Line<'static>> {
+    let worktree = session.and_then(|session| session.worktree.as_ref())?;
+
+    let value = match &worktree.retired {
+        Some(retired) => format!("{} ({retired})", worktree.label()),
+        None => worktree.label(),
+    };
+
+    Some(context_panel_value(
+        "WORKTREE",
+        &format!("\u{2387} {value}"),
+        width,
+        if worktree.live() {
+            Style::default().fg(theme::accent())
+        } else {
+            Style::default().fg(theme::muted())
+        },
+    ))
+}
+
+/// The same badge in the form a rail card or a header can prefix a title with.
+pub fn worktree_badge(session: &SessionInfo) -> Option<String> {
+    session
+        .worktree
+        .as_ref()
+        .filter(|worktree| worktree.live())
+        .map(|worktree| format!("\u{2387} {}", worktree.label()))
+}
+
 fn plan_panel_height(app: &App, area: Rect) -> u16 {
     if !app.sessions.show_plan || area.height < 16 {
         return 0;
@@ -1113,6 +1173,13 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .and_then(|session| session.provider.as_deref())
         .unwrap_or("unknown")
         .to_string();
+    // D7/D9. Read here, beside the provider, because the watch below is borrowed mutably
+    // for the rest of this function and these two come from the session *row*.
+    let conversation_worktree = app.sessions.open_info().and_then(worktree_badge);
+    let conversation_handed_off_from = app
+        .sessions
+        .open_info()
+        .and_then(|session| session.handed_off_from.clone());
 
     let Some((plane, id)) = app.sessions.open.clone() else {
         frame.render_widget(
@@ -1260,6 +1327,8 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 provider: &conversation_provider,
                 show_event_details,
                 verbosity,
+                worktree: conversation_worktree,
+                handed_off_from: conversation_handed_off_from,
             },
         );
     }
@@ -1353,6 +1422,10 @@ fn details_pane(
                 provider: pane.provider,
                 show_event_details: true,
                 verbosity: pane.verbosity,
+                // The details pane replaces the subtitle with a cursor line, so neither
+                // badge is drawn there and neither is looked up.
+                worktree: None,
+                handed_off_from: None,
             },
         );
     }
@@ -1421,6 +1494,10 @@ struct ConversationHeader<'a> {
     provider: &'a str,
     show_event_details: bool,
     verbosity: Verbosity,
+    /// D7. `⎇ <branch>` where this session was given its own worktree.
+    worktree: Option<String>,
+    /// D9. The session this one's opening packet was written from, where there was one.
+    handed_off_from: Option<String>,
 }
 
 fn render_conversation_header(
@@ -1503,6 +1580,21 @@ fn render_conversation_header(
         }
 
         facts.push(compact_session_id(header.id, area.width.saturating_sub(24)));
+
+        if let Some(badge) = header.worktree.as_deref() {
+            facts.push(badge.to_string());
+        }
+
+        // D9. Said on the header rather than only in `/context`: a handoff child opens
+        // with a packet *about* another conversation and no memory of it, and a reader
+        // who does not know that is reading a session that appears to start mid-thought.
+        if let Some(parent) = header.handed_off_from.as_deref() {
+            facts.push(format!(
+                "handed off from {}",
+                compact_session_id(parent, 14)
+            ));
+        }
+
         format!(" {}", facts.join(" · "))
     };
     frame.render_widget(

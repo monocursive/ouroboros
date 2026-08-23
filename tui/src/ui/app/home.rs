@@ -166,6 +166,9 @@ impl App {
                 approval_mode: self.config.defaults.approval_mode(),
                 sandbox_mode: self.config.defaults.sandbox_mode(),
                 objective: String::new(),
+                // The quick start is the shortest path there is; a worktree is a choice,
+                // and it is made in the `n` dialog or on the command line.
+                worktree: false,
             });
 
         let params = match request.params() {
@@ -320,6 +323,7 @@ impl App {
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
             objective: String::new(),
+            worktree: false,
         };
 
         let params = match request.params() {

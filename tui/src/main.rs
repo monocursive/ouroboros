@@ -125,6 +125,7 @@ async fn run(cli: Cli) -> Result<()> {
             sandbox_mode,
             message,
             machine,
+            worktree,
             print,
         }) => {
             new_session(
@@ -139,6 +140,7 @@ async fn run(cli: Cli) -> Result<()> {
                     machine,
                 },
                 message,
+                worktree,
                 print,
             )
             .await
@@ -284,6 +286,7 @@ async fn new_session(
     config: Loaded,
     flags: StartFlags,
     message: Option<String>,
+    worktree: bool,
     print: bool,
 ) -> Result<()> {
     paths.ensure_private_data_dir()?;
@@ -319,6 +322,7 @@ async fn new_session(
             })?),
         },
         objective: String::new(),
+        worktree,
     };
 
     // Mint the durable identity before the mutation. If the reply disappears after the
@@ -2876,6 +2880,7 @@ mod tests {
             approval_mode: None,
             sandbox_mode: None,
             objective: String::new(),
+            worktree: false,
         }
     }
 

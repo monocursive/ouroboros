@@ -80,6 +80,7 @@ fn start_plan(prompt: &str) -> Plan {
         approval_mode: None,
         sandbox_mode: None,
         objective: String::new(),
+        worktree: false,
     };
 
     let params = request.params().expect("a validated start request");

@@ -88,6 +88,12 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         machine: Option<String>,
 
+        /// Run in a fresh `git worktree` under the runtime's data directory instead of
+        /// the workspace itself, so two sessions on one repository do not fight over its
+        /// exclusive lease (D7). Refused where the workspace is not a git repository.
+        #[arg(long)]
+        worktree: bool,
+
         /// Print the session id and exit instead of opening the terminal UI.
         #[arg(long)]
         print: bool,
