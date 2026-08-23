@@ -10,7 +10,10 @@ defmodule Ouroboros.Interactive.State do
     :turn_runtime_timeout_ms,
     :turn_idle_timeout_ms,
     :session_idle_timeout_ms,
-    :approval_timeout_ms
+    :approval_timeout_ms,
+    # B2. Plan mode is this plane's option — `request/1` folds it into `provider_options`
+    # for the adapters that read it — and not a coding-task option the base would refuse.
+    :plan
   ]
 
   # Start options that land on the struct rather than in `options`. `forked_from` and
@@ -22,7 +25,7 @@ defmodule Ouroboros.Interactive.State do
   # What `configure/2` may write into a session's durable options. Deliberately a literal
   # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
   # even if a capability check somewhere else is ever wrong.
-  @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
+  @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort, :plan]
 
   # A session title is drawn into one picker row on every list, so it is bounded where it
   # is written rather than by every client that draws it. An auto-title is shorter still:
@@ -270,6 +273,7 @@ defmodule Ouroboros.Interactive.State do
     |> rename(:runtime_timeout_ms, :turn_runtime_timeout_ms)
     |> rename(:idle_timeout_ms, :turn_idle_timeout_ms)
     |> Map.drop([:attachments, :max_turns])
+    |> fold_plan_option()
     |> Map.merge(%{
       cwd: state.workspace,
       metadata: metadata
@@ -279,6 +283,21 @@ defmodule Ouroboros.Interactive.State do
     |> Ouroboros.Provider.apply_runtime_provider_policy(state.provider)
     |> Ouroboros.Provider.apply_execution_directories(state.provider, :session)
   end
+
+  # B2. `plan` is a session option on the wire and a provider option underneath: the
+  # native session and the Claude adapter read `provider_options.plan`, and the pinned
+  # Harness request has no field of its own for it (a fifth `approval_mode` is refused by
+  # the dependency). A session started planning therefore carries it where the adapters
+  # look; one that is not carries nothing, so the request stays byte-identical to before.
+  defp fold_plan_option(%{plan: true} = request) do
+    provider_options = Map.get(request, :provider_options) || %{}
+
+    request
+    |> Map.delete(:plan)
+    |> Map.put(:provider_options, Map.put(provider_options, :plan, true))
+  end
+
+  defp fold_plan_option(request), do: Map.delete(request, :plan)
 
   # The provider session id a session learned from its own events is the one that can
   # resume it, and it lives on the struct rather than in the start options. A request
@@ -577,6 +596,9 @@ defmodule Ouroboros.Interactive.State do
             :has_system_prompt,
             present?(Map.get(state.options, :system_prompt))
           ),
+        # B2. Whether the session is planning, as the record has it; a plan exit the native
+        # session applied is folded into the record by the coordinator.
+        plan: Map.get(state.options, :plan, false) == true,
         has_provider_options:
           projected(
             state.options,
@@ -878,7 +900,8 @@ defmodule Ouroboros.Interactive.State do
           :runtime_exposure,
           :env,
           :env_mode,
-          :mcp_config
+          :mcp_config,
+          :plan
         ]
 
     case Enum.find(Keyword.keys(opts), &(&1 not in accepted)) do

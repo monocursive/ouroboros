@@ -385,6 +385,12 @@ defmodule Ouroboros.Gateway.Methods do
 
   @approval_decisions %{"approve" => :approve, "deny" => :deny}
   @approval_scopes %{"once" => :once, "session" => :session}
+  # The one shape of `provider_options` an answer may carry: a plan-exit question's
+  # explicit choice and the follow-up prompt that runs once the session is out of plan
+  # mode (B2). Anything else under that key is still refused — an approval is a yes or a
+  # no, and this is the narrowest door a plan-aware client needs.
+  @plan_exit_choices ["auto_edit", "prompt", "keep_planning"]
+  @max_follow_up_bytes 32 * 1024
 
   # The permission engine's own vocabulary, spelled out for the same reason as the rest:
   # a client string is matched against these terms, never converted into one.
@@ -430,6 +436,9 @@ defmodule Ouroboros.Gateway.Methods do
     # in `@configuration_options`: a session cannot be moved into a worktree after its
     # workspace has been admitted and leased.
     "worktree" => :boolean,
+    # B2. Start planning: a read-only posture with a plan-exit question at the end of the
+    # turn. Which transports can be told is `Ouroboros.Provider.plan_mode/2`'s answer.
+    "plan" => :boolean,
     "machine" => :node,
     "node" => :node
   }
@@ -443,7 +452,8 @@ defmodule Ouroboros.Gateway.Methods do
     "approval_mode" => {:enum, @approval_modes},
     "sandbox_mode" => {:enum, @sandbox_modes},
     "model" => :string,
-    "reasoning_effort" => {:enum, @reasoning_efforts}
+    "reasoning_effort" => {:enum, @reasoning_efforts},
+    "plan" => :boolean
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -754,9 +764,19 @@ defmodule Ouroboros.Gateway.Methods do
                  "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
                 {"reason", :optional, :string, nil},
                 {"actor", {:optional, "human"}, {:enum, ["human", "headless", "automation"]},
-                 "who answered: `headless` is `ouro run --approve-all`; the ledger's `approval` entry records it"}
+                 "who answered: `headless` is `ouro run --approve-all`; the ledger's `approval` entry records it"},
+                {"provider_options", :optional,
+                 {:object,
+                  [
+                    {"choice", :optional, {:enum, @plan_exit_choices},
+                     "a plan-exit question's explicit answer (B2); otherwise the decision and scope decide"},
+                    {"follow_up", :optional, :string,
+                     "the prompt to run once the session has left plan mode; at most 32 KiB"}
+                  ]},
+                 "accepted only in this shape, for a plan-exit question; anything else is refused"}
               ]}
-           ]}, "`provider_options` is deliberately not accepted: an approval is a yes or a no"},
+           ]},
+          "an approval is a yes or a no; `provider_options` is admitted only as a plan-exit answer"},
          @session_node
        ]},
     "interactive.configure" =>
@@ -2187,6 +2207,7 @@ defmodule Ouroboros.Gateway.Methods do
     "reasoning_effort" => :reasoning_effort,
     "runtime_exposure" => :runtime_exposure,
     "worktree" => :worktree,
+    "plan" => :plan,
     "role" => :role,
     "machine" => :node,
     "node" => :node,
@@ -2336,23 +2357,48 @@ defmodule Ouroboros.Gateway.Methods do
   @approval_actors %{"human" => :human, "headless" => :headless, "automation" => :automation}
 
   defp structured_approval(response) do
-    unknown = Map.keys(response) -- ["decision", "scope", "reason", "actor"]
+    unknown = Map.keys(response) -- ["decision", "scope", "reason", "actor", "provider_options"]
 
     with [] <- unknown,
          {:ok, decision} <- Map.fetch(@approval_decisions, Map.get(response, "decision")),
          {:ok, scope} <- Map.fetch(@approval_scopes, Map.get(response, "scope", "once")),
          {:ok, reason} <- fetch_optional_string(response, "reason"),
-         {:ok, actor} <- Map.fetch(@approval_actors, Map.get(response, "actor", "human")) do
+         {:ok, actor} <- Map.fetch(@approval_actors, Map.get(response, "actor", "human")),
+         {:ok, provider_options} <- plan_exit_options(Map.get(response, "provider_options")) do
       approval = %{decision: decision, scope: scope}
 
       approval =
         if reason, do: Map.put(approval, :reason, reason), else: approval
+
+      approval =
+        if provider_options,
+          do: Map.put(approval, :provider_options, provider_options),
+          else: approval
 
       {:ok, if(actor == :human, do: approval, else: Map.put(approval, :actor, actor))}
     else
       _refused -> {:invalid, approval_message()}
     end
   end
+
+  defp plan_exit_options(nil), do: {:ok, nil}
+
+  defp plan_exit_options(options) when is_map(options) do
+    with [] <- Map.keys(options) -- ["choice", "follow_up"],
+         true <- Map.get(options, "choice", "auto_edit") in @plan_exit_choices,
+         {:ok, follow_up} <- fetch_optional_string(options, "follow_up"),
+         true <- is_nil(follow_up) or byte_size(follow_up) <= @max_follow_up_bytes do
+      {:ok,
+       options
+       |> Map.take(["choice", "follow_up"])
+       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+       |> Map.new()}
+    else
+      _refused -> :refused
+    end
+  end
+
+  defp plan_exit_options(_other), do: :refused
 
   # What a permission-prompt tool actually carries. `tool_name` is the only required
   # field: Claude Code's call names the tool, hands over its arguments object, and

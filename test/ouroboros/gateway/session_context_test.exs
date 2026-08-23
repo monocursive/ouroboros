@@ -577,4 +577,118 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
   defp restore_ouroboros(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_ouroboros(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  describe "plan mode on the wire" do
+    defp plan_events(ref, type, predicate) do
+      {:ok, %State{events: events}} = InteractiveSession.info(ref)
+      Enum.filter(events, &(&1.type == type and predicate.(&1)))
+    end
+
+    defp await_plan_event(ref, type, predicate) do
+      wait_until(fn -> plan_events(ref, type, predicate) != [] end)
+      hd(plan_events(ref, type, predicate))
+    end
+
+    test "a native session started planning answers its plan-exit question over the wire, and the record follows",
+         %{id: id} = context do
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "p1",
+             name: "plan",
+             input: %{"steps" => [%{"step" => "write the greeter", "status" => "pending"}]}
+           }}
+        ],
+        [{:text, "Plan ready."}, {:finish, :stop}],
+        [{:text, "built"}, {:finish, :stop}]
+      ]
+
+      {model_spec, agent} = NativeModelScript.start(script)
+
+      {:ok, ref} =
+        InteractiveSession.start(
+          id: id,
+          provider: :native,
+          workspace: context.workspace,
+          model: model_spec,
+          workspace_mode: :shared_read,
+          approval_mode: :auto_approve,
+          plan: true
+        )
+
+      on_exit(fn -> InteractiveSession.close(ref) end)
+
+      # The option is a session option on the wire and a provider option underneath.
+      {:ok, %State{} = session} = InteractiveSession.info(ref)
+      assert State.public(session).options.plan == true
+      request = State.request(session)
+      assert request.provider_options[:plan] == true
+      refute Map.has_key?(request, :plan)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "plan the greeter", id: "turn-plan")
+
+      question =
+        await_plan_event(ref, :approval_requested, &(&1.payload["kind"] == "plan_exit"))
+
+      assert Enum.map(question.payload["options"], & &1["optionId"]) ==
+               ["auto_edit", "prompt", "keep_planning"]
+
+      # The explicit choice and the follow-up ride `provider_options`, the one shape the
+      # gateway admits under that key.
+      assert {:ok, _answer} =
+               Methods.invoke("interactive.respond_approval", %{
+                 "id" => id,
+                 "request_id" => question.request_id,
+                 "response" => %{
+                   "decision" => "approve",
+                   "scope" => "once",
+                   "provider_options" => %{"choice" => "auto_edit", "follow_up" => "now build it"}
+                 }
+               })
+
+      exit_event =
+        await_plan_event(
+          ref,
+          :provider_event,
+          &(&1.payload["kind"] == "plan_exit" and &1.payload["applied"] == true)
+        )
+
+      assert exit_event.payload["choice"] == "auto_edit"
+      assert exit_event.payload["follow_up"] == true
+
+      # `interactive.info` follows the posture the session now runs under.
+      {:ok, %State{} = after_exit} = InteractiveSession.info(ref)
+      assert State.public(after_exit).options.approval_mode == :auto_edit
+      assert State.public(after_exit).options.plan == false
+
+      # The follow-up ran as the rest of the same turn: the third scripted answer was used.
+      wait_until(fn -> NativeModelScript.call_count(agent) == 3 end)
+
+      # And plan mode can be put back, and taken off again, through `interactive.configure`.
+      assert {:ok, result} =
+               Methods.invoke("interactive.configure", %{"id" => id, "plan" => true})
+
+      assert result.changed == [:plan]
+      assert result.applies == :now
+      assert result.options.plan == true
+
+      assert {:ok, result} =
+               Methods.invoke("interactive.configure", %{"id" => id, "plan" => false})
+
+      assert result.options.plan == false
+    end
+
+    test "a transport that cannot be told to plan refuses by declaration, as wire data",
+         %{id: id} do
+      start_session(id)
+
+      assert {:error, _code, _message, ["unsupported_configuration", details]} =
+               Methods.invoke("interactive.configure", %{"id" => id, "plan" => true})
+
+      assert details["field"] == "plan"
+      retire_session(id)
+    end
+  end
 end

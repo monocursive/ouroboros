@@ -771,6 +771,50 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # B2. A plan exit the native session applied changed the session's approval and
+  # sandbox modes from inside, on an answer this coordinator only relayed. The durable
+  # record — and so `interactive.info` — follows the event, or a client would keep drawing
+  # a posture the session no longer runs under. Mode names are matched against the closed
+  # vocabularies rather than turned into atoms.
+  @plan_exit_approval_modes %{
+    "auto_edit" => :auto_edit,
+    "prompt" => :prompt,
+    "auto_approve" => :auto_approve,
+    "default" => :default
+  }
+  @plan_exit_sandbox_modes %{
+    "read_only" => :read_only,
+    "workspace_write" => :workspace_write,
+    "danger_full_access" => :danger_full_access
+  }
+
+  defp apply_plan_exits(session, events) do
+    Enum.reduce(events, session, fn
+      %Event{
+        type: :provider_event,
+        payload: %{"kind" => "plan_exit", "applied" => true} = payload
+      },
+      session ->
+        State.configure(session, plan_exit_changes(payload))
+
+      _event, session ->
+        session
+    end)
+  end
+
+  defp plan_exit_changes(payload) do
+    %{plan: Map.get(payload, "plan") == true}
+    |> put_known(:approval_mode, @plan_exit_approval_modes, Map.get(payload, "approval_mode"))
+    |> put_known(:sandbox_mode, @plan_exit_sandbox_modes, Map.get(payload, "sandbox_mode"))
+  end
+
+  defp put_known(changes, key, vocabulary, value) do
+    case Map.fetch(vocabulary, value) do
+      {:ok, atom} -> Map.put(changes, key, atom)
+      :error -> changes
+    end
+  end
+
   defp persist_harness_events(runtime, harness_events) do
     projected = Enum.map(harness_events, &Event.from_harness(runtime.session.id, &1))
 
@@ -795,6 +839,7 @@ defmodule Ouroboros.Interactive.Task do
         |> append_event(event)
       end)
       |> apply_turn_event_statuses(projected)
+      |> apply_plan_exits(projected)
       |> mark_gap_ambiguities(projected)
       # What the session spent rides the same checkpoint as the events it was read from,
       # so a restart resumes the account rather than restarting it at zero.
@@ -1791,17 +1836,67 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) do
       {:error, {:session_not_configurable, session.status}, runtime}
     else
-      with {:ok, changes, applies} <-
-             Provider.session_configuration(
-               session.provider,
-               changes,
-               Map.get(session.options, :transport)
-             ),
-           :ok <- apply_configuration(runtime, changes) do
-        record_configuration(runtime, changes, applies)
+      # B2. Plan mode is not a Harness configuration field — the pinned `SessionRequest`
+      # refuses a fifth key — so it is split off here and goes around `Session.configure/2`
+      # to the native session, where `Provider.plan_mode/2` says the transport can be told
+      # mid-life. Everything else takes the path it always took.
+      {plan, rest} = Map.pop(changes, :plan)
+
+      with {:ok, rest, applies} <- configuration_changes(session, rest, plan),
+           :ok <- apply_plan(runtime, plan),
+           :ok <- apply_rest(runtime, rest) do
+        record_configuration(runtime, plan_changes(rest, plan), applies)
       else
         {:error, reason} -> {:error, reason, runtime}
       end
+    end
+  end
+
+  # A change that is only `plan` has nothing for the provider to validate; a change that
+  # is nothing at all is still refused there, as it always was.
+  defp configuration_changes(_session, rest, planning?)
+       when rest == %{} and is_boolean(planning?),
+       do: {:ok, %{}, :now}
+
+  defp configuration_changes(session, rest, _planning?),
+    do:
+      Provider.session_configuration(session.provider, rest, Map.get(session.options, :transport))
+
+  defp apply_rest(_runtime, rest) when rest == %{}, do: :ok
+  defp apply_rest(runtime, rest), do: apply_configuration(runtime, rest)
+
+  defp plan_changes(rest, nil), do: rest
+  defp plan_changes(rest, planning?), do: Map.put(rest, :plan, planning?)
+
+  defp apply_plan(_runtime, nil), do: :ok
+
+  defp apply_plan(%{session: session}, planning?) when is_boolean(planning?) do
+    case Provider.plan_mode(session.provider, Map.get(session.options, :transport)) do
+      {:ok, %{settable: :any_time}} ->
+        with {:ok, pid} <- native_transport(session, :plan) do
+          case safe_session_call(fn -> NativeSession.plan_mode(pid, planning?) end) do
+            :ok -> :ok
+            {:ok, _state} -> :ok
+            {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
+            other -> {:error, {:configure_refused, durable(other)}}
+          end
+        end
+
+      {:ok, %{settable: :at_start, via: via}} ->
+        {:error,
+         {:unsupported_configuration,
+          %{
+            provider: session.provider,
+            field: :plan,
+            reason: :at_start_only,
+            message:
+              "#{session.provider} can only be told to plan when the session starts " <>
+                "(it carries the posture as #{via} on every launch); start a new session " <>
+                "with `plan: true` instead."
+          }}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

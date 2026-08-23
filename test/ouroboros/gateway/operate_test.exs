@@ -537,7 +537,11 @@ defmodule Ouroboros.Gateway.OperateTest do
     test "an approval response outside the allowlist is refused", %{client: client} do
       assert hello(client)["result"]
 
-      for response <- ["maybe", %{"decision" => "approve", "provider_options" => %{"a" => 1}}] do
+      for response <- [
+            "maybe",
+            %{"decision" => "approve", "provider_options" => %{"a" => 1}},
+            %{"decision" => "approve", "provider_options" => %{"choice" => "bogus"}}
+          ] do
         answer =
           call(client, "interactive.respond_approval", %{
             "id" => "session",
@@ -548,6 +552,25 @@ defmodule Ouroboros.Gateway.OperateTest do
         assert answer["error"]["code"] == -32602
         assert answer["error"]["message"] =~ "approve"
       end
+    end
+
+    test "a plan-exit answer's choice and follow-up are the one provider_options shape admitted",
+         %{client: client} do
+      assert hello(client)["result"]
+
+      answer =
+        call(client, "interactive.respond_approval", %{
+          "id" => "session",
+          "request_id" => "request",
+          "response" => %{
+            "decision" => "approve",
+            "provider_options" => %{"choice" => "auto_edit", "follow_up" => "now build it"}
+          }
+        })
+
+      # Past the envelope; the session it names does not exist, which is the next refusal.
+      assert answer["error"]
+      refute answer["error"]["code"] == -32602
     end
 
     test "an approval answer may name a headless actor, and an actor outside the vocabulary is refused",
