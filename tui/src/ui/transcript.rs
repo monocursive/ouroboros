@@ -88,13 +88,6 @@ impl Note {
             Self::Local { block } => block.text(),
         }
     }
-
-    /// Whether this is one of this client's own notes rather than a stream fact. The two
-    /// are drawn differently — a muted in-conversation cell against a warning divider —
-    /// because only one of them means something went wrong.
-    pub fn local(&self) -> bool {
-        matches!(self, Self::Local { .. })
-    }
 }
 
 /// The tail of a transcript, and how much of the ledger it does not reach.

@@ -10,7 +10,6 @@
 
 use serde_json::Value;
 
-use super::compact;
 use super::transcript::leaf_text;
 
 /// How long a digest, an id, or a reason may be before it stops being a label.
@@ -579,14 +578,6 @@ pub struct ShellResult {
     pub spill_error: Option<String>,
 }
 
-/// How much of a command's inline output one transcript cell holds.
-///
-/// The runtime already bounds this at 30 KiB; a cell that drew all of it would push the
-/// conversation it belongs to off the screen, so the head and the tail are kept and the
-/// count between them names the key that has the rest.
-pub const SHELL_HEAD_LINES: usize = 8;
-pub const SHELL_TAIL_LINES: usize = 8;
-
 impl ShellResult {
     pub fn decode(value: &Value) -> Option<Self> {
         let map = value.as_object()?;
@@ -863,13 +854,6 @@ impl ShellEvent {
             error: sentence(map, "error", 512),
         }
     }
-}
-
-/// What a refusal this client could not read still says: its compact JSON.
-///
-/// Used where a typed decoder declined, so nothing is dropped on the floor.
-pub fn unread(data: Option<&Value>) -> Option<String> {
-    data.filter(|value| !value.is_null()).map(compact)
 }
 
 #[cfg(test)]

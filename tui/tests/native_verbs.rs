@@ -716,6 +716,33 @@ fn a_bang_draft_states_where_it_runs_before_it_is_sent() {
     );
 }
 
+/// The posture is stated, never the answer: a rule may allow this exact command and only
+/// the engine knows, so the composer says where the session stands rather than predicting.
+#[test]
+fn a_bang_draft_on_a_prompting_session_says_it_needs_a_rule() {
+    let mut app = opened_at(native_capabilities(), "prompt");
+    compose(&mut app);
+    type_text(&mut app, "!mix test");
+
+    let text = screen(&mut app).text();
+    assert!(
+        text.contains("needs a permission rule at this approval mode"),
+        "{text}"
+    );
+
+    let mut older = opened_without(native_capabilities(), &["workspace.exec"]);
+    compose(&mut older);
+    type_text(&mut older, "!mix test");
+
+    assert!(
+        screen(&mut older)
+            .text()
+            .contains("does not serve workspace.exec"),
+        "{}",
+        screen(&mut older).text()
+    );
+}
+
 #[test]
 fn a_bang_draft_sends_the_rest_to_workspace_exec() {
     let mut older = opened_without(native_capabilities(), &["workspace.exec"]);

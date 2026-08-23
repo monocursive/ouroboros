@@ -2170,14 +2170,24 @@ fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
         // B7. Said *before* the command is sent, every time, because "where does this
         // run" is the one thing about `!` that a person cannot infer from the screen: not
         // here, but on the session's own owner node, in the workspace the agent is
-        // editing.
+        // editing. And where the session's posture does not already permit it, that is
+        // said too — the engine may still allow this exact command by rule, and only it
+        // knows, so this states the posture rather than predicting the answer.
         if shell_draft {
+            let said = if !app.shell_offered() {
+                "this gateway does not serve workspace.exec".to_string()
+            } else if app.shell_auto_approved() {
+                format!("runs on {}", app.shell_where())
+            } else {
+                format!(
+                    "runs on {} — needs a permission rule at this approval mode",
+                    app.shell_where()
+                )
+            };
+
             spans.push(Span::styled(" ! ", Style::default().fg(theme::warn())));
             spans.push(Span::styled(
-                super::tree::truncate(
-                    &format!("runs on {}", app.shell_where()),
-                    area.width.saturating_sub(6).max(20) as usize,
-                ),
+                super::tree::truncate(&said, area.width.saturating_sub(6).max(20) as usize),
                 Style::default().fg(theme::muted()),
             ));
         } else if !composer.attachments.is_empty() {
