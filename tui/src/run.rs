@@ -35,7 +35,7 @@
 //! on a human it does not have — the failure mode this replaces is a script that hangs
 //! until its CI job is killed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -409,8 +409,7 @@ struct Run<'a> {
     /// Agent messages, in order, with the in-flight one last.
     messages: Vec<String>,
     draft: Option<String>,
-    files: BTreeSet<String>,
-    file_order: Vec<String>,
+    changed: ChangedFiles,
     approvals: JoinSet<Result<(), ClientError>>,
     /// The send could not be reconciled. Only a turn-terminal event can clear it.
     unreconciled: Option<String>,
@@ -436,8 +435,7 @@ impl<'a> Run<'a> {
             rounds: 0,
             messages: Vec::new(),
             draft: None,
-            files: BTreeSet::new(),
-            file_order: Vec::new(),
+            changed: ChangedFiles::default(),
             approvals: JoinSet::new(),
             unreconciled: None,
             requested: None,
@@ -1233,17 +1231,9 @@ impl<'a> Run<'a> {
                 }
             }
             EventType::Usage => fold_usage(&mut self.report.usage, &event.payload),
-            EventType::FileChange => {
-                for path in file_paths(&event.payload) {
-                    if self.file_order.len() >= MAX_FILES {
-                        break;
-                    }
-
-                    if self.files.insert(path.clone()) {
-                        self.file_order.push(path);
-                    }
-                }
-            }
+            EventType::ToolCall if self.ours(event) => self.changed.note_call(&event.payload),
+            EventType::ToolResult if self.ours(event) => self.changed.note_result(&event.payload),
+            EventType::FileChange => self.changed.note_change(&event.payload),
             EventType::ApprovalRequested => {
                 self.report.approvals_requested += 1;
                 self.answer_approval(event, sinks);
@@ -1425,7 +1415,7 @@ impl<'a> Run<'a> {
         }
 
         self.report.text = text;
-        self.report.files_changed = std::mem::take(&mut self.file_order);
+        self.report.files_changed = self.changed.take();
         self.report.duration = self.started_at.elapsed();
 
         if let Some(unreconciled) = self.unreconciled.take() {
@@ -1668,6 +1658,158 @@ fn normalise_key(key: &str) -> String {
 /// `{"changes": […], "status": …}` for item-level edits — and the generic JSON adapter
 /// passes provider records through untouched, so the key list is the tolerant one the
 /// transcript already uses rather than a single spelling.
+/// The files a run changed, in first-seen order: every path a `file_change` named, plus
+/// the target of a well-known write tool once its result came back without an error.
+/// Providers whose harness adapter reports no `file_change` — Claude among them — would
+/// otherwise finish an edit with `files_changed: []`, which a script reads as "nothing to
+/// review". A call is counted on its result, never on its request: a refused or failed
+/// write changed nothing.
+#[derive(Default)]
+struct ChangedFiles {
+    order: Vec<String>,
+    /// Write tools awaiting their result, by call id.
+    pending: BTreeMap<String, Vec<String>>,
+}
+
+const MAX_PENDING_WRITES: usize = 64;
+
+/// Tools that write the file they name: the vendors' (Claude Code, Codex, Gemini, the
+/// Anthropic editor tool) and this runtime's own. A tool not named here is never inferred
+/// to have written anything, whatever its input looks like.
+const WRITE_TOOLS: &[&str] = &[
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "edit",
+    "write",
+    "apply_patch",
+    "write_file",
+    "edit_file",
+    "create_file",
+    "replace",
+    "str_replace_based_edit_tool",
+    "str_replace_editor",
+];
+
+impl ChangedFiles {
+    fn note_call(&mut self, payload: &Value) {
+        let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+            return;
+        };
+
+        if self.pending.len() >= MAX_PENDING_WRITES {
+            return;
+        }
+
+        if let Some(paths) = write_tool_targets(payload) {
+            self.pending.insert(call_id.to_string(), paths);
+        }
+    }
+
+    fn note_result(&mut self, payload: &Value) {
+        let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(paths) = self.pending.remove(call_id) else {
+            return;
+        };
+
+        let failed = payload
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || matches!(
+                payload.get("status").and_then(Value::as_str),
+                Some("failed" | "error" | "errored")
+            );
+
+        if !failed {
+            for path in paths {
+                self.record(path);
+            }
+        }
+    }
+
+    fn note_change(&mut self, payload: &Value) {
+        for path in file_paths(payload) {
+            self.record(path);
+        }
+    }
+
+    fn record(&mut self, path: String) {
+        if self.order.len() >= MAX_FILES || self.order.iter().any(|held| same_file(held, &path)) {
+            return;
+        }
+
+        self.order.push(path);
+    }
+
+    fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.order)
+    }
+}
+
+/// The files a write tool's call names, or `None` for a tool that is not a write tool.
+fn write_tool_targets(payload: &Value) -> Option<Vec<String>> {
+    let name = payload.get("name").and_then(Value::as_str)?;
+
+    if !WRITE_TOOLS.contains(&name) {
+        return None;
+    }
+
+    let input = ["input", "arguments", "args", "params"]
+        .iter()
+        .find_map(|key| payload.get(key))?;
+    let Value::Object(fields) = input else {
+        return None;
+    };
+    let mut paths = Vec::new();
+
+    for key in ["file_path", "path", "notebook_path", "filePath", "file"] {
+        if let Some(path) = fields.get(key).and_then(Value::as_str) {
+            push_path(path, &mut paths);
+        }
+    }
+
+    for key in ["patch", "input", "diff"] {
+        if let Some(text) = fields.get(key).and_then(Value::as_str) {
+            for path in v4a_targets(text) {
+                push_path(&path, &mut paths);
+            }
+
+            if let Some(path) = Diff::parse(text).path {
+                push_path(&path, &mut paths);
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
+/// The files a V4A patch names: `*** Add File:`, `*** Update File:`, `*** Delete File:`,
+/// and the destination of a `*** Move to:`.
+fn v4a_targets(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|header| line.strip_prefix(header))
+        })
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
 fn file_paths(payload: &Value) -> Vec<String> {
     let mut paths = Vec::new();
 
@@ -2015,6 +2157,79 @@ mod tests {
         assert_eq!(
             refusal.to_json(),
             json!({ "type": "error", "error": "no provider was named" })
+        );
+    }
+
+    #[test]
+    fn a_write_tool_counts_its_file_once_the_result_is_not_an_error() {
+        let mut changed = super::ChangedFiles::default();
+
+        changed.note_call(&json!({
+            "call_id": "c1", "name": "Edit",
+            "input": { "file_path": "/w/ws/main.c", "old_string": "a", "new_string": "b" }
+        }));
+        changed.note_call(&json!({
+            "call_id": "c2", "name": "Write",
+            "input": { "file_path": "/w/ws/refused.c", "content": "" }
+        }));
+        changed.note_call(&json!({
+            "call_id": "c3", "name": "Read",
+            "input": { "file_path": "/w/ws/read.c" }
+        }));
+        changed.note_call(&json!({
+            "call_id": "c4", "name": "Write",
+            "input": { "file_path": "/w/ws/failed.c", "content": "" }
+        }));
+        changed.note_call(&json!({
+            "call_id": "c5", "name": "NotebookEdit",
+            "input": { "notebook_path": "/w/ws/never-answered.ipynb" }
+        }));
+
+        changed.note_result(&json!({ "call_id": "c1", "is_error": false, "output": "ok" }));
+        changed.note_result(&json!({ "call_id": "c2", "is_error": true, "output": "refused" }));
+        changed.note_result(&json!({ "call_id": "c3", "is_error": false, "output": "..." }));
+        changed.note_result(&json!({ "call_id": "c4", "status": "failed" }));
+
+        // Only the edit that succeeded: the refused write, the failed one, the read, and
+        // the call whose result never arrived all changed nothing.
+        assert_eq!(changed.take(), vec!["/w/ws/main.c"]);
+    }
+
+    #[test]
+    fn a_file_change_and_the_edit_that_caused_it_are_one_file() {
+        let mut changed = super::ChangedFiles::default();
+
+        changed.note_call(&json!({
+            "call_id": "c1", "name": "edit", "input": { "path": "/w/ws/lib/a.ex" }
+        }));
+        changed.note_result(&json!({ "call_id": "c1", "is_error": false }));
+        changed
+            .note_change(&json!({ "changes": [{ "path": "lib/a.ex" }, { "path": "lib/b.ex" }] }));
+
+        assert_eq!(changed.take(), vec!["/w/ws/lib/a.ex", "lib/b.ex"]);
+    }
+
+    #[test]
+    fn a_v4a_patch_names_every_file_it_touches() {
+        let targets = super::write_tool_targets(&json!({
+            "call_id": "c1", "name": "apply_patch",
+            "input": { "patch": "*** Begin Patch\n*** Update File: lib/a.ex\n*** Move to: lib/b.ex\n@@\n-x\n+y\n*** Add File: lib/c.ex\n+1\n*** Delete File: lib/d.ex\n*** End Patch\n" }
+        }));
+
+        assert_eq!(
+            targets,
+            Some(vec![
+                "lib/a.ex".to_string(),
+                "lib/b.ex".to_string(),
+                "lib/c.ex".to_string(),
+                "lib/d.ex".to_string()
+            ])
+        );
+        assert_eq!(
+            super::write_tool_targets(
+                &json!({ "call_id": "c", "name": "Bash", "input": { "command": "rm x" } })
+            ),
+            None
         );
     }
 }

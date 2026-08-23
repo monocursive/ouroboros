@@ -52,9 +52,10 @@ nobody holds.
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
 `review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
-full Elixir suite at **1543 passed, 0 failed**; the Rust suites at **932 / 940 passed,
-0 failed** (one epmd-binding test in `tui/src/fleet.rs` is load-flaky when a stray
-`epmd -daemon` is running and passes in isolation every time). Every slice was built by a
+full Elixir suite at **1580 passed, 0 failed**; the Rust suites at **0 failed** across
+every target in both feature sets (507 lib tests, 515 with `embed`; one epmd-binding test
+in `tui/src/fleet.rs` is load-flaky when a stray `epmd -daemon` is running and passes in
+isolation every time); the local eval corpus at **17 / 17**. Every slice was built by a
 babysat Opus agent in an isolated worktree, diff-verified against its own final report,
 and merged with the CI-identical gates run on the merged tree; integration defects that
 only the merged tree could reveal are listed under each track.
@@ -69,6 +70,17 @@ the silent denial §3.1 row 6 described is over for Claude at both `:prompt` and
 Codex app-server `thread/resume` refusing a thread with no rollout (fail-closed to
 `:lost`); the LSP pool's freshness gate against Apple clangd 21; `[` dumping a transcript
 into tmux 3.7's native scrollback.
+
+**Live-verified on 2026-08-23, on a default install (no `OUROBOROS_WORKSPACE_ROOTS`):**
+the whole vendor diagnostics chain. A real Claude Code 2.1.238 session started through
+`ouro run --provider claude` read the `PostToolUse` hook the adapter composed into
+`--settings`, ran `ouro hook post-tool-use` after its `Edit`, which reached the gateway's
+`code_intel.touch` (`gateway operate code_intel.touch` in the runtime log), which admitted
+the session's own workspace, spawned clangd, and handed the model — which quoted it
+verbatim in its answer — `Edit applied. Found 1 new diagnostic issue in …/main.c: error
+5:11 [undeclared_var_use] Use of undeclared identifier 'undefined_thing'`. The same run
+exposed that `ouro run` reported `files_changed: []` for that edit, fixed the same day
+(see §I/H1 below).
 
 ### Fix-first (§6)
 
@@ -127,10 +139,10 @@ into tmux 3.7's native scrollback.
 | D5 | landed | hooks (seven events wired; `SessionStart/End`, `PreCompact` declared, not wired) |
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire) |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
-| D8 | in flight | Terminal-Bench adapter + local corpus |
+| D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
 | E1 | landed | per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops; placed after the gateway |
-| E2 | landed (native) / vendor path in flight | diagnostics after edit in the native loop; Claude `PostToolUse` bridge in flight |
-| E3 | landed (native) / wire in flight | `code_intel` tool (eleven ops, rename gated); `code_intel.*` verbs in flight |
+| E2 | landed | diagnostics after edit in the native loop; for bridged Claude sessions a `PostToolUse` hook (`ouro hook post-tool-use`, three fixed output shapes, exit 0 on every path) composed into `--settings` — **live-verified**; Codex has no hook (its app-server transport has no config plumbing — recorded as a gap, not guessed) |
+| E3 | landed | `code_intel` tool (eleven ops, rename gated); `runtime.lsp.status`, `code_intel.{request,diagnostics,touch}` on the wire (node-routed, typed refusals, `pending` never reads as clean); `mcp-serve` serves `code_intel`/`diagnostics`/`touch` to Claude beside `approve`; `Diagnostics.signature/1` gives one definition of "the same diagnostic"; admission = configured roots **plus the workspace of every session the node holds** (a default install had none before 2026-08-23) |
 | E4 | pending | `@symbol`, jump-to-definition |
 | E5 | pending | structural index |
 | F1 | landed | resume after restart |
@@ -143,13 +155,13 @@ into tmux 3.7's native scrollback.
 | G3 | pending | native subagent tool |
 | G4 | pending | visible agent-to-agent messaging |
 | G5 | pending | orchestration UI |
-| H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified** |
+| H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified**. `files_changed` counts every `file_change` plus the target of a well-known write tool once its result was not an error — Claude's harness adapter emits no `file_change`, so a Claude edit used to finish as `[]` |
 | H2 | pending | `ouro acp` |
 | H3 | pending | `docs/PROTOCOL.md` |
 | H4 | pending | HTTP/SSE |
 | I1 | partial | `:permission` and `:operator_shell` kinds in the ledger; native tool calls as ledger entries pending |
 | I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
-| I3 | in flight | fleet-wide `ledger.list` + chain, `ouro ledger` |
+| I3 | landed | `ledger.{list,get,export}` (`fleet: true` fans out over bounded `:erpc`, merges by `{node, sequence}`, names the nodes that did not answer); `ledger.export` is JSONL with `hash(n) = sha256(hash(n-1) ‖ line(n))` over a canonical encoding — client-verifiable, not tamper-evident storage; `ouro ledger [--fleet] [--since N] [--json]` |
 | J1–J5 | pending | distribution |
 
 ### Scorecard now
@@ -171,20 +183,20 @@ what a user of `ouro` on `review-fixes` gets today.
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
 | 11 | Sandboxing / isolation | 1 | 2 (worktrees on both planes; no OS sandbox) |
 | 12 | MCP & tool ecosystem | 0 | 1 (Ouroboros *serves* MCP to Claude; no native MCP client; hooks and skills landed) |
-| 13 | LSP / semantic navigation | 0 | 2 (pool + native tool; vendor path in flight) |
+| 13 | LSP / semantic navigation | 0 | 3 (pool, native tool, the wire, MCP tools and a post-edit hook for Claude — live-verified end to end; no `@symbol` input or structural index yet) |
 | 14 | Git-native flow | 0 | 1 (worktrees) |
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
 | 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
 | 18 | In-session parallelism | 1 | 1→2 (delegation on the wire; client in flight) |
 | 19 | Background handoff + remote attach | 2 | 2 |
-| 20 | Cross-machine / fleet coordination | 2 | 2→3 (fleet ledger queries and triage in flight) |
+| 20 | Cross-machine / fleet coordination | 2 | 2→3 (fleet ledger queries landed; triage in flight) |
 | 21 | Programmability | 1 | 2 (hooks, skills, `ouro run --json`, MCP server; no ACP agent mode yet) |
 | 22 | Install / update / auth | 1 | 1 |
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
-| 24 | Audit & governance | 2 | 2→3 (permission and operator-shell effects ledgered; fleet queries in flight) |
+| 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **≈45, ≈49 once the in-flight slices land** |
+| | **Total / 75** | **23** | **≈47, ≈49 once the client half of B7/G1/G2 lands** |
 
 ### Honest limits added this wave
 
@@ -202,6 +214,20 @@ what a user of `ouro` on `review-fixes` gets today.
 - Worktrees scope containment; `bash` still runs with the operator's privileges and the
   worktree shares the repository's object store.
 - Test peers in `cluster_test.exs` never receive this repo's provider overrides.
+- Code-intelligence admission follows sessions: a node admits its configured roots plus
+  the workspace of every interactive session it holds, nothing else. Until 2026-08-23 a
+  default install (no configured roots) had no code intelligence at all, and every
+  code-intel test configured roots, so the suites never saw it — the local corpus, which
+  runs a daemon with no roots, is where such defaults get caught now.
+- The ledger export chain is computed over the answer and stored nowhere: it catches a
+  copy altered after export, not a node that rewrote its own checkpoint first. The ledger
+  is not replicated; `--fleet` asks every owner.
+- `files_changed` in `ouro run` infers a write from a fixed list of tool names and a
+  non-error result; a vendor tool named differently, or a write done through `Bash`, is
+  not counted. New-only diagnostics over-report in two documented directions (a file the
+  pool never held; an error whose range moved).
+- Codex sessions get no post-edit hook; bridged Claude sessions at `auto_edit` /
+  `auto_approve` get neither the MCP tools nor the hook.
 
 
 ## 1. Method and sources

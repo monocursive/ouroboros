@@ -965,7 +965,12 @@ script that calls `ouro run` in a loop should pay one cold start, not one per pr
 
 The result object carries `session_id`, `turn_id`, `status`, `provider`, `node`, `usage`,
 `files_changed`, `approvals` (`requested`/`answered`), `duration_ms`, and `error` when
-there is one. `usage` is **numbers only**, folded from `usage` events by replacement
+there is one. `files_changed` is every path a `file_change` event named, plus the target of a
+well-known write tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `apply_patch`, the
+Anthropic editor tool, and this runtime's own `write`/`edit`) once its result came back
+without an error — Claude's harness adapter reports no `file_change` at all, so without
+the second half an edit would finish as `[]`. A refused or failed write counts nothing, and a
+file named both absolutely and relatively counts once. `usage` is **numbers only**, folded from `usage` events by replacement
 rather than addition — those payloads are cumulative for the turn — with camelCase keys
 normalised and `total_tokens` derived from `input_tokens + output_tokens` exactly as the
 Harness mappers derive it, and only when the provider did not send it.
