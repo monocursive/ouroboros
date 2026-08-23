@@ -53,7 +53,10 @@ defmodule Ouroboros.ProviderCapabilityTest do
   # provider that changes transports upstream fails here rather than in a session.
   @interactive_capabilities %{
     claude: %{transport: :stream_json_resume, approvals: false, steer: false, interrupt: :process},
-    codex: %{transport: :app_server, approvals: :native, steer: false, interrupt: :native},
+    # C3: the app server has `turn/steer`, so this transport declares it. The `codex exec`
+    # fallback still does not — see the pair asserted in `codex_session_test.exs`, which is
+    # the case this per-provider table cannot express because it names only the default.
+    codex: %{transport: :app_server, approvals: :native, steer: :native, interrupt: :native},
     opencode: %{transport: :acp, approvals: :native, steer: false, multimodal: :native},
     kimi: %{transport: :acp, approvals: :native, steer: false, multimodal: :native},
     pi: %{transport: :rpc, steer: :native, approvals: false, interrupt: :native}

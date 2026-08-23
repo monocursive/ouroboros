@@ -7,6 +7,7 @@ defmodule Ouroboros.Provider.CodexSessionTest do
   alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.State
   alias Ouroboros.Provider.{CodexAdapter, CodexSession}
+  alias Ouroboros.Test.CodexSchema
 
   # Transport `next_id` starts at 1: initialize, thread/start, turn/start. The fake must
   # echo those ids back. Approval uses a distinct server id so it cannot be mistaken for
@@ -66,6 +67,64 @@ defmodule Ouroboros.Provider.CodexSessionTest do
       ;;
     *'"method":"thread/resume"'*)
       echo '{"id":2,"result":{"thread":{"id":"thread-parent"}}}'
+      ;;
+  """
+
+  # A turn that stays open so there is something to steer. `turn/steer` is request id 4:
+  # initialize 1, thread/start 2, turn/start 3. Its result is the bare `{turnId}` the
+  # schema declares, not the `{turn: {id}}` every other result carries.
+  @steer_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      echo '{"id":3,"result":{"turn":{"id":"turn-prov-1","status":"inProgress"}}}'
+      echo '{"method":"turn/started","params":{"turn":{"id":"turn-prov-1"}}}'
+      echo '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+      ;;
+    *'"method":"turn/steer"'*)
+      echo '{"id":4,"result":{"turnId":"turn-prov-1"}}'
+      echo '{"method":"turn/completed","params":{"turn":{"id":"turn-prov-1","status":"completed"}}}'
+      ;;
+  """
+
+  # The `expectedTurnId` precondition failing on the wire: the turn ended between the
+  # runtime's check and the frame arriving.
+  @steer_rejected_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      echo '{"id":3,"result":{"turn":{"id":"turn-prov-1","status":"inProgress"}}}'
+      echo '{"method":"turn/started","params":{"turn":{"id":"turn-prov-1"}}}'
+      echo '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+      ;;
+    *'"method":"turn/steer"'*)
+      echo '{"id":4,"error":{"code":-32602,"message":"that turn is no longer active"}}'
+      ;;
+  """
+
+  # The app server folding its own context, in both spellings: the `thread/compacted`
+  # notification the schema marks deprecated, and the `contextCompaction` item that
+  # replaces it.
+  @compaction_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      echo '{"id":3,"result":{"turn":{"id":"turn-prov-1","status":"inProgress"}}}'
+      echo '{"method":"thread/compacted","params":{"threadId":"thread-1","turnId":"turn-prov-1"}}'
+      echo '{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"item-9"}}}'
+      echo '{"method":"turn/completed","params":{"turn":{"id":"turn-prov-1","status":"completed"}}}'
       ;;
   """
 
@@ -440,6 +499,151 @@ defmodule Ouroboros.Provider.CodexSessionTest do
 
     refusal = Enum.find(logged(executable), &(&1["id"] == 42))
     assert refusal["error"]["message"] =~ "serves no app-server methods"
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "steer is declared on app-server only, and the exec fallback is left as it was" do
+    [app_server, exec] = CodexAdapter.spec().session_transports
+
+    assert app_server.name == :app_server
+    assert app_server.capabilities.steer == :native
+
+    assert Jido.Harness.InteractionCapabilities.supported?(app_server.capabilities, :steer)
+
+    # `codex exec --json` has no channel to steer down and gains nothing here.
+    assert exec.name == :exec_jsonl_resume
+    assert exec.capabilities.steer == false
+
+    # And what a client actually reads — `options.capabilities.steer` — says the same,
+    # which is the gate that offers Alt+Enter.
+    assert Ouroboros.Provider.session_capabilities(:codex, :app_server).steer == :native
+    assert Ouroboros.Provider.session_capabilities(:codex, :exec_jsonl_resume).steer == false
+  end
+
+  test "the app server's own compaction is reported as the provider's, never as this runtime's" do
+    executable = fake_app_server(@compaction_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("keep going"), "turn-1")
+
+    compacted = await_event(:provider_event)
+    assert compacted.payload["kind"] == "context_compacted"
+    assert compacted.payload["source"] == "provider"
+    assert compacted.payload["turn_id"] == "turn-prov-1"
+
+    # The `contextCompaction` item is the shape that replaces the notification; both are
+    # read, and neither claims this runtime folded anything.
+    item = await_event(:provider_event)
+    assert item.payload["kind"] == "context_compacted"
+    assert item.payload["source"] == "provider"
+
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a steer reaches turn/steer with the running turn as its expectedTurnId" do
+    executable = fake_app_server(@steer_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("start something long"), "turn-1")
+    assert %{payload: %{"text" => "working"}} = await_event(:output_text_delta)
+
+    assert :ok =
+             CodexSession.steer(handle, TurnRequest.new!("actually, stop and do this"), "req-1")
+
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+    steer = executable |> logged() |> Enum.find(&(&1["method"] == "turn/steer"))
+
+    # The id comes from the session's own counter — initialize 1, thread/start 2,
+    # turn/start 3 — which is the whole reason the frame is built in the dialect and
+    # written here rather than the other way round.
+    assert steer["id"] == 4
+
+    assert steer["params"] == %{
+             "threadId" => "thread-1",
+             "expectedTurnId" => "turn-prov-1",
+             "input" => [%{"type" => "text", "text" => "actually, stop and do this"}]
+           }
+
+    CodexSchema.assert_valid!(steer["params"], "TurnSteerParams")
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a steer carries images the same way a turn does, through the one input builder" do
+    executable = fake_app_server(@steer_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    workspace = attachment_workspace()
+    image = Path.join(workspace, "diagram.png")
+    File.write!(image, "not really a png, but a regular file")
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("start something long"), "turn-1")
+    assert %{payload: %{"text" => "working"}} = await_event(:output_text_delta)
+
+    steer = TurnRequest.new!(%{prompt: "look at this instead", attachments: [image]})
+    assert :ok = CodexSession.steer(handle, steer, "req-1")
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+    input =
+      executable
+      |> logged()
+      |> Enum.find(&(&1["method"] == "turn/steer"))
+      |> get_in(["params", "input"])
+
+    assert input == [
+             %{"type" => "text", "text" => "look at this instead"},
+             %{"type" => "localImage", "path" => image}
+           ]
+
+    CodexSchema.assert_valid!(
+      %{"threadId" => "thread-1", "expectedTurnId" => "turn-prov-1", "input" => input},
+      "TurnSteerParams"
+    )
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a steer with no turn running is refused by name and sends no frame" do
+    executable = fake_app_server(@steer_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    # `expectedTurnId` is required and is a precondition, so there is nothing honest to
+    # send here. The refusal is the dialect's, one layer below the harness worker's own
+    # `:no_active_turn` gate, for the window where the turn ended first.
+    before = length(logged(executable))
+
+    assert {:error, :no_active_turn} =
+             CodexSession.steer(handle, TurnRequest.new!("too late"), "req-1")
+
+    assert length(logged(executable)) == before
+    refute Enum.any?(logged(executable), &(&1["method"] == "turn/steer"))
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a steer the app server refuses is reported rather than silently dropped" do
+    executable = fake_app_server(@steer_rejected_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert :ok = CodexSession.send(handle, TurnRequest.new!("start something long"), "turn-1")
+    assert %{payload: %{"text" => "working"}} = await_event(:output_text_delta)
+
+    # The transport answers `:ok` — the frame was written. What came back is a failure,
+    # and a steer whose words never reached the model must not look like one that did.
+    assert :ok = CodexSession.steer(handle, TurnRequest.new!("steer me"), "req-1")
+
+    failed = await_event(:provider_event)
+    assert failed.payload["kind"] == "steer_failed"
+    assert failed.payload["error"] =~ "turn is no longer active"
+    assert failed.request_id == "req-1"
 
     assert :ok = CodexSession.close(handle)
   end

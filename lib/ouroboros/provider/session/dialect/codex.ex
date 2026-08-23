@@ -1,5 +1,42 @@
 defmodule Ouroboros.Provider.Session.Dialect.Codex do
-  @moduledoc false
+  @moduledoc """
+  Wire mapping for the Codex app server.
+
+  Every method, parameter and enum here is taken from the schema the protocol's own
+  generator emits — `codex app-server generate-json-schema --out <dir>`, codex-cli
+  0.147.0 — and the files it produced for the methods this dialect speaks are committed
+  verbatim under `test/support/codex_schema/`, so the tests check frames against the
+  schema rather than against a literal they also wrote.
+
+  ## How an approval answer becomes two durable facts
+
+  One human answer has to move two policies, or the "don't ask again" it offers is only
+  half true. `scope: :session` on a command approval therefore does both:
+
+    * **Codex's own policy** — this dialect's reply. When the request carried a
+      `proposedExecpolicyAmendment`, the reply is
+      `{"decision": {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": [...]}}}`,
+      which amends the app server's execpolicy so commands matching that argv prefix stop
+      being asked about. With no proposal in the request the reply is `acceptForSession`,
+      which fills the app server's session approval cache with this one command instead.
+    * **This runtime's own policy** — `Ouroboros.Control.Permissions.Seam.answered/4`,
+      reached from `Session.Jsonl` on the same reply. It writes a `:session`-scope C1 rule
+      through `Permissions.remember/4`, so the next identical request is answered by the
+      engine and never reaches a human. That path is transport-neutral and shared with
+      ACP; nothing about it is Codex-specific, which is why this dialect does not write
+      rules itself.
+
+  The two are deliberately the same scope and expire together: `Seam.forget_session/0`
+  drops the rule when this transport terminates, and the app server's amendment and cache
+  die with the thread. The C1 rule is derived from the command by `Permissions.suggest/1`
+  (`Bash(git status *)`) while the amendment is the prefix Codex proposed
+  (`["git", "status"]`) — two spellings of the same intent, each in the language of the
+  policy it is written into.
+
+  Only a human's answer can reach either. A rule that already says yes replies `accept`,
+  the narrowest grant that answers the question, because widening a provider's own policy
+  is not something a rule may do on a human's behalf.
+  """
 
   @behaviour Ouroboros.Provider.Session.Dialect
 
@@ -25,6 +62,20 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   # exactly what a mid-session configuration change can move here.
   @configurable_fields [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
 
+  # An execpolicy amendment is an argv prefix. These bounds are what a prefix plausibly
+  # is; a proposal outside them is refused rather than trimmed, because a trimmed prefix
+  # allows strictly more than the one the app server offered.
+  @max_amendment_tokens 32
+  @max_amendment_token_bytes 256
+
+  # How many filesystem entries a permissions escalation shows in the modal. The rest are
+  # counted in `not_shown` rather than dropped without saying so.
+  @max_permission_entries 32
+
+  # `PermissionsRequestApprovalResponse` requires `permissions`, so a refusal is not an
+  # absent field but an empty `GrantedPermissionProfile`: every optional grant withheld.
+  @no_permissions %{"permissions" => %{}}
+
   @impl true
   def name, do: :app_server
 
@@ -42,6 +93,7 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       process: :persistent,
       multi_turn: :native,
       follow_up: :managed,
+      steer: :native,
       interrupt: :native,
       approvals: :native,
       multimodal: :native,
@@ -89,6 +141,110 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   """
   @spec fork_option() :: {atom(), term()}
   def fork_option, do: {:fork, true}
+
+  @doc """
+  The frame that folds this thread's context, for a runtime that can route one here.
+
+  **Nothing calls this yet, and no capability claims otherwise.** `interactive.compact`
+  reaches `Ouroboros.Interactive.Task`, which gates compaction on
+  `native_transport(session, :compact)` and refuses every other transport with
+  `{:unsupported_on_transport, …}` — only a native session hands this runtime the
+  conversation to fold. There is no `compact` key in `InteractionCapabilities` and none
+  in `Ouroboros.Provider`'s public capability set, so a Codex session correctly reports
+  no compaction today and this function changes nothing about that.
+
+  It exists because the app server's half is knowable and now pinned:
+  `thread/compact/start` takes `{threadId}` and answers `{}`
+  (`v2/ThreadCompactStartParams.json`, codex-cli 0.147.0). Routing to it is one clause in
+  `Task.handle_call({:compact, focus})` — beside the `native_transport/2` call, a branch
+  that asks the session transport for this frame instead — plus a `:compact` derived
+  capability in `Ouroboros.Provider` so the refusal stays declaration-shaped. Both are
+  another agent's files this wave, so this is the half that could land honestly.
+
+  `focus` has nowhere to go: the app server takes no focus argument, so a runtime that
+  wires this up must refuse a focused compaction on this transport rather than quietly
+  compact without it.
+  """
+  @spec compact_request(runtime :: map()) :: {:request, String.t(), map()} | {:error, term()}
+  def compact_request(%{provider_session_id: thread_id}) when is_binary(thread_id),
+    do: {:request, "thread/compact/start", %{"threadId" => thread_id}}
+
+  def compact_request(_runtime), do: {:error, :session_not_open}
+
+  @doc """
+  The frame that asks the app server which models it offers, and the reader for its answer.
+
+  **Not wired to `runtime.models`, and deliberately.** That method answers from
+  `Ouroboros.Models.list/0` — a packaged `llm_db` snapshot, keyed by a static
+  provider-to-catalogue table, with `source: "llm_db"` stated in the reply. It is a
+  process-free read of a local catalogue. `model/list` is the opposite: it needs a live
+  `codex app-server` on the other end of a thread, and its answer is what *this account*
+  may use, including whether each model is hidden, its service tiers, and its supported
+  reasoning efforts — things no static catalogue knows.
+
+  Bridging them honestly needs a seam that does not exist: `Models.provider_models/1`
+  has no hook for a transport to contribute rows, and folding live rows into a reply
+  labelled `source: "llm_db"` would misdescribe where they came from. The seam worth
+  building is a per-provider one — a `models/1` on the adapter, consulted when a session
+  is open, with its own `source` — rather than a special case inside `runtime.models`.
+
+  `limit` and `includeHidden` are sent only when stated, because the schema's own
+  defaults are the server's to choose (`v2/ModelListParams.json`, codex-cli 0.147.0).
+  """
+  @spec model_list_request(keyword()) :: {:request, String.t(), map()}
+  def model_list_request(options \\ []) do
+    params =
+      %{}
+      |> maybe_put("limit", Keyword.get(options, :limit))
+      |> maybe_put("cursor", Keyword.get(options, :cursor))
+
+    params =
+      case Keyword.get(options, :include_hidden) do
+        hidden when is_boolean(hidden) -> Map.put(params, "includeHidden", hidden)
+        _unstated -> params
+      end
+
+    {:request, "model/list", params}
+  end
+
+  @doc """
+  Reads a `model/list` result into the rows a picker needs.
+
+  The rows are under `data`, not `models` — `ModelListResponse` requires exactly that key,
+  and the live app server answers with it. Every field but `id` is dropped when absent
+  rather than shown as `nil`, so a row is what the server said and not a shape padded out
+  to look complete. `next_cursor` is echoed so a caller can page.
+  """
+  @spec models(map()) :: %{models: [map()], next_cursor: String.t() | nil}
+  def models(result) when is_map(result) do
+    rows =
+      case result["data"] do
+        list when is_list(list) -> Enum.flat_map(list, &model_row/1)
+        _absent -> []
+      end
+
+    %{models: rows, next_cursor: result["nextCursor"]}
+  end
+
+  def models(_result), do: %{models: [], next_cursor: nil}
+
+  defp model_row(%{"id" => id} = model) when is_binary(id) do
+    [
+      %{
+        id: id,
+        model: model["model"],
+        display_name: model["displayName"],
+        description: model["description"],
+        default: model["isDefault"] == true,
+        hidden: model["hidden"] == true,
+        default_reasoning_effort: model["defaultReasoningEffort"],
+        input_modalities: model["inputModalities"] || []
+      }
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    ]
+  end
+
+  defp model_row(_model), do: []
 
   # Three ways to open, and the request says which. `thread/fork` branches a thread's
   # history into a new thread id, taking `threadId` and optional `lastTurnId`/`ephemeral`
@@ -144,8 +300,32 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   def close_signal(_runtime), do: :skip
 
+  # `turn/steer` takes `threadId`, `expectedTurnId` and the same `input: UserInput[]` union
+  # `turn/start` takes (`v2/TurnSteerParams.json`, codex-cli 0.147.0, committed under
+  # `test/support/codex_schema/`), so a steer carries text and images exactly as a turn
+  # does — `turn_input/1` builds both and there is no second rendering to drift.
+  #
+  # `expectedTurnId` is a *precondition*, not a label: the schema says the request fails
+  # when it does not match the currently active turn. So a steer with no provider turn id
+  # in hand is refused here by name rather than sent with a guess and failed on the wire.
+  # `Jido.Harness.SessionWorker` already refuses a steer with no active turn
+  # (`{:error, :no_active_turn}`); this is the same refusal one layer down, for the window
+  # where the harness still has a turn and the app server has already ended it.
   @impl true
-  def steer(_runtime, _request, _request_id), do: {:error, :unsupported}
+  def steer(%{provider_session_id: thread_id, provider_turn_id: turn_id}, turn, _request_id)
+      when is_binary(thread_id) and is_binary(turn_id) do
+    {:request, "turn/steer",
+     %{
+       "threadId" => thread_id,
+       "expectedTurnId" => turn_id,
+       "input" => turn_input(turn)
+     }}
+  end
+
+  def steer(%{provider_session_id: thread_id}, _turn, _request_id) when is_binary(thread_id),
+    do: {:error, :no_active_turn}
+
+  def steer(_runtime, _turn, _request_id), do: {:error, :session_not_open}
 
   # An app-server thread has no "set these options" method: `turn/start` carries model,
   # effort, approval policy and sandbox policy on every turn, rebuilt from the session
@@ -167,22 +347,43 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   # The one pre-tool seam the app server gives. `Ouroboros.Control.Permissions` answers
   # first; only what it leaves as `:ask` becomes an approval the human sees.
+  #
+  # A rule's own yes grants the *narrowest* thing that answers the question: `accept` for
+  # this one command, and a `turn`-scoped grant for a permissions request. Widening the
+  # provider's own policy is something only a human's "don't ask again" may do, so neither
+  # `acceptForSession` nor an execpolicy amendment is reachable from here.
   @impl true
   def approval_request(method, params) when method in @approval_methods do
     case Seam.decide(:app_server, method, params, approval_payload(method, params)) do
       {:ask, payload} -> {:approval, payload, %{params: params, method: method}}
-      {:allow, _rule} -> {:result, %{"decision" => "accept"}}
-      {:deny, _rule} -> {:result, %{"decision" => "decline"}}
+      {:allow, _rule} -> {:result, allow_result(method, params)}
+      {:deny, _rule} -> {:result, deny_result(method)}
     end
   end
 
   def approval_request(_method, _params), do: :method_not_found
 
+  # Two request families with two different answer shapes, so the stash's method decides
+  # which one is spoken. `item/permissions/requestApproval` answers with a granted
+  # profile and a grant scope; the command and file-change families answer with a
+  # `decision`. Replying `{"decision": …}` to a permissions request is not a near miss —
+  # `PermissionsRequestApprovalResponse` requires `permissions`, so it is a frame the app
+  # server has no field to read.
   @impl true
-  def approval_reply(response, _stash), do: %{"decision" => decision(response)}
+  def approval_reply(response, stash) do
+    case Map.get(stash, :method) do
+      "item/permissions/requestApproval" -> permissions_reply(response, stash)
+      _command_or_file_change -> %{"decision" => decision(response, stash)}
+    end
+  end
 
   @impl true
-  def deny_reply(_stash), do: %{"decision" => "decline"}
+  def deny_reply(stash) do
+    case Map.get(stash, :method) do
+      "item/permissions/requestApproval" -> @no_permissions
+      _command_or_file_change -> %{"decision" => "decline"}
+    end
+  end
 
   @impl true
   def handle_notification("turn/started", params, _raw, runtime) do
@@ -246,6 +447,15 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     end
   end
 
+  # The app server folding its own context. Surfaced as what it is rather than imitated:
+  # this runtime never saw the conversation and has nothing to say about what was kept.
+  # `thread/compacted` is the notification the schema marks deprecated in favour of the
+  # `contextCompaction` item (see `map_item_completed/3`); both are read so a server on
+  # either side of that change is understood.
+  def handle_notification("thread/compacted", params, raw, _runtime) do
+    [{:emit_event, event(:provider_event, compaction_payload(params["turnId"]), raw)}]
+  end
+
   def handle_notification("thread/started", params, _raw, runtime) do
     [{:assign, %{provider_session_id: thread_id(params) || runtime.provider_session_id}}]
   end
@@ -276,6 +486,24 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   end
 
   def handle_rpc({:interrupt, _turn_id}, _message, _runtime), do: []
+
+  # `TurnSteerResponse` is `{turnId}` — the turn the steered input joined. A steer that
+  # failed its `expectedTurnId` precondition is the case worth saying out loud: the turn
+  # ended between the harness's check and this frame, so the human's words went nowhere
+  # and a silent `:ok` would have claimed otherwise.
+  def handle_rpc({:steer, request_id}, message, runtime) do
+    case rpc_result(message) do
+      {:ok, result} ->
+        [{:assign, %{provider_turn_id: steer_turn_id(result) || runtime.provider_turn_id}}]
+
+      {:error, reason} ->
+        [
+          {:emit, :provider_event,
+           %{"kind" => "steer_failed", "error" => error_text(reason) || inspect(reason)},
+           [request_id: request_id]}
+        ]
+    end
+  end
 
   def handle_rpc(pending, message, _runtime) do
     [
@@ -357,6 +585,9 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       type when type in ["fileChange", "file_change"] ->
         [event(:file_change, %{"changes" => item["changes"], "status" => item["status"]}, raw)]
 
+      type when type in ["contextCompaction", "context_compaction"] ->
+        [event(:provider_event, compaction_payload(nil), raw)]
+
       _other ->
         [event(:provider_event, %{"item_type" => item["type"] || "unknown"}, raw)]
     end
@@ -413,6 +644,15 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     )
   end
 
+  # `source: "provider"` is the load-bearing field: it says this runtime was told a
+  # compaction happened, not that it performed one. `interactive.context` reports what a
+  # session can honestly say, and for every non-native transport that is what its events
+  # carried — so a compaction it never ran must not look like one it did.
+  defp compaction_payload(turn_id) do
+    %{"kind" => "context_compacted", "source" => "provider", "turn_id" => turn_id}
+    |> reject_nils()
+  end
+
   defp approval_payload(method, params) do
     command = command_text(params)
     reason = params["reason"]
@@ -423,8 +663,139 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
       |> reject_nils()
 
     %{"tool_call" => tool_call, "reason" => reason, "kind" => approval_kind(method)}
+    |> maybe_put("execpolicy_amendment", amendment(params))
+    |> maybe_put("permissions", permissions_summary(method, params))
     |> reject_nils()
   end
+
+  # `proposedExecpolicyAmendment` is the app server's own offer: the argv prefix that,
+  # amended into its execpolicy, would stop it asking about commands like this one. It is
+  # already the prefix rather than the command — `["git", "status"]`, not the whole line —
+  # so passing it through is the content-minimised choice as well as the faithful one.
+  #
+  # Advertised **only when the request carries one**, because the extra answer it unlocks
+  # is one this transport can honour only when there is an amendment to send. A malformed
+  # or oversized proposal is not truncated to fit: a shortened prefix is a *wider* rule
+  # than the one proposed, so it is dropped and the answer falls back to `acceptForSession`.
+  defp amendment(params) when is_map(params) do
+    case params["proposedExecpolicyAmendment"] do
+      tokens when is_list(tokens) and tokens != [] -> bounded_amendment(tokens)
+      _absent -> nil
+    end
+  end
+
+  defp amendment(_params), do: nil
+
+  defp bounded_amendment(tokens) do
+    if length(tokens) <= @max_amendment_tokens and
+         Enum.all?(tokens, &(is_binary(&1) and byte_size(&1) <= @max_amendment_token_bytes)) do
+      tokens
+    end
+  end
+
+  # What the escalation actually asks for, in the shape a modal can render: which paths
+  # at which access, and whether the sandbox's network is being opened. Bounded, and the
+  # count of what did not fit is stated rather than dropped in silence.
+  defp permissions_summary("item/permissions/requestApproval", params) do
+    profile = params["permissions"] || %{}
+    filesystem = profile["fileSystem"] || %{}
+    requested = filesystem_entries(filesystem)
+    sent = Enum.take(requested, @max_permission_entries)
+
+    %{
+      "filesystem" => sent,
+      "network" => get_in(profile, ["network", "enabled"]),
+      "not_shown" => length(requested) - length(sent)
+    }
+    |> reject_nils()
+  end
+
+  defp permissions_summary(_method, _params), do: nil
+
+  # `entries` is the current shape; `read`/`write` are the arrays the schema marks as
+  # going away in its favour. Both are read, so an app server on either side of that
+  # change is rendered rather than shown an empty list.
+  defp filesystem_entries(filesystem) do
+    entries =
+      case filesystem["entries"] do
+        list when is_list(list) -> Enum.map(list, &filesystem_entry/1)
+        _absent -> []
+      end
+
+    legacy =
+      Enum.flat_map(["read", "write"], fn access ->
+        case filesystem[access] do
+          list when is_list(list) ->
+            for path <- list, is_binary(path), do: %{"access" => access, "path" => path}
+
+          _absent ->
+            []
+        end
+      end)
+
+    Enum.reject(entries ++ legacy, &is_nil/1)
+  end
+
+  defp filesystem_entry(%{"access" => access, "path" => path}) when is_binary(access) do
+    case permission_path(path) do
+      nil -> nil
+      rendered -> %{"access" => access, "path" => rendered}
+    end
+  end
+
+  defp filesystem_entry(_entry), do: nil
+
+  # `FileSystemPath` is a union of a literal path, a glob, and a named special location.
+  # A special location is rendered as its own name rather than resolved: this runtime does
+  # not know what the app server means by `project_roots`, and inventing a path for the
+  # modal would put a directory in front of a human that nothing had verified.
+  defp permission_path(%{"type" => "path", "path" => path}) when is_binary(path), do: path
+
+  defp permission_path(%{"type" => "glob_pattern", "pattern" => pattern})
+       when is_binary(pattern),
+       do: pattern
+
+  defp permission_path(%{"type" => "special", "value" => %{"kind" => kind}})
+       when is_binary(kind),
+       do: "<" <> kind <> ">"
+
+  defp permission_path(path) when is_binary(path), do: path
+  defp permission_path(_path), do: nil
+
+  # A rule's yes, in each family's own narrowest shape.
+  defp allow_result("item/permissions/requestApproval", params),
+    do: %{"permissions" => requested_profile(params), "scope" => "turn"}
+
+  defp allow_result(_method, _params), do: %{"decision" => "accept"}
+
+  defp deny_result("item/permissions/requestApproval"), do: @no_permissions
+  defp deny_result(_method), do: %{"decision" => "decline"}
+
+  # Approving a permissions request grants exactly the profile that was requested and
+  # nothing beside it, at the narrowest grant scope that answers the question Ouroboros
+  # was asked: `PermissionGrantScope` is `turn | session`, which is the same distinction
+  # `ApprovalResponse.scope` already draws between `:once` and `:session`, so the two map
+  # one to one and neither widens the other.
+  defp permissions_reply(%{decision: :approve} = response, stash) do
+    %{
+      "permissions" => requested_profile(Map.get(stash, :params) || %{}),
+      "scope" => grant_scope(response)
+    }
+  end
+
+  defp permissions_reply(_response, _stash), do: @no_permissions
+
+  defp grant_scope(%{scope: :session}), do: "session"
+  defp grant_scope(_response), do: "turn"
+
+  defp requested_profile(params) when is_map(params) do
+    case params["permissions"] do
+      %{} = profile -> profile
+      _absent -> %{}
+    end
+  end
+
+  defp requested_profile(_params), do: %{}
 
   defp approval_name("item/fileChange/requestApproval"), do: "file_change"
   defp approval_name("item/permissions/requestApproval"), do: "permissions"
@@ -443,9 +814,28 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
     end
   end
 
-  defp decision(%{decision: :approve, scope: :session}), do: "acceptForSession"
-  defp decision(%{decision: :approve}), do: "accept"
-  defp decision(%{decision: :deny}), do: "decline"
+  # "Don't ask again" is the one answer that may move a policy, and the app server offers
+  # two ways to spell it. `acceptForSession` fills its session approval cache with *this*
+  # command; `acceptWithExecpolicyAmendment` amends its execpolicy with the prefix it
+  # proposed, so commands like this one stop being asked about at all. The second is only
+  # reachable when the request proposed an amendment, which is the whole reason
+  # `approval_payload/2` advertises it only then.
+  #
+  # Both halves land on one answer. This one moves Codex's own policy; the C1 rule that
+  # stops *this runtime* asking is written by `Permissions.Seam.answered/4` from the same
+  # `scope: :session`, transport-neutrally, for ACP and the app server alike. A session
+  # rule and a session-scoped amendment also expire together — `Seam.forget_session/0`
+  # drops the rule when this transport terminates, and the app server's cache dies with
+  # the thread — so neither outlives the conversation the human answered in.
+  defp decision(%{decision: :approve, scope: :session}, stash) do
+    case amendment(Map.get(stash, :params) || %{}) do
+      nil -> "acceptForSession"
+      tokens -> %{"acceptWithExecpolicyAmendment" => %{"execpolicy_amendment" => tokens}}
+    end
+  end
+
+  defp decision(%{decision: :approve}, _stash), do: "accept"
+  defp decision(%{decision: :deny}, _stash), do: "decline"
 
   defp thread_params(request) do
     %{"cwd" => Path.expand(request.cwd)}
@@ -590,6 +980,11 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
   defp turn_id(%{"turn" => %{"id" => id}}) when is_binary(id), do: id
   defp turn_id(%{"id" => id}) when is_binary(id), do: id
   defp turn_id(_), do: nil
+
+  # `turn/steer` answers with a bare `turnId` rather than the `turn` object every other
+  # result carries, so it gets its own reader instead of a looser `turn_id/1`.
+  defp steer_turn_id(%{"turnId" => id}) when is_binary(id), do: id
+  defp steer_turn_id(result), do: turn_id(result)
 
   defp item_type(%{"type" => type}) when is_binary(type), do: type
   defp item_type(_item), do: "unknown"

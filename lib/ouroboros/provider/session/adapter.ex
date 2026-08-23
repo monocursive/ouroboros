@@ -41,6 +41,20 @@ defmodule Ouroboros.Provider.Session.Adapter do
         do: Jido.Harness.SessionAdapter.call(handle, {:respond_approval, {request_id, response}})
 
       @doc """
+      Steers the turn in flight through the dialect.
+
+      `Jido.Harness.SessionWorker` gates a steer on `function_exported?/3` *after* it
+      gates it on `InteractionCapabilities.supported?(capabilities, :steer)`, so a
+      dialect that declares no steering is refused by declaration before this is
+      reached, and one that declares it but cannot build a frame answers
+      `{:error, :unsupported}` itself. Exporting it unconditionally therefore adds no
+      claim: the capability is still the only thing that says a transport can steer.
+      """
+      @impl true
+      def steer(handle, request, request_id),
+        do: Jido.Harness.SessionAdapter.call(handle, {:steer, request, request_id})
+
+      @doc """
       Applies a mid-session configuration change through the dialect.
 
       `Jido.Harness.SessionWorker` gates this on `function_exported?/3` before it gates

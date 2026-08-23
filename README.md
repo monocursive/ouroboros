@@ -265,9 +265,24 @@ the named Codex policy or node-level executable and retry or restart as instruct
 
 Interactive Codex sessions use app-server, so a sandbox escalation — `git commit` writing
 `.git`, extra writable directories, network — arrives as the existing approve/deny modal.
-Public `provider_execution` reports `interactive_approvals: true` and
+A request for sandbox *permissions* rather than one command arrives there too, carrying
+the paths and network access it asks for; approving grants exactly the profile requested,
+for the turn or for the session, and refusing grants an empty one. Public
+`provider_execution` reports `interactive_approvals: true` and
 `escalation_behavior: :prompt` for those sessions. Deny-for-session is still `decline`:
 Codex has no persistent deny-for-session, and Ouroboros does not invent one.
+
+Where the app server proposes an execpolicy amendment — the argv prefix that would stop
+it asking about commands like this one — the modal says so, and approving for the session
+sends it back as well as writing the permission rule that stops *this* runtime asking.
+One answer, both policies; the option appears only on requests that carried a proposal,
+because it is the only case this transport can honour it.
+
+Steering is live on app-server: `Alt+Enter` injects into the running turn through
+`turn/steer`, carrying text and images the same way a turn does. The `codex exec`
+fallback declares no steering and the key says so — the same provider, two transports,
+two honest answers. Compaction is not offered on either: `interactive.compact` folds a
+conversation this runtime holds, and only a native session hands it one.
 
 Coding turns still use Harness's managed `exec --json` transport, which cannot carry an
 approval question back into Ouroboros. Coding public state, and interactive sessions that
