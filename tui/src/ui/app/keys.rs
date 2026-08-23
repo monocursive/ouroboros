@@ -237,6 +237,7 @@ impl App {
             Some(Action::LeaderCopy) => self.copy_last_agent(),
             Some(Action::LeaderScrollback) => self.dump_to_scrollback(),
             Some(Action::LeaderEditorView) => self.view_transcript(),
+            Some(Action::LeaderOpenImage) => self.open_newest_image(),
             Some(Action::LeaderSteer) => self.compose(ComposerVerb::Steer),
             Some(Action::LeaderApproval) => self.reopen_approval(),
             Some(Action::LeaderShellRule) => self.add_shell_rule(),

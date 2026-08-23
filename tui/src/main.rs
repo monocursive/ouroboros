@@ -125,8 +125,32 @@ async fn run(cli: Cli) -> Result<()> {
         config.problems.push(note);
     }
 
+    // F2. `ouro --continue` asks the same question `ouro run --continue` does, and gets its
+    // answer from the same place; what differs is only what is done with the session.
+    //
+    // It belongs to the bare command, and a flag typed *before* a subcommand that only the
+    // bare command acts on is a flag that would be silently dropped. `ouro run` has its
+    // own `--continue` because sending a prompt into the resolved session is a different
+    // act from opening it; every other subcommand has nothing to continue.
+    let continue_from = match (cli.continue_session, &cli.command) {
+        (false, _) => None,
+        (true, Some(_command)) => bail!(
+            "--continue belongs to the bare command: `ouro --continue` opens the last \
+             session for this workspace, and `ouro run --continue \"…\"` sends a prompt \
+             into it. The subcommand typed here takes neither"
+        ),
+        (true, None) => {
+            let here = std::env::current_dir().context("reading the working directory")?;
+
+            Some(ContinueRequest {
+                workspace: ouro::continuation::Workspace::resolve(cli.workspace.as_deref(), &here),
+                or_new: cli.or_new,
+            })
+        }
+    };
+
     match cli.command {
-        None => attach_local(&paths, cli.dev, config).await,
+        None => attach_local(&paths, cli.dev, config, continue_from).await,
         Some(Command::New {
             provider,
             workspace,
@@ -241,8 +265,24 @@ fn embedded_release() -> String {
 /// The screen is taken first, so the seconds a cold start costs are seconds of visible
 /// progress rather than of silence, and a boot that fails does so somewhere it can show
 /// the runtime's own output.
-async fn attach_local(paths: &Paths, dev: bool, config: Loaded) -> Result<()> {
-    attach_local_with(paths, dev, config, false, None).await
+async fn attach_local(
+    paths: &Paths,
+    dev: bool,
+    config: Loaded,
+    continue_from: Option<ContinueRequest>,
+) -> Result<()> {
+    attach_local_with(paths, dev, config, false, None, continue_from).await
+}
+
+/// F2. What `ouro --continue` asked for, carried to the one place a connection exists.
+///
+/// Deliberately not resolved before the screen is taken: the answer is `interactive.list`'s
+/// and a second connection opened only to ask it would be a second handshake, a second
+/// token read, and a second thing that can fail before the UI has anywhere to say so.
+struct ContinueRequest {
+    workspace: ouro::continuation::Workspace,
+    /// With nothing to continue, land on the home composer instead of refusing.
+    or_new: bool,
 }
 
 async fn attach_local_with(
@@ -251,6 +291,7 @@ async fn attach_local_with(
     config: Loaded,
     open_machines: bool,
     add_outcome: Option<fleet_add::Outcome>,
+    continue_from: Option<ContinueRequest>,
 ) -> Result<()> {
     paths.ensure_private_data_dir()?;
 
@@ -282,6 +323,7 @@ async fn attach_local_with(
         daemon,
         None,
         local,
+        continue_from,
     )
     .await
 }
@@ -708,39 +750,64 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         eprintln!("ouro run: {problem}");
     }
 
-    let plan = match args.resume.as_deref().map(str::trim) {
-        Some(id) if !id.is_empty() => ouro::run::Plan::Resume {
-            session_id: id.to_string(),
+    // F2. Which directory `--continue` means, decided here where the command was typed —
+    // a relative path resolved on the other side of the socket would resolve against the
+    // runtime's own working directory, which for a spawned daemon is a release root.
+    let continue_from = if args.continue_session {
+        if let Some(named) = continue_ignores(&args) {
+            return Err(refuse_run(&options, &named));
+        }
+
+        let here = std::env::current_dir().context("reading the working directory")?;
+
+        Some(ouro::continuation::Workspace::resolve(
+            args.workspace.as_deref(),
+            &here,
+        ))
+    } else {
+        None
+    };
+
+    let flags = StartFlags {
+        provider: args.provider,
+        workspace: args.workspace.map(workspace_argument).transpose()?,
+        approval_mode: args.approval_mode,
+        sandbox_mode: args.sandbox_mode,
+        machine: args.machine,
+    };
+
+    // Built the same way whichever path reaches it, so `--or-new` cannot drift from the
+    // plain start it stands in for.
+    let start_plan = |prompt: String| -> Result<ouro::run::Plan, String> {
+        ouro::run::start_plan(
+            &flags,
+            &config.config.defaults,
+            &config.path,
+            new_client_session_id().map_err(|error| format!("{error:#}"))?,
+            |machine, workspace| {
+                start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
+            },
             prompt,
-        },
-        Some(_blank) => {
+        )
+        .map_err(|refusal| refusal.to_string())
+    };
+
+    let plan = match (&continue_from, args.resume.as_deref().map(str::trim)) {
+        // Resolved after the handshake: the answer is `interactive.list`'s, and there is
+        // no honest way to know it from here. Deliberately the one refusal this command
+        // cannot make before it connects — and it still makes it before it mutates.
+        (Some(_workspace), _) => None,
+        (None, Some(id)) if !id.is_empty() => Some(ouro::run::Plan::Resume {
+            session_id: id.to_string(),
+            prompt: prompt.clone(),
+        }),
+        (None, Some(_blank)) => {
             return Err(refuse_run(&options, "--resume needs a session id"));
         }
-        None => {
-            let flags = StartFlags {
-                provider: args.provider,
-                workspace: args.workspace.map(workspace_argument).transpose()?,
-                approval_mode: args.approval_mode,
-                sandbox_mode: args.sandbox_mode,
-                machine: args.machine,
-            };
-
-            let plan = ouro::run::start_plan(
-                &flags,
-                &config.config.defaults,
-                &config.path,
-                new_client_session_id()?,
-                |machine, workspace| {
-                    start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
-                },
-                prompt,
-            );
-
-            match plan {
-                Ok(plan) => plan,
-                Err(refusal) => return Err(refuse_run(&options, &refusal.to_string())),
-            }
-        }
+        (None, None) => match start_plan(prompt.clone()) {
+            Ok(plan) => Some(plan),
+            Err(refusal) => return Err(refuse_run(&options, &refusal)),
+        },
     };
 
     // A silent sink for the machinery `ouro new` reports its boot through. The lines exist
@@ -782,6 +849,53 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         mut notifications,
     } = attached;
 
+    // F2. The one step that needs a connection before it can decide anything, and still
+    // the last step before any mutation: `interactive.list` is `read` scope, so a
+    // `--continue` that resolves to nothing leaves the fleet exactly as it found it.
+    let plan = match plan {
+        Some(plan) => plan,
+        None => {
+            let workspace = continue_from.expect("a deferred plan is only built for --continue");
+
+            let resolved = match ouro::continuation::target(&client, &hello, &workspace).await {
+                // Something to continue: exactly what `--resume <id>` would have been
+                // given, said out loud on stderr because this client chose it, not the
+                // caller. `--resume` prints nothing because there was nothing to choose.
+                Ok(ouro::continuation::Continued::Session(session)) => {
+                    eprintln!("ouro run: {}", session.describe());
+                    Ok(ouro::run::Plan::Resume {
+                        session_id: session.id,
+                        prompt,
+                    })
+                }
+                // Nothing to continue. `--or-new` is the only thing that turns this into a
+                // start — and it says so, because a session this command created is not a
+                // session it continued and reporting otherwise would be a lie about where
+                // the conversation came from.
+                Ok(ouro::continuation::Continued::Nothing(reason)) if args.or_new => {
+                    eprintln!("ouro run: {reason}");
+                    eprintln!("ouro run: --or-new: starting a new session instead");
+                    start_plan(prompt)
+                }
+                Ok(ouro::continuation::Continued::Nothing(reason)) => Err(reason),
+                // A gateway that could not answer is never rounded up to `--or-new`:
+                // "we could not look" is not "there was nothing there", and starting a
+                // second session on top of a live one would be the failure this exists to
+                // prevent.
+                Err(failure) => Err(failure),
+            };
+
+            match resolved {
+                Ok(plan) => plan,
+                Err(refusal) => {
+                    client.stop().await;
+                    detach_owned_daemon(&mut daemon);
+                    return Err(refuse_run(&options, &refusal));
+                }
+            }
+        }
+    };
+
     let report = {
         let mut out = std::io::stdout().lock();
         let mut err = std::io::stderr().lock();
@@ -802,21 +916,58 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     };
 
     client.stop().await;
-
-    // The session outlives this process only if the runtime does, and `ouro run` is a
-    // command a script calls repeatedly: tearing the daemon down between prompts would
-    // make every one of them pay a cold start.
-    if let Some(daemon) = daemon.as_mut() {
-        let pid = daemon.pid();
-        daemon.detach();
-        eprintln!("the runtime is still running (pid {pid}); `ouro` attaches to it");
-    }
+    detach_owned_daemon(&mut daemon);
 
     match report {
         Ok(report) if report.status == ouro::run::Status::Completed => Ok(()),
         Ok(report) => Err(anyhow!(report.exit())),
         Err(refusal) => Err(refuse_run(&options, &refusal.to_string())),
     }
+}
+
+/// The session outlives this process only if the runtime does, and `ouro run` is a command
+/// a script calls repeatedly: tearing the daemon down between prompts would make every one
+/// of them pay a cold start.
+fn detach_owned_daemon(daemon: &mut Option<Daemon>) {
+    if let Some(daemon) = daemon.as_mut() {
+        let pid = daemon.pid();
+        daemon.detach();
+        eprintln!("the runtime is still running (pid {pid}); `ouro` attaches to it");
+    }
+}
+
+/// The start options `--continue` would have had to ignore, named rather than dropped.
+///
+/// The session `--continue` resolves to was configured when it was created, exactly as a
+/// `--resume`d one was — which is why `--resume` refuses these outright. Here they are
+/// refused only *without* `--or-new`, because with it they describe the session this
+/// command may end up starting, and that is a session they genuinely configure.
+fn continue_ignores(args: &RunArgs) -> Option<String> {
+    if args.or_new {
+        return None;
+    }
+
+    let named: Vec<&str> = [
+        args.provider.as_ref().map(|_| "--provider"),
+        args.approval_mode.as_ref().map(|_| "--approval-mode"),
+        args.sandbox_mode.as_ref().map(|_| "--sandbox-mode"),
+        args.machine.as_ref().map(|_| "--machine"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if named.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "{} describe{} a session --continue is not going to start: the one it resolves to \
+         was configured when it was created. Add --or-new to start a session with them, or \
+         drop them",
+        named.join(" and "),
+        if named.len() == 1 { "s" } else { "" }
+    ))
 }
 
 /// A refusal: the sentence on stderr, the object on stdout where stdout is JSON, and the
@@ -2026,6 +2177,8 @@ async fn attach_remote(
             add_log: Vec::new(),
             add_recipe: None,
         },
+        // `--continue` belongs to the bare command, which never reaches `ouro attach`.
+        None,
     )
     .await
 }
@@ -2108,6 +2261,7 @@ async fn remote_endpoint(
 }
 
 /// Connects with the boot screen still live, and hands the terminal to the UI.
+#[allow(clippy::too_many_arguments)]
 async fn draw(
     mut boot: Boot,
     address: SocketAddr,
@@ -2115,7 +2269,8 @@ async fn draw(
     mode: Mode,
     mut daemon: Option<Daemon>,
     open: Option<(Plane, String, Option<String>)>,
-    local: Local,
+    mut local: Local,
+    continue_from: Option<ContinueRequest>,
 ) -> Result<()> {
     let (hook, channel) = ui::hook();
     let progress = boot.progress();
@@ -2141,6 +2296,44 @@ async fn draw(
     progress.report(BootEvent::Connected {
         node: attached.hello.node.clone(),
     });
+
+    // F2. The handshake is done, so the question `--continue` asks can finally be put. A
+    // session it resolves to is opened before the first frame, exactly as `ouro new` opens
+    // the one it just started; nothing to continue is a refusal that tears the screen back
+    // down rather than a silent landing on the rail, because a person who typed
+    // `--continue` and got the home screen would reasonably think they had been continued.
+    let open = match continue_from {
+        None => open,
+        Some(request) => {
+            match ouro::continuation::target(&attached.client, &attached.hello, &request.workspace)
+                .await
+            {
+                Ok(ouro::continuation::Continued::Session(session)) => {
+                    Some((Plane::Interactive, session.id, None))
+                }
+                // `--or-new` lands on the home composer, and says so: a person who typed
+                // `--continue` and silently got a blank screen would reasonably believe
+                // the conversation in front of them was the one they left.
+                Ok(ouro::continuation::Continued::Nothing(reason)) if request.or_new => {
+                    local
+                        .config
+                        .problems
+                        .push(format!("{reason} — opening the composer instead"));
+                    None
+                }
+                Ok(ouro::continuation::Continued::Nothing(reason)) | Err(reason) => {
+                    return Err(fail_boot_with_owned_daemon(
+                        boot,
+                        &mut daemon,
+                        Some(&attached.client),
+                        anyhow!(reason),
+                        "resolving --continue failed",
+                    )
+                    .await)
+                }
+            }
+        }
+    };
 
     run_ui(
         address,
@@ -2338,6 +2531,9 @@ async fn run_ui(
             config::load(local.config.path),
             true,
             Some(outcome),
+            // The restart belongs to one `fleet add`, not to the invocation that asked to
+            // continue a session; that request was already answered before this dialog.
+            None,
         ))
         .await;
     }
@@ -3537,6 +3733,7 @@ mod tests {
                 add_log: Vec::new(),
                 add_recipe: None,
             },
+            None,
         )
         .await
         .expect_err("the gateway refuses the wrong token");

@@ -533,12 +533,14 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
     // Its own cell rather than a suffix on the badge: the two are separate statements —
     // who is asked, and what can be written — and on a narrow row the first is the one
     // that has to survive.
-    if let Some(sandbox) = &facts.sandbox_mode {
-        segments.push(Segment::new(
-            sandbox.replace('_', "-"),
-            Style::default().fg(theme::muted()),
-            6,
-        ));
+    //
+    // C5. The OS sandbox joins it here rather than becoming a fourth cell, because
+    // `workspace-write · sandbox-exec` is one statement in two halves: the policy the
+    // session was started with, and the mechanism actually holding it. A runtime that
+    // named no mechanism adds nothing — an absent key is not a claim that there is no
+    // sandbox, and drawing one from silence would invent the most alarming answer.
+    if let Some(sandbox) = sandbox_cell(facts) {
+        segments.push(sandbox);
     }
 
     if facts.working {
@@ -757,6 +759,41 @@ fn mode_badge(approval_mode: Option<&str>) -> Option<(String, Style)> {
     };
 
     Some((format!("{glyph} {}", mode.replace('_', "-")), style))
+}
+
+/// The footer's file-access cell: the policy, the OS mechanism, or both (C5).
+///
+/// Three inputs and four outcomes, none of them a guess. `sandbox_mode` is what the
+/// session was *started* with; `capabilities.sandbox` is what the runtime reported
+/// actually holding the process. A runtime that named the mechanism and no policy still
+/// gets a cell — knowing the agent runs under `bwrap` is worth saying on its own — and a
+/// runtime that named neither gets nothing at all.
+///
+/// The unconfined case is the only one coloured differently. `no OS sandbox` is a fact an
+/// operator would want to notice, and the runtime stated it: this is not the client
+/// deciding that silence is dangerous.
+fn sandbox_cell(facts: &SessionFacts) -> Option<Segment> {
+    let policy = facts
+        .sandbox_mode
+        .as_deref()
+        .map(|mode| mode.replace('_', "-"));
+    let mechanism = facts.capabilities.os_sandbox();
+
+    let text = match (policy, mechanism) {
+        (Some(policy), Some(mechanism)) => format!("{policy} · {mechanism}"),
+        (Some(policy), None) => policy,
+        (None, Some(mechanism)) => mechanism.to_string(),
+        (None, None) => return None,
+    };
+
+    let unconfined = mechanism == Some("no OS sandbox");
+    let colour = if unconfined {
+        theme::warn()
+    } else {
+        theme::muted()
+    };
+
+    Some(Segment::new(text, Style::default().fg(colour), 6))
 }
 
 /// Codex's elapsed format: `4m 07s`, and an hour where there is one.

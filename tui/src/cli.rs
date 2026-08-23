@@ -39,6 +39,22 @@ pub struct Cli {
     #[arg(long = "ax-screen-reader", global = true)]
     pub ax_screen_reader: bool,
 
+    /// Open the most recent session whose workspace is this directory — on any machine in
+    /// the fleet, because `interactive.list` is fanned out over all of them — instead of
+    /// landing on the sessions rail. With nothing to continue this refuses rather than
+    /// starting a session; `--or-new` is how you ask for one.
+    #[arg(long = "continue")]
+    pub continue_session: bool,
+
+    /// With `--continue` and nothing to continue, open the new-session dialog for this
+    /// workspace instead of refusing.
+    #[arg(long, requires = "continue_session")]
+    pub or_new: bool,
+
+    /// Which directory `--continue` means. Omitted, the one this command is typed in.
+    #[arg(long, value_name = "PATH", requires = "continue_session")]
+    pub workspace: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -271,6 +287,22 @@ pub struct RunArgs {
         conflicts_with_all = ["provider", "workspace", "approval_mode", "sandbox_mode", "machine"]
     )]
     pub resume: Option<String>,
+
+    /// Send the prompt into the most recent session whose workspace is `--workspace` (or
+    /// this directory), on any machine in the fleet. It resolves to exactly what
+    /// `--resume <id>` would have been given, which is why the two are refused together:
+    /// one names a session and the other looks one up, and a command that accepted both
+    /// would have to silently ignore one of them.
+    ///
+    /// With nothing to continue this refuses without starting a session. `--or-new` is
+    /// how you ask for one instead, and the start options below are accepted only with it.
+    #[arg(long = "continue", conflicts_with = "resume")]
+    pub continue_session: bool,
+
+    /// With `--continue` and nothing to continue, start a session and send the prompt into
+    /// it instead of refusing.
+    #[arg(long, requires = "continue_session")]
+    pub or_new: bool,
 
     /// A provider this runtime serves. Omitted, the config file's `defaults.provider` is
     /// used, and with neither this refuses.
@@ -689,6 +721,63 @@ mod tests {
                 "--resume {flag:?} must be refused, not quietly dropped"
             );
         }
+    }
+
+    /// One names a session, the other looks one up. A command that took both would have to
+    /// ignore one of them, and the same refusal `--resume` already makes for the start
+    /// options is the honest answer here (F2).
+    #[test]
+    fn continue_and_resume_are_refused_together_rather_than_one_winning() {
+        assert!(
+            Cli::try_parse_from(["ouro", "run", "hi", "--continue", "--resume", "s-1"]).is_err(),
+            "--continue with --resume must be refused, not quietly resolved to one of them"
+        );
+    }
+
+    /// `--or-new` only means something with `--continue`, so typing it alone is a mistake
+    /// worth naming rather than a no-op.
+    #[test]
+    fn or_new_without_continue_is_refused_on_both_surfaces() {
+        assert!(Cli::try_parse_from(["ouro", "--or-new"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "run", "hi", "--or-new"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ouro", "--workspace", "/srv/work"]).is_err(),
+            "a bare `ouro` has no workspace to take; it is `--continue`'s parameter"
+        );
+    }
+
+    #[test]
+    fn continue_parses_on_both_surfaces_and_defaults_to_this_directory() {
+        let cli = parse(&["--continue"]);
+        assert!(cli.continue_session && !cli.or_new);
+        assert_eq!(cli.workspace, None);
+        assert!(cli.command.is_none());
+
+        let cli = parse(&["--continue", "--or-new", "--workspace", "/srv/work"]);
+        assert!(cli.continue_session && cli.or_new);
+        assert_eq!(cli.workspace, Some(PathBuf::from("/srv/work")));
+
+        let Some(Command::Run(args)) = parse(&["run", "carry on", "--continue"]).command else {
+            panic!("`ouro run --continue` must parse as Run");
+        };
+        assert!(args.continue_session && !args.or_new);
+        assert_eq!(args.resume, None);
+        assert_eq!(args.workspace, None);
+
+        let Some(Command::Run(args)) = parse(&[
+            "run",
+            "carry on",
+            "--continue",
+            "--or-new",
+            "--workspace",
+            "/srv/work",
+        ])
+        .command
+        else {
+            panic!("`ouro run --continue --or-new` must parse as Run");
+        };
+        assert!(args.continue_session && args.or_new);
+        assert_eq!(args.workspace, Some(PathBuf::from("/srv/work")));
     }
 
     #[test]

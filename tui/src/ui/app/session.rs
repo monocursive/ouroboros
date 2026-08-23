@@ -1867,7 +1867,69 @@ impl App {
         };
         let params = self.routed_session_params(plane, id, params);
 
+        // A11. The images this turn carries, recorded where they were sent. Deliberately
+        // after the params are built and before the call is issued: what is drawn is what
+        // was actually put on the wire, and the header is read from the file this client
+        // itself wrote a moment ago rather than from anything a provider will say later.
+        self.note_sent_images(plane, id, &input);
+
         self.issue(Call::new(tag, method, params));
+    }
+
+    /// Draws the turn's image attachments into the transcript, one placeholder each.
+    ///
+    /// The runtime's `input_accepted` carries the prompt's text and nothing else, so an
+    /// attachment never comes back down the stream — this is the only place the
+    /// conversation can learn that a picture was part of the turn. Bounded by
+    /// [`crate::model::ATTACHMENT_LIMIT`], which is what the composer already accepted.
+    ///
+    /// The header read is one bounded prefix of a local file per attachment, and it happens
+    /// here rather than in the projection because projection must stay clock-free and
+    /// filesystem-free: the export snapshot depends on it.
+    fn note_sent_images(&mut self, plane: Plane, id: &str, input: &crate::model::TurnInput) {
+        if input.attachments.is_empty() {
+            return;
+        }
+
+        let workspace = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.workspace.clone())
+            .map(std::path::PathBuf::from);
+
+        let images: Vec<_> = input
+            .attachments
+            .iter()
+            .filter(|attachment| {
+                // An attachment the composer classified as an image, or one whose name
+                // ends in a format this client reads. A `@`-completed `notes.md` is not an
+                // image and does not become a placeholder claiming to be one.
+                attachment.kind == crate::model::AttachmentKind::Image
+                    || crate::images::format_of(&attachment.path).is_some()
+            })
+            .map(|attachment| {
+                let described = crate::images::describe(workspace.as_deref(), &attachment.path);
+
+                crate::ui::transcript_cells::ImageCell {
+                    named: attachment.path.clone(),
+                    pixels: described.header.map(|header| (header.width, header.height)),
+                    format: described
+                        .header
+                        .map(|header| header.format.as_str().to_string()),
+                    note: described.note,
+                }
+            })
+            .collect();
+
+        if images.is_empty() {
+            return;
+        }
+
+        if let Some(watch) = self.sessions.watches.get_mut(&(plane, id.to_string())) {
+            for image in images {
+                watch.image_note(image);
+            }
+        }
     }
 
     /// Sends whatever the queue is holding, for every session, as soon as it can.

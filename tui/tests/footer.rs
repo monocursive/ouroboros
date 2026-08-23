@@ -427,6 +427,96 @@ fn a_fact_the_runtime_did_not_report_is_absent_rather_than_guessed() {
     assert!(row.contains("ctrl+p commands"), "{row}");
 }
 
+// ---------------------------------------------------------------------------------------
+// C5 — the OS sandbox beside the policy it enforces
+// ---------------------------------------------------------------------------------------
+
+/// The footer's file-access cell, for a session whose capability map declares `sandbox`.
+fn with_os_sandbox(sandbox: Value) -> App {
+    let mut capabilities = native_capabilities();
+    capabilities["sandbox"] = sandbox;
+
+    let mut app = opened("idle", options(capabilities), usage(), Vec::new());
+    app.apply(Msg::Tick);
+    app
+}
+
+#[test]
+fn the_os_sandbox_is_named_beside_the_policy_it_enforces() {
+    for mechanism in ["sandbox-exec", "bwrap"] {
+        let mut app = with_os_sandbox(json!(mechanism));
+        let row = footer(&render(&mut app, 160, 24));
+
+        assert!(
+            row.contains(&format!("workspace-write · {mechanism}")),
+            "the policy and the mechanism holding it are one statement in two halves: \
+             {row}"
+        );
+    }
+}
+
+/// `"none"` is a claim the runtime made, not a silence, and it is the one worth noticing.
+#[test]
+fn a_session_the_runtime_could_not_confine_says_so_in_words() {
+    let mut app = with_os_sandbox(json!("none"));
+    let screen = render(&mut app, 160, 24);
+    let row = footer(&screen);
+
+    assert!(row.contains("workspace-write · no OS sandbox"), "{row}");
+    assert!(
+        !row.contains("· none"),
+        "`none` is the absence of a mechanism, not a mechanism called none: {row}"
+    );
+    assert_eq!(
+        screen.colour_of("no OS sandbox", "no"),
+        ouro::ui::theme::warn(),
+        "an unconfined agent is the one file-access answer worth colouring"
+    );
+}
+
+/// The tri-state rule, on the key an operator would most like this client to guess about.
+#[test]
+fn a_runtime_that_named_no_os_sandbox_has_the_client_name_none_either() {
+    // Absent from a capability map that is otherwise fully populated: an older gateway,
+    // or a transport C5 has not taught to report. Either way nobody said.
+    let mut app = with_os_sandbox(Value::Null);
+    let row = footer(&render(&mut app, 160, 24));
+
+    assert!(
+        row.contains("workspace-write"),
+        "the policy is still reported: {row}"
+    );
+    assert!(
+        !row.contains("no OS sandbox") && !row.contains("sandbox-exec") && !row.contains("bwrap"),
+        "silence is not a claim in either direction: {row}"
+    );
+
+    // And explicit `false`, which the tri-state reads as "this transport has none". Still
+    // not rendered as prose the runtime did not write.
+    let mut app = with_os_sandbox(json!(false));
+    let row = footer(&render(&mut app, 160, 24));
+    assert!(!row.contains("no OS sandbox"), "{row}");
+}
+
+/// A mechanism without a policy is still worth a cell: knowing the agent runs under
+/// `bwrap` is a fact on its own.
+#[test]
+fn an_os_sandbox_is_drawn_even_where_the_session_named_no_policy() {
+    let mut capabilities = native_capabilities();
+    capabilities["sandbox"] = json!("sandbox-exec");
+
+    let mut app = opened(
+        "idle",
+        json!({ "capabilities": capabilities }),
+        Value::Null,
+        Vec::new(),
+    );
+    app.apply(Msg::Tick);
+
+    let row = footer(&render(&mut app, 160, 24));
+    assert!(row.contains("sandbox-exec"), "{row}");
+}
+
 #[test]
 fn the_model_falls_back_to_the_transcripts_run_started() {
     let mut app = opened(

@@ -812,6 +812,11 @@ process + signal), `serde`/`serde_json`, `clap`, `anyhow`, `flate2`, `tar`,
 
 ```
 ouro                  spawn (or adopt via gateway.json) + attach UI
+ouro --continue [--or-new] [--workspace PATH]
+                      open the most recent session whose workspace is this
+                      directory, on any fleet machine, instead of the rail;
+                      with nothing to continue this refuses rather than
+                      starting one, and --or-new lands on the composer instead
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
 ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
@@ -822,10 +827,14 @@ ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       is refused, naming both places
 ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--machine NAME] [--resume SESSION-ID]
+         [--continue [--or-new]]
          [--json | --stream-json] [--approve-all] [--timeout SECS] [-v]
          [--addr HOST:PORT] [--token-file PATH]
                       headless: run one prompt, stream the normalised events,
-                      exit with a documented code. No alternate screen, ever
+                      exit with a documented code. No alternate screen, ever.
+                      --continue resolves the same session `ouro --continue`
+                      would open and sends the prompt into it; refused with
+                      --resume, which names one instead of looking one up
 ouro stop             graceful stop of the locally spawned daemon
 ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
@@ -999,6 +1008,69 @@ warns that the normal `ouroboros-dev` isolation is disabled and a release runtim
 that same directory may be adopted. The override is neither rewritten nor refused;
 operators who want isolation with an explicit root should name a dedicated dev
 directory.
+
+#### `--continue` — the last session for this workspace (F2, `src/continuation.rs`)
+
+`ouro --continue` opens it; `ouro run --continue "…"` sends a prompt into it. Both resolve
+the same way, through one function over rows the gateway already answered.
+
+*The rule, exactly.*
+
+1. **Which directory.** `--workspace` if it was typed, otherwise the working directory,
+   made absolute the same way `ouro new` makes a workspace absolute
+   (`runtime::resolve_workspace`). Its canonical form is kept beside it where this
+   filesystem has one, so `/tmp/p` and `/private/tmp/p` are the same directory rather than
+   two strings. Both spellings are tidied — a trailing `/` or `/.` is dropped, because
+   `ouro run` with no `--workspace` sends `<cwd>/.` and a raw comparison would fail to find
+   the session it had itself started.
+2. **Which rows.** One `interactive.list` call. That method is `read` scope and the gateway
+   **fans it out over `:erpc` to every connected, compatible fleet machine** before
+   answering (`Gateway.Methods.fleet_sessions/1`), so **rows from other nodes are
+   included** — that is what makes "on any machine" true, and this client contacts no
+   machine itself. A gateway that does not serve the method, or that refuses the call, is a
+   **failure**, never an empty answer: "we could not look" must not become `--or-new`'s new
+   session.
+3. **Which of them are eligible.** Rows whose `workspace` names that directory, minus the
+   ones whose `status` is terminal (`closed`/`completed`/`failed`/`cancelled`/`lost`) —
+   `ouro run --resume` refuses a terminal session outright, so opening one and being
+   rejected would be a worse way to learn the same thing. An **unrecognised** status is not
+   terminal and stays eligible. The rows carry no separate "resumable" flag to consult:
+   `options.capabilities` describes what the *transport* can do, not whether a closed
+   conversation may be reopened. A row retained as `last_known` (its owner offline) is not
+   excluded — trying is how you find out whether the machine came back, and the gateway
+   refuses in its own words if it did not.
+4. **Which one wins.** The newest by **`updated_at`** — `Interactive.State.touch/1` writes
+   it as a fixed-width UTC ISO-8601 string, so lexical order is chronological order.
+   Deliberately **not** `cursor`, which counts one session's own events and would rank a
+   chatty session from last week above the one abandoned ten minutes ago. Ties fall to
+   `created_at`, then `id`, so the answer does not depend on list order.
+
+*With nothing to continue*, both surfaces **refuse** and neither calls `interactive.start`:
+`ouro run --continue` exits **64** with the reason on stderr, and `ouro --continue` tears
+the boot screen back down with the same sentence. The reason names which of three things
+happened — the sessions here have ended, this fleet has no sessions at all, or none of the
+ones it has were opened on this directory. `--or-new` is the only thing that turns a
+no-match into a start, and it **says so** on stderr (`--or-new: starting a new session
+instead`) rather than letting a created session read as a continued one. In the UI it lands
+on the home composer with the same sentence as a notice.
+
+*Start options.* `--continue` accepts `--workspace` (it names where to look) and, with
+`--or-new`, the options that would configure the session it may create. Without `--or-new`,
+`--provider`/`--approval-mode`/`--sandbox-mode`/`--machine` are **refused by name** rather
+than ignored, for the reason `--resume` refuses them: the session being resumed was
+configured when it was created. `--continue` with `--resume` is refused by clap — one names
+a session, the other looks one up.
+
+*What is said out loud.* `ouro run --continue` prints `continuing <id> (<title>) on <node>,
+last active <timestamp>` on **stderr** before the turn — unconditionally, not only under
+`-v`, because this client chose which session out of several and a caller who cannot check
+that is being asked to trust a guess. `--resume` prints nothing, because there was nothing
+to choose.
+
+*Limit, stated.* The workspace comparison is **lexical**. A row's `workspace` is a path on
+its own machine, and canonicalising it here would resolve another host's symlinks against
+this filesystem; two fleet machines that reach the same project by different absolute paths
+are therefore two workspaces to `--continue`.
 
 #### `ouro run` — the headless surface (`src/run.rs`)
 
@@ -1547,6 +1619,10 @@ fixtures and `tests/input_grammar.rs` pin both shapes.
   other verb. Where the gateway does not serve it the answer is local and names the
   missing method, and `/` completion does not offer the command at all.
 
+An image attachment is also drawn into the transcript where it was sent, as one labelled
+row — see [Images in the transcript](#images-in-the-transcript-a11) for what that row says
+and when it becomes a picture.
+
 Chips and a per-turn effort are part of the unsent draft: they survive a composer closed
 with `Esc` and reopened with `i`, they travel with a queued draft, and they come back
 with a refused turn. A same-id reconciliation replays the whole envelope, because one
@@ -1556,6 +1632,111 @@ and come back `:turn_id_conflict`.
 The whole path is capability-gated. Where the runtime declared `multimodal: false` there
 is no chip and no image: the `@` still completes as text, `Ctrl+V` still pastes text, and
 both refusals name the transport.
+
+### Images in the transcript (A11)
+
+An image in a conversation is drawn as one row:
+
+```
+  ▣ [image 1280×720 png · .ouroboros/images/image-7.png]
+```
+
+The terminal is asked once, at startup, which graphics protocol it speaks — and **this
+build draws the placeholder whatever the answer is**. The detection is real and the
+encoders are written and byte-tested; the placement pass that puts pixels on a screen is
+not, and is deliberately not faked. See *Honest limits* at the end of this section.
+
+**Which terminals.** Detection has two halves and they are different kinds of evidence.
+
+| protocol | how it is detected | drawn by this build |
+|---|---|---|
+| kitty graphics | the `_Gi=4242,…,a=q` graphics query, answered `OK`. A *handshake*: nothing is assumed. kitty, Ghostty, WezTerm and Konsole answer it | encoder written (`f=100`, PNG); not yet placed |
+| iTerm2 inline images (OSC 1337) | an **allowlist** on the name a terminal gives itself — `TERM_PROGRAM` locally, `LC_TERMINAL` over ssh. iTerm2, WezTerm, mintty. There is no capability query for this escape: a terminal that does not know it simply swallows it, so a name is the only honest signal | encoder written; not yet placed |
+| sixel | DA1 attribute `4` | **no** — see below |
+| anything else | — | placeholder |
+
+Both questions this client has for the terminal (this one and OSC 11's background colour)
+are asked in **one** bounded window inside `Screen::enter`, with DA1 as the terminator:
+every terminal answers DA1, so its reply is how the client learns that silence from the
+other two is an answer rather than a terminal still thinking. Nothing is retried, nothing
+blocks input beyond the 100 ms ceiling, and `OURO_NO_IMAGES=1` turns the whole thing off
+for a terminal that claims a protocol it does not honour, or a multiplexer that eats the
+escapes.
+
+**Sixel is detected and not drawn.** Encoding it needs a palette quantiser, and shipping a
+mediocre one would put a *wrong* picture on the screen where an honest placeholder belongs.
+So a sixel terminal gets the placeholder and a sentence saying why — "we know your terminal
+can and we cannot" is a different statement from "we could not tell", and the operator is
+owed the first one rather than left to conclude the detection failed.
+
+**The bounds.** A picture is placed in a cell box computed from the file's own header and
+the terminal's cell size (`TIOCGWINSZ`, or 8×16 assumed where the terminal declines to
+say): at most the pane's width, at most **40 rows**, aspect preserved by scaling on
+whichever edge binds first, and never smaller than one cell. A transcript is a scrollback,
+not a gallery — a screenshot must not push the exchange around it off the screen. Files are
+read at most **16 MiB**, and only the first **64 KiB** is parsed, for the two numbers a
+label needs.
+
+**The path rule, which is the security posture of the whole feature.** A transcript is a
+stream of strings a provider wrote. A client that opened every path in one would turn a
+`/tmp/x.png` mentioned in an agent's output into a file this process reads — and, under a
+protocol that transmits the bytes, into a file it puts on your screen. So:
+
+- a **relative** path is resolved against the session workspace;
+- an **absolute** one must be inside it;
+- containment is checked **again after canonicalisation**, so a symlink planted in the
+  workspace cannot walk out;
+- anything else is shown **as text, naming the path, and never opened** — including to find
+  out how big it is. A placeholder that reported dimensions for a file outside the
+  workspace would be proof it had been read.
+
+This is the same rule `Interactive.Task.canonical_attachments/2` applies on the runtime
+side, enforced twice because the two enforcements protect different machines: the runtime's
+workspace lease, and this terminal's screen.
+
+**Fallbacks, and they are every case today.** The placeholder is what is drawn wherever the
+picture is not: no protocol, a format kitty will not take whole (kitty is PNG-only here, so
+a JPEG would be a placeholder there and a picture under iTerm2), a file on another fleet
+machine, a path outside the workspace, a file over the ceiling, a header this build cannot
+read. Each of those is a **different sentence** in the label — `not readable inside this
+workspace; not read`, `not a format this client reads`, `could not be read` — because a
+placeholder that did not say why leaves a reader unsure whether the picture is missing or
+the client is broken. In **`--ax-screen-reader` mode it is always the placeholder**, and in
+`/raw` too: a picture yields nothing to a selection.
+
+**`ctrl+x i`** hands the newest image in the conversation to `$OPENER`, then to `open` /
+`xdg-open`. *Newest*, because the transcript has no cell cursor to point at one and
+inventing a selection for this key would be a larger change than the key is worth; it says
+which file it opened. A path the placeholder refused to read is a path this refuses to
+open — the same decision, and an opener is the more dangerous of the two ways to touch a
+file.
+
+**`/export` carries images by path and never as bytes.** An export is a text file someone
+shares, and a base64 payload in it would be megabytes of unreadable noise in a document
+whose whole point is that it can be read and diffed. The rule is structural rather than a
+discipline: the cell holds a path, two numbers, and a format name, and has no bytes to
+leak.
+
+**Honest limits.**
+
+- The images that reach the transcript are the **attachments this client sent**. The
+  runtime's `input_accepted` carries the prompt's `text` and nothing else
+  (`Interactive.Task.enrich_chat_input/2`), so a turn's attachments are not in the event
+  ledger at all — the client draws what it itself put on the wire, which also means these
+  rows **do not survive a reconnect or a replay**. A tool result that names an image path
+  is not projected as an image, because no provider in this runtime emits a shape that
+  names one unambiguously; recognising a path by its extension inside arbitrary tool output
+  would be this client guessing at somebody else's schema.
+- **This build detects the protocols and draws the placeholder; it does not yet emit the
+  graphics escape.** The encoders exist and are byte-tested (`images::kitty`,
+  `images::iterm2`); what is missing is the placement pass — reserving the rows, mapping a
+  cell to an absolute screen row after the transcript's scroll slice, and writing the
+  escape inside `draw_synchronized`'s bracket. It was left out deliberately rather than
+  shipped unverified: a mis-placed graphics escape corrupts the whole transcript (the
+  terminal scrolls, rows repaint over the image, a kitty placement outlives its scroll)
+  rather than degrading to text, and it cannot be verified without a real terminal. Until
+  it lands, `image_protocol()` is what the terminal said and the placeholder is what is
+  drawn — which is the honest pairing, not a claim either way.
 
 ### Esc, Esc Esc, and going back (B5)
 
@@ -1922,8 +2103,9 @@ row looking satisfied.
 `Interactive.State.public/1` projects `options.capabilities` — a map the runtime derives
 from the transport a session actually selected, with the keys `transport`, `process`,
 `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
-`dynamic_model`, and `dynamic_configuration`, whose values are a mechanism name
-(`native` / `managed` / `process`) or `false`. The client decodes it as **three** states,
+`dynamic_model`, `dynamic_configuration`, and `sandbox`, whose values are a mechanism name
+(`native` / `managed` / `process`; for `sandbox`, `sandbox-exec` / `bwrap` / `none`) or
+`false`. The client decodes it as **three** states,
 and the third one is the point:
 
 - a value the runtime gave → *declared*, and the mechanism is kept verbatim, because
@@ -1957,7 +2139,18 @@ palette, the `ctrl+x` which-key overlay, and `/` completion in the composer:
 - `fork` gates the backtrack menu's fork row, together with `hello.methods` — two
   different questions, and the verb is offered only where both answer yes. An unknown
   `fork` is not "no", so a runtime that has never spoken about forking still offers it
-  wherever `interactive.fork` is served.
+  wherever `interactive.fork` is served;
+- `sandbox` (C5) names the **OS** sandbox the runtime actually put the session's process
+  in, and joins the footer's file-access cell as the second half of one statement:
+  `workspace-write · sandbox-exec`, `workspace-write · bwrap`. The two halves are
+  different facts — `sandbox_mode` is the policy the session was *started* with, this is
+  the mechanism holding it — and either can appear without the other. The literal `none`
+  renders as **`no OS sandbox`** in `warn`, because it is a positive claim the runtime
+  made and the one file-access answer worth noticing; rendering it as `· none` would read
+  like a mechanism called "none". **Absent renders nothing**: an older gateway's silence
+  must not become the most alarming of the three answers. The composer's `FILES` caption
+  is unchanged — it states the requested policy, and naming the mechanism twice on one
+  screen would not make it truer.
 
 The `n` dialog reads the other half of the same story out of `runtime.providers`, whose
 `normalized_options`, `normalized_values`, and `session_transports` the client already

@@ -344,6 +344,60 @@ pub struct FileCell {
     pub kind: Option<String>,
 }
 
+/// One image in the conversation (A11).
+///
+/// Everything a renderer needs is decided **before** the cell exists, because projection
+/// is clock-free and filesystem-free by contract: the same watch at the same width has to
+/// be the same bytes, and a cell that stat'd a file would make the export snapshot depend
+/// on what happened to be on disk. So the header was read once, when the image entered the
+/// conversation, and what is carried here is the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCell {
+    /// The path exactly as it was named — workspace-relative for an attachment this
+    /// client wrote. Never the absolute path it resolved to, which is a fact about this
+    /// machine rather than about the conversation, and which would put a home directory
+    /// into an `/export` shared with someone else.
+    pub named: String,
+    /// The pixel size and format, where the file was inside the workspace and readable.
+    pub pixels: Option<(u32, u32)>,
+    pub format: Option<String>,
+    /// Why there is no size, where there is none. Never a bare absence: a placeholder that
+    /// did not say why it was a placeholder leaves a reader unsure whether the picture is
+    /// missing or the client is broken.
+    pub note: Option<String>,
+}
+
+impl ImageCell {
+    /// The one line every surface draws.
+    ///
+    /// Built here rather than in three renderers so the pane, the screen reader, and the
+    /// export cannot word the same image differently.
+    pub fn label(&self) -> String {
+        let mut text = String::from("[image ");
+
+        match self.pixels.zip(self.format.as_deref()) {
+            Some(((width, height), format)) => text.push_str(&format!("{width}×{height} {format}")),
+            None => text.push_str("size unknown"),
+        }
+
+        text.push_str(" · ");
+        text.push_str(&self.named);
+
+        if let Some(note) = self
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            text.push_str(" · ");
+            text.push_str(note);
+        }
+
+        text.push(']');
+        text
+    }
+}
+
 /// What a divider terminates. Turn boundaries are the ones `/diff` counts turns by, so
 /// they cannot be told apart from "earlier history is gone" by their wording alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +441,8 @@ pub enum Cell {
     Exploration(ExplorationCell),
     CommandOutput(String),
     File(FileCell),
+    /// A11. An image in the conversation, drawn as a labelled placeholder.
+    Image(ImageCell),
     Diff(DiffCell),
     /// What one turn changed, drawn at its end divider: `3 files · +120 −18`.
     DiffStat {
@@ -491,6 +547,10 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
             Entry::Note(Note::Local { block }) => {
                 flush_agent(&mut cells, &mut pending, false);
                 cells.push(Cell::Runtime(block.clone()));
+            }
+            Entry::Note(Note::Image { cell }) => {
+                flush_agent(&mut cells, &mut pending, false);
+                cells.push(Cell::Image(cell.clone()));
             }
             Entry::Note(note) => {
                 flush_agent(&mut cells, &mut pending, false);
@@ -1059,6 +1119,7 @@ pub fn render_cells_at(
             }
             Cell::CommandOutput(text) => render_command_output(&mut lines, text, width, verbosity),
             Cell::File(file) => render_file(&mut lines, file, width),
+            Cell::Image(image) => render_image(&mut lines, image, width),
             Cell::Diff(diff) => render_diff(&mut lines, diff, width, verbosity),
             Cell::DiffStat {
                 files,
@@ -1273,6 +1334,10 @@ fn render_plain(lines: &mut Vec<Line<'static>>, cell: &Cell, vocabulary: Vocabul
                     .unwrap_or_default()
             ),
         ),
+        // A11. Always the placeholder here, whatever the terminal can do. `/raw` is a
+        // copying view and a picture yields nothing to a selection; screen-reader mode is
+        // the case the placeholder was written for in the first place.
+        Cell::Image(image) => label(lines, image.label()),
         Cell::Diff(diff) => {
             for file in &diff.parsed.files {
                 label(lines, diff_heading(file, diff));
@@ -1987,13 +2052,15 @@ fn project_file(
 }
 
 /// The divider text for a *stream* note. A local note never reaches this — it is a
-/// [`Cell::Runtime`] block, because nothing about it went wrong.
+/// [`Cell::Runtime`] block, because nothing about it went wrong. Nor does an image note,
+/// for the same reason: it is a [`Cell::Image`].
 fn chat_note(note: &Note) -> &'static str {
     match note {
         Note::Lagged { .. } => "Some live updates were missed by the gateway",
         Note::ClientDropped => "Some live updates were missed by this client",
         Note::Reconnected => "Connection restored",
         Note::Local { .. } => "A runtime verb answered here",
+        Note::Image { .. } => "An image was sent here",
     }
 }
 
@@ -2588,6 +2655,26 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
             path,
             Style::default().fg(colour).add_modifier(Modifier::DIM),
         ),
+    ]));
+}
+
+/// A11. One image, as the row that is drawn wherever a picture cannot be.
+///
+/// A single line, on the same two-space gutter every other cell uses, and truncated to the
+/// pane like every other path. Never more than one row: an image nobody can see should cost
+/// a transcript one line, not a box.
+fn render_image(lines: &mut Vec<Line<'static>>, image: &ImageCell, width: usize) {
+    let label = super::tree::truncate(&image.label(), width.saturating_sub(4).max(8));
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "▣ ",
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(label, theme::quiet()),
     ]));
 }
 

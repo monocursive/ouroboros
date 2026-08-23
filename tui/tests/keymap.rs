@@ -415,6 +415,7 @@ fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
         (Action::LeaderCopy, "y"),
         (Action::LeaderScrollback, "["),
         (Action::LeaderEditorView, "v"),
+        (Action::LeaderOpenImage, "i"),
         (Action::LeaderSteer, "s"),
         (Action::LeaderApproval, "a"),
         (Action::LeaderShellRule, "r"),

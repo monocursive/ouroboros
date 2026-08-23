@@ -781,6 +781,7 @@ Markdown rather than the rendering ([docs/TUI.md §3.4](docs/TUI.md)).
 
 ```sh
 ouro                    # spawn a runtime, or adopt one already running here, then attach
+ouro --continue         # open the last session for this directory, on any fleet machine
 ouro daemon             # spawn only: print the port, pid, and token file, then exit
 ouro attach             # connect to the runtime published in this data directory
 ouro attach --addr 127.0.0.1:4560 --token-file ~/.ouro-token
@@ -789,6 +790,7 @@ ouro new -m "fix the tests"                # the same, with configured defaults 
 ouro run "fix the tests"                   # headless: one prompt, the answer on stdout
 ouro run "fix the tests" --stream-json     # one JSON object per event, then a result object
 ouro run "and now the docs" --resume SESSION-ID   # another turn in a session that exists
+ouro run "and now the docs" --continue     # the same, into the last session for this directory
 ouro ledger --fleet     # the durable effect ledger, every connected machine's
 ouro stop               # ask the runtime this client started to shut down
 ouro version            # client version, embedded release version and digest, protocol
@@ -850,6 +852,26 @@ had looked. It starts no runtime — a command whose whole job is to tell you wh
 waiting must not answer by creating something to wait on — and it subscribes to nothing,
 so a session's group is a fact the runtime declared rather than something this command
 watched for.
+
+### Put me back where I was: `--continue`
+
+```sh
+ouro --continue                            # open it
+ouro run --continue "and now the docs"     # send a prompt into it
+ouro --continue --or-new                   # ...or start one, if there is nothing to open
+```
+
+It means *the most recent session whose workspace is this directory, on any machine in the
+fleet* — `interactive.list` is fanned out over every connected node before the gateway
+answers, so the session you left on the studio is the one your laptop continues. Newest is
+by the session's own `updated_at`, not by how many events it has; sessions that have ended
+are skipped, because an ended session takes no further turns.
+
+With nothing to continue it **refuses** and starts nothing — `ouro run --continue` exits 64
+with the reason — and `--or-new` is the only way to turn that into a new session. When it
+does, it says so, because a session this command created is not a session it continued.
+Resolving one prints `continuing <id> on <node>, last active …` on stderr: this client
+picked out of several, and you are owed the chance to check which.
 
 ### Headless: `ouro run`
 
@@ -930,6 +952,19 @@ produced it, beside the chip. `Ctrl+V` pastes a clipboard image as an attachment
 the provider takes one, through whichever clipboard tool the machine has, and falls
 through to an ordinary text paste otherwise. `/effort low|medium|high` sets the reasoning
 effort of the next turn only.
+
+An image in the conversation is drawn as one labelled row: `▣ [image 1280×720 png ·
+.ouroboros/images/image-7.png]`. The terminal is asked once, at startup, which graphics
+protocol it speaks — kitty graphics with the protocol's own query rather than a guess from
+`TERM`, iTerm2's inline images by an allowlist of terminals documented to implement the
+escape (it has no query), sixel from DA1 — and **this build draws the placeholder either
+way**: the encoders are written and tested, the placement pass that puts pixels on the
+screen is not, and shipping the unverified half is exactly the claim a terminal client
+should not make. Sizing is bounded to 40 rows and the pane width with the aspect kept,
+nothing over 16 MiB is read, `--ax-screen-reader` always gets the placeholder, and
+`/export` carries images by path and never as bytes. A path outside the session workspace
+is shown as text and **never opened** — not even to find out how big it is. `ctrl+x i`
+hands the newest one to `$OPENER`, `open`, or `xdg-open`.
 
 `,` opens settings: the runtime's facts as it reports them, and this client's own
 defaults — provider, workspace, approval mode — which prefill the `n` dialog and stand

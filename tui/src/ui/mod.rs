@@ -98,6 +98,7 @@ use tokio::sync::mpsc;
 use crate::clipboard;
 use crate::fleet::{self, Ports};
 use crate::fleet_add::{self, CandidateSource};
+use crate::images;
 use crate::proto::{Hello, Notification};
 use crate::runtime::Daemon;
 use crate::transport::{Client, HookFuture, ReconnectHook};
@@ -232,6 +233,72 @@ static THEME_BACKGROUND: AtomicU8 = AtomicU8::new(0);
 /// `--print` run, a piped `ouro run`, and every test process are all the second case.
 static THEME_PROBED: AtomicBool = AtomicBool::new(false);
 
+/// A11. Which graphics protocol the terminal answered with: 0 none, 1 kitty, 2 iTerm2,
+/// 3 sixel.
+///
+/// Process-wide for the same reason the theme's answer is: the question can only be put in
+/// [`Screen::enter`], before there is an `App`, and every renderer downstream needs the
+/// answer without being threaded one.
+static IMAGE_PROTOCOL: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the terminal was actually asked about pictures. The same "asked and got
+/// nothing" versus "never asked" distinction the theme probe keeps.
+static IMAGE_PROBED: AtomicBool = AtomicBool::new(false);
+
+fn set_image_protocol(protocol: Option<images::Protocol>) {
+    IMAGE_PROTOCOL.store(
+        match protocol {
+            None => 0,
+            Some(images::Protocol::Kitty) => 1,
+            Some(images::Protocol::Iterm2) => 2,
+            Some(images::Protocol::Sixel) => 3,
+        },
+        Ordering::SeqCst,
+    );
+    IMAGE_PROBED.store(true, Ordering::SeqCst);
+}
+
+/// The graphics protocol this terminal declared, whether or not this build can encode it.
+pub fn image_protocol() -> Option<images::Protocol> {
+    match IMAGE_PROTOCOL.load(Ordering::SeqCst) {
+        1 => Some(images::Protocol::Kitty),
+        2 => Some(images::Protocol::Iterm2),
+        3 => Some(images::Protocol::Sixel),
+        _none => None,
+    }
+}
+
+/// Whether an image can actually be put on this screen right now.
+///
+/// Three conditions, and all three are about honesty rather than capability: the terminal
+/// declared a protocol, this build encodes that protocol, and the screen is not being
+/// drawn for a screen reader — where a picture is not an answer at any resolution, and the
+/// placeholder *is* the content.
+pub fn images_render() -> bool {
+    !access::screen_reader() && image_protocol().is_some_and(images::Protocol::renders)
+}
+
+/// The sentence to show when a terminal declared a protocol this build will not use.
+///
+/// Only for the case worth explaining: a sixel terminal, where the operator can reasonably
+/// expect pictures and will otherwise conclude the detection failed. Silence everywhere
+/// else — a terminal with no graphics protocol at all is the ordinary case and does not
+/// need to be told what it is missing.
+pub fn image_note() -> Option<String> {
+    if !IMAGE_PROBED.load(Ordering::SeqCst) {
+        return None;
+    }
+
+    match image_protocol() {
+        Some(images::Protocol::Sixel) => Some(
+            "this terminal reports sixel, which this build does not encode; images are \
+             drawn as labelled placeholders"
+                .to_string(),
+        ),
+        _otherwise => None,
+    }
+}
+
 fn theme_request() -> theme::ThemeName {
     let at = THEME_REQUEST.load(Ordering::SeqCst) as usize;
     theme::ThemeName::ALL
@@ -275,12 +342,59 @@ pub fn set_theme(name: theme::ThemeName, no_color: bool) {
 /// skipped under `NO_COLOR` because the answer cannot change the outcome. A probe with no
 /// consequence is a hundred milliseconds spent on nothing and a window in which a
 /// keystroke can be swallowed.
-fn probe_theme() {
-    if theme_request() != theme::ThemeName::Auto || THEME_NO_COLOR.load(Ordering::SeqCst) {
+/// Everything this client asks the terminal, in **one** bounded window.
+///
+/// Two questions — what colour is your background (OSC 11, for `auto`) and can you draw a
+/// picture (kitty's graphics query, DA1's sixel attribute, A11) — written together and
+/// read out of one buffer, because the cost of a probe is the wait for a terminal that
+/// never answers, and paying it twice would double a startup delay nobody attributes to
+/// the right thing.
+///
+/// DA1 is what makes the wait short. Every terminal answers it, so its reply arriving is
+/// how this client learns that the *absence* of the other two replies is an answer rather
+/// than a terminal still thinking. Without it the theme probe waits out its whole timeout
+/// on every terminal in the world that does not implement OSC 11.
+fn probe_terminal() {
+    let wants_theme =
+        theme_request() == theme::ThemeName::Auto && !THEME_NO_COLOR.load(Ordering::SeqCst);
+    let image_env = images::Env::from_env();
+    let wants_images = !image_env.disabled;
+
+    if !wants_theme && !wants_images {
         return;
     }
 
-    let background = probe_background();
+    let mut request = Vec::new();
+
+    if wants_theme {
+        // `?` asks; the reply comes back as `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` and a
+        // terminator.
+        request.extend_from_slice(b"\x1b]11;?\x07");
+    }
+
+    // The graphics query already ends in DA1. Where it is not being asked, DA1 is still
+    // written on its own, because it is the terminator this loop stops on.
+    request.extend_from_slice(if wants_images {
+        images::QUERY
+    } else {
+        b"\x1b[c"
+    });
+
+    let reply = ask_terminal(&request);
+
+    if wants_images {
+        set_image_protocol(images::detect(
+            &image_env,
+            reply.as_deref().unwrap_or_default(),
+        ));
+    }
+
+    if !wants_theme {
+        return;
+    }
+
+    let background = reply.as_deref().and_then(theme::parse_osc11);
+
     THEME_BACKGROUND.store(
         match background {
             Some(theme::Background::Dark) => 1,
@@ -289,7 +403,10 @@ fn probe_theme() {
         },
         Ordering::SeqCst,
     );
-    THEME_PROBED.store(true, Ordering::SeqCst);
+    // "Asked and got nothing" only where a question was actually put: no tty means no
+    // question, and a sentence about a terminal that "did not answer" would be about a
+    // conversation that never happened.
+    THEME_PROBED.store(reply.is_some(), Ordering::SeqCst);
 
     theme::install(theme::resolve(
         theme::ThemeName::Auto,
@@ -372,15 +489,25 @@ const BACKGROUND_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
 /// entered and nothing else is talking, but a keystroke typed into that window on a
 /// terminal that never answers can be lost. That is the trade the query makes, and it is
 /// why it is only made when the operator asked for `auto`.
-fn probe_background() -> Option<theme::Background> {
+/// A cap as well as a deadline: a terminal streaming something that is not a reply must
+/// not turn a bounded probe into an unbounded read.
+const QUERY_REPLY_LIMIT: usize = 1024;
+
+/// Writes one request to the terminal and reads what comes back, bounded twice.
+///
+/// `None` where there was nothing to ask — no tty, or a write that failed — which is a
+/// different fact from an empty reply and is what keeps [`theme_note`] from complaining
+/// about a question nobody put. Otherwise the bytes collected until DA1 answered, the
+/// deadline passed, or [`QUERY_REPLY_LIMIT`] was reached.
+fn ask_terminal(request: &[u8]) -> Option<Vec<u8>> {
     use std::os::unix::io::AsRawFd;
 
     if !io::stdout().is_terminal() {
         return None;
     }
 
-    // `?` asks; the reply comes back as `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` and a terminator.
-    if write!(io::stdout(), "\x1b]11;?\x07")
+    if io::stdout()
+        .write_all(request)
         .and_then(|()| io::stdout().flush())
         .is_err()
     {
@@ -395,7 +522,7 @@ fn probe_background() -> Option<theme::Background> {
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return None;
+            return Some(collected);
         }
 
         let mut poll = libc::pollfd {
@@ -407,7 +534,7 @@ fn probe_background() -> Option<theme::Background> {
         // SAFETY: one initialised `pollfd` describing a descriptor this process owns.
         let ready = unsafe { libc::poll(&mut poll, 1, remaining.as_millis() as libc::c_int) };
         if ready <= 0 {
-            return None;
+            return Some(collected);
         }
 
         let mut buffer = [0u8; 64];
@@ -416,19 +543,13 @@ fn probe_background() -> Option<theme::Background> {
             unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
 
         if read <= 0 {
-            return None;
+            return Some(collected);
         }
 
         collected.extend_from_slice(&buffer[..read as usize]);
 
-        if let Some(background) = theme::parse_osc11(&collected) {
-            return Some(background);
-        }
-
-        // A cap as well as a deadline: a terminal streaming something that is not a reply
-        // must not turn a bounded probe into an unbounded read.
-        if collected.len() > 512 {
-            return None;
+        if images::reply_complete(&collected) || collected.len() > QUERY_REPLY_LIMIT {
+            return Some(collected);
         }
     }
 }
@@ -518,8 +639,9 @@ impl Screen {
 
         // Before the alternate screen and before the event loop: this is the only moment
         // in the process when the terminal can be asked a question and nobody else is
-        // reading the answer. `auto` only.
-        probe_theme();
+        // reading the answer. One window, both questions — the palette and the graphics
+        // protocol.
+        probe_terminal();
 
         io::stdout()
             .execute(EnterAlternateScreen)
@@ -1119,6 +1241,72 @@ pub fn persist(app: &mut App) {
     }
 }
 
+/// A11. Hands a local file to whatever this desktop opens files with.
+///
+/// `$OPENER` first, so an operator who wants `feh` or `imv` says so once; then the
+/// platform's own — `open`, `xdg-open`, `start`. Spawned and not waited on: an image viewer
+/// is a window the operator closes when they are done, and a TUI that blocked on it would
+/// be a frozen terminal behind a picture.
+///
+/// The App has already resolved the path through the workspace rule, so this function's
+/// only job is the process. It still refuses a path that stopped existing between the
+/// keystroke and here, because spawning an opener on a name that is no longer a file is a
+/// worse error message than this one.
+fn open_pending_path(app: &mut App) {
+    let Some(path) = app.take_open_path() else {
+        return;
+    };
+
+    if !path.is_file() {
+        app.inform(
+            format!("{} is no longer a file; it was not opened", path.display()),
+            app::NoticeKind::Warn,
+        );
+        return;
+    }
+
+    let opener = env::var("OPENER")
+        .ok()
+        .map(|opener| opener.trim().to_string())
+        .filter(|opener| !opener.is_empty());
+
+    let result = match opener {
+        // Through `sh -c` with the path as `$1`, the same indirection `$EDITOR` uses, so
+        // an `OPENER` that is a command *with arguments* works and a path with a space in
+        // it still arrives as one argument.
+        Some(opener) => ProcessCommand::new("sh")
+            .arg("-c")
+            .arg(format!("{opener} \"$1\""))
+            .arg("ouro-opener")
+            .arg(&path)
+            .spawn(),
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                ProcessCommand::new("open").arg(&path).spawn()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                ProcessCommand::new("xdg-open").arg(&path).spawn()
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "this platform has no configured opener; set $OPENER",
+                ))
+            }
+        }
+    };
+
+    if let Err(error) = result {
+        app.inform(
+            format!("could not open {}: {error}", path.display()),
+            app::NoticeKind::Error,
+        );
+    }
+}
+
 fn open_pending_url(app: &mut App) {
     let Some(url) = app.take_open_url() else {
         return;
@@ -1261,6 +1449,7 @@ pub async fn run(
         // settings overlay closing.
         persist(&mut app);
         open_pending_url(&mut app);
+        open_pending_path(&mut app);
         copy_pending(&mut app);
         clipboard_pending(&mut app, &sender);
         chrome_pending(&mut app);
