@@ -54,6 +54,20 @@ use crate::transport::{Client, ClientError};
 /// The reason `deny` is the headless default, said in the place the runtime records it.
 pub const HEADLESS_DENY_REASON: &str = "ouro run: headless, no approver";
 
+/// B2. The same, for the plan-exit question. It is `keep_planning` rather than a refusal
+/// of the work: the plan was produced and reported, and the session is left planning.
+///
+/// It is also the *literal* `keep_planning` — `Provider.Native.Session.plan_exit_choice/1`
+/// matches `reason` against the three option ids exactly — so a gateway too old for
+/// `provider_options` still reads the right answer out of the fallback rather than
+/// inferring it from `deny`.
+pub const HEADLESS_PLAN_REASON: &str = "keep_planning";
+
+/// How many plan steps the result object carries. Bounded like everything else: a result
+/// object is read by a script, and an unbounded one is a script that runs out of memory
+/// because a model wrote a long plan.
+const REPORT_PLAN_STEPS: usize = 64;
+
 /// `interactive.start` declares a 120s gateway ceiling because provider readiness is
 /// `:infinity` upstream. The same number the UI uses, for the same reason.
 const START_TIMEOUT: Duration = Duration::from_secs(130);
@@ -208,6 +222,15 @@ pub struct Report {
     pub files_changed: Vec<String>,
     pub approvals_requested: u64,
     pub approvals_answered: u64,
+    /// B2. The plan a planning run produced, as the plan-exit question carried it.
+    ///
+    /// `None` for every run that was not planning, and for a planning run whose turn
+    /// produced nothing to ask about — the runtime raises the question only where there
+    /// *is* a plan, so an absent field means no plan was made rather than one this client
+    /// dropped. Present, it is `{source, steps}` or `{source, message}`: the structured
+    /// form where the model used the plan tool, and the prose form labelled as prose where
+    /// it did not.
+    pub plan: Option<Value>,
     pub duration: Duration,
     pub error: Option<String>,
     /// The agent's own words. Carried for the plain surface, deliberately absent from the
@@ -228,6 +251,7 @@ impl Report {
             files_changed: Vec::new(),
             approvals_requested: 0,
             approvals_answered: 0,
+            plan: None,
             duration: Duration::ZERO,
             error: None,
             text: String::new(),
@@ -281,12 +305,80 @@ impl Report {
             )),
         );
 
+        // B2. Absent unless a plan-exit question actually carried one, so a script can
+        // test for the key rather than for an empty object it would have to interpret.
+        if let Some(plan) = &self.plan {
+            object.insert("plan".into(), plan.clone());
+        }
+
         if let Some(error) = &self.error {
             object.insert("error".into(), Value::String(error.clone()));
         }
 
         Value::Object(object)
     }
+}
+
+/// B2. The plan out of a `plan_exit` payload, in the shape the result object carries.
+///
+/// Two forms, because the runtime produces two and they are not the same artifact: a
+/// structured `steps` list where the model used the plan tool, and a `message` where it
+/// planned in prose. `source` says which, so a script that needs the structured form can
+/// tell it apart rather than parsing prose that happens to have numbered lines.
+///
+/// The steps are reduced to their text: a result object is a contract, and a step's
+/// `status` at the moment the question was asked is a fact about the planning turn rather
+/// than about the plan.
+fn plan_report(payload: &Value) -> Option<Value> {
+    let source = payload
+        .get("plan_source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    let steps: Vec<Value> = payload
+        .pointer("/plan/plan")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .take(REPORT_PLAN_STEPS)
+                .filter_map(|step| match step {
+                    Value::String(text) => Some(text.trim()).filter(|text| !text.is_empty()),
+                    Value::Object(_) => ["step", "content", "text", "title", "description"]
+                        .iter()
+                        .find_map(|key| step.get(*key).and_then(Value::as_str))
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty()),
+                    _other => None,
+                })
+                .map(|text| Value::String(text.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    // Nothing to report is reported as nothing, not as an empty plan.
+    if steps.is_empty() && message.is_none() {
+        return None;
+    }
+
+    let mut plan = Map::new();
+    plan.insert("source".into(), Value::String(source.to_string()));
+
+    if !steps.is_empty() {
+        plan.insert("steps".into(), Value::Array(steps));
+    }
+
+    if let Some(message) = message {
+        plan.insert("message".into(), Value::String(message.to_string()));
+    }
+
+    Some(Value::Object(plan))
 }
 
 fn usage_json(usage: &BTreeMap<String, f64>) -> Value {
@@ -1330,6 +1422,12 @@ impl<'a> Run<'a> {
             return;
         };
 
+        // B2. A plan exit is not an ordinary approval and is not answered like one.
+        if event.payload.get("kind").and_then(Value::as_str) == Some("plan_exit") {
+            self.answer_plan_exit(&request_id, &event.payload, sinks);
+            return;
+        }
+
         let (decision, reason) = if self.options.approve_all {
             (ApprovalDecision::Approve, None)
         } else {
@@ -1359,6 +1457,64 @@ impl<'a> Run<'a> {
                 .call("interactive.respond_approval", params)
                 .await
                 .map(|_value| ())
+        });
+    }
+
+    /// B2. The plan-exit question, answered `keep_planning` — **including under
+    /// `--approve-all`**.
+    ///
+    /// `--approve-all` says "answer the approvals this run raises"; it does not say
+    /// "reconfigure the session I started". Those are different powers, and the plan-exit
+    /// question is the second: `auto_edit` moves the session's approval mode and its
+    /// sandbox for every turn after this one. A headless run that granted itself that
+    /// would turn `--plan` from "plan this" into "do this" with nobody there to object, so
+    /// the answer is always the one that changes nothing.
+    ///
+    /// The plan is captured for the result object *first*, because it is the whole output
+    /// of a planning run: the answer releases the held terminal event and the run ends,
+    /// and there is no second chance to read it.
+    fn answer_plan_exit(&mut self, request_id: &str, payload: &Value, sinks: &mut Sinks<'_>) {
+        self.report.plan = plan_report(payload);
+
+        sinks.warn(&format!(
+            "plan exit {request_id} answered keep_planning (headless); the session is left \
+             planning"
+        ));
+
+        let mut answer = model::respond_approval_params_with_plan(
+            &self.report.session_id,
+            request_id,
+            model::PlanChoice::KeepPlanning,
+            None,
+        );
+        answer["response"]["actor"] = Value::String("headless".to_string());
+
+        // The same fallback the TUI has, for the same reason: a gateway that does not
+        // admit `provider_options` refuses the whole call with a bare `-32602`. Built here
+        // rather than retried from the answer handler, because a headless run has nowhere
+        // to put a notice and the second form means exactly the same thing to the runtime
+        // — `deny`/`once` is what `plan_exit_choice/1` folds `keep_planning` back to.
+        let mut fallback = model::respond_approval_params_with_reason(
+            &self.report.session_id,
+            request_id,
+            ApprovalDecision::Deny,
+            ApprovalScope::Once,
+            Some(HEADLESS_PLAN_REASON),
+        );
+        fallback["response"]["actor"] = Value::String("headless".to_string());
+
+        let params = self.routed(answer);
+        let fallback = self.routed(fallback);
+
+        let client = self.client.clone();
+        self.approvals.spawn(async move {
+            match client.call("interactive.respond_approval", params).await {
+                Ok(_value) => Ok(()),
+                Err(_refused) => client
+                    .call("interactive.respond_approval", fallback)
+                    .await
+                    .map(|_value| ()),
+            }
         });
     }
 
@@ -1919,6 +2075,7 @@ pub fn start_plan(
     session_id: String,
     workspace: impl FnOnce(&str, Option<&str>) -> Result<String, String>,
     prompt: String,
+    plan: bool,
 ) -> Result<Plan, Refusal> {
     let resolved = crate::config::resolve_start(flags, defaults)
         .map_err(|missing| Refusal(missing.message(config_path)))?;
@@ -1946,6 +2103,10 @@ pub fn start_plan(
         // `ouro run` takes no --worktree: a one-shot prompt that provisioned a worktree
         // would leave one behind for a session nobody is going to reopen.
         worktree: false,
+        // B2. `--plan` is the opposite case, and it is why it is offered here: a planning
+        // run is *meant* to leave the session behind, planning, for `ouro --continue` to
+        // pick up.
+        plan,
     };
 
     let params = request

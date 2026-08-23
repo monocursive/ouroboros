@@ -110,6 +110,15 @@ pub enum Command {
         #[arg(long)]
         worktree: bool,
 
+        /// Start the session planning (B2): it reads and reasons but edits nothing, and
+        /// at the end of a planning turn it asks whether to build the plan.
+        ///
+        /// The only way to reach plan mode on a transport that carries the posture on
+        /// every launch — Claude refuses a mid-life change — so this is not merely a
+        /// shortcut for `/plan on` once the session is open.
+        #[arg(long)]
+        plan: bool,
+
         /// Print the session id and exit instead of opening the terminal UI.
         #[arg(long)]
         print: bool,
@@ -340,6 +349,16 @@ pub struct RunArgs {
     /// waits for one.
     #[arg(long)]
     pub approve_all: bool,
+
+    /// Start the session planning (B2): it reads and reasons but edits nothing, and the
+    /// plan it produced is reported in the result object as `plan`.
+    ///
+    /// The plan-exit question is answered `keep_planning`, **including under
+    /// `--approve-all`**: nobody is at the keyboard, and a headless run that granted
+    /// itself `auto_edit` would turn "plan this" into "do this" with no one to object.
+    /// The session is left planning, so `ouro --continue` opens it where it was.
+    #[arg(long)]
+    pub plan: bool,
 
     /// Seconds before the turn is interrupted and reported as `timeout` (exit 4).
     #[arg(long, value_name = "SECS", default_value_t = 600)]

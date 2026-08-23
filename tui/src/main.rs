@@ -159,6 +159,7 @@ async fn run(cli: Cli) -> Result<()> {
             message,
             machine,
             worktree,
+            plan,
             print,
         }) => {
             new_session(
@@ -173,8 +174,11 @@ async fn run(cli: Cli) -> Result<()> {
                     machine,
                 },
                 message,
-                worktree,
-                print,
+                NewSessionFlags {
+                    worktree,
+                    plan,
+                    print,
+                },
             )
             .await
         }
@@ -328,6 +332,19 @@ async fn attach_local_with(
     .await
 }
 
+/// The three booleans `ouro new` carries that are not start *parameters*: two are start
+/// intent the gateway takes as options, and the third decides whether a terminal opens at
+/// all. Bundled because they travel together and a function signature is not a place to
+/// keep a list of flags.
+struct NewSessionFlags {
+    /// D7. Provision a `git worktree` under the data directory before the lease is taken.
+    worktree: bool,
+    /// B2. Start the session planning: it reads and reasons but edits nothing.
+    plan: bool,
+    /// Print the session id and exit instead of opening the terminal UI.
+    print: bool,
+}
+
 /// `ouro new`: state every choice, start the session, and attach to it.
 ///
 /// The validation is [`StartRequest`]'s — the same code the `n` dialog runs — so a
@@ -341,9 +358,10 @@ async fn new_session(
     config: Loaded,
     flags: StartFlags,
     message: Option<String>,
-    worktree: bool,
-    print: bool,
+    start: NewSessionFlags,
 ) -> Result<()> {
+    let print = start.print;
+
     paths.ensure_private_data_dir()?;
 
     let resolved = config::resolve_start(&flags, &config.config.defaults)
@@ -377,7 +395,8 @@ async fn new_session(
             })?),
         },
         objective: String::new(),
-        worktree,
+        worktree: start.worktree,
+        plan: start.plan,
     };
 
     // Mint the durable identity before the mutation. If the reply disappears after the
@@ -788,6 +807,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
                 start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
             },
             prompt,
+            args.plan,
         )
         .map_err(|refusal| refusal.to_string())
     };
@@ -3112,6 +3132,7 @@ mod tests {
             sandbox_mode: None,
             objective: String::new(),
             worktree: false,
+            plan: false,
         }
     }
 

@@ -1947,6 +1947,14 @@ pub struct StartRequest {
     /// or `1` is `-32602` — and an unasked-for `false` on every start would be this client
     /// stating a default the plane already has.
     pub worktree: bool,
+    /// B2. Start the session planning: read-only, and holding its terminal event at the
+    /// end of a planning turn to ask whether to build the plan.
+    ///
+    /// Sent only when true, for the same reason `worktree` is. It is the one way to reach
+    /// plan mode on a transport that carries the posture on every launch — Claude refuses
+    /// a mid-life change as `at_start_only` — so `--plan` is not merely a shortcut for
+    /// `/plan on` after the fact.
+    pub plan: bool,
 }
 
 impl StartRequest {
@@ -1961,6 +1969,7 @@ impl StartRequest {
             sandbox_mode: None,
             objective: String::new(),
             worktree: false,
+            plan: false,
         }
     }
 
@@ -2037,6 +2046,10 @@ impl StartRequest {
 
         if self.worktree {
             params.insert("worktree".into(), Value::Bool(true));
+        }
+
+        if self.plan {
+            params.insert("plan".into(), Value::Bool(true));
         }
 
         Ok(Value::Object(params))
