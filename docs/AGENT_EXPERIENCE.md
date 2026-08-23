@@ -158,7 +158,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | G5 | pending | orchestration UI |
 | H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified**. `files_changed` counts every `file_change` plus the target of a well-known write tool once its result was not an error — Claude's harness adapter emits no `file_change`, so a Claude edit used to finish as `[]` |
 | H2 | pending | `ouro acp` |
-| H3 | pending | `docs/PROTOCOL.md` |
+| H3 | landed | `mix ouroboros.protocol.docs` generates `docs/PROTOCOL.md` (18 bands, 81 methods with scope, ceiling, a parameter table, the pinned fixture, and the errors it can answer) from `Methods.table/0`, a new declared `@params` contract, and the golden fixtures; an 11-test drift suite includes an AST check that `@params` equals what the validators enforce and a check that TUI.md §2.4 catalogues every method (it found the two rewind verbs missing; closed the same day); `make protocol-docs`; no thin clients yet |
 | H4 | pending | HTTP/SSE |
 | I1 | partial | `:permission` and `:operator_shell` kinds in the ledger; native tool calls as ledger entries pending |
 | I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
