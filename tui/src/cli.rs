@@ -342,7 +342,12 @@ pub enum McpCommand {
         url: Option<String>,
 
         /// One argument. Repeat for more; order is kept.
-        #[arg(long = "arg", value_name = "ARG")]
+        ///
+        /// `allow_hyphen_values` because an MCP server's arguments are overwhelmingly
+        /// flags — `--arg --stdio` is the common case, not the exotic one — and a parser
+        /// that read the value as a second option would make this unusable for the servers
+        /// people actually run.
+        #[arg(long = "arg", value_name = "ARG", allow_hyphen_values = true)]
         args: Vec<String>,
 
         /// One `KEY=VALUE`. Repeat for more. **Values are written and never printed
@@ -733,6 +738,121 @@ mod tests {
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied()))
             .expect("a parseable command line")
+    }
+
+    /// B2. `--plan` is a plain boolean on both surfaces, with no flag it fights.
+    #[test]
+    fn plan_is_a_boolean_on_new_and_on_run() {
+        let Some(Command::New { plan, .. }) = parse(&["new", "--plan"]).command else {
+            panic!("`ouro new --plan` must parse as New");
+        };
+        assert!(plan);
+
+        let Some(Command::New { plan, .. }) = parse(&["new"]).command else {
+            panic!("`ouro new` must parse");
+        };
+        assert!(!plan, "an unasked-for plan is not a plan");
+
+        let Some(Command::Run(args)) = parse(&["run", "hi", "--plan"]).command else {
+            panic!("`ouro run --plan` must parse as Run");
+        };
+        assert!(args.plan);
+
+        // Deliberately compatible with --approve-all: the two say different things, and
+        // the plan-exit answer stays `keep_planning` under both.
+        let Some(Command::Run(args)) = parse(&["run", "hi", "--plan", "--approve-all"]).command
+        else {
+            panic!("`ouro run --plan --approve-all` must parse");
+        };
+        assert!(args.plan && args.approve_all);
+    }
+
+    /// D4. An MCP server's arguments are overwhelmingly flags, so `--arg --stdio` has to
+    /// reach the file as the argument `--stdio` rather than being read as an option.
+    ///
+    /// Pinned because the first live run of this command failed on exactly that.
+    #[test]
+    fn mcp_add_takes_hyphenated_arguments() {
+        let Some(Command::Mcp {
+            command:
+                McpCommand::Add {
+                    name,
+                    command,
+                    args,
+                    env,
+                    scope,
+                    ..
+                },
+        }) = parse(&[
+            "mcp",
+            "add",
+            "fake",
+            "--command",
+            "/bin/cat",
+            "--arg",
+            "--stdio",
+            "--arg",
+            "-v",
+            "--env",
+            "TOKEN=x",
+        ])
+        .command
+        else {
+            panic!("`ouro mcp add` must parse");
+        };
+
+        assert_eq!(name, "fake");
+        assert_eq!(command.as_deref(), Some("/bin/cat"));
+        assert_eq!(args, vec!["--stdio".to_string(), "-v".to_string()]);
+        assert_eq!(env, vec!["TOKEN=x".to_string()]);
+        assert_eq!(scope, "user", "the default scope is the user file");
+    }
+
+    /// `--command` and `--url` are two transports, and naming both is refused by the
+    /// parser rather than by the file writer.
+    #[test]
+    fn mcp_add_refuses_two_transports() {
+        assert!(Cli::try_parse_from([
+            "ouro",
+            "mcp",
+            "add",
+            "fake",
+            "--command",
+            "/bin/cat",
+            "--url",
+            "https://example.invalid"
+        ])
+        .is_err());
+    }
+
+    /// `ouro mcp list` is a read with the same three flags every read-only subcommand has.
+    #[test]
+    fn mcp_list_carries_the_node_and_the_workspace() {
+        let Some(Command::Mcp {
+            command:
+                McpCommand::List {
+                    node,
+                    workspace,
+                    json,
+                    ..
+                },
+        }) = parse(&[
+            "mcp",
+            "list",
+            "--node",
+            "ouroboros@golden",
+            "--workspace",
+            "/srv/repo",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("`ouro mcp list` must parse");
+        };
+
+        assert_eq!(node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(workspace, Some(PathBuf::from("/srv/repo")));
+        assert!(json);
     }
 
     #[test]
