@@ -144,6 +144,11 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Some(Command::Run(args)) => run_prompt(&paths, cli.dev, config, *args).await,
+        Some(Command::Agents {
+            json,
+            addr,
+            token_file,
+        }) => agents_page(&paths, json, addr, token_file).await,
         Some(Command::Daemon) => daemon(&paths, cli.dev).await,
         Some(Command::Attach {
             addr,
@@ -1902,6 +1907,64 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
         runtime::DAEMON_LOG_MAX_BYTES / (1024 * 1024),
         runtime::DAEMON_LOG_BACKUPS
     );
+
+    Ok(())
+}
+
+/// `ouro agents` (G2): every session this runtime can see, grouped by what it needs.
+///
+/// Read-only and one-shot: two list calls, the same grouping the rail draws, and out. It
+/// deliberately starts no runtime — a command whose whole job is to answer "is anything
+/// waiting on me" must not answer it by creating something to wait on — so an unreachable
+/// runtime is an error rather than a cold start.
+async fn agents_page(
+    paths: &Paths,
+    json_output: bool,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let Connected { client, hello, .. } = attach_with(address, token, false, hook).await?;
+
+    // `hello.methods` is the gate here as everywhere: a gateway that serves neither list
+    // is told apart from one whose lists are empty, because those are different answers.
+    let mut missing = Vec::new();
+
+    let interactive = if hello.serves("interactive.list") {
+        client
+            .call("interactive.list", json!({}))
+            .await
+            .context("calling interactive.list")?
+    } else {
+        missing.push("interactive.list");
+        json!([])
+    };
+
+    let coding = if hello.serves("coding.list") {
+        client
+            .call("coding.list", json!({}))
+            .await
+            .context("calling coding.list")?
+    } else {
+        missing.push("coding.list");
+        json!([])
+    };
+
+    client.stop().await;
+
+    for method in &missing {
+        eprintln!("ouro agents: this gateway does not serve {method}; its rows are missing");
+    }
+
+    let (interactive, coding) = ouro::agents::decode(&interactive, &coding);
+    let rows = ouro::agents::group(&interactive, &coding);
+
+    if json_output {
+        println!("{}", ouro::agents::render_json(&rows));
+    } else {
+        print!("{}", ouro::agents::render(&rows));
+    }
 
     Ok(())
 }

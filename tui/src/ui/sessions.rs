@@ -15,7 +15,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::keymap::Action;
-use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
+use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus, Triage};
 
 use super::access;
 use super::app::{App, ComposerVerb, Connection};
@@ -166,7 +166,47 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or(0)
         .saturating_sub(visible_count.saturating_sub(1))
         .min(sessions.len().saturating_sub(visible_count));
+
+    // G2. The groups, with their counts, so a heading can state how many rows the rail is
+    // *not* drawing as well as how many it is.
+    let counts = app.sessions.triage_counts();
+    let groups = app.sessions.triaged();
+    // A running cursor rather than a fixed pitch: a heading costs one row and a card five,
+    // and the two interleave.
+    let mut cursor = rows[1].y;
+    let mut drawn_group: Option<Triage> = None;
+
     for (offset, session) in sessions.iter().skip(start).take(visible_count).enumerate() {
+        let group = groups
+            .get(start + offset)
+            .map(|(group, _session)| *group)
+            .unwrap_or(Triage::Working);
+
+        if drawn_group != Some(group) && cursor < rows[1].bottom() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", group.label()),
+                        match group {
+                            Triage::NeedsInput => Style::default()
+                                .fg(theme::warn())
+                                .add_modifier(Modifier::BOLD),
+                            Triage::Working => theme::label(),
+                            Triage::Done => Style::default().fg(theme::muted()),
+                        },
+                    ),
+                    Span::styled(
+                        format!("{:02}", counts[group as usize]),
+                        Style::default().fg(theme::muted()),
+                    ),
+                ])),
+                Rect::new(rows[1].x, cursor, rows[1].width, 1),
+            );
+
+            cursor = cursor.saturating_add(1);
+            drawn_group = Some(group);
+        }
+
         let selected = app
             .sessions
             .open
@@ -204,15 +244,13 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 _ => Style::default().fg(theme::muted()),
             }
         };
-        let card = Rect::new(
-            rows[1].x,
-            rows[1].y.saturating_add((offset as u16).saturating_mul(5)),
-            rows[1].width,
-            4.min(rows[1].height),
-        );
+        let card = Rect::new(rows[1].x, cursor, rows[1].width, 4);
+
         if card.y.saturating_add(card.height) > rows[1].bottom() {
             break;
         }
+
+        cursor = cursor.saturating_add(5);
         let block = Block::default()
             .borders(access::borders(Borders::ALL))
             .border_style(border_style);
@@ -233,12 +271,40 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(named.clone(), Style::default().fg(theme::muted())),
                     ];
 
+                    // G2. The rail lists every fleet node's sessions, so a row that does
+                    // not say which machine it is on is a row nobody can act on. The
+                    // `unavailable` mark stays where it always was — a dimmed title —
+                    // because an offline owner is a fact about the observation, not about
+                    // the session's own state.
+                    let node = session
+                        .node
+                        .as_deref()
+                        .map(|node| node.split('@').next_back().unwrap_or(node))
+                        .map(|host| format!(" · {}", super::tree::truncate(host, 12)));
+
                     // I2. Only where the runtime reported one, and only where the whole
                     // cell fits: the footer's rule, because a half-drawn `42.5k · $0.4` is
                     // a fact rendered as noise. The short form — the cost alone — is tried
                     // before the cell is dropped entirely.
-                    let spare =
+                    // Dropped whole rather than half-drawn, the same rule the usage cell
+                    // below follows: a machine name clipped to `ouroboros@al` is a fact
+                    // rendered as noise, and the picker carries it in full anyway.
+                    let mut spare =
                         (content.width as usize).saturating_sub(head.width() + named.width());
+                    let node = node.filter(|node| node.width() <= spare);
+
+                    if let Some(node) = node {
+                        spare = spare.saturating_sub(node.width());
+                        spans.push(Span::styled(
+                            node,
+                            if session.last_known {
+                                Style::default().fg(theme::warn())
+                            } else {
+                                Style::default().fg(theme::muted())
+                            },
+                        ));
+                    }
+
                     let usage = session.usage.as_ref();
                     let cell = super::panels::usage_cell(usage)
                         .filter(|cell| cell.width() + 3 <= spare)
@@ -276,9 +342,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             rows[1],
         );
     } else if sessions.len() > visible_count {
-        let summary_y = rows[1]
-            .y
-            .saturating_add((visible_count as u16).saturating_mul(5));
+        let summary_y = cursor;
         if summary_y < rows[1].bottom() {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(

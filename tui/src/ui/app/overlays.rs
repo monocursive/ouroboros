@@ -566,6 +566,16 @@ pub enum Overlay {
         what: usize,
         confirming: bool,
     },
+    /// G2. The last thing one session's agent said, without leaving the list.
+    ///
+    /// Read out of the transcript this client already holds — never a fresh call — so a
+    /// row whose events were never subscribed says so rather than showing an empty box.
+    Peek {
+        plane: Plane,
+        id: String,
+        title: String,
+        text: Option<String>,
+    },
     /// G1. The coding tasks this conversation delegated, and a way into each one.
     Delegations {
         plane: Plane,
@@ -977,6 +987,20 @@ impl App {
                     }
                 }
             }
+            // G2. One key in, one key out. `r` goes on from the peek to the reply, so a
+            // triage pass is Space to look and r to answer without a detour.
+            Overlay::Peek { plane, id, .. } => {
+                let (plane, id) = (*plane, id.clone());
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | ' ') => self.overlay = None,
+                    KeyCode::Char('r') => {
+                        self.overlay = None;
+                        self.reply_to_session(plane, id);
+                    }
+                    _ => {}
+                }
+            }
             // G1. `Enter` opens the child's own transcript; there is no way to talk to it
             // from here, because a delegation is a coding task with a parent and not a
             // sub-conversation.
@@ -1292,6 +1316,23 @@ impl App {
                 self.overlay = None;
                 if let Some((plane, id)) = session {
                     self.open_session(plane, id);
+                }
+            }
+            // G2. Peek and reply, on the surface that has a cursor. `Space` shows the
+            // last thing the agent said without leaving the list — the question triage
+            // exists to answer is "does this one need me", and opening a transcript to
+            // find out costs the place in the list. `r` is the answer to "yes".
+            KeyCode::Char(' ') => {
+                if let Some((plane, id)) = selected.or_else(|| self.sessions.picker_key(index)) {
+                    self.peek_session(plane, id);
+                }
+            }
+            KeyCode::Char('r') => {
+                let session = selected.or_else(|| self.sessions.picker_key(index));
+                self.overlay = None;
+
+                if let Some((plane, id)) = session {
+                    self.reply_to_session(plane, id);
                 }
             }
             KeyCode::Char('x') => {

@@ -101,6 +101,27 @@ pub enum Command {
     /// three can be corrupted by them.
     Run(Box<RunArgs>),
 
+    /// Print every session this runtime can see, grouped by what each one needs.
+    ///
+    /// The same grouping the Sessions rail draws — needs input, working, done — printed
+    /// once and exited, for a terminal without a tty and for the thirty seconds where
+    /// opening a UI to ask "is anything waiting on me" is thirty seconds too many.
+    Agents {
+        /// One JSON object with the counts and the runtime's own rows, instead of the
+        /// plain page.
+        #[arg(long)]
+        json: bool,
+
+        /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+
+        /// A file holding the gateway token. Omitted, the token beside gateway.json is
+        /// used.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+    },
+
     /// Start a runtime, print how to reach it, and leave it running.
     Daemon,
 

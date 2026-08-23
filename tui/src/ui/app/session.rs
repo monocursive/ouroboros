@@ -337,21 +337,35 @@ impl SessionsTab {
             .map(Vec::as_slice)
     }
 
-    /// Both planes' sessions in one list, ordered so the list does not reshuffle under the
-    /// cursor between polls: newest activity first, ties broken by plane then id.
+    /// Both planes' sessions in one list, across every fleet node, grouped by what each
+    /// one needs (G2) and then ordered so the list does not reshuffle under the cursor
+    /// between polls: newest activity first, ties broken by plane then id.
+    ///
+    /// The grouping is the ordering, not a second pass: every surface that lists sessions
+    /// — the rail, the picker, `ouro agents` — reads this one function, so a session that
+    /// is first here is first everywhere.
     pub fn merged(&self) -> Vec<&SessionInfo> {
-        let mut rows: Vec<&SessionInfo> = self
+        self.triaged()
+            .into_iter()
+            .map(|(_group, session)| session)
+            .collect()
+    }
+
+    /// The same list with each row's group beside it, for the surfaces that draw headings.
+    pub fn triaged(&self) -> Vec<(Triage, &SessionInfo)> {
+        let mut rows: Vec<(Triage, &SessionInfo)> = self
             .interactive
             .value
             .iter()
             .flatten()
             .chain(self.coding.value.iter().flatten())
+            .map(|session| (self.triage_of(session), session))
             .collect();
 
-        rows.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
+        rows.sort_by(|(left_group, left), (right_group, right)| {
+            left_group
+                .cmp(right_group)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
                 .then_with(|| left.plane.cmp(&right.plane))
                 .then_with(|| left.id.cmp(&right.id))
         });
@@ -359,9 +373,32 @@ impl SessionsTab {
         // One row represents one addressable v1 stream. A duplicate explicit ID is still
         // visible, but as a single conflict row whose owners are named by the renderer.
         let mut seen = HashSet::new();
-        rows.retain(|session| seen.insert((session.plane, session.id.clone())));
+        rows.retain(|(_group, session)| seen.insert((session.plane, session.id.clone())));
 
         rows
+    }
+
+    /// Which group one row belongs to, counting the approvals this client is holding for
+    /// it as well as the status the plane declared.
+    pub fn triage_of(&self, session: &SessionInfo) -> Triage {
+        let pending = self
+            .watches
+            .get(&(session.plane, session.id.clone()))
+            .map(|watch| watch.pending_approvals.len())
+            .unwrap_or(0);
+
+        session.triage(pending)
+    }
+
+    /// How many rows sit in each group, for the footer's cell and for `ouro agents`.
+    pub fn triage_counts(&self) -> [usize; 3] {
+        let mut counts = [0usize; 3];
+
+        for (group, _session) in self.triaged() {
+            counts[group as usize] += 1;
+        }
+
+        counts
     }
 
     pub fn picker_index(&self, selected: Option<&(Plane, String)>) -> usize {

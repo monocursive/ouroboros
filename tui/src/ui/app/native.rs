@@ -872,6 +872,54 @@ impl App {
         }
     }
 
+    // ----- G2: peek and reply ---------------------------------------------------------
+
+    /// `Space`: the last thing this session's agent said, without leaving the list.
+    ///
+    /// Read out of the transcript this client already holds, never fetched. A row nobody
+    /// has subscribed to has no last message *here*, and saying so is the honest answer —
+    /// a peek that quietly opened a subscription would make the cheap key expensive and
+    /// would change what the runtime is streaming just because someone looked.
+    pub(super) fn peek_session(&mut self, plane: Plane, id: String) {
+        let text = self
+            .sessions
+            .watches
+            .get(&(plane, id.clone()))
+            .and_then(|watch| crate::ui::transcript_cells::last_agent_message(watch.entries()));
+
+        let title = self
+            .sessions
+            .session(plane, &id)
+            .and_then(|session| session.objective.clone())
+            .filter(|objective| !objective.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
+
+        self.overlay = Some(Overlay::Peek {
+            plane,
+            id,
+            title,
+            text,
+        });
+    }
+
+    /// `r`: open that session and put the cursor in its composer.
+    ///
+    /// The reply goes to the session, not through the list: there is no cross-session
+    /// message verb, and a list that appeared to send one would be inventing a channel.
+    pub(super) fn reply_to_session(&mut self, plane: Plane, id: String) {
+        if plane != Plane::Interactive {
+            self.inform(
+                "a coding task takes no reply; open it to watch or cancel it",
+                NoticeKind::Info,
+            );
+            self.open_session(plane, id);
+            return;
+        }
+
+        self.open_session(plane, id);
+        self.compose(super::ComposerVerb::Message);
+    }
+
     // ----- shared ----------------------------------------------------------------------
 
     /// Records what one of these verbs answered, in the transcript it was about.

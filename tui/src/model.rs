@@ -191,6 +191,72 @@ impl SessionStatus {
     }
 }
 
+/// G2. Which of the three questions a fleet row answers: does it need me, is it working,
+/// or is it done.
+///
+/// The order is the order they are drawn in, and it is the whole point of the grouping —
+/// what needs a human is what a person opening `ouro` is looking for, and it must not be
+/// below eleven finished sessions from yesterday.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Triage {
+    NeedsInput,
+    Working,
+    Done,
+}
+
+impl Triage {
+    pub const ALL: [Self; 3] = [Self::NeedsInput, Self::Working, Self::Done];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "NEEDS INPUT",
+            Self::Working => "WORKING",
+            Self::Done => "DONE",
+        }
+    }
+
+    /// The one-word form `ouro agents --json` and the footer use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "needs_input",
+            Self::Working => "working",
+            Self::Done => "done",
+        }
+    }
+}
+
+impl SessionInfo {
+    /// Which group this row belongs to, from *declared* state and nothing else.
+    ///
+    /// The three inputs are the plane's own `status`, the pending approvals this client
+    /// is holding for the session, and whether the runtime says the session is waiting on
+    /// a human. Never a guess: a row whose owner is offline keeps whichever group its
+    /// last complete observation put it in, because "we cannot see it right now" is not
+    /// the same claim as "it needs you" — and a client that promoted every unreachable
+    /// session to the top would make the top of the list meaningless.
+    pub fn triage(&self, pending_approvals: usize) -> Triage {
+        if pending_approvals > 0 || self.status == SessionStatus::AwaitingApproval {
+            return Triage::NeedsInput;
+        }
+
+        if self.status.terminal() {
+            return Triage::Done;
+        }
+
+        if self.status.busy() {
+            return Triage::Working;
+        }
+
+        // `idle` on the interactive plane is a conversation waiting for its next prompt —
+        // a human's turn, which is exactly what this grouping is for. On the coding plane
+        // there is nobody to prompt it, so an idle task is simply between turns.
+        match (self.plane, &self.status) {
+            (Plane::Interactive, SessionStatus::Idle) => Triage::NeedsInput,
+            _otherwise => Triage::Working,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for SessionStatus {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(Self::parse(&String::deserialize(deserializer)?))

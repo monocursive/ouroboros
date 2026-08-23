@@ -451,6 +451,55 @@ fn note(text: impl Into<String>) -> Line<'static> {
     ))
 }
 
+/// How many lines of the last agent message a peek shows. A glance, not a transcript:
+/// deciding whether a session needs you takes the top of what it said, and the rest is one
+/// `Enter` away.
+const PEEK_LINES: usize = 12;
+
+/// G2. `Space` on a row: the last thing that session's agent said.
+pub fn peek(frame: &mut Frame, area: Rect, app: &App, title: &str, id: &str, text: Option<&str>) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            crate::ui::tree::truncate(title, 64),
+            theme::label().add_modifier(Modifier::BOLD),
+        )),
+        note(crate::ui::tree::truncate(id, 64)),
+        Line::from(""),
+    ];
+
+    match text {
+        Some(text) => {
+            for row in text.lines().take(PEEK_LINES) {
+                lines.push(Line::from(Span::raw(row.to_string())));
+            }
+
+            let omitted = text.lines().count().saturating_sub(PEEK_LINES);
+
+            if omitted > 0 {
+                lines.push(note(format!(
+                    "… {omitted} more line{}",
+                    if omitted == 1 { "" } else { "s" }
+                )));
+            }
+        }
+        // Two different silences, and only one of them is about the session. This client
+        // holds no transcript for a row it never subscribed to, and saying "nothing was
+        // said" there would be a claim about someone else's conversation.
+        None => lines.push(note(
+            "this client is not holding this session's transcript, so it has no last \
+             message to show — enter opens it",
+        )),
+    }
+
+    lines.push(Line::from(""));
+    lines.push(note(format!(
+        "r replies · enter opens · esc closes · {} lists them all",
+        app.keymap.label(Action::LeaderSessions)
+    )));
+
+    page(frame, area, "peek", lines, 0);
+}
+
 /// `/context` (D9): what this session can honestly say about its own context window.
 pub fn context(
     frame: &mut Frame,

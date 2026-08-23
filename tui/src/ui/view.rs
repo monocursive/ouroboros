@@ -564,15 +564,37 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         ));
     }
 
+    // G2. The open session's own approvals, and — beside them — how many rows across the
+    // whole fleet are in each triage group. One cell, because they answer the same
+    // question at two scales: what is waiting on me here, and what is waiting on me
+    // anywhere. The fleet half is drawn only where there is more than one session, so a
+    // single-session terminal keeps the cell it always had.
+    let [needs, working, _done] = app.sessions.triage_counts();
+    let fleet = if needs + working > 0 && app.sessions.merged().len() > 1 {
+        format!(" · {needs} waiting · {working} working")
+    } else {
+        String::new()
+    };
+
     if facts.approvals > 0 {
         segments.push(Segment::new(
             format!(
-                "{} approval{}",
+                "{} approval{}{fleet}",
                 facts.approvals,
                 if facts.approvals == 1 { "" } else { "s" }
             ),
             Style::default().fg(theme::warn()),
             11,
+        ));
+    } else if !fleet.is_empty() {
+        segments.push(Segment::new(
+            format!("{needs} waiting · {working} working"),
+            Style::default().fg(if needs > 0 {
+                theme::warn()
+            } else {
+                theme::muted()
+            }),
+            8,
         ));
     }
 
@@ -849,6 +871,9 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         Overlay::Delegations { rows, choice, .. } => {
             super::panels::delegations(frame, area, rows, *choice)
         }
+        Overlay::Peek {
+            title, text, id, ..
+        } => super::panels::peek(frame, area, app, title, id, text.as_deref()),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
         Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
         Overlay::Diff(state) => changed_files(frame, area, state),
@@ -1247,16 +1272,29 @@ const ACCOUNT_WIDTH: u16 = 58;
 const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
 fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(Plane, String)>) {
-    let sessions = app.sessions.merged();
+    let rows = app.sessions.triaged();
+    let sessions: Vec<_> = rows.iter().map(|(_group, session)| *session).collect();
     let height = (sessions.len() + 5).clamp(7, 20) as u16;
-    let popup = centered(area, 62, height);
+    let popup = centered(area, 72, height);
     frame.render_widget(Clear, popup);
 
+    // G2. The counts are in the title rather than in heading rows, because this is a
+    // `List` whose selection is an index: a heading row would be selectable, and a
+    // selectable row that cannot be opened is a row that lies about what Enter does. The
+    // grouping is still visible on every row, in the column below.
+    let [needs, working, done] = app.sessions.triage_counts();
+
+    // The counts above and the keys below: at eighty columns one title cannot hold both,
+    // and dropping the keys would leave a list whose two new verbs nobody ever finds.
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
         .title(Span::styled(
-            " switch session · enter open · x end ",
+            format!(" sessions · {needs} need input · {working} working · {done} done "),
             theme::heading(),
+        ))
+        .title_bottom(Span::styled(
+            " space peek · r reply · enter open · x end ",
+            Style::default().fg(theme::muted()),
         ));
 
     if sessions.is_empty() {
@@ -1276,16 +1314,32 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     }
 
     let choice = app.sessions.picker_index(selected);
-    let items = sessions
+    let items = rows
         .iter()
-        .map(|session| {
+        .map(|(group, session)| {
             let mut spans = vec![
+                Span::styled(
+                    format!("{:<12}", group.label().to_ascii_lowercase()),
+                    match group {
+                        crate::model::Triage::NeedsInput => Style::default().fg(theme::warn()),
+                        crate::model::Triage::Working => Style::default().fg(theme::system()),
+                        crate::model::Triage::Done => Style::default().fg(theme::muted()),
+                    },
+                ),
                 Span::styled(
                     format!("{:<6}", session.plane.tag()),
                     Style::default().fg(theme::muted()),
                 ),
-                Span::raw(super::tree::truncate(&session.id, 42)),
+                Span::raw(super::tree::truncate(&session.id, 36)),
             ];
+
+            // G2. Which machine, on the row, because the list spans every fleet node.
+            if let Some(node) = session.node.as_deref() {
+                spans.push(Span::styled(
+                    format!("  {}", super::tree::truncate(node, 24)),
+                    Style::default().fg(theme::muted()),
+                ));
+            }
             if let Some(owners) = app.sessions.owner_conflict(session.plane, &session.id) {
                 spans.push(Span::styled(
                     format!(

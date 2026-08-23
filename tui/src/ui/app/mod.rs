@@ -38,7 +38,7 @@ use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
     Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
-    SandboxMode, SessionInfo, StartRequest, StartedRef, TurnInput,
+    SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
