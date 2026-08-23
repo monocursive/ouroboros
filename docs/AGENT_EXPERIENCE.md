@@ -88,7 +88,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | # | Status |
 |---|---|
 | X1 | landed — `unsupported_approval_mode` typed refusal for `:prompt` on transports without an approvals channel (claude/gemini/grok/zai/codex-exec); lifted for Claude by the bridge below |
-| X2 | landed — `options.capabilities` declares `steer`; chrome offers it only where truthy (today `pi`; Codex app-server after C3's `turn/steer`) |
+| X2 | landed — `options.capabilities` declares `steer`; chrome offers it only where truthy (`pi`, and since C3 the Codex app server) |
 | X3 | landed — docs name `Ctrl-O` |
 | X4 | landed — `[terminal] mouse`, one-time selection hint |
 | X5 | landed — DEC 2026 bracket around every frame, cursor escapes inside |
@@ -129,7 +129,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | B9 | landed | grouped `?`, first-run tips, `? new here` |
 | C1 | landed | `Control.Permissions`: Claude Code's Bash semantics, four scopes, deny→ask→allow, protected paths, durable rules, every decision in the ledger, `permissions.{list,add,remove}` |
 | C2 | landed | `ouro mcp-serve` + `--permission-prompt-tool` + `interactive.request_approval`; `ClaudeAdapter` bridges `:prompt` and `:default`; **live-verified** |
-| C3 | partial | X7 landed; `turn/steer`, `acceptWithExecpolicyAmendment`, `acceptForSession` pending |
+| C3 | landed (runtime) | `turn/steer` through `steer/3` (the adapter export, the JSONL request tracking, and the dialect return type all had to exist first — the runtime path did not); `acceptWithExecpolicyAmendment` offered only when Codex proposes one, answered by the same `scope: "session"` that writes the C1 rule; `item/permissions/requestApproval` now answered in its schema shape (it was being answered with a field the schema cannot read, and `seam.ex` read a `grantRoot` the schema does not have, so escalations reached the engine with zero paths); `thread/compact/start` and `model/list` as dialect halves with no runtime caller yet (a `compact` capability and a per-provider `models/1` seam are the pending runtime work); ten schema files pinned from codex-cli 0.147.0 and every frame asserted against them; live-verified frame-exact against `codex app-server --stdio`, not through a paid turn |
 | C4 | partial | X8 landed; `fs/*`, `terminal/*` service and `session/set_mode` pending |
 | C5 | pending | OS sandbox for the native agent |
 | C6 | pending | classifier |
@@ -160,7 +160,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | H2 | pending | `ouro acp` |
 | H3 | landed | `mix ouroboros.protocol.docs` generates `docs/PROTOCOL.md` (18 bands, 81 methods with scope, ceiling, a parameter table, the pinned fixture, and the errors it can answer) from `Methods.table/0`, a new declared `@params` contract, and the golden fixtures; an 11-test drift suite includes an AST check that `@params` equals what the validators enforce and a check that TUI.md §2.4 catalogues every method (it found the two rewind verbs missing; closed the same day); `make protocol-docs`; no thin clients yet |
 | H4 | pending | HTTP/SSE |
-| I1 | partial | `:permission` and `:operator_shell` kinds in the ledger; native tool calls as ledger entries pending |
+| I1 | landed | `tool_call` entries for the native agent, checkpointed before the tool runs (a ledger that cannot record stops the tool) and settled with `completed\|failed\|refused\|timed_out`, content-minimised subjects (paths, a command digest, hosts, the MCP server and tool); `approval` entries for every human answer on every provider, written before the answer is forwarded, with `actor` (`human`, or `headless` — `ouro run` now names itself), `scope`, `rule_id`; `ledger_ref` `{node, id}` on `tool_call` and `approval_resolved` events; fair retention across kinds so a flood of tool calls cannot evict the only forge. Landing it exposed that the Claude bridge had been calling `Permissions.record/2` with the wrong shape since C2 — no bridged decision had ever reached the ledger; fixed the same day with a test against the real engine |
 | I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
 | I3 | landed | `ledger.{list,get,export}` (`fleet: true` fans out over bounded `:erpc`, merges by `{node, sequence}`, names the nodes that did not answer); `ledger.export` is JSONL with `hash(n) = sha256(hash(n-1) ‖ line(n))` over a canonical encoding — client-verifiable, not tamper-evident storage; `ouro ledger [--fleet] [--since N] [--json]` |
 | J1–J5 | pending | distribution |
@@ -176,7 +176,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 2 | Benchmark standing | 0 | 0 (adapter in flight; no number) |
 | 3 | Token efficiency & cost | 0 | 2 (usage + cost everywhere; cache-stable prefix; soft budget) |
 | 4 | Responsiveness | 1 | 1 (managed transports still re-exec per turn) |
-| 5 | Steering mid-turn | 1 | 2 (visible queue; native steer; vendor steer only where declared) |
+| 5 | Steering mid-turn | 1 | 2 (visible queue; native steer; vendor steer where declared — `pi` and, since C3, the Codex app server; Claude has no steer channel) |
 | 6 | Plan / approval flow | 0 | 2 (approvals real on Claude/Codex/ACP/native with rules and "don't ask again"; no plan mode yet) |
 | 7 | Input ergonomics | 1 | 2 (chips, image paste, `/effort`, `/model`, rebindable keys; no vim) |
 | 8 | TUI rendering correctness | 1 | 2 (sync output, escape hatches, themes, a11y) |
@@ -229,6 +229,15 @@ what a user of `ouro` on `review-fixes` gets today.
   pool never held; an error whose range moved).
 - Codex sessions get no post-edit hook; bridged Claude sessions at `auto_edit` /
   `auto_approve` get neither the MCP tools nor the hook.
+- A native `tool_call` ledger entry names the Harness session id while an `approval`
+  names the Ouroboros one (`interactive.info`'s `harness_session_id` bridges them); a
+  `tool_call`'s `ledger_ref` carries no `sequence` because the row is broadcast before the
+  write that admits it; `:timed_out` is inferred from elapsed time, not reported by the
+  tool; a tool call now costs two ledger checkpoints on top of its permission writes.
+- Codex steer is asserted at the dialect, not through a full Harness worker session; the
+  amendment and permissions replies are schema- and fake-server-verified, never answered
+  by a real Codex approval. The execpolicy amendment and the C1 rule are computed
+  independently and agree by construction in the tested cases, not by derivation.
 - The MCP client speaks stdio only and validates no arguments (the server owns its
   schema); a `url` server is refused by name, never silently dropped. MCP tool names are
   absent from the cached system-prompt tool list (the loop rebuilds the specs before every
