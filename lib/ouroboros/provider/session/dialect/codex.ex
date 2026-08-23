@@ -345,6 +345,69 @@ defmodule Ouroboros.Provider.Session.Dialect.Codex do
 
   def configure(_runtime, _changes), do: {:error, :unsupported}
 
+  # ── the runtime's own round trips ─────────────────────────────────────────────────
+
+  # C4 wires C3's two pinned frames. `compact_request/1` and `model_list_request/1` still
+  # hold the schema knowledge; this is only where a runtime verb reaches them.
+  #
+  # A `focus` is **refused**, not dropped. `ThreadCompactStartParams` has one field,
+  # `threadId`, so there is nowhere for "keep the migration plan" to go; compacting anyway
+  # would fold the thread on the app server's own terms while the operator was told theirs
+  # were applied. A refusal that names the reason is the only answer that is true.
+  @impl true
+  def ask(:compact, args, runtime) do
+    case Map.get(args, :focus) do
+      focus when is_binary(focus) and focus != "" ->
+        {:error,
+         {:unsupported_on_transport,
+          %{
+            transport: :app_server,
+            verb: :compact,
+            reason: :focus_not_supported,
+            message:
+              "the Codex app server's `thread/compact/start` takes a thread id and nothing " <>
+                "else, so a focus has nowhere to go. Compact without one, or move the " <>
+                "session to a native transport where the fold is this runtime's own."
+          }}}
+
+      _unfocused ->
+        compact_request(runtime)
+    end
+  end
+
+  def ask(:models, args, _runtime) do
+    model_list_request(
+      limit: Map.get(args, :limit),
+      cursor: Map.get(args, :cursor),
+      include_hidden: Map.get(args, :include_hidden)
+    )
+  end
+
+  def ask(_verb, _args, _runtime), do: {:error, :unsupported}
+
+  # `thread/compact/start` answers `{}`; the fold itself arrives later as the
+  # `thread/compacted` notification `handle_notification/4` already maps into the
+  # transcript. So the report here is what this runtime actually knows at this moment —
+  # that the app server accepted the request — and it says which side did the work rather
+  # than borrowing the native path's token counts, which nothing measured.
+  @impl true
+  def answer(:compact, _result, _runtime),
+    do: %{trigger: "manual", summarised: false, source: "codex:thread/compact/start"}
+
+  def answer(:models, result, _runtime) do
+    listed = models(result)
+    %{source: "codex:model/list", models: listed.models, next_cursor: listed.next_cursor}
+  end
+
+  def answer(_verb, result, _runtime), do: result
+
+  # The app server never calls the client: every server-to-client frame it sends is an
+  # approval, which `approval_request/2` above answers. Refusing by name rather than by
+  # omission is this behaviour's rule — a dialect that grows a client service later has to
+  # say so here.
+  @impl true
+  def service_request(_method, _params, _runtime), do: :method_not_found
+
   # The one pre-tool seam the app server gives. `Ouroboros.Control.Permissions` answers
   # first; only what it leaves as `:ask` becomes an approval the human sees.
   #

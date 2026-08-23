@@ -175,6 +175,15 @@ defmodule Ouroboros.Application do
           # without reading another supervisor's private state.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Native.Registry},
+          # C4. The same idea for the JSONL transports, keyed by harness session id. The
+          # pinned harness exposes its session *worker* but never the transport handle
+          # underneath it, and the three verbs that have to reach a dialect directly — a
+          # Codex `thread/compact/start`, a live `model/list`, an ACP `session/set_mode` —
+          # are exactly the ones it has no vocabulary for. Its own registry cannot be
+          # borrowed for this: `Jido.Harness.SessionManager.list/1` selects every key in it
+          # and calls each pid as a session worker.
+          {Ouroboros.Application.RegistryOwner,
+           keys: :unique, name: Ouroboros.Provider.Session.Registry},
           {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Coding.Registry},
           {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
           Ouroboros.Coding.Recovery,

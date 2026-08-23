@@ -1607,6 +1607,96 @@ defmodule Ouroboros.Provider do
   end
 
   @doc """
+  Returns whether a running session can be told to change the *agent's own* mode.
+
+  C4, and the counterpart to B1's refusal rather than a reversal of it. ACP's only
+  configuration verb is `session/set_mode`, whose argument is a mode id the agent itself
+  invented and published in `session/new`'s `availableModes` — "ask", "architect",
+  "code", whatever that agent ships. Those are not Ouroboros's four normalized approval
+  modes and no bundled agent publishes a mapping, so `approval_mode` and `sandbox_mode`
+  stay refused on ACP exactly as they were: the transport declares no
+  `dynamic_configuration`, and `session_configuration/3` refuses before any wire is
+  touched.
+
+  What C4 adds is a *different key*. `mode` carries the agent's own id, is validated
+  against the list that agent announced, and is refused by name everywhere else. Nothing
+  is guessed and nothing is mapped: a client that wants to move an ACP agent's posture
+  has to name a mode the agent said it had.
+
+  Declaration-shaped, like `session_fork_options/2`: the answer comes from the dialect
+  exporting `mode_option/0`, so a transport gains this by implementing it rather than by
+  being added to a table here. `applies` is `:now` because `session/set_mode` is a
+  correlated round trip that has already been answered by the time this runtime replies.
+
+  Not durable. A mode is a property of the live agent process; a resume starts a new one,
+  which comes up in its own default. Reporting it as remembered would be a claim about a
+  session that has not started yet.
+  """
+  @spec session_mode(term(), atom() | nil) :: {:ok, map()} | {:error, term()}
+  def session_mode(provider, transport \\ nil) do
+    with {:ok, spec} <- mode_spec(provider),
+         {:ok, declared} <- mode_transport(spec, provider, transport) do
+      case dialect_mode_option(declared) do
+        {:mode, vocabulary} ->
+          {:ok, %{applies: :now, settable: :any_time, via: :session_set_mode, ids: vocabulary}}
+
+        _undeclared ->
+          {:error,
+           {:unsupported_configuration,
+            %{
+              provider: spec.provider,
+              transport: declared.name,
+              field: :mode,
+              reason: :transport_has_no_modes,
+              message:
+                "#{inspect(spec.provider)} reaches this session over the " <>
+                  "#{inspect(declared.name)} transport, which has no notion of an agent " <>
+                  "mode. `mode` carries an id the agent itself published; a transport " <>
+                  "that publishes none cannot be told one."
+            }}}
+      end
+    end
+  end
+
+  defp dialect_mode_option(%{adapter: adapter}) do
+    with dialect when not is_nil(dialect) <- Session.dialect(adapter),
+         true <- function_exported?(dialect, :mode_option, 0) do
+      dialect.mode_option()
+    else
+      _no_dialect_mode -> nil
+    end
+  end
+
+  defp mode_spec(provider) do
+    case Registry.spec(provider) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      _unresolvable ->
+        {:error,
+         {:unsupported_configuration,
+          %{provider: provider, field: :mode, reason: :unknown_provider}}}
+    end
+  end
+
+  defp mode_transport(spec, provider, transport) do
+    case selected_transport(spec, transport) do
+      nil ->
+        {:error,
+         {:unsupported_configuration,
+          %{
+            provider: provider,
+            transport: transport,
+            field: :mode,
+            reason: :unknown_session_transport
+          }}}
+
+      declared ->
+        {:ok, declared}
+    end
+  end
+
+  @doc """
   Returns the options a *running* session may still be changed to, and when it takes hold.
 
   Validated against exactly what `safety_options/3` validates a start against — the

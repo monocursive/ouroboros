@@ -10,6 +10,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Provider
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Session, as: NativeSession
+  alias Ouroboros.Provider.Session, as: ProviderSession
   alias Ouroboros.Team
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace
@@ -1836,37 +1837,66 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) do
       {:error, {:session_not_configurable, session.status}, runtime}
     else
-      # B2. Plan mode is not a Harness configuration field — the pinned `SessionRequest`
-      # refuses a fifth key — so it is split off here and goes around `Session.configure/2`
-      # to the native session, where `Provider.plan_mode/2` says the transport can be told
-      # mid-life. Everything else takes the path it always took.
+      # B2/C4. Two keys are not Harness configuration fields — the pinned `SessionRequest`
+      # refuses a fifth — so they are split off here and go around `Session.configure/2`:
+      # `plan` to the native session, where `Provider.plan_mode/2` says the transport can
+      # be told mid-life, and `mode` to the session's own transport, where
+      # `Provider.session_mode/2` says the agent published a vocabulary to name. Everything
+      # else takes the path it always took.
       {plan, rest} = Map.pop(changes, :plan)
+      {mode, rest} = Map.pop(rest, :mode)
 
-      with {:ok, rest, applies} <- configuration_changes(session, rest, plan),
+      with {:ok, rest, applies} <- configuration_changes(session, rest, plan, mode),
            :ok <- apply_plan(runtime, plan),
+           :ok <- apply_mode(runtime, mode),
            :ok <- apply_rest(runtime, rest) do
-        record_configuration(runtime, plan_changes(rest, plan), applies)
+        record_configuration(runtime, plan_changes(rest, plan, mode), applies)
       else
         {:error, reason} -> {:error, reason, runtime}
       end
     end
   end
 
-  # A change that is only `plan` has nothing for the provider to validate; a change that
-  # is nothing at all is still refused there, as it always was.
-  defp configuration_changes(_session, rest, planning?)
-       when rest == %{} and is_boolean(planning?),
+  # A change that is only `plan` or only `mode` has nothing for the provider to validate;
+  # a change that is nothing at all is still refused there, as it always was.
+  defp configuration_changes(_session, rest, planning?, mode)
+       when rest == %{} and (is_boolean(planning?) or is_binary(mode)),
        do: {:ok, %{}, :now}
 
-  defp configuration_changes(session, rest, _planning?),
+  defp configuration_changes(session, rest, _planning?, _mode),
     do:
       Provider.session_configuration(session.provider, rest, Map.get(session.options, :transport))
 
   defp apply_rest(_runtime, rest) when rest == %{}, do: :ok
   defp apply_rest(runtime, rest), do: apply_configuration(runtime, rest)
 
-  defp plan_changes(rest, nil), do: rest
-  defp plan_changes(rest, planning?), do: Map.put(rest, :plan, planning?)
+  defp plan_changes(rest, plan, mode) do
+    rest
+    |> then(fn changes -> if is_nil(plan), do: changes, else: Map.put(changes, :plan, plan) end)
+    |> then(fn changes -> if is_nil(mode), do: changes, else: Map.put(changes, :mode, mode) end)
+  end
+
+  # C4. The agent's own mode id, forwarded as `session/set_mode` and validated by the
+  # dialect against what the agent announced. Not written into the session's durable
+  # options: a mode belongs to the live agent process, and a resumed session starts a new
+  # one in that agent's own default. The `configured` event still records the change, so
+  # the transcript says what was asked for even though nothing claims it survives.
+  defp apply_mode(_runtime, nil), do: :ok
+
+  defp apply_mode(%{session: session} = runtime, mode) when is_binary(mode) do
+    case Provider.session_mode(session.provider, Map.get(session.options, :transport)) do
+      {:ok, _support} ->
+        with_harness_session(runtime, fn harness_session_id ->
+          case ProviderSession.ask(harness_session_id, :set_mode, %{mode: mode}) do
+            {:ok, _answer} -> :ok
+            {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
+          end
+        end)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp apply_plan(_runtime, nil), do: :ok
 

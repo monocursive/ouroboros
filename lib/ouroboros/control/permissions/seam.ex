@@ -108,19 +108,70 @@ defmodule Ouroboros.Control.Permissions.Seam do
   end
 
   @doc """
+  Decides one service request the agent asked *this runtime* to perform.
+
+  C4's second seam, and a different question from `decide/4`. There the provider is
+  asking permission for something it will do itself; here an ACP agent has called the
+  client — `fs/write_text_file`, `terminal/create` — and Ouroboros is the process that
+  will do it. That makes the classification the runtime's own rather than a reading of
+  someone else's params, so the caller states it: `Ouroboros.Provider.Session.Service`
+  knows the canonical path it resolved and the command line it is about to run, and
+  passes both here already normalised.
+
+  Classified as the ordinary tool it is, deliberately. A `terminal/create` is a shell
+  execution and arrives as `tool: "bash"` with the command line, so a `Bash(…)` deny an
+  operator wrote covers it — a service that classified itself as `Tool(terminal/create)`
+  would be a documented way around every rule the operator already has. A write over an
+  existing file is `tool: "edit"` and a write that creates one is `tool: "write"`, so
+  `Edit(…)` and `Write(…)` each mean what they say.
+  """
+  @spec decide_service(:acp | :app_server, map(), map()) :: verdict()
+  def decide_service(dialect, fields, payload) do
+    bound = principal()
+    request = service_request(dialect, fields, bound)
+
+    case Permissions.evaluate(request) do
+      {:allow, ref} -> {:allow, ref}
+      {:deny, ref} -> {:deny, ref}
+      {:ask, _reason} -> {:ask, suggested(payload, request)}
+    end
+  rescue
+    _error -> {:ask, payload}
+  catch
+    _kind, _reason -> {:ask, payload}
+  end
+
+  @doc """
   Records a human's answer, and turns a session-scoped one into a rule.
 
   `stash` is the dialect's own approval stash, which carries the provider params the
   request was built from. `decision_id` is stable per session and provider request id, so
   a retried acknowledgement records once.
+
+  A service stash carries the fields `decide_service/3` was asked with instead of the
+  provider's params, because there is no provider request to re-read: rebuilding a
+  `session/request_permission` shape from a `fs/write_text_file` frame would write a
+  ledger entry describing something that never happened.
   """
   @spec answered(:acp | :app_server, String.t(), map(), map()) :: :ok
+  def answered(dialect, decision_id, %{service: fields} = stash, response)
+      when is_map(fields) do
+    record_answer(decision_id, service_request(dialect, fields, principal()), stash, response)
+  end
+
   def answered(dialect, decision_id, stash, response) do
     bound = principal()
     params = Map.get(stash, :params) || %{}
     method = Map.get(stash, :method) || ""
     request = request(dialect, method, params, bound)
+    record_answer(decision_id, request, stash, response)
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
 
+  defp record_answer(decision_id, request, _stash, response) do
     _ =
       Permissions.record(decision_id, %{
         decision: response.decision,
@@ -131,7 +182,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
         request: request
       })
 
-    _ = remember(response, request, bound)
+    _ = remember(response, request, principal())
     :ok
   rescue
     _error -> :ok
@@ -226,6 +277,22 @@ defmodule Ouroboros.Control.Permissions.Seam do
       mode: codex_mode(method),
       domains: [],
       context: context(bound, %{"kind" => codex_kind(method)})
+    })
+  end
+
+  # The caller already normalised this one, so nothing is inferred here: `tool`, `mode`,
+  # `command` and `paths` are what `Session.Service` resolved, and only the principal and
+  # the workspace are added. `method` travels in the context so the ledger row says which
+  # client service was asked for.
+  defp service_request(_dialect, fields, bound) do
+    base(bound)
+    |> Map.merge(%{
+      tool: to_string(Map.get(fields, :tool) || "unknown"),
+      command: text(Map.get(fields, :command)),
+      paths: Enum.filter(List.wrap(Map.get(fields, :paths)), &(is_binary(&1) and &1 != "")),
+      mode: Map.get(fields, :mode) || :write,
+      domains: [],
+      context: context(bound, %{"kind" => "acp_service", "method" => Map.get(fields, :method)})
     })
   end
 

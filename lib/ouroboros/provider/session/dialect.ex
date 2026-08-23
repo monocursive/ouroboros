@@ -32,6 +32,23 @@ defmodule Ouroboros.Provider.Session.Dialect do
 
   @type approval :: {:approval, map(), map()} | :method_not_found | {:result, map()}
 
+  # C4. The *second* inbound seam. `approval_request/2` is a provider asking permission
+  # for something it will do itself; this is a provider asking Ouroboros to do the thing.
+  # ACP is the one protocol here where the traffic runs both ways: an agent may call the
+  # client for `fs/read_text_file`, `fs/write_text_file` and the five `terminal/*` verbs.
+  # A dialect that serves none says so with `:method_not_found`, which is what the wire
+  # already answers, so nothing about a one-way transport changes.
+  @type service :: {:service, atom(), map()} | :method_not_found
+
+  # C4. One correlated round trip the *runtime* starts, for the verbs that are neither a
+  # turn nor an interrupt: `interactive.compact` on a Codex thread, `runtime.models` for a
+  # live account, `interactive.configure`'s `mode` on ACP. `ask/3` builds the frame and
+  # `answer/3` reads the result, so the wire mapping stays in the dialect and the
+  # correlation stays in `Session.Jsonl` — the same split `steer/3` already uses, and for
+  # the same reason: an id spent behind the session's back would be reused.
+  @type verb :: :compact | :models | :set_mode
+  @type ask :: {:request, String.t(), map()} | {:error, term()}
+
   @callback name() :: atom()
   @callback ready_kind() :: String.t()
   @callback unsupported_method_message() :: String.t()
@@ -55,6 +72,9 @@ defmodule Ouroboros.Provider.Session.Dialect do
   @callback steer(runtime(), TurnRequest.t(), String.t()) ::
               :ok | {:request, String.t(), map()} | {:error, term()}
   @callback configure(runtime(), map()) :: :ok | {:error, term()}
+  @callback ask(verb(), map(), runtime()) :: ask()
+  @callback answer(verb(), map(), runtime()) :: term()
+  @callback service_request(String.t(), map(), runtime()) :: service()
   @callback approval_request(String.t(), map()) :: approval()
   @callback approval_reply(ApprovalResponse.t(), map()) :: map()
   @callback deny_reply(map()) :: map()
@@ -76,6 +96,9 @@ defmodule Ouroboros.Provider.Session.Dialect do
     close_signal: 1,
     steer: 3,
     configure: 2,
+    ask: 3,
+    answer: 3,
+    service_request: 3,
     approval_request: 2,
     approval_reply: 2,
     deny_reply: 1,
