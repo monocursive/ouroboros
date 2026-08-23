@@ -70,6 +70,12 @@ defmodule Ouroboros.Coding.TaskState do
     :no_session,
     :no_skills,
     :offline,
+    # B2. `plan` is execution policy in the plainest sense — a read-only posture with an
+    # exit approval attached — and it is durable for the same reason `approval_mode` is: a
+    # session resumed from a checkpoint must come back in the posture it was running in.
+    # Native and Claude both declare it (`Ouroboros.Provider.plan_mode/2`); every other
+    # provider's adapter spec does not list it, so `allowed_by_adapter` refuses it there.
+    :plan,
     :project_trust,
     :resume_last,
     :session_dir,

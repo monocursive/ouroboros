@@ -110,6 +110,24 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
     end
   end
 
+  # The worker journals; a harness-driven test reads the journal rather than a mailbox.
+  defp await_replay(session_id, predicate, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 15_000
+    {:ok, events} = Jido.Harness.Session.replay(session_id, cursor: 0, limit: 500)
+
+    cond do
+      predicate.(events) ->
+        events
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition never held; saw #{inspect(Enum.map(events, & &1.type))}")
+
+      true ->
+        Process.sleep(20)
+        await_replay(session_id, predicate, deadline)
+    end
+  end
+
   defp write_call(id, path, content),
     do: {:tool_call, %{id: id, name: "write", input: %{"path" => path, "content" => content}}}
 
@@ -587,7 +605,122 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
         )
 
       on_exit(fn -> if Process.alive?(resumed), do: Session.close(resumed) end)
-      assert {:ok, %{plan: false}} = Session.plan_state(resumed)
+
+      # And the answer itself survives. The resumed request says nothing about approvals,
+      # so it defaults to `:prompt`; the session comes back at `:prompt` because that is
+      # what a person chose, not because that is the default.
+      assert {:ok, %{plan: false, approval_mode: :prompt}} = Session.plan_state(resumed)
+    end
+
+    test "the plan-exit answer outlives a restart the request would have overruled", context do
+      script = [[plan_call("c1")], [{:text, "planned"}, {:finish, :stop}]]
+
+      %{handle: handle, request: request} =
+        open(context, script, %{approval_mode: :prompt, provider_options: %{plan: true}})
+
+      ready = await_event(:provider_event)
+      provider_session_id = ready.provider_session_id
+
+      assert :ok = Session.send(handle, TurnRequest.new!("plan it"), "turn-1")
+      approval = await_event(:approval_requested)
+
+      assert :ok =
+               Session.respond_approval(
+                 handle,
+                 approval.request_id,
+                 ApprovalResponse.new!(%{
+                   decision: :approve,
+                   provider_options: %{"choice" => "auto_edit"}
+                 })
+               )
+
+      await_event(:turn_completed)
+      assert :ok = Session.close(handle)
+      drain()
+
+      {model_spec, _agent} = NativeModelScript.start([])
+
+      # The interactive plane rebuilds a resumed request from its own durable options, so
+      # this is exactly the request a restart produces: `approval_mode: :prompt`, the mode
+      # the session *started* in, with no memory of the answer.
+      {:ok, resumed} =
+        Session.open(
+          SessionRequest.new!(%{
+            provider: :native,
+            cwd: request.cwd,
+            model: model_spec,
+            approval_mode: :prompt,
+            provider_session_id: provider_session_id
+          }),
+          %{
+            session_id: "sess-plan-answered",
+            provider: :native,
+            owner: self(),
+            adapter: Ouroboros.Provider.Native,
+            config: %{},
+            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            telemetry_context: %{}
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(resumed), do: Session.close(resumed) end)
+      assert {:ok, %{plan: false, approval_mode: :auto_edit}} = Session.plan_state(resumed)
+    end
+
+    test "an explicit approval_mode change supersedes the plan-exit answer", context do
+      script = [[plan_call("c1")], [{:text, "planned"}, {:finish, :stop}]]
+
+      %{handle: handle, request: request} =
+        open(context, script, %{approval_mode: :prompt, provider_options: %{plan: true}})
+
+      ready = await_event(:provider_event)
+      provider_session_id = ready.provider_session_id
+
+      assert :ok = Session.send(handle, TurnRequest.new!("plan it"), "turn-1")
+      approval = await_event(:approval_requested)
+
+      assert :ok =
+               Session.respond_approval(
+                 handle,
+                 approval.request_id,
+                 ApprovalResponse.new!(%{
+                   decision: :approve,
+                   provider_options: %{"choice" => "auto_edit"}
+                 })
+               )
+
+      await_event(:turn_completed)
+      assert :ok = Session.configure(handle, %{approval_mode: :auto_approve})
+      assert :ok = Session.close(handle)
+      drain()
+
+      {model_spec, _agent} = NativeModelScript.start([])
+
+      {:ok, resumed} =
+        Session.open(
+          SessionRequest.new!(%{
+            provider: :native,
+            cwd: request.cwd,
+            model: model_spec,
+            approval_mode: :auto_approve,
+            provider_session_id: provider_session_id
+          }),
+          %{
+            session_id: "sess-plan-superseded",
+            provider: :native,
+            owner: self(),
+            adapter: Ouroboros.Provider.Native,
+            config: %{},
+            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            telemetry_context: %{}
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(resumed), do: Session.close(resumed) end)
+
+      # The file no longer names a mode, so the request decides — which is the only way
+      # `interactive.configure` can stay the authority it is everywhere else.
+      assert {:ok, %{approval_mode: :auto_approve}} = Session.plan_state(resumed)
     end
   end
 
@@ -611,6 +744,72 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
       assert :ok = Session.plan_mode(handle, false)
       assert {:ok, %{plan: false, sandbox_mode: :workspace_write}} = Session.plan_state(handle)
+    end
+
+    test "plan mode is reachable and durable through the harness worker", context do
+      # The end-to-end check the unit tests above cannot make: driven through
+      # `Jido.Harness.Session` rather than by calling the transport's callbacks, because
+      # the worker is the thing that would deny a plan-exit approval as *stale* if the
+      # terminal event had gone out first. Plan → question → auto_edit → a write that
+      # succeeds, with the worker's own bookkeeping intact throughout.
+      script = [
+        [plan_call("c1")],
+        [{:text, "that is the plan"}, {:finish, :stop}],
+        [write_call("c2", "lib/built.ex", "defmodule Built do\nend\n")],
+        [{:text, "built"}, {:finish, :stop}]
+      ]
+
+      {model_spec, _agent} = NativeModelScript.start(script)
+
+      {:ok, session_id} =
+        Jido.Harness.Session.start(:native, %{
+          cwd: context.workspace,
+          model: model_spec,
+          approval_mode: :prompt,
+          approval_timeout_ms: 10_000,
+          provider_options: %{plan: true}
+        })
+
+      on_exit(fn -> Jido.Harness.Session.close(session_id) end)
+
+      {:ok, turn_id} = Jido.Harness.Session.send_message(session_id, "plan the change")
+      events = await_replay(session_id, &Enum.any?(&1, fn e -> e.type == :approval_requested end))
+      ask = Enum.find(events, &(&1.type == :approval_requested))
+
+      assert ask.payload["kind"] == "plan_exit"
+      assert ask.turn_id == turn_id
+
+      # The failure this whole design avoids: the worker denies an approval whose turn is
+      # no longer its active one, and it says so with this event.
+      refute Enum.any?(events, fn event ->
+               event.type == :provider_event and
+                 event.payload["kind"] == "stale_approval_denied"
+             end)
+
+      assert {:ok, %{state: :awaiting_approval}} = Jido.Harness.Session.info(session_id)
+
+      assert :ok =
+               Jido.Harness.Session.respond_approval(session_id, ask.request_id, %{
+                 decision: :approve,
+                 scope: :session
+               })
+
+      events = await_replay(session_id, &Enum.any?(&1, fn e -> e.type == :turn_completed end))
+
+      exit_event =
+        Enum.find(events, &(&1.type == :provider_event and &1.payload["kind"] == "plan_exit"))
+
+      assert exit_event.payload["choice"] == "auto_edit"
+      assert {:ok, result} = Jido.Harness.Session.await(session_id, turn_id, 15_000)
+      assert result.status == :completed
+
+      # And the posture really changed: the write that plan mode refused now applies with
+      # no approval at all, because `auto_edit` is what the operator chose.
+      {:ok, second} = Jido.Harness.Session.send_message(session_id, "now build it")
+      assert {:ok, %{status: :completed}} = Jido.Harness.Session.await(session_id, second, 15_000)
+
+      assert File.read!(Path.join(context.workspace, "lib/built.ex")) ==
+               "defmodule Built do\nend\n"
     end
 
     test "leaving plan mode rebuilds the prefix", context do

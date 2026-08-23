@@ -276,7 +276,7 @@ defmodule Ouroboros.Provider.Native.Session do
         model_module: Model.module(),
         model_spec: model_spec,
         reasoning_effort: request.reasoning_effort,
-        approval_mode: Loop.approval_mode(request.approval_mode),
+        approval_mode: posture.approval_mode || Loop.approval_mode(request.approval_mode),
         max_iterations: Loop.max_iterations(options, nil),
         tool_timeout_ms: Loop.tool_timeout(options),
         messages: messages,
@@ -304,6 +304,11 @@ defmodule Ouroboros.Provider.Native.Session do
         rules_loaded: [],
         # ---- plan mode (B2) ----
         plan_mode?: posture.plan?,
+        # The `approval_mode` a plan-exit answer chose, or nil. Held apart from
+        # `approval_mode` itself so that only a mode *this runtime's own approval* set is
+        # restored across a restart: a session that never planned resumes exactly as it
+        # always has, from its request.
+        plan_exit_mode: posture.approval_mode,
         # What the operator's sandbox was before plan mode forced `:read_only`, so leaving
         # plan mode gives back what they chose rather than this runtime's default.
         sandbox_before_plan: posture.sandbox_before_plan,
@@ -433,7 +438,7 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call({:configure, changes}, _from, state) do
     with {:ok, state} <- apply_configuration(state, changes),
          {:ok, state} <- build_context(state) do
-      {:reply, :ok, state}
+      {:reply, :ok, supersede_plan_exit_mode(state, changes)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -718,6 +723,17 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   # ---------------------------------------------------------------- config
+
+  # An operator naming an `approval_mode` from outside outranks the one a plan-exit answer
+  # chose, and clears it: two durable records of one fact eventually disagree, and the
+  # newer instruction is the one that means something. Only the `configure` call runs this
+  # — the plan-exit path calls `apply_configuration/2` directly — so it cannot clear its
+  # own answer on the way in.
+  defp supersede_plan_exit_mode(state, changes) do
+    if Enum.any?(changes, fn {key, _value} -> normalize_key(key) == :approval_mode end),
+      do: persist_posture(%{state | plan_exit_mode: nil}),
+      else: state
+  end
 
   defp apply_configuration(state, changes) do
     Enum.reduce_while(changes, {:ok, state}, fn {key, value}, {:ok, state} ->
@@ -1569,7 +1585,10 @@ defmodule Ouroboros.Provider.Native.Session do
 
     with {:ok, state} <- apply_configuration(state, changes),
          {:ok, state} <- build_context(state) do
-      {state, true}
+      # The answer is made durable here, not left to the plane. A person answered an
+      # approval this runtime raised; a restart that put the session back to the mode it
+      # was started with would lose their answer without saying so.
+      {persist_posture(%{state | plan_exit_mode: mode}), true}
     else
       # A refused reconfiguration leaves the session planning and says so in the event
       # above rather than reporting a mode the session is not in. There is nothing here a
@@ -1632,36 +1651,56 @@ defmodule Ouroboros.Provider.Native.Session do
   # definition. An unreadable or nonsense file is treated as no file. It names a boolean
   # and a sandbox mode, so the worst a corrupt one can do is start a session at the
   # posture its request already asked for.
-  # The stored posture and the request are combined in the one direction that cannot lose
-  # a mode: plan mode is on when the checkpoint says the session was planning **or** when
-  # this start asked for it. A resume can therefore never silently put a planning session
-  # back to work, and a caller can always ask for plan mode whatever the file says.
+  # A written posture **wins outright on a resume**, and that precedence is the whole
+  # point. `provider_options` are *start* intent, and the interactive plane replays them
+  # verbatim when it rebuilds a request from its checkpoint — so a session that started
+  # planning, was accepted, and went to work would be dragged back into plan mode on every
+  # restart if the request could outvote the file. The file is what the session is
+  # actually doing; the request is what someone once asked for.
+  #
+  # A resume that finds no posture file at all falls back to the request, which is what
+  # makes a session written by an older build resume the way its caller asked.
   defp restore_posture(session_dir, request, options) do
-    stored = read_posture(Path.join(session_dir, @posture_file), request.provider_session_id)
-    plan? = requested_plan?(options) or stored.plan?
+    stored =
+      case read_posture(Path.join(session_dir, @posture_file), request.provider_session_id) do
+        {:ok, stored} ->
+          stored
+
+        :absent ->
+          %{plan?: requested_plan?(options), sandbox_before_plan: nil, approval_mode: nil}
+      end
 
     %{
-      plan?: plan?,
+      plan?: stored.plan?,
+      approval_mode: stored.approval_mode,
       sandbox_before_plan:
-        if(plan?, do: stored.sandbox_before_plan || Loop.sandbox_mode(request.sandbox_mode))
+        if(stored.plan?,
+          do: stored.sandbox_before_plan || Loop.sandbox_mode(request.sandbox_mode)
+        )
     }
   end
 
-  @empty_posture %{plan?: false, sandbox_before_plan: nil}
-
-  defp read_posture(_path, nil), do: @empty_posture
+  defp read_posture(_path, nil), do: :absent
 
   defp read_posture(path, _resumed) do
     with {:ok, body} <- File.read(path),
          {:ok, %{} = decoded} <- decode_posture(body) do
-      %{
-        plan?: decoded["plan"] == true,
-        sandbox_before_plan: sandbox_atom(decoded["sandbox_before_plan"])
-      }
+      {:ok,
+       %{
+         plan?: decoded["plan"] == true,
+         sandbox_before_plan: sandbox_atom(decoded["sandbox_before_plan"]),
+         approval_mode: approval_atom(decoded["approval_mode"])
+       }}
     else
-      _absent_or_unusable -> @empty_posture
+      _absent_or_unusable -> :absent
     end
   end
+
+  # Only the two a plan exit can choose. Anything else in the file — a hand-edit, an older
+  # build — is read as "no plan exit set a mode", which falls back to the request.
+  defp approval_atom("auto_edit"), do: :auto_edit
+  defp approval_atom("prompt"), do: :prompt
+  defp approval_atom(_other), do: nil
 
   defp decode_posture(body) do
     {:ok, JSON.decode!(body)}
@@ -1689,7 +1728,8 @@ defmodule Ouroboros.Provider.Native.Session do
       JSON.encode!(%{
         "plan" => state.plan_mode?,
         "sandbox_before_plan" =>
-          state.sandbox_before_plan && Atom.to_string(state.sandbox_before_plan)
+          state.sandbox_before_plan && Atom.to_string(state.sandbox_before_plan),
+        "approval_mode" => state.plan_exit_mode && Atom.to_string(state.plan_exit_mode)
       })
 
     case File.write(Path.join(state.session_dir, @posture_file), payload) do

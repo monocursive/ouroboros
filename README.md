@@ -456,7 +456,15 @@ message when the model ignored the tool — the session holds the turn open and 
 manual approvals* / *No, keep planning*. The chosen answer configures the session (plan
 off, `approval_mode` set, sandbox restored); a follow-up prompt sent with the answer runs
 as the rest of that same turn, so the work continues under the turn the plan ran under.
-The posture is durable beside the conversation, so a resumed session comes back planning.
+
+The posture is durable beside the conversation, so a resumed session comes back planning —
+and so does the answer: the `approval_mode` a plan exit chose outlives a restart that
+would otherwise put the session back to the mode it was started in. An explicit
+`interactive.configure` supersedes it, which keeps that verb the authority it is
+everywhere else. **Honest gap:** `interactive.info` still reports the mode the *plane*
+recorded, because the plan exit reconfigures the provider directly rather than through
+`interactive.configure`; the session's own `turn_started` and the `plan_exit` event state
+what the session is actually running under.
 
 Claude gets its own: `provider_options: %{plan: true}` becomes `--permission-mode plan`,
 applying **from the next turn** because `claude --print` runs one process per turn.
