@@ -153,6 +153,17 @@ pub enum Command {
         token_file: Option<PathBuf>,
     },
 
+    /// The MCP servers this runtime runs for the native agent, and the files that declare
+    /// them (D4).
+    ///
+    /// `list` reads the runtime. `add` and `remove` edit a JSON file and never touch the
+    /// socket: there is no `mcp.add` on the wire, because a server definition is a command
+    /// line that runs on somebody's machine and is never authored over a socket.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+
     /// Start a runtime, print how to reach it, and leave it running.
     Daemon,
 
@@ -281,6 +292,103 @@ pub enum HookCommand {
 /// [`crate::config::resolve_start`] against the same `[defaults]`; `--addr`/`--token-file`
 /// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
 /// Nothing here is a second way to say something the other two commands already say.
+/// D4. The three things an operator does with MCP servers.
+///
+/// `list` is a read of the runtime and starts nothing, like `ouro agents`. `add` and
+/// `remove` edit the Claude-compatible `mcp.json` the runtime's loader reads and never
+/// open a socket at all.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Every MCP server this runtime runs, and every entry its loader refused.
+    List {
+        /// The node to ask. Omitted, this runtime's own — a server runs where its session
+        /// runs, so a fleet asks the machine the work is on.
+        #[arg(long, value_name = "NODE")]
+        node: Option<String>,
+
+        /// Also report what is *configured* for this workspace but not started, and every
+        /// entry the loader refused. Without it the answer is only what is running.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// The runtime's own answer as one JSON object, unchanged.
+        #[arg(long)]
+        json: bool,
+
+        /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+
+        /// A file holding the gateway token. Omitted, the token beside gateway.json is
+        /// used.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+    },
+
+    /// Declare a server in `mcp.json`. No runtime is contacted and nothing is started.
+    Add {
+        /// `[A-Za-z0-9_-]{1,64}`, and no `__`: a tool reaches the model as
+        /// `mcp__<server>__<tool>` and is split on the first `__`.
+        name: String,
+
+        /// The program to run. Required unless `--url` is given.
+        #[arg(long, value_name = "PROGRAM")]
+        command: Option<String>,
+
+        /// An HTTP/SSE endpoint. Written to the file as a valid Claude Code definition,
+        /// and refused by this runtime as `unsupported_transport`: this build speaks
+        /// stdio only, and says so rather than dropping the entry.
+        #[arg(long, value_name = "URL", conflicts_with = "command")]
+        url: Option<String>,
+
+        /// One argument. Repeat for more; order is kept.
+        #[arg(long = "arg", value_name = "ARG")]
+        args: Vec<String>,
+
+        /// One `KEY=VALUE`. Repeat for more. **Values are written and never printed
+        /// back** — not by this command, and not by the runtime, which puts only a count
+        /// on the wire.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// The directory the server runs in.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+
+        /// `user` writes `~/.config/ouroboros/mcp.json`; `workspace` writes
+        /// `<workspace>/.ouroboros/mcp.json`, which the runtime reads only for a workspace
+        /// it has been told to trust.
+        #[arg(long, value_name = "SCOPE", default_value = "user")]
+        scope: String,
+
+        /// Which workspace, for `--scope workspace`. Omitted, the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// Replace a definition already recorded under this name. Without it a name
+        /// already present with different bytes is refused.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the check that `--command` resolves on PATH or is an existing file. The
+        /// check only ever warns — the file may be written on one machine for a session
+        /// that runs on another.
+        #[arg(long)]
+        no_check: bool,
+    },
+
+    /// Remove a server from `mcp.json`.
+    Remove {
+        name: String,
+
+        #[arg(long, value_name = "SCOPE", default_value = "user")]
+        scope: String,
+
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// The prompt to run.
