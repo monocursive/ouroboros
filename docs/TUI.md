@@ -399,7 +399,13 @@ upstream spec still describes code that is no longer running. `fork` is the one 
 `Jido.Harness.InteractionCapabilities` has no notion of — the harness has no concept of
 branching a session — so it is derived beside the declared ten from the dialect's own
 `fork_option/0` or from the run adapter, and re-checked structurally each time (the
-transport must carry `:provider_session_id`, the adapter must declare `resume?`). The whole
+transport must carry `:provider_session_id`, the adapter must declare `resume?`). `sandbox`
+(C5) is the other derived key, and it is node-local by nature: a native session projected
+on the node that owns it says which OS sandbox its shell runs under — `sandbox-exec`,
+`bwrap`, or `none`, a string rather than a boolean — and a row projected anywhere else
+carries no `sandbox` key, which a client reads as unknown rather than as "none". Vendor
+providers run their tools behind their own boundaries and say nothing here; a native
+`bash` `tool_call` event carries the same string per command. The whole
 map is `null` when neither the provider nor the transport resolves — an absent claim rather
 than a false one.
 
