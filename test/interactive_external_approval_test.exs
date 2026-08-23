@@ -45,6 +45,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
   use ExUnit.Case, async: false
 
   alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Control.Permissions
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
@@ -291,7 +292,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     retire_session(id)
   end
 
-  test "the durable engine allows a bridged command a session-scope rule names", %{id: id} do
+  test "the durable engine applies scoped shell allows and file denies to the bridge", %{id: id} do
     Application.delete_env(:ouroboros, :permissions_engine)
     ref = start_session(id)
     {:ok, info} = InteractiveSession.info(ref)
@@ -303,8 +304,18 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
       workspace: info.workspace
     }
 
-    assert {:ok, _rule} =
-             Ouroboros.Control.Permissions.remember(principal, "Bash(git *)", :allow, :session)
+    assert {:ok, _allow_rule} =
+             Permissions.remember(principal, "Bash(git *)", :allow, :session)
+
+    assert {:ok, deny_rule} =
+             Permissions.remember(
+               principal,
+               "Read(lib/ouroboros/interactive/**)",
+               :deny,
+               :workspace
+             )
+
+    on_exit(fn -> Permissions.remove(:workspace, deny_rule.id) end)
 
     assert {:ok, allowed} =
              InteractiveSession.request_approval(ref, %{
@@ -317,9 +328,32 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     assert allowed.decision == :allow
     assert allowed.source == :engine
 
-    [request] = events_of(ref, :approval_requested)
-    assert is_binary(request.payload["suggested_rule"])
-    assert request.payload["tool_call"]["name"] == "Bash"
+    assert {:ok, denied} =
+             InteractiveSession.request_approval(ref, %{
+               tool_name: "Read",
+               input: %{"file_path" => "lib/ouroboros/interactive/task.ex"},
+               tool_use_id: "toolu_read_rule",
+               cwd: info.workspace
+             })
+
+    assert denied.decision == :deny
+    assert denied.source == :engine
+
+    [bash_request, read_request] = events_of(ref, :approval_requested)
+    assert bash_request.payload["suggested_rule"] == "Bash(git status *)"
+    assert bash_request.payload["tool_call"]["name"] == "Bash"
+
+    expected_read_rule =
+      "Read(#{Path.join(info.workspace, "lib/ouroboros/interactive")}/**)"
+
+    assert read_request.payload["suggested_rule"] == expected_read_rule
+    assert read_request.payload["tool_call"]["name"] == "Read"
+
+    [bash_resolved, read_resolved] = events_of(ref, :approval_resolved)
+    assert bash_resolved.payload["decision"] == "approve"
+    assert bash_resolved.payload["source"] == "engine"
+    assert read_resolved.payload["decision"] == "deny"
+    assert read_resolved.payload["source"] == "engine"
 
     retire_session(id)
   end

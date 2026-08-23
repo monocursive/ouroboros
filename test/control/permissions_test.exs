@@ -202,6 +202,39 @@ defmodule Ouroboros.Control.PermissionsTest do
       assert entry.result.decision == :deny
     end
 
+    test "a workspace file rule matches canonical paths only under its own root" do
+      root = tmp_root("workspace-read")
+      other_root = tmp_root("other-workspace")
+      on_exit(fn -> File.rm_rf(root) end)
+      on_exit(fn -> File.rm_rf(other_root) end)
+      engine = start_engine!()
+
+      assert {:ok, rule} =
+               Permissions.remember(
+                 %{workspace: root},
+                 "Read(lib/private/**)",
+                 :deny,
+                 :workspace,
+                 engine
+               )
+
+      request = %{
+        tool: "read",
+        paths: ["lib/private/secrets.ex"],
+        mode: :read,
+        context: %{workspace: root}
+      }
+
+      assert {:deny, %{id: id, scope: :workspace}} = Permissions.evaluate(request, engine)
+      assert id == rule.id
+
+      assert {:ask, :no_rule} =
+               Permissions.evaluate(
+                 put_in(request, [:context, :workspace], other_root),
+                 engine
+               )
+    end
+
     test "the command line never enters the ledger, only its digest" do
       Application.put_env(:ouroboros, :permissions, [{"Bash(rm *)", :deny}])
       engine = start_engine!()

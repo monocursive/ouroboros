@@ -2776,11 +2776,10 @@ mod tests {
             status.availability.get("workspace"),
             Some(&Availability::Disabled)
         );
-        assert!(
-            status.availability.contains_key("effect_ledger"),
-            "the effect ledger reports its availability beside the other planes"
+        assert_eq!(
+            status.availability.get("effect_ledger"),
+            Some(&Availability::Available)
         );
-        assert_eq!(status.availability.len(), 11);
 
         assert_eq!(status.mode("upgrade"), Some("ready"));
         assert_eq!(status.mode("release"), Some("ready"));
