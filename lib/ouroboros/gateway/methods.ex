@@ -450,6 +450,402 @@ defmodule Ouroboros.Gateway.Methods do
 
   @control_options %{"id" => :string, "max_revisions" => :non_negative_integer}
 
+  # ---------------------------------------------------------------------------------
+  # H3. The parameter contract, as data.
+  #
+  # `@table` says what a method costs and what scope it needs; this says what it *takes*.
+  # It exists so that `docs/PROTOCOL.md` is generated from this module rather than written
+  # beside it — a reference kept in step by hand is a reference that is wrong within a
+  # release.
+  #
+  # Two things keep it from becoming prose:
+  #
+  #   * Where the validator already holds its rules as data — the `options/3` allowlists
+  #     above — the entries are *derived* from that data rather than restated, so a kind
+  #     or an enum member cannot drift from what `option_value/3` matches on.
+  #   * Everything else is checked by `Ouroboros.Gateway.ProtocolDocsTest`, which parses
+  #     this file and asserts that each method's key set here is exactly the allowlist its
+  #     `invoke/2` clause enforces — through `only_keys/2`, `options/3`, or a shared
+  #     `with_*` helper — and that a key `fetch_string/2` demands is marked required while
+  #     one `fetch_optional_*` accepts is marked optional.
+  #
+  # `:closed` means an unknown key is `-32602` naming it. `:open` means the clause reads
+  # what it needs and ignores the rest — stated rather than smoothed over, because the
+  # difference is exactly what a client discovers by sending a typo.
+  #
+  # A descriptor is `{name, requirement, type, note}`. `requirement` is `:required`,
+  # `:optional`, or `{:optional, default}` where the *gateway* supplies the default.
+  # `type` is the term the validator matches on; the two `{:enum_mfa, …}`/`{:limits, …}`
+  # forms name a function this build answers from, so a doc built here cannot state a
+  # narrower vocabulary than the runtime accepts. `note` is `nil` or one sentence.
+  # ---------------------------------------------------------------------------------
+
+  @start_option_notes %{
+    "id" =>
+      "caller-owned; a matching retry adopts the same immutable intent and a conflicting reuse is refused",
+    "machine" => "an alias of `node` — provide one or the other, never both",
+    "workspace" =>
+      "required, and absolute, when `machine`/`node` selects a machine other than this one",
+    "worktree" => "provisions a `git worktree` under the data directory before the lease is taken"
+  }
+
+  @start_params for {name, kind} <- Enum.sort(@start_options),
+                    do: {name, :optional, kind, Map.get(@start_option_notes, name)}
+
+  @configuration_params for {name, kind} <- Enum.sort(@configuration_options),
+                            do: {name, :optional, kind, nil}
+
+  @worker_params for {name, kind} <- Enum.sort(@worker_options),
+                     do:
+                       {name, :optional, kind,
+                        if(name == "node", do: "the machine the worker runs on", else: nil)}
+
+  @delegation_params for {name, kind} <- Enum.sort(@delegation_options),
+                         do:
+                           {name, :optional, kind,
+                            if(name == "id", do: "caller-owned delegation id", else: nil)}
+
+  @interactive_delegation_params for {name, kind} <-
+                                       Enum.sort(@interactive_delegation_options),
+                                     do:
+                                       {name, :optional, kind,
+                                        "defaults to the conversation's own"}
+
+  @control_params for {name, kind} <- Enum.sort(@control_options),
+                      do: {name, :optional, kind, nil}
+
+  # The routing pair every plane verb carries: which session, and which machine owns it.
+  @session_id {"id", :required, :string, "the interactive session id"}
+  @session_node {"node", :optional, :node,
+                 "the machine that owns the session; this one by default"}
+  @task_id {"id", :required, :string, "the coding task id"}
+  @task_node {"node", :optional, :node, "the machine that owns the task; this one by default"}
+  @authority_node {"node", :optional, :node,
+                   "the machine whose authority answers; this one by default"}
+
+  @cursor_param {"cursor", {:optional, 0}, :non_negative_integer,
+                 "exclusive — the window starts at the next sequence"}
+  @limit_param {"limit", {:optional, @default_replay_limit}, {:integer, 1, @replay_limit}, nil}
+  @sequence_param {"sequence", :required, :positive_integer,
+                   "the exact sequence; a gap answers `-32007` rather than the next event that exists"}
+  @ledger_limit_param {"limit", :optional, {:limits, {EffectLedger, :query_limits, []}},
+                       "the ledger's own bound, not this table's"}
+
+  @turn_input_param {"input", :required,
+                     {:either,
+                      [
+                        :string,
+                        {:object,
+                         [
+                           {"prompt", :required, :string, nil},
+                           {"attachments", :optional, {:list, :string, 32},
+                            "each must be an existing regular file the leased workspace contains"},
+                           {"reasoning_effort", :optional, {:enum_of, @reasoning_efforts}, nil}
+                         ]}
+                      ]}, nil}
+  @turn_id_param {"turn_id", :optional, :string,
+                  "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
+
+  @params %{
+    "hello" =>
+      {:open,
+       [
+         {"token", :required, :string,
+          "compared against the listener's token by SHA-256 digest, so neither length nor content leaks"},
+         {"protocol", :required, {:const, 1},
+          "anything else is `-32002` carrying `{\"server_protocol\": 1}`, and the socket closes"},
+         {"client", :optional, :string,
+          "a display name for the audit line, cut to 120 characters"}
+       ]},
+    "runtime.status" => {:open, []},
+    "runtime.providers" => {:open, []},
+    "runtime.models" => {:open, []},
+    "runtime.lsp.status" => {:open, []},
+    "runtime.shutdown" =>
+      {:open, [],
+       "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
+    "fleet.status" => {:open, []},
+    "fleet.doctor" => {:open, []},
+    "fleet.forget_session_owner" =>
+      {:closed,
+       [
+         {"machine", :required, :string,
+          "must appear in the validated local profile's signed-roster tombstones, and must be offline"},
+         {"accept_state_loss", :required, {:const, true},
+          "anything else is refused: this retires durable session-owner evidence"}
+       ]},
+    "account.read" => {:closed, []},
+    "account.login.start" =>
+      {:closed, [{"flow", {:optional, "browser"}, {:enum, ["browser", "device_code"]}, nil}]},
+    "account.login.cancel" =>
+      {:closed,
+       [{"login_id", :required, :string, "correlates with the `loginId` the start reply carried"}]},
+    "account.logout" => {:closed, []},
+    "agents.list" => {:open, []},
+    "agents.state" => {:open, [{"id", :required, :string, "the agent id"}]},
+    "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
+    "interactive.list" => {:open, []},
+    "interactive.info" => {:closed, [@session_id, @session_node]},
+    "interactive.replay" => {:closed, [@session_id, @cursor_param, @limit_param, @session_node]},
+    "interactive.event_detail" => {:closed, [@session_id, @sequence_param, @session_node]},
+    "interactive.context" => {:closed, [@session_id, @session_node]},
+    "interactive.delegations" => {:closed, [@session_id, @session_node]},
+    "interactive.subscribe" =>
+      {:closed, [@session_id, @cursor_param, @session_node],
+       "answered by the connection itself, because the plane registers the calling process"},
+    "interactive.unsubscribe" => {:closed, [@session_id, @session_node]},
+    "coding.list" => {:open, []},
+    "coding.info" => {:closed, [@task_id, @task_node]},
+    "coding.replay" => {:closed, [@task_id, @cursor_param, @limit_param, @task_node]},
+    "coding.event_detail" => {:closed, [@task_id, @sequence_param, @task_node]},
+    "coding.subscribe" =>
+      {:closed, [@task_id, @cursor_param, @task_node],
+       "answered by the connection itself, because the plane registers the calling process"},
+    "coding.unsubscribe" => {:closed, [@task_id, @task_node]},
+    "teams.list" => {:open, []},
+    "teams.state" => {:open, [{"id", :required, :string, "the team id"}]},
+    "plans.list" => {:open, []},
+    "plans.get" => {:open, [{"id", :required, :string, "the plan id"}]},
+    "control.list" => {:open, []},
+    "control.get" => {:open, [{"id", :required, :string, "the control run id"}]},
+    "upgrade.status" => {:open, []},
+    "upgrade.rollouts" => {:open, []},
+    "upgrade.history" =>
+      {:open,
+       [
+         {"module", :required, :string,
+          "a module this node has loaded, with or without the `Elixir.` prefix; an unknown name is `-32602`, never a new atom"}
+       ]},
+    "signing.decisions" => {:open, []},
+    "grants.list" =>
+      {:open,
+       [{"principal", :required, :string, "per-principal by design; there is no list-all"}]},
+    "permissions.list" =>
+      {:closed,
+       [
+         {"scope", :optional, {:enum_of, @permission_scopes}, nil},
+         {"workspace", :optional, :string, nil},
+         @authority_node
+       ]},
+    "permissions.add" =>
+      {:closed,
+       [
+         {"scope", :required, {:enum_of, @permission_rule_scopes},
+          "`node` rules come from `config :ouroboros, :permissions` and are never written over the wire"},
+         {"pattern", :required, :string,
+          "validated by `Control.Permissions.Pattern` and by nothing else"},
+         {"decision", :required, {:enum_of, @permission_decisions}, nil},
+         {"workspace", :optional, :string, "required for a `workspace` rule"},
+         @authority_node
+       ]},
+    "permissions.remove" =>
+      {:closed,
+       [
+         {"scope", :required, {:enum_of, @permission_removable_scopes}, nil},
+         {"id", :required, :string, "an unknown id is `-32007`"},
+         @authority_node
+       ]},
+    "code_intel.request" =>
+      {:closed,
+       [
+         {"workspace", :required, :string,
+          "narrows the marker walk and can never widen it; `/` is refused rather than obeyed"},
+         {"operation", :required, {:enum_mfa, {CodeIntel, :operations, []}}, nil},
+         {"path", :required, :string, nil},
+         {"line", {:optional, 0}, :non_negative_integer, "0-based, as the protocol reports it"},
+         {"character", {:optional, 0}, :non_negative_integer, "0-based"},
+         {"query", :optional, :string, "for the two symbol searches"},
+         @authority_node
+       ]},
+    "code_intel.diagnostics" =>
+      {:closed,
+       [
+         {"workspace", :required, :string, nil},
+         {"path", :required, :string, nil},
+         {"wait_ms", :optional, {:integer, 0, @code_intel_max_wait_ms},
+          "how long to wait for the cache to describe the file's current content"},
+         @authority_node
+       ]},
+    "code_intel.touch" =>
+      {:closed,
+       [
+         {"workspace", :required, :string, nil},
+         {"path", :required, :string, nil},
+         {"action", :required, {:enum, ["changed", "closed", "ensure_open", "open"]},
+          "`ensure_open` is the one to reach for when asking about a file; `open` re-reads it and assigns a new version"},
+         @authority_node
+       ]},
+    "ledger.list" =>
+      {:closed,
+       [
+         {"principal", :optional, :string, nil},
+         {"effect", :optional, {:enum_mfa, {EffectLedger, :effects, []}}, nil},
+         {"status", :optional, {:enum_mfa, {EffectLedger, :statuses, []}}, nil},
+         {"since_sequence", {:optional, 0}, :non_negative_integer, nil},
+         {"order", {:optional, "desc"}, {:enum, ["asc", "desc"]}, nil},
+         @ledger_limit_param,
+         @authority_node,
+         {"fleet", {:optional, false}, :boolean,
+          "fans out to every connected core node over the same bounded `:erpc` the `fleet.*` verbs use"}
+       ]},
+    "ledger.get" =>
+      {:closed, [{"id", :required, :string, "an unknown id is `-32007`"}, @authority_node]},
+    "ledger.export" =>
+      {:closed,
+       [
+         {"since", {:optional, 0}, :non_negative_integer, "the first sequence to export"},
+         @authority_node
+       ]},
+    "interactive.start" => {:closed, @start_params},
+    "interactive.send_message" =>
+      {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
+    "interactive.follow_up" =>
+      {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
+    "interactive.steer" =>
+      {:closed, [@session_id, @turn_input_param, @session_node],
+       "no `turn_id`: the harness mints a steer's request id inside its own worker, so this verb has no caller-keyed idempotency"},
+    "interactive.request_approval" =>
+      {:closed,
+       [
+         @session_id,
+         {"request", :required,
+          {:object,
+           [
+             {"tool_name", :required, :string, nil},
+             {"input", :optional, :object, "the tool's own arguments"},
+             {"tool_use_id", :optional, :string, nil},
+             {"cwd", :optional, :string, "the directory the tool would run in"}
+           ]}, "a closed object; nothing else is accepted"},
+         @session_node
+       ]},
+    "interactive.respond_approval" =>
+      {:closed,
+       [
+         @session_id,
+         {"request_id", :required, :string, "the id the `approval_requested` event carried"},
+         {"response", :required,
+          {:either,
+           [
+             {:enum_of, @approval_decisions},
+             {:object,
+              [
+                {"decision", :required, {:enum_of, @approval_decisions}, nil},
+                {"scope", {:optional, "once"}, {:enum_of, @approval_scopes},
+                 "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
+                {"reason", :optional, :string, nil}
+              ]}
+           ]}, "`provider_options` is deliberately not accepted: an approval is a yes or a no"},
+         @session_node
+       ]},
+    "interactive.configure" =>
+      {:closed, [@session_id, @session_node | @configuration_params],
+       "a strict subset of `interactive.start`'s options; whether any one of them is changeable is the transport's answer, asked per session"},
+    "interactive.rename" =>
+      {:closed,
+       [
+         @session_id,
+         {"title", :required, :string,
+          "trimmed, at most 120 graphemes, and refused rather than stripped if it holds a control character"},
+         @session_node
+       ]},
+    "interactive.fork" =>
+      {:closed,
+       [
+         @session_id,
+         {"fork_id", :optional, :string, "caller-owned id for the child"},
+         @session_node
+       ]},
+    "interactive.rewind" =>
+      {:closed,
+       [
+         @session_id,
+         {"to_turn", :required, :turn_target, nil},
+         {"what", {:optional, "both"}, {:enum, ["both", "conversation", "files"]}, nil},
+         @session_node
+       ]},
+    "interactive.rewind_points" => {:closed, [@session_id, @session_node]},
+    "interactive.compact" =>
+      {:closed,
+       [
+         @session_id,
+         {"focus", :optional, :string, "what the fold should keep"},
+         @session_node
+       ]},
+    "interactive.handoff" =>
+      {:closed,
+       [
+         @session_id,
+         {"prompt", :optional, :string,
+          "a prompt forging the `<ouroboros-runtime>` delimiters is refused, not escaped"},
+         {"handoff_id", :optional, :string, "caller-owned id for the child"},
+         @session_node
+       ]},
+    "workspace.exec" =>
+      {:closed,
+       [
+         @session_id,
+         {"command", :required, :string,
+          "run through `/bin/sh -c` in the session's admitted workspace, on its owner node"},
+         @session_node
+       ]},
+    "interactive.delegate" =>
+      {:closed,
+       [
+         @session_id,
+         {"objective", :required, :string, nil},
+         {"delegation_id", :optional, :string,
+          "caller-owned; a repeat under the same id answers with the same delegation rather than a second one"},
+         @session_node | @interactive_delegation_params
+       ]},
+    "interactive.interrupt" =>
+      {:closed,
+       [
+         @session_id,
+         {"turn_id", :optional, :string, "the running turn by default"},
+         @session_node
+       ]},
+    "interactive.close" => {:closed, [@session_id, @session_node]},
+    "interactive.kill" => {:closed, [@session_id, @session_node]},
+    "interactive.delete" => {:closed, [@session_id, @session_node], "terminal sessions only"},
+    "coding.start" => {:closed, [{"objective", :required, :string, nil} | @start_params]},
+    "coding.cancel" => {:closed, [@task_id, @task_node]},
+    "coding.delete" => {:closed, [@task_id, @task_node], "terminal tasks only"},
+    "teams.add_worker" =>
+      {:closed,
+       [
+         {"team_id", :required, :string, "must name a team running on this node"},
+         {"worker_id", :required, :string, nil} | @worker_params
+       ]},
+    "teams.delegate" =>
+      {:closed,
+       [
+         {"team_id", :required, :string, "must name a team running on this node"},
+         {"worker_id", :required, :string, nil},
+         {"objective", :required, :string, nil} | @delegation_params
+       ]},
+    "teams.cancel" =>
+      {:open,
+       [
+         {"team_id", :required, :string, "must name a team running on this node"},
+         {"delegation_id", :required, :string, nil}
+       ]},
+    "teams.close" =>
+      {:open, [{"team_id", :required, :string, "must name a team running on this node"}]},
+    "control.submit" => {:closed, [{"objective", :required, :string, nil} | @control_params]},
+    "control.cancel" => {:open, [{"id", :required, :string, "the control run id"}]},
+    "capabilities.list" => {:closed, [{"workspace", :required, :string, nil}]},
+    "capabilities.preview" =>
+      {:closed, [{"workspace", :required, :string, nil}, {"path", :required, :string, nil}]},
+    "capabilities.admit" =>
+      {:closed,
+       [
+         {"workspace", :required, :string, nil},
+         {"path", :required, :string, nil},
+         {"session_id", :optional, :string,
+          "recorded as `session:<id>` in the admission's authorship"}
+       ]}
+  }
+
   @type entry :: %{
           :scope => :read | :operate,
           :timeout => pos_integer(),
@@ -495,6 +891,48 @@ defmodule Ouroboros.Gateway.Methods do
   @doc "The numeric code for one named protocol error."
   @spec code(atom()) :: integer()
   def code(name), do: Map.fetch!(@codes, name)
+
+  @doc "Every named protocol error and its numeric code."
+  @spec codes() :: %{atom() => integer()}
+  def codes, do: @codes
+
+  @doc """
+  The parameter contract of every method, normalised.
+
+  Each entry is `%{envelope: :closed | :open, params: [descriptor], note: String.t() | nil}`
+  where a descriptor is `%{name:, requirement:, type:, note:}`. `:closed` means an unknown
+  key is refused with `-32602` naming it; `:open` means the handler reads what it needs and
+  ignores the rest.
+
+  Public because `mix ouroboros.protocol.docs` generates `docs/PROTOCOL.md` from it, and
+  `Ouroboros.Gateway.ProtocolDocsTest` proves it still agrees with the validators in this
+  file. A reference written beside the code rather than out of it is a reference that goes
+  wrong quietly; this is the seam that makes the drift loud.
+  """
+  @spec params() :: %{String.t() => map()}
+  def params do
+    Map.new(@params, fn {method, entry} -> {method, normalize_params(entry)} end)
+  end
+
+  @doc "One method's parameter contract, or `:error` if this build does not serve it."
+  @spec params(String.t()) :: {:ok, map()} | :error
+  def params(method) when is_binary(method) do
+    case Map.fetch(@params, method) do
+      {:ok, entry} -> {:ok, normalize_params(entry)}
+      :error -> :error
+    end
+  end
+
+  defp normalize_params({envelope, descriptors}),
+    do: normalize_params({envelope, descriptors, nil})
+
+  defp normalize_params({envelope, descriptors, note}) do
+    %{envelope: envelope, note: note, params: Enum.map(descriptors, &normalize_descriptor/1)}
+  end
+
+  defp normalize_descriptor({name, requirement, type, note}) do
+    %{name: name, requirement: requirement, type: type, note: note}
+  end
 
   @doc """
   Validates the parameters of a subscribe call.

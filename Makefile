@@ -12,13 +12,14 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev test bench-local golden release-tarball ouro fleet-e2e dist
+.PHONY: help dev test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
 	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
+	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
 	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
@@ -55,6 +56,14 @@ golden:
 	@echo "==> golden: regenerating the gateway fixtures and failing on drift"
 	$(MIX) ouroboros.gateway.golden
 	git diff --exit-code test/support/gateway_golden
+
+# `docs/PROTOCOL.md` is generated from the method table, the parameter contract, and the
+# fixtures above — so it is regenerated after them, and in that order. A diff here is a
+# protocol change and is committed as one, exactly like a fixture diff.
+protocol-docs: golden
+	@echo "==> protocol-docs: regenerating docs/PROTOCOL.md and failing on drift"
+	$(MIX) ouroboros.protocol.docs
+	git diff --exit-code docs/PROTOCOL.md
 
 release-tarball:
 	@echo "==> release-tarball: MIX_ENV=prod mix release"

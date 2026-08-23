@@ -572,6 +572,12 @@ ouro version            # client version, embedded release version and digest, p
 ouro --dev              # start `mix run --no-halt` in this checkout instead
 ```
 
+What `ouro` speaks is the runtime's loopback gateway — line-delimited JSON-RPC over TCP,
+one token, one protocol version — and every method it can call is catalogued in
+[docs/PROTOCOL.md](docs/PROTOCOL.md): scope, ceiling, parameters, and the pinned frames a
+second implementation decodes, generated from the runtime by `mix ouroboros.protocol.docs`
+rather than written beside it. [docs/TUI.md §2](docs/TUI.md) is the narrative behind it.
+
 Build it from a checkout. ERTS is not cross-compiled, so the binary is only valid for
 the machine that built it:
 

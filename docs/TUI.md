@@ -262,6 +262,12 @@ stay binaries (every plane API already takes string ids).
 
 ### 2.4 Method catalog (v1)
 
+The exhaustive per-method reference — scope, ceiling, every parameter with its type and
+whether the envelope refuses an unknown one, and the pinned frames — is
+[docs/PROTOCOL.md](PROTOCOL.md), generated from `Gateway.Methods` and the fixtures by
+`mix ouroboros.protocol.docs`; this table is the narrative that says what each method
+*means* and what it maps to, and where the two disagree the generated one is right.
+
 Every handler runs in a supervised task under a per-method gateway timeout
 (default **15_000ms**; exceptions in the table). Timeout → `-32005`. Every
 upstream call is made in the `safe_call` posture (`try/rescue/catch :exit`) —
