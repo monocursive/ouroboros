@@ -259,6 +259,22 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
       itself runs in a supervised task under the ceiling its table entry names. A handler
       that outlives its ceiling is killed and the request is answered `-32005`.
 
+      **The token.** `hello.token` is compared against the listener's own by SHA-256 digest
+      — hashing first makes the two lengths equal, so the comparison can neither raise nor
+      leak one. Where that token comes from is listener configuration rather than protocol:
+      a `0600` file named by `OUROBOROS_GATEWAY_TOKEN_FILE`, or `OUROBOROS_GATEWAY_TOKEN`
+      for a development loop.
+
+      **Resync turns on `sequence`.** Every event carries one, and it is the cursor the
+      whole streaming contract uses. `replay` and `subscribe` take an *exclusive* cursor, so
+      a window begins at the sequence after the one named, and `interactive.event_detail`
+      is that window narrowed to one. `stream.lagged` says how many event frames were
+      dropped and the newest sequence among them, which is how far ahead the session had
+      run. A cursor below what a session still retains is refused with `-32006` carrying
+      `{"reason": "cursor_pruned", "floor": N}` — the one error whose `data` a client
+      branches on rather than displays, and it is pinned below. What a client should *do*
+      about each of the three is [docs/TUI.md §2.5](TUI.md).
+
       | ceiling | methods | which |
       |---|---|---|
       """,
