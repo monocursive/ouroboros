@@ -52,8 +52,8 @@ nobody holds.
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
 `review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
-full Elixir suite at **1581 passed, 0 failed**; the Rust suites at **0 failed** across
-every target in both feature sets (2,063 test runs across the default and `embed` sets;
+full Elixir suite at **1800 passed, 0 failed**; the Rust suites at **0 failed** across
+every target in both feature sets (≈2,400 test runs across the default and `embed` sets;
 one epmd-binding test in `tui/src/fleet.rs` is load-flaky when a stray `epmd -daemon` is
 running and passes in isolation every time); the local eval corpus at **17 / 17** through
 the merged client. Every slice was built by a
@@ -177,16 +177,16 @@ what a user of `ouro` on `review-fixes` gets today.
 | 3 | Token efficiency & cost | 0 | 2 (usage + cost everywhere; cache-stable prefix; soft budget) |
 | 4 | Responsiveness | 1 | 1 (managed transports still re-exec per turn) |
 | 5 | Steering mid-turn | 1 | 2 (visible queue; native steer; vendor steer where declared — `pi` and, since C3, the Codex app server; Claude has no steer channel) |
-| 6 | Plan / approval flow | 0 | 2 (approvals real on Claude/Codex/ACP/native with rules and "don't ask again"; no plan mode yet) |
+| 6 | Plan / approval flow | 0 | 3 (approvals real on Claude/Codex/ACP/native with rules and "don't ask again"; native plan mode with a plan-exit question on the wire, Claude started planning; the three-choice modal is still the generic approval modal) |
 | 7 | Input ergonomics | 1 | 2 (chips, image paste, `/effort`, `/model`, rebindable keys; no vim) |
 | 8 | TUI rendering correctness | 1 | 2 (sync output, escape hatches, themes, a11y) |
 | 9 | Work visibility | 1 | 3 (every kind rendered, plan panel, diff review, details tree, delegation rows, context page, operator-shell cells) |
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
-| 11 | Sandboxing / isolation | 1 | 2 (worktrees on both planes; no OS sandbox) |
+| 11 | Sandboxing / isolation | 1 | 3 (worktrees on both planes; native `bash` under `sandbox-exec` on macOS with `.git` and the runtime's own config read-only and network off by default; `bwrap` argv pinned but unverified; no seccomp, no domain allowlist; hooks and checks unsandboxed) |
 | 12 | MCP & tool ecosystem | 0 | 2 (native agent consumes stdio MCP servers by name with bounds and permissions; Ouroboros also *serves* MCP to Claude; hooks and skills landed; no HTTP/OAuth, no `ouro mcp add`) |
 | 13 | LSP / semantic navigation | 0 | 3 (pool, native tool, the wire, MCP tools and a post-edit hook for Claude — live-verified end to end; no `@symbol` input or structural index yet) |
 | 14 | Git-native flow | 0 | 1 (worktrees) |
-| 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway) |
+| 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway; `ouro --continue` finds this directory's newest session on any machine) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
 | 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
 | 18 | In-session parallelism | 1 | 2 (delegation on the wire and in the rail; a delegation is a coding task with a parent, not a sub-conversation — G3 pending) |
@@ -197,7 +197,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **≈49** |
+| | **Total / 75** | **23** | **52** |
 
 ### Honest limits added this wave
 
