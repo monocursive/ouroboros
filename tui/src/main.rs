@@ -32,8 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, RunArgs, ServiceCommand,
-    SessionsCommand, SyncCommand,
+    AcpArgs, Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, RunArgs,
+    ServiceCommand, SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -179,6 +179,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Some(Command::Run(args)) => run_prompt(&paths, cli.dev, config, *args).await,
+        Some(Command::Acp(args)) => acp_agent(&paths, cli.dev, config, *args).await,
         Some(Command::Agents {
             json,
             addr,
@@ -923,6 +924,118 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         Ok(report) => Err(anyhow!(report.exit())),
         Err(refusal) => Err(refuse_run(&options, &refusal.to_string())),
     }
+}
+
+/// `ouro acp`: the same session, hosted inside an editor over the Agent Client Protocol.
+///
+/// This function is the seam and nothing else — every refusal it can make happens before a
+/// runtime is started, and everything from `initialize` onwards belongs to
+/// [`ouro::acp_serve::run`], which the integration tests drive against a scripted gateway
+/// without any of this.
+///
+/// **stdout is the protocol.** Nothing here may write to it: the boot's own lines, the
+/// config file's problems, and the "runtime is still running" notice all go to stderr,
+/// which is where an editor puts an agent's log.
+async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> Result<()> {
+    for problem in &config.problems {
+        eprintln!("ouro acp: {problem}");
+    }
+
+    // The same resolution `ouro new` and `ouro run` perform, against the same `[defaults]`,
+    // so an operator who stated a provider once does not state it again in editor config.
+    let flags = ouro::config::StartFlags {
+        provider: args.provider,
+        workspace: args.workspace.map(workspace_argument).transpose()?,
+        approval_mode: args.approval_mode,
+        sandbox_mode: args.sandbox_mode,
+        machine: None,
+    };
+
+    let resolved = ouro::config::resolve_start(&flags, &config.config.defaults)
+        .map_err(|missing| anyhow!(missing.message(&config.path)))?;
+
+    // Validated here rather than at `session/new`: a mode this build cannot name would
+    // otherwise become a `-32602` on the editor's first prompt, hours after it was typed
+    // into a settings file.
+    if let Some(mode) = &resolved.approval_mode {
+        if ApprovalMode::parse(mode).is_none() {
+            bail!(
+                "{}",
+                StartError::UnknownApprovalMode(mode.clone()).message()
+            );
+        }
+    }
+
+    if let Some(mode) = &resolved.sandbox_mode {
+        if SandboxMode::parse(mode).is_none() {
+            bail!("{}", StartError::UnknownSandboxMode(mode.clone()).message());
+        }
+    }
+
+    // Resolved where the command was typed. A relative path sent across the socket would
+    // resolve against the runtime's own working directory, which for a spawned daemon is a
+    // release root and has nothing to do with the editor's project.
+    let workspace = match resolved.workspace.as_deref() {
+        Some(path) => Some(absolute(PathBuf::from(path))?),
+        None => None,
+    };
+
+    let boot = Arc::new(std::sync::Mutex::new(BootProgress::new()));
+    let progress = Progress::Screen(boot.clone());
+
+    let (address, token, mut daemon) = if args.addr.is_some() || args.token_file.is_some() {
+        let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+        (address, token, None)
+    } else {
+        paths.ensure_private_data_dir()?;
+        let (publication, token, daemon) = local_runtime(paths, dev, &progress).await?;
+        (local_address(publication.port), token, daemon)
+    };
+
+    // Unconditionally verbose: an editor shows the agent's stderr in a log pane, and a
+    // person debugging "my agent will not start" needs the boot lines it produced.
+    report_boot(&boot, true);
+
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    // Reconnect stays off for the same reason `ouro run` turns it off: a silent
+    // re-handshake would drop every session's subscription and leave the editor watching a
+    // stream that is never coming back. A closed connection ends this process instead, and
+    // the editor restarts it.
+    let attached = match attach_with(address, token, false, hook).await {
+        Ok(attached) => attached,
+        Err(error) => {
+            return Err(clean_up_owned_daemon_after_error(
+                &mut daemon,
+                error,
+                "connecting to the newly started runtime failed",
+            )
+            .await)
+        }
+    };
+
+    let Connected {
+        client,
+        hello,
+        notifications,
+    } = attached;
+
+    let outcome = ouro::acp_serve::serve(
+        client.clone(),
+        hello,
+        notifications,
+        ouro::acp_serve::Options {
+            provider: resolved.provider,
+            workspace,
+            approval_mode: resolved.approval_mode,
+            sandbox_mode: resolved.sandbox_mode,
+        },
+    )
+    .await;
+
+    client.stop().await;
+    detach_owned_daemon(&mut daemon);
+
+    outcome
 }
 
 /// The session outlives this process only if the runtime does, and `ouro run` is a command
