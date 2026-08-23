@@ -1,0 +1,57 @@
+{
+  "codexVersion": "codex-cli 0.147.0",
+  "generator": "codex app-server generate-json-schema --out <dir>",
+  "generatedOn": "2026-08-23",
+  "files": {
+    "CommandExecutionRequestApprovalParams.json": {
+      "sha256": "4e47e8fdb5432c9a709377064b3bed28f0a491fef4ca1e60ef3893dbbf98b9ad",
+      "generatedIn": ".",
+      "method": "item/commandExecution/requestApproval"
+    },
+    "CommandExecutionRequestApprovalResponse.json": {
+      "sha256": "6d0767113e22f311381809b6b236b0dde2b99b01992879c26bf7b1ea0e003cb7",
+      "generatedIn": ".",
+      "method": "item/commandExecution/requestApproval"
+    },
+    "ModelListParams.json": {
+      "sha256": "de29a536c00a5b8f46f34dba417dabd93365305571a8ed200e33bea85db68b5a",
+      "generatedIn": "v2",
+      "method": "model/list"
+    },
+    "ModelListResponse.json": {
+      "sha256": "4d4fe3b0c52f71d7ed33eeda1e67e00673851f4af4ce1cca6b2b5cf1f3a2495f",
+      "generatedIn": "v2",
+      "method": "model/list"
+    },
+    "PermissionsRequestApprovalParams.json": {
+      "sha256": "c6d165e1b0c65d5dcf1e099b4c226c7e4dad79fe2b88b03621a1fc6c1d3c86c2",
+      "generatedIn": ".",
+      "method": "item/permissions/requestApproval"
+    },
+    "PermissionsRequestApprovalResponse.json": {
+      "sha256": "23f3f24e9dbf35db3e0b85703f0d934da5a1cff3cbb611fba8bcd41f3b4a04b0",
+      "generatedIn": ".",
+      "method": "item/permissions/requestApproval"
+    },
+    "ThreadCompactStartParams.json": {
+      "sha256": "684b20adf20213a9fcbca31b59108feadcd5a8b693c16431c20d701049df3737",
+      "generatedIn": "v2",
+      "method": "thread/compact/start"
+    },
+    "ThreadCompactStartResponse.json": {
+      "sha256": "74674e47f33e37d7d97d144eac1789ef0580a1fc12d45a5675bb97caa08d803a",
+      "generatedIn": "v2",
+      "method": "thread/compact/start"
+    },
+    "TurnSteerParams.json": {
+      "sha256": "4a52eb76e7a717bb388484ccd7538737fca0df35481fc30a21e259f1bfe96e37",
+      "generatedIn": "v2",
+      "method": "turn/steer"
+    },
+    "TurnSteerResponse.json": {
+      "sha256": "866ba9a77c12b5d570c837d58f73bf40b24e50fa93404bdf792dd984d313b1aa",
+      "generatedIn": "v2",
+      "method": "turn/steer"
+    }
+  }
+}
