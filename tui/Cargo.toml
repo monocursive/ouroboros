@@ -21,6 +21,17 @@ embed = ["dep:flate2", "dep:tar", "dep:sha2"]
 
 [dependencies]
 anyhow = "1"
+# Already in this tree twice over (`rcgen`, `x509-parser`); named directly because
+# `dist/release.pub` and a `.minisig` are base64 and nothing else in this crate decodes
+# it. No new crate enters the dependency graph.
+base64 = "0.22"
+# The one addition `ouro update` needed. Current `minisign` signs the BLAKE2b-512 hash of
+# a file rather than the file, so verifying a signature the release pipeline actually
+# produces means computing that hash; `ring` (already here, and what does the Ed25519
+# verification) has no BLAKE2b. RustCrypto's implementation is pure Rust with no C and no
+# OpenSSL, and every crate under it — `digest`, `block-buffer`, `crypto-common`,
+# `generic-array`, `typenum` — was already in the lock behind `sha2`.
+blake2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 # Pinned to the version `ratatui` itself re-exports. Two crossterm majors in one tree
 # would compile, and then the backend would refuse the terminal handle this crate owns.

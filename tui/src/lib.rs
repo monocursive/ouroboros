@@ -26,3 +26,4 @@ pub mod runtime;
 pub mod status;
 pub mod transport;
 pub mod ui;
+pub mod update;

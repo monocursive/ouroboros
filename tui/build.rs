@@ -9,6 +9,12 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=OUROBOROS_RELEASE_TARBALL");
     println!("cargo:rerun-if-env-changed=OUROBOROS_RELEASE_VERSION");
+    // `ouro update`'s trust root and download location are compile-time inputs
+    // (tui/src/update.rs reads them with `option_env!`, falling back to the committed
+    // dist/release.pub). Cargo does not fingerprint `option_env!` on its own, so a fork
+    // that rebuilds with a different key would otherwise keep the old one.
+    println!("cargo:rerun-if-env-changed=OURO_RELEASE_PUBKEY");
+    println!("cargo:rerun-if-env-changed=OURO_RELEASE_BASE_URL");
     println!("cargo:rustc-check-cfg=cfg(embedded_release)");
 
     #[cfg(feature = "embed")]
