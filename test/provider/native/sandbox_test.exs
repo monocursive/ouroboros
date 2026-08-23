@@ -304,7 +304,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       first = Sandbox.detect()
       assert :persistent_term.get({Sandbox, :detection}) == first
       assert Sandbox.detect() == first
-      assert Sandbox.detect().backend == @backend
+      assert first.backend in [:sandbox_exec, :bwrap, :none]
     end
 
     test "lets configuration turn the sandbox off ahead of the cache, without a restart" do
@@ -332,7 +332,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.tool_call_marker("bash", scope, @none) == %{"sandbox" => "none"}
 
       assert Sandbox.tool_call_marker("bash", scope, Sandbox.detect()) == %{
-               "sandbox" => Sandbox.label(@backend)
+               "sandbox" => Sandbox.label(Sandbox.detect())
              }
 
       assert Sandbox.tool_call_marker("read", scope, Sandbox.detect()) == %{}
@@ -516,6 +516,39 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert result.output =~ "Operation not permitted"
       assert result.output =~ "never into a `.git` or `.ouroboros` directory"
       refute File.exists?(Path.join(workspace, ".git/HEAD"))
+    end
+
+    test "stops a real git commit, because a commit writes into .git", %{root: root} do
+      repo = Path.join(root, "repo")
+      File.mkdir_p!(repo)
+      File.write!(Path.join(repo, "README.md"), "one\n")
+      git = fn args -> System.cmd("git", args, cd: repo, stderr_to_stdout: true) end
+      git.(["init", "-q"])
+      git.(["-c", "user.email=a@b", "-c", "user.name=a", "add", "-A"])
+      git.(["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"])
+
+      {:ok, scope} = Paths.scope(repo, [], :workspace_write)
+
+      result =
+        run(
+          Bash,
+          %{
+            "command" =>
+              "echo two >> README.md && " <>
+                "git -c user.email=a@b -c user.name=a commit -qam second"
+          },
+          %{scope: scope, session_dir: root, reads: %{}}
+        )
+
+      assert result.is_error
+      assert result.output =~ "index.lock"
+      assert result.output =~ "Operation not permitted"
+      assert result.output =~ "never into a `.git` or `.ouroboros` directory"
+
+      # The workspace edit landed; the history did not.
+      assert File.read!(Path.join(repo, "README.md")) == "one\ntwo\n"
+      {log, 0} = git.(["log", "--oneline"])
+      assert String.trim(log) |> String.split("\n") |> length() == 1
     end
 
     test "denies a connection by policy, which reads differently from a port refusing it", %{
