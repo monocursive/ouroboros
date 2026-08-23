@@ -67,6 +67,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     ]
     |> Enum.concat(writable_rules(policy))
     |> Enum.concat(protected_rules(policy))
+    |> Enum.concat(reallow_rules(policy))
     |> Enum.concat(segment_rules(policy))
     |> Enum.concat([network_rule(policy)])
     |> Enum.join("\n")
@@ -121,6 +122,22 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
 
   defp protected_rules(policy),
     do: rules(policy.protected, "deny", "OURO_PROTECTED")
+
+  # A writable root that sits inside a protected one — a worktree under the node's data
+  # directory (D7) — is allowed again *after* the denies, because SBPL is last-match-wins
+  # and the deny above would otherwise swallow it. The segment denies still come last, so
+  # the worktree's own `.git` stays read-only. The parameter is the root's own, so the
+  # path is never spliced into the profile here either.
+  defp reallow_rules(policy) do
+    policy.writable
+    |> Enum.with_index()
+    |> Enum.filter(fn {path, _index} -> Enum.any?(policy.protected, &nested?(path, &1)) end)
+    |> Enum.map(fn {_path, index} ->
+      "(allow file-write* (subpath (param \"OURO_WRITABLE_#{index}\")))"
+    end)
+  end
+
+  defp nested?(path, root), do: path == root or String.starts_with?(path, root <> "/")
 
   defp rules(paths, verb, prefix) do
     paths

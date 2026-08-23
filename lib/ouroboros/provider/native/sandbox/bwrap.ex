@@ -77,10 +77,16 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
 
   @doc "Just the bubblewrap options, without the program — the half a test can pin."
   @spec options(map(), Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  # Later binds overlay earlier ones, so the order is the policy: the protected roots go
+  # read-only first, the writable roots are bound on top — which is what keeps a worktree
+  # under the node's data directory (D7) writable while the rest of that directory stays
+  # read-only — and the `.git`/`.ouroboros` directories beneath each writable root are
+  # re-bound read-only last.
   def options(scope, policy) do
     ["--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] ++
+      Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
-      Enum.flat_map(read_only_within(policy), &["--ro-bind", &1, &1]) ++
+      Enum.flat_map(on_disk(segment_dirs(policy)), &["--ro-bind", &1, &1]) ++
       ["--tmpfs", policy.scratch] ++
       network(policy) ++
       chdir(scope)
@@ -88,18 +94,17 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
 
   defp writable(policy), do: Enum.reject(policy.writable, &(&1 == policy.scratch))
 
-  # Every protected location that is actually on disk. `--ro-bind` of a source that
-  # does not exist is a bubblewrap error, and a sandbox that refuses to start because a
-  # workspace has no `.git` would be worse than one that binds fewer paths: the
-  # underlying `--ro-bind / /` already makes a path that does not exist unwritable.
-  defp read_only_within(policy) do
-    segments =
-      for root <- writable(policy),
-          segment <- policy.protected_segments,
-          do: Path.join(root, segment)
-
-    Enum.filter(segments ++ policy.protected, &File.exists?/1)
+  defp segment_dirs(policy) do
+    for root <- writable(policy),
+        segment <- policy.protected_segments,
+        do: Path.join(root, segment)
   end
+
+  # Only locations that are actually on disk. `--ro-bind` of a source that does not exist
+  # is a bubblewrap error, and a sandbox that refuses to start because a workspace has no
+  # `.git` would be worse than one that binds fewer paths: the underlying `--ro-bind / /`
+  # already makes a path that does not exist unwritable.
+  defp on_disk(paths), do: Enum.filter(paths, &File.exists?/1)
 
   defp network(%{network: true}), do: []
   defp network(_denied), do: ["--unshare-net"]

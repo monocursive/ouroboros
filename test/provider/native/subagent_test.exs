@@ -780,14 +780,13 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert result.payload["output"] =~ "Worktree kept"
     end
 
-    # A limit of where D7 puts worktrees, not of G3, pinned here so it is visible rather
-    # than folklore. `Ouroboros.Control.Permissions.Rules` protects `<data_dir>/**` from
-    # every write and says outright that no rule turns it off; `Workspace.Worktree.root/1`
-    # puts worktrees under `<data_dir>/worktrees`. So on a node with a data directory —
-    # every release — a session running in a worktree can write nothing at all. Delete this
-    # test when the worktree root moves out of the data directory, or when the protected
-    # list exempts it.
-    test "with a data directory configured the node's protected-path rule denies the child's writes",
+    # `Ouroboros.Control.Permissions.Rules` protects `<data_dir>/**` from every write, and
+    # `Workspace.Worktree.root/1` puts worktrees under `<data_dir>/worktrees`. Until
+    # 2026-08-23 those two facts together meant that on a node with a data directory —
+    # every release — a session running in a worktree could write nothing at all; G3's
+    # first version of this test pinned that. The rule now exempts the worktree root (its
+    # `.git` stays protected), and this test holds the behaviour D7 always meant.
+    test "with a data directory configured a child still writes inside its worktree",
          context do
       File.mkdir_p!(Path.join(context.data_dir, "worktrees"))
       Application.put_env(:ouroboros, :data_dir, context.data_dir)
@@ -812,7 +811,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       [settled] = subagent_events(events, "settled")
       on_exit(fn -> File.rm_rf(settled.payload["worktree"]["path"]) end)
 
-      assert settled.payload["files_changed"] == 0
+      assert settled.payload["files_changed"] == 1
+      assert File.read!(Path.join(settled.payload["worktree"]["path"], "lib/b.ex")) == "x"
 
       transcript =
         File.read!(
@@ -823,7 +823,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
           ])
         )
 
-      assert transcript =~ "protected-path"
+      refute transcript =~ "protected-path"
     end
 
     test "a worktree this node cannot lease is refused rather than silently shared",

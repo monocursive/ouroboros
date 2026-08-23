@@ -147,6 +147,29 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       end
     end
 
+    test "allows a worktree inside the protected data directory again after the denies" do
+      policy = %{
+        fixed_policy(:workspace_write)
+        | writable: ["/scratch", "/srv/ouroboros/data/worktrees/repo/s1"],
+          protected: ["/srv/ouroboros/data", "/home/agent/.config/ouroboros"]
+      }
+
+      lines = String.split(SandboxExec.profile(policy), "\n")
+      deny = "(deny file-write* (subpath (param \"OURO_PROTECTED_0\")))"
+      reallow = "(allow file-write* (subpath (param \"OURO_WRITABLE_1\")))"
+      git = "(deny file-write* (regex #\"/\\.git($|/)\"))"
+
+      indexes = fn line -> for {l, i} <- Enum.with_index(lines), l == line, do: i end
+      [deny_at] = indexes.(deny)
+      [_first_allow, reallow_at] = indexes.(reallow)
+      [git_at] = indexes.(git)
+      # Last match wins: the worktree is allowed again after the data directory is denied,
+      # and its `.git` is denied after that. The scratch root, outside every protected
+      # root, is allowed once and never repeated.
+      assert deny_at < reallow_at and reallow_at < git_at
+      assert [_once] = indexes.("(allow file-write* (subpath (param \"OURO_WRITABLE_0\")))")
+    end
+
     test "wraps a shell line as sandbox-exec's own argv, with the shell last" do
       policy = fixed_policy(:read_only)
 
@@ -182,6 +205,31 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                "--chdir",
                "/ws"
              ]
+    end
+
+    test "binds a protected root read-only before a worktree inside it is bound writable", %{
+      root: root
+    } do
+      data = Path.join(root, "data")
+      worktree = Path.join(data, "worktrees/s1")
+      File.mkdir_p!(worktree)
+      scratch = Path.join(root, "scratch")
+
+      policy = %{
+        fixed_policy(:workspace_write)
+        | writable: [scratch, worktree],
+          protected: [data],
+          scratch: scratch
+      }
+
+      options = Bwrap.options(%{root: worktree}, policy)
+      triples = Enum.chunk_every(options, 3, 1)
+      ro = Enum.find_index(triples, &(&1 == ["--ro-bind", data, data]))
+      bind = Enum.find_index(triples, &(&1 == ["--bind", worktree, worktree]))
+      assert is_integer(ro) and is_integer(bind)
+      # The later bind overlays the earlier read-only one: the worktree is writable, the
+      # rest of the data directory is not.
+      assert ro < bind
     end
 
     test "binds each writable root read-write and re-binds its .git read-only on top", %{

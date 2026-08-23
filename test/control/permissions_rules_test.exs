@@ -105,6 +105,21 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
       {:ok, root: root, data_dir: data_dir}
     end
 
+    test "a write inside the node's worktree root is not protected, but its .git still is",
+         %{data_dir: data_dir} do
+      # D7 puts the workspaces it provisions under `<data_dir>/worktrees`; a session
+      # running in one has to be able to write there, and nowhere else beneath the data
+      # directory.
+      worktree = Path.join(data_dir, "worktrees/repo/session")
+      File.mkdir_p!(Path.join(worktree, ".git"))
+      {:ok, worktree} = Ouroboros.Control.Permissions.Paths.canonicalize(worktree, nil)
+      {:ok, data_dir} = Ouroboros.Control.Permissions.Paths.canonicalize(data_dir, nil)
+
+      refute Rules.protected_write?(Path.join(worktree, "lib/a.ex"))
+      assert Rules.protected_write?(Path.join(worktree, ".git/HEAD"))
+      assert Rules.protected_write?(Path.join(data_dir, "sessions/s1/conversation.json"))
+    end
+
     test "a write into .git is denied whatever the rules say", %{root: root} do
       request =
         Request.new(%{

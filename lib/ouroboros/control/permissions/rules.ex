@@ -66,10 +66,30 @@ defmodule Ouroboros.Control.Permissions.Rules do
   @spec protected_write?(String.t()) :: boolean()
   def protected_write?(path) when is_binary(path) do
     Enum.any?(@protected_segments, &Paths.has_segment?(path, &1)) or
-      Enum.any?(protected_roots(), &Paths.within?(path, &1))
+      (Enum.any?(protected_roots(), &Paths.within?(path, &1)) and not worktree_write?(path))
   end
 
   def protected_write?(_path), do: false
+
+  # D7 keeps the workspaces it provisions under `<data_dir>/worktrees`: a workspace a
+  # session was given to write in, not runtime state, and the one place beneath the data
+  # directory a session is *meant* to write. Without this exemption no session on a node
+  # with a data directory — every release — could write inside its worktree at all, which
+  # G3's subagent tests were the first to notice. A worktree's own `.git` and
+  # `.ouroboros` stay protected by the segment rules above, exactly as in any workspace.
+  defp worktree_write?(path) do
+    case worktree_root() do
+      nil -> false
+      root -> Paths.within?(path, root)
+    end
+  end
+
+  defp worktree_root do
+    case Paths.canonicalize(Ouroboros.Workspace.Worktree.root(), nil) do
+      {:ok, canonical} -> canonical
+      {:error, _reason} -> nil
+    end
+  end
 
   @doc "The protected write paths this request would touch, if any."
   @spec protected_targets(Request.t()) :: [String.t()]
