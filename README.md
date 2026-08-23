@@ -557,6 +557,12 @@ transcript it never had would be a claim with nothing behind it.
   than by the model, which is why they were left outside; but a `read_only` session
   whose workspace is trusted and whose `ouroboros.toml` runs a writing check does write.
   `grep` shells out to ripgrep with an argv and no shell, and is not wrapped either.
+- **A scratch directory outlives a tool the loop had to kill.** The per-call `$TMPDIR`
+  is removed when the command ends, but a `bash` call that overruns the *tool's* own
+  deadline is ended with `Task.shutdown(task, :brutal_kill)`, which runs no cleanup.
+  The next `bash` call on the node sweeps any `ouroboros-sandbox-*` directory older
+  than six hours — well past the ten-minute ceiling a live command can reach — so the
+  leak is bounded rather than absent.
 - **A tool that asks the OS for a temp directory instead of reading `$TMPDIR` is denied.**
   macOS `mktemp` with no template asks libc for `_CS_DARWIN_USER_TEMP_DIR`, which is
   outside the scratch directory. `mktemp "$TMPDIR/x.XXXXXX"` works; bare `mktemp` does

@@ -94,6 +94,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # protected write segments `Ouroboros.Control.Permissions.Rules` denies.
   @protected_segments [".git", ".ouroboros"]
 
+  @scratch_prefix "ouroboros-sandbox-"
+  # Six hours against a ten-minute command ceiling: wide enough that a live scratch
+  # directory can never be mistaken for an abandoned one.
+  @abandoned_after_seconds 6 * 60 * 60
+  @sweep_limit 200
+
   @none %{
     backend: :none,
     executable: nil,
@@ -230,12 +236,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   scratch space: `mktemp`, `make`, `cc` and every configure script want a `$TMPDIR`,
   and a sandbox that denies one turns "read-only" into "cannot run a compiler". The
   directory is `0700`, outside every session root, and removed when the command ends.
+
+  It also sweeps abandoned ones on the way in, because "removed when the command ends"
+  is not always in this runtime's gift: `Ouroboros.Provider.Native.Tools.execute/4`
+  ends a tool that overran its own deadline with `Task.shutdown(task, :brutal_kill)`,
+  and a killed process runs no `after` clause. The sweep is the only thing that keeps
+  that from being an unbounded leak. It is deliberately not a timer or a supervised
+  process: a directory nobody is sweeping on a node where nobody is running `bash` is
+  not a problem worth a process tree.
   """
   @spec scratch() :: {:ok, String.t()} | {:error, term()}
   def scratch do
-    name =
-      "ouroboros-sandbox-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+    sweep()
 
+    name = @scratch_prefix <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     path = Path.join(System.tmp_dir!(), name)
 
     with :ok <- File.mkdir_p(path),
@@ -245,6 +259,43 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     else
       {:error, reason} -> {:error, {:scratch_unavailable, reason}}
     end
+  end
+
+  @doc """
+  Removes scratch directories left behind by commands that were killed rather than ended.
+
+  Older than #{div(@abandoned_after_seconds, 3600)} hours, which cannot be a live one:
+  a `bash` command's own ceiling is ten minutes (`Tools.Bash`'s `@max_timeout_ms`), so
+  anything this old belongs to a process that is gone. Bounded at
+  #{@sweep_limit} directories per call so a crowded temp directory costs a bounded
+  amount of work rather than a growing one.
+  """
+  @spec sweep() :: :ok
+  def sweep do
+    root = System.tmp_dir!()
+    cutoff = System.os_time(:second) - @abandoned_after_seconds
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        entries
+        |> Stream.filter(&String.starts_with?(&1, @scratch_prefix))
+        |> Stream.map(&Path.join(root, &1))
+        |> Stream.filter(&abandoned?(&1, cutoff))
+        |> Enum.take(@sweep_limit)
+        |> Enum.each(&File.rm_rf/1)
+
+      {:error, _unreadable} ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp abandoned?(path, cutoff) do
+    match?(
+      {:ok, %File.Stat{type: :directory, mtime: mtime}} when mtime < cutoff,
+      File.stat(path, time: :posix)
+    )
   end
 
   @doc "Removes a scratch directory and everything the command left in it."

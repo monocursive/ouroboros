@@ -318,6 +318,26 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.label(detection) == "none"
     end
 
+    test "sweeps a scratch directory a killed tool task could not remove, and spares a live one" do
+      abandoned = Path.join(System.tmp_dir!(), "ouroboros-sandbox-abandoned-probe")
+      File.mkdir_p!(abandoned)
+      on_exit(fn -> File.rm_rf(abandoned) end)
+      # Seven hours old: past the six-hour cutoff, which no live command can reach.
+      old = System.os_time(:second) - 7 * 60 * 60
+      File.touch!(abandoned, old)
+
+      {:ok, live} = Sandbox.scratch()
+
+      assert File.exists?(live)
+      refute File.exists?(abandoned)
+
+      Sandbox.sweep()
+      assert File.exists?(live)
+
+      Sandbox.release(live)
+      refute File.exists?(live)
+    end
+
     test "names each backend the way a client shows it" do
       assert Sandbox.label(:sandbox_exec) == "sandbox-exec"
       assert Sandbox.label(:bwrap) == "bwrap"
