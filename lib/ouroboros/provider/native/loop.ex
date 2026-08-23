@@ -1392,6 +1392,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           approvals_denied: 0,
           usage: %{input: 0, output: 0, cost: nil},
           text: "",
+          turn_id: nil,
           worktree: Map.get(started, :worktree),
           background: false,
           depth: 0,
@@ -1408,6 +1409,16 @@ defmodule Ouroboros.Provider.Native.Loop do
   # request size is a fact about the child's window, and the parent's meter is the one
   # thing on that event a session must not be able to lie about. `Native.Session` drops a
   # `usage` payload carrying `subagent_task_id` from its meter for the same reason.
+  #
+  # It carries the **child's** turn id, and that is arithmetic rather than bookkeeping.
+  # `Ouroboros.Interactive.State.account_usage/3` reads two `usage` events of one turn as
+  # a provider re-reporting a running total and keeps the field-wise maximum; a child's
+  # spend is not a re-report of the parent's, it is more spend, so under the parent's turn
+  # id the larger of the two would swallow the smaller. Under the child's — a real turn id,
+  # of the turn that actually spent it — the plane accounts it as its own contribution and
+  # adds it, which is what "folded into the session's usage" has to mean for `/cost` to be
+  # true. Leaving it blank is not an option: `Jido.Harness.Session.EventStore`'s
+  # `normalize_adapter_event/2` fills an absent turn id with the active one.
   defp fold_subagent_usage(state, spec, summary) do
     payload =
       %{
@@ -1424,7 +1435,12 @@ defmodule Ouroboros.Provider.Native.Loop do
           else: payload
       end)
 
-    emit(state, :usage, payload)
+    state.emit.(%{
+      type: :usage,
+      payload: payload,
+      turn_id: Map.get(summary, :turn_id) || state.turn_id,
+      request_id: nil
+    })
 
     %{
       state

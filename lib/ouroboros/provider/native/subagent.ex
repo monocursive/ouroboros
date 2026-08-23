@@ -575,6 +575,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
       description: state.description,
       provider_session_id: state.provider_session_id,
       session_dir: state.session_dir,
+      # The child's own turn id. It is in the summary because the parent's usage fold is
+      # attributed to it: the tokens were spent in this turn, not in the parent's, and the
+      # plane's per-turn accounting reads two reports of one turn as one being a re-report
+      # of the other.
+      turn_id: state.turn_id,
       status: state.status,
       error: state.error,
       turns: state.turns,

@@ -417,11 +417,15 @@ believes are contained. A worktree holding uncommitted work when the child ends 
 and its path is in the summary.
 
 **Cost and accountability.** The child's tokens fold into the parent's `usage` events and
-its turn totals, so `/cost` stays true; the fold deliberately carries no context meter,
-because the child's request size is a fact about the child's window. Every one of the
-child's tool calls is its own effect-ledger entry under the parent's session and
-principal, with `authority.constraints.subagent_parent` naming the parent provider session
-and a cause of `native.subagent.tool_call`.
+its turn totals, so `/cost` stays true. The fold carries no context meter — the child's
+request size is a fact about the child's window — and it is attributed to the *child's*
+turn id, because the session's own accounting reads two usage reports of one turn as a
+provider re-reporting a running total and keeps the larger. (That same reading is why a
+single native turn with several model calls reports the largest of them rather than their
+sum; it predates subagents and is not something they change.) Every one of the child's tool
+calls is its own effect-ledger entry under the parent's session and principal, with
+`authority.constraints.subagent_parent` naming the parent provider session and a cause of
+`native.subagent.tool_call`.
 
 **Where the transcript is.** The child's full conversation is at
 `<data_dir>/native/<child-provider-session-id>/conversation.json`, exactly like any other

@@ -555,7 +555,11 @@ subagents renders the modal it already has; one that has can label it with the c
 deliberately **without** `context_used`/`context_window`: a running cost should include the
 child, and a context meter must not, because the child's request size is a fact about the
 child's window. A footer that sums `usage` stays correct; one that reads the meter is
-untouched.
+untouched. Its `turn_id` is the **child's** (`sub_turn_…`), not the parent's, because the
+plane reads two usage reports of one turn as one being a re-report of the other and keeps
+the larger — a client that groups events by turn should treat a `usage` carrying
+`subagent_task_id` as belonging to the parent turn it was folded into, which the preceding
+`subagent` events name.
 
 `ledger_ref` is **absent** rather than null when there is no entry to name — a `tool_call`
 for a tool the session does not have (nothing was admitted, nothing ran), an

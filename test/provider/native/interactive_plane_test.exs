@@ -214,8 +214,17 @@ defmodule Ouroboros.Provider.Native.InteractivePlaneTest do
     assert folded.payload["input_tokens"] == 61
     refute Map.has_key?(folded.payload, "context_window")
 
+    # The child's own turn id, so the plane accounts it as its own contribution and adds it
+    # rather than reading it as the parent re-reporting a running total. See
+    # `Loop.fold_subagent_usage/3`.
+    assert String.starts_with?(folded.turn_id, "sub_turn_")
+
     completed = Enum.find(events, &(&1.type == :turn_completed))
     assert completed.payload["input_tokens"] == 20 + 61
+
+    # …and the plane's own accounting, which is what `/cost` reads, has both in it.
+    assert {:ok, info} = InteractiveSession.info(session)
+    assert info.usage.total_tokens == 73 + 26
 
     if System.get_env("OUROBOROS_SHOW_SUBAGENT_EVENTS") == "1" do
       for event <- events do
