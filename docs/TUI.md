@@ -1941,8 +1941,9 @@ row looking satisfied.
 `Interactive.State.public/1` projects `options.capabilities` — a map the runtime derives
 from the transport a session actually selected, with the keys `transport`, `process`,
 `multi_turn`, `follow_up`, `interrupt`, `approvals`, `steer`, `multimodal`,
-`dynamic_model`, and `dynamic_configuration`, whose values are a mechanism name
-(`native` / `managed` / `process`) or `false`. The client decodes it as **three** states,
+`dynamic_model`, `dynamic_configuration`, and `sandbox`, whose values are a mechanism name
+(`native` / `managed` / `process`; for `sandbox`, `sandbox-exec` / `bwrap` / `none`) or
+`false`. The client decodes it as **three** states,
 and the third one is the point:
 
 - a value the runtime gave → *declared*, and the mechanism is kept verbatim, because
@@ -1973,7 +1974,18 @@ palette, the `ctrl+x` which-key overlay, and `/` completion in the composer:
 - `fork` gates the backtrack menu's fork row, together with `hello.methods` — two
   different questions, and the verb is offered only where both answer yes. An unknown
   `fork` is not "no", so a runtime that has never spoken about forking still offers it
-  wherever `interactive.fork` is served.
+  wherever `interactive.fork` is served;
+- `sandbox` (C5) names the **OS** sandbox the runtime actually put the session's process
+  in, and joins the footer's file-access cell as the second half of one statement:
+  `workspace-write · sandbox-exec`, `workspace-write · bwrap`. The two halves are
+  different facts — `sandbox_mode` is the policy the session was *started* with, this is
+  the mechanism holding it — and either can appear without the other. The literal `none`
+  renders as **`no OS sandbox`** in `warn`, because it is a positive claim the runtime
+  made and the one file-access answer worth noticing; rendering it as `· none` would read
+  like a mechanism called "none". **Absent renders nothing**: an older gateway's silence
+  must not become the most alarming of the three answers. The composer's `FILES` caption
+  is unchanged — it states the requested policy, and naming the mechanism twice on one
+  screen would not make it truer.
 
 The `n` dialog reads the other half of the same story out of `runtime.providers`, whose
 `normalized_options`, `normalized_values`, and `session_transports` the client already

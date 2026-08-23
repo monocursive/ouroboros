@@ -595,6 +595,17 @@ pub struct Capabilities {
     pub fork: Capability,
     pub dynamic_model: Capability,
     pub dynamic_configuration: Capability,
+    /// C5. Which OS sandbox the runtime actually put this session's process in —
+    /// `sandbox-exec` on macOS, `bwrap` on Linux, or the literal `"none"` where the
+    /// platform offered neither and the session runs unconfined.
+    ///
+    /// Held as a mechanism rather than a yes/no because the three answers are three
+    /// different things to say, and because `"none"` is a *positive* claim: it is the
+    /// runtime reporting that nothing is between the agent and the filesystem, which is
+    /// worth a line of chrome. Silence stays [`Capability::Unknown`] and draws nothing —
+    /// a client that rendered "no OS sandbox" from an absent key would be inventing the
+    /// most alarming of the three answers out of an older gateway's silence.
+    pub sandbox: Capability,
     /// Whether a map was present at all. `false` means an older gateway, and is the
     /// difference between "this session cannot steer" and "nobody said".
     pub declared: bool,
@@ -627,7 +638,28 @@ impl Capabilities {
             fork: at("fork"),
             dynamic_model: at("dynamic_model"),
             dynamic_configuration: at("dynamic_configuration"),
+            sandbox: at("sandbox"),
             declared: true,
+        }
+    }
+}
+
+impl Capabilities {
+    /// How the chrome names the OS sandbox, or `None` where the runtime did not say.
+    ///
+    /// Three answers and a silence, and the silence renders nothing: `sandbox_mode` is
+    /// the policy a session was *started* with, and this is the mechanism that enforces
+    /// it. A client that turned "nobody said" into either "confined" or "unconfined"
+    /// would be asserting the one fact an operator most needs to be true.
+    pub fn os_sandbox(&self) -> Option<&str> {
+        match self.sandbox.mechanism()?.trim() {
+            "" => None,
+            // The runtime's own word for "the platform offered nothing and the process
+            // runs unconfined". Said in a sentence rather than as a mechanism name,
+            // because `sandbox: workspace_write · none` reads like a mechanism called
+            // "none" rather than like the absence of one.
+            "none" => Some("no OS sandbox"),
+            mechanism => Some(mechanism),
         }
     }
 }
