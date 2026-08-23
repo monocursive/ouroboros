@@ -260,6 +260,26 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
       assert entry.attempt.call_id == "c1"
     end
 
+    test "a bash call names the OS sandbox it runs under, and a read names none", context do
+      {loop, _agent} =
+        start_loop(context, [
+          [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "true"}}}],
+          [{:tool_call, %{id: "c2", name: "read", input: %{"path" => "lib/a.ex"}}}],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      run(loop)
+      events = collect()
+
+      [bash_call, read_call] = Enum.filter(events, &(&1.type == :tool_call))
+      assert bash_call.payload["name"] == "bash"
+
+      # A string naming the backend, or `none` — never a boolean a client would have to guess at.
+      assert bash_call.payload["sandbox"] in ["sandbox-exec", "bwrap", "none"]
+      assert read_call.payload["name"] == "read"
+      refute Map.has_key?(read_call.payload, "sandbox")
+    end
+
     test "a tool the session does not have claims no entry it has no row for", context do
       {loop, _agent} =
         start_loop(context, [

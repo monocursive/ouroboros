@@ -622,6 +622,13 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       # The option is a session option on the wire and a provider option underneath.
       {:ok, %State{} = session} = InteractiveSession.info(ref)
       assert State.public(session).options.plan == true
+      # C5. The owner node names the OS sandbox its shell runs under, as a string.
+      assert State.public(session).options.capabilities.sandbox in [
+               "sandbox-exec",
+               "bwrap",
+               "none"
+             ]
+
       request = State.request(session)
       assert request.provider_options[:plan] == true
       refute Map.has_key?(request, :plan)

@@ -76,6 +76,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
+  alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Tools
   alias Ouroboros.Provider.Native.Tools.AskUser
 
@@ -1114,16 +1115,22 @@ defmodule Ouroboros.Provider.Native.Loop do
   # entry cannot get out of order.
   defp ledger_ref(effect_id), do: %{"node" => Atom.to_string(node()), "id" => effect_id}
 
+  # C5. A `bash` call says which OS sandbox it runs under — `sandbox-exec`, `bwrap`, or
+  # `none` — on the event a client draws, so "no OS sandbox" is a fact read off the row
+  # rather than a guess about the node. Other tools carry no such key: this runtime runs
+  # them itself, inside its own boundary.
   defp emit_tool_call(state, call, effect_id) do
     emit(
       state,
       :tool_call,
-      reject_nils(%{
+      %{
         "name" => call.name,
         "call_id" => call.id,
         "input" => call.input,
         "ledger_ref" => effect_id && ledger_ref(effect_id)
-      })
+      }
+      |> Map.merge(Sandbox.tool_call_marker(call.name, state.scope))
+      |> reject_nils()
     )
   end
 

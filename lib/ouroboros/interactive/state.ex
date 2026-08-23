@@ -579,6 +579,26 @@ defmodule Ouroboros.Interactive.State do
     }
   end
 
+  # C5. Which OS sandbox a native session's shell runs under is a fact about the node
+  # that owns the session, so it is answered only where that node is this one — a row
+  # projected elsewhere carries no `sandbox` key, which a client reads as unknown rather
+  # than as "none". Vendor providers run their own tools behind their own boundaries and
+  # say nothing here.
+  defp put_sandbox_capability(capabilities, %__MODULE__{provider: :native, node: owner})
+       when is_map(capabilities) do
+    if owner == node() do
+      Map.put(
+        capabilities,
+        :sandbox,
+        Ouroboros.Provider.Native.Sandbox.label(Ouroboros.Provider.Native.Sandbox.detect())
+      )
+    else
+      capabilities
+    end
+  end
+
+  defp put_sandbox_capability(capabilities, _state), do: capabilities
+
   @spec public(t()) :: t()
   def public(%__MODULE__{} = state) do
     prompt_trace = Map.get(state, :prompt_trace)
@@ -629,6 +649,7 @@ defmodule Ouroboros.Interactive.State do
               Map.get(state.options, :transport)
             )
           )
+          |> put_sandbox_capability(state)
       }
       |> Trace.put(prompt_trace)
 
