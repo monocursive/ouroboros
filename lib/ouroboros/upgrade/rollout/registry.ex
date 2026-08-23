@@ -277,9 +277,17 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
            checkpoint(rollouts),
            state.opts
          ]) do
-      :ok -> {:reply, {:ok, entry}, %{state | rollouts: rollouts}}
-      {:error, reason} -> {:reply, {:error, {:rollout_checkpoint_failed, reason}}, state}
-      other -> {:reply, {:error, {:invalid_rollout_storage_response, other}}, state}
+      :ok ->
+        {:reply, {:ok, entry}, %{state | rollouts: rollouts}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, {:rollout_commit_outcome_unknown, ambiguity}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:rollout_checkpoint_failed, reason}}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_rollout_storage_response, other}}, state}
     end
   end
 

@@ -1,43 +1,29 @@
 defmodule Ouroboros.Provider.Native.Exec do
   @moduledoc """
-  One bounded child process, for everything in this provider that is not `bash`.
+  One bounded child-process runner for the native provider.
 
-  `grep` shells out to ripgrep, a hook runs an operator's command with JSON on its
-  stdin, and `[checks]` runs a typecheck. Each needs the same four things and no more:
-  a deadline that actually reaps the child, a cap on how many bytes it may return, an
-  exit status, and — for hooks — stderr kept apart from stdout, because the hook
-  contract makes stderr the reason text of a block.
+  `grep`, hooks, checks, and the native `bash` tool all cross this boundary. Every child
+  runs through `priv/provider-exec` for the workspace umask and through Erlexec in its own
+  process group. A deadline signals that whole group with TERM, waits a bounded grace,
+  then sends KILL. A shell child does not survive merely because it was backgrounded.
 
-  `System.cmd/3` gives none of those. It has no timeout at all, so a compile that hangs
-  would hang the turn, and a `Task.shutdown/2` around it kills the Elixir process while
-  leaving the OS child running. So this is a port, like
-  `Ouroboros.Provider.Native.Tools.Bash`, with the same TERM-then-close reaping and the
-  same honest limit: a child that detaches from its process group outlives its deadline.
+  Output is bounded while the process runs and while it is being drained after a signal.
+  stdout and stderr can be merged for ordinary argv commands or retained separately for
+  hook contracts. No temporary stderr file exists for an untrusted command to fill.
 
-  ## Two shapes
-
-  `run/3` takes an executable and an argv list. Nothing is interpreted by a shell, which
-  is what makes it safe to hand a model-supplied regular expression to ripgrep.
-
-  `run_shell/2` takes a command line and runs it through `/bin/sh -c`, for hooks and
-  `[checks]`, whose commands are written by an operator and are shell by definition.
-  Only that shape carries stdin and separates stderr, and it does both through the
-  filesystem rather than through the port: a port cannot signal end-of-file on stdin
-  without being closed, and a hook that reads until EOF would otherwise wait for its own
-  deadline. The script is therefore prefixed with `exec <` and `exec 2>` redirects on
-  their own lines, into private `0600` temporary files, so the operator's command text
-  is passed through unrewritten.
-
-  Every child goes through `priv/provider-exec`, the `umask 022` wrapper every Harness
-  CLI child already crosses, so a file a hook creates is an ordinary `0644` rather than
-  inheriting the managed BEAM's `077`.
+  `run/3` takes an executable and argv with no shell. `run_shell/2` takes an operator
+  command line through `/bin/sh -c`; stdin is supplied through one private temporary file
+  so a command that reads to EOF does not wait for an open port.
   """
 
   @default_timeout_ms 60_000
   @default_max_bytes 1024 * 1024
   @max_timeout_ms 600_000
-  @max_max_bytes 16 * 1024 * 1024
+  @max_max_bytes 64 * 1024 * 1024
   @drain_ms 500
+  @exit_drain_ms 50
+  @exit_drain_deadline_ms @exit_drain_ms * 4
+  @startup_timeout_ms 5_000
 
   @type result :: %{
           status: integer(),
@@ -60,7 +46,7 @@ defmodule Ouroboros.Provider.Native.Exec do
   @spec run(String.t(), [String.t()], keyword()) :: {:ok, result()} | {:error, term()}
   def run(executable, args, opts \\ []) when is_binary(executable) and is_list(args) do
     with {:ok, wrapper} <- wrapper() do
-      spawn_and_collect(wrapper, [executable | args], nil, opts)
+      spawn_and_collect(wrapper, [executable | args], false, opts)
     end
   end
 
@@ -74,17 +60,12 @@ defmodule Ouroboros.Provider.Native.Exec do
   @spec run_shell(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run_shell(command, opts \\ []) when is_binary(command) do
     with {:ok, wrapper} <- wrapper(),
-         {:ok, error_path} <- scratch_file(""),
          {:ok, stdin_path} <- scratch_file(stdin_of(opts)) do
-      script =
-        "exec <" <>
-          shell_quote(stdin_path) <>
-          "\nexec 2>" <> shell_quote(error_path) <> "\n" <> command
+      script = "exec <" <> shell_quote(stdin_path) <> "\n" <> command
 
       try do
-        spawn_and_collect(wrapper, ["/bin/sh", "-c", script], error_path, opts)
+        spawn_and_collect(wrapper, ["/bin/sh", "-c", script], true, opts)
       after
-        _ = File.rm(error_path)
         _ = File.rm(stdin_path)
       end
     end
@@ -96,128 +77,185 @@ defmodule Ouroboros.Provider.Native.Exec do
 
   # ---------------------------------------------------------------- internals
 
-  defp spawn_and_collect(wrapper, args, error_path, opts) do
+  alias Jido.Harness.ProcessDriver.Erlexec
+
+  defp spawn_and_collect(wrapper, args, separate_stderr?, opts) do
     timeout = timeout_ms(opts)
     max_bytes = max_bytes(opts)
 
-    port_options =
+    options =
       [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        :hide,
-        {:args, Enum.map(args, &String.to_charlist/1)}
+        :monitor,
+        {:group, 0},
+        :kill_group,
+        {:stdin, :close},
+        {:stdout, self()},
+        if(separate_stderr?, do: {:stderr, self()}, else: {:stderr, :stdout})
       ]
-      |> merge_stderr(error_path)
       |> maybe_cd(Keyword.get(opts, :cd))
       |> maybe_env(Keyword.get(opts, :env))
 
-    port = Port.open({:spawn_executable, String.to_charlist(wrapper)}, port_options)
+    case :exec.run([wrapper | args], options, @startup_timeout_ms) do
+      {:ok, exec_pid, os_pid} ->
+        state = empty_output()
+        deadline = System.monotonic_time(:millisecond) + timeout
 
-    os_pid =
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} -> pid
-        _gone -> nil
-      end
+        case collect(exec_pid, os_pid, state, max_bytes, deadline) do
+          {:ok, output, status} ->
+            {:ok, result(output, status, false)}
 
-    deadline = System.monotonic_time(:millisecond) + timeout
+          {:timeout, output} ->
+            output = terminate_group(exec_pid, os_pid, output, max_bytes)
+            {:ok, result(output, 124, true)}
+        end
 
-    case collect(port, [], 0, max_bytes, deadline, false) do
-      {:ok, output, truncated?, status} ->
-        {:ok, result(output, read_errors(error_path, max_bytes), status, false, truncated?)}
-
-      {:timeout, acc, truncated?} ->
-        if os_pid,
-          do:
-            System.cmd("/bin/kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
-
-        drained = drain(port, acc, System.monotonic_time(:millisecond) + @drain_ms)
-        if Port.info(port), do: Port.close(port)
-
-        {:ok,
-         result(
-           IO.iodata_to_binary(drained),
-           read_errors(error_path, max_bytes),
-           124,
-           true,
-           truncated?
-         )}
+      {:error, reason} ->
+        {:error, {:spawn_failed, reason}}
     end
   rescue
     error -> {:error, {:spawn_failed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:spawn_failed, kind, reason}}
   end
 
-  defp result(output, stderr, status, timed_out?, truncated?) do
+  defp terminate_group(exec_pid, os_pid, output, max_bytes) do
+    _ = Erlexec.signal(os_pid, :sigterm)
+    deadline = System.monotonic_time(:millisecond) + @drain_ms
+
+    case collect(exec_pid, os_pid, output, max_bytes, deadline) do
+      {:ok, drained, _status} ->
+        drained
+
+      {:timeout, drained} ->
+        _ = Erlexec.signal(os_pid, :sigkill)
+
+        case collect(
+               exec_pid,
+               os_pid,
+               drained,
+               max_bytes,
+               System.monotonic_time(:millisecond) + @drain_ms
+             ) do
+          {:ok, killed, _status} -> killed
+          {:timeout, killed} -> killed
+        end
+    end
+  end
+
+  defp result(output, status, timed_out?) do
     %{
       status: status,
-      output: output,
-      stderr: stderr,
+      output: IO.iodata_to_binary(output.stdout),
+      stderr: IO.iodata_to_binary(output.stderr),
       timed_out?: timed_out?,
-      truncated?: truncated?
+      truncated?: output.truncated?
     }
   end
 
-  defp merge_stderr(options, nil), do: [:stderr_to_stdout | options]
-  defp merge_stderr(options, _error_path), do: options
+  defp empty_output do
+    %{stdout: [], stdout_bytes: 0, stderr: [], stderr_bytes: 0, truncated?: false}
+  end
 
-  defp maybe_cd(options, path) when is_binary(path),
-    do: [{:cd, String.to_charlist(path)} | options]
-
+  defp maybe_cd(options, path) when is_binary(path), do: [{:cd, path} | options]
   defp maybe_cd(options, _other), do: options
 
-  defp maybe_env(options, env) when is_list(env) and env != [] do
-    converted =
-      Enum.flat_map(env, fn
-        {name, value} when is_binary(name) and is_binary(value) ->
-          [{String.to_charlist(name), String.to_charlist(value)}]
-
-        _other ->
-          []
+  defp maybe_env(options, env) do
+    overrides =
+      env
+      |> List.wrap()
+      |> Enum.flat_map(fn
+        {name, value} when is_binary(name) and is_binary(value) -> [{name, value}]
+        _other -> []
       end)
+      |> Map.new()
 
-    if converted == [], do: options, else: [{:env, converted} | options]
+    # Erlexec's manager was started with the VM and does not observe later
+    # `System.put_env/2` calls. Passing the current environment preserves Port.open's
+    # per-command inheritance semantics; explicit tool variables win.
+    inherited = Map.merge(System.get_env(), overrides)
+    [{:env, Map.to_list(inherited)} | options]
   end
 
-  defp maybe_env(options, _other), do: options
-
-  defp collect(port, acc, size, max_bytes, deadline, truncated?) do
+  defp collect(exec_pid, os_pid, output, max_bytes, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {^port, {:data, data}} ->
-        if size >= max_bytes do
-          collect(port, acc, size, max_bytes, deadline, true)
-        else
-          collect(port, [acc, data], size + byte_size(data), max_bytes, deadline, truncated?)
-        end
+      {:stdout, ^os_pid, data} ->
+        collect(exec_pid, os_pid, append(output, :stdout, data, max_bytes), max_bytes, deadline)
 
-      {^port, {:exit_status, status}} ->
-        {:ok, IO.iodata_to_binary(acc), truncated?, status}
+      {:stderr, ^os_pid, data} ->
+        collect(exec_pid, os_pid, append(output, :stderr, data, max_bytes), max_bytes, deadline)
+
+      {:DOWN, ^os_pid, :process, ^exec_pid, reason} ->
+        now = System.monotonic_time(:millisecond)
+
+        drained =
+          drain_after_down(
+            os_pid,
+            output,
+            max_bytes,
+            now + @exit_drain_ms,
+            now + @exit_drain_deadline_ms
+          )
+
+        {:ok, drained, exit_status(reason)}
     after
-      remaining -> {:timeout, acc, truncated?}
+      remaining -> {:timeout, output}
     end
   end
 
-  defp drain(port, acc, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+  defp drain_after_down(os_pid, output, max_bytes, idle_deadline, hard_deadline) do
+    now = System.monotonic_time(:millisecond)
+    remaining = max(min(idle_deadline, hard_deadline) - now, 0)
 
     receive do
-      {^port, {:data, data}} -> drain(port, [acc, data], deadline)
-      {^port, {:exit_status, _status}} -> acc
+      {:stdout, ^os_pid, data} ->
+        drain_after_down(
+          os_pid,
+          append(output, :stdout, data, max_bytes),
+          max_bytes,
+          min(System.monotonic_time(:millisecond) + @exit_drain_ms, hard_deadline),
+          hard_deadline
+        )
+
+      {:stderr, ^os_pid, data} ->
+        drain_after_down(
+          os_pid,
+          append(output, :stderr, data, max_bytes),
+          max_bytes,
+          min(System.monotonic_time(:millisecond) + @exit_drain_ms, hard_deadline),
+          hard_deadline
+        )
     after
-      remaining -> acc
+      remaining -> output
     end
   end
 
-  defp read_errors(nil, _max_bytes), do: ""
+  defp append(output, stream, data, max_bytes) when is_binary(data) do
+    bytes_key = if stream == :stdout, do: :stdout_bytes, else: :stderr_bytes
+    used = Map.fetch!(output, bytes_key)
+    available = max(max_bytes - used, 0)
+    kept = if byte_size(data) <= available, do: data, else: binary_part(data, 0, available)
 
-  defp read_errors(path, max_bytes) do
-    case File.read(path) do
-      {:ok, content} when byte_size(content) <= max_bytes -> content
-      {:ok, content} -> binary_part(content, 0, max_bytes)
-      {:error, _reason} -> ""
-    end
+    output
+    |> Map.update!(stream, &[&1, kept])
+    |> Map.put(bytes_key, used + byte_size(kept))
+    |> Map.update!(:truncated?, &(&1 or byte_size(kept) != byte_size(data)))
   end
+
+  defp exit_status(:normal), do: 0
+
+  defp exit_status({:exit_status, status}) when is_integer(status) do
+    case :exec.status(status) do
+      {:status, exit_status} -> exit_status
+      {:signal, signal, _core?} -> 128 + :exec.signal_to_int(signal)
+    end
+  rescue
+    _error -> status
+  end
+
+  defp exit_status(status) when is_integer(status), do: exit_status({:exit_status, status})
+  defp exit_status(_reason), do: 1
 
   defp stdin_of(opts) do
     case Keyword.get(opts, :stdin) do

@@ -31,17 +31,14 @@ defmodule Ouroboros.Provider.Native.Hooks do
   A repository that ships its own hooks is a repository that runs commands on every
   machine that clones it. Claude Code gates project settings on workspace trust, Kiro
   keeps workspace rules outside the repository entirely, and both do it because the
-  alternative is remote code execution by `git clone` (R3 §8d). So `ouroboros.toml` is
-  read only when the workspace is trusted, by one of:
+  alternative is remote code execution by `git clone` (R3 §8d). `ouroboros.toml` is
+  therefore read only when `config :ouroboros, :trusted_workspaces` names the canonical
+  workspace root.
 
-    * `config :ouroboros, :trusted_workspaces` naming the canonical root, or
-    * a `.ouroboros/trusted` marker file inside the workspace.
-
-  The marker is written by the operator. The agent cannot write it: `.ouroboros` is in
-  `Ouroboros.Control.Permissions.Rules`' protected-segment list, so every tool call that
-  would create it is denied by the engine before any human sees it. On a node with no
-  permission engine configured that denial becomes an approval prompt instead, which is
-  stated in the README rather than pretended away.
+  Trust cannot come from a file inside the workspace. The native shell may run without an
+  OS sandbox on a node that has no backend, and repository contents are writable by
+  definition under `workspace_write`; either fact makes an in-repository trust marker
+  self-authorizing. Operator configuration lives outside both authorities.
 
   Untrusted is not silent: `load/2` reports `trusted?: false` together with how many
   hooks it declined to load, so a session can say why the repository's hooks did nothing.
@@ -106,7 +103,6 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   @project_file "ouroboros.toml"
   @user_file "hooks.toml"
-  @marker Path.join(".ouroboros", "trusted")
 
   @default_timeout_ms 60_000
   @max_timeout_ms 600_000
@@ -438,32 +434,34 @@ defmodule Ouroboros.Provider.Native.Hooks do
     end)
   end
 
-  @doc "Whether a workspace is trusted for repository-supplied hooks and checks."
+  @doc "Whether operator configuration trusts a workspace for repository commands."
   @spec trusted?(String.t() | nil, keyword()) :: boolean()
   def trusted?(workspace_root, opts \\ [])
   def trusted?(nil, _opts), do: false
 
   def trusted?(root, opts) when is_binary(root) do
-    configured =
-      opts
-      |> Keyword.get(
-        :trusted_workspaces,
-        Application.get_env(:ouroboros, :trusted_workspaces, [])
-      )
-      |> List.wrap()
-      |> Enum.filter(&is_binary/1)
-      |> Enum.map(&Path.expand/1)
+    canonical =
+      case Ouroboros.Workspace.Path.canonicalize(root) do
+        {:ok, path} -> path
+        {:error, _reason} -> Path.expand(root)
+      end
 
-    Path.expand(root) in configured or marker?(root)
+    opts
+    |> Keyword.get(
+      :trusted_workspaces,
+      Application.get_env(:ouroboros, :trusted_workspaces, [])
+    )
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.any?(fn configured ->
+      case Ouroboros.Workspace.Path.canonicalize(configured) do
+        {:ok, path} -> path == canonical
+        {:error, _reason} -> Path.expand(configured) == canonical
+      end
+    end)
   end
 
   def trusted?(_root, _opts), do: false
-
-  @doc "Where the trust marker lives for a workspace."
-  @spec marker_path(String.t()) :: String.t()
-  def marker_path(root), do: Path.join(root, @marker)
-
-  defp marker?(root), do: root |> marker_path() |> File.regular?()
 
   # ---------------------------------------------------------------- invoking
 

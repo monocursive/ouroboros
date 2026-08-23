@@ -281,17 +281,25 @@ defmodule Ouroboros.Control.Grants do
 
   def handle_call(:durability, _from, state), do: {:reply, state.durability, state}
 
-  # The authority this record confers is used after the write, so a failed checkpoint is
-  # reported without touching in-memory state: the caller holds nothing it can spend.
+  # A definite pre-commit failure leaves memory alone. Post-rename ambiguity stops this
+  # authority below, so it cannot continue beside a different visible checkpoint.
   defp persist(grants, reply, state) do
     case adapter_call(state.adapter, :put_checkpoint, [
            @store_key,
            checkpoint(grants),
            state.opts
          ]) do
-      :ok -> {:reply, ok(reply), %{state | grants: grants}}
-      {:error, reason} -> {:reply, {:error, {:grant_checkpoint_failed, reason}}, state}
-      other -> {:reply, {:error, {:invalid_grant_storage_response, other}}, state}
+      :ok ->
+        {:reply, ok(reply), %{state | grants: grants}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, {:grant_commit_outcome_unknown, ambiguity}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:grant_checkpoint_failed, reason}}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_grant_storage_response, other}}, state}
     end
   end
 

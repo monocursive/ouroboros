@@ -800,16 +800,16 @@ transcript it never had would be a claim with nothing behind it.
   added to a command that already failed, and never to one killed by its own timeout.
 - **The sandbox wraps `bash` and nothing else.** A `[checks]` command and a hook run
   through `Ouroboros.Provider.Native.Exec`, unsandboxed, in every mode — including
-  `read_only`. They are the operator's own commands, gated by the trust marker rather
-  than by the model, which is why they were left outside; but a `read_only` session
-  whose workspace is trusted and whose `ouroboros.toml` runs a writing check does write.
-  `grep` shells out to ripgrep with an argv and no shell, and is not wrapped either.
-- **A scratch directory outlives a tool the loop had to kill.** The per-call `$TMPDIR`
-  is removed when the command ends, but a `bash` call that overruns the *tool's* own
-  deadline is ended with `Task.shutdown(task, :brutal_kill)`, which runs no cleanup.
-  The next `bash` call on the node sweeps any `ouroboros-sandbox-*` directory older
-  than six hours — well past the ten-minute ceiling a live command can reach — so the
-  leak is bounded rather than absent.
+  `read_only`. They are operator-authorized commands: project commands load only when the
+  workspace's canonical root is present in node configuration under
+  `config :ouroboros, :trusted_workspaces`. Trust never comes from workspace contents.
+  A trusted `read_only` workspace whose `ouroboros.toml` runs a writing check can write.
+  `grep` shells out to ripgrep with an argv and no shell, and is not sandbox-wrapped.
+- **A scratch directory can outlive a tool task the loop brutally kills.** The per-call
+  `$TMPDIR` is removed when the command runner exits, but `Task.shutdown(task,
+  :brutal_kill)` runs no cleanup. The next `bash` call sweeps
+  `ouroboros-sandbox-*` directories older than six hours — beyond the ten-minute command
+  ceiling — so the leak is bounded rather than absent.
 - **A tool that asks the OS for a temp directory instead of reading `$TMPDIR` is denied.**
   macOS `mktemp` with no template asks libc for `_CS_DARWIN_USER_TEMP_DIR`, which is
   outside the scratch directory. `mktemp "$TMPDIR/x.XXXXXX"` works; bare `mktemp` does
@@ -817,16 +817,13 @@ transcript it never had would be a claim with nothing behind it.
 - **`:unrestricted` is still not offered.** C5 gave this provider a sandbox to relax, not
   a reason to offer a mode that switches everything off. The escalation from a sandbox
   denial is a human, `add_dirs`, or `workspace_write` — not a flag.
-- **A command that detaches from its process group can outlive its timeout.** The
-  timeout terminates the shell this runtime started. The same limit applies to a hook
-  and to a `[checks]` command.
-- **A repository's hooks and checks need trust, and trust is the operator's to give.**
-  `ouroboros.toml` is read only when the workspace is named in
-  `config :ouroboros, :trusted_workspaces` or carries a `.ouroboros/trusted` file. The
-  agent cannot write that file: `.ouroboros` is in the permission engine's protected-path
-  list, so the write is denied by a node-scope rule before any human is asked. On a node
-  with no permission engine configured that denial is an approval prompt instead — which
-  is to say, on such a node the marker is only as safe as the person answering the modal.
+- **Command deadlines cover the process group.** `bash`, hooks, checks, and argv helpers
+  start in an Erlexec-owned group. A timeout sends TERM to the group, drains bounded
+  output, then sends KILL; an ordinary background child cannot survive the result.
+- **A repository's hooks, checks, and MCP servers need external operator trust.**
+  `ouroboros.toml` is read only when the canonical workspace root is named in
+  `config :ouroboros, :trusted_workspaces`. A file inside a writable repository cannot
+  authorize repository commands.
 - **A skill is instructions, and instructions from a repository are a repository's
   words.** `skill` loads a `SKILL.md` into the turn as a tool result. It grants nothing
   and runs nothing, but a model reads it, exactly as it reads any other file in the tree.
@@ -2425,9 +2422,9 @@ agent forged cannot patch the authority that decided it could forge.
   checkpoint, so an agent granted `:forge` on one node is not granted it on another.
   Like every other store here, that is single-node ownership rather than a replicated
   policy service.
-- **A failed revocation leaves the grant standing** and says so. An authority that
-  forgot a grant it could not durably forget would hand it back at the next restart, so
-  an unacknowledged revocation has not happened.
+- **A definite pre-commit revocation failure leaves the grant standing** and says so.
+  A post-rename durability failure is reported as an unknown commit outcome and restarts
+  the authority; the caller must reconcile instead of being told either state definitely won.
 - **The durable ledger is node-local and bounded.** Production uses a synced checkpoint;
   development/test uses ETS. Terminal history is capped by
   `:ouroboros, :effect_ledger_limit` (1,000 by default) and shared fairly across kinds,
@@ -2709,8 +2706,9 @@ everything else this engine decides.
   operator's own `allow` included, since the store is the only place a stricter rule
   could have been — while protected paths and configured denies still refuse. An `allow`
   whose ledger entry cannot be written comes back as `{:ask, :unrecordable}`.
-- **A failed rule write leaves the previous state standing**, in both directions, for the
-  reason `Control.Grants` states about revocation.
+- **A definite pre-commit rule-write failure leaves the previous state standing.**
+  A post-rename durability failure stops and restarts the authority with an explicit
+  unknown outcome, so live memory never continues beside a different visible checkpoint.
 - **`scope: "always"` does not exist on an approval.** `Jido.Harness.ApprovalResponse`
   admits `once` and `session`; the durable form of "never ask me again" is
   `permissions.add` with the pattern `suggested_rule` named.

@@ -107,12 +107,11 @@ defmodule Ouroboros.Cluster.Monitor do
 
     case commit do
       :ok ->
-        state =
-          state
-          |> Map.put(:session_owners, updated)
-          |> Map.put(:session_owner_evidence, :reliable)
-
+        state = %{state | session_owners: updated, session_owner_evidence: :reliable}
         {:reply, :ok, state}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
 
       {:error, reason} ->
         Logger.error(
@@ -128,6 +127,10 @@ defmodule Ouroboros.Cluster.Monitor do
     case forget_session_owner(state, machine) do
       {:ok, result, updated} ->
         {:reply, {:ok, result}, updated}
+
+      {:error,
+       {:session_owner_forget_checkpoint_failed, {:commit_outcome_unknown, _reason} = ambiguity}} ->
+        {:stop, ambiguity, {:error, {:session_owner_commit_outcome_unknown, ambiguity}}, state}
 
       {:error, {:session_owner_forget_checkpoint_failed, _failure} = reason} ->
         Logger.error(

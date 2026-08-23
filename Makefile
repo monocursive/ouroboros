@@ -36,7 +36,7 @@ dev:
 # extractor nobody compiled is an extractor nobody tested.
 test:
 	@echo "==> test: mix test, then cargo test/fmt/clippy with and without the embed feature"
-	$(MIX) test
+	SHELL="$(SHELL)" $(MIX) test
 	cd tui && $(CARGO) test
 	cd tui && $(CARGO) test --features embed
 	cd tui && $(CARGO) fmt --check

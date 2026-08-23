@@ -232,8 +232,8 @@ defmodule Ouroboros.Provider.Native.Loop do
       if state.hooks.declined > 0,
         do: [
           "#{state.hooks.declined} hook(s)/check(s) in #{Path.join(state.scope.root, "ouroboros.toml")} " <>
-            "were not loaded: this workspace is not trusted. An operator can trust it with " <>
-            "`config :ouroboros, :trusted_workspaces` or a `.ouroboros/trusted` file."
+            "were not loaded: this workspace is not trusted. An operator can trust it by " <>
+            "adding its canonical root to `config :ouroboros, :trusted_workspaces`."
         ],
         else: []
 

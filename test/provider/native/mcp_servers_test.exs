@@ -226,12 +226,11 @@ defmodule Ouroboros.Provider.Native.McpServersTest do
                load(context)
     end
 
-    test "a `.ouroboros/trusted` marker trusts the workspace, exactly as it does for hooks",
-         context do
+    test "an in-workspace marker cannot authorize MCP commands", context do
       File.write!(Path.join([context.workspace, ".ouroboros", "trusted"]), "")
       write(workspace_file(context), %{"mcpServers" => %{"a" => %{"command" => "x"}}})
 
-      assert %{servers: [%{name: "a"}], trusted?: true} = load(context)
+      assert %{servers: [], declined: 1, trusted?: false} = load(context)
     end
 
     test "no workspace at all still loads node and user servers", context do

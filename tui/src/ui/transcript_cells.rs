@@ -3646,12 +3646,7 @@ fn colour(tone: Tone) -> Color {
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
-    if !lines.is_empty()
-        && !lines
-            .last()
-            .map(Line::width)
-            .is_some_and(|width| width == 0)
-    {
+    if !lines.is_empty() && lines.last().map(Line::width).is_none_or(|width| width != 0) {
         lines.push(Line::from(""));
     }
 }

@@ -985,6 +985,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp persist_journal(state, journal) do
     case storage_put(state.storage, journal) do
       :ok -> {:ok, %{state | journal: journal}}
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
       {:error, reason} -> {:error, reason, state}
       other -> {:error, {:invalid_storage_response, storage_response_kind(other)}, state}
     end

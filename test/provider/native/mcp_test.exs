@@ -367,10 +367,12 @@ defmodule Ouroboros.Provider.Native.McpTest do
       configure(context, args: [])
 
       Mcp.specs(context.workspace, pool: pool)
-      before = os_pid(pool, "fake")
+      before = server_status(pool, "fake")
       Mcp.specs(context.workspace, pool: pool)
+      after_second_session = server_status(pool, "fake")
 
-      assert os_pid(pool, "fake") == before
+      assert after_second_session.restarts == before.restarts
+      assert after_second_session.uptime_ms >= before.uptime_ms
       assert %{servers: [_one]} = Pool.status(pool)
     end
 
@@ -579,8 +581,8 @@ defmodule Ouroboros.Provider.Native.McpTest do
     end
   end
 
-  defp os_pid(pool, name) do
-    Enum.find_value(Pool.status(pool).servers, &(&1.name == name and &1.uptime_ms))
+  defp server_status(pool, name) do
+    Enum.find(Pool.status(pool).servers, &(&1.name == name))
   end
 
   defp recorded(path) do

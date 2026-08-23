@@ -78,7 +78,7 @@ defmodule Ouroboros.Upgrade.Epoch do
   defp locked(opts, fun) do
     retries = Keyword.get(opts, :lock_retries, @lock_retries)
 
-    case :global.trans({__MODULE__, :allocation}, fun, [node() | Node.list()], retries) do
+    case :global.trans({{__MODULE__, :allocation}, self()}, fun, [node() | Node.list()], retries) do
       :aborted -> {:error, :epoch_lock_unavailable}
       result -> result
     end

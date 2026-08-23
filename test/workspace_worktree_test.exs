@@ -163,6 +163,27 @@ defmodule Ouroboros.WorkspaceWorktreeTest do
       assert recorded.base_commit == "deadbeef"
     end
 
+    test "concurrent creates retain every recovery record", context do
+      {runner, _log} = recording_runner(context)
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn index ->
+            Worktree.create(context.repo, "concurrent-#{index}",
+              runner: runner,
+              root: context.worktrees
+            )
+          end,
+          max_concurrency: 20,
+          timeout: 10_000
+        )
+        |> Enum.to_list()
+
+      assert Enum.all?(results, &match?({:ok, {:ok, _worktree}}, &1))
+      assert length(Worktree.list(root: context.worktrees)) == 20
+    end
+
     test "a workspace inside a repository gets the same subdirectory in the worktree",
          context do
       sub = Path.join(context.repo, "apps/web")

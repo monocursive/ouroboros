@@ -264,7 +264,7 @@ impl App {
                 .config
                 .defaults
                 .sandbox_mode()
-                .map_or(true, SandboxMode::writable)
+                .is_none_or(SandboxMode::writable)
         {
             self.inform(
                 "new sessions can already edit files; --sandbox-mode read_only or settings \

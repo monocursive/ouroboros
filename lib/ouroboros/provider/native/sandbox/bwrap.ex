@@ -29,10 +29,10 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       `/dev/null` unwritable and `/proc` stale, and both are load-bearing for ordinary
       shell tools.
     * `--bind <root> <root>` per writable root (`workspace_write` only).
-    * `--ro-bind <path> <path>` for each protected directory that exists — the `.git`
-      and `.ouroboros` directories directly under a writable root, the node's data
-      directory, and the user's config. Only paths that exist are bound, because
-      bubblewrap fails on a source that is not there.
+    * `--ro-bind <path> <path>` for each protected directory that exists.
+    * `--ro-bind <scratch> <path>` for each protected segment that does not exist yet.
+      The empty scratch directory is a read-only placeholder at that destination, so a
+      command cannot create `.git` or `.ouroboros` after admission.
     * `--tmpfs <scratch>` — a fresh, private, in-memory `$TMPDIR` for this one command,
       at the same path the macOS backend makes writable, so both backends give the
       shell the same `$TMPDIR` contract.
@@ -45,13 +45,12 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   process group the tool's TERM-then-close reaping does not reach. A hardening that
   costs a deadline its teeth, for a channel that does not exist here, is a bad trade.
 
-  ## The segment limit
+  ## Protected segments
 
-  Where macOS denies writes to *any* `.git` segment with one regular expression,
-  bubblewrap can only bind paths that exist. Only the `.git` and `.ouroboros`
-  directories directly beneath a writable root are protected here; a vendored
-  dependency's nested `.git` is not. That is a real difference between the two
-  backends and it is stated in the README rather than papered over.
+  Bubblewrap has no path-regex rule. Existing `.git` and `.ouroboros` paths are rebound
+  read-only. Missing ones are covered by read-only bind mounts of the command's empty
+  scratch directory. Both cases deny creation and writes at the protected destination;
+  a path being absent when the command starts is not an authority to create it.
   """
 
   @doc """
@@ -86,7 +85,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
     ["--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] ++
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
-      Enum.flat_map(on_disk(segment_dirs(policy)), &["--ro-bind", &1, &1]) ++
+      protected_segment_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
       network(policy) ++
       chdir(scope)
@@ -100,10 +99,16 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
         do: Path.join(root, segment)
   end
 
-  # Only locations that are actually on disk. `--ro-bind` of a source that does not exist
-  # is a bubblewrap error, and a sandbox that refuses to start because a workspace has no
-  # `.git` would be worse than one that binds fewer paths: the underlying `--ro-bind / /`
-  # already makes a path that does not exist unwritable.
+  defp protected_segment_binds(policy) do
+    Enum.flat_map(segment_dirs(policy), fn destination ->
+      source = if File.exists?(destination), do: destination, else: policy.scratch
+      ["--ro-bind", source, destination]
+    end)
+  end
+
+  # Protected roots are mounted only when present. Unlike protected *segments*, these are
+  # absolute operator locations outside writable roots; an absent one stays unreachable
+  # through the read-only `/` bind and needs no destination placeholder.
   defp on_disk(paths), do: Enum.filter(paths, &File.exists?/1)
 
   defp network(%{network: true}), do: []

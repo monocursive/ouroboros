@@ -396,15 +396,22 @@ defmodule Ouroboros.Control.Permissions do
      }, state}
   end
 
-  # A rule is spent after this call returns, so a failed checkpoint leaves memory alone:
-  # the caller holds nothing it could act on. A failed *removal* leaves the rule standing
-  # for the mirror-image reason `Control.Grants` states — a rule this node could not
-  # durably forget would come back at the next boot.
+  # Definite pre-commit failures leave memory alone in both directions. A post-rename
+  # durability failure is different: the checkpoint may be visible, so this authority
+  # stops below and lets supervision reload one state instead of continuing with two.
   defp persist(rules, reply, state) do
     case adapter_call(state.adapter, :put_checkpoint, [@store_key, checkpoint(rules), state.opts]) do
-      :ok -> {:reply, reply, %{state | rules: rules}}
-      {:error, reason} -> {:reply, {:error, {:permission_checkpoint_failed, reason}}, state}
-      other -> {:reply, {:error, {:invalid_permission_storage_response, other}}, state}
+      :ok ->
+        {:reply, reply, %{state | rules: rules}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, {:permission_commit_outcome_unknown, ambiguity}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:permission_checkpoint_failed, reason}}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_permission_storage_response, other}}, state}
     end
   end
 

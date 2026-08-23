@@ -152,23 +152,17 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert trusted.declined == 0
     end
 
-    test "a `.ouroboros/trusted` marker in the workspace also trusts it", %{
+    test "an in-workspace marker cannot authorize repository commands", %{
       workspace: workspace
     } do
       project_toml(workspace, "[[hooks]]\nevent = \"Stop\"\ncommand = \"true\"\n")
-      refute Hooks.load(workspace).trusted?
-
       File.mkdir_p!(Path.join(workspace, ".ouroboros"))
-      File.write!(Hooks.marker_path(workspace), "")
+      File.write!(Path.join([workspace, ".ouroboros", "trusted"]), "")
 
-      assert Hooks.load(workspace).trusted?
-    end
-
-    test "the marker lives under `.ouroboros`, which the permission engine protects" do
-      # The agent must not be able to trust its own repository. `.ouroboros` is a
-      # protected segment, so every tool call that would create the marker is denied by
-      # a node-scope rule before any human is asked.
-      assert Hooks.marker_path("/w") == "/w/.ouroboros/trusted"
+      config = Hooks.load(workspace)
+      refute config.trusted?
+      assert config.hooks == []
+      assert config.declined == 1
 
       assert Enum.any?(
                Ouroboros.Control.Permissions.Rules.protected_paths(),

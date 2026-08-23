@@ -47,7 +47,10 @@ defmodule Ouroboros.Mesh do
     with :ok <- check_agent_module(agent_module),
          {:ok, initial_state} <- build_initial_state(opts) do
       start_opts = build_start_opts(id, opts, initial_state)
-      :global.trans({__MODULE__, id}, fn -> do_start_agent(id, agent_module, start_opts) end)
+
+      :global.trans({{__MODULE__, id}, self()}, fn ->
+        do_start_agent(id, agent_module, start_opts)
+      end)
     end
   end
 

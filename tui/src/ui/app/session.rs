@@ -2031,7 +2031,7 @@ impl App {
                         .sessions
                         .pending_reconciliations
                         .get(&(*plane, id.clone()))
-                        .map_or(true, VecDeque::is_empty)
+                        .is_none_or(VecDeque::is_empty)
             })
             .collect::<Vec<_>>();
 

@@ -133,9 +133,17 @@ defmodule Ouroboros.Orchestration.Store do
 
   defp persist(plans, state) do
     case state.adapter.put_checkpoint(state.key, plans, state.opts) do
-      :ok -> {:reply, :ok, %{state | plans: plans}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      other -> {:reply, {:error, {:invalid_storage_response, other}}, state}
+      :ok ->
+        {:reply, :ok, %{state | plans: plans}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_storage_response, other}}, state}
     end
   end
 

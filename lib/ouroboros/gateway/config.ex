@@ -122,6 +122,8 @@ defmodule Ouroboros.Gateway.Config do
   # generated token clears @min_token_bytes with room to spare.
   @generated_token_bytes 32
 
+  @max_token_file_bytes 4 * 1024
+
   alias Ouroboros.DataDir
 
   # Below this a `hello` frame itself would be chopped, and every connection would fail
@@ -373,9 +375,9 @@ defmodule Ouroboros.Gateway.Config do
   defp token_generate?(opts), do: Keyword.get(opts, :token_generate, false) == true
 
   defp read_token_file!(path, generate?) do
-    case File.read(path) do
-      {:ok, contents} ->
-        String.trim(contents)
+    case File.lstat(path, time: :posix) do
+      {:ok, stat} ->
+        read_private_token!(path, stat)
 
       {:error, :enoent} when generate? ->
         generate_token_file!(path)
@@ -385,6 +387,105 @@ defmodule Ouroboros.Gateway.Config do
               "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} is not readable: " <>
                 (reason |> :file.format_error() |> List.to_string())
     end
+  end
+
+  defp read_private_token!(path, before) do
+    validate_token_stat!(path, before)
+
+    contents =
+      File.open!(path, [:read, :binary], fn io ->
+        {:ok, opened} = :file.read_file_info(io, time: :posix)
+        validate_open_token_stat!(path, opened)
+
+        body =
+          case IO.binread(io, @max_token_file_bytes + 1) do
+            bytes when is_binary(bytes) -> bytes
+            :eof -> ""
+            {:error, reason} -> raise File.Error, reason: reason, action: "read", path: path
+          end
+
+        if byte_size(body) > @max_token_file_bytes do
+          raise ArgumentError,
+                "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} exceeds #{@max_token_file_bytes} bytes"
+        end
+
+        unless same_open_file?(before, opened) do
+          raise ArgumentError,
+                "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} changed while it was opened"
+        end
+
+        body
+      end)
+
+    case File.lstat(path, time: :posix) do
+      {:ok, after_read} ->
+        validate_token_stat!(path, after_read)
+
+        unless same_file?(before, after_read) do
+          raise ArgumentError,
+                "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} changed while it was read"
+        end
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} changed while it was read: " <>
+                (reason |> :file.format_error() |> List.to_string())
+    end
+
+    String.trim(contents)
+  rescue
+    error in [File.Error] ->
+      raise ArgumentError,
+            "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} is not readable: " <> Exception.message(error)
+  end
+
+  defp validate_token_stat!(path, stat) do
+    mode = Bitwise.band(stat.mode, 0o777)
+    uid = DataDir.current_uid!()
+
+    cond do
+      stat.type != :regular ->
+        raise ArgumentError,
+              "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} must be a regular file, got: #{stat.type}"
+
+      stat.uid != uid ->
+        raise ArgumentError,
+              "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} must be owned by uid #{uid}, got: #{stat.uid}"
+
+      mode != 0o600 ->
+        raise ArgumentError,
+              "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} must have mode 0600, got: " <>
+                (mode |> Integer.to_string(8) |> String.pad_leading(4, "0"))
+
+      stat.size > @max_token_file_bytes ->
+        raise ArgumentError,
+              "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} exceeds #{@max_token_file_bytes} bytes"
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_open_token_stat!(path, opened) do
+    type = elem(opened, 2)
+    mode = Bitwise.band(elem(opened, 7), 0o777)
+    uid = elem(opened, 12)
+    expected_uid = DataDir.current_uid!()
+
+    unless type == :regular and mode == 0o600 and uid == expected_uid do
+      raise ArgumentError,
+            "OUROBOROS_GATEWAY_TOKEN_FILE=#{path} changed to an unsafe file while it was opened"
+    end
+  end
+
+  defp same_open_file?(stat, opened) do
+    stat.uid == elem(opened, 12) and stat.major_device == elem(opened, 9) and
+      stat.inode == elem(opened, 11)
+  end
+
+  defp same_file?(left, right) do
+    left.uid == right.uid and left.major_device == right.major_device and
+      left.inode == right.inode
   end
 
   # Only reachable with `:token_generate`, which only the defaulted single-machine posture
@@ -399,21 +500,24 @@ defmodule Ouroboros.Gateway.Config do
   defp generate_token_file!(path) do
     DataDir.ensure_private!(Path.dirname(path))
 
-    tmp = path <> ".tmp-#{System.unique_integer([:positive, :monotonic])}"
+    tmp =
+      path <>
+        ".tmp-#{System.pid()}-#{Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)}"
+
     token = @generated_token_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
     try do
-      File.touch!(tmp)
+      File.write!(tmp, "", [:exclusive, :sync])
       File.chmod!(tmp, 0o600)
-      File.write!(tmp, token)
+      File.write!(tmp, token, [:sync])
 
-      case File.read(path) do
+      case File.lstat(path, time: :posix) do
         {:error, :enoent} ->
           File.rename!(tmp, path)
           token
 
-        {:ok, contents} ->
-          String.trim(contents)
+        {:ok, stat} ->
+          read_private_token!(path, stat)
 
         {:error, reason} ->
           raise ArgumentError,

@@ -146,15 +146,22 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
   defp wait_for_file(path, deadline) do
     case File.read(path) do
       {:ok, body} ->
-        body
+        case JSON.decode(body) do
+          {:ok, _payload} -> body
+          {:error, _reason} -> retry_file(path, deadline)
+        end
 
       {:error, _reason} ->
-        if System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(25)
-          wait_for_file(path, deadline)
-        else
-          flunk("#{path} was never written")
-        end
+        retry_file(path, deadline)
+    end
+  end
+
+  defp retry_file(path, deadline) do
+    if System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(25)
+      wait_for_file(path, deadline)
+    else
+      flunk("#{path} was never written as complete JSON")
     end
   end
 

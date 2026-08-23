@@ -212,78 +212,140 @@ pub fn read(images: &[Reader], texts: &[Reader], scratch: &Path) -> Clip {
     }
 }
 
-/// Runs one reader and returns what it produced, bounded by [`IMAGE_LIMIT`].
+/// Runs one reader and returns what it produced, bounded in bytes and wall time.
 fn run(reader: &Reader, scratch: &Path) -> Result<Vec<u8>> {
+    run_with_timeout(reader, scratch, TIMEOUT)
+}
+
+fn run_with_timeout(
+    reader: &Reader,
+    scratch: &Path,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>> {
     let args = reader.args.iter().map(|arg| match reader.sink {
         Sink::File => arg.replace("{}", &scratch.to_string_lossy()),
         Sink::Stdout => arg.clone(),
     });
 
-    let mut child = Command::new(&reader.program)
+    let mut command = Command::new(&reader.program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(match reader.sink {
             Sink::Stdout => Stdio::piped(),
             Sink::File => Stdio::null(),
         })
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command
         .spawn()
         .with_context(|| format!("running {}", reader.program))?;
 
-    // Bounded on both axes: at most `IMAGE_LIMIT` bytes read, and at most `TIMEOUT`
-    // waited. The read is what actually bounds a `Sink::Stdout` tool — a pipe that fills
-    // makes the child block, and the kill below then ends it.
-    let captured = match reader.sink {
-        Sink::Stdout => {
-            let mut stdout = child.stdout.take().expect("a piped stdout");
+    let mut reader_thread = None;
+    let mut receiver = None;
+
+    if reader.sink == Sink::Stdout {
+        let mut stdout = child.stdout.take().expect("a piped stdout");
+        let (sender, output) = std::sync::mpsc::sync_channel(1);
+        reader_thread = Some(std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let read = std::io::copy(
+            let result = std::io::copy(
                 &mut Read::by_ref(&mut stdout).take(IMAGE_LIMIT as u64 + 1),
                 &mut bytes,
-            );
+            )
+            .map(|_| bytes);
+            let _ = sender.send(result);
+        }));
+        receiver = Some(output);
+    }
 
-            if read.is_err() || bytes.len() > IMAGE_LIMIT {
-                let _ = child.kill();
-                let _ = child.wait();
+    let deadline = std::time::Instant::now() + timeout;
+    let mut status = None;
+    let mut captured = None;
+
+    loop {
+        if captured.is_none() {
+            if let Some(output) = receiver.as_ref() {
+                match output.try_recv() {
+                    Ok(result) => captured = Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        captured = Some(Err(std::io::Error::other(
+                            "clipboard output reader exited without a result",
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(Ok(bytes)) = captured.as_ref() {
+            if bytes.len() > IMAGE_LIMIT {
+                terminate_process_group(&mut child);
+                if let Some(thread) = reader_thread.take() {
+                    let _ = thread.join();
+                }
                 bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
             }
-
-            bytes
         }
-        Sink::File => Vec::new(),
-    };
 
-    let deadline = std::time::Instant::now() + TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("{} did not finish within {TIMEOUT:?}", reader.program);
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(error) => {
-                return Err(error).with_context(|| format!("waiting for {}", reader.program))
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(result)) => status = Some(result),
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_process_group(&mut child);
+                    return Err(error).with_context(|| format!("waiting for {}", reader.program));
+                }
             }
         }
-    };
 
+        let output_complete = reader.sink == Sink::File || captured.is_some();
+        if status.is_some() && output_complete {
+            break;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            terminate_process_group(&mut child);
+            if let Some(thread) = reader_thread.take() {
+                let _ = thread.join();
+            }
+            let _ = std::fs::remove_file(scratch);
+            bail!("{} did not finish within {timeout:?}", reader.program);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    if let Some(thread) = reader_thread {
+        let _ = thread.join();
+    }
+
+    let status = status.expect("the completion condition requires a status");
     if !status.success() {
+        let _ = std::fs::remove_file(scratch);
         bail!("{} exited with {status}", reader.program);
     }
 
     match reader.sink {
-        Sink::Stdout => Ok(captured),
+        Sink::Stdout => captured
+            .expect("the completion condition requires captured output")
+            .with_context(|| format!("reading stdout from {}", reader.program)),
         Sink::File => {
-            let bytes = std::fs::read(scratch).with_context(|| {
+            let result = std::fs::read(scratch).with_context(|| {
                 format!(
                     "reading what {} wrote to {}",
                     reader.program,
                     scratch.display()
                 )
-            })?;
+            });
             let _ = std::fs::remove_file(scratch);
+            let bytes = result?;
 
             if bytes.len() > IMAGE_LIMIT {
                 bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
@@ -292,6 +354,28 @@ fn run(reader: &Reader, scratch: &Path) -> Result<Vec<u8>> {
             Ok(bytes)
         }
     }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let group = -(child.id() as i32);
+    unsafe {
+        libc::kill(group, libc::SIGTERM);
+    }
+
+    // The group may still contain pipe-holding descendants after the leader exited.
+    // Always escalate the group after the grace; waiting only on `child` would recreate
+    // the exact stdout-EOF hang this function exists to break.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    unsafe {
+        libc::kill(group, libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Whether these bytes are a PNG. The eight-byte signature, nothing cleverer: the file is
@@ -326,68 +410,172 @@ pub fn write_image(workspace: &Path, id: &str, bytes: &[u8]) -> Result<String> {
         bail!("the clipboard did not hold a PNG");
     }
 
-    let directory = workspace.join(IMAGE_DIR);
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("creating {}", directory.display()))?;
-    restrict(&directory, 0o700);
-    ignore_in_git(&workspace.join(".ouroboros"));
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("the clipboard image id is not a safe file-name component");
+    }
 
-    let relative = format!("{IMAGE_DIR}/image-{id}.png");
-    let path = workspace.join(&relative);
-    write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    let workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("resolving workspace {}", workspace.display()))?;
+    let ouroboros = open_private_child_dir(&workspace, ".ouroboros", 0o700)?;
+    let images =
+        open_private_child_dir_at(&ouroboros, "images", 0o700, &workspace.join(".ouroboros"))?;
+    ignore_in_git(&ouroboros);
 
-    Ok(relative)
+    let filename = format!("image-{id}.png");
+    write_private_at(&images, &filename, bytes).with_context(|| {
+        format!(
+            "writing {}",
+            workspace
+                .join(".ouroboros/images")
+                .join(&filename)
+                .display()
+        )
+    })?;
+
+    Ok(format!("{IMAGE_DIR}/{filename}"))
 }
 
 /// A pasted image lives inside the workspace because that is the only place the runtime
 /// admits an attachment from — and a workspace is usually a repository. The client-owned
 /// `.ouroboros/` directory ignores itself so a paste never lands in `git status`.
-/// Best-effort and written once: an operator who removes the marker on purpose keeps it
-/// removed, and a failure here is never a reason to fail the paste.
-fn ignore_in_git(directory: &Path) {
-    let marker = directory.join(".gitignore");
-    if marker.exists() {
-        return;
-    }
-    let _ = std::fs::write(&marker, "*\n");
-}
-
+///
+/// Every component is opened descriptor-relative with `O_NOFOLLOW`. A repository may
+/// contain symlinks, but pasting an image must never follow one outside the workspace.
 #[cfg(unix)]
-fn restrict(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-}
-
-#[cfg(not(unix))]
-fn restrict(_path: &Path, _mode: u32) {}
-
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+fn open_private_child_dir(parent: &Path, name: &str, mode: u32) -> Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let parent_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)
+        .with_context(|| format!("opening workspace directory {}", parent.display()))?;
 
+    open_private_child_dir_at(&parent_file, name, mode, parent)
+}
+
+#[cfg(unix)]
+fn open_private_child_dir_at(
+    parent: &std::fs::File,
+    name: &str,
+    mode: u32,
+    display_parent: &Path,
+) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::PermissionsExt;
+
+    let name = CString::new(name).map_err(|_| anyhow::anyhow!("directory name contains NUL"))?;
+    let mkdir_result =
+        unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) };
+    let created = if mkdir_result == 0 {
+        true
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error).with_context(|| {
+                format!(
+                    "creating {}",
+                    display_parent
+                        .join(name.to_string_lossy().as_ref())
+                        .display()
+                )
+            });
+        }
+        false
+    };
+
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd == -1 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "opening {} without following links",
+                display_parent
+                    .join(name.to_string_lossy().as_ref())
+                    .display()
+            )
+        });
+    }
+
+    let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    if created {
+        directory
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| {
+                format!(
+                    "restricting {}",
+                    display_parent
+                        .join(name.to_string_lossy().as_ref())
+                        .display()
+                )
+            })?;
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn ignore_in_git(directory: &std::fs::File) {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let name = CString::new(".gitignore").expect("static file name");
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd == -1 {
+        return;
+    }
+
+    let mut marker = unsafe { std::fs::File::from_raw_fd(fd) };
+    let _ = marker.write_all(b"*\n").and_then(|()| marker.sync_all());
+}
+
+#[cfg(unix)]
+fn write_private_at(directory: &std::fs::File, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let name = CString::new(name).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "file name contains NUL")
+    })?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(bytes)?;
     file.sync_all()
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-
-    file.write_all(bytes)?;
-    file.sync_all()
+fn open_private_child_dir(_parent: &Path, _name: &str, _mode: u32) -> Result<std::fs::File> {
+    bail!("clipboard image persistence requires a Unix filesystem")
 }
 
 /// A scratch path for a [`Sink::File`] reader, in this process's own temporary directory.
@@ -464,6 +652,25 @@ mod tests {
     }
 
     #[test]
+    fn a_stdout_reader_and_its_background_child_obey_the_wall_time_bound() {
+        let reader = shell("sleep 30 & wait");
+        let started = std::time::Instant::now();
+        let error = run_with_timeout(
+            &reader,
+            &scratch_path("test-timeout"),
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("a timeout");
+
+        assert!(error.to_string().contains("did not finish"), "{error:#}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "clipboard timeout took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn an_image_is_written_private_and_named_relative_to_the_workspace() {
         let workspace = std::env::temp_dir().join(format!("ouro-clip-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&workspace);
@@ -505,6 +712,27 @@ mod tests {
             std::fs::read_to_string(workspace.join(".ouroboros/.gitignore")).unwrap(),
             "images/\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_symlink_cannot_redirect_clipboard_writes() {
+        let root = std::env::temp_dir().join(format!("ouro-clip-link-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join(".ouroboros")).unwrap();
+
+        let error = write_image(&workspace, "01LINK", PNG).expect_err("a symlink refusal");
+        assert!(
+            error.to_string().contains("without following links"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

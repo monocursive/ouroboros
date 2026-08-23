@@ -9,10 +9,11 @@ defmodule Ouroboros.Workspace.Worktree do
 
   ## Never a shell string
 
-  Every `git` invocation is an argv **list** passed to `System.cmd/3`. There is no
-  interpolation into a command line anywhere in this module, so a session id or a
-  workspace path containing `;`, `$(…)`, a newline, or a leading `-` is an argument and
-  cannot become a command. `test/workspace_worktree_test.exs` asserts the exact argv list
+  Every `git` invocation is an argv **list** passed to
+  `Ouroboros.Provider.Native.Exec`. There is no interpolation into a command line, so a
+  session id or workspace path containing `;`, `$(…)`, a newline, or a leading `-` is an
+  argument and cannot become a command. The runner also bounds output, wall time, and the
+  whole process group. `test/workspace_worktree_test.exs` asserts the exact argv list
   through an injectable runner, which is the only way that claim stays true after
   somebody edits this file. `git` itself is found on `PATH` and refused by name when it
   is absent, rather than being assumed.
@@ -39,12 +40,15 @@ defmodule Ouroboros.Workspace.Worktree do
   """
 
   alias Ouroboros.Workspace.Path, as: WorkspacePath
+  alias Ouroboros.Provider.Native.Exec
 
   require Logger
 
   @marker "created.json"
   @marker_version 1
   @max_entries 500
+  @git_timeout_ms 120_000
+  @max_git_timeout_ms 600_000
   @session_id_regex ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
 
   @typedoc "One provisioned worktree."
@@ -80,7 +84,7 @@ defmodule Ouroboros.Workspace.Worktree do
   """
   @spec create(String.t(), String.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def create(workspace, session_id, opts \\ []) do
-    runner = Keyword.get(opts, :runner, &run_git/2)
+    runner = runner(opts)
 
     with :ok <- validate_session_id(session_id),
          :ok <- ensure_git(not Keyword.has_key?(opts, :runner)),
@@ -107,8 +111,14 @@ defmodule Ouroboros.Workspace.Worktree do
         node: Atom.to_string(node())
       }
 
-      _ = record(worktree, opts)
-      {:ok, worktree}
+      case record(worktree, opts) do
+        :ok ->
+          {:ok, worktree}
+
+        {:error, reason} ->
+          cleanup = cleanup_unrecorded(runner, canonical, toplevel)
+          {:error, {:worktree_unrecorded, canonical, reason, cleanup}}
+      end
     end
   end
 
@@ -165,7 +175,13 @@ defmodule Ouroboros.Workspace.Worktree do
     do: :not_applicable
 
   def retire(%{worktree: %{"path" => path} = worktree} = record, opts) do
-    case remove(path, opts) do
+    target =
+      case Map.get(worktree, "repository") do
+        repository when is_binary(repository) -> %{path: path, repository: repository}
+        _missing -> path
+      end
+
+    case remove(target, opts) do
       {:ok, :removed} ->
         {:ok, %{record | worktree: Map.put(worktree, "retired", "removed")}, :removed}
 
@@ -223,7 +239,7 @@ defmodule Ouroboros.Workspace.Worktree do
   end
 
   def remove(%{path: path} = worktree, opts) do
-    runner = Keyword.get(opts, :runner, &run_git/2)
+    runner = runner(opts)
 
     cond do
       not File.dir?(path) ->
@@ -430,15 +446,38 @@ defmodule Ouroboros.Workspace.Worktree do
     end
   end
 
-  # The one place a real `git` is spawned. `System.cmd/3` takes an argv list and never a
-  # shell, so nothing below can be interpreted as a command.
-  defp run_git(args, cwd) when is_list(args) and is_binary(cwd) do
-    case System.cmd("git", args, cd: cwd, stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, {status, output}}
+  # The one place a real `git` is spawned. `Exec.run/3` preserves argv boundaries,
+  # bounds output and time, and reaps the whole process group on expiry.
+  defp run_git(args, cwd, timeout_ms) when is_list(args) and is_binary(cwd) do
+    case Exec.run("git", args, cd: cwd, timeout_ms: timeout_ms) do
+      {:ok, %{timed_out?: true, output: output}} ->
+        {:error, {124, "git timed out after #{timeout_ms} ms\n" <> output}}
+
+      {:ok, %{status: 0, output: output}} ->
+        {:ok, output}
+
+      {:ok, %{status: status, output: output}} ->
+        {:error, {status, output}}
+
+      {:error, reason} ->
+        {:error, {127, "git unavailable: #{inspect(reason)}"}}
     end
-  rescue
-    error -> {:error, {:git_unavailable, Exception.message(error)}}
+  end
+
+  defp runner(opts) do
+    case Keyword.get(opts, :runner) do
+      runner when is_function(runner, 2) ->
+        runner
+
+      _default ->
+        timeout =
+          case Keyword.get(opts, :git_timeout_ms, @git_timeout_ms) do
+            value when is_integer(value) and value > 0 -> min(value, @max_git_timeout_ms)
+            _invalid -> @git_timeout_ms
+          end
+
+        fn args, cwd -> run_git(args, cwd, timeout) end
+    end
   end
 
   # ---------------------------------------------------------------- paths
@@ -519,36 +558,101 @@ defmodule Ouroboros.Workspace.Worktree do
     end)
   end
 
+  defp cleanup_unrecorded(runner, path, repository) do
+    case runner.(["worktree", "remove", path], repository) do
+      {:ok, _output} -> :removed
+      {:error, reason} -> {:retained, reason}
+    end
+  rescue
+    error -> {:retained, {:cleanup_failed, Exception.message(error)}}
+  catch
+    kind, reason -> {:retained, {:cleanup_failed, kind, reason}}
+  end
+
   defp forget(path, opts) do
     update_marker(opts, fn entries -> Enum.reject(entries, &(&1.path == path)) end)
   end
 
-  # Read-modify-write under a write to a temporary file and a rename, so a crash leaves
-  # the previous marker rather than half of a new one. This is node-local bookkeeping,
-  # not a lease: `Ouroboros.Workspace` is still the only authority on who may use a
-  # directory, and a marker that disagreed with it would not widen anything.
+  # The marker is a recoverable index shared by every session owner on this node.
+  # `:global.trans` serializes the read-modify-write boundary; without it concurrent
+  # creates each read the same old list and the last rename silently drops the others.
   defp update_marker(opts, fun) do
     path = marker_path(opts)
-    entries = fun.(read_marker(path))
 
-    payload = %{
-      "version" => @marker_version,
-      "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "worktrees" => Enum.map(entries, &encode/1)
-    }
+    case :global.trans(
+           {{__MODULE__, path}, self()},
+           fn -> write_marker(path, fun) end,
+           [node()],
+           20
+         ) do
+      :aborted ->
+        {:error, :worktree_marker_lock_unavailable}
 
+      result ->
+        result
+    end
+  end
+
+  defp write_marker(path, fun) do
     with :ok <- File.mkdir_p(Elixir.Path.dirname(path)),
-         {:ok, json} <- encode_json(payload),
-         temporary =
-           path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
-         :ok <- File.write(temporary, json, [:binary, :sync]),
-         :ok <- File.chmod(temporary, 0o600),
-         :ok <- File.rename(temporary, path) do
-      :ok
+         {:ok, current} <- read_marker_for_update(path),
+         entries = fun.(current),
+         {:ok, json} <-
+           encode_json(%{
+             "version" => @marker_version,
+             "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+             "worktrees" => Enum.map(entries, &encode/1)
+           }) do
+      temporary =
+        path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+      try do
+        with :ok <- File.write(temporary, "", [:exclusive, :sync]),
+             :ok <- File.chmod(temporary, 0o600),
+             :ok <- File.write(temporary, json, [:binary, :sync]),
+             :ok <- File.rename(temporary, path),
+             :ok <- sync_directory(Elixir.Path.dirname(path)) do
+          :ok
+        end
+      after
+        _ = File.rm(temporary)
+      end
     else
       {:error, reason} ->
         Logger.warning("worktree marker write failed: #{inspect(reason)}")
         {:error, {:worktree_marker_write_failed, reason}}
+    end
+  end
+
+  defp read_marker_for_update(path) do
+    case File.read(path) do
+      {:error, :enoent} ->
+        {:ok, []}
+
+      {:ok, json} ->
+        case decode_json(json) do
+          {:ok, %{"version" => @marker_version, "worktrees" => list}} when is_list(list) ->
+            {:ok, Enum.flat_map(list, &decode/1)}
+
+          _invalid ->
+            {:error, :worktree_marker_corrupt}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp sync_directory(directory) do
+    with {:ok, device} <- :file.open(String.to_charlist(directory), [:read, :raw, :directory]) do
+      result = :file.sync(device)
+      close = :file.close(device)
+
+      case {result, close} do
+        {:ok, :ok} -> :ok
+        {{:error, reason}, _} -> {:error, {:directory_sync_failed, reason}}
+        {:ok, {:error, reason}} -> {:error, {:directory_close_failed, reason}}
+      end
     end
   end
 

@@ -3,8 +3,13 @@ defmodule Ouroboros.Storage.DurableFile do
   A Jido storage adapter whose checkpoint commits are durable before success.
 
   Checkpoints are serialized to an exclusive temporary file, synced, atomically
-  renamed over the checkpoint, and followed by a parent-directory sync. Thread
-  operations fail closed because this adapter is intentionally limited to
+  renamed over the checkpoint, and followed by a parent-directory sync. A failure
+  before rename is an ordinary error and leaves the old checkpoint standing. A failure
+  after rename is `{:error, {:commit_outcome_unknown, reason}}`: the new inode is visible,
+  but the directory entry was not proven durable. Callers must reconcile that outcome,
+  never report it as a definite refusal while continuing with old in-memory state.
+
+  Thread operations fail closed because this adapter is intentionally limited to
   Ouroboros mutation journals, which use checkpoint operations only.
 
   `:durability_hook` is a deterministic fault-observation seam for tests. A hook
@@ -44,10 +49,20 @@ defmodule Ouroboros.Storage.DurableFile do
   @impl true
   def delete_checkpoint(key, opts) do
     with {:ok, path} <- checkpoint_path(key, opts),
-         :ok <- hook(opts, :before_delete),
-         :ok <- remove_if_present(path),
-         :ok <- sync_directory(Path.dirname(path), opts) do
-      :ok
+         :ok <- hook(opts, :before_delete) do
+      case remove_if_present(path) do
+        {:ok, false} ->
+          :ok
+
+        {:ok, true} ->
+          case sync_directory(Path.dirname(path), opts) do
+            :ok -> :ok
+            {:error, reason} -> {:error, {:commit_outcome_unknown, reason}}
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   rescue
     error -> {:error, error}
@@ -77,12 +92,24 @@ defmodule Ouroboros.Storage.DurableFile do
       end
 
     result =
-      with :ok <- precommit,
-           :ok <- hook(opts, :before_rename),
-           :ok <- File.rename(temporary, path),
-           :ok <- hook(opts, :before_directory_sync),
-           :ok <- sync_directory(Path.dirname(path), opts) do
-        :ok
+      case precommit do
+        :ok ->
+          with :ok <- hook(opts, :before_rename),
+               :ok <- File.rename(temporary, path) do
+            directory_result =
+              with :ok <- hook(opts, :before_directory_sync),
+                   :ok <- sync_directory(Path.dirname(path), opts) do
+                :ok
+              end
+
+            case directory_result do
+              :ok -> :ok
+              {:error, reason} -> {:error, {:commit_outcome_unknown, reason}}
+            end
+          end
+
+        {:error, _reason} = error ->
+          error
       end
 
     if precommit != :ok do
@@ -144,8 +171,8 @@ defmodule Ouroboros.Storage.DurableFile do
 
   defp remove_if_present(path) do
     case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
+      :ok -> {:ok, true}
+      {:error, :enoent} -> {:ok, false}
       {:error, reason} -> {:error, reason}
     end
   end

@@ -491,6 +491,24 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "timed out after 300 ms"
     end
 
+    test "a timeout reaps ordinary background descendants", %{context: context} do
+      pid_file = Path.join(context.scope.root, "background.pid")
+      command = "sleep 30 & child=$!; echo \"$child\" > background.pid; wait"
+
+      result =
+        run(
+          Ouroboros.Provider.Native.Tools.Bash,
+          %{"command" => command, "timeout_ms" => 300},
+          context,
+          30_000
+        )
+
+      assert result.is_error
+      {pid, ""} = pid_file |> File.read!() |> String.trim() |> Integer.parse()
+      {_output, status} = System.cmd("/bin/kill", ["-0", Integer.to_string(pid)])
+      assert status != 0, "background descendant #{pid} survived the command deadline"
+    end
+
     test "spills a large output to a private file and returns its path", %{context: context} do
       result =
         run(

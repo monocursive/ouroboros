@@ -776,11 +776,11 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
 /// on two sides — [`QUEUE_ROWS`] rows at most, and never on a terminal so short that the
 /// conversation would lose its last lines to it.
 fn queue_panel_height(app: &App, area: Rect, plan_height: u16) -> u16 {
-    if !app
+    if app
         .sessions
         .open
         .as_ref()
-        .is_some_and(|(plane, _id)| *plane == Plane::Interactive)
+        .is_none_or(|(plane, _id)| *plane != Plane::Interactive)
     {
         return 0;
     }
@@ -1765,12 +1765,7 @@ fn push_working_indicator(lines: &mut Vec<Line<'static>>, tick: u64, message: &s
 }
 
 fn separate(lines: &mut Vec<Line<'static>>) {
-    if !lines.is_empty()
-        && !lines
-            .last()
-            .map(Line::width)
-            .is_some_and(|width| width == 0)
-    {
+    if !lines.is_empty() && lines.last().map(Line::width).is_none_or(|width| width != 0) {
         lines.push(Line::from(""));
     }
 }

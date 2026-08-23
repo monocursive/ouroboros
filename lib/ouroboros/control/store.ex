@@ -118,9 +118,17 @@ defmodule Ouroboros.Control.Store do
 
   defp persist(runs, state) do
     case state.adapter.put_checkpoint(state.key, runs, state.opts) do
-      :ok -> {:reply, :ok, %{state | runs: runs}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      other -> {:reply, {:error, {:invalid_storage_response, other}}, state}
+      :ok ->
+        {:reply, :ok, %{state | runs: runs}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_storage_response, other}}, state}
     end
   end
 

@@ -195,9 +195,17 @@ defmodule Ouroboros.Coding.Store do
 
   defp persist_tasks(tasks, reply, state) do
     case adapter_call(state.adapter, :put_checkpoint, [@store_key, tasks, state.opts]) do
-      :ok -> {:reply, reply, %{state | tasks: tasks}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      other -> {:reply, {:error, {:invalid_storage_response, other}}, state}
+      :ok ->
+        {:reply, reply, %{state | tasks: tasks}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_storage_response, other}}, state}
     end
   end
 

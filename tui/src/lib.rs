@@ -1,11 +1,10 @@
 //! The `ouro` client, as a library so the binary and the tests speak to it the same way.
 //!
-//! Slice 3a is plumbing: a transport that speaks `Ouroboros.Gateway`'s line protocol, a
-//! process supervisor that can start a runtime and find one it already started, and the
-//! tolerant wire types both need. There is no terminal UI here — Slice 3b adds it on top
-//! of exactly these modules, and the seams it will need (the reconnect hook, the bounded
-//! log ring, the notification channel) exist and are exercised now so that adding a UI
-//! does not move them.
+//! The library half of the `ouro` product: runtime discovery and supervision, the bounded
+//! gateway transport and tolerant wire model, the Ratatui application, headless and ACP
+//! modes, fleet lifecycle, signed updates, MCP bridging, and the CLI surfaces that compose
+//! them. Keeping these modules in the library lets integration tests drive the same code
+//! the binary dispatches.
 
 pub mod acp_serve;
 pub mod agents;

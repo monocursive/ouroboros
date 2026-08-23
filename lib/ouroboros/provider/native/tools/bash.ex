@@ -64,6 +64,7 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       ]
     ]
 
+  alias Ouroboros.Provider.Native.Exec
   alias Ouroboros.Provider.Native.Sandbox
 
   @max_timeout_ms 600_000
@@ -76,12 +77,11 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
   @impl true
   def run(params, context) do
-    with {:ok, wrapper} <- wrapper(),
-         {:ok, plan} <- plan(params.command, context.scope) do
+    with {:ok, plan} <- plan(params.command, context.scope) do
       timeout = min(params.timeout_ms, @max_timeout_ms)
 
       try do
-        finish(execute(wrapper, plan, context.scope.root, timeout), plan, context, timeout)
+        finish(execute(plan, context.scope.root, timeout), plan, context, timeout)
       after
         Sandbox.release(plan.scratch)
       end
@@ -187,93 +187,26 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
   # ------------------------------------------------------------------ execution
 
-  defp wrapper do
-    with directory when is_list(directory) <- :code.priv_dir(:ouroboros),
-         path = directory |> List.to_string() |> Path.join("provider-exec"),
-         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
-         true <- Bitwise.band(mode, 0o111) != 0 do
-      {:ok, path}
-    else
-      failure -> {:error, {:wrapper_unavailable, failure}}
-    end
-  end
+  defp execute(plan, cwd, timeout_ms) do
+    case Exec.run(plan.executable, plan.args,
+           cd: cwd,
+           env: plan.env,
+           timeout_ms: timeout_ms,
+           max_bytes: @max_captured_bytes
+         ) do
+      {:ok, result} ->
+        output =
+          if result.truncated? do
+            result.output <>
+              "\n[command output truncated at #{@max_captured_bytes} bytes]\n"
+          else
+            result.output
+          end
 
-  defp execute(wrapper, plan, cwd, timeout_ms) do
-    port =
-      Port.open(
-        {:spawn_executable, String.to_charlist(wrapper)},
-        [
-          :binary,
-          :exit_status,
-          :use_stdio,
-          :stderr_to_stdout,
-          :hide,
-          {:args, Enum.map([plan.executable | plan.args], &String.to_charlist/1)},
-          {:cd, String.to_charlist(cwd)}
-        ] ++ env_option(plan.env)
-      )
+        {:ok, output, result.status, result.timed_out?}
 
-    os_pid =
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} -> pid
-        _gone -> nil
-      end
-
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-
-    case collect(port, [], 0, deadline) do
-      {:ok, output, status} ->
-        {:ok, output, status, false}
-
-      :timeout ->
-        # TERM first so a shell can run its own traps, then close the port, which is
-        # what actually reaps the direct child. A process the command detached from its
-        # own group can outlive this; that limit is stated in the README rather than
-        # pretended away. `sandbox-exec` execs the shell in place rather than forking
-        # it, so this still reaches the shell rather than a wrapper around it.
-        if os_pid,
-          do:
-            System.cmd("/bin/kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
-
-        drained = drain(port, [], System.monotonic_time(:millisecond) + 500)
-        if Port.info(port), do: Port.close(port)
-        {:ok, drained, 124, true}
-    end
-  rescue
-    error -> {:error, {:spawn_failed, Exception.message(error)}}
-  end
-
-  defp env_option([]), do: []
-
-  defp env_option(pairs),
-    do: [{:env, Enum.map(pairs, fn {n, v} -> {String.to_charlist(n), String.to_charlist(v)} end)}]
-
-  defp collect(port, acc, size, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^port, {:data, data}} ->
-        if size >= @max_captured_bytes do
-          collect(port, acc, size, deadline)
-        else
-          collect(port, [acc, data], size + byte_size(data), deadline)
-        end
-
-      {^port, {:exit_status, status}} ->
-        {:ok, IO.iodata_to_binary(acc), status}
-    after
-      remaining -> :timeout
-    end
-  end
-
-  defp drain(port, acc, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^port, {:data, data}} -> drain(port, [acc, data], deadline)
-      {^port, {:exit_status, _status}} -> IO.iodata_to_binary(acc)
-    after
-      remaining -> IO.iodata_to_binary(acc)
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

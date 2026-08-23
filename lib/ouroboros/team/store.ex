@@ -159,9 +159,17 @@ defmodule Ouroboros.Team.Store do
     teams = Map.put(state.teams, snapshot.id, snapshot)
 
     case adapter_call(state.adapter, :put_checkpoint, [@store_key, teams, state.opts]) do
-      :ok -> {:reply, :ok, %{state | teams: teams}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      other -> {:reply, {:error, {:invalid_team_storage_response, other}}, state}
+      :ok ->
+        {:reply, :ok, %{state | teams: teams}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_team_storage_response, other}}, state}
     end
   end
 

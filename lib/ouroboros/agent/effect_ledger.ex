@@ -865,11 +865,17 @@ defmodule Ouroboros.Agent.EffectLedger do
   end
 
   defp checkpoint(adapter, opts, checkpoint) do
-    adapter_call(adapter, :put_checkpoint, [
-      @store_key,
-      Map.put(checkpoint, :version, @checkpoint_version),
-      opts
-    ])
+    result =
+      adapter_call(adapter, :put_checkpoint, [
+        @store_key,
+        Map.put(checkpoint, :version, @checkpoint_version),
+        opts
+      ])
+
+    case result do
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
+      other -> other
+    end
   end
 
   defp load(adapter, adapter_opts) do

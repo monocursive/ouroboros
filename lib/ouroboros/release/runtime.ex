@@ -506,7 +506,10 @@ defmodule Ouroboros.Release.Runtime do
   defp persist_if_changed(storage, journal), do: persist_journal(storage, journal)
 
   defp persist_journal({adapter, opts}, journal) do
-    adapter.put_checkpoint(@checkpoint_key, journal, opts)
+    case adapter.put_checkpoint(@checkpoint_key, journal, opts) do
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
+      other -> other
+    end
   rescue
     error -> {:error, error}
   end

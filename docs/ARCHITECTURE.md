@@ -219,8 +219,8 @@ Because the loop is here, three things are possible that are structurally imposs
 a managed transport: a tool call can be blocked on a human approval before it runs, a
 steered message can be delivered between two tool calls of a running turn, and an
 interrupt can stop the turn after the current tool rather than by killing a process. It
-is therefore where LSP, hooks, permission rules, compaction, and file checkpoints attach
-natively — all of which have landed. MCP attaches at the same seam and does not exist yet.
+is therefore where LSP, hooks, permission rules, compaction, file checkpoints, and MCP
+attach natively — all of which have landed.
 
 - `Ouroboros.Provider.Native.Loop` drives one turn. It runs in a task so the session
   process stays answerable, emits through a function, and takes control on its mailbox.
@@ -236,9 +236,9 @@ natively — all of which have landed. MCP attaches at the same seam and does no
   `Ouroboros.Provider.Native.Paths`, which builds on `Ouroboros.Workspace.Path` and adds
   the case a tool loop needs: a file that does not exist yet, resolved through the deepest
   ancestor that does, so a write through a symlinked parent is judged by where that parent
-  really points. `Ouroboros.Provider.Native.Exec` is the bounded child-process runner
-  every non-shell tool shares: argv with no shell for `grep`, and `/bin/sh -c` with stdin
-  and a separated stderr for hooks and `[checks]`.
+  really points. `Ouroboros.Provider.Native.Exec` is the shared bounded process-group
+  runner: argv with no shell for `grep` and Git, `/bin/sh -c` with separated stderr for
+  hooks and `[checks]`, and the same group deadline beneath the native `bash` tool.
 - `Ouroboros.Provider.Native.Session` is the transport. It writes the conversation to
   `Ouroboros.Provider.Native.Checkpoint` — content-addressed, `0600`, atomic — *before*
   the terminal turn event reaches the owner, the same checkpoint-before-broadcast rule
@@ -280,11 +280,11 @@ natively — all of which have landed. MCP attaches at the same seam and does no
 
 `Ouroboros.Provider.Native.Hooks` reads `ouroboros.toml` in the workspace and
 `~/.config/ouroboros/hooks.toml` for the user, and speaks the JSON contract Claude Code,
-Codex, Gemini and Factory converged on. Project hooks and `[checks]` require workspace
-trust — `config :ouroboros, :trusted_workspaces` or a `.ouroboros/trusted` marker — because
-a repository that ships hooks is a repository that runs commands on every machine that
-clones it. `.ouroboros` is in `Ouroboros.Control.Permissions.Rules`' protected-segment
-list, so the agent's own tools cannot create that marker.
+Codex, Gemini and Factory converged on. Project hooks and `[checks]` require the canonical
+workspace root in `config :ouroboros, :trusted_workspaces`, because a repository that
+ships hooks is a repository that runs commands on every machine that clones it. Trust is
+held outside workspace contents; neither a native file tool nor an unsandboxed shell can
+make the repository authorize itself.
 
 `PreToolUse` hooks run **after** the permission engine and only when it did not deny. A
 hook therefore cannot allow what a rule denied — not by convention but by construction,
@@ -679,15 +679,13 @@ generation.
 every server is gone, every document is closed, and the next acquire spawns fresh; the
 only durable truth is the files on disk.
 
-What is **not** done in this slice: diagnostics are never fed back into a session — no
-edit result carries them, no transcript shows them, and no `PostToolUse` bridge exists
-(E2). The nine navigation operations are reachable from Elixir but are not exposed to any
-model as a tool, natively or over MCP (E3). There is no gateway method; `status/0` is
-shaped so `runtime.lsp.status` can be a one-line wrapper when the method surface is
-free. There is no installer — `ouro lsp install` is a later slice, and until it exists an
-absent server is an install hint and nothing more. There is no rename, no code actions,
-no formatting, and no tree-sitter fallback for languages without a server. Language-server
-stderr is inherited by the runtime process rather than captured per server.
+Diagnostics are fed back after native writes under a bounded edited-file policy, and the
+model has one `code_intel` tool for diagnostics, nine navigation operations, rename
+preview, and rename apply. The gateway exposes the same pool for clients, including
+status. What remains absent is an installer — an unavailable server produces an install
+hint and nothing is installed — plus formatting and a tree-sitter fallback for languages
+without a server. Language-server stderr is inherited by the runtime process rather than
+captured per server.
 ### Permission plane
 
 `Ouroboros.Control.Permissions` is the second deny-by-default authority, and it answers a
@@ -754,7 +752,7 @@ patch lane refuses an artifact that would replace the module deciding what code 
 | Ungranted agent requests an effect | Refused as `{:effect_denied, effect, reason}` and recorded; the agent stays alive and nothing reaches the world | Done |
 | Effect signal claims another agent's identity | The principal comes from server-side agent state; the claim is recorded as `claimed_from` and buys nothing | Done |
 | Effect outruns its deadline | The work is killed at `:effect_timeout` and settles as a failure; the agent's process was never blocked | Done |
-| Grant checkpoint write fails | The grant is refused and never applied; a failed revocation leaves the grant standing and reports the error | Operator retry tooling |
+| Grant checkpoint write fails | A pre-rename failure is a definite refusal; a post-rename durability failure is `commit_outcome_unknown` and restarts the authority for reconciliation | Operator reconciliation tooling |
 | Effect authority is unreachable | Every attempt is refused; there is no path that fails open | Replicated policy authority |
 | Language server is absent from PATH | `{:server_unavailable, id, hint}` with the install command; nothing is installed | `ouro lsp install` (E1 follow-on) |
 | Language server crashes | Restarted with backoff up to `max_restarts`, then the key is `:broken` for an hour and every call answers `{:error, :broken}` | Done |
@@ -826,8 +824,8 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - The permission store is node-local and bounded like every other authority here. A
   machine's rules do not replicate, and the bound refuses a new rule rather than evicting
   an existing one — evicting a `deny` to admit an `allow` would be a storage limit that
-  widens authority. A failed rule write leaves the previous state standing in both
-  directions, for the reason revocation does.
+  widens authority. A pre-commit rule-write failure leaves the previous state standing;
+  post-rename ambiguity restarts the authority instead of continuing with divergent memory.
 - Coding requests default to workspace write and prompt approval where the provider can
   enforce it; a provider that cannot is refused at creation rather than silently
   downgraded, and the downgrade has to be typed out (`sandbox_mode: :default`).

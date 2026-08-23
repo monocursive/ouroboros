@@ -232,7 +232,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert ro < bind
     end
 
-    test "binds each writable root read-write and re-binds its .git read-only on top", %{
+    test "re-binds existing and absent protected segments read-only over writable roots", %{
       root: root,
       workspace: workspace
     } do
@@ -260,6 +260,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                "--ro-bind",
                Path.join(workspace, ".git"),
                Path.join(workspace, ".git"),
+               "--ro-bind",
+               scratch,
+               Path.join(workspace, ".ouroboros"),
                "--tmpfs",
                scratch,
                "--unshare-net",

@@ -20,11 +20,10 @@ defmodule Ouroboros.Provider.Native.Mcp.Servers do
   A repository that ships its own `mcp.json` is a repository that runs commands on every
   machine that clones it — exactly the hazard `Ouroboros.Provider.Native.Hooks`
   documents for `ouroboros.toml`. So the workspace file is read through the same gate,
-  `Hooks.trusted?/2`: `config :ouroboros, :trusted_workspaces` naming the canonical
-  root, or a `.ouroboros/trusted` marker an operator wrote. Untrusted is not silent —
-  `load/2` reports `trusted?: false` and how many servers it declined — and it is not
-  self-healing either: `.ouroboros` is a protected segment in the permission engine's
-  rule language, so the agent cannot write its own trust marker.
+  `Hooks.trusted?/2`: `config :ouroboros, :trusted_workspaces` must name the canonical
+  root. Untrusted is not silent — `load/2` reports `trusted?: false` and how many servers
+  it declined. Trust is deliberately held outside the workspace, where neither a native
+  file tool nor an unsandboxed shell can authorize repository commands.
 
   ## What is refused, by name
 

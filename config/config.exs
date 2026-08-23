@@ -1,5 +1,10 @@
 import Config
 
+# Erlexec's port manager refuses to start without SHELL even when every command is an
+# argv list. Service managers and coding harnesses legitimately omit it, so establish the
+# Unix release's portable shell before dependency applications start.
+if System.get_env("SHELL") in [nil, ""], do: System.put_env("SHELL", "/bin/sh")
+
 # Development and test builds can exercise the local upgrade lane without managing a
 # signing key. Production always requires an explicitly trusted signature.
 config :ouroboros,

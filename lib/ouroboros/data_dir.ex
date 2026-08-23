@@ -193,7 +193,8 @@ defmodule Ouroboros.DataDir do
     end
   end
 
-  defp current_uid! do
+  @doc false
+  def current_uid! do
     id = trusted_executable!(@id_paths, "id")
 
     case trusted_command(id, ["-u"]) do

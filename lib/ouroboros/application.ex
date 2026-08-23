@@ -75,26 +75,16 @@ defmodule Ouroboros.Application do
     # An unrecognized role raises here rather than booting the privileged tree.
     role = Ouroboros.Cluster.boot_role!()
 
-    case Supervisor.start_link(children(role),
-           strategy: :rest_for_one,
-           name: Ouroboros.Supervisor
-         ) do
-      {:ok, pid} ->
-        reconcile_worktrees(role)
-        {:ok, pid}
-
-      other ->
-        other
-    end
+    Supervisor.start_link(children(role),
+      strategy: :rest_for_one,
+      name: Ouroboros.Supervisor
+    )
   end
 
-  # D7's recoverable half. A crash or a power cut leaves worktrees this runtime created
-  # and never removed; the marker under the worktree root is what makes them findable
-  # afterwards. Clean ones go, dirty ones are reported and left exactly where they are —
-  # this is the boot path, and a boot that deleted somebody's uncommitted work to tidy up
-  # would be the worst bug in the tree. Never fatal: a reconcile that cannot run leaves
-  # strays, which is a mess, not an outage.
-  defp reconcile_worktrees(:core) do
+  # D7's recoverable half runs as a supervised one-shot task after the workspace manager
+  # starts. Boot never waits on Git or on a slow filesystem; a manager restart reruns the
+  # task through the `rest_for_one` chain.
+  defp reconcile_worktrees do
     if Application.get_env(:ouroboros, :workspace_allowed_roots, []) != [] do
       report = Ouroboros.Workspace.Worktree.reconcile()
 
@@ -109,8 +99,6 @@ defmodule Ouroboros.Application do
   rescue
     error -> Logger.warning("worktree reconcile failed: #{Exception.message(error)}")
   end
-
-  defp reconcile_worktrees(_role), do: :ok
 
   defp retained([]), do: ""
 
@@ -282,8 +270,18 @@ defmodule Ouroboros.Application do
 
   defp workspace_children do
     case Application.get_env(:ouroboros, :workspace_allowed_roots, []) do
-      [_ | _] -> [{Ouroboros.Workspace, recover_reservations: true}]
-      [] -> []
+      [_ | _] ->
+        [
+          {Ouroboros.Workspace, recover_reservations: true},
+          %{
+            id: Ouroboros.Workspace.Worktree.Reconciler,
+            start: {Task, :start_link, [fn -> reconcile_worktrees() end]},
+            restart: :temporary
+          }
+        ]
+
+      [] ->
+        []
     end
   end
 

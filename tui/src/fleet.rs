@@ -4961,22 +4961,44 @@ fn clean_failed_epmd_child(child: &mut Child, lock_path: &Path) -> Result<()> {
             .context("stopping an EPMD child whose ownership could not be established")?;
         let _ = child.wait();
     }
-    remove_unlocked_epmd_lock(lock_path)
+
+    let deadline = Instant::now() + EPMD_STOP_DEADLINE;
+    loop {
+        match try_remove_unlocked_epmd_lock(lock_path)? {
+            true => return Ok(()),
+            false if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            false => {
+                bail!(
+                    "{} remains held after the EPMD child was stopped; refusing to remove it",
+                    lock_path.display()
+                )
+            }
+        }
+    }
 }
 
 fn remove_unlocked_epmd_lock(path: &Path) -> Result<()> {
-    if !path.try_exists()? {
-        return Ok(());
-    }
-    let file = open_epmd_lock(path)?;
-    if !try_lock_epmd_file(&file)? {
+    if try_remove_unlocked_epmd_lock(path)? {
+        Ok(())
+    } else {
         bail!(
             "{} remains held after the EPMD child was stopped; refusing to remove it",
             path.display()
-        );
+        )
+    }
+}
+
+fn try_remove_unlocked_epmd_lock(path: &Path) -> Result<bool> {
+    if !path.try_exists()? {
+        return Ok(true);
+    }
+    let file = open_epmd_lock(path)?;
+    if !try_lock_epmd_file(&file)? {
+        return Ok(false);
     }
     fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
-    sync_parent(path)
+    sync_parent(path)?;
+    Ok(true)
 }
 
 fn load_epmd_owner(data_dir: &Path) -> Result<Option<EpmdOwner>> {

@@ -504,6 +504,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   defp checkpoint(journal, state) do
     case adapter_call(state.adapter, :put_checkpoint, [@store_key, journal, state.opts]) do
       :ok -> :ok
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
       {:error, reason} -> {:error, reason}
       other -> {:error, {:invalid_signing_storage_response, describe(other)}}
     end

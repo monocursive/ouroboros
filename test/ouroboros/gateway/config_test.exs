@@ -107,6 +107,35 @@ defmodule Ouroboros.Gateway.ConfigTest do
         Config.new!(token_file: path, token_generate: false, data_dir: "/tmp/x")
       end
     end
+
+    @tag :tmp_dir
+    test "token files must be private regular stable files", %{tmp_dir: tmp_dir} do
+      exposed = Path.join(tmp_dir, "exposed.token")
+      File.write!(exposed, String.duplicate("x", 32))
+      File.chmod!(exposed, 0o644)
+
+      assert_raise ArgumentError, ~r/must have mode 0600/, fn ->
+        Config.new!(token_file: exposed, data_dir: tmp_dir)
+      end
+
+      target = Path.join(tmp_dir, "target.token")
+      File.write!(target, String.duplicate("y", 32))
+      File.chmod!(target, 0o600)
+      link = Path.join(tmp_dir, "linked.token")
+      File.ln_s!(target, link)
+
+      assert_raise ArgumentError, ~r/must be a regular file/, fn ->
+        Config.new!(token_file: link, data_dir: tmp_dir)
+      end
+
+      oversized = Path.join(tmp_dir, "oversized.token")
+      File.write!(oversized, String.duplicate("z", 4_097))
+      File.chmod!(oversized, 0o600)
+
+      assert_raise ArgumentError, ~r/exceeds 4096 bytes/, fn ->
+        Config.new!(token_file: oversized, data_dir: tmp_dir)
+      end
+    end
   end
 
   describe "generating a token" do
@@ -145,6 +174,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
       path = Path.join(tmp_dir, "gateway.token")
       existing = String.duplicate("e", 48)
       File.write!(path, existing <> "\n")
+      File.chmod!(path, 0o600)
 
       config = Config.new!(token_file: path, token_generate: true, data_dir: tmp_dir)
 
@@ -213,6 +243,7 @@ defmodule Ouroboros.Gateway.ConfigTest do
     test "a token file wins over the environment token and is trimmed" do
       path = Path.join(System.tmp_dir!(), "ouroboros-gateway-token-#{System.unique_integer()}")
       File.write!(path, "  " <> String.duplicate("f", 40) <> "\n")
+      File.chmod!(path, 0o600)
       on_exit(fn -> File.rm(path) end)
 
       config = Config.new!(token_file: path, token: @token, data_dir: "/tmp/x")

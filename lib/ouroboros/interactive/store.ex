@@ -172,9 +172,17 @@ defmodule Ouroboros.Interactive.Store do
 
   defp persist(sessions, state, reply \\ :ok) do
     case adapter_call(state.adapter, :put_checkpoint, [state.key, sessions, state.opts]) do
-      :ok -> {:reply, reply, %{state | sessions: sessions}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      other -> {:reply, {:error, {:invalid_storage_response, other}}, state}
+      :ok ->
+        {:reply, reply, %{state | sessions: sessions}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_storage_response, other}}, state}
     end
   end
 
