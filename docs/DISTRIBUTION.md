@@ -262,7 +262,7 @@ disagreeing with the disk and the next `upgrade` silently reverts yours.
 
 ## 7. What is tested, and what is not
 
-**Tested** (`cargo test`, `sh scripts/test-install.sh`, `sh scripts/check-release-workflow.sh`):
+**Tested** (`cargo test` in `tui/`, and `make dist-check` for the two shell suites):
 
 - 27 unit tests in `tui/src/update.rs`: SemVer ordering including pre-releases, triple
   detection for platforms this run is not on, the `sha256sum` parser (both spellings,
@@ -275,7 +275,11 @@ disagreeing with the disk and the next `upgrade` silently reverts yours.
   asserting the installed binary is byte-identical afterwards and no staged file survived.
   The signing side is re-implemented there from the format rather than shared with the
   verifier, so a mistake in one does not cancel out in the other.
-- 18 shell assertions for `install.sh`, and 54 structural checks on `release.yml`.
+- 18 shell assertions for `install.sh`, and 54 structural checks on `release.yml`. Both
+  run under `make dist-check`, which is deliberately not part of `make test`: the
+  workflow check needs a YAML parser (python3 with PyYAML, or ruby), and a release whose
+  four native runners fail because one of them lacks PyYAML is worse than a check
+  somebody has to type.
 
 **Not tested, and it needs CI or network to be:**
 
