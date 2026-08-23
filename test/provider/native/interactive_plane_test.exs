@@ -122,4 +122,105 @@ defmodule Ouroboros.Provider.Native.InteractivePlaneTest do
     assert {:ok, info} = InteractiveSession.info(session)
     assert info.provider == :native
   end
+
+  # G3's acceptance claim at the level a client actually sees it: a subagent needs no
+  # plane change at all. The parent is an ordinary interactive session, the child never
+  # becomes a second one, and everything a client would draw a child row from is in the
+  # parent's own replayed event stream.
+  test "a subagent's whole round trip is in the parent session's replayed events",
+       context do
+    {child_spec, _child} =
+      NativeModelScript.start([
+        [{:tool_call, %{id: "r1", name: "read", input: %{"path" => "lib/a.ex"}}}],
+        [
+          {:text, "A defines x/0 and returns 1."},
+          {:usage, %{input_tokens: 61, output_tokens: 12}},
+          {:finish, :stop}
+        ]
+      ])
+
+    {parent_spec, _parent} =
+      NativeModelScript.start([
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "agent",
+             input: %{
+               "prompt" => "summarise lib/a.ex",
+               "description" => "read a.ex",
+               "tools" => ["read"]
+             }
+           }}
+        ],
+        [
+          {:text, "The child says A defines x/0."},
+          {:usage, %{input_tokens: 20, output_tokens: 6}},
+          {:finish, :stop}
+        ]
+      ])
+
+    assert {:ok, session} =
+             InteractiveSession.start(
+               id: "native-subagent-#{System.unique_integer([:positive])}",
+               provider: :native,
+               workspace: context.workspace,
+               model: parent_spec,
+               approval_mode: :auto_approve,
+               provider_options: %{"subagent_model" => child_spec}
+             )
+
+    on_exit(fn -> InteractiveSession.close(session) end)
+
+    assert {:ok, _turn} =
+             InteractiveSession.send_message(session, "summarise lib/a.ex", id: "turn-1")
+
+    events =
+      await_replay(session, fn events -> Enum.any?(events, &(&1.type == :turn_completed)) end)
+
+    subagent =
+      Enum.filter(events, fn event ->
+        event.type == :provider_event and event.payload["kind"] == "subagent"
+      end)
+
+    assert Enum.map(subagent, & &1.payload["phase"]) |> Enum.uniq() |> Enum.sort() ==
+             ["progress", "settled", "spawned"]
+
+    spawned = Enum.find(subagent, &(&1.payload["phase"] == "spawned"))
+    settled = Enum.find(subagent, &(&1.payload["phase"] == "settled"))
+
+    assert spawned.payload["tools"] == ["read"]
+    assert spawned.payload["depth"] == 1
+    assert settled.payload["status"] == "completed"
+    assert settled.payload["tool_calls"] == 1
+    assert settled.payload["input_tokens"] == 61
+
+    # The plane produced no second session for the child, and no second rail row: the
+    # child is named only by a provider session id inside the parent's events.
+    assert {:ok, info} = InteractiveSession.info(session)
+    assert info.provider_session_id == spawned.provider_session_id
+    refute info.provider_session_id == settled.payload["provider_session_id"]
+
+    result =
+      Enum.find(events, &(&1.type == :tool_result and &1.payload["name"] == "agent"))
+
+    assert result.payload["output"] =~ "A defines x/0 and returns 1."
+
+    # The child's spend is on the parent's stream as `usage`, so a footer that sums them
+    # is right, and it carries no context meter, so a footer that reads one is untouched.
+    folded =
+      Enum.find(events, &(&1.type == :usage and Map.has_key?(&1.payload, "subagent_task_id")))
+
+    assert folded.payload["input_tokens"] == 61
+    refute Map.has_key?(folded.payload, "context_window")
+
+    completed = Enum.find(events, &(&1.type == :turn_completed))
+    assert completed.payload["input_tokens"] == 20 + 61
+
+    if System.get_env("OUROBOROS_SHOW_SUBAGENT_EVENTS") == "1" do
+      for event <- events do
+        IO.puts("#{event.type} #{inspect(event.payload, limit: :infinity)}")
+      end
+    end
+  end
 end
