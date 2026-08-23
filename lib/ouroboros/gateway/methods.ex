@@ -448,12 +448,20 @@ defmodule Ouroboros.Gateway.Methods do
   # could have its workspace or its event limit moved underneath it would no longer be
   # the session its id promised. Whether any one of these four is actually changeable is
   # the transport's answer, asked per session rather than encoded here.
+  #
+  # C4. `mode` is the sixth, and it is not a member of any vocabulary this gateway knows:
+  # it carries the *agent's own* mode id, which an ACP agent published in `session/new`
+  # and which `Ouroboros.Provider.Session.Dialect.ACP` validates against that list before
+  # sending `session/set_mode`. A `:string` here rather than an enum is the honest type —
+  # the allowed values belong to the agent, not to this table — and every transport whose
+  # dialect declares no modes refuses it by name.
   @configuration_options %{
     "approval_mode" => {:enum, @approval_modes},
     "sandbox_mode" => {:enum, @sandbox_modes},
     "model" => :string,
     "reasoning_effort" => {:enum, @reasoning_efforts},
-    "plan" => :boolean
+    "plan" => :boolean,
+    "mode" => :string
   }
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
@@ -515,8 +523,15 @@ defmodule Ouroboros.Gateway.Methods do
   @start_params for {name, kind} <- Enum.sort(@start_options),
                     do: {name, :optional, kind, Map.get(@start_option_notes, name)}
 
+  @configuration_option_notes %{
+    "mode" =>
+      "the *agent's* own mode id, validated against the `availableModes` it published; refused by name on a transport whose dialect declares none",
+    "plan" => "not a Harness configuration key — it takes its own per-transport path (B2)"
+  }
+
   @configuration_params for {name, kind} <- Enum.sort(@configuration_options),
-                            do: {name, :optional, kind, nil}
+                            do:
+                              {name, :optional, kind, Map.get(@configuration_option_notes, name)}
 
   @worker_params for {name, kind} <- Enum.sort(@worker_options),
                      do:
@@ -2208,6 +2223,7 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime_exposure" => :runtime_exposure,
     "worktree" => :worktree,
     "plan" => :plan,
+    "mode" => :mode,
     "role" => :role,
     "machine" => :node,
     "node" => :node,

@@ -176,6 +176,22 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   @impl true
   def configure(_runtime, _changes), do: {:error, :unsupported}
 
+  @doc """
+  This dialect's declaration that a client may set the *agent's* own mode.
+
+  Not a `Dialect` callback, for the reason `fork_option/0` is not one either:
+  `Dialect.verify!/1` pins an exact callback list, and a transport that has nothing to say
+  about modes should say it by not exporting this rather than by returning a `false`
+  nobody reads. `Ouroboros.Provider.session_mode/2` looks for the export, so the
+  capability is the dialect's own claim rather than a table somewhere else.
+
+  The value names *whose* vocabulary the id comes from. `:agent_declared` is the whole
+  honest answer here: Ouroboros neither defines these ids nor maps them onto its own
+  approval modes — it forwards one the agent published and refuses one it did not.
+  """
+  @spec mode_option() :: {atom(), atom()}
+  def mode_option, do: {:mode, :agent_declared}
+
   # ── the runtime's own round trips ─────────────────────────────────────────────────
 
   # `session/set_mode` takes `{sessionId, modeId}` and answers `{}`

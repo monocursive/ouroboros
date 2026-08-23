@@ -60,4 +60,46 @@ defmodule Ouroboros.Provider.Session do
   end
 
   def dialect(_adapter), do: nil
+
+  @doc """
+  Asks the transport serving one harness session for a correlated round trip.
+
+  C4. The three verbs the pinned harness has no vocabulary for — a Codex
+  `thread/compact/start`, a live `model/list`, an ACP `session/set_mode` — reach the wire
+  through here and nowhere else. `Jido.Harness.Session` exposes the session *worker*, and
+  the worker's own `configure` path validates against a four-key `SessionRequest` before
+  the transport is ever consulted, so a verb outside that vocabulary cannot travel on it.
+
+  Two refusals, and they mean different things — the same split
+  `Ouroboros.Interactive.Task`'s `native_transport/2` makes. `:unsupported` is the
+  dialect saying its protocol has no such frame, which no amount of waiting changes.
+  `provider_transport_unavailable` is a liveness answer: the verb exists, this session's
+  transport is not up, and retrying is sensible.
+  """
+  @spec ask(term(), atom(), map(), timeout()) :: {:ok, term()} | {:error, term()}
+  def ask(harness_session_id, verb, args \\ %{}, timeout \\ 30_000)
+
+  def ask(harness_session_id, verb, args, timeout) when is_binary(harness_session_id) do
+    case Ouroboros.Provider.Session.Jsonl.whereis(harness_session_id) do
+      pid when is_pid(pid) ->
+        Ouroboros.Provider.Session.Jsonl.ask(pid, verb, args, timeout)
+
+      nil ->
+        {:error, transport_unavailable(verb, :no_live_transport)}
+    end
+  end
+
+  def ask(_harness_session_id, verb, _args, _timeout),
+    do: {:error, transport_unavailable(verb, :not_started)}
+
+  defp transport_unavailable(verb, reason) do
+    {:provider_transport_unavailable,
+     %{
+       verb: verb,
+       reason: reason,
+       message:
+         "this session has no live provider transport to ask; send a turn first, or " <>
+           "reopen the session."
+     }}
+  end
 end

@@ -516,7 +516,109 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     end
   end
 
+  # ── session/set_mode ───────────────────────────────────────────────────────────────
+
+  describe "session/set_mode" do
+    test "the transport forwards a mode the agent announced, and answers when it lands", %{
+      workspace: workspace
+    } do
+      executable = fake_acp(mode_cases())
+      handle = open!(executable, workspace)
+
+      assert {:ok, :ok} =
+               Ouroboros.Provider.Session.Jsonl.ask(handle, :set_mode, %{mode: "ask"})
+
+      frame = Enum.find(logged(executable), &(&1["method"] == "session/set_mode"))
+      assert frame["params"] == %{"sessionId" => "sess-1", "modeId" => "ask"}
+      assert :ok = ACP.close(handle)
+    end
+
+    test "a mode the agent never announced is refused rather than sent", %{
+      workspace: workspace
+    } do
+      executable = fake_acp(mode_cases())
+      handle = open!(executable, workspace)
+
+      assert {:error, {:unsupported_configuration, details}} =
+               Ouroboros.Provider.Session.Jsonl.ask(handle, :set_mode, %{mode: "yolo"})
+
+      assert details.reason == :unknown_mode
+      assert details.modes == ["build", "ask"]
+      refute Enum.any?(logged(executable), &(&1["method"] == "session/set_mode"))
+      assert :ok = ACP.close(handle)
+    end
+
+    test "an agent that announced no modes at all has no vocabulary to be told", %{
+      workspace: workspace
+    } do
+      executable = fake_acp(mode_cases(modes: false))
+      handle = open!(executable, workspace)
+
+      assert {:error, {:unsupported_configuration, details}} =
+               Ouroboros.Provider.Session.Jsonl.ask(handle, :set_mode, %{mode: "ask"})
+
+      assert details.reason == :no_modes_announced
+      assert :ok = ACP.close(handle)
+    end
+
+    test "the ACP dialect declares modes and the app-server dialect does not" do
+      assert Dialect.mode_option() == {:mode, :agent_declared}
+
+      refute function_exported?(Ouroboros.Provider.Session.Dialect.Codex, :mode_option, 0)
+
+      for provider <- [:opencode, :kimi] do
+        assert {:ok, %{applies: :now, settable: :any_time, ids: :agent_declared}} =
+                 Ouroboros.Provider.session_mode(provider)
+      end
+
+      assert {:error, {:unsupported_configuration, %{field: :mode, reason: reason}}} =
+               Ouroboros.Provider.session_mode(:codex)
+
+      assert reason == :transport_has_no_modes
+    end
+
+    test "the gateway carries mode as a sixth interactive.configure key" do
+      {:ok, contract} = Ouroboros.Gateway.Methods.params("interactive.configure")
+      mode = Enum.find(contract.params, &(&1.name == "mode"))
+
+      assert mode.requirement == :optional
+      # A string, not an enum: the allowed values belong to the agent, not to the gateway.
+      assert mode.type == :string
+      assert mode.note =~ "availableModes"
+    end
+
+    test "approval_mode and sandbox_mode stay refused on ACP by declaration" do
+      for field <- [:approval_mode, :sandbox_mode] do
+        assert {:error, {:unconfigurable_session, details}} =
+                 Ouroboros.Provider.session_configuration(:opencode, %{field => :prompt})
+
+        assert details.reason == :no_dynamic_configuration
+      end
+    end
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────────────
+
+  defp mode_cases(options \\ []) do
+    modes =
+      if Keyword.get(options, :modes, true) do
+        ~s(,"modes":{"currentModeId":"build","availableModes":[{"id":"build","name":"Build"},{"id":"ask","name":"Ask"}]})
+      else
+        ""
+      end
+
+    """
+      *'"method":"initialize"'*)
+        printf '%s\\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+        ;;
+      *'"method":"session/new"'*)
+        printf '%s\\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"#{modes}}}'
+        ;;
+      *'"method":"session/set_mode"'*)
+        printf '%s\\n' '{"jsonrpc":"2.0","id":3,"result":{}}'
+        ;;
+    """
+  end
 
   defp context(root),
     do: %{root: root, sandbox_mode: :workspace_write, turn_id: nil, rpc_id: 1}
