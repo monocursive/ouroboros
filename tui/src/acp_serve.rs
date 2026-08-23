@@ -478,9 +478,13 @@ impl Agent {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let id = message.get("id").cloned();
 
-        // A notification: acted on, never answered.
+        // A notification: acted on, never answered. It still drains the notice queue —
+        // nothing puts anything there today, and a handler that starts to must not have it
+        // silently held until the next request.
         let Some(id) = id.filter(|id| !id.is_null()) else {
-            return self.notification(&method, params).await;
+            let mut frames = self.notification(&method, params).await;
+            frames.extend(std::mem::take(&mut self.notices));
+            return frames;
         };
 
         let answer = self.dispatch(&method, params, &id).await;
