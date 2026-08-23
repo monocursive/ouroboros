@@ -69,10 +69,20 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @registry Ouroboros.Provider.Native.Registry
 
-  # B2. What a planning session may not see. `code_intel` stays — most of its operations
-  # read, and the writing ones are refused by `Native.Permissions` with a reason that names
-  # planning, which is a better answer than a tool that vanished.
-  @plan_hidden_tools ["write", "edit", "apply_patch", "bash"]
+  # B2. Plan mode deliberately does **not** shorten the tool list, and the reason is a seam
+  # rather than a preference. The only lever this process has over what the model is shown
+  # is `disallowed_tools`, and the loop resolves a call against the same list
+  # (`Loop.dispatch/2` → `Tools.lookup/3`) — so `write` removed from the list is `write`
+  # whose call never reaches `Native.Permissions`, coming back as "`write` is not a tool in
+  # this session": true of the list, and misleading about the session. Between a shorter
+  # list and a refusal that says "this session is planning, record the plan instead", the
+  # refusal is worth more.
+  #
+  # The prompt closes the gap: `Native.Prompt`'s `## Plan mode` block names `write`,
+  # `edit`, `apply_patch` and `bash` as refused, so the model is told rather than left to
+  # find out. Doing both needs one change in `Loop.run_turn/2` — honouring the `tool_specs`
+  # the session already passes rather than rebuilding them, which is what that struct's own
+  # comment already promises — and that module is not this one's to change.
 
   # The three answers to "your plan is ready". `kind` is ACP's vocabulary, and it is there
   # so that a client which has never heard of plan mode still renders something it can
@@ -606,10 +616,22 @@ defmodule Ouroboros.Provider.Native.Session do
       })
     end
 
-    {:noreply, release(state)}
+    # A crash after the loop emitted its terminal event but before it returned would leave
+    # a held `turn_completed` behind a `turn_failed`. One turn, one terminal: the failure
+    # that just went out is the one that stands, so the held event is dropped rather than
+    # emitted after it.
+    {:noreply, release(discard_held_terminal(state, reason))}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp discard_held_terminal(%{plan_exit: nil} = state, _reason), do: state
+  defp discard_held_terminal(state, :normal), do: state
+
+  defp discard_held_terminal(%{plan_exit: pending} = state, _crash) do
+    _ = pending.timer && Process.cancel_timer(pending.timer)
+    %{state | plan_exit: nil}
+  end
 
   # A turn that ended leaves no loop and no pending approvals. Both are per-turn state:
   # a request_id from a finished turn must not be answerable afterwards.
@@ -1014,23 +1036,6 @@ defmodule Ouroboros.Provider.Native.Session do
       compactions: length(state.compactions)
     ]
   end
-
-  # Plan mode deliberately does *not* shorten the tool list, and the reason is a seam
-  # rather than a preference. The only lever this process has over what the model is shown
-  # is `disallowed_tools`, and the loop resolves a call with the same list
-  # (`Loop.dispatch/2` → `Tools.lookup/3`) — so a tool removed from the list is a tool
-  # whose call never reaches `Native.Permissions` and comes back as "`write` is not a tool
-  # in this session", which is true of the list and misleading about the session. Between a
-  # shorter list and a refusal that says "this session is planning, write the plan
-  # instead", the refusal is worth more.
-  #
-  # The prompt closes the gap the list leaves open: the `## Plan mode` block names the four
-  # tools that are refused, so the model is told rather than left to find out. Hiding them
-  # *and* keeping the refusal needs one change in `Loop.run_turn/2` — honouring the
-  # `tool_specs` the session already passes instead of rebuilding them — which is that
-  # module's to make.
-  @doc false
-  def plan_hidden_tools, do: @plan_hidden_tools
 
   # The prefix is built once and reused. It is rebuilt only where the operator changed
   # the session — `configure` — or where compaction rewrote the conversation, which are

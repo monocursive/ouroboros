@@ -98,10 +98,13 @@ defmodule Ouroboros.Provider.Native.Permissions do
   """
   @spec planning?(map()) :: boolean()
   def planning?(request) when is_map(request) do
-    request
-    |> Map.get(:context, %{})
-    |> then(fn context when is_map(context) -> Map.get(context, :approval_mode) end)
-    |> Kernel.==(:plan)
+    case Map.get(request, :context) do
+      context when is_map(context) -> Map.get(context, :approval_mode) == :plan
+      # A request with no context, or one whose context is not a map, is not a planning
+      # request — and saying so is the whole answer. Raising here would turn a malformed
+      # request into a crashed turn, which is the one direction this module never takes.
+      _absent -> false
+    end
   end
 
   def planning?(_request), do: false
