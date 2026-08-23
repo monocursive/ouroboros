@@ -49,6 +49,11 @@ defmodule Ouroboros.Interactive.Task do
   # of waiting callers is an unbounded table.
   @max_external_approvals 8
 
+  # I1. How many `request_id => ledger effect id` stamps this coordinator keeps in memory
+  # so a later `approval_resolved` can name its entry. Comfortably above the eight
+  # approvals that can be outstanding at once, and bounded because it is memory.
+  @max_approval_effects 64
+
   # The coordinator's own wait, when the session states none. Layered deliberately below
   # `Ouroboros.InteractiveSession`'s transport wait and the gateway's method ceiling, so
   # the answer a caller gets is this module's honest denial rather than a killed task.
@@ -273,10 +278,49 @@ defmodule Ouroboros.Interactive.Task do
 
     scope = Map.get(response, :scope, :once)
 
-    {:reply, :ok, close_external_approval(runtime, request_id, decision, :human, reason, scope)}
+    # I1. Recorded before the answer reaches the caller waiting on it, for the same reason
+    # the request was recorded before it was asked.
+    {effect_id, runtime} =
+      record_approval(
+        runtime,
+        request_id,
+        decision,
+        scope,
+        response,
+        external_approval_subject(runtime, request_id),
+        "external"
+      )
+
+    {:reply, :ok,
+     close_external_approval(runtime, request_id, decision, :human, reason, scope, effect_id)}
   end
 
   def handle_call({:respond_approval, request_id, response}, _from, runtime) do
+    # I1. Written before the answer is forwarded to the transport. Every provider reaches
+    # this clause — the native session, the Codex and ACP dialects — so one entry per human
+    # answer holds however the provider asked the question.
+    decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
+
+    runtime =
+      case harness_approval_subject(runtime, request_id) do
+        :unknown ->
+          runtime
+
+        subject ->
+          {_effect_id, runtime} =
+            record_approval(
+              runtime,
+              request_id,
+              decision,
+              Map.get(response, :scope, :once),
+              response,
+              subject,
+              "provider"
+            )
+
+          runtime
+      end
+
     reply = with_harness_session(runtime, &Session.respond_approval(&1, request_id, response))
     {:reply, reply, schedule_poll(runtime, 0)}
   end
@@ -597,7 +641,12 @@ defmodule Ouroboros.Interactive.Task do
       terminal_observed_at: nil,
       pending_steers: [],
       resume_settled: false,
-      external_approvals: %{}
+      external_approvals: %{},
+      # I1. `request_id => effect_id` for approvals this coordinator has recorded, so the
+      # `approval_resolved` a transport emits later can be stamped with the ledger entry
+      # its answer was written under. Memory, and bounded: the durable record is the
+      # ledger entry itself, and a coordinator restart loses only the stamp.
+      approval_effects: %{}
     }
   end
 
@@ -731,6 +780,7 @@ defmodule Ouroboros.Interactive.Task do
     # user side of the chat without changing Harness or inventing client-local rows.
     reconciled = reconcile_turn_ids(runtime.session, projected)
     projected = Enum.map(projected, &enrich_chat_input(&1, reconciled))
+    projected = Enum.map(projected, &enrich_approval_resolved(&1, runtime.approval_effects))
 
     {projected, pending_steers} =
       Enum.map_reduce(projected, runtime.pending_steers, &enrich_steer_input/2)
@@ -2821,14 +2871,25 @@ defmodule Ouroboros.Interactive.Task do
      %{runtime | external_approvals: Map.put(runtime.external_approvals, request_id, pending)}}
   end
 
-  defp close_external_approval(runtime, request_id, decision, source, reason, scope) do
+  defp close_external_approval(
+         runtime,
+         request_id,
+         decision,
+         source,
+         reason,
+         scope,
+         effect_id \\ nil
+       ) do
     {pending, table} = Map.pop(runtime.external_approvals, request_id)
     runtime = %{runtime | external_approvals: table}
 
     if pending do
       _ = Process.cancel_timer(pending.timer)
       record_permission(runtime, pending.request, request_id, decision, source, nil)
-      runtime = resolve_external_event(runtime, request_id, decision, source, reason, scope)
+
+      runtime =
+        resolve_external_event(runtime, request_id, decision, source, reason, scope, effect_id)
+
       GenServer.reply(pending.from, {:ok, external_answer(request_id, decision, source, reason)})
       runtime
     else
@@ -2836,7 +2897,15 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp resolve_external_event(runtime, request_id, decision, source, reason, scope) do
+  defp resolve_external_event(
+         runtime,
+         request_id,
+         decision,
+         source,
+         reason,
+         scope,
+         effect_id \\ nil
+       ) do
     payload =
       %{
         "decision" => if(decision == :allow, do: "approve", else: "deny"),
@@ -2846,6 +2915,7 @@ defmodule Ouroboros.Interactive.Task do
         "request_id" => request_id
       }
       |> put_present("reason", reason)
+      |> put_present("ledger_ref", effect_id && ledger_ref(effect_id))
 
     case emit_runtime_event(runtime, :approval_resolved, payload,
            request_id: request_id,
@@ -3095,6 +3165,227 @@ defmodule Ouroboros.Interactive.Task do
       )
     end)
   end
+
+  # ---------------------------------------------------------------------------
+  # I1 — the human answer, in the effect ledger
+  #
+  # `Ouroboros.Control.Permissions` already records what the *engine* decided as a
+  # `:permission` entry. This records what a *person* decided, which is the one answer no
+  # rule can reconstruct afterwards, and it records it on every provider: the external
+  # bridge above, the native session's approval channel, and the Codex and ACP dialects
+  # all pass through `respond_approval`.
+  #
+  # Written before the answer is forwarded, and — unlike `workspace.exec` — best effort
+  # rather than a hard gate. The difference is deliberate: refusing to forward an answer
+  # because the ledger is down would strand a tool call the operator has already decided
+  # about, on a provider waiting for exactly one reply. Here the cheaper failure is the
+  # missing row, and it is missing visibly.
+  # ---------------------------------------------------------------------------
+
+  defp record_approval(runtime, request_id, decision, scope, response, subject, origin) do
+    session = runtime.session
+    effect_id = approval_effect_id(session.id, request_id)
+
+    attrs = %{
+      id: effect_id,
+      effect: :approval,
+      principal: "session:" <> session.id,
+      attempt:
+        %{
+          session_id: session.id,
+          request_id: request_id,
+          provider: session.provider,
+          subject: subject.subject,
+          node: node()
+        }
+        |> put_present(:tool, subject.tool),
+      authority: %{
+        decision: decision,
+        reason: "human",
+        constraints: %{scope: scope, actor: approval_actor(response), origin: origin}
+      },
+      cause: %{signal_type: "interactive.respond_approval", signal_id: request_id},
+      result:
+        %{
+          decision: decision,
+          scope: scope,
+          actor: approval_actor(response),
+          origin: origin
+        }
+        |> put_present(:rule_id, approval_rule_id(response))
+    }
+
+    write =
+      if decision == :deny do
+        fn -> EffectLedger.record_denied(Map.put(attrs, :error, :approval_denied)) end
+      else
+        fn -> EffectLedger.record_settled(attrs) end
+      end
+
+    case safe_ledger(write) do
+      {:ok, _entry, _disposition} ->
+        {effect_id, remember_approval_effect(runtime, request_id, effect_id)}
+
+      other ->
+        Logger.warning(
+          "interactive session #{session.id} could not record the answer to approval " <>
+            "#{request_id} in the effect ledger (#{inspect(durable(other))}); the answer " <>
+            "still stands and the session's own approval_resolved event carries it"
+        )
+
+        {nil, runtime}
+    end
+  end
+
+  # Who answered. The runtime observes a `respond_approval` and nothing about the caller
+  # behind it, so `:human` is the honest default and anything else has to be *said*: a
+  # caller that answers without a person at the keyboard — `ouro run --approve-all` is the
+  # one that exists — names itself in the response. See TUI.md §2.4.
+  defp approval_actor(response) do
+    case Map.get(response, :actor) do
+      actor when actor in [:human, :headless, :automation] -> actor
+      "headless" -> :headless
+      "automation" -> :automation
+      _unstated -> :human
+    end
+  end
+
+  # Present only when the answer wrote a durable rule and said so. The "don't ask again"
+  # button is a separate `permissions.add` call this seam never sees, so inventing an id
+  # from the `suggested_rule` in the request would claim a rule that may not exist.
+  defp approval_rule_id(response) do
+    case Map.get(response, :rule_id) do
+      id when is_binary(id) and id != "" -> id
+      _absent -> nil
+    end
+  end
+
+  # The subject of an approval this coordinator is holding: the request the bridge handed
+  # in, which is the same shape `permission_subject/2` reads.
+  defp external_approval_subject(runtime, request_id) do
+    case Map.get(runtime.external_approvals, request_id) do
+      %{request: request} when is_map(request) ->
+        input = if is_map(Map.get(request, :input)), do: Map.get(request, :input), else: %{}
+        tool = to_string(Map.get(request, :tool_name) || "")
+
+        %{
+          tool: presence(tool),
+          subject:
+            approval_subject_fields(
+              tool,
+              string_field(input, ["command"]),
+              permission_paths(input, Map.get(request, :cwd) || runtime.session.workspace)
+            )
+        }
+
+      _absent ->
+        %{tool: nil, subject: %{}}
+    end
+  end
+
+  # The subject of an approval a *provider* asked for: read back off the durable
+  # `approval_requested` event, which is where every dialect and the native session put the
+  # same three facts. An event aged out of the retained window leaves the subject empty
+  # rather than guessed.
+  # An answer to a request this session never asked is not a human decision to record — it
+  # is a caller naming an id, and a ledger that wrote a row for each of those would be both
+  # unbounded and untrue. `:unknown` is that case. A session that *is* waiting on an
+  # approval whose request event has aged out of the retained window still records, with an
+  # empty subject: the answer happened, and only its subject is beyond recall.
+  defp harness_approval_subject(runtime, request_id) do
+    case Enum.find(runtime.session.events, fn event ->
+           event.type == :approval_requested and event.request_id == request_id
+         end) do
+      %Event{payload: payload} when is_map(payload) ->
+        call = Map.get(payload, "tool_call")
+        call = if is_map(call), do: call, else: %{}
+        tool = to_string(Map.get(call, "name") || "")
+
+        %{
+          tool: presence(tool),
+          subject:
+            approval_subject_fields(
+              tool,
+              string_field(call, ["command"]),
+              Map.get(payload, "paths")
+            )
+        }
+
+      _absent ->
+        if runtime.session.status == :awaiting_approval,
+          do: %{tool: nil, subject: %{}},
+          else: :unknown
+    end
+  end
+
+  defp approval_subject_fields(tool, command, paths) do
+    %{}
+    |> put_present(:paths, presence(paths))
+    |> put_present(:command_sha256, command && Exec.digest(command))
+    |> Map.merge(mcp_subject(tool))
+  end
+
+  # `mcp__server__tool` carries two identities in one name, on every provider that speaks
+  # it. Splitting it here lets a reader ask what a session did through one MCP server
+  # without parsing tool names out of the ledger.
+  defp mcp_subject("mcp__" <> rest) do
+    case String.split(rest, "__", parts: 2) do
+      [server, tool] when server != "" and tool != "" -> %{mcp_server: server, mcp_tool: tool}
+      _unsplittable -> %{}
+    end
+  end
+
+  defp mcp_subject(_tool), do: %{}
+
+  defp presence(""), do: nil
+  defp presence([]), do: nil
+  defp presence(value), do: value
+
+  # Embeds `node()` for the same reason every other effect id here does: it is read across
+  # a fleet, where a VM-local number alone collides.
+  defp approval_effect_id(session_id, request_id) do
+    digest =
+      :sha256
+      |> :crypto.hash(:erlang.term_to_binary({node(), session_id, request_id}))
+      |> Base.encode16(case: :lower)
+
+    "approval-" <> binary_slice(digest, 0, 32)
+  end
+
+  # Exactly the two parameters `ledger.get` takes, so a client resolves the row it drew
+  # without a second vocabulary to translate.
+  defp ledger_ref(effect_id), do: %{"node" => Atom.to_string(node()), "id" => effect_id}
+
+  defp remember_approval_effect(runtime, request_id, effect_id) do
+    effects = Map.put(runtime.approval_effects, request_id, effect_id)
+
+    effects =
+      if map_size(effects) > @max_approval_effects,
+        do:
+          Map.drop(
+            effects,
+            Enum.take(Map.keys(effects), map_size(effects) - @max_approval_effects)
+          ),
+        else: effects
+
+    %{runtime | approval_effects: effects}
+  end
+
+  # Stamps the transport's own `approval_resolved` with the ledger entry the answer was
+  # written under, the same way `enrich_chat_input/2` stamps an input the runtime already
+  # had the words for. The provider does not know about the ledger and should not have to.
+  defp enrich_approval_resolved(
+         %Event{type: :approval_resolved, request_id: request_id} = event,
+         effects
+       )
+       when is_binary(request_id) do
+    case Map.get(effects, request_id) do
+      nil -> event
+      effect_id -> %{event | payload: Map.put(event.payload, "ledger_ref", ledger_ref(effect_id))}
+    end
+  end
+
+  defp enrich_approval_resolved(event, _effects), do: event
 
   defp external_answer(request_id, decision, source, reason) do
     %{request_id: request_id, decision: decision, source: source, reason: reason}

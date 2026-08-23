@@ -236,10 +236,18 @@ defmodule Ouroboros.Test.HarnessAdapter do
     :ok
   end
 
-  @spec emit(pid(), Event.event_type(), map()) :: :ok
-  def emit(adapter, type, payload \\ %{})
-      when is_pid(adapter) and is_atom(type) and is_map(payload) do
-    send(adapter, {:ouroboros_test_emit, type, payload})
+  @doc """
+  Emits one event from a running turn.
+
+  `fields` carries the event's own non-payload identities — today `:request_id`, which is
+  what an `approval_requested` / `approval_resolved` pair is correlated by everywhere in
+  this runtime. A fixture that could not set it could not stand in for a transport with an
+  approvals channel at all.
+  """
+  @spec emit(pid(), Event.event_type(), map(), keyword()) :: :ok
+  def emit(adapter, type, payload \\ %{}, fields \\ [])
+      when is_pid(adapter) and is_atom(type) and is_map(payload) and is_list(fields) do
+    send(adapter, {:ouroboros_test_emit, type, payload, fields})
     :ok
   end
 
@@ -254,13 +262,15 @@ defmodule Ouroboros.Test.HarnessAdapter do
       fn -> provider_session_id end,
       fn provider_session_id ->
         receive do
-          {:ouroboros_test_emit, type, payload} ->
+          {:ouroboros_test_emit, type, payload, fields} ->
             event =
               Event.new!(
-                provider: @provider,
-                type: type,
-                provider_session_id: provider_session_id,
-                payload: payload
+                [
+                  provider: @provider,
+                  type: type,
+                  provider_session_id: provider_session_id,
+                  payload: payload
+                ] ++ Keyword.take(fields, [:request_id, :turn_id])
               )
 
             {[event], provider_session_id}
