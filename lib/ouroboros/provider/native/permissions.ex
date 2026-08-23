@@ -32,6 +32,34 @@ defmodule Ouroboros.Provider.Native.Permissions do
 
   A return this module does not recognise is treated as `{:ask, {:engine_error, …}}`.
   An engine that returns nonsense must not be able to authorize anything.
+
+  ## Plan mode (B2)
+
+  A session the operator put into plan mode is read-only for the duration, and that is
+  decided *here* rather than by each tool, for two reasons. The loop routes every tool
+  call through `evaluate/1` before it reaches a tool, so this is the one place a posture
+  can be enforced once; and a refusal that comes back from the permission layer carries a
+  `rule_ref` the loop already renders with `deny_message/2`, so the model is told **why**
+  it may not write in words that name planning rather than in a sandbox error that does
+  not.
+
+  The signal is `context.approval_mode == :plan`, which
+  `Ouroboros.Provider.Native.Loop.permission_request/2` copies straight off the loop's own
+  `approval_mode` — set to `:plan` by `Ouroboros.Provider.Native.Session` for exactly the
+  turns a planning session runs. It is not a value the harness's `SessionRequest` accepts
+  (its `approval_mode` is a four-member `Zoi.enum`), which is why plan mode is its own
+  `plan` key everywhere a caller can reach and only ever `:plan` on the loop's internal
+  struct.
+
+  **Plan mode outranks the engine in the deny direction only.** A rule that would have
+  allowed a write does not un-plan a session: the operator asked for a read-only posture
+  and a repository-scoped rule is not the authority that revokes it. A rule that would
+  have denied is not consulted, because the answer is the same and the reason a planning
+  session gives is the more useful one. Nothing here can *allow* anything.
+
+  `:read` and `:network` are untouched. Reading the workspace and fetching a page are the
+  work of planning; refusing them would produce plans written from memory, which is the
+  failure this mode exists to avoid.
   """
 
   # The same node-level key the interactive plane reads for external approvals, so one
@@ -42,9 +70,51 @@ defmodule Ouroboros.Provider.Native.Permissions do
 
   @type decision :: {:allow, term()} | {:deny, term()} | {:ask, term()}
 
-  @doc "Evaluates one tool attempt. `{:ask, :no_engine}` when no engine is loaded."
+  # The two effects a planning session refuses. `:read` and `:network` are how a plan gets
+  # written; refusing them would leave the model guessing at the workspace it is planning
+  # against.
+  @planning_refuses [:write, :execute]
+
+  @doc """
+  Evaluates one tool attempt. `{:ask, :no_engine}` when no engine is loaded.
+
+  A request whose `context.approval_mode` is `:plan` and whose `mode` is `:write` or
+  `:execute` is refused here, before the engine is asked at all — see the module doc for
+  why the posture outranks a rule in that one direction.
+  """
   @spec evaluate(map()) :: decision()
   def evaluate(request) when is_map(request) do
+    case planning_refusal(request) do
+      {:deny, _rule} = refusal -> refusal
+      :ok -> engine_decision(request)
+    end
+  end
+
+  @doc """
+  Whether a permission request describes a session that is planning.
+
+  Exposed so a caller can ask the same question this module answers rather than
+  re-deriving the convention from `context.approval_mode` somewhere else.
+  """
+  @spec planning?(map()) :: boolean()
+  def planning?(request) when is_map(request) do
+    request
+    |> Map.get(:context, %{})
+    |> then(fn context when is_map(context) -> Map.get(context, :approval_mode) end)
+    |> Kernel.==(:plan)
+  end
+
+  def planning?(_request), do: false
+
+  defp planning_refusal(request) do
+    if planning?(request) and Map.get(request, :mode) in @planning_refuses do
+      {:deny, {:plan_mode, Map.get(request, :mode)}}
+    else
+      :ok
+    end
+  end
+
+  defp engine_decision(request) do
     if exported?(:evaluate, 1) do
       case apply(engine(), :evaluate, [request]) do
         {:allow, _rule} = decision -> decision
@@ -90,8 +160,23 @@ defmodule Ouroboros.Provider.Native.Permissions do
   @spec engine?() :: boolean()
   def engine?, do: exported?(:evaluate, 1)
 
-  @doc "How a refusal reads in a tool result. Names the rule, never invents one."
+  @doc """
+  How a refusal reads in a tool result. Names the rule, never invents one.
+
+  The plan-mode refusal is the one that does not name a rule, because no rule produced it.
+  It says what the posture is, what is still available, and what happens at the end of the
+  turn — a model told only "denied" retries the same write, and a model told "this session
+  is planning" writes the plan instead.
+  """
   @spec deny_message(String.t(), term()) :: String.t()
+  def deny_message(tool, {:plan_mode, mode}) do
+    "Refused: this session is in **plan mode**, so `#{tool}` cannot run — plan mode " <>
+      "refuses every #{mode} until the operator leaves it. Keep exploring with the " <>
+      "read-only tools, then record your plan with the `plan` tool and stop. When your " <>
+      "turn ends the operator is asked whether to accept the plan and how to run it; " <>
+      "nothing is written or executed before they answer."
+  end
+
   def deny_message(tool, rule_ref) do
     "Refused: permission rule #{format_rule(rule_ref)} denies #{tool} for this session."
   end

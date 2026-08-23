@@ -58,6 +58,7 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Ouroboros.Provider.Native.Context.Compaction
   alias Ouroboros.Provider.Native.Context.Handoff
   alias Ouroboros.Provider.Native.Context.Window
+  alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
@@ -67,6 +68,30 @@ defmodule Ouroboros.Provider.Native.Session do
   @checkpoint_timeout 15_000
 
   @registry Ouroboros.Provider.Native.Registry
+
+  # B2. What a planning session may not see. `code_intel` stays — most of its operations
+  # read, and the writing ones are refused by `Native.Permissions` with a reason that names
+  # planning, which is a better answer than a tool that vanished.
+  @plan_hidden_tools ["write", "edit", "apply_patch", "bash"]
+
+  # The three answers to "your plan is ready". `kind` is ACP's vocabulary, and it is there
+  # so that a client which has never heard of plan mode still renders something it can
+  # send: `Ouroboros`'s own TUI maps `allow_always`/`allow_once`/`reject_once` onto
+  # approve-session / approve-once / deny and labels the row with `name`. A plan-aware
+  # client sends `optionId` back in `provider_options["choice"]` and gets exactly what it
+  # picked.
+  @plan_exit_options [
+    %{"optionId" => "auto_edit", "name" => "Yes, auto-accept edits", "kind" => "allow_always"},
+    %{"optionId" => "prompt", "name" => "Yes, manual approvals", "kind" => "allow_once"},
+    %{"optionId" => "keep_planning", "name" => "No, keep planning", "kind" => "reject_once"}
+  ]
+
+  @max_plan_message_bytes 8 * 1024
+  @max_follow_up_bytes 32 * 1024
+  # The posture that has to outlive the process. Held apart from `conversation.json`
+  # because it is not conversation: a resume that restored the messages and dropped the
+  # read-only posture would put a planning session back to work without asking anyone.
+  @posture_file "posture.json"
 
   # ---------------------------------------------------------------- adapter
 
@@ -164,6 +189,41 @@ defmodule Ouroboros.Provider.Native.Session do
   @spec rewind_points(pid()) :: {:ok, [map()]} | {:error, term()}
   def rewind_points(handle), do: SessionAdapter.call(handle, :rewind_points)
 
+  @doc """
+  Puts this session into, or out of, plan mode — B2's runtime half.
+
+  Plan mode is a read-only posture with a job attached. While it is on:
+
+    * `sandbox_mode` is forced to `:read_only` and what it displaced is remembered, so
+      leaving gives the operator back the sandbox they chose;
+    * `write`, `edit`, `apply_patch` and `bash` are dropped from the tool list the model
+      sees, and every `:write` or `:execute` attempt is refused by
+      `Ouroboros.Provider.Native.Permissions` with a message that names planning — a rule
+      that would have allowed it does not un-plan the session;
+    * the system prompt carries a `## Plan mode` block telling the model to explore,
+      record the plan with the `plan` tool, and stop;
+    * a turn that completes with a plan raises a **plan-exit approval** on the ordinary
+      approval channel offering "Yes, auto-accept edits" / "Yes, manual approvals" /
+      "No, keep planning", and the answer configures this session accordingly. A follow-up
+      prompt supplied with the answer runs as the rest of that same turn.
+
+  It is durable: the posture is written beside the conversation, so a session resumed by
+  id comes back planning rather than back at work.
+
+  This is a verb rather than an `interactive.configure` key because the pinned harness's
+  `Jido.Harness.Session.RequestValidator.normalize_configuration/1` refuses any key
+  outside `model`/`reasoning_effort`/`approval_mode`/`sandbox_mode`, and a fifth key on
+  that path would be advertised and then rejected one call later. It reaches a session the
+  way `compact/2`, `handoff/2` and `rewind/3` do — by name through the registry.
+  """
+  @spec plan_mode(pid(), boolean()) :: :ok | {:error, term()}
+  def plan_mode(handle, planning?) when is_boolean(planning?),
+    do: configure(handle, %{plan: planning?})
+
+  @doc "Whether this session is planning, and what it would go back to when it stops."
+  @spec plan_state(pid()) :: {:ok, map()} | {:error, term()}
+  def plan_state(handle), do: SessionAdapter.call(handle, :plan_state)
+
   @doc false
   def start_link({request, context}), do: GenServer.start_link(__MODULE__, {request, context})
 
@@ -201,6 +261,9 @@ defmodule Ouroboros.Provider.Native.Session do
          {:ok, session_dir, durable?} <- Paths.session_dir(provider_session_id),
          {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(provider_session_id),
          {:ok, messages} <- restore(checkpoint_path, request.provider_session_id) do
+      posture = restore_posture(session_dir, request, options)
+      scope = if posture.plan?, do: %{scope | sandbox_mode: :read_only}, else: scope
+
       state = %{
         request: request,
         context: context,
@@ -238,13 +301,34 @@ defmodule Ouroboros.Provider.Native.Session do
         plan: nil,
         # A lazily-loaded rule enters the conversation once per session, not once per
         # turn: the loop reports back what it injected so the next turn does not repeat it.
-        rules_loaded: []
+        rules_loaded: [],
+        # ---- plan mode (B2) ----
+        plan_mode?: posture.plan?,
+        # What the operator's sandbox was before plan mode forced `:read_only`, so leaving
+        # plan mode gives back what they chose rather than this runtime's default.
+        sandbox_before_plan: posture.sandbox_before_plan,
+        # The plan-exit approval this session is holding a terminal turn event for, or nil.
+        plan_exit: nil,
+        # What *this turn* produced, which is what the plan-exit question is about. Both
+        # are reset per turn: a plan from three turns ago is not this turn's answer.
+        turn_plan: nil,
+        turn_text: nil,
+        # ---- hooks (D5's three lifecycle events) ----
+        hooks: Hooks.load(scope.root),
+        # `SessionStart`'s `additionalContext`, held until the first turn's prompt and
+        # dropped once it has been sent. It never joins the system prompt: the prefix has
+        # a fingerprint and a session-scoped instruction in it would cost the cache.
+        start_context: [],
+        resumed?: not is_nil(request.provider_session_id)
       }
 
       case build_context(state) do
         {:ok, state} ->
           register(provider_session_id)
-          {:ok, state}
+          # Written at open as well as on every change: a session that *started* planning
+          # — `provider_options: %{plan: true}` — has a posture worth resuming into, and
+          # waiting for a `configure` that may never come would lose it.
+          {:ok, persist_posture(state)}
 
         {:error, reason} ->
           {:stop, reason}
@@ -265,9 +349,21 @@ defmodule Ouroboros.Provider.Native.Session do
     :exit, _reason -> :ok
   end
 
+  # `SessionStart` runs here rather than in `init/1` for one reason: `init/1` blocks the
+  # supervisor's `start_child`, which nothing bounds, whereas this call is bounded by
+  # `@startup_timeout` and each hook is bounded again inside `Hooks.session_start/2`. A
+  # session whose operator wrote a slow start hook opens late; it does not hang a
+  # supervisor.
   @impl GenServer
-  def handle_call(:initialize, _from, state),
-    do: {:reply, {:ok, state.provider_session_id}, state}
+  def handle_call(:initialize, _from, state) do
+    context =
+      Hooks.session_start(
+        state.hooks,
+        Map.put(hook_base(state), "source", if(state.resumed?, do: "resume", else: "startup"))
+      )
+
+    {:reply, {:ok, state.provider_session_id}, %{state | start_context: context}}
+  end
 
   def handle_call({:send, _request, _turn_id}, _from, %{loop: loop} = state)
       when not is_nil(loop),
@@ -288,6 +384,17 @@ defmodule Ouroboros.Provider.Native.Session do
     {:reply, :ok, state}
   end
 
+  # An interrupt while the plan-exit question is open cancels the question, not the turn:
+  # the model's turn genuinely completed, and the held event is the one that says so. The
+  # session stays in plan mode, which is what "I did not answer" means.
+  def handle_call({:interrupt, requested}, _from, %{loop: nil, plan_exit: %{} = pending} = state) do
+    if requested in [:active, pending.turn_id] do
+      {:reply, :ok, settle_plan_exit(state, :keep_planning, nil)}
+    else
+      {:reply, {:error, :not_active}, state}
+    end
+  end
+
   def handle_call({:interrupt, _turn_id}, _from, %{loop: nil} = state),
     do: {:reply, {:error, :not_active}, state}
 
@@ -298,6 +405,17 @@ defmodule Ouroboros.Provider.Native.Session do
     else
       {:reply, {:error, :not_active}, state}
     end
+  end
+
+  # The plan-exit answer is handled *here* rather than forwarded to the loop, because the
+  # loop that produced the plan has already returned: its turn ended, and what is waiting
+  # is this process holding that turn's terminal event.
+  def handle_call(
+        {:respond_approval, request_id, response},
+        _from,
+        %{plan_exit: %{request_id: request_id}} = state
+      ) do
+    {:reply, :ok, answer_plan_exit(state, response)}
   end
 
   def handle_call({:respond_approval, request_id, response}, _from, state) do
@@ -323,6 +441,18 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call(:context_info, _from, state), do: {:reply, {:ok, context_info(state)}, state}
 
+  def handle_call(:plan_state, _from, state) do
+    {:reply,
+     {:ok,
+      %{
+        plan: state.plan_mode?,
+        sandbox_mode: state.scope.sandbox_mode,
+        sandbox_after_plan: state.sandbox_before_plan,
+        approval_mode: state.approval_mode,
+        awaiting_plan_exit: state.plan_exit != nil
+      }}, state}
+  end
+
   def handle_call({:compact, _focus}, _from, %{loop: loop} = state) when not is_nil(loop),
     do: {:reply, {:error, :busy}, state}
 
@@ -341,8 +471,12 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def handle_call(:close, _from, state) do
-    state = stop_loop(state)
+    # A held terminal event goes out before the session does. A client whose turn never
+    # ended because the plan-exit question was still open would be waiting on a session
+    # that no longer exists.
+    state = state |> release_held_terminal() |> stop_loop()
     _ = checkpoint(state)
+    _ = session_end(state, "closed")
 
     emit(state, %{
       type: :session_closed,
@@ -400,17 +534,57 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @impl GenServer
   def handle_info({:native_event, turn_id, event}, %{loop: %{turn_id: turn_id}} = state) do
-    state = state |> track_approval(event) |> track_usage(event) |> track_plan(event)
-    emit(state, event)
+    state =
+      state
+      |> track_approval(event)
+      |> track_usage(event)
+      |> track_plan(event)
+      |> track_text(event)
 
-    if event.type in [:turn_completed, :turn_failed, :turn_interrupted] do
-      {:noreply, release(state)}
-    else
-      {:noreply, state}
+    cond do
+      # B2. A planning turn that finished is not a finished turn: the operator still has to
+      # say what happens to the plan. The terminal event is *held* — not emitted and then
+      # followed by a question — because `Jido.Harness.Session.Lifecycle` denies any
+      # approval request whose turn is no longer the worker's active one, so an exit
+      # approval raised after `turn_completed` would be auto-denied as stale. Holding it
+      # also states the truth: from a client's point of view the turn is still running,
+      # and it is, because the answer decides whether it continues.
+      plan_exit?(state, event) ->
+        {:noreply, raise_plan_exit(state, event)}
+
+      event.type in [:turn_completed, :turn_failed, :turn_interrupted] ->
+        emit(state, event)
+        {:noreply, release(state)}
+
+      true ->
+        emit(state, event)
+        {:noreply, state}
     end
   end
 
   def handle_info({:native_event, _stale_turn_id, _event}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:plan_exit_timeout, request_id},
+        %{plan_exit: %{request_id: request_id}} = state
+      ) do
+    emit(state, %{
+      type: :provider_event,
+      payload: %{
+        "kind" => "status",
+        "status" => "plan_exit_unanswered",
+        "message" =>
+          "nobody answered the plan-exit question within " <>
+            "#{inspect(state.request.approval_timeout_ms)} ms, so this session is still planning."
+      },
+      turn_id: nil,
+      request_id: nil
+    })
+
+    {:noreply, settle_plan_exit(state, :keep_planning, nil)}
+  end
+
+  def handle_info({:plan_exit_timeout, _stale}, state), do: {:noreply, state}
 
   def handle_info({ref, :ok}, %{loop: %{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
@@ -436,13 +610,28 @@ defmodule Ouroboros.Provider.Native.Session do
   # a request_id from a finished turn must not be answerable afterwards.
   defp release(state), do: %{state | loop: nil, approvals: MapSet.new()}
 
+  # `:normal` is the `close` path, which already fired `SessionEnd` with its own reason.
+  # Anything else is the session going away without being asked to, which is exactly the
+  # case a `SessionEnd` hook exists to notice.
   @impl GenServer
-  def terminate(_reason, state) do
+  def terminate(:normal, state) do
     _ = stop_loop(state)
     :ok
   rescue
     _error -> :ok
   end
+
+  def terminate(reason, state) do
+    _ = stop_loop(state)
+    _ = session_end(state, terminate_reason(reason))
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp terminate_reason(:shutdown), do: "shutdown"
+  defp terminate_reason({:shutdown, _detail}), do: "shutdown"
+  defp terminate_reason(_crash), do: "crashed"
 
   # ---------------------------------------------------------------- turns
 
@@ -469,7 +658,12 @@ defmodule Ouroboros.Provider.Native.Session do
         provider_session_id: state.provider_session_id,
         turn_id: turn_id,
         reasoning_effort: request.reasoning_effort || state.reasoning_effort,
-        approval_mode: state.approval_mode,
+        # `:plan` is not one of the four modes `Jido.Harness.SessionRequest` accepts, and it
+        # never travels as one: it is set on the loop's own struct for the turns a planning
+        # session runs, and `Loop.permission_request/2` copies it into `context.approval_mode`
+        # where `Native.Permissions` reads it. That is the whole mechanism by which a
+        # planning session refuses a write with a reason that says "planning".
+        approval_mode: loop_approval_mode(state),
         allowed_tools: state.request.allowed_tools,
         disallowed_tools: state.request.disallowed_tools,
         messages: state.messages,
@@ -480,7 +674,7 @@ defmodule Ouroboros.Provider.Native.Session do
         approval_timeout_ms: state.request.approval_timeout_ms
       }
 
-      prompt = TurnRequest.text(request)
+      prompt = TurnRequest.text(request) <> injected(state.start_context)
 
       task =
         Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
@@ -492,7 +686,12 @@ defmodule Ouroboros.Provider.Native.Session do
        %{
          state
          | loop: %{pid: task.pid, ref: task.ref, turn_id: turn_id},
-           turns: state.turns + 1
+           turns: state.turns + 1,
+           # Sent once. A `SessionStart` hook's context belongs to the session opening, not
+           # to every prompt after it.
+           start_context: [],
+           turn_plan: nil,
+           turn_text: nil
        }}
     end
   end
@@ -541,9 +740,55 @@ defmodule Ouroboros.Provider.Native.Session do
 
   # Sandbox mode changes the tools' own refusals, so it takes effect on the next tool
   # call, not the next turn — which is what `dynamic_configuration: :native` promises.
+  #
+  # While the session is planning the operator's value is *recorded* rather than applied:
+  # `:read_only` is the posture plan mode is, and letting a `sandbox_mode` change lift it
+  # would be a way past a mode rather than a change of one. It lands the moment plan mode
+  # is left, which is what `sandbox_before_plan` is for.
+  defp configure_one(%{plan_mode?: true} = state, :sandbox_mode, value)
+       when value in [:default, :read_only, :workspace_write] do
+    {:ok, %{state | sandbox_before_plan: Loop.sandbox_mode(value)}}
+  end
+
   defp configure_one(state, :sandbox_mode, value)
        when value in [:default, :read_only, :workspace_write] do
     {:ok, %{state | scope: %{state.scope | sandbox_mode: Loop.sandbox_mode(value)}}}
+  end
+
+  # B2's key, and the reason it is `plan` rather than a fifth `approval_mode`: the pinned
+  # `Jido.Harness.SessionRequest` validates `approval_mode` against a four-member
+  # `Zoi.enum`, so a `:plan` member would be refused at every session start and every
+  # resume. A mode label a transport rejects is not a mode.
+  #
+  # Entering forces `sandbox_mode: :read_only` and remembers what it displaced; leaving
+  # gives that back. Both directions rebuild the cached prefix, because the plan
+  # instruction block is part of it — the caller is `handle_call({:configure, …})`, which
+  # already does.
+  defp configure_one(%{plan_mode?: true} = state, :plan, true), do: {:ok, state}
+  defp configure_one(%{plan_mode?: false} = state, :plan, false), do: {:ok, state}
+
+  defp configure_one(state, :plan, true) do
+    {:ok,
+     %{
+       state
+       | plan_mode?: true,
+         sandbox_before_plan: state.scope.sandbox_mode,
+         scope: %{state.scope | sandbox_mode: :read_only}
+     }
+     |> persist_posture()}
+  end
+
+  defp configure_one(state, :plan, false) do
+    restored = state.sandbox_before_plan || Loop.sandbox_mode(state.request.sandbox_mode)
+
+    {:ok,
+     %{
+       state
+       | plan_mode?: false,
+         sandbox_before_plan: nil,
+         scope: %{state.scope | sandbox_mode: restored}
+     }
+     |> persist_posture()}
   end
 
   defp configure_one(_state, key, value),
@@ -557,9 +802,16 @@ defmodule Ouroboros.Provider.Native.Session do
       "reasoning_effort" -> :reasoning_effort
       "approval_mode" -> :approval_mode
       "sandbox_mode" -> :sandbox_mode
+      "plan" -> :plan
       other -> other
     end
   end
+
+  # What the loop is told this turn runs under. `:plan` only ever exists here and on the
+  # loop's own struct; the session's durable `approval_mode` keeps whatever the operator
+  # set, so leaving plan mode without naming a mode returns to it.
+  defp loop_approval_mode(%{plan_mode?: true}), do: :plan
+  defp loop_approval_mode(state), do: state.approval_mode
 
   # ---------------------------------------------------------------- resume
 
@@ -738,7 +990,7 @@ defmodule Ouroboros.Provider.Native.Session do
       cwd: state.scope.root,
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,
-      approval_mode: state.approval_mode,
+      approval_mode: loop_approval_mode(state),
       tools: Tools.specs(state.request.allowed_tools, state.request.disallowed_tools),
       model_module: state.model_module,
       model_spec: state.model_spec,
@@ -746,6 +998,23 @@ defmodule Ouroboros.Provider.Native.Session do
       compactions: length(state.compactions)
     ]
   end
+
+  # Plan mode deliberately does *not* shorten the tool list, and the reason is a seam
+  # rather than a preference. The only lever this process has over what the model is shown
+  # is `disallowed_tools`, and the loop resolves a call with the same list
+  # (`Loop.dispatch/2` → `Tools.lookup/3`) — so a tool removed from the list is a tool
+  # whose call never reaches `Native.Permissions` and comes back as "`write` is not a tool
+  # in this session", which is true of the list and misleading about the session. Between a
+  # shorter list and a refusal that says "this session is planning, write the plan
+  # instead", the refusal is worth more.
+  #
+  # The prompt closes the gap the list leaves open: the `## Plan mode` block names the four
+  # tools that are refused, so the model is told rather than left to find out. Hiding them
+  # *and* keeping the refusal needs one change in `Loop.run_turn/2` — honouring the
+  # `tool_specs` the session already passes instead of rebuilding them — which is that
+  # module's to make.
+  @doc false
+  def plan_hidden_tools, do: @plan_hidden_tools
 
   # The prefix is built once and reused. It is rebuilt only where the operator changed
   # the session — `configure` — or where compaction rewrote the conversation, which are
@@ -772,7 +1041,9 @@ defmodule Ouroboros.Provider.Native.Session do
       compaction_thrashing: state.thrashing?,
       compactions: Enum.reverse(state.compactions),
       archives: Enum.reverse(state.archives),
-      handed_off_to: state.handed_off_to
+      handed_off_to: state.handed_off_to,
+      plan: state.plan_mode?,
+      awaiting_plan_exit: state.plan_exit != nil
     })
   end
 
@@ -839,7 +1110,40 @@ defmodule Ouroboros.Provider.Native.Session do
 
       {:error, :compaction_thrashing, %{state | thrashing?: true}}
     else
-      do_compaction(state, focus, trigger)
+      gated_compaction(state, focus, trigger)
+    end
+  end
+
+  # `PreCompact`, on the `PreToolUse` contract: exit 2 refuses, stderr is the reason. It is
+  # the second thing in this provider a hook may stop, and it earns that for the same
+  # reason a tool call does — compaction rewrites the conversation, and a repository that
+  # knows this is the wrong moment has no other way to say so.
+  #
+  # A refusal is the *existing* refusal path, which is the point: nothing is dropped, the
+  # whole conversation stays, prior archives stay, and the reason reaches the operator in
+  # the event that names it. The next model request may still be refused for length, which
+  # is a truthful failure rather than a silent loss.
+  defp gated_compaction(state, focus, trigger) do
+    base =
+      hook_base(state)
+      |> Map.put("trigger", if(trigger == :manual, do: "manual", else: "automatic"))
+      |> Map.put("custom_instructions", focus || "")
+      |> Map.put("messages", length(state.messages))
+
+    case Hooks.pre_compact(state.hooks, base) do
+      {:ok, _context} ->
+        do_compaction(state, focus, trigger)
+
+      {:deny, reason} ->
+        announce_refusal(
+          state,
+          "pre_compact_hook_denied",
+          reason,
+          "the conversation was not compacted because a PreCompact hook refused it. " <>
+            "Nothing was dropped."
+        )
+
+        {:error, {:pre_compact_denied, reason}, state}
     end
   end
 
@@ -865,21 +1169,34 @@ defmodule Ouroboros.Provider.Native.Session do
   defp refuse_compaction(state, reason) do
     Logger.warning("native compaction refused: archive unwritable (#{inspect(reason)})")
 
+    announce_refusal(
+      state,
+      "archive_unwritable",
+      inspect(reason),
+      "the conversation was not compacted because its pre-compaction transcript " <>
+        "could not be archived. Nothing was dropped."
+    )
+
+    {:error, {:archive_unwritable, reason}, state}
+  end
+
+  # One event shape for every refused compaction, whatever refused it. The `status` stays
+  # `compaction_refused` — a client keys on that — and `cause` names which of the two it
+  # was, because "a hook said no" and "this node could not write the archive" are
+  # different problems with different fixes.
+  defp announce_refusal(state, cause, reason, message) do
     emit(state, %{
       type: :provider_event,
       payload: %{
         "kind" => "status",
         "status" => "compaction_refused",
-        "reason" => inspect(reason),
-        "message" =>
-          "the conversation was not compacted because its pre-compaction transcript " <>
-            "could not be archived. Nothing was dropped."
+        "cause" => cause,
+        "reason" => reason,
+        "message" => message
       },
       turn_id: nil,
       request_id: nil
     })
-
-    {:error, {:archive_unwritable, reason}, state}
   end
 
   defp apply_compaction(state, outcome, entry, trigger) do
@@ -1061,7 +1378,366 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp track_plan(state, %{type: :plan_updated, payload: payload}) when is_map(payload),
-    do: %{state | plan: payload}
+    do: %{state | plan: payload, turn_plan: payload}
 
   defp track_plan(state, _event), do: state
+
+  defp track_text(state, %{type: :output_text_final, payload: %{"text" => text}})
+       when is_binary(text),
+       do: %{state | turn_text: text}
+
+  defp track_text(state, _event), do: state
+
+  # ---------------------------------------------------------------- plan mode (B2)
+
+  # Only a completed turn raises the question, and only when the turn produced something
+  # to ask about. A failed or interrupted turn has no plan to accept, and a turn that
+  # neither called `plan` nor said anything has nothing to show a person — asking anyway
+  # would be a modal with an empty body.
+  defp plan_exit?(%{plan_mode?: true, plan_exit: nil} = state, %{type: :turn_completed}),
+    do: plan_summary(state) != nil
+
+  defp plan_exit?(_state, _event), do: false
+
+  # The plan, in the two shapes a turn can produce one. `plan_updated` is the tool's, and
+  # it is preferred because it is structured. A model that ignored the tool and wrote the
+  # plan in prose still planned, and refusing to show that would make the exit approval
+  # depend on the model using a tool the prompt calls optional — so the final message is
+  # the fallback, labelled as such rather than passed off as a step list.
+  defp plan_summary(%{turn_plan: %{} = plan}) do
+    case Map.get(plan, "plan") do
+      [_first | _rest] = steps -> %{source: "plan_tool", plan: plan, steps: steps, message: nil}
+      _empty -> nil
+    end
+  end
+
+  defp plan_summary(%{turn_text: text}) when is_binary(text) do
+    case String.trim(text) do
+      "" ->
+        nil
+
+      trimmed ->
+        %{
+          source: "message",
+          plan: nil,
+          steps: [],
+          message: clip(trimmed, @max_plan_message_bytes)
+        }
+    end
+  end
+
+  defp plan_summary(_state), do: nil
+
+  defp raise_plan_exit(state, terminal) do
+    summary = plan_summary(state)
+    request_id = "plan_exit_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+    emit(state, %{
+      type: :approval_requested,
+      payload: plan_exit_payload(summary),
+      turn_id: terminal.turn_id,
+      request_id: request_id
+    })
+
+    %{
+      state
+      | plan_exit: %{
+          request_id: request_id,
+          turn_id: terminal.turn_id,
+          terminal: terminal,
+          timer: plan_exit_timer(state, request_id)
+        }
+    }
+  end
+
+  defp plan_exit_payload(summary) do
+    %{
+      "kind" => "plan_exit",
+      "header" => "Plan ready",
+      "question" =>
+        "This session has been planning. Ready to build it?\n" <>
+          "· Yes, auto-accept edits — edits inside the workspace apply without asking; " <>
+          "commands still ask.\n" <>
+          "· Yes, manual approvals — every write and command is put to you.\n" <>
+          "· No, keep planning — nothing changes and the session stays read-only.",
+      "plan_source" => summary.source,
+      "options" => @plan_exit_options
+    }
+    |> maybe_put("plan", summary.plan)
+    |> maybe_put("message", summary.message)
+  end
+
+  defp maybe_put(payload, _key, nil), do: payload
+  defp maybe_put(payload, key, value), do: Map.put(payload, key, value)
+
+  defp plan_exit_timer(%{request: %{approval_timeout_ms: :infinity}}, _request_id), do: nil
+
+  defp plan_exit_timer(%{request: %{approval_timeout_ms: timeout}}, request_id)
+       when is_integer(timeout) and timeout > 0,
+       do: Process.send_after(self(), {:plan_exit_timeout, request_id}, timeout)
+
+  defp plan_exit_timer(_state, _request_id), do: nil
+
+  defp answer_plan_exit(state, response) do
+    choice = plan_exit_choice(response)
+    settle_plan_exit(state, choice, follow_up(response))
+  end
+
+  # How the three choices are read, in the order that keeps a client which has never heard
+  # of plan mode useful. An explicit `provider_options["choice"]` wins. Otherwise `reason`
+  # is matched *exactly* against the three ids and labels — loosely matching free text a
+  # person typed would put a session to work on a sentence that mentioned edits. Otherwise
+  # the decision and scope decide, which is what today's TUI actually sends: it renders the
+  # three options' `kind`s onto approve-session, approve-once and deny.
+  defp plan_exit_choice(response) do
+    options = Map.get(response, :provider_options) || %{}
+    explicit = Map.get(options, "choice") || Map.get(options, :choice)
+
+    cond do
+      choice = known_choice(explicit) -> choice
+      choice = known_choice(Map.get(response, :reason)) -> choice
+      Map.get(response, :decision) == :deny -> :keep_planning
+      Map.get(response, :scope) == :session -> :auto_edit
+      true -> :prompt
+    end
+  end
+
+  defp known_choice(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "auto_edit" -> :auto_edit
+      "yes, auto-accept edits" -> :auto_edit
+      "prompt" -> :prompt
+      "yes, manual approvals" -> :prompt
+      "keep_planning" -> :keep_planning
+      "no, keep planning" -> :keep_planning
+      _free_text -> nil
+    end
+  end
+
+  defp known_choice(value) when value in [:auto_edit, :prompt, :keep_planning], do: value
+  defp known_choice(_other), do: nil
+
+  defp follow_up(response) do
+    options = Map.get(response, :provider_options) || %{}
+
+    case Map.get(options, "follow_up") || Map.get(options, :follow_up) do
+      text when is_binary(text) ->
+        case String.trim(text) do
+          "" -> nil
+          trimmed -> clip(trimmed, @max_follow_up_bytes)
+        end
+
+      _absent ->
+        nil
+    end
+  end
+
+  # The one place the three answers become configuration. `keep_planning` deliberately
+  # calls nothing: "leaves everything as it was" is a claim about the session, and the way
+  # to keep it true is to not touch it.
+  defp settle_plan_exit(%{plan_exit: nil} = state, _choice, _follow_up), do: state
+
+  defp settle_plan_exit(state, choice, follow_up) do
+    pending = state.plan_exit
+    _ = pending.timer && Process.cancel_timer(pending.timer)
+    state = %{state | plan_exit: nil}
+
+    {state, applied} = apply_plan_exit(state, choice)
+
+    emit(state, %{
+      type: :provider_event,
+      payload: %{
+        "kind" => "plan_exit",
+        "choice" => Atom.to_string(choice),
+        "approval_mode" => Atom.to_string(state.approval_mode),
+        "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
+        "plan" => state.plan_mode?,
+        "applied" => applied,
+        "follow_up" => follow_up != nil
+      },
+      turn_id: pending.turn_id,
+      request_id: pending.request_id
+    })
+
+    continue_after_plan_exit(state, pending, follow_up)
+  end
+
+  defp apply_plan_exit(state, :keep_planning), do: {state, false}
+
+  defp apply_plan_exit(state, mode) when mode in [:auto_edit, :prompt] do
+    changes = %{plan: false, approval_mode: mode}
+
+    with {:ok, state} <- apply_configuration(state, changes),
+         {:ok, state} <- build_context(state) do
+      {state, true}
+    else
+      # A refused reconfiguration leaves the session planning and says so in the event
+      # above rather than reporting a mode the session is not in. There is nothing here a
+      # caller can retry differently, so it is not an error return: the question was
+      # answered, and the answer could not be carried out.
+      {:error, reason} ->
+        Logger.warning("native plan exit could not reconfigure the session: #{inspect(reason)}")
+        {state, false}
+    end
+  end
+
+  # Two ways a held turn ends. Without a follow-up the terminal event finally goes out and
+  # the turn is over. With one, the *same* turn continues: the follow-up runs under the
+  # turn id the plan ran under, which is what keeps the harness worker's bookkeeping true —
+  # its active turn is still active, its approvals still route, and the terminal event it
+  # eventually sees is the one that finishes the work it dispatched. A completed turn
+  # followed by more work under a turn nobody started would be neither.
+  defp continue_after_plan_exit(state, pending, nil), do: emit_held(state, pending)
+
+  defp continue_after_plan_exit(state, pending, follow_up) do
+    case start_turn(state, TurnRequest.new!(follow_up), pending.turn_id) do
+      {:ok, state} ->
+        state
+
+      {:error, reason} ->
+        emit(state, %{
+          type: :provider_event,
+          payload: %{
+            "kind" => "status",
+            "status" => "plan_follow_up_refused",
+            "reason" => inspect(reason),
+            "message" =>
+              "the plan was accepted and the follow-up prompt could not be started; " <>
+                "send it again as an ordinary turn."
+          },
+          turn_id: pending.turn_id,
+          request_id: nil
+        })
+
+        emit_held(state, pending)
+    end
+  end
+
+  defp emit_held(state, pending) do
+    emit(state, pending.terminal)
+    release(state)
+  end
+
+  defp release_held_terminal(%{plan_exit: nil} = state), do: state
+
+  defp release_held_terminal(%{plan_exit: pending} = state) do
+    _ = pending.timer && Process.cancel_timer(pending.timer)
+    emit_held(%{state | plan_exit: nil}, pending)
+  end
+
+  # ---------------------------------------------------------------- posture
+
+  # Read at open, and only for a session that asked to resume — the same rule the
+  # conversation checkpoint follows, for the same reason: a fresh id has no posture by
+  # definition. An unreadable or nonsense file is treated as no file. It names a boolean
+  # and a sandbox mode, so the worst a corrupt one can do is start a session at the
+  # posture its request already asked for.
+  # The stored posture and the request are combined in the one direction that cannot lose
+  # a mode: plan mode is on when the checkpoint says the session was planning **or** when
+  # this start asked for it. A resume can therefore never silently put a planning session
+  # back to work, and a caller can always ask for plan mode whatever the file says.
+  defp restore_posture(session_dir, request, options) do
+    stored = read_posture(Path.join(session_dir, @posture_file), request.provider_session_id)
+    plan? = requested_plan?(options) or stored.plan?
+
+    %{
+      plan?: plan?,
+      sandbox_before_plan:
+        if(plan?, do: stored.sandbox_before_plan || Loop.sandbox_mode(request.sandbox_mode))
+    }
+  end
+
+  @empty_posture %{plan?: false, sandbox_before_plan: nil}
+
+  defp read_posture(_path, nil), do: @empty_posture
+
+  defp read_posture(path, _resumed) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{} = decoded} <- decode_posture(body) do
+      %{
+        plan?: decoded["plan"] == true,
+        sandbox_before_plan: sandbox_atom(decoded["sandbox_before_plan"])
+      }
+    else
+      _absent_or_unusable -> @empty_posture
+    end
+  end
+
+  defp decode_posture(body) do
+    {:ok, JSON.decode!(body)}
+  rescue
+    _error -> :error
+  end
+
+  defp sandbox_atom("read_only"), do: :read_only
+  defp sandbox_atom("workspace_write"), do: :workspace_write
+  defp sandbox_atom("unrestricted"), do: :unrestricted
+  defp sandbox_atom(_other), do: nil
+
+  # `provider_options` is where a start-time posture rides, the same channel
+  # `max_iterations`, `tool_timeout_ms` and `checkpoint_limit` already use — the harness's
+  # `SessionRequest` accepts it as a free map, which is the only reason plan mode can be
+  # asked for at start at all.
+  defp requested_plan?(options),
+    do: Map.get(options, :plan) == true or Map.get(options, "plan") == true
+
+  # Best effort, and deliberately not fatal: a session whose data directory went read-only
+  # keeps planning, it just would not remember it across a restart. Saying so once beats
+  # refusing a mode change over a file.
+  defp persist_posture(state) do
+    payload =
+      JSON.encode!(%{
+        "plan" => state.plan_mode?,
+        "sandbox_before_plan" =>
+          state.sandbox_before_plan && Atom.to_string(state.sandbox_before_plan)
+      })
+
+    case File.write(Path.join(state.session_dir, @posture_file), payload) do
+      :ok ->
+        state
+
+      {:error, reason} ->
+        Logger.warning("native session posture not persisted: #{inspect(reason)}")
+        state
+    end
+  end
+
+  # ---------------------------------------------------------------- hooks (D5)
+
+  # The same content-minimised payload the loop's hooks get, minus the turn: none of the
+  # three lifecycle events happens inside one.
+  defp hook_base(state) do
+    %{
+      "session_id" => state.context.session_id,
+      "provider_session_id" => state.provider_session_id,
+      "turn_id" => nil,
+      "cwd" => state.scope.root,
+      "workspace_trusted" => state.hooks.trusted?
+    }
+  end
+
+  # Detached, because this runs on the way out. A node whose task supervisor is not up —
+  # a session driven straight from a test — runs it inline instead, under the same
+  # per-hook ceiling: bounded either way, and observable either way.
+  defp session_end(state, reason) do
+    config = state.hooks
+    base = Map.put(hook_base(state), "reason", reason)
+
+    case Task.Supervisor.start_child(Jido.Harness.SessionTaskSupervisor, fn ->
+           Hooks.session_end(config, base)
+         end) do
+      {:ok, _pid} -> :ok
+      _unavailable -> Hooks.session_end(config, base)
+    end
+  rescue
+    _error -> :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp injected([]), do: ""
+  defp injected(lines), do: "\n" <> Enum.join(lines, "\n")
+
+  defp clip(text, limit) when byte_size(text) <= limit, do: text
+  defp clip(text, limit), do: binary_part(text, 0, limit) <> "…"
 end

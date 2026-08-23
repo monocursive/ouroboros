@@ -91,7 +91,12 @@ defmodule Ouroboros.Provider.Native do
         # No `:unrestricted`. See the moduledoc: there is no OS sandbox to relax.
         sandbox_mode: [:default, :read_only, :workspace_write]
       },
-      provider_options: [:max_iterations, :tool_timeout_ms, :event_limit]
+      # `plan` (B2) is here rather than in `normalized_options` because
+      # `Jido.Harness.SessionRequest` has no field for it and its `approval_mode` enum has
+      # no fifth member; `provider_options` is the one channel a start can carry it on.
+      # Mid-session it moves through `Native.Session.plan_mode/2`, which is a live process
+      # call rather than a request field. `Ouroboros.Provider.plan_mode/2` declares both.
+      provider_options: [:max_iterations, :tool_timeout_ms, :event_limit, :plan]
     )
   end
 

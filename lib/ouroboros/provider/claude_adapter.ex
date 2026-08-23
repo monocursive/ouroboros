@@ -57,6 +57,27 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       today's truth — and the X1 refusal goes on protecting people from a mode that
       cannot work.
 
+  ## Plan mode (B2)
+
+  Claude Code has its own: `--permission-mode plan` (verified against the installed
+  2.1.238, whose `--help` lists `acceptEdits`, `auto`, `bypassPermissions`, `manual`,
+  `dontAsk`, `plan`). The pinned adapter derives that flag from `approval_mode` and has no
+  fifth mode to derive it from, so this module composes it the same way it composes
+  `--permission-prompt-tool`: it re-performs the argv assembly and *replaces* whatever
+  `approval_mode` chose.
+
+  It is asked for with `provider_options: %{plan: true}`, on the session request or on one
+  turn's, and `plan` is added to the declared `provider_options` so the harness accepts it.
+  It applies **from the next turn**, and that is not a hedge: `claude --print` runs one
+  process per turn, so the turn already executing keeps the mode its argv was built with.
+  `Ouroboros.Provider.plan_mode/2` says exactly this.
+
+  What this deliberately does *not* do is force `sandbox_mode: :read_only` alongside it.
+  Claude Code's plan mode is Claude Code's own read-only posture; rewriting an option the
+  caller stated is the one thing `Ouroboros.Provider`'s whole moduledoc says this runtime
+  does not do, and a `--settings` sandbox block the operator did not ask for would be
+  exactly that.
+
   ## MCP by reference, which is what D6 asks for
 
   `mcp_config` stays refused *inline* from callers on both planes
@@ -121,6 +142,13 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
 
   @helper_env "OUROBOROS_PROCESS_ID_HELPER"
 
+  # B2's vendor half. `plan` is a provider option this module declares on top of the pinned
+  # adapter's six, which is what makes it legal at all: `Jido.Harness.Session.Manager` and
+  # `Jido.Harness.Run.RequestResolver` both refuse a provider option the spec does not
+  # name, so an undeclared key would be a refused session rather than an ignored one.
+  @plan_option :plan
+  @plan_mode "plan"
+
   # Mirrors the pinned adapter's own list. It is private there and this module has to hand
   # the same set to `build_argv/2`, so it is spelled out rather than guessed at.
   @provider_options [
@@ -141,14 +169,22 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   @impl true
   def spec do
     base = Claude.spec()
-    %{base | session_transports: Enum.map(base.session_transports, &declare_approvals/1)}
+
+    %{
+      base
+      | session_transports: Enum.map(base.session_transports, &declare_approvals/1),
+        provider_options: base.provider_options ++ [@plan_option]
+    }
   end
 
   @impl true
   def run(%RunRequest{} = request, context) do
-    case bridge(request) do
-      nil -> Claude.run(request, context)
-      bridge -> bridged_run(request, context, bridge)
+    case {planning?(request), bridge(request)} do
+      # Byte-identical to the pinned adapter's own dispatch when this module has nothing
+      # to add. The delegating path cannot drift; the composed one has to be kept honest
+      # by hand, so it is entered only when it is earning something.
+      {false, nil} -> Claude.run(request, context)
+      {planning?, bridge} -> composed_run(request, context, bridge, planning?)
     end
   end
 
@@ -239,13 +275,13 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
     end
   end
 
-  defp bridged_run(request, context, bridge) do
+  defp composed_run(request, context, bridge, planning?) do
     options =
       request.provider_options
       |> Helpers.provider_options(@provider_options)
       |> with_hooks(bridge)
 
-    request = %{request | mcp_config: bridge.servers}
+    request = if bridge, do: %{request | mcp_config: bridge.servers}, else: request
 
     with {:ok, argv} <- Claude.build_argv(request, options) do
       request = %{request | env: Helpers.merge_env(request, context.config)}
@@ -253,14 +289,9 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       executable =
         options[:cli_path] || Helpers.cli_path(context.config, Claude.spec().executable)
 
-      CLIStream.run(
-        :claude,
-        request,
-        context,
-        executable,
-        with_prompt_tool(argv),
-        &CLIMapper.claude/1
-      )
+      argv = argv |> with_prompt_tool(bridge) |> with_plan_mode(planning?)
+
+      CLIStream.run(:claude, request, context, executable, argv, &CLIMapper.claude/1)
     end
   rescue
     exception ->
@@ -274,9 +305,60 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   # `build_argv/2` ends with `["--", prompt]`, so the flag goes in front of the separator
   # rather than after the positional it introduces. With no separator the split leaves an
   # empty tail and the pair lands at the end, which is still a flag before no positional.
-  defp with_prompt_tool(argv) do
+  defp with_prompt_tool(argv, nil), do: argv
+
+  defp with_prompt_tool(argv, _bridge) do
     {head, tail} = Enum.split_while(argv, &(&1 != "--"))
     head ++ ["--permission-prompt-tool", @prompt_tool] ++ tail
+  end
+
+  # ---------------------------------------------------------------------------
+  # Plan mode (B2)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Whether one run request asks for Claude Code's plan mode.
+
+  Read off `provider_options[:plan]` rather than off `approval_mode`, because the pinned
+  `Jido.Harness.SessionRequest` validates `approval_mode` against a four-member `Zoi.enum`
+  that has no room for a fifth member. Both spellings of the key are accepted for the same
+  reason every other option here accepts both: the value crosses the wire as a string.
+  """
+  @spec planning?(RunRequest.t()) :: boolean()
+  def planning?(%RunRequest{provider_options: options}) when is_map(options),
+    do: Map.get(options, :plan) == true or Map.get(options, "plan") == true
+
+  def planning?(_request), do: false
+
+  @doc """
+  The argv a planning run is given, from the argv it would otherwise have had.
+
+  Claude Code 2.1.238 takes `--permission-mode plan` (`claude --help`: `acceptEdits`,
+  `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`), and the pinned
+  `Jido.Harness.Adapters.Claude.build_argv/2` derives that flag from `approval_mode` alone
+  — `:default` emits nothing, `:prompt` emits `default`, `:auto_edit` emits `acceptEdits`,
+  `:auto_approve` emits `bypassPermissions`. So plan mode has to *replace* whatever it
+  chose, or add the pair when it chose nothing.
+
+  Exposed so a test can read the exact argv without running a CLI.
+  """
+  @spec with_plan_mode([String.t()], boolean()) :: [String.t()]
+  def with_plan_mode(argv, false), do: argv
+
+  def with_plan_mode(argv, true) do
+    {head, tail} = Enum.split_while(argv, &(&1 != "--"))
+
+    case replace_permission_mode(head) do
+      {:ok, replaced} -> replaced ++ tail
+      :absent -> head ++ ["--permission-mode", @plan_mode] ++ tail
+    end
+  end
+
+  defp replace_permission_mode(argv) do
+    case Enum.find_index(argv, &(&1 == "--permission-mode")) do
+      nil -> :absent
+      index -> {:ok, List.replace_at(argv, index + 1, @plan_mode)}
+    end
   end
 
   # ---------------------------------------------------------------------------
