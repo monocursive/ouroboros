@@ -62,7 +62,9 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Subagent
   alias Ouroboros.Provider.Native.Tools
+  alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
 
   @startup_timeout 30_000
   @checkpoint_timeout 15_000
@@ -328,6 +330,19 @@ defmodule Ouroboros.Provider.Native.Session do
         # are reset per turn: a plan from three turns ago is not this turn's answer.
         turn_plan: nil,
         turn_text: nil,
+        # ---- subagents (G3) ----
+        # Where this session sits in the subagent tree, and whose child it is. All three
+        # ride in `provider_options` because that is the only channel a `SessionRequest`
+        # carries an unvalidated map on — the same channel `plan` and `max_iterations`
+        # already use — and because a child is opened by this runtime rather than by an
+        # operator, so nothing that is not this runtime ever sets them.
+        subagent_depth: subagent_depth(options),
+        subagent_parent: string_option(options, "subagent_parent"),
+        subagent_task_id: string_option(options, "subagent_task_id"),
+        # `task_id => %{pid:, monitor:, meta:, status:}`. The session holds them, not the
+        # loop, because a background child outlives the turn that spawned it and the loop
+        # does not. Closing the session stops every one of them.
+        subagents: %{},
         # ---- hooks (D5's three lifecycle events) ----
         hooks: Hooks.load(scope.root),
         # `SessionStart`'s `additionalContext`, held until the first turn's prompt and
@@ -485,11 +500,51 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
+  # ---------------------------------------------------------------- subagents (G3)
+
+  # The parent session is the registry, and deliberately not a global one. A task id is
+  # only ever meaningful to the session that spawned it, so scoping the table to this
+  # process makes "collect a child of another session" structurally impossible rather
+  # than a check somebody has to remember.
+  def handle_call({:subagent_track, task_id, pid, meta}, _from, state) do
+    if map_size(state.subagents) >= AgentTool.max_tracked() do
+      {:reply, {:error, :subagent_table_full}, state}
+    else
+      monitor = Process.monitor(pid)
+
+      {:reply, :ok,
+       %{
+         state
+         | subagents: Map.put(state.subagents, task_id, %{pid: pid, monitor: monitor, meta: meta})
+       }}
+    end
+  end
+
+  def handle_call({:subagent_lookup, task_id}, _from, state) do
+    case Map.fetch(state.subagents, task_id) do
+      {:ok, %{pid: pid}} -> {:reply, {:ok, pid}, state}
+      :error -> {:reply, :error, state}
+    end
+  end
+
+  def handle_call({:subagent_release, task_id}, _from, state),
+    do: {:reply, :ok, forget_subagent(state, task_id)}
+
+  # `running` is what the four-at-once cap counts; `tracked` includes the settled ones a
+  # background collection has not picked up yet. Both are answered from live processes
+  # rather than from a status this table would have to keep in step with the child's own.
+  def handle_call(:subagent_counts, _from, state) do
+    running =
+      Enum.count(state.subagents, fn {_task_id, entry} -> Process.alive?(entry.pid) end)
+
+    {:reply, %{running: running, tracked: map_size(state.subagents)}, state}
+  end
+
   def handle_call(:close, _from, state) do
     # A held terminal event goes out before the session does. A client whose turn never
     # ended because the plan-exit question was still open would be waiting on a session
     # that no longer exists.
-    state = state |> release_held_terminal() |> stop_loop()
+    state = state |> release_held_terminal() |> stop_loop() |> stop_subagents("session closed")
     _ = checkpoint(state)
     _ = session_end(state, "closed")
 
@@ -623,7 +678,78 @@ defmodule Ouroboros.Provider.Native.Session do
     {:noreply, release(discard_held_terminal(state, reason))}
   end
 
+  # G3. A background child reports here rather than to a loop, because the turn that
+  # spawned it has ended. Its progress and its terminal digest reach the client as
+  # `provider_event`s of this session with no turn id, which is the truth: the work is
+  # this session's, and no turn of it is running.
+  def handle_info({:subagent, _task_id, {:progress, payload}}, state) do
+    emit(state, subagent_event(payload))
+    {:noreply, state}
+  end
+
+  # A settled background child stays in the table until somebody collects it: the summary
+  # lives in its own process, and forgetting the entry here would make `agent_result`
+  # answer "no such task" about a child that finished a second ago.
+  def handle_info({:subagent, _task_id, {:settled, summary}}, state) do
+    emit(state, subagent_event(Subagent.settled_payload(summary)))
+    {:noreply, state}
+  end
+
+  # An approval a background child raised reaches nobody here, and this process must not
+  # pretend otherwise. `Subagent` denies it at source with a legible reason and counts it
+  # in the digest; this clause exists so that a message which somehow arrives is dropped
+  # rather than matched by something else.
+  def handle_info({:subagent, _task_id, {:approval, _request_id, _payload}}, state),
+    do: {:noreply, state}
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    {:noreply, forget_by_monitor(state, monitor)}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp forget_subagent(state, task_id) do
+    case Map.fetch(state.subagents, task_id) do
+      {:ok, entry} ->
+        Process.demonitor(entry.monitor, [:flush])
+        %{state | subagents: Map.delete(state.subagents, task_id)}
+
+      :error ->
+        state
+    end
+  end
+
+  defp forget_by_monitor(state, monitor) do
+    case Enum.find(state.subagents, fn {_task_id, entry} -> entry.monitor == monitor end) do
+      {task_id, _entry} -> %{state | subagents: Map.delete(state.subagents, task_id)}
+      nil -> state
+    end
+  end
+
+  # Children are stopped when the **session** closes, not when a turn ends. That is the
+  # whole lifecycle promise a background child makes, and it is kept here: every tracked
+  # child, settled or not, is stopped, its own session closed, and its worktree retired by
+  # `Subagent`'s own terminate.
+  defp stop_subagents(%{subagents: subagents} = state, _reason) when map_size(subagents) == 0,
+    do: state
+
+  defp stop_subagents(state, _reason) do
+    Enum.each(state.subagents, fn {_task_id, entry} ->
+      Process.demonitor(entry.monitor, [:flush])
+      _ = Subagent.stop(entry.pid, :stopped)
+    end)
+
+    %{state | subagents: %{}}
+  end
+
+  defp subagent_event(payload) do
+    %{
+      type: :provider_event,
+      payload: Map.put(payload, "kind", "subagent"),
+      turn_id: nil,
+      request_id: nil
+    }
+  end
 
   defp discard_held_terminal(%{plan_exit: nil} = state, _reason), do: state
   defp discard_held_terminal(state, :normal), do: state
@@ -643,6 +769,7 @@ defmodule Ouroboros.Provider.Native.Session do
   @impl GenServer
   def terminate(:normal, state) do
     _ = stop_loop(state)
+    _ = stop_subagents(state, "session closed")
     :ok
   rescue
     _error -> :ok
@@ -650,6 +777,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def terminate(reason, state) do
     _ = stop_loop(state)
+    _ = stop_subagents(state, "session ended")
     _ = session_end(state, terminate_reason(reason))
     :ok
   rescue
@@ -698,7 +826,17 @@ defmodule Ouroboros.Provider.Native.Session do
         session_grants: state.session_grants,
         max_iterations: state.max_iterations,
         tool_timeout_ms: state.tool_timeout_ms,
-        approval_timeout_ms: state.request.approval_timeout_ms
+        approval_timeout_ms: state.request.approval_timeout_ms,
+        # G3. What the loop needs to be somebody's parent: the process that outlives the
+        # turn, and the two values a child's own session is built from. Passing the
+        # request and the context rather than a copied list of fields is the mechanism
+        # that makes "a child inherits its parent's posture" true by construction.
+        session_pid: owner,
+        session_request: state.request,
+        session_context: state.context,
+        subagent_depth: state.subagent_depth,
+        subagent_parent: state.subagent_parent,
+        subagent_task_id: state.subagent_task_id
       }
 
       prompt = TurnRequest.text(request) <> injected(state.start_context)
@@ -1029,7 +1167,10 @@ defmodule Ouroboros.Provider.Native.Session do
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,
       approval_mode: loop_approval_mode(state),
-      tools: Tools.specs(state.request.allowed_tools, state.request.disallowed_tools),
+      tools:
+        Tools.specs(state.request.allowed_tools, state.request.disallowed_tools,
+          subagent_depth: state.subagent_depth
+        ),
       model_module: state.model_module,
       model_spec: state.model_spec,
       reasoning_effort: state.reasoning_effort,
@@ -1074,6 +1215,12 @@ defmodule Ouroboros.Provider.Native.Session do
   # that has not spent a turn yet reports zero used, which is true, rather than an
   # estimate of what the prefix will cost, which would be a guess presented as a
   # measurement.
+  # G3. A child's spend folds into this session's `usage` events so `/cost` stays true,
+  # but a child's *request size* is a fact about the child's window and never about this
+  # one. The meter therefore ignores any payload that names a subagent — the one thing on
+  # that event a session must not be able to misreport about itself.
+  defp track_usage(state, %{type: :usage, payload: %{"subagent_task_id" => _child}}), do: state
+
   defp track_usage(state, %{type: :usage, payload: payload}) when is_map(payload) do
     case Window.used(payload) do
       used when used > 0 -> %{state | context_used: used}
@@ -1724,6 +1871,27 @@ defmodule Ouroboros.Provider.Native.Session do
   # asked for at start at all.
   defp requested_plan?(options),
     do: Map.get(options, :plan) == true or Map.get(options, "plan") == true
+
+  # A depth this runtime did not set is 0 — a session an operator started. A nonsense
+  # value is read as the cap rather than as 0, which fails closed: the worst a corrupt or
+  # hand-written option can do is deny a session its `agent` tool, never grant one a level
+  # of nesting it was not given.
+  defp subagent_depth(options) do
+    case Map.get(options, :subagent_depth) || Map.get(options, "subagent_depth") do
+      depth when is_integer(depth) and depth >= 0 -> min(depth, AgentTool.max_depth())
+      nil -> 0
+      _nonsense -> AgentTool.max_depth()
+    end
+  end
+
+  # Both key spellings, and never by minting an atom from a string: `provider_options`
+  # arrives from a caller, and a lookup that creates atoms turns a request into a way to
+  # grow this node's atom table.
+  defp string_option(options, key) do
+    Enum.find_value(options, fn {candidate, value} ->
+      if to_string(candidate) == key and is_binary(value) and value != "", do: value
+    end)
+  end
 
   # Best effort, and deliberately not fatal: a session whose data directory went read-only
   # keeps planning, it just would not remember it across a restart. Saying so once beats

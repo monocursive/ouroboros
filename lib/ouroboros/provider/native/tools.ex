@@ -41,6 +41,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
+  alias Ouroboros.Provider.Native.Tools.AgentResult
   alias Ouroboros.Provider.Native.Tools.ApplyPatch
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Bash
@@ -81,6 +83,8 @@ defmodule Ouroboros.Provider.Native.Tools do
       WebFetch,
       CodeIntel,
       AskUser,
+      AgentTool,
+      AgentResult,
       Skill,
       Plan
     ]
@@ -100,6 +104,11 @@ defmodule Ouroboros.Provider.Native.Tools do
   stands — so a caller that only wants the names, like the system prompt's tool list, is
   not obliged to know about them.
 
+  `subagent_depth:` is G3's cap made visible rather than only enforced: a session already
+  at `Tools.Agent.max_depth/0` is shown no `agent` and no `agent_result` at all. A cap the
+  model can read off its own tool list is one it does not spend a call discovering, and
+  the loop refuses the name as well for the session that invents it anyway.
+
   MCP tools follow the static ones, and only when `workspace:` was given: a server is
   configured for a workspace, so a caller that named no workspace has not asked for any.
   They come last because a cached prefix is cheapest when the part that never changes is
@@ -110,15 +119,37 @@ defmodule Ouroboros.Provider.Native.Tools do
     allowed = normalize(allowed)
     disallowed = normalize(disallowed)
 
+    hidden = depth_hidden(opts)
+
     static =
       modules()
       |> Enum.filter(fn module ->
         name = module.name()
-        name not in disallowed and (allowed == [] or name in allowed)
+
+        name not in hidden and name not in disallowed and
+          (allowed == [] or name in allowed)
       end)
       |> Enum.map(&spec(&1, opts))
 
     static ++ mcp_specs(allowed, disallowed, opts)
+  end
+
+  @doc """
+  The tool names a session at `depth` may not be shown, G3's depth cap in the schema list.
+
+  Depth 0 is a session an operator started. Its children are 1, theirs are 2, and 2 is
+  the cap: a grandchild is shown neither `agent` nor `agent_result`, because there is
+  nothing it could collect either.
+  """
+  @spec depth_hidden(keyword()) :: [String.t()]
+  def depth_hidden(opts) do
+    case Keyword.get(opts, :subagent_depth) do
+      depth when is_integer(depth) and depth >= 0 ->
+        if depth >= AgentTool.max_depth(), do: ["agent", "agent_result"], else: []
+
+      _absent ->
+        []
+    end
   end
 
   # The filters apply to an MCP tool exactly as they apply to a static one, on its full
@@ -263,6 +294,12 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp mode("bash", _input), do: :execute
   defp mode("mcp__" <> _rest, _input), do: :execute
+
+  # G3. Spawning a child that will run tools of its own is an effect, and the honest
+  # classification of "a program whose actions this call authorises but does not name" is
+  # the one that asks. `agent_result` is `:read` by the default clause below, deliberately:
+  # collecting a summary of work that already happened must never need a second approval.
+  defp mode("agent", _input), do: :execute
   defp mode("web_fetch", _input), do: :network
   defp mode(name, _input) when name in ["write", "edit", "apply_patch"], do: :write
 

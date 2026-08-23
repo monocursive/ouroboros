@@ -181,6 +181,8 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                "web_fetch",
                "code_intel",
                "ask_user",
+               "agent",
+               "agent_result",
                "skill",
                "plan"
              ]

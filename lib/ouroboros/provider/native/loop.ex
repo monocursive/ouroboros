@@ -62,6 +62,27 @@ defmodule Ouroboros.Provider.Native.Loop do
   A tool the session does not have is not gated, does not run, and gets no entry; its
   `tool_call` event carries no `ledger_ref`, which is the honest way to say that nothing
   was admitted.
+
+  ### The subagent link (G3)
+
+  A child session's tool calls are its own entries, under the child's `provider_session_id`
+  and its own turn id — but under the **parent's** `session_id` and principal, because the
+  child is opened with the parent's harness context and belongs to the parent's interactive
+  session. The provider-session link rides in `authority.constraints` as `subagent_parent`
+  and `subagent_task_id`, and the cause is `native.subagent.tool_call` rather than
+  `native.tool_call`, so a reader can ask "everything a subagent of this session did"
+  without parsing anything. It is in `constraints` rather than in `attempt.subject` for one
+  structural reason: `Ouroboros.Agent.EffectLedger`'s subject vocabulary is a closed
+  whitelist and this module does not own that file.
+
+  ## Subagents (G3)
+
+  `agent` is the second tool this loop answers itself rather than in the tool task, and
+  for the same reason `ask_user` is: it has to block on things only this process can
+  reach. A foreground child's approvals are put on **this session's** approval channel
+  with a fresh parent request id, and the answer is handed back to the child by the id
+  the child minted — two id spaces, one person. See
+  `Ouroboros.Provider.Native.Subagent` for the lifecycle and every bound.
   """
 
   alias Jido.Harness.ApprovalResponse
@@ -77,7 +98,10 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
   alias Ouroboros.Provider.Native.Sandbox
+  alias Ouroboros.Provider.Native.Subagent
   alias Ouroboros.Provider.Native.Tools
+  alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
+  alias Ouroboros.Provider.Native.Tools.AgentResult
   alias Ouroboros.Provider.Native.Tools.AskUser
 
   @default_max_iterations 50
@@ -129,6 +153,20 @@ defmodule Ouroboros.Provider.Native.Loop do
     # description reads the workspace, so without this a file appearing under
     # `.agents/skills/` mid-turn would silently invalidate the cache.
     tool_specs: nil,
+    # G3. What this session needs in order to be somebody's parent. `session_pid` is the
+    # transport GenServer, which is the only thing that outlives a turn and can therefore
+    # hold a background child; `session_request` and `session_context` are what a child's
+    # own `Session.open/2` is built from, so a child inherits its parent's posture by
+    # construction rather than by a list of fields somebody remembered to copy.
+    # `subagent_depth` is this session's own depth — 0 for one an operator started — and
+    # `subagent_parent`/`subagent_task_id` are set only on a child, which is what makes a
+    # child's ledger entries say whose they are.
+    session_pid: nil,
+    session_request: nil,
+    session_context: nil,
+    subagent_depth: 0,
+    subagent_parent: nil,
+    subagent_task_id: nil,
     messages: [],
     reads: %{},
     session_grants: MapSet.new(),
@@ -371,27 +409,53 @@ defmodule Ouroboros.Provider.Native.Loop do
         {:continue, tool_result(state, call, unknown_tool(call.name, state))}
 
       {:ok, module} ->
-        # Classified once, here, and handed to the gate: re-deriving it would run
-        # `code_intel`'s rename preview a second time for nothing.
-        classified = Tools.classify(call.name, call.input, state.scope)
-        effect_id = tool_effect_id(state, call)
-        emit_tool_call(state, call, effect_id)
+        if depth_capped?(state, module) do
+          # G3. The schema list a session at the cap was shown has no `agent` in it, so a
+          # call is an invention. It is refused by name rather than as "unknown tool",
+          # because the truthful answer — the cap — is the one the model can act on.
+          emit_tool_call(state, call, nil)
 
-        gated(state, call, module, classified, effect_id)
+          {:continue,
+           tool_result(state, call, %{
+             output: AgentTool.depth_refusal(state.subagent_depth),
+             is_error: true
+           })}
+        else
+          # Classified once, here, and handed to the gate: re-deriving it would run
+          # `code_intel`'s rename preview a second time for nothing.
+          classified = Tools.classify(call.name, call.input, state.scope)
+          effect_id = tool_effect_id(state, call)
+          emit_tool_call(state, call, effect_id)
+
+          gated(state, call, module, classified, effect_id)
+        end
     end
   end
+
+  defp depth_capped?(state, module) when module in [AgentTool, AgentResult],
+    do: is_integer(state.subagent_depth) and state.subagent_depth >= AgentTool.max_depth()
+
+  defp depth_capped?(_state, _module), do: false
 
   defp gated(state, call, module, classified, effect_id) do
     case gate(state, call, classified) do
       {:allow, state, call, classified, hook_context, authority} ->
         case open_tool_effect(state, call, classified, effect_id, authority) do
           :ok ->
-            # `ask_user` is answered on the approval channel rather than in the tool
-            # task: it has to block on a human, and the approval path is the only thing
-            # in this provider that can. See `Native.Tools.AskUser`.
-            if Tools.interactive?(module),
-              do: ask_question(state, call, hook_context, effect_id),
-              else: execute(state, call, module, classified, hook_context, effect_id)
+            # Two tools are answered by this process rather than in the tool task, and
+            # both for the same reason: they block on something only this process can
+            # reach. `ask_user` blocks on a human through the approval path; `agent`
+            # blocks on a child session whose own approvals travel that same path.
+            cond do
+              module == AgentTool ->
+                run_subagent(state, call, hook_context, effect_id)
+
+              Tools.interactive?(module) ->
+                ask_question(state, call, hook_context, effect_id)
+
+              true ->
+                execute(state, call, module, classified, hook_context, effect_id)
+            end
 
           {:error, reason} ->
             {:continue, tool_result(state, call, unrecordable(call, reason))}
@@ -411,7 +475,12 @@ defmodule Ouroboros.Provider.Native.Loop do
     context = %{
       scope: state.scope,
       session_dir: state.session_dir,
-      reads: state.reads
+      reads: state.reads,
+      # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
+      # so it is handed two closures over the session rather than a pid to call: the tool
+      # never learns which process tracks what, and a run with no session gets `nil` and
+      # says so instead of failing obscurely.
+      subagents: subagent_handles(state)
     }
 
     # Checkpoint before write, always, and before the language server is asked anything:
@@ -1050,6 +1119,388 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp reason_suffix(""), do: ""
   defp reason_suffix(reason), do: ": #{reason}"
 
+  # ---------------------------------------------------------------- subagents (G3)
+
+  # `agent`, from the moment the gate admitted it to the moment its child's summary
+  # becomes a tool result. Everything here runs in the loop process, which is the point:
+  # a child's approval has to reach this session's approval channel, and this is the only
+  # process that owns one.
+  defp run_subagent(state, call, hook_context, effect_id) do
+    case subagent_parent(state) do
+      {:ok, parent} ->
+        case AgentTool.plan(call.input, parent) do
+          {:ok, spec} -> spawn_subagent(state, call, spec, hook_context, effect_id)
+          {:error, message} -> refuse_subagent(state, call, hook_context, effect_id, message)
+        end
+
+      {:error, message} ->
+        refuse_subagent(state, call, hook_context, effect_id, message)
+    end
+  end
+
+  # A refusal is an ordinary failed tool result and an ordinary settled ledger entry. The
+  # call was admitted — the entry is open — and what failed is the tool, which is exactly
+  # what `:failed` means there.
+  defp refuse_subagent(state, call, hook_context, effect_id, message) do
+    result = Tools.normalize_result_of(%{output: message, is_error: true})
+    settle_tool_effect(state, effect_id, result, 0)
+    {:continue, tool_result(state, call, append_context(result, hook_context))}
+  end
+
+  # What a child inherits, gathered in one place so that "a child may never be more
+  # permissive than its parent" is a property of this map rather than of the tool's
+  # discipline. Nothing the model wrote reaches it except through
+  # `Native.Tools.Agent.plan/2`'s own arguments.
+  defp subagent_parent(%{session_context: nil}),
+    do:
+      {:error,
+       "Refused: `agent` needs an interactive native session to own the child, and this " <>
+         "is a one-shot run. Do the work in this run instead."}
+
+  defp subagent_parent(state) do
+    counts = subagent_counts(state)
+
+    {:ok,
+     %{
+       depth: state.subagent_depth,
+       provider_session_id: state.provider_session_id,
+       session_id: state.session_id,
+       session_pid: state.session_pid,
+       request: state.session_request,
+       context: state.session_context,
+       scope: state.scope,
+       model_spec: state.model_spec,
+       approval_mode: state.approval_mode,
+       tool_names: state |> tool_specs() |> Enum.map(& &1.name),
+       options: Map.new(state.session_request.provider_options || %{}),
+       subscriber: self(),
+       background_subscriber: state.session_pid,
+       running: counts.running,
+       tracked: counts.tracked
+     }}
+  end
+
+  defp spawn_subagent(state, call, spec, hook_context, effect_id) do
+    started_at = System.monotonic_time(:millisecond)
+
+    case Subagent.spawn(spec) do
+      {:ok, started} ->
+        emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
+        _ = track_subagent(state, spec, started)
+
+        if spec.background do
+          background_result(state, call, spec, started, hook_context, effect_id, started_at)
+        else
+          wait_for_subagent(
+            state,
+            call,
+            spec,
+            started,
+            hook_context,
+            effect_id,
+            started_at,
+            deadline(spec.deadline_ms + 5_000),
+            %{}
+          )
+        end
+
+      {:error, reason} ->
+        refuse_subagent(
+          state,
+          call,
+          hook_context,
+          effect_id,
+          "Refused: the subagent could not be started (#{inspect(reason)}). Nothing ran, " <>
+            "and there is no task to collect."
+        )
+    end
+  end
+
+  defp background_result(state, call, spec, started, hook_context, effect_id, started_at) do
+    result =
+      Tools.normalize_result_of(%{
+        output:
+          "Subagent #{spec.task_id} (#{spec.description}) is running in the background as " <>
+            "#{started.provider_session_id}. Collect it with " <>
+            "`agent_result` and that task_id — it is stopped when this session closes, and " <>
+            "a collection after that says so.",
+        is_error: false
+      })
+
+    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
+    {:continue, tool_result(state, call, append_context(result, hook_context))}
+  end
+
+  # The wait, and the four things that can interrupt it. `pending` maps the parent request
+  # ids this process minted to the child's own — the whole of the approval translation.
+  defp wait_for_subagent(
+         state,
+         call,
+         spec,
+         started,
+         hook_context,
+         effect_id,
+         started_at,
+         deadline,
+         pending
+       ) do
+    task_id = spec.task_id
+    remaining = remaining(deadline)
+
+    receive do
+      {:subagent, ^task_id, {:progress, payload}} ->
+        emit(state, :provider_event, subagent_event(payload))
+
+        wait_for_subagent(
+          state,
+          call,
+          spec,
+          started,
+          hook_context,
+          effect_id,
+          started_at,
+          deadline,
+          pending
+        )
+
+      {:subagent, ^task_id, {:approval, child_request_id, payload}} ->
+        request_id = new_request_id()
+        emit(state, :approval_requested, subagent_approval(payload, spec), request_id)
+
+        wait_for_subagent(
+          state,
+          call,
+          spec,
+          started,
+          hook_context,
+          effect_id,
+          started_at,
+          deadline,
+          Map.put(pending, request_id, child_request_id)
+        )
+
+      {:subagent, ^task_id, {:settled, summary}} ->
+        finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at)
+
+      {:subagent, _other, _message} ->
+        wait_for_subagent(
+          state,
+          call,
+          spec,
+          started,
+          hook_context,
+          effect_id,
+          started_at,
+          deadline,
+          pending
+        )
+
+      {:native_approval, request_id, %ApprovalResponse{} = response} ->
+        pending =
+          case Map.fetch(pending, request_id) do
+            {:ok, child_request_id} ->
+              Subagent.respond(started.pid, child_request_id, response)
+              Map.delete(pending, request_id)
+
+            # An answer to something else — a question this turn asked before the child
+            # existed. Dropped rather than forwarded: a response addressed to one request
+            # is not an answer to another.
+            :error ->
+              pending
+          end
+
+        wait_for_subagent(
+          state,
+          call,
+          spec,
+          started,
+          hook_context,
+          effect_id,
+          started_at,
+          deadline,
+          pending
+        )
+
+      :native_interrupt ->
+        summary = settle_subagent(state, spec, started, :stopped)
+        emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
+        settle_tool_effect(state, effect_id, :refused, nil, 0)
+        {:interrupted, %{state | interrupted?: true}}
+
+      {:native_steer, text} ->
+        wait_for_subagent(
+          %{state | steer: state.steer ++ [text]},
+          call,
+          spec,
+          started,
+          hook_context,
+          effect_id,
+          started_at,
+          deadline,
+          pending
+        )
+    after
+      # The backstop, not the deadline. `Subagent` runs the real one and settles itself
+      # `timed_out`, which arrives here as an ordinary `{:settled, …}`; this fires only
+      # when that process is itself wedged, and it still produces a summary rather than a
+      # tool call that never returned.
+      remaining ->
+        summary = settle_subagent(state, spec, started, :timed_out)
+        finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at)
+    end
+  end
+
+  defp finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at) do
+    emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
+    state = fold_subagent_usage(state, spec, summary)
+
+    # A foreground child is released the moment its summary is in hand: nothing can
+    # collect it afterwards, and leaving it tracked would spend one of the parent's four
+    # slots on a child that has already answered.
+    _ = Subagent.stop(started.pid, :stopped)
+    _ = release_subagent(state, spec.task_id)
+
+    result =
+      Tools.normalize_result_of(%{
+        output: Subagent.render(summary),
+        is_error: summary.status in [:failed, :timed_out]
+      })
+
+    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
+    {:continue, tool_result(state, call, append_context(result, hook_context))}
+  end
+
+  defp settle_subagent(_state, _spec, started, reason) do
+    case Subagent.stop(started.pid, reason) do
+      {:ok, summary} ->
+        summary
+
+      # A child whose own process is gone still owes the parent a terminal answer. This is
+      # the least this runtime knows to be true about it, said as such.
+      {:error, _unreachable} ->
+        %{
+          task_id: started.task_id,
+          description: "subagent",
+          provider_session_id: started.provider_session_id,
+          session_dir: Map.get(started, :session_dir),
+          status: reason,
+          error: "the child's own process could not be reached for a summary",
+          turns: 0,
+          tool_calls: 0,
+          files_changed: [],
+          files_changed_count: 0,
+          approvals_denied: 0,
+          usage: %{input: 0, output: 0, cost: nil},
+          text: "",
+          worktree: Map.get(started, :worktree),
+          background: false,
+          depth: 0,
+          tools: []
+        }
+    end
+  end
+
+  # I2/G3. The child's spend is the parent's spend: it was this session's turn that
+  # decided to make it. Folding it into `state.usage` is what keeps `turn_completed`'s
+  # totals true, and the `usage` event is what keeps a client's running cost true.
+  #
+  # The event deliberately carries **no** `context_used`/`context_window`: the child's
+  # request size is a fact about the child's window, and the parent's meter is the one
+  # thing on that event a session must not be able to lie about. `Native.Session` drops a
+  # `usage` payload carrying `subagent_task_id` from its meter for the same reason.
+  defp fold_subagent_usage(state, spec, summary) do
+    payload =
+      %{
+        "input_tokens" => summary.usage.input,
+        "output_tokens" => summary.usage.output,
+        "total_tokens" => summary.usage.input + summary.usage.output,
+        "model" => spec.request.model,
+        "subagent_task_id" => summary.task_id,
+        "provider_session_id" => summary.provider_session_id
+      }
+      |> then(fn payload ->
+        if is_number(summary.usage.cost),
+          do: Map.put(payload, "cost_usd", summary.usage.cost),
+          else: payload
+      end)
+
+    emit(state, :usage, payload)
+
+    %{
+      state
+      | usage: %{
+          input: state.usage.input + summary.usage.input,
+          output: state.usage.output + summary.usage.output,
+          cost: state.usage.cost + (summary.usage.cost || 0.0)
+        }
+    }
+  end
+
+  defp subagent_event(payload), do: Map.put(payload, "kind", "subagent")
+
+  # The child's own approval payload, forwarded whole so a client renders it exactly as it
+  # would any other, with one key added saying which child is asking. Adding rather than
+  # rewriting is deliberate: a client that has never heard of subagents still shows the
+  # right modal.
+  defp subagent_approval(payload, spec) when is_map(payload) do
+    Map.put(payload, "subagent", %{
+      "task_id" => spec.task_id,
+      "description" => spec.description,
+      "provider_session_id" => spec.request.provider_session_id
+    })
+  end
+
+  defp subagent_approval(_payload, spec),
+    do: %{"kind" => "tool", "subagent" => %{"task_id" => spec.task_id}}
+
+  defp subagent_handles(%{session_pid: pid}) when is_pid(pid) do
+    %{
+      lookup: fn task_id ->
+        case session_call(pid, {:subagent_lookup, task_id}) do
+          {:ok, child} when is_pid(child) -> {:ok, child}
+          _absent -> :error
+        end
+      end,
+      release: fn task_id -> session_call(pid, {:subagent_release, task_id}) end
+    }
+  end
+
+  defp subagent_handles(_state), do: nil
+
+  defp track_subagent(%{session_pid: pid}, spec, started) when is_pid(pid),
+    do:
+      session_call(
+        pid,
+        {:subagent_track, spec.task_id, started.pid,
+         %{
+           description: spec.description,
+           background: spec.background,
+           provider_session_id: started.provider_session_id
+         }}
+      )
+
+  defp track_subagent(_state, _spec, _started), do: {:error, :no_session}
+
+  defp release_subagent(%{session_pid: pid}, task_id) when is_pid(pid),
+    do: session_call(pid, {:subagent_release, task_id})
+
+  defp release_subagent(_state, _task_id), do: :ok
+
+  defp subagent_counts(%{session_pid: pid}) when is_pid(pid) do
+    case session_call(pid, :subagent_counts) do
+      %{running: _running, tracked: _tracked} = counts -> counts
+      _unreachable -> %{running: 0, tracked: 0}
+    end
+  end
+
+  defp subagent_counts(_state), do: %{running: 0, tracked: 0}
+
+  defp session_call(pid, message) do
+    GenServer.call(pid, message, 5_000)
+  catch
+    :exit, reason -> {:error, {:session_unreachable, reason}}
+  end
+
   # ---------------------------------------------------------------- the ledger (I1)
 
   # What admitted or refused one tool call, in the shape `EffectLedger`'s `authority` map
@@ -1178,10 +1629,30 @@ defmodule Ouroboros.Provider.Native.Loop do
           node: node(),
           permission_entry_id: authority.permission_entry_id
         }),
-      authority: Map.delete(authority, :permission_entry_id),
-      cause: %{signal_type: "native.tool_call", signal_id: effect_id}
+      authority: authority |> Map.delete(:permission_entry_id) |> link_parent(state),
+      cause: %{signal_type: cause_type(state), signal_id: effect_id}
     }
   end
+
+  # G3. Which parent's authority this call ran under. It rides in `constraints` because
+  # that is the one part of an entry `Ouroboros.Agent.EffectLedger` passes through whole,
+  # and because it is true of the authority rather than of the subject: a child is
+  # admitted to do something *because* its parent was, and this names which parent.
+  defp link_parent(authority, %{subagent_parent: parent} = state) when is_binary(parent) do
+    Map.update(
+      authority,
+      :constraints,
+      %{},
+      &Map.merge(&1 || %{}, %{subagent_parent: parent, subagent_task_id: state.subagent_task_id})
+    )
+  end
+
+  defp link_parent(authority, _state), do: authority
+
+  defp cause_type(%{subagent_parent: parent}) when is_binary(parent),
+    do: "native.subagent.tool_call"
+
+  defp cause_type(_state), do: "native.tool_call"
 
   # What the call is *about*, in identities. Paths and hostnames name things; a command
   # line and a tool's arguments are contents, so the command is a digest and the arguments
@@ -1447,7 +1918,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   # The workspace reaches the specs so `skill` can put its catalogue in its description.
   # Everything else's description is static.
   defp build_tool_specs(state),
-    do: Tools.specs(state.allowed_tools, state.disallowed_tools, workspace: state.scope.root)
+    do:
+      Tools.specs(state.allowed_tools, state.disallowed_tools,
+        workspace: state.scope.root,
+        subagent_depth: state.subagent_depth
+      )
 
   defp signature(call), do: {call.name, call.input}
 

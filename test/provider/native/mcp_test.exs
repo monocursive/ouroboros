@@ -451,11 +451,12 @@ defmodule Ouroboros.Provider.Native.McpTest do
       %{specs: specs}
     end
 
-    test "MCP tools follow the static thirteen in the spec list", context do
+    test "MCP tools follow the static ones in the spec list", context do
       names = Enum.map(context.specs, & &1.name)
+      static = length(Tools.modules())
 
-      assert Enum.take(names, 13) == Enum.map(Tools.modules(), & &1.name())
-      assert Enum.drop(names, 13) == ["mcp__fake__echo", "mcp__fake__add"]
+      assert Enum.take(names, static) == Enum.map(Tools.modules(), & &1.name())
+      assert Enum.drop(names, static) == ["mcp__fake__echo", "mcp__fake__add"]
     end
 
     test "no MCP tool appears when the caller named no workspace" do

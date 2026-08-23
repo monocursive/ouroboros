@@ -38,7 +38,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   end
 
   describe "the tool set" do
-    test "is D2's full set, and every one has a JSON Schema the model can read" do
+    test "is D2's full set plus G3's two, and every one has a JSON Schema the model can read" do
       names = Enum.map(Tools.specs(nil, nil), & &1.name)
 
       assert names == [
@@ -53,6 +53,8 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "web_fetch",
                "code_intel",
                "ask_user",
+               "agent",
+               "agent_result",
                "skill",
                "plan"
              ]
@@ -77,6 +79,8 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "web_fetch",
                "code_intel",
                "ask_user",
+               "agent",
+               "agent_result",
                "skill",
                "plan"
              ]
