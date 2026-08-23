@@ -52,10 +52,11 @@ nobody holds.
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
 `review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
-full Elixir suite at **1580 passed, 0 failed**; the Rust suites at **0 failed** across
-every target in both feature sets (507 lib tests, 515 with `embed`; one epmd-binding test
-in `tui/src/fleet.rs` is load-flaky when a stray `epmd -daemon` is running and passes in
-isolation every time); the local eval corpus at **17 / 17**. Every slice was built by a
+full Elixir suite at **1581 passed, 0 failed**; the Rust suites at **0 failed** across
+every target in both feature sets (2,063 test runs across the default and `embed` sets;
+one epmd-binding test in `tui/src/fleet.rs` is load-flaky when a stray `epmd -daemon` is
+running and passes in isolation every time); the local eval corpus at **17 / 17** through
+the merged client. Every slice was built by a
 babysat Opus agent in an isolated worktree, diff-verified against its own final report,
 and merged with the CI-identical gates run on the merged tree; integration defects that
 only the merged tree could reveal are listed under each track.
@@ -123,7 +124,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | B4 | landed | `@` chips → the object envelope; image paste into `<workspace>/.ouroboros/images` (self-ignoring); `/effort`; `/model` |
 | B5 | landed | `Esc Esc` backtrack (fork where served, else edit-and-resend), `[keys] backtrack` |
 | B6 | landed | `rename` + auto-title, `fork` via each transport's own verb (`fork` capability), picker/rail columns |
-| B7 | landed (runtime) / client in flight | `workspace.exec` with `:operator_shell` ledger entry before run, envelope carries the last three |
+| B7 | landed | `workspace.exec` with `:operator_shell` ledger entry before run, envelope carries the last three; client `!cmd` states node, workspace, and approval posture before Enter, renders the reply as a block, dedupes the runtime's `operator_shell` cell by `command_digest`, and offers the engine's `suggested_rule` on refusal (`ctrl+x r` → `permissions.add`); `/btw` not done |
 | B8 | landed | `keymap.rs`: 40 actions, `[keys]` grammar, every surface reads the map, `/keys` |
 | B9 | landed | grouped `?`, first-run tips, `? new here` |
 | C1 | landed | `Control.Permissions`: Claude Code's Bash semantics, four scopes, deny→ask→allow, protected paths, durable rules, every decision in the ledger, `permissions.{list,add,remove}` |
@@ -134,10 +135,10 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | C6 | pending | classifier |
 | D1 | landed | `Ouroboros.Provider.Native` on ReqLLM (not `Jido.AI.Agent` — its runtime executes tools itself); approvals at the tool boundary; native steer; checkpoint before the terminal event; **no live model run yet** |
 | D2 | landed | grep/glob/ls/`web_fetch`/`ask_user`/V4A `apply_patch`/skills/`todo` |
-| D3 | landed | AGENTS.md hierarchy with lazy `paths:` rules, cache-stable prefix + fingerprint, meter → `usage.context_window`, compaction that refuses rather than lose its archive, handoff |
+| D3 | landed | AGENTS.md hierarchy with lazy `paths:` rules, cache-stable prefix + fingerprint, meter → `usage.context_window`, compaction that refuses rather than lose its archive, handoff; client `/compact [focus]` (report as a block, then a re-measured meter), `/handoff <prompt>` (opens the child), `/context` (a scrollable page whose first line is `source`), all gated on `hello.methods` **and** `capabilities.transport == "native"`; the footer `%` is now `context_used / context_window`, not cumulative spend |
 | D4 | pending | MCP client for the native agent |
 | D5 | landed | hooks (seven events wired; `SessionStart/End`, `PreCompact` declared, not wired) |
-| D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire) |
+| D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire); client `/rewind` as a menu with per-row warnings then a three-way `what` chooser, `Esc Esc` offers `r` where checkpoints exist; the facade now admits turn-id strings, not only ordinals |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
 | D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
 | E1 | landed | per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops; placed after the gateway |
@@ -150,8 +151,8 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | F3 | landed | usage accounting, `runtime.models` from `llm_db` |
 | F4 | landed | titles, list filters |
 | F5 | landed | `/export`; compaction archives |
-| G1 | landed (runtime) / client in flight | `interactive.delegate/delegations`, parent/children rows |
-| G2 | in flight | fleet triage |
+| G1 | landed | `interactive.delegate/delegations`; client `/delegate` with a caller-owned id, `delegation` events as transcript cells, child rows nested under the parent in the rail, `Ctrl+T` lists delegations beside the plan (Enter/Esc navigation lives in `/delegations`, a cursor surface) |
+| G2 | landed | fleet triage: needs-input / working / done from declared state across every node, counts in the footer, node labels on rail cards and picker rows, offline owners keep their group with a `last_known` mark; `Space` peek and `r` reply on the session picker (the rail has no row cursor); `ouro agents [--json]` starts no runtime — **live-verified** against a scratch daemon |
 | G3 | pending | native subagent tool |
 | G4 | pending | visible agent-to-agent messaging |
 | G5 | pending | orchestration UI |
@@ -179,7 +180,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 6 | Plan / approval flow | 0 | 2 (approvals real on Claude/Codex/ACP/native with rules and "don't ask again"; no plan mode yet) |
 | 7 | Input ergonomics | 1 | 2 (chips, image paste, `/effort`, `/model`, rebindable keys; no vim) |
 | 8 | TUI rendering correctness | 1 | 2 (sync output, escape hatches, themes, a11y) |
-| 9 | Work visibility | 1 | 2 (every kind rendered, plan panel, diff review, details tree; delegation rows in flight) |
+| 9 | Work visibility | 1 | 3 (every kind rendered, plan panel, diff review, details tree, delegation rows, context page, operator-shell cells) |
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
 | 11 | Sandboxing / isolation | 1 | 2 (worktrees on both planes; no OS sandbox) |
 | 12 | MCP & tool ecosystem | 0 | 1 (Ouroboros *serves* MCP to Claude; no native MCP client; hooks and skills landed) |
@@ -188,15 +189,15 @@ what a user of `ouro` on `review-fixes` gets today.
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
 | 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
-| 18 | In-session parallelism | 1 | 1→2 (delegation on the wire; client in flight) |
+| 18 | In-session parallelism | 1 | 2 (delegation on the wire and in the rail; a delegation is a coding task with a parent, not a sub-conversation — G3 pending) |
 | 19 | Background handoff + remote attach | 2 | 2 |
-| 20 | Cross-machine / fleet coordination | 2 | 2→3 (fleet ledger queries landed; triage in flight) |
+| 20 | Cross-machine / fleet coordination | 2 | 3 (fleet ledger queries; triage across nodes in the rail, the picker, and `ouro agents`) |
 | 21 | Programmability | 1 | 2 (hooks, skills, `ouro run --json`, MCP server; no ACP agent mode yet) |
 | 22 | Install / update / auth | 1 | 1 |
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **≈47, ≈49 once the client half of B7/G1/G2 lands** |
+| | **Total / 75** | **23** | **≈49** |
 
 ### Honest limits added this wave
 
@@ -228,6 +229,13 @@ what a user of `ouro` on `review-fixes` gets today.
   pool never held; an error whose range moved).
 - Codex sessions get no post-edit hook; bridged Claude sessions at `auto_edit` /
   `auto_approve` get neither the MCP tools nor the hook.
+- Client halves of B7/G1/G2 were verified against the scripted `App` harness and the
+  corpus, plus `ouro agents`/`ouro ledger` against a live scratch daemon — not the
+  interactive screens against a live socket. The delegations panel and the `/context`
+  meter are read on demand (`Ctrl+T`, `/compact`), not on a cadence; `Space`/`r` triage
+  keys are on the session picker, not the rail; the `--worktree` refusal path (a workspace
+  that is not a git repository) is rendered through the ordinary error path and was not
+  exercised live.
 
 
 ## 1. Method and sources
