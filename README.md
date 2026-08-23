@@ -417,14 +417,52 @@ through the permission engine, the approval, and the checkpoint like any other e
 
 **What is enforced.** Every tool path is canonicalised through every symlink and refused
 outside the session workspace or its declared `add_dirs`; a `..` segment is refused
-outright. `sandbox_mode: :read_only` refuses `write`, `edit`, and — read this part —
-**every `bash` command**. Approvals are real: `approval_mode: :prompt` asks before a
+outright. `sandbox_mode: :read_only` refuses `write` and `edit`, and runs `bash` inside
+the node's OS sandbox — or refuses it outright where the node has none (the section
+below). Approvals are real: `approval_mode: :prompt` asks before a
 write or a command and blocks until a human answers or the timeout denies;
 `:auto_edit` auto-approves writes inside the workspace only, and still asks for
 commands; `:auto_approve` asks for nothing. `steer` delivers a message at the next tool
 boundary of a running turn, which no other provider here supports. A turn stops after
 the current tool on interrupt, at `max_iterations` (50 by default), and on the third
 identical tool call.
+
+**The OS sandbox (C5).** `bash` is the one tool that runs a program this runtime never
+inspects, so it is the one tool an OS sandbox is for.
+`Ouroboros.Provider.Native.Sandbox` probes the node once — macOS `/usr/bin/sandbox-exec`,
+Linux `bwrap` — and the answer is a string, not a boolean:
+`runtime.providers` carries `details.sandbox` as `"sandbox-exec"`, `"bwrap"`, or
+`"none"`, and a client may say "no OS sandbox" for a native session only when it reads
+`none`. Set `config :ouroboros, native_sandbox: :none` to turn it off deliberately; the
+override is read ahead of the cache, so it takes effect without a restart.
+
+| `sandbox_mode` | backend present | backend absent |
+|---|---|---|
+| `read_only` | reads anywhere the process could already read; **no writes at all** except a per-call scratch directory `$TMPDIR` points at; no network | **`bash` refused**, and the refusal names what was missing |
+| `workspace_write` | the above, plus writes under the workspace and every `add_dirs` root — with `.git` and `.ouroboros` beneath them, the node's data directory and `~/.config/ouroboros` read-only; no network | runs **unsandboxed**, exactly as it did before C5 |
+
+macOS gets a Seatbelt profile shaped after Codex CLI's published base policy: `(deny
+default)`, `(allow file-read*)`, the handful of operations `/bin/sh` needs to exist, and
+then the writable roots — each one a `sandbox-exec -D` parameter rather than text spliced
+into the profile, so a workspace name can never become policy. `.git` and `.ouroboros` are
+denied by regular expression, which covers a vendored dependency's nested `.git` as well
+as the workspace's own. Linux gets a bubblewrap argv: `--ro-bind / /` for the whole
+filesystem, `--bind` per writable root, `--ro-bind` back over each root's `.git`,
+`--tmpfs` for the scratch `$TMPDIR`, `--unshare-net` when the network is denied, and
+`--die-with-parent`.
+
+**`.git` read-only means `git commit` fails inside the sandbox.** That is Codex's rule
+and it is kept for Codex's reason — the repository's history is the thing a session must
+not rewrite behind you. Commits are yours.
+
+When the sandbox stops a command the tool result quotes the line that proves it, names
+the constraint (a write outside the writable set, or the network), and says what to ask a
+human for, so the model escalates instead of retrying (Cursor's rule). `Operation not
+permitted` is `EPERM` and is what a Seatbelt denial looks like from inside; `Permission
+denied` is `EACCES`, an ordinary file mode, and is deliberately *not* treated as a sandbox
+denial. Nothing degrades quietly: a `sandbox_mode` with no policy is refused rather than
+rounded to the nearest one, and a sandbox that fails to start refuses the command instead
+of running it with less containment than the session was told it had.
 
 **What it reads from the project.** `AGENTS.md` in the workspace, then every `AGENTS.md`
 above it up to the filesystem root, with `CLAUDE.md` as the fallback name at each level,
@@ -492,11 +530,40 @@ transcript it never had would be a claim with nothing behind it.
 
 **What is not enforced, and will not be until it is.**
 
-- **There is no OS sandbox.** `workspace_write` is those path checks and nothing else.
-  A `bash` command runs with your privileges, can reach the network, and can write
-  outside the workspace through a program this runtime does not inspect. `:unrestricted`
-  is not offered at all, because there is no sandbox to relax. macOS Seatbelt and Linux
-  bubblewrap are a later slice.
+- **The OS sandbox is filesystem and network, and nothing finer.** There is no seccomp
+  filter on the bubblewrap path, so the syscall surface is not narrowed; there is no
+  domain allowlist and no proxy, so the network is on or off rather than "these hosts".
+  `config :ouroboros, native_sandbox_network: true` lifts it for every native session on
+  the node — a blunt instrument, and the honest description of one.
+- **The bubblewrap path is unit-tested, not run.** `bwrap` was not installed on the
+  machine C5 was written on. Its argv is pinned byte for byte and its meaning is read
+  from bubblewrap's documented options; its *behaviour* is not claimed. It also protects
+  less than the macOS path does: only the `.git` and `.ouroboros` directories directly
+  beneath a writable root, where Seatbelt denies the segment at any depth.
+- **`sandbox-exec` is deprecated by Apple.** It works on macOS 26 and it is what Codex
+  CLI and Cursor use, but it carries that warning and Apple may withdraw it.
+- **On a node with no backend, `workspace_write` is the tools' path checks and nothing
+  else.** A `bash` command runs with your privileges, can reach the network, and can
+  write outside the workspace through a program this runtime does not inspect. It is
+  reported, not hidden: `details.sandbox` reads `none`.
+- **Attributing a failure to the sandbox is evidence, not proof.** `EPERM` is what a
+  Seatbelt denial looks like from inside a program, but it is also what a non-root
+  `chown` looks like. The note is hedged (“appears to have stopped this command”) and
+  quotes the line it read, so the model and the reader can judge it. It is only ever
+  added to a command that already failed, and never to one killed by its own timeout.
+- **The sandbox wraps `bash` and nothing else.** A `[checks]` command and a hook run
+  through `Ouroboros.Provider.Native.Exec`, unsandboxed, in every mode — including
+  `read_only`. They are the operator's own commands, gated by the trust marker rather
+  than by the model, which is why they were left outside; but a `read_only` session
+  whose workspace is trusted and whose `ouroboros.toml` runs a writing check does write.
+  `grep` shells out to ripgrep with an argv and no shell, and is not wrapped either.
+- **A tool that asks the OS for a temp directory instead of reading `$TMPDIR` is denied.**
+  macOS `mktemp` with no template asks libc for `_CS_DARWIN_USER_TEMP_DIR`, which is
+  outside the scratch directory. `mktemp "$TMPDIR/x.XXXXXX"` works; bare `mktemp` does
+  not.
+- **`:unrestricted` is still not offered.** C5 gave this provider a sandbox to relax, not
+  a reason to offer a mode that switches everything off. The escalation from a sandbox
+  denial is a human, `add_dirs`, or `workspace_write` — not a flag.
 - **A command that detaches from its process group can outlive its timeout.** The
   timeout terminates the shell this runtime started. The same limit applies to a hook
   and to a `[checks]` command.
