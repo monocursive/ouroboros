@@ -21,6 +21,10 @@ defmodule Ouroboros.Interactive.Task do
 
   @poll_interval 25
   @replay_limit 100
+  # C4. How long this coordinator waits on a provider-side fold. Under the gateway's own
+  # 120s ceiling for `interactive.compact`, so a transport that never answers is this
+  # call's failure rather than a connection's.
+  @compaction_wait 110_000
   @terminal_retire_ms 100
   @workspace_reacquire_attempts 25
   @workspace_reacquire_delay_ms 4
@@ -371,14 +375,11 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # C4. Two transports can fold a conversation now, and they fold different things.
+  # `Provider.compact_capability/1` is the declaration both branches read, so a transport
+  # gains compaction by declaring it rather than by being named here.
   def handle_call({:compact, focus}, _from, runtime) do
-    case native_transport(runtime.session, :compact) do
-      {:ok, pid} ->
-        {:reply, compact_native(pid, focus), runtime}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, runtime}
-    end
+    {:reply, compact(runtime, focus), runtime}
   end
 
   # Read-only, and it answers for every transport — with different amounts of truth. The
@@ -2059,12 +2060,56 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  defp compact(%{session: session} = runtime, focus) do
+    case Provider.session_compact(session.provider, Map.get(session.options, :transport)) do
+      :native ->
+        with {:ok, pid} <- native_transport(session, :compact), do: compact_native(pid, focus)
+
+      :provider ->
+        compact_provider(runtime, focus)
+
+      false ->
+        {:error, uncompactable(session)}
+    end
+  end
+
   defp compact_native(pid, focus) do
     case safe_session_call(fn -> NativeSession.compact(pid, focus) end) do
       {:ok, report} when is_map(report) -> {:ok, durable(report)}
       {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
       other -> {:error, {:compaction_refused, durable(other)}}
     end
+  end
+
+  # The provider folds its own thread. A `focus` is refused by the dialect rather than
+  # dropped, and that refusal travels out untouched: `unsupported_on_transport` with
+  # `reason: focus_not_supported` is a capability answer a client can render, where
+  # `compaction_refused` would look like something worth retrying.
+  defp compact_provider(runtime, focus) do
+    with_harness_session(runtime, fn harness_session_id ->
+      case ProviderSession.ask(harness_session_id, :compact, %{focus: focus}, @compaction_wait) do
+        {:ok, report} when is_map(report) -> {:ok, durable(report)}
+        {:error, {:unsupported_on_transport, _details} = reason} -> {:error, durable(reason)}
+        {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
+        other -> {:error, {:compaction_refused, durable(other)}}
+      end
+    end)
+  end
+
+  defp uncompactable(%State{} = session) do
+    transport = session_transport(session)
+
+    {:unsupported_on_transport,
+     %{
+       transport: transport,
+       verb: :compact,
+       provider: session.provider,
+       message:
+         "#{inspect(session.provider)} reaches this session over the " <>
+           "#{inspect(transport)} transport, which neither hands its conversation to this " <>
+           "runtime nor offers a fold of its own. Only a `native` session or a Codex " <>
+           "app-server thread can compact."
+     }}
   end
 
   # Never a guess. A native session answers with the facts it holds; every other transport

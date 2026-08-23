@@ -7,6 +7,7 @@ defmodule Ouroboros.Provider.CodexSessionTest do
   alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.State
   alias Ouroboros.Provider.{CodexAdapter, CodexSession}
+  alias Ouroboros.Provider.Session.Jsonl
   alias Ouroboros.Test.CodexSchema
 
   # Transport `next_id` starts at 1: initialize, thread/start, turn/start. The fake must
@@ -125,6 +126,23 @@ defmodule Ouroboros.Provider.CodexSessionTest do
       echo '{"method":"thread/compacted","params":{"threadId":"thread-1","turnId":"turn-prov-1"}}'
       echo '{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"item-9"}}}'
       echo '{"method":"turn/completed","params":{"turn":{"id":"turn-prov-1","status":"completed"}}}'
+      ;;
+  """
+
+  # C4. The runtime asking the app server to fold its own thread. `thread/compact/start`
+  # answers `{}`; the fold itself arrives afterwards as the notification above.
+  @compact_start_cases """
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"userAgent":"fake"}}'
+      ;;
+    *'"method":"thread/start"'*)
+      echo '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+      ;;
+    *'"method":"thread/compact/start"'*)
+      echo '{"id":3,"result":{}}'
+      ;;
+    *'"method":"model/list"'*)
+      echo '{"id":3,"result":{"data":[{"id":"gpt-5.3-codex","model":"gpt-5.3-codex","displayName":"GPT-5.3 Codex","isDefault":true,"defaultReasoningEffort":"medium"},{"id":"gpt-5.3-codex-mini","model":"gpt-5.3-codex-mini","displayName":"GPT-5.3 Codex mini"}],"nextCursor":"page-2"}}'
       ;;
   """
 
@@ -646,6 +664,99 @@ defmodule Ouroboros.Provider.CodexSessionTest do
     assert failed.request_id == "req-1"
 
     assert :ok = CodexSession.close(handle)
+  end
+
+  test "an unfocused compaction sends thread/compact/start and answers when it lands" do
+    executable = fake_app_server(@compact_start_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert {:ok, report} = Jsonl.ask(handle, :compact, %{focus: nil})
+
+    # The report says which side did the folding, and claims no token counts: the app
+    # server summarised its own thread and reported none.
+    assert report == %{
+             trigger: "manual",
+             summarised: false,
+             source: "codex:thread/compact/start"
+           }
+
+    frame = executable |> logged() |> Enum.find(&(&1["method"] == "thread/compact/start"))
+
+    # The id comes from the session's own counter — initialize 1, thread/start 2 — which
+    # is why the frame is built in the dialect and written by the transport.
+    assert frame["id"] == 3
+    assert frame["params"] == %{"threadId" => "thread-1"}
+    CodexSchema.assert_valid!(frame["params"], "ThreadCompactStartParams")
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "a focused compaction is refused by name and no frame is sent" do
+    executable = fake_app_server(@compact_start_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    before = length(logged(executable))
+
+    assert {:error, {:unsupported_on_transport, details}} =
+             Jsonl.ask(handle, :compact, %{focus: "the migration plan"})
+
+    assert details.reason == :focus_not_supported
+    assert details.verb == :compact
+    assert details.message =~ "focus"
+
+    # `ThreadCompactStartParams` has one field, so a focus has nowhere to go. Compacting
+    # anyway would fold the thread on the app server's terms while the operator was told
+    # theirs applied.
+    assert length(logged(executable)) == before
+    refute Enum.any?(logged(executable), &(&1["method"] == "thread/compact/start"))
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "model/list answers with this account's rows, labelled as the app server's" do
+    executable = fake_app_server(@compact_start_cases)
+    handle = open_session!(executable)
+    drain_ready()
+
+    assert {:ok, answer} = Jsonl.ask(handle, :models, %{limit: 2, include_hidden: false})
+
+    assert answer.source == "codex:model/list"
+    assert answer.next_cursor == "page-2"
+
+    assert answer.models == [
+             %{
+               id: "gpt-5.3-codex",
+               model: "gpt-5.3-codex",
+               display_name: "GPT-5.3 Codex",
+               default: true,
+               hidden: false,
+               default_reasoning_effort: "medium",
+               input_modalities: []
+             },
+             %{
+               id: "gpt-5.3-codex-mini",
+               model: "gpt-5.3-codex-mini",
+               display_name: "GPT-5.3 Codex mini",
+               default: false,
+               hidden: false,
+               input_modalities: []
+             }
+           ]
+
+    frame = executable |> logged() |> Enum.find(&(&1["method"] == "model/list"))
+    assert frame["params"] == %{"limit" => 2, "includeHidden" => false}
+    CodexSchema.assert_valid!(frame["params"], "ModelListParams")
+
+    assert :ok = CodexSession.close(handle)
+  end
+
+  test "the ACP dialect has neither frame, and says so by name" do
+    for verb <- [:compact, :models] do
+      assert Ouroboros.Provider.Session.Dialect.ACP.ask(verb, %{}, %{}) ==
+               {:error, :unsupported}
+    end
   end
 
   defp open_session!(executable, overrides \\ []) do

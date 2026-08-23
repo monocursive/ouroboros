@@ -48,7 +48,7 @@ defmodule Ouroboros.Provider.Session.DialectTest do
     assert Dialect.ACP.configure(%{}, %{approval_mode: :auto_approve}) == {:error, :unsupported}
   end
 
-  test "the app server's compaction frame is built, and no capability claims it is routed" do
+  test "the app server's compaction frame is built, and a capability now claims it" do
     assert Dialect.Codex.compact_request(%{provider_session_id: "thread-1"}) ==
              {:request, "thread/compact/start", %{"threadId" => "thread-1"}}
 
@@ -57,11 +57,22 @@ defmodule Ouroboros.Provider.Session.DialectTest do
     assert Dialect.Codex.compact_request(%{provider_session_id: nil}) ==
              {:error, :session_not_open}
 
-    # The honesty half. `interactive.compact` still refuses this transport, so nothing
-    # public may say a Codex session compacts — there is no `compact` capability key to
-    # set, and this asserts none appeared beside the ones there are.
-    refute :compact in Ouroboros.Provider.capability_keys()
+    # C4 routed it, so the honesty half moved rather than disappeared: there is now a
+    # `compact` capability key, it says `:provider` for Codex, and it is still not an
+    # `InteractionCapabilities` field — the harness has no notion of folding a session, so
+    # the claim is derived from the dialect's own `compact_option/0`.
+    assert :compact in Ouroboros.Provider.capability_keys()
+    assert Ouroboros.Provider.session_compact(:codex) == :provider
+    assert Dialect.Codex.compact_option() == {:compact, :provider}
     refute Map.has_key?(Dialect.Codex.capabilities(), :compact)
+
+    # `ask/3` is the only route to the wire, and a focus is refused there rather than
+    # dropped, because `ThreadCompactStartParams` has nowhere to put one.
+    assert {:request, "thread/compact/start", %{"threadId" => "thread-1"}} =
+             Dialect.Codex.ask(:compact, %{focus: nil}, %{provider_session_id: "thread-1"})
+
+    assert {:error, {:unsupported_on_transport, %{reason: :focus_not_supported}}} =
+             Dialect.Codex.ask(:compact, %{focus: "the plan"}, %{provider_session_id: "thread-1"})
   end
 
   test "model/list sends only the options that were stated" do

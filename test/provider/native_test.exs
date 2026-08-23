@@ -120,7 +120,10 @@ defmodule Ouroboros.Provider.NativeTest do
                multimodal: false,
                dynamic_model: :native,
                dynamic_configuration: :native,
-               fork: false
+               fork: false,
+               # C4. `:native` because this runtime holds the conversation it folds, which
+               # is what lets the report carry real token counts.
+               compact: :native
              }
     end
 
