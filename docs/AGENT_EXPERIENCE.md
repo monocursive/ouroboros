@@ -118,7 +118,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | A12 | landed | 5,000-entry gate: 2.6 ms debug / 0.6–1.3 ms release; found `Watch::entries` O(ledger) and the markdown memo thrashing |
 | B0 | landed | capabilities + usage in `State.public/1`; tri-state chrome (only an explicit `false` hides) |
 | B1 | landed | `interactive.configure` with `applies: :now | :next_turn` (`:now` only for `pi`); ACP refused by declaration (agent-invented mode ids) |
-| B2 | pending | plan mode |
+| B2 | partial | runtime half landed: native read-only posture refused at the permission layer with a refusal that names planning, a `## Plan mode` prompt block, a held-turn plan-exit approval carrying `auto_edit`/`prompt`/`keep_planning` + a same-turn follow-up, durable across a resume; Claude `--permission-mode plan` (`:next_turn`), Codex refused as `pending` (C3 owns the dialect), everything else refused by declaration. Pending: `plan` on the wire (the pinned harness normalizes a configure to four keys), `provider_options` on `interactive.respond_approval` (so a follow-up can cross), and the three-choice modal in the client |
 | B3 | landed | visible local+durable queue, `↑` retract, `Alt+Enter` steer where declared, Esc keeps the queue |
 | B4 | landed | `@` chips → the object envelope; image paste into `<workspace>/.ouroboros/images` (self-ignoring); `/effort`; `/model` |
 | B5 | landed | `Esc Esc` backtrack (fork where served, else edit-and-resend), `[keys] backtrack` |
@@ -136,7 +136,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | D2 | landed | grep/glob/ls/`web_fetch`/`ask_user`/V4A `apply_patch`/skills/`todo` |
 | D3 | landed | AGENTS.md hierarchy with lazy `paths:` rules, cache-stable prefix + fingerprint, meter → `usage.context_window`, compaction that refuses rather than lose its archive, handoff |
 | D4 | pending | MCP client for the native agent |
-| D5 | landed | hooks (seven events wired; `SessionStart/End`, `PreCompact` declared, not wired) |
+| D5 | landed | hooks (all ten events wired; `SessionStart`/`SessionEnd`/`PreCompact` dispatched by the session rather than the loop, bounded at 10 s each; `PreCompact` `exit 2` refuses a compaction the way `PreToolUse` refuses a tool) |
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire) |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
 | D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
