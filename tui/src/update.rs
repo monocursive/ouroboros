@@ -316,8 +316,18 @@ impl Version {
         };
 
         // An empty identifier (`1.0.0-`, `1.0.0-a..b`) is not a version, and silently
-        // accepting one would make two different strings compare equal.
-        if pre.iter().any(String::is_empty) {
+        // accepting one would make two different strings compare equal. SemVer §9 also
+        // limits identifiers to `[0-9A-Za-z-]`, which is worth enforcing rather than
+        // assuming: this version is read out of a downloaded file and then printed to a
+        // terminal, and a "version" carrying ANSI escapes would be printed as control
+        // codes. The signature makes that the release key's problem rather than a
+        // stranger's — but only until the day the release key is the problem.
+        if pre.iter().any(|identifier| {
+            identifier.is_empty()
+                || !identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) {
             return None;
         }
 
@@ -751,6 +761,27 @@ pub fn verify<'a>(key: &PublicKey, signature: &'a Signature, message: &[u8]) -> 
         })?;
 
     Ok(&signature.trusted_comment)
+}
+
+/// Renders a string that came off the wire as one terminal line.
+///
+/// The trusted comment is authenticated — the global signature covers it — so this is not
+/// where the security is. It is the acknowledgement that "authenticated" and "safe to
+/// paint onto a terminal" are different properties: an authenticated string can still
+/// carry ANSI escapes, and the day the release key is the thing that went wrong is not
+/// the day to also hand it the cursor.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == '\t' {
+                ' '
+            } else if character.is_control() {
+                '.'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn blake2b512(message: &[u8]) -> [u8; 64] {
@@ -1273,7 +1304,7 @@ fn run_verified(
         "  signature ok, Ed25519 key {} (dist/release.pub)",
         key.id()
     );
-    let _ = writeln!(out, "  signed    {trusted}");
+    let _ = writeln!(out, "  signed    {}", printable(trusted));
 
     let entries = String::from_utf8(sums)
         .map_err(|_| anyhow!("{SUMS_NAME} is not text"))
@@ -1611,9 +1642,20 @@ mod tests {
             "",
             "1.2.3-",
             "1.0.0-a..b",
+            // A version is read out of a downloaded file and then printed to a terminal.
+            "1.0.0-\u{1b}[2Jrc1",
+            "1.0.0-rc 1",
         ] {
             assert!(Version::parse(text).is_none(), "{text:?} parsed");
         }
+    }
+
+    #[test]
+    fn a_trusted_comment_cannot_repaint_the_terminal() {
+        let rendered = printable("timestamp:1\tfile:SHA256SUMS\u{1b}[2K\u{7}hashed");
+
+        assert_eq!(rendered, "timestamp:1 file:SHA256SUMS.[2K.hashed");
+        assert!(!rendered.chars().any(char::is_control));
     }
 
     #[test]
