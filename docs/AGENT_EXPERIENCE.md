@@ -52,8 +52,8 @@ nobody holds.
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
 `review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
-full Elixir suite at **1800 passed, 0 failed**; the Rust suites at **0 failed** across
-every target in both feature sets (≈2,400 test runs across the default and `embed` sets;
+full Elixir suite at **1854 passed, 0 failed**; the Rust suites at **0 failed** across
+every target in both feature sets (≈3,000 test runs across the default and `embed` sets;
 one epmd-binding test in `tui/src/fleet.rs` is load-flaky when a stray `epmd -daemon` is
 running and passes in isolation every time); the local eval corpus at **17 / 17** through
 the merged client. Every slice was built by a
@@ -139,7 +139,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | D4 | landed | `Ouroboros.Provider.Native.Mcp`: a bounded stdio MCP client (one 15 s handshake budget including paginated `tools/list`, 60 s calls, 100 KB results with a visible truncation marker, restart cap then `broken`, idle stop, killed with the session that claimed it); tools appear as `mcp__<server>__<tool>` through one seam in the registry and go through `Permissions` like any other tool; servers by name from node config, `~/.config/ouroboros/mcp.json`, and a trust-gated `<workspace>/.ouroboros/mcp.json`; `mcp.list` on the wire; a real `mcp__fake__echo` round trip proven in events. Client: `/mcp` overlay (servers, states, tool counts, refusals with reasons, env *counts*) and `ouro mcp list|add|remove` writing the Claude-compatible `mcp.json` at user or workspace scope with private modes, refusing to clobber a different definition, never echoing env values, warning that a `url` entry will be refused by the runtime — live-verified, including the workspace-trust gate. stdio only — `url` servers are refused by name (`unsupported_transport`); no OAuth, no `resources/*`/`prompts/*`; the runtime reads the user file from `$HOME` while the client honours `XDG_CONFIG_HOME` (the client says so when they disagree) |
 | D5 | landed | hooks (all ten events wired; `SessionStart`/`SessionEnd`/`PreCompact` dispatched by the session rather than the loop, bounded at 10 s each; `PreCompact` `exit 2` refuses a compaction the way `PreToolUse` refuses a tool) |
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire); client `/rewind` as a menu with per-row warnings then a three-way `what` chooser, `Esc Esc` offers `r` where checkpoints exist; the facade now admits turn-id strings, not only ordinals |
-| D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire |
+| D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire. Until 2026-08-23 no session could write inside a worktree on a node with a data directory — worktrees live under `<data_dir>/worktrees` and the protected-path rule denied the whole data directory; neither D7 test wrote through a session's tools. The rule now exempts the worktree root (its `.git`/`.ouroboros` stay protected) and both OS-sandbox backends re-allow a writable root nested in a protected one |
 | D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
 | E1 | landed | per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops; placed after the gateway |
 | E2 | landed | diagnostics after edit in the native loop; for bridged Claude sessions a `PostToolUse` hook (`ouro hook post-tool-use`, three fixed output shapes, exit 0 on every path) composed into `--settings` — **live-verified**; Codex has no hook (its app-server transport has no config plumbing — recorded as a gap, not guessed) |
@@ -153,7 +153,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | F5 | landed | `/export`; compaction archives |
 | G1 | landed | `interactive.delegate/delegations`; client `/delegate` with a caller-owned id, `delegation` events as transcript cells, child rows nested under the parent in the rail, `Ctrl+T` lists delegations beside the plan (Enter/Esc navigation lives in `/delegations`, a cursor surface) |
 | G2 | landed | fleet triage: needs-input / working / done from declared state across every node, counts in the footer, node labels on rail cards and picker rows, offline owners keep their group with a `last_known` mark; `Space` peek and `r` reply on the session picker (the rail has no row cursor); `ouro agents [--json]` starts no runtime — **live-verified** against a scratch daemon |
-| G3 | pending | native subagent tool |
+| G3 | landed (runtime) | the native `agent` tool spawns a child native session inside the same interactive session — isolated context, the parent's tools intersected with an allowlist, never more permissive than the parent (plan, sandbox, approval mode), optional worktree (refused with the reason when the node cannot lease one), `background: true` with a companion `agent_result` to collect — with bounds: depth 2, at most 4 running children (a fifth is refused, not queued), 12 turns by default, a 300 s deadline, a 16 KiB summary; `provider_event kind: "subagent"` at spawn/progress/settled; a child's approvals reach the parent's channel; its usage folds into the parent's totals under the child's own turn id; its calls are ledgered with the parent named; stopped when the parent session closes. Live round trip through the interactive plane. It also found the D7 defect (no session could write inside a worktree on a node with a data directory), fixed the same day. Client rendering of the `subagent` events is pending; one turn per child, no steering into one |
 | G4 | pending | visible agent-to-agent messaging |
 | G5 | pending | orchestration UI |
 | H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified**. `files_changed` counts every `file_change` plus the target of a well-known write tool once its result was not an error — Claude's harness adapter emits no `file_change`, so a Claude edit used to finish as `[]` |
@@ -189,7 +189,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway; `ouro --continue` finds this directory's newest session on any machine) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
 | 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
-| 18 | In-session parallelism | 1 | 2 (delegation on the wire and in the rail; a delegation is a coding task with a parent, not a sub-conversation — G3 pending) |
+| 18 | In-session parallelism | 1 | 3 (native subagents with bounds, summaries, and background collection; delegation on the wire and in the rail; the client does not draw `subagent` events yet) |
 | 19 | Background handoff + remote attach | 2 | 2 |
 | 20 | Cross-machine / fleet coordination | 2 | 3 (fleet ledger queries; triage across nodes in the rail, the picker, and `ouro agents`) |
 | 21 | Programmability | 1 | 3 (hooks, skills, `ouro run --json`, MCP server, generated protocol reference, and `ouro acp` so editors drive it as an agent) |
@@ -197,7 +197,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **54** |
+| | **Total / 75** | **23** | **55** |
 
 ### Honest limits added this wave
 
@@ -238,6 +238,18 @@ what a user of `ouro` on `review-fixes` gets today.
   amendment and permissions replies are schema- and fake-server-verified, never answered
   by a real Codex approval. The execpolicy amendment and the C1 rule are computed
   independently and agree by construction in the tested cases, not by derivation.
+- `Interactive.State.account_usage/3` keeps the *maximum* of same-turn `usage` events,
+  not the sum, so a native turn with several model calls under-reports; G3 folds a
+  child's spend under the child's own turn id to sidestep it, but the parent's own
+  multi-call turns are still under-counted. The `agent` tool is `:execute`, so under
+  `prompt` a child that writes costs two approvals. Approval payloads carry no tool
+  `call_id`, so `ouro acp` correlates a permission request with the call in flight
+  positionally — right for today's sequential loop, not for parallel tool calls.
+- C4's Codex halves (`thread/compact/start` behind `interactive.compact`, a
+  per-provider models seam) were interrupted by the account's weekly usage limit; the
+  ACP services and the `mode` key landed, the Codex work sits uncommitted in the agent's
+  worktree and is not on the branch. The client draws neither `subagent` events nor the
+  `ledger_ref` on tool rows yet.
 - The MCP client speaks stdio only and validates no arguments (the server owns its
   schema); a `url` server is refused by name, never silently dropped. MCP tool names are
   absent from the cached system-prompt tool list (the loop rebuilds the specs before every
