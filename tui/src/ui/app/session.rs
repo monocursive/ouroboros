@@ -336,22 +336,45 @@ impl SessionsTab {
             .get(&(plane, id.to_string()))
             .map(Vec::as_slice)
     }
+}
 
-    /// Both planes' sessions in one list, ordered so the list does not reshuffle under the
-    /// cursor between polls: newest activity first, ties broken by plane then id.
+/// One row of the session list, with the two things a renderer needs beside the session
+/// itself: which triage group it landed in, and how deep it is nested under a parent.
+#[derive(Debug, Clone, Copy)]
+pub struct TriageRow<'a> {
+    pub group: Triage,
+    /// `0` for a top-level row, `1` for a coding task its parent conversation delegated.
+    pub depth: usize,
+    pub session: &'a SessionInfo,
+}
+
+impl SessionsTab {
+    /// Both planes' sessions in one list, across every fleet node, grouped by what each
+    /// one needs (G2) and then ordered so the list does not reshuffle under the cursor
+    /// between polls: newest activity first, ties broken by plane then id.
+    ///
+    /// The grouping is the ordering, not a second pass: every surface that lists sessions
+    /// — the rail, the picker, `ouro agents` — reads this one function, so a session that
+    /// is first here is first everywhere.
     pub fn merged(&self) -> Vec<&SessionInfo> {
-        let mut rows: Vec<&SessionInfo> = self
+        self.triaged().into_iter().map(|row| row.session).collect()
+    }
+
+    /// The same list with each row's group beside it, for the surfaces that draw headings.
+    pub fn triaged(&self) -> Vec<TriageRow<'_>> {
+        let mut rows: Vec<(Triage, &SessionInfo)> = self
             .interactive
             .value
             .iter()
             .flatten()
             .chain(self.coding.value.iter().flatten())
+            .map(|session| (self.triage_of(session), session))
             .collect();
 
-        rows.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
+        rows.sort_by(|(left_group, left), (right_group, right)| {
+            left_group
+                .cmp(right_group)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
                 .then_with(|| left.plane.cmp(&right.plane))
                 .then_with(|| left.id.cmp(&right.id))
         });
@@ -359,9 +382,82 @@ impl SessionsTab {
         // One row represents one addressable v1 stream. A duplicate explicit ID is still
         // visible, but as a single conflict row whose owners are named by the renderer.
         let mut seen = HashSet::new();
-        rows.retain(|session| seen.insert((session.plane, session.id.clone())));
+        rows.retain(|(_group, session)| seen.insert((session.plane, session.id.clone())));
 
-        rows
+        Self::nest_children(rows)
+    }
+
+    /// G1. Moves each delegated coding task directly under the conversation that started
+    /// it, and marks it as nested.
+    ///
+    /// **Only within a group.** The two orderings this rail carries answer different
+    /// questions — "what needs me" and "who started this" — and where they disagree the
+    /// first one wins, because a child that needs a human must not be buried under a
+    /// parent that does not. A child whose parent sits in another group therefore keeps
+    /// its own place at depth zero, which is the honest answer rather than a tree drawn
+    /// across a heading.
+    fn nest_children(rows: Vec<(Triage, &SessionInfo)>) -> Vec<TriageRow<'_>> {
+        let mut ordered: Vec<TriageRow<'_>> = Vec::with_capacity(rows.len());
+        let mut taken: HashSet<(Plane, String)> = HashSet::new();
+
+        for (group, session) in &rows {
+            if taken.contains(&(session.plane, session.id.clone())) {
+                continue;
+            }
+
+            ordered.push(TriageRow {
+                group: *group,
+                depth: 0,
+                session,
+            });
+
+            if session.children.is_empty() {
+                continue;
+            }
+
+            for (child_group, child) in &rows {
+                let claimed = child.plane == Plane::Coding
+                    && (session.children.iter().any(|id| id == &child.id)
+                        || child
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| parent.id == session.id));
+
+                if claimed && child_group == group {
+                    taken.insert((child.plane, child.id.clone()));
+                    ordered.push(TriageRow {
+                        group: *child_group,
+                        depth: 1,
+                        session: child,
+                    });
+                }
+            }
+        }
+
+        ordered
+    }
+
+    /// Which group one row belongs to, counting the approvals this client is holding for
+    /// it as well as the status the plane declared.
+    pub fn triage_of(&self, session: &SessionInfo) -> Triage {
+        let pending = self
+            .watches
+            .get(&(session.plane, session.id.clone()))
+            .map(|watch| watch.pending_approvals.len())
+            .unwrap_or(0);
+
+        session.triage(pending)
+    }
+
+    /// How many rows sit in each group, for the footer's cell and for `ouro agents`.
+    pub fn triage_counts(&self) -> [usize; 3] {
+        let mut counts = [0usize; 3];
+
+        for row in self.triaged() {
+            counts[row.group as usize] += 1;
+        }
+
+        counts
     }
 
     pub fn picker_index(&self, selected: Option<&(Plane, String)>) -> usize {
@@ -727,6 +823,13 @@ impl App {
         }
 
         self.sessions.show_plan = !self.sessions.show_plan;
+
+        // G1. The panel lists this conversation's children beside its plan, so opening it
+        // is what reads them. Only on the way *open*: closing a panel is not a reason to
+        // ask the runtime anything.
+        if self.sessions.show_plan {
+            self.read_delegations();
+        }
     }
 
     pub(super) fn toggle_session_details(&mut self) {
@@ -885,6 +988,12 @@ impl App {
 
         let choice = entries.len().saturating_sub(1);
         let fork_offered = self.fork_offered();
+        // D6. A rewind is the third answer this menu can give, and it is offered on the
+        // same two-gate rule as the fork: the method must be served and the transport must
+        // be the one that keeps the checkpoints a rewind restores from.
+        let rewind_offered = self
+            .native_verb_offered("interactive.rewind_points")
+            .is_ok();
 
         self.overlay = Some(Overlay::Backtrack {
             plane,
@@ -892,6 +1001,7 @@ impl App {
             entries,
             choice,
             fork_offered,
+            rewind_offered,
         });
     }
 
@@ -1593,6 +1703,21 @@ impl App {
             return;
         }
 
+        // B7. A draft that begins with `!` is the operator's own command, not a message to
+        // the model. Claimed here, beside the slash verbs, because it is the same kind of
+        // thing: a line the composer acts on itself rather than sending as a turn.
+        if let Some(command) = input.strip_prefix('!') {
+            self.run_operator_shell(command);
+
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.accept_submission();
+                composer.user_changed_draft();
+            }
+
+            self.remember_composer_history();
+            return;
+        }
+
         let Some((plane, id)) = self.sessions.open.clone() else {
             return;
         };
@@ -1887,6 +2012,24 @@ impl App {
             return true;
         }
 
+        // D9/G1. Four verbs that take the rest of the line: a compaction focus, a handoff
+        // prompt, a delegation's objective. Bare `/compact` is the unfocused fold, which
+        // is why it also has a row in the table below.
+        if let Some(focus) = slash_arg(trimmed, "/compact") {
+            self.compact_session(Some(focus));
+            return true;
+        }
+
+        if let Some(prompt) = slash_arg(trimmed, "/handoff") {
+            self.handoff_session(prompt);
+            return true;
+        }
+
+        if let Some(objective) = slash_arg(trimmed, "/delegate") {
+            self.delegate(objective);
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),
@@ -1898,6 +2041,12 @@ impl App {
             "/steer" => Some(Command::Steer),
             "/backtrack" => Some(Command::Backtrack),
             "/fork" => Some(Command::Fork),
+            "/compact" => Some(Command::Compact),
+            "/handoff" => Some(Command::Handoff),
+            "/context" => Some(Command::Context),
+            "/rewind" => Some(Command::Rewind),
+            "/delegate" => Some(Command::Delegate),
+            "/delegations" => Some(Command::Delegations),
             "/editor" => Some(Command::ExternalEditor),
             "/close" => Some(Command::CloseSession),
             "/options" => Some(Command::NewSessionOptions),

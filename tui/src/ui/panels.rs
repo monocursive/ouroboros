@@ -409,3 +409,527 @@ fn usage_parts(usage: Option<&crate::model::SessionUsage>) -> Vec<String> {
 
     parts
 }
+
+// ----- D9/D6/G1: the pages the native context verbs answer with ------------------------
+
+/// How many cells the context meter's bar is. Fixed, so two readings taken minutes apart
+/// are comparable at a glance rather than scaled to whatever the terminal happened to be.
+const METER_CELLS: usize = 32;
+
+fn meter(used: u64, window: u64) -> String {
+    let filled =
+        ((used.saturating_mul(METER_CELLS as u64) / window.max(1)) as usize).min(METER_CELLS);
+
+    format!(
+        "[{}{}]",
+        "\u{2588}".repeat(filled),
+        "\u{00b7}".repeat(METER_CELLS - filled)
+    )
+}
+
+fn heading(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        theme::label().add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn row(label: &str, value: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {label:<22}"),
+            Style::default().fg(theme::muted()),
+        ),
+        Span::raw(value.into()),
+    ])
+}
+
+fn note(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(theme::muted()),
+    ))
+}
+
+/// How many lines of the last agent message a peek shows. A glance, not a transcript:
+/// deciding whether a session needs you takes the top of what it said, and the rest is one
+/// `Enter` away.
+const PEEK_LINES: usize = 12;
+
+/// G2. `Space` on a row: the last thing that session's agent said.
+pub fn peek(frame: &mut Frame, area: Rect, app: &App, title: &str, id: &str, text: Option<&str>) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            crate::ui::tree::truncate(title, 64),
+            theme::label().add_modifier(Modifier::BOLD),
+        )),
+        note(crate::ui::tree::truncate(id, 64)),
+        Line::from(""),
+    ];
+
+    match text {
+        Some(text) => {
+            for row in text.lines().take(PEEK_LINES) {
+                lines.push(Line::from(Span::raw(row.to_string())));
+            }
+
+            let omitted = text.lines().count().saturating_sub(PEEK_LINES);
+
+            if omitted > 0 {
+                lines.push(note(format!(
+                    "… {omitted} more line{}",
+                    if omitted == 1 { "" } else { "s" }
+                )));
+            }
+        }
+        // Two different silences, and only one of them is about the session. This client
+        // holds no transcript for a row it never subscribed to, and saying "nothing was
+        // said" there would be a claim about someone else's conversation.
+        None => lines.push(note(
+            "this client is not holding this session's transcript, so it has no last \
+             message to show — enter opens it",
+        )),
+    }
+
+    lines.push(Line::from(""));
+    lines.push(note(format!(
+        "r replies · enter opens · esc closes · {} lists them all",
+        app.keymap.label(Action::LeaderSessions)
+    )));
+
+    page(frame, area, "peek", lines, 0);
+}
+
+/// `/context` (D9): what this session can honestly say about its own context window.
+pub fn context(
+    frame: &mut Frame,
+    area: Rect,
+    context: &crate::model::native::SessionContext,
+    scroll: usize,
+) {
+    page(frame, area, "context", context_lines(context), scroll);
+}
+
+pub fn context_lines(context: &crate::model::native::SessionContext) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // The first thing on the page, because it decides what the rest of it means. A
+    // `usage` answer is not a thinner native one — it is a different claim, made by the
+    // provider rather than by this runtime — and a page that did not say so would read as
+    // though the missing rows were zeroes.
+    if context.native() {
+        lines.push(note(
+            "source  native \u{2014} this session counted these figures itself",
+        ));
+    } else {
+        lines.push(note(format!(
+            "source  {} \u{2014} only what this transport's own usage events reported",
+            context.source.as_deref().unwrap_or("usage")
+        )));
+    }
+
+    if let Some(transport) = &context.transport {
+        lines.push(row("transport", transport.clone()));
+    }
+
+    if let Some(model) = &context.model {
+        lines.push(row("model", model.clone()));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(heading("WINDOW"));
+
+    match (context.context_window, context.context_used) {
+        (Some(window), Some(used)) => {
+            lines.push(row("window", format!("{} tokens", tokens(window))));
+            lines.push(row(
+                "used by the last request",
+                format!("{} tokens", tokens(used)),
+            ));
+
+            let share = context.share().unwrap_or(0);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<22}", ""), Style::default().fg(theme::muted())),
+                Span::styled(
+                    format!("{} {share}%", meter(used, window)),
+                    Style::default().fg(if share >= 80 {
+                        theme::warn()
+                    } else {
+                        theme::accent()
+                    }),
+                ),
+            ]));
+        }
+        (Some(window), None) => {
+            lines.push(row("window", format!("{} tokens", tokens(window))));
+            lines.push(note(
+                "  no request has been counted yet, so there is nothing to divide",
+            ));
+        }
+        (None, _nothing_to_divide) => lines.push(note(
+            "  this provider named no context window, so there is no percentage to draw",
+        )),
+    }
+
+    if let Some(total) = context.total_tokens.filter(|total| *total > 0) {
+        lines.push(row("session total", format!("{} tokens", tokens(total))));
+    }
+
+    if let Some(compact_at) = context.compact_at {
+        lines.push(row(
+            "folds at",
+            format!("{}% of the window", (compact_at * 100.0).round() as i64),
+        ));
+    }
+
+    if let Some(keep) = context.keep_recent_tokens {
+        lines.push(row("keeps recent", format!("{} tokens", tokens(keep))));
+    }
+
+    if !context.native() {
+        lines.push(Line::from(""));
+        lines.push(note(
+            "Compactions, archives, the cached prefix and the instruction files are things",
+        ));
+        lines.push(note(
+            "only a native session has, so this page reports the subset this one knows.",
+        ));
+        return lines;
+    }
+
+    if let Some(fingerprint) = &context.prefix_fingerprint {
+        lines.push(Line::from(""));
+        lines.push(heading("PREFIX"));
+        lines.push(row(
+            "fingerprint",
+            fingerprint.chars().take(16).collect::<String>(),
+        ));
+        lines.push(row("tools", context.tools.len().to_string()));
+
+        if let Some(messages) = context.messages {
+            lines.push(row("messages held", messages.to_string()));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(heading("COMPACTIONS"));
+
+    if context.compactions.is_empty() {
+        lines.push(note("  none \u{2014} nothing has been folded away"));
+    } else {
+        for (index, fold) in context.compactions.iter().enumerate() {
+            lines.push(row(
+                &format!("{}.", index + 1),
+                format!(
+                    "{} \u{b7} {}",
+                    fold.trigger.as_deref().unwrap_or("fold"),
+                    fold.describe()
+                ),
+            ));
+        }
+    }
+
+    if context.compaction_thrashing == Some(true) {
+        lines.push(Line::from(Span::styled(
+            "  automatic compaction has stopped: two folds inside three turns is a window \
+             that cannot hold this conversation, not a context that needs folding",
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    if !context.archive_ids.is_empty() {
+        lines.push(row("archives", context.archive_ids.join(", ")));
+        lines.push(note(
+            "  ids only \u{2014} the bodies are the conversation that was folded away",
+        ));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(heading("INSTRUCTIONS"));
+
+    if context.instruction_files.is_empty() {
+        lines.push(note("  no project instruction files were loaded"));
+    } else {
+        for path in &context.instruction_files {
+            lines.push(row("loaded", path.clone()));
+        }
+    }
+
+    for dropped in &context.instruction_files_dropped {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  dropped               {} ({} bytes, {})",
+                dropped.path,
+                dropped.bytes.unwrap_or(0),
+                dropped.reason.as_deref().unwrap_or("over budget")
+            ),
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    if let Some(bytes) = context.instruction_bytes.filter(|bytes| *bytes > 0) {
+        lines.push(row("instruction bytes", bytes.to_string()));
+    }
+
+    if let Some(child) = &context.handed_off_to {
+        lines.push(Line::from(""));
+        lines.push(row("handed off to", child.clone()));
+    }
+
+    if let Some(parent) = &context.handed_off_from {
+        lines.push(row("handed off from", parent.clone()));
+    }
+
+    lines
+}
+
+/// `/rewind` (D6): the turns this session can go back to, and what each cannot put back.
+pub fn rewind(
+    frame: &mut Frame,
+    area: Rect,
+    points: &[crate::model::native::RewindPoint],
+    choice: usize,
+    what: usize,
+    confirming: bool,
+) {
+    let lines = if confirming {
+        rewind_choice_lines(points, choice, what)
+    } else {
+        rewind_menu_lines(points, choice)
+    };
+
+    page(frame, area, "rewind", lines, 0);
+}
+
+/// How many turns the menu draws around the selection. A session with four hundred
+/// checkpointed turns must not make this page four hundred rows long.
+const REWIND_WINDOW: usize = 10;
+
+pub fn rewind_menu_lines(
+    points: &[crate::model::native::RewindPoint],
+    choice: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![note(
+        "Pick the turn to return to. Everything after it is undone.",
+    )];
+
+    let start = choice
+        .saturating_sub(REWIND_WINDOW / 2)
+        .min(points.len().saturating_sub(REWIND_WINDOW));
+
+    if start > 0 {
+        lines.push(note(format!("  \u{2026} {start} earlier turns")));
+    }
+
+    for (index, point) in points.iter().enumerate().skip(start).take(REWIND_WINDOW) {
+        let selected = index == choice;
+        let mut facts = Vec::new();
+
+        if point.files > 0 {
+            facts.push(format!(
+                "{} file{}",
+                point.files,
+                if point.files == 1 { "" } else { "s" }
+            ));
+        }
+
+        if point.commands > 0 {
+            facts.push(format!(
+                "{} shell command{}",
+                point.commands,
+                if point.commands == 1 { "" } else { "s" }
+            ));
+        }
+
+        if let Some(at) = &point.at {
+            facts.push(at.clone());
+        }
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {}  {}",
+                if selected { "\u{25b8}" } else { " " },
+                point
+                    .turn_id
+                    .clone()
+                    .unwrap_or_else(|| format!("turn {}", index + 1)),
+                facts.join(" \u{b7} ")
+            ),
+            if selected {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        )));
+
+        // The warning sits under the row it is about and is drawn for every row, not only
+        // the selected one: a menu that revealed the catch only once you moved onto it is
+        // a menu that hides the catch.
+        if let Some(warning) = point.warning() {
+            lines.push(Line::from(Span::styled(
+                format!("    {warning}"),
+                Style::default().fg(theme::warn()),
+            )));
+        }
+    }
+
+    let shown = points.len().saturating_sub(start).min(REWIND_WINDOW);
+
+    if start + shown < points.len() {
+        lines.push(note(format!(
+            "  \u{2026} {} later turns",
+            points.len() - start - shown
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(note(
+        "\u{2191}\u{2193} picks a turn \u{b7} enter chooses what to restore \u{b7} esc leaves",
+    ));
+
+    lines
+}
+
+pub fn rewind_choice_lines(
+    points: &[crate::model::native::RewindPoint],
+    choice: usize,
+    what: usize,
+) -> Vec<Line<'static>> {
+    use crate::ui::app::native::REWIND_WHAT;
+
+    let mut lines = Vec::new();
+
+    let Some(point) = points.get(choice) else {
+        return lines;
+    };
+
+    lines.push(heading(&format!(
+        "Return to {}",
+        point
+            .turn_id
+            .clone()
+            .unwrap_or_else(|| format!("turn {}", choice + 1))
+    )));
+
+    // Stated again, on the screen where the choice is actually made. This is the whole
+    // point of the two screens: a rewind says what it cannot restore *before* it acts.
+    if let Some(warning) = point.warning() {
+        lines.push(Line::from(Span::styled(
+            format!("  {warning}"),
+            Style::default().fg(theme::warn()),
+        )));
+        lines.push(note(
+            "  Those changes are not checkpointed, so this cannot put them back.",
+        ));
+    } else {
+        lines.push(note(
+            "  Every file this turn changed has a snapshot, so all of them can come back.",
+        ));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(heading("RESTORE"));
+
+    for (index, (name, description)) in REWIND_WHAT.iter().enumerate() {
+        let selected = index == what;
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {name:<14} {description}",
+                if selected { "\u{25b8}" } else { " " }
+            ),
+            if selected {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(note(
+        "\u{2191}\u{2193} picks \u{b7} enter rewinds \u{b7} esc goes back to the turns",
+    ));
+
+    lines
+}
+
+/// `/delegations` (G1): the coding tasks this conversation started, and a way into each.
+pub fn delegations(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[crate::model::native::DelegationRow],
+    choice: usize,
+) {
+    page(
+        frame,
+        area,
+        "delegations",
+        delegation_lines(rows, Some(choice)),
+        0,
+    );
+}
+
+/// `choice` is `None` for the read-only list the `Ctrl+T` panel draws beside the plan.
+pub fn delegation_lines(
+    rows: &[crate::model::native::DelegationRow],
+    choice: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    if rows.is_empty() {
+        lines.push(note("this conversation has delegated nothing"));
+        return lines;
+    }
+
+    for (index, entry) in rows.iter().enumerate() {
+        let selected = choice == Some(index);
+        let mut facts = vec![entry.status.as_deref().unwrap_or("unknown").to_string()];
+
+        if let Some(node) = &entry.task_node {
+            facts.push(node.clone());
+        }
+
+        // Which of the two answers this status is. A parent that was not running when its
+        // child finished holds a stale copy, and the runtime says which it read rather
+        // than letting the two look alike.
+        match entry.source.as_deref() {
+            Some("session") => facts.push("as this conversation last heard".to_string()),
+            Some("team") | None => {}
+            Some(other) => facts.push(other.to_string()),
+        }
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {}  {}",
+                if selected { "\u{25b8}" } else { " " },
+                entry.task_id.as_deref().unwrap_or("(unnamed task)"),
+                facts.join(" \u{b7} ")
+            ),
+            match (selected, entry.terminal()) {
+                (true, _) => Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
+                (false, true) => Style::default().fg(theme::muted()),
+                (false, false) => Style::default(),
+            },
+        )));
+
+        if let Some(digest) = &entry.result_digest {
+            lines.push(note(format!("    result digest {digest}")));
+        }
+    }
+
+    if choice.is_some() {
+        lines.push(Line::from(""));
+        lines.push(note(
+            "\u{2191}\u{2193} picks \u{b7} enter opens the child's transcript \u{b7} esc leaves",
+        ));
+    }
+
+    lines
+}

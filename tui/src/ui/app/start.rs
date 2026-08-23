@@ -59,6 +59,10 @@ pub enum NewField {
     SandboxMode,
     /// Only reachable on the coding plane, where the objective is required.
     Objective,
+    /// D7. Whether the session runs in its own `git worktree` rather than the workspace
+    /// itself. Offered only where the gateway serves the option, because a toggle that a
+    /// runtime silently ignores is worse than no toggle.
+    Worktree,
     Start,
 }
 
@@ -171,6 +175,7 @@ impl NewSession {
             NewField::Workspace,
             NewField::ApprovalMode,
             NewField::SandboxMode,
+            NewField::Worktree,
             NewField::Start,
         ]);
         fields
@@ -293,6 +298,7 @@ impl NewSession {
                 self.sandbox =
                     (self.sandbox as isize + delta).rem_euclid(SANDBOX_ROWS as isize) as usize;
             }
+            NewField::Worktree => self.request.worktree = !self.request.worktree,
             _ => {}
         }
     }

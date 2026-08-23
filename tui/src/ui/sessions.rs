@@ -15,10 +15,10 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::keymap::Action;
-use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus};
+use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus, Triage};
 
 use super::access;
-use super::app::{App, Composer, ComposerVerb, Connection};
+use super::app::{App, ComposerVerb, Connection};
 use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
@@ -166,7 +166,49 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or(0)
         .saturating_sub(visible_count.saturating_sub(1))
         .min(sessions.len().saturating_sub(visible_count));
+
+    // G2. The groups, with their counts, so a heading can state how many rows the rail is
+    // *not* drawing as well as how many it is.
+    let counts = app.sessions.triage_counts();
+    let groups = app.sessions.triaged();
+    // A running cursor rather than a fixed pitch: a heading costs one row and a card five,
+    // and the two interleave.
+    let mut cursor = rows[1].y;
+    let mut drawn_group: Option<Triage> = None;
+
     for (offset, session) in sessions.iter().skip(start).take(visible_count).enumerate() {
+        let row = groups.get(start + offset);
+        let group = row.map(|row| row.group).unwrap_or(Triage::Working);
+        // G1. A delegated coding task is a child of the conversation that started it, and
+        // the rail draws that: one column of indent and a tree glyph in place of the
+        // signal, so the relationship is visible without a second list.
+        let nested = row.is_some_and(|row| row.depth > 0);
+
+        if drawn_group != Some(group) && cursor < rows[1].bottom() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", group.label()),
+                        match group {
+                            Triage::NeedsInput => Style::default()
+                                .fg(theme::warn())
+                                .add_modifier(Modifier::BOLD),
+                            Triage::Working => theme::label(),
+                            Triage::Done => Style::default().fg(theme::muted()),
+                        },
+                    ),
+                    Span::styled(
+                        format!("{:02}", counts[group as usize]),
+                        Style::default().fg(theme::muted()),
+                    ),
+                ])),
+                Rect::new(rows[1].x, cursor, rows[1].width, 1),
+            );
+
+            cursor = cursor.saturating_add(1);
+            drawn_group = Some(group);
+        }
+
         let selected = app
             .sessions
             .open
@@ -204,27 +246,50 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 _ => Style::default().fg(theme::muted()),
             }
         };
+        let indent = u16::from(nested) * 2;
         let card = Rect::new(
-            rows[1].x,
-            rows[1].y.saturating_add((offset as u16).saturating_mul(5)),
-            rows[1].width,
-            4.min(rows[1].height),
+            rows[1].x.saturating_add(indent),
+            cursor,
+            rows[1].width.saturating_sub(indent),
+            4,
         );
+
         if card.y.saturating_add(card.height) > rows[1].bottom() {
             break;
         }
+
+        cursor = cursor.saturating_add(5);
         let block = Block::default()
             .borders(access::borders(Borders::ALL))
             .border_style(border_style);
         let content = block.inner(card);
         frame.render_widget(block, card);
-        let marker = if selected { "▌" } else { signal };
+        let marker = match (selected, nested) {
+            (true, _) => "▌",
+            (false, true) => "└",
+            (false, false) => signal,
+        };
+        // D7. Dropped whole where the card cannot hold it, the same rule the node label
+        // and the usage cell below follow.
+        let badge = worktree_badge(session)
+            .filter(|badge| badge.width() + label.width() + 4 <= content.width as usize);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(format!("{marker} "), border_style),
-                    Span::styled(label, title_style),
-                ]),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(format!("{marker} "), border_style),
+                        Span::styled(label, title_style),
+                    ];
+
+                    if let Some(badge) = badge {
+                        spans.push(Span::styled(
+                            format!(" {badge}"),
+                            Style::default().fg(theme::accent()),
+                        ));
+                    }
+
+                    spans
+                }),
                 Line::from({
                     let head = session.status.as_str().to_uppercase();
                     let named = format!(" · {}", super::tree::truncate(provider, 9));
@@ -233,12 +298,40 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(named.clone(), Style::default().fg(theme::muted())),
                     ];
 
+                    // G2. The rail lists every fleet node's sessions, so a row that does
+                    // not say which machine it is on is a row nobody can act on. The
+                    // `unavailable` mark stays where it always was — a dimmed title —
+                    // because an offline owner is a fact about the observation, not about
+                    // the session's own state.
+                    let node = session
+                        .node
+                        .as_deref()
+                        .map(|node| node.split('@').next_back().unwrap_or(node))
+                        .map(|host| format!(" · {}", super::tree::truncate(host, 12)));
+
                     // I2. Only where the runtime reported one, and only where the whole
                     // cell fits: the footer's rule, because a half-drawn `42.5k · $0.4` is
                     // a fact rendered as noise. The short form — the cost alone — is tried
                     // before the cell is dropped entirely.
-                    let spare =
+                    // Dropped whole rather than half-drawn, the same rule the usage cell
+                    // below follows: a machine name clipped to `ouroboros@al` is a fact
+                    // rendered as noise, and the picker carries it in full anyway.
+                    let mut spare =
                         (content.width as usize).saturating_sub(head.width() + named.width());
+                    let node = node.filter(|node| node.width() <= spare);
+
+                    if let Some(node) = node {
+                        spare = spare.saturating_sub(node.width());
+                        spans.push(Span::styled(
+                            node,
+                            if session.last_known {
+                                Style::default().fg(theme::warn())
+                            } else {
+                                Style::default().fg(theme::muted())
+                            },
+                        ));
+                    }
+
                     let usage = session.usage.as_ref();
                     let cell = super::panels::usage_cell(usage)
                         .filter(|cell| cell.width() + 3 <= spare)
@@ -276,9 +369,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             rows[1],
         );
     } else if sessions.len() > visible_count {
-        let summary_y = rows[1]
-            .y
-            .saturating_add((visible_count as u16).saturating_mul(5));
+        let summary_y = cursor;
         if summary_y < rows[1].bottom() {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -440,12 +531,17 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     let event_count = watch.map(Watch::len).unwrap_or(0);
     let cursor = watch.map(Watch::cursor).unwrap_or(0);
     let dropped = watch.map(|watch| watch.dropped).unwrap_or(0);
+    // D7. The worktree row costs the ACTIVE CONTEXT panel one row, and only where there
+    // is one: a panel sized for a row it is not drawing would leave a blank line under
+    // every ordinary session.
+    let worktree_row = worktree_line(session, inner.width.saturating_sub(2));
+
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(5),
         Constraint::Length(1),
-        Constraint::Length(7),
+        Constraint::Length(7 + u16::from(worktree_row.is_some())),
         Constraint::Length(1),
         Constraint::Length(7),
         Constraint::Length(1),
@@ -522,7 +618,12 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
                 }),
             ),
             Line::from(Span::styled(session_label, session_style)),
-        ],
+        ]
+        .into_iter()
+        // Only where there is one. A row saying "WORKTREE no" on every ordinary session
+        // would be this client narrating a default.
+        .chain(worktree_row)
+        .collect(),
     );
 
     render_context_panel(
@@ -628,7 +729,7 @@ fn detail(frame: &mut Frame, area: Rect, app: &mut App, inline_context: bool) {
         .map(|(plane, _id)| *plane == Plane::Interactive)
         .unwrap_or(false)
     {
-        composer_block_height(app.sessions.composer.as_ref(), area.width)
+        composer_block_height(app, area.width)
     } else {
         0
     };
@@ -827,24 +928,75 @@ fn render_approval_snack(frame: &mut Frame, area: Rect, subject: &str, hint: &st
 /// The panel stays open across idle redraws — a task list that disappears the moment the
 /// agent stops working is the Codex #18920 anti-pattern — but it never takes the
 /// conversation's last rows on a short terminal.
+/// D7. The `⎇ worktree` badge, as one context-panel row.
+///
+/// The branch where `git worktree add` made one, and the short base commit where it ran
+/// `--detach` and there is no branch to name. A retired worktree — removed on close, or
+/// kept because it still held uncommitted work — says so instead of showing a live branch
+/// for a directory that may no longer be there.
+fn worktree_line(session: Option<&SessionInfo>, width: u16) -> Option<Line<'static>> {
+    let worktree = session.and_then(|session| session.worktree.as_ref())?;
+
+    let value = match &worktree.retired {
+        Some(retired) => format!("{} ({retired})", worktree.label()),
+        None => worktree.label(),
+    };
+
+    Some(context_panel_value(
+        "WORKTREE",
+        &format!("\u{2387} {value}"),
+        width,
+        if worktree.live() {
+            Style::default().fg(theme::accent())
+        } else {
+            Style::default().fg(theme::muted())
+        },
+    ))
+}
+
+/// The same badge in the form a rail card or a header can prefix a title with.
+pub fn worktree_badge(session: &SessionInfo) -> Option<String> {
+    session
+        .worktree
+        .as_ref()
+        .filter(|worktree| worktree.live())
+        .map(|worktree| format!("\u{2387} {}", worktree.label()))
+}
+
 fn plan_panel_height(app: &App, area: Rect) -> u16 {
     if !app.sessions.show_plan || area.height < 16 {
         return 0;
     }
 
-    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
+    // G1. The panel draws whichever of the two the session has. A conversation that
+    // delegated work but published no plan still has something to show here, and one that
+    // has neither draws nothing at all rather than an empty frame.
+    let children = app.open_delegation_rows().len() as u16;
+
+    if plan.is_none() && children == 0 {
         return 0;
-    };
+    }
 
     // Heading, the explanation's first wrapped rows, one row per step, and the borders.
-    let body = 1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some());
-    body.saturating_add(2).min(PLAN_PANEL_ROWS)
+    let steps = plan.map_or(0, |plan| {
+        1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some())
+    });
+    let delegations = if children > 0 { children + 1 } else { 0 };
+
+    steps
+        .saturating_add(delegations)
+        .saturating_add(2)
+        .min(PLAN_PANEL_ROWS)
 }
 
 fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
+    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
+    let children = app.open_delegation_rows();
+
+    if plan.is_none() && children.is_empty() {
         return;
-    };
+    }
 
     let block = Block::default()
         .borders(access::borders(Borders::TOP))
@@ -853,12 +1005,25 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(block, area);
 
     let mut lines = Vec::new();
-    transcript_cells::render_plan(
-        &mut lines,
-        plan,
-        inner.width.max(8) as usize,
-        &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
-    );
+
+    if let Some(plan) = plan {
+        transcript_cells::render_plan(
+            &mut lines,
+            plan,
+            inner.width.max(8) as usize,
+            &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
+        );
+    }
+
+    // G1. Beside the plan, not instead of it: a delegation is work this conversation
+    // handed to a child, and the plan is work it kept.
+    if !children.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("Delegations  {}  /delegations opens one", children.len()),
+            theme::label(),
+        )));
+        lines.extend(super::panels::delegation_lines(children, None));
+    }
 
     // The newest rows are the ones being worked on, so a plan longer than the panel keeps
     // its tail rather than its head.
@@ -1020,6 +1185,13 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .and_then(|session| session.provider.as_deref())
         .unwrap_or("unknown")
         .to_string();
+    // D7/D9. Read here, beside the provider, because the watch below is borrowed mutably
+    // for the rest of this function and these two come from the session *row*.
+    let conversation_worktree = app.sessions.open_info().and_then(worktree_badge);
+    let conversation_handed_off_from = app
+        .sessions
+        .open_info()
+        .and_then(|session| session.handed_off_from.clone());
 
     let Some((plane, id)) = app.sessions.open.clone() else {
         frame.render_widget(
@@ -1167,6 +1339,8 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 provider: &conversation_provider,
                 show_event_details,
                 verbosity,
+                worktree: conversation_worktree,
+                handed_off_from: conversation_handed_off_from,
             },
         );
     }
@@ -1260,6 +1434,10 @@ fn details_pane(
                 provider: pane.provider,
                 show_event_details: true,
                 verbosity: pane.verbosity,
+                // The details pane replaces the subtitle with a cursor line, so neither
+                // badge is drawn there and neither is looked up.
+                worktree: None,
+                handed_off_from: None,
             },
         );
     }
@@ -1328,6 +1506,10 @@ struct ConversationHeader<'a> {
     provider: &'a str,
     show_event_details: bool,
     verbosity: Verbosity,
+    /// D7. `⎇ <branch>` where this session was given its own worktree.
+    worktree: Option<String>,
+    /// D9. The session this one's opening packet was written from, where there was one.
+    handed_off_from: Option<String>,
 }
 
 fn render_conversation_header(
@@ -1410,6 +1592,21 @@ fn render_conversation_header(
         }
 
         facts.push(compact_session_id(header.id, area.width.saturating_sub(24)));
+
+        if let Some(badge) = header.worktree.as_deref() {
+            facts.push(badge.to_string());
+        }
+
+        // D9. Said on the header rather than only in `/context`: a handoff child opens
+        // with a packet *about* another conversation and no memory of it, and a reader
+        // who does not know that is reading a session that appears to start mid-thought.
+        if let Some(parent) = header.handed_off_from.as_deref() {
+            facts.push(format!(
+                "handed off from {}",
+                compact_session_id(parent, 14)
+            ));
+        }
+
         format!(" {}", facts.join(" · "))
     };
     frame.render_widget(
@@ -1646,15 +1843,15 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     frame.render_widget(block, area);
 
     let rows = Layout::vertical([
-        Constraint::Length(chip_rows(active)),
+        Constraint::Length(chip_rows(app)),
         Constraint::Min(2),
         Constraint::Length(completion_rows(active.map(|composer| &composer.editor))),
         Constraint::Length(1),
     ])
     .split(inner);
 
-    if let Some(composer) = active {
-        render_chips(frame, rows[0], composer);
+    if active.is_some() {
+        render_chips(frame, rows[0], app);
     }
 
     let rows = &rows[1..];
@@ -1877,24 +2074,37 @@ const COMPOSER_EDITOR_MIN: u16 = 2;
 const COMPOSER_EDITOR_MAX: u16 = 6;
 const COMPOSER_CHROME: u16 = 3;
 
-fn composer_block_height(composer: Option<&Composer>, width: u16) -> u16 {
+fn composer_block_height(app: &App, width: u16) -> u16 {
+    let composer = app.sessions.composer.as_ref();
     let editor = composer.map(|composer| &composer.editor);
 
-    COMPOSER_CHROME + chip_rows(composer) + editor_rows(editor, width) + completion_rows(editor)
+    COMPOSER_CHROME + chip_rows(app) + editor_rows(editor, width) + completion_rows(editor)
 }
 
 /// How many rows the attachment chips and their refusal want, above the editor.
 ///
 /// Zero for the ordinary turn, which is most of them: a composer with nothing attached
 /// draws exactly what it drew before B4.
-fn chip_rows(composer: Option<&Composer>) -> u16 {
-    let Some(composer) = composer else {
+fn chip_rows(app: &App) -> u16 {
+    let Some(composer) = app.sessions.composer.as_ref() else {
         return 0;
     };
 
-    let chips = u16::from(!composer.attachments.is_empty() || composer.reasoning_effort.is_some());
+    let chips = u16::from(
+        !composer.attachments.is_empty()
+            || composer.reasoning_effort.is_some()
+            || app.delegating
+            || composer.editor.text().starts_with('!'),
+    );
 
-    chips + u16::from(composer.attachment_refusal.is_some())
+    // B7. A refusal is two rows: what the runtime said, and the rule that would fix it.
+    // Both are on the composer rather than in the notice row, because a one-key action
+    // that expires in four seconds is not an action anyone can take.
+    let refused = app.shell_refusal.as_ref().map_or(0, |refusal| {
+        1 + u16::from(refusal.offer.is_some() || refusal.suggested_rule.is_some())
+    });
+
+    chips + u16::from(composer.attachment_refusal.is_some()) + refused
 }
 
 /// The chips: what this turn will carry as `params.input.attachments`, and the per-turn
@@ -1903,14 +2113,23 @@ fn chip_rows(composer: Option<&Composer>) -> u16 {
 /// Chips rather than the substituted text alone because they are the only place the
 /// structured half of the turn is visible. The text still says `@src/app.rs`; the chip is
 /// what says that path is *also* travelling as an attachment the runtime will canonicalise.
-fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
-    if chip_rows(Some(composer)) == 0 {
+fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
+    if chip_rows(app) == 0 {
         return;
     }
 
-    let mut lines = Vec::new();
+    let Some(composer) = app.sessions.composer.as_ref() else {
+        return;
+    };
 
-    if !composer.attachments.is_empty() || composer.reasoning_effort.is_some() {
+    let mut lines = Vec::new();
+    let shell_draft = composer.editor.text().starts_with('!');
+
+    if !composer.attachments.is_empty()
+        || composer.reasoning_effort.is_some()
+        || app.delegating
+        || shell_draft
+    {
         let mut spans = Vec::new();
 
         for attachment in &composer.attachments {
@@ -1937,7 +2156,41 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
             spans.push(Span::raw(" "));
         }
 
-        if !composer.attachments.is_empty() {
+        // G1. A delegation is two bounded team calls behind a ninety-second ceiling, so
+        // it is worth saying that something is in flight rather than leaving the composer
+        // looking idle.
+        if app.delegating {
+            spans.push(Span::styled(
+                " delegating… ",
+                Style::default().fg(theme::accent()),
+            ));
+            spans.push(Span::raw(" "));
+        }
+
+        // B7. Said *before* the command is sent, every time, because "where does this
+        // run" is the one thing about `!` that a person cannot infer from the screen: not
+        // here, but on the session's own owner node, in the workspace the agent is
+        // editing. And where the session's posture does not already permit it, that is
+        // said too — the engine may still allow this exact command by rule, and only it
+        // knows, so this states the posture rather than predicting the answer.
+        if shell_draft {
+            let said = if !app.shell_offered() {
+                "this gateway does not serve workspace.exec".to_string()
+            } else if app.shell_auto_approved() {
+                format!("runs on {}", app.shell_where())
+            } else {
+                format!(
+                    "runs on {} — needs a permission rule at this approval mode",
+                    app.shell_where()
+                )
+            };
+
+            spans.push(Span::styled(" ! ", Style::default().fg(theme::warn())));
+            spans.push(Span::styled(
+                super::tree::truncate(&said, area.width.saturating_sub(6).max(20) as usize),
+                Style::default().fg(theme::muted()),
+            ));
+        } else if !composer.attachments.is_empty() {
             spans.push(Span::styled(
                 "backspace on an empty draft removes the last",
                 Style::default().fg(theme::muted()),
@@ -1952,6 +2205,41 @@ fn render_chips(frame: &mut Frame, area: Rect, composer: &Composer) {
             super::tree::truncate(refusal, area.width.max(20) as usize),
             Style::default().fg(theme::warn()),
         )));
+    }
+
+    if let Some(refusal) = app.shell_refusal.as_ref() {
+        let mut said = refusal
+            .message
+            .clone()
+            .unwrap_or_else(|| "the command was refused".to_string());
+
+        if let Some(denied) = &refusal.denied_by {
+            said = format!("{said} (denied by {denied})");
+        }
+
+        lines.push(Line::from(Span::styled(
+            super::tree::truncate(&said, area.width.max(20) as usize),
+            Style::default().fg(theme::warn()),
+        )));
+
+        // The rule is named in full before it is written, and the key is only offered
+        // where this client could actually honour it. Where it could not, the rule is
+        // still printed — an operator who can run `permissions.add` themselves is better
+        // served by the exact pattern than by silence.
+        if let Some(pattern) = &refusal.suggested_rule {
+            let row = match &refusal.offer {
+                Some(_) => format!(
+                    "{} saves the rule {pattern}",
+                    app.keymap.label(crate::keymap::Action::LeaderShellRule)
+                ),
+                None => format!("the rule {pattern} would allow it; this client cannot save it"),
+            };
+
+            lines.push(Line::from(Span::styled(
+                super::tree::truncate(&row, area.width.max(20) as usize),
+                Style::default().fg(theme::accent()),
+            )));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);

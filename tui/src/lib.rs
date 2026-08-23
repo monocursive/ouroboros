@@ -7,6 +7,7 @@
 //! log ring, the notification channel) exist and are exercised now so that adding a UI
 //! does not move them.
 
+pub mod agents;
 pub mod cli;
 pub mod clipboard;
 pub mod config;

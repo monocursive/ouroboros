@@ -88,6 +88,12 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         machine: Option<String>,
 
+        /// Run in a fresh `git worktree` under the runtime's data directory instead of
+        /// the workspace itself, so two sessions on one repository do not fight over its
+        /// exclusive lease (D7). Refused where the workspace is not a git repository.
+        #[arg(long)]
+        worktree: bool,
+
         /// Print the session id and exit instead of opening the terminal UI.
         #[arg(long)]
         print: bool,
@@ -100,6 +106,27 @@ pub enum Command {
     /// followed by the result object. Progress and warnings go to stderr so none of the
     /// three can be corrupted by them.
     Run(Box<RunArgs>),
+
+    /// Print every session this runtime can see, grouped by what each one needs.
+    ///
+    /// The same grouping the Sessions rail draws — needs input, working, done — printed
+    /// once and exited, for a terminal without a tty and for the thirty seconds where
+    /// opening a UI to ask "is anything waiting on me" is thirty seconds too many.
+    Agents {
+        /// One JSON object with the counts and the runtime's own rows, instead of the
+        /// plain page.
+        #[arg(long)]
+        json: bool,
+
+        /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+
+        /// A file holding the gateway token. Omitted, the token beside gateway.json is
+        /// used.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+    },
 
     /// Start a runtime, print how to reach it, and leave it running.
     Daemon,

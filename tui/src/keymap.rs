@@ -88,6 +88,8 @@ pub enum Action {
     LeaderEditorView,
     LeaderSteer,
     LeaderApproval,
+    /// B7. Save the permission rule a refused `!` command's refusal named.
+    LeaderShellRule,
     LeaderEnd,
     LeaderDetails,
     LeaderQuit,
@@ -106,7 +108,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 40] = [
+    pub const ALL: [Action; 41] = [
         Self::Send,
         Self::Steer,
         Self::Newline,
@@ -134,6 +136,7 @@ impl Action {
         Self::LeaderEditorView,
         Self::LeaderSteer,
         Self::LeaderApproval,
+        Self::LeaderShellRule,
         Self::LeaderEnd,
         Self::LeaderDetails,
         Self::LeaderQuit,
@@ -179,6 +182,7 @@ impl Action {
             Self::LeaderEditorView => "leader.editor_view",
             Self::LeaderSteer => "leader.steer",
             Self::LeaderApproval => "leader.approval",
+            Self::LeaderShellRule => "leader.shell_rule",
             Self::LeaderEnd => "leader.end",
             Self::LeaderDetails => "leader.details",
             Self::LeaderQuit => "leader.quit",
@@ -214,6 +218,7 @@ impl Action {
             | Self::LeaderEditorView
             | Self::LeaderSteer
             | Self::LeaderApproval
+            | Self::LeaderShellRule
             | Self::LeaderEnd
             | Self::LeaderDetails
             | Self::LeaderQuit
@@ -262,6 +267,7 @@ impl Action {
             Self::LeaderEditorView => "v",
             Self::LeaderSteer => "s",
             Self::LeaderApproval => "a",
+            Self::LeaderShellRule => "r",
             Self::LeaderEnd => "x",
             Self::LeaderDetails => "d",
             Self::LeaderQuit => "q",
@@ -308,6 +314,7 @@ impl Action {
             Self::LeaderEditorView => "transcript in $EDITOR",
             Self::LeaderSteer => "steer",
             Self::LeaderApproval => "approval",
+            Self::LeaderShellRule => "save the rule a refused ! command named",
             Self::LeaderEnd => "end or remove session",
             Self::LeaderDetails => "event details",
             Self::LeaderQuit => "quit",

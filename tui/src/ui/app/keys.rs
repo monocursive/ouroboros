@@ -239,6 +239,7 @@ impl App {
             Some(Action::LeaderEditorView) => self.view_transcript(),
             Some(Action::LeaderSteer) => self.compose(ComposerVerb::Steer),
             Some(Action::LeaderApproval) => self.reopen_approval(),
+            Some(Action::LeaderShellRule) => self.add_shell_rule(),
             Some(Action::LeaderEnd) => self.open_close_confirm(),
             Some(Action::LeaderDetails) => self.toggle_session_details(),
             Some(Action::LeaderQuit) => self.open_quit(),

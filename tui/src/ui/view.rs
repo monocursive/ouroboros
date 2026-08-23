@@ -564,37 +564,86 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         ));
     }
 
+    // G2. The open session's own approvals, and — beside them — how many rows across the
+    // whole fleet are in each triage group. One cell, because they answer the same
+    // question at two scales: what is waiting on me here, and what is waiting on me
+    // anywhere. The fleet half is drawn only where there is more than one session, so a
+    // single-session terminal keeps the cell it always had.
+    let [needs, working, _done] = app.sessions.triage_counts();
+    let fleet = if needs + working > 0 && app.sessions.merged().len() > 1 {
+        format!(" · {needs} waiting · {working} working")
+    } else {
+        String::new()
+    };
+
     if facts.approvals > 0 {
         segments.push(Segment::new(
             format!(
-                "{} approval{}",
+                "{} approval{}{fleet}",
                 facts.approvals,
                 if facts.approvals == 1 { "" } else { "s" }
             ),
             Style::default().fg(theme::warn()),
             11,
         ));
+    } else if !fleet.is_empty() {
+        segments.push(Segment::new(
+            format!("{needs} waiting · {working} working"),
+            Style::default().fg(if needs > 0 {
+                theme::warn()
+            } else {
+                theme::muted()
+            }),
+            8,
+        ));
+    }
+
+    // D9. The percentage is drawn only where *both* halves were reported, and the
+    // numerator is `context_used` — what the last request actually cost — never the
+    // session's cumulative spend, which crosses its own window many times over on a long
+    // conversation. What `/context` measured wins over the session row, because a row's
+    // `usage` is reduced by the runtime to tokens and cost and carries no window at all.
+    // A meter divided by a number this client invented would be a lie presented as a
+    // measurement, and so would one divided by the wrong number.
+    let share = app
+        .open_context_meter()
+        .and_then(crate::model::native::SessionContext::share)
+        .or_else(|| {
+            facts
+                .usage
+                .as_ref()
+                .and_then(crate::model::SessionUsage::context_share)
+        });
+
+    // The two are separate facts and either can arrive without the other: a session may
+    // have measured its window without any provider reporting a token total, and the row
+    // that carried the total may carry no window. Whichever is known is drawn.
+    match (
+        facts
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.total_tokens.filter(|total| *total > 0)),
+        share,
+    ) {
+        (Some(total), Some(share)) => segments.push(Segment::new(
+            format!("{} tokens · {share}%", tokens(total)),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (Some(total), None) => segments.push(Segment::new(
+            format!("{} tokens", tokens(total)),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (None, Some(share)) => segments.push(Segment::new(
+            format!("{share}% context"),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (None, None) => {}
     }
 
     if let Some(usage) = &facts.usage {
-        if let Some(total) = usage.total_tokens.filter(|total| *total > 0) {
-            // The percentage is drawn only where the runtime reported a window. No
-            // runtime reports one today, so this is a hook rather than a feature — and a
-            // context meter divided by a number this client invented would be a lie
-            // presented as a measurement.
-            let share = usage
-                .context_window
-                .filter(|window| *window > 0)
-                .map(|window| format!(" · {}%", (total * 100 / window).min(999)))
-                .unwrap_or_default();
-
-            segments.push(Segment::new(
-                format!("{} tokens{share}", tokens(total)),
-                Style::default().fg(theme::muted()),
-                3,
-            ));
-        }
-
         if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
             // I2. `[budget] max_cost_usd` is a soft limit: past it the cell turns WARN and
             // a notice is said once. Nothing is stopped — a client cannot refuse a turn the
@@ -820,8 +869,34 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             entries,
             choice,
             fork_offered,
+            rewind_offered,
             ..
-        } => backtrack(frame, area, entries, *choice, *fork_offered),
+        } => backtrack(
+            frame,
+            area,
+            entries,
+            *choice,
+            *fork_offered,
+            *rewind_offered,
+        ),
+        // D9/D6/G1. All three draw in [`super::panels`], beside `/keys` and `/cost`: this
+        // file is where parallel work collides, and none of them needs anything from it.
+        Overlay::Context { context, scroll } => {
+            super::panels::context(frame, area, context, *scroll)
+        }
+        Overlay::Rewind {
+            points,
+            choice,
+            what,
+            confirming,
+            ..
+        } => super::panels::rewind(frame, area, points, *choice, *what, *confirming),
+        Overlay::Delegations { rows, choice, .. } => {
+            super::panels::delegations(frame, area, rows, *choice)
+        }
+        Overlay::Peek {
+            title, text, id, ..
+        } => super::panels::peek(frame, area, app, title, id, text.as_deref()),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
         Overlay::Machines(machines_state) => machines(frame, area, app, machines_state),
         Overlay::Diff(state) => changed_files(frame, area, state),
@@ -1220,16 +1295,29 @@ const ACCOUNT_WIDTH: u16 = 58;
 const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
 fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(Plane, String)>) {
-    let sessions = app.sessions.merged();
+    let rows = app.sessions.triaged();
+    let sessions: Vec<_> = rows.iter().map(|row| row.session).collect();
     let height = (sessions.len() + 5).clamp(7, 20) as u16;
-    let popup = centered(area, 62, height);
+    let popup = centered(area, 72, height);
     frame.render_widget(Clear, popup);
 
+    // G2. The counts are in the title rather than in heading rows, because this is a
+    // `List` whose selection is an index: a heading row would be selectable, and a
+    // selectable row that cannot be opened is a row that lies about what Enter does. The
+    // grouping is still visible on every row, in the column below.
+    let [needs, working, done] = app.sessions.triage_counts();
+
+    // The counts above and the keys below: at eighty columns one title cannot hold both,
+    // and dropping the keys would leave a list whose two new verbs nobody ever finds.
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
         .title(Span::styled(
-            " switch session · enter open · x end ",
+            format!(" sessions · {needs} need input · {working} working · {done} done "),
             theme::heading(),
+        ))
+        .title_bottom(Span::styled(
+            " space peek · r reply · enter open · x end ",
+            Style::default().fg(theme::muted()),
         ));
 
     if sessions.is_empty() {
@@ -1249,16 +1337,40 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     }
 
     let choice = app.sessions.picker_index(selected);
-    let items = sessions
+    let items = rows
         .iter()
-        .map(|session| {
+        .map(|row| {
+            let (group, session) = (row.group, row.session);
             let mut spans = vec![
+                Span::styled(
+                    // G1. A delegated task is drawn under the conversation that started
+                    // it, where the two landed in the same group.
+                    format!(
+                        "{}{:<width$}",
+                        if row.depth > 0 { "\u{2514} " } else { "" },
+                        group.label().to_ascii_lowercase(),
+                        width = 12 - 2 * usize::from(row.depth > 0)
+                    ),
+                    match group {
+                        crate::model::Triage::NeedsInput => Style::default().fg(theme::warn()),
+                        crate::model::Triage::Working => Style::default().fg(theme::system()),
+                        crate::model::Triage::Done => Style::default().fg(theme::muted()),
+                    },
+                ),
                 Span::styled(
                     format!("{:<6}", session.plane.tag()),
                     Style::default().fg(theme::muted()),
                 ),
-                Span::raw(super::tree::truncate(&session.id, 42)),
+                Span::raw(super::tree::truncate(&session.id, 36)),
             ];
+
+            // G2. Which machine, on the row, because the list spans every fleet node.
+            if let Some(node) = session.node.as_deref() {
+                spans.push(Span::styled(
+                    format!("  {}", super::tree::truncate(node, 24)),
+                    Style::default().fg(theme::muted()),
+                ));
+            }
             if let Some(owners) = app.sessions.owner_conflict(session.plane, &session.id) {
                 spans.push(Span::styled(
                     format!(
@@ -2201,6 +2313,22 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 ),
                 None => ("files", dialog.sandbox_label(), Style::default()),
             },
+            // D7. Two gates, and the row says which one is closed. A gateway that does
+            // not serve `interactive.start`'s worktree option cannot honour the toggle,
+            // and a toggle silently ignored is worse than none.
+            NewField::Worktree => (
+                "worktree",
+                if dialog.request.worktree {
+                    "yes — its own git worktree, so two sessions can share a repository".to_string()
+                } else {
+                    "no — the workspace itself, which takes an exclusive lease".to_string()
+                },
+                if dialog.request.worktree {
+                    Style::default().fg(theme::accent())
+                } else {
+                    Style::default()
+                },
+            ),
             NewField::Start => (
                 "",
                 if dialog.pending {
@@ -2924,13 +3052,28 @@ fn backtrack(
     entries: &[(u64, String)],
     choice: usize,
     fork_offered: bool,
+    rewind_offered: bool,
 ) {
+    let mut verbs = vec![if fork_offered {
+        "enter forks"
+    } else {
+        "enter edits and resends as a new turn"
+    }];
+
+    if fork_offered {
+        verbs.push("e edits and resends as a new turn");
+    }
+
+    // D6. Named last because it is the only one of the three that *removes* something,
+    // and because it leaves this menu for one that states what it cannot restore.
+    if rewind_offered {
+        verbs.push("r rewinds");
+    }
+
+    verbs.push("esc closes");
+
     let mut lines = vec![Line::from(Span::styled(
-        if fork_offered {
-            "enter forks · e edits and resends as a new turn · esc closes"
-        } else {
-            "enter edits and resends as a new turn · esc closes"
-        },
+        verbs.join(" · "),
         Style::default().fg(theme::muted()),
     ))];
 
@@ -2942,7 +3085,11 @@ fn backtrack(
     }
 
     lines.push(Line::from(Span::styled(
-        "nothing here removes an earlier turn; both verbs only add one",
+        if rewind_offered {
+            "the two verbs above only add a turn; the rewind is the one that undoes"
+        } else {
+            "nothing here removes an earlier turn; both verbs only add one"
+        },
         Style::default().fg(theme::muted()),
     )));
     lines.push(Line::from(""));

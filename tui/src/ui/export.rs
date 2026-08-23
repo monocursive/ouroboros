@@ -409,6 +409,21 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
         Cell::ChatNote { text } => {
             paragraph(out, text, width);
         }
+        // An export writes the body whole: it exists so the conversation can be read
+        // outside this client, and a command's output folded to a head and a tail there
+        // would be an export that quietly lost the middle.
+        Cell::Runtime(block) => {
+            label(out, &block.label);
+
+            if !block.detail.trim().is_empty() {
+                paragraph(out, &block.detail, width);
+            }
+
+            for row in &block.body {
+                out.push_str(row);
+                out.push('\n');
+            }
+        }
         Cell::Divider { text, .. } => {
             paragraph(out, &format!("── {text} ──"), width);
         }

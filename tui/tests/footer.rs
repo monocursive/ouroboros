@@ -466,19 +466,34 @@ fn the_context_percentage_waits_for_a_window_the_runtime_has_not_reported_yet() 
     assert!(row.contains("42.5k tokens"), "{row}");
     assert!(!row.contains('%'), "{row}");
 
-    // The hook: the moment a runtime reports one, the meter appears without a client-side
-    // table of model windows.
-    let mut with_window = usage();
-    with_window["context_window"] = json!(200_000);
+    // D9. A window alone is still not a meter. The numerator is `context_used` — what the
+    // last request actually cost — and never the session's cumulative spend, which crosses
+    // its own window many times over on a long conversation: dividing by it would report
+    // "340%" for a session that had compacted twice and was nowhere near full.
+    let mut window_only = usage();
+    window_only["context_window"] = json!(200_000);
     let mut app = opened(
         "idle",
         options(native_capabilities()),
-        with_window,
+        window_only,
         Vec::new(),
     );
 
     let row = footer(&render(&mut app, 160, 24));
-    assert!(row.contains("42.5k tokens · 21%"), "{row}");
+    assert!(row.contains("42.5k tokens"), "{row}");
+    assert!(
+        !row.contains('%'),
+        "a window with nothing measured against it is not a percentage: {row}"
+    );
+
+    // Both halves, and the meter appears — with no client-side table of model windows.
+    let mut measured = usage();
+    measured["context_window"] = json!(200_000);
+    measured["context_used"] = json!(50_000);
+    let mut app = opened("idle", options(native_capabilities()), measured, Vec::new());
+
+    let row = footer(&render(&mut app, 160, 24));
+    assert!(row.contains("42.5k tokens · 25%"), "{row}");
 }
 
 // ---------------------------------------------------------------------------------------

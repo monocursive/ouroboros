@@ -47,6 +47,7 @@ use crate::transport::ClientError;
 
 static SESSION_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+pub mod native;
 pub mod transcript;
 
 /// Which plane an id belongs to. The two have separate id spaces, so a session is only
@@ -187,6 +188,72 @@ impl SessionStatus {
 
     pub fn busy(&self) -> bool {
         matches!(self, Self::Running | Self::Starting | Self::Closing)
+    }
+}
+
+/// G2. Which of the three questions a fleet row answers: does it need me, is it working,
+/// or is it done.
+///
+/// The order is the order they are drawn in, and it is the whole point of the grouping —
+/// what needs a human is what a person opening `ouro` is looking for, and it must not be
+/// below eleven finished sessions from yesterday.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Triage {
+    NeedsInput,
+    Working,
+    Done,
+}
+
+impl Triage {
+    pub const ALL: [Self; 3] = [Self::NeedsInput, Self::Working, Self::Done];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "NEEDS INPUT",
+            Self::Working => "WORKING",
+            Self::Done => "DONE",
+        }
+    }
+
+    /// The one-word form `ouro agents --json` and the footer use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "needs_input",
+            Self::Working => "working",
+            Self::Done => "done",
+        }
+    }
+}
+
+impl SessionInfo {
+    /// Which group this row belongs to, from *declared* state and nothing else.
+    ///
+    /// The three inputs are the plane's own `status`, the pending approvals this client
+    /// is holding for the session, and whether the runtime says the session is waiting on
+    /// a human. Never a guess: a row whose owner is offline keeps whichever group its
+    /// last complete observation put it in, because "we cannot see it right now" is not
+    /// the same claim as "it needs you" — and a client that promoted every unreachable
+    /// session to the top would make the top of the list meaningless.
+    pub fn triage(&self, pending_approvals: usize) -> Triage {
+        if pending_approvals > 0 || self.status == SessionStatus::AwaitingApproval {
+            return Triage::NeedsInput;
+        }
+
+        if self.status.terminal() {
+            return Triage::Done;
+        }
+
+        if self.status.busy() {
+            return Triage::Working;
+        }
+
+        // `idle` on the interactive plane is a conversation waiting for its next prompt —
+        // a human's turn, which is exactly what this grouping is for. On the coding plane
+        // there is nobody to prompt it, so an idle task is simply between turns.
+        match (self.plane, &self.status) {
+            (Plane::Interactive, SessionStatus::Idle) => Triage::NeedsInput,
+            _otherwise => Triage::Working,
+        }
     }
 }
 
@@ -582,11 +649,17 @@ pub struct SessionUsage {
     pub turns_with_usage: Option<u64>,
     /// The model's context window, for the footer's `%` meter.
     ///
-    /// **No runtime reports this today.** `runtime.models` (A7's runtime half) is where
-    /// the window and pricing from `llm_db` are meant to arrive; until then this is
-    /// always `None` and the footer states tokens without a percentage rather than
-    /// dividing by a number this client made up.
+    /// `interactive.info` carries it where a provider named one — a `usage` event's own
+    /// `context_window`, or a native session's own count (D9). A `list` row does not: the
+    /// runtime reduces a row's `usage` to tokens and cost, so the meter lights up on the
+    /// open session and stays dark in the rail, which is the honest asymmetry.
     pub context_window: Option<u64>,
+    /// How much of that window the *last request* filled, as the provider counted it.
+    ///
+    /// This is the numerator the meter needs, and it is not `total_tokens`: a session's
+    /// cumulative spend crosses its own window many times over, so a percentage built
+    /// from it would climb past 100% on a conversation that was never close to full.
+    pub context_used: Option<u64>,
 }
 
 impl SessionUsage {
@@ -606,7 +679,21 @@ impl SessionUsage {
             cost_usd: map.get("cost_usd").and_then(Value::as_f64),
             turns_with_usage: count("turns_with_usage"),
             context_window: count("context_window"),
+            context_used: count("context_used"),
         })
+    }
+
+    /// How full the window is, where both halves were reported.
+    ///
+    /// `None` rather than a guess: a provider that named no window gets no percentage,
+    /// and one that named a window but has not spent a turn yet gets none either — a
+    /// meter reading 0% on a session with a loaded prefix would be a measurement nobody
+    /// made.
+    pub fn context_share(&self) -> Option<u64> {
+        let window = self.context_window.filter(|window| *window > 0)?;
+        let used = self.context_used.filter(|used| *used > 0)?;
+
+        Some((used.saturating_mul(100) / window).min(999))
     }
 }
 
@@ -642,6 +729,22 @@ pub struct SessionInfo {
     pub capabilities: Capabilities,
     /// What the provider reported spending, folded by the runtime.
     pub usage: Option<SessionUsage>,
+    /// G1. The coding task ids this conversation delegated — ids only, which is what the
+    /// row carries. Empty where it delegated nothing *and* where the gateway predates the
+    /// key: both are "this client knows of no children", and the rail nests nothing
+    /// either way rather than drawing an empty branch.
+    pub children: Vec<String>,
+    /// G1, the other half. Coding rows only: the conversation that delegated this task.
+    pub parent: Option<native::Parent>,
+    /// D7. The `git worktree` this session was given, where it asked for one.
+    pub worktree: Option<native::Worktree>,
+    /// D7. Whether the start asked for a worktree. Kept beside `worktree` because a
+    /// request the runtime could not honour is a different fact from never asking.
+    pub worktree_requested: bool,
+    /// D9. The session this one's opening packet was written from. Held apart from
+    /// `forked_from` because the two are different claims: a fork carries the parent's
+    /// conversation, a handoff carries a packet *about* it.
+    pub handed_off_from: Option<String>,
     /// This row came from the previous complete list because runtime.status explicitly
     /// reports its owner offline. It is retained for addressability, not presented as a
     /// fresh observation.
@@ -718,6 +821,36 @@ impl SessionInfo {
                 options.and_then(|options| options.get("capabilities")),
             ),
             usage: SessionUsage::decode(value.get("usage")),
+            // Read tolerantly out of the raw tree for the same reason `options` is: these
+            // five keys arrived with D7/D9/G1, an older gateway sends none of them, and a
+            // strict field here would be the one place this client refuses a session
+            // because its runtime is a build behind.
+            children: value
+                .get("children")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(native::MAX_ROWS)
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            parent: native::Parent::decode(value.get("parent")),
+            worktree: native::Worktree::decode(value.get("worktree")),
+            worktree_requested: value
+                .get("worktree_requested")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            handed_off_from: value
+                .get("handed_off_from")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
             last_known: false,
             raw: value.clone(),
         })
@@ -1762,6 +1895,13 @@ pub struct StartRequest {
     pub sandbox_mode: Option<SandboxMode>,
     /// Required on the coding plane, refused on the interactive one.
     pub objective: String,
+    /// D7. Run in a `git worktree` under the runtime's data directory instead of the
+    /// workspace itself, so two sessions on one repository do not fight over its lease.
+    ///
+    /// Sent only when true. The gateway's `worktree` option is a strict boolean — `"true"`
+    /// or `1` is `-32602` — and an unasked-for `false` on every start would be this client
+    /// stating a default the plane already has.
+    pub worktree: bool,
 }
 
 impl StartRequest {
@@ -1775,6 +1915,7 @@ impl StartRequest {
             approval_mode: None,
             sandbox_mode: None,
             objective: String::new(),
+            worktree: false,
         }
     }
 
@@ -1847,6 +1988,10 @@ impl StartRequest {
                 "sandbox_mode".into(),
                 Value::String(mode.as_str().to_string()),
             );
+        }
+
+        if self.worktree {
+            params.insert("worktree".into(), Value::Bool(true));
         }
 
         Ok(Value::Object(params))

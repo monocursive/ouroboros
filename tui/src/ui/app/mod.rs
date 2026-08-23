@@ -38,7 +38,7 @@ use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
     Capabilities, CursorPruned, Effort, Event, EventType, Plane, ProviderEntry, RuntimeStatus,
-    SandboxMode, SessionInfo, StartRequest, StartedRef, TurnInput,
+    SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -57,6 +57,7 @@ mod footer;
 mod home;
 mod keys;
 mod machines;
+pub mod native;
 mod overlays;
 mod session;
 mod settings;
@@ -327,6 +328,76 @@ pub enum Tag {
         input: String,
         submission_sequence: u64,
     },
+    /// D9. `interactive.compact`. Its own tag rather than an [`Tag::Action`] because the
+    /// answer is a *report* to draw, not an acknowledgement to acknowledge.
+    Compact {
+        plane: Plane,
+        id: String,
+    },
+    /// D9. `interactive.handoff`. Carries the caller-owned child id so a ceiling that
+    /// fires after the child exists still names something this client can open.
+    Handoff {
+        plane: Plane,
+        id: String,
+        child: String,
+    },
+    /// D9. `interactive.context`. `show` separates the operator asking to *see* it from
+    /// the refresh a compaction triggers, which only needs the meter.
+    Context {
+        plane: Plane,
+        id: String,
+        show: bool,
+    },
+    /// D6. `interactive.rewind_points` — the menu, before anything is chosen.
+    RewindPoints {
+        plane: Plane,
+        id: String,
+    },
+    /// D6. `interactive.rewind`. `label` and `what` travel with the request because the
+    /// answer names neither, and a note that could not say what was undone would be a
+    /// worse record than none.
+    Rewind {
+        plane: Plane,
+        id: String,
+        label: String,
+        what: &'static str,
+    },
+    /// B7. `workspace.exec`. The command line is on the tag because the runtime never
+    /// records it — the ledger holds a digest and deliberately not the words — so this is
+    /// the only place it can be echoed back.
+    Shell {
+        plane: Plane,
+        id: String,
+        command: String,
+    },
+    /// G1. `interactive.delegate`.
+    Delegate {
+        plane: Plane,
+        id: String,
+    },
+    /// G1. `interactive.delegations`, for the overlay or for the `Ctrl+T` panel.
+    Delegations {
+        plane: Plane,
+        id: String,
+        show: bool,
+    },
+}
+
+/// B7. A `workspace.exec` the runtime would not run, as the composer states it.
+///
+/// Everything here came from the runtime's own refusal. `offer` is present only where all
+/// three conditions this client can check hold — the engine suggested a rule, this gateway
+/// serves `permissions.add`, and the session names a workspace to scope it to — because a
+/// one-key offer that could not be honoured would be worse than no offer at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRefusalState {
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub denied_by: Option<String>,
+    pub approval_mode: Option<String>,
+    pub suggested_rule: Option<String>,
+    /// `(pattern, workspace)` for the rule the one-key answer would write.
+    pub offer: Option<(String, String)>,
 }
 
 /// One `/export` the driver has to write.
@@ -825,6 +896,21 @@ pub struct App {
     /// double-Escape that then had nothing to show would be a chord that punished you for
     /// being idle.
     pub(super) backtrack_arm: Option<(u64, (Plane, String))>,
+    /// D9. What `interactive.context` last answered, and for which session.
+    ///
+    /// Keyed by identity rather than stored on the session row because a row's `usage` is
+    /// reduced by the runtime to tokens and cost — the window is not in it — so the meter
+    /// has nowhere else to read a measured `context_used / context_window` from. Dropped
+    /// on nothing: a stale reading for a session that is no longer open is simply not
+    /// matched, and the footer falls back to stating tokens without a percentage.
+    pub(super) context: Option<(Plane, String, Box<crate::model::native::SessionContext>)>,
+    /// G1. What `interactive.delegations` last answered, and for which session.
+    pub(super) delegations: Option<(Plane, String, Vec<crate::model::native::DelegationRow>)>,
+    /// G1. Whether a `/delegate` is in flight, for the composer's chip.
+    pub(super) delegating: bool,
+    /// B7. The last refused operator command, kept on the composer so the reason and the
+    /// one key that fixes it are on screen together.
+    pub(super) shell_refusal: Option<ShellRefusalState>,
     /// Tick at which a second Ctrl+C will open the quit dialog.
     ctrl_c_until: Option<u64>,
     /// Last agent message the I/O driver should copy to the clipboard.
@@ -976,6 +1062,10 @@ impl App {
             leader_until: None,
             help_scroll: 0,
             backtrack_arm: None,
+            context: None,
+            delegations: None,
+            delegating: false,
+            shell_refusal: None,
             ctrl_c_until: None,
             details: DetailsView::default(),
             export_pending: None,
@@ -1297,6 +1387,30 @@ impl App {
         // and resend" works everywhere.
         if !self.fork_offered() {
             hidden.push("/fork");
+        }
+
+        // D9/D6. Three verbs only a native session can honour: this runtime has to be the
+        // one holding the conversation to fold it, hand it over, or put it back.
+        if !self.context_verbs_offered() {
+            hidden.push("/compact");
+            hidden.push("/handoff");
+            hidden.push("/rewind");
+        }
+
+        // D9. `interactive.context` answers for every transport, so its only gate is the
+        // method — a vendor session gets the subset its own `usage` events reported.
+        if !self.context_overlay_offered() {
+            hidden.push("/context");
+        }
+
+        // G1. Two halves of the same slice, gated separately because a gateway can serve
+        // one and not the other.
+        if !self.delegation_offered() {
+            hidden.push("/delegate");
+        }
+
+        if !(self.sessions.open.is_some() && self.hello.serves("interactive.delegations")) {
+            hidden.push("/delegations");
         }
 
         self.completion_catalog.hide_commands(hidden);

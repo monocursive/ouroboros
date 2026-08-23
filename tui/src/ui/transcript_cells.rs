@@ -18,7 +18,7 @@
 //! that re-lays out a 64 MiB tool result on every frame is a transcript that stops
 //! redrawing.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 
 use ratatui::layout::Alignment;
@@ -182,6 +182,75 @@ pub enum Tone {
     Error,
 }
 
+/// How many rows of a runtime block's body are drawn before the count takes over.
+///
+/// Head and tail both, like a tool result: the last rows of a command's output are where
+/// its failure is, and the first rows of a restored-file list are where the paths a reader
+/// is looking for are.
+pub const BLOCK_HEAD: usize = 8;
+pub const BLOCK_TAIL: usize = 6;
+
+/// One thing this runtime did, as a transcript block.
+///
+/// Built in exactly two ways and rendered in one: from the durable event the runtime
+/// wrote, and from the reply the operator's own verb answered with. The reply is the
+/// fuller of the two — it carries the elapsed time, the spill path and the command's own
+/// text, none of which the durable event records — so where this client holds both, the
+/// reply's block is drawn and the event's is deduped away against `Block::key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    /// The bold first row: `$ mix test`, `Compacted`, `Delegated`.
+    pub label: String,
+    /// One line of facts under it. Empty draws nothing rather than a placeholder.
+    pub detail: String,
+    /// Pre-split rows drawn verbatim — command output, restored paths — head and tail with
+    /// the count between them.
+    pub body: Vec<String>,
+    pub tone: Tone,
+    /// What the runtime's own durable record of the same act is matched against, so the
+    /// two are never drawn side by side. A command's digest, a compaction's archive id.
+    pub key: Option<String>,
+}
+
+impl Block {
+    pub fn new(label: impl Into<String>, detail: impl Into<String>, tone: Tone) -> Self {
+        Self {
+            label: label.into(),
+            detail: detail.into(),
+            body: Vec::new(),
+            tone,
+            key: None,
+        }
+    }
+
+    pub fn with_body(mut self, body: Vec<String>) -> Self {
+        self.body = body;
+        self
+    }
+
+    pub fn with_key(mut self, key: Option<String>) -> Self {
+        self.key = key;
+        self
+    }
+
+    /// The whole block as plain text, for `/details` and the screen-reader path.
+    pub fn text(&self) -> String {
+        let mut text = self.label.clone();
+
+        if !self.detail.trim().is_empty() {
+            text.push_str(" — ");
+            text.push_str(&self.detail);
+        }
+
+        for row in &self.body {
+            text.push('\n');
+            text.push_str(row);
+        }
+
+        text
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCell {
     pub call_id: Option<String>,
@@ -338,6 +407,14 @@ pub enum Cell {
     ChatNote {
         text: String,
     },
+    /// Something *this runtime* did, rather than the provider: a fold of the conversation,
+    /// a rewind, a delegation, a command the operator ran themselves (D9, D6, G1, B7).
+    ///
+    /// One cell for all four because they are the same kind of claim — Ouroboros recording
+    /// its own act in the conversation it changed — and because a reader scanning a
+    /// transcript should be able to tell those apart from the model's work by their shape
+    /// alone.
+    Runtime(Block),
     Divider {
         text: String,
         tone: Tone,
@@ -381,6 +458,17 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
     let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
     // The last queue depth projected, so an unchanged count is not restated.
     let mut queued: Option<usize> = None;
+    // What this client has already drawn in full from an operator verb's own reply, so the
+    // runtime's durable record of the same act is not drawn beside it. Gathered in a pass
+    // of its own because the two can arrive in either order: the reply usually lands
+    // first, but a replay after a reconnect delivers the event before anything else.
+    let drawn_locally: BTreeSet<String> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Note(Note::Local { block, .. }) => block.key.clone(),
+            _other => None,
+        })
+        .collect();
 
     for entry in entries {
         match entry {
@@ -399,6 +487,10 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     tone: Tone::Warning,
                     kind: DividerKind::Other,
                 });
+            }
+            Entry::Note(Note::Local { block }) => {
+                flush_agent(&mut cells, &mut pending, false);
+                cells.push(Cell::Runtime(block.clone()));
             }
             Entry::Note(note) => {
                 flush_agent(&mut cells, &mut pending, false);
@@ -513,6 +605,39 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                         cells.push(Cell::ChatNote {
                             text: provider_note_text(&kind, &detail),
                         });
+                    }
+                    // B7/D9. Both of these have a reply this client may already have drawn
+                    // in full. Where it did, the durable record is skipped rather than
+                    // drawn a second time in a thinner form — and where it did not (a
+                    // second client watching, a session reopened after a restart), this is
+                    // the only copy and it is drawn.
+                    PresentationEvent::OperatorShell(shell) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        let block = shell_block(&shell);
+
+                        if !block
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| drawn_locally.contains(key))
+                        {
+                            cells.push(Cell::Runtime(block));
+                        }
+                    }
+                    PresentationEvent::Compaction(report) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        let block = compaction_block(&report);
+
+                        if !block
+                            .key
+                            .as_ref()
+                            .is_some_and(|key| drawn_locally.contains(key))
+                        {
+                            cells.push(Cell::Runtime(block));
+                        }
+                    }
+                    PresentationEvent::Delegation(delegation) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Runtime(delegation_block(&delegation)));
                     }
                     PresentationEvent::ToolCall(call) => {
                         flush_agent(&mut cells, &mut pending, false);
@@ -947,6 +1072,7 @@ pub fn render_cells_at(
                 tone,
             } => render_status(&mut lines, label, detail, colour(*tone), width, verbosity),
             Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
+            Cell::Runtime(block) => render_runtime_block(&mut lines, block, width, verbosity),
             Cell::Divider { text, tone, .. } => lines.push(divider(text, width, colour(*tone))),
         }
     }
@@ -1193,6 +1319,22 @@ fn render_plain(lines: &mut Vec<Line<'static>>, cell: &Cell, vocabulary: Vocabul
             body(lines, detail, Style::default());
         }
         Cell::ChatNote { text } => label(lines, text.clone()),
+        // The label carries the whole first line so a voice reads "compacted, at your
+        // request — archived 12 messages" as one sentence rather than as a heading
+        // followed by an orphaned fragment.
+        Cell::Runtime(block) => {
+            label(
+                lines,
+                match block.detail.trim().is_empty() {
+                    true => block.label.clone(),
+                    false => format!("{}: {}", block.label, block.detail),
+                },
+            );
+
+            if !block.body.is_empty() {
+                body(lines, &block.body.join("\n"), theme::quiet());
+            }
+        }
         // ASCII, not a box rule: a boundary is still content, and a copied line should not
         // arrive somewhere else carrying U+2500.
         Cell::Divider { text, tone, .. } => label(
@@ -1844,11 +1986,14 @@ fn project_file(
     }
 }
 
+/// The divider text for a *stream* note. A local note never reaches this — it is a
+/// [`Cell::Runtime`] block, because nothing about it went wrong.
 fn chat_note(note: &Note) -> &'static str {
     match note {
         Note::Lagged { .. } => "Some live updates were missed by the gateway",
         Note::ClientDropped => "Some live updates were missed by this client",
         Note::Reconnected => "Connection restored",
+        Note::Local { .. } => "A runtime verb answered here",
     }
 }
 
@@ -2588,6 +2733,185 @@ fn render_diffstat(
             Style::default().fg(theme::system()),
         ),
     ]));
+}
+
+/// B7. The durable record of a command the operator ran.
+///
+/// The runtime never writes the command *text* — only its digest — so this cell names the
+/// digest and says so. A cell that guessed at the command line from a digest would be
+/// inventing the one thing the ledger deliberately does not keep.
+pub fn shell_block(shell: &crate::model::native::ShellEvent) -> Block {
+    let label = match &shell.command_digest {
+        Some(digest) => format!("$ command {}", digest.chars().take(12).collect::<String>()),
+        None => "$ command".to_string(),
+    };
+
+    let mut facts = Vec::new();
+
+    if let Some(error) = &shell.error {
+        facts.push(format!("could not be started: {error}"));
+    } else {
+        match shell.exit_status {
+            Some(0) => facts.push("exit 0".to_string()),
+            Some(status) => facts.push(format!("exit {status}")),
+            None => facts.push("no exit status".to_string()),
+        }
+    }
+
+    if shell.timed_out {
+        facts.push("timed out".to_string());
+    }
+
+    if let Some(ms) = shell.duration_ms {
+        facts.push(elapsed_label(ms));
+    }
+
+    if let Some(bytes) = shell.output_bytes {
+        facts.push(format!("{bytes} bytes"));
+    }
+
+    if let Some(path) = &shell.spilled {
+        facts.push(format!("full output at {path}"));
+    }
+
+    let failed = shell.error.is_some() || shell.timed_out || shell.exit_status != Some(0);
+
+    Block::new(
+        label,
+        facts.join(" · "),
+        if failed { Tone::Warning } else { Tone::Muted },
+    )
+    .with_body(
+        shell
+            .output_excerpt
+            .as_deref()
+            .map(body_rows)
+            .unwrap_or_default(),
+    )
+    .with_key(shell.command_digest.clone())
+}
+
+/// D9. One fold of the conversation.
+pub fn compaction_block(report: &crate::model::native::Compaction) -> Block {
+    let label = match report.trigger.as_deref() {
+        Some("manual") => "Compacted, at your request",
+        Some("automatic") => "Compacted automatically",
+        _unnamed => "Compacted",
+    };
+
+    Block::new(label, report.describe(), Tone::Muted).with_key(report.archive_id.clone())
+}
+
+/// G1. A coding task this conversation delegated, starting or finishing.
+pub fn delegation_block(delegation: &crate::model::native::DelegationEvent) -> Block {
+    let started = delegation.status.as_deref() == Some("started");
+
+    let label = match (&delegation.status, started) {
+        (_, true) => "Delegated to a coding task".to_string(),
+        (Some(status), false) => format!("Delegation {status}"),
+        (None, false) => "Delegation".to_string(),
+    };
+
+    let mut facts = Vec::new();
+
+    if let Some(task) = &delegation.task_id {
+        facts.push(format!("task {task}"));
+    }
+
+    if let Some(node) = &delegation.task_node {
+        facts.push(node.clone());
+    }
+
+    // A digest, never the result: the child's own transcript is the record of what it
+    // did, and a parent that quoted it would be presenting a copy as the thing.
+    if let Some(digest) = &delegation.result_digest {
+        facts.push(format!("result digest {digest}"));
+    }
+
+    let tone = match delegation.status.as_deref() {
+        Some("failed" | "cancelled" | "lost") => Tone::Warning,
+        Some("completed") => Tone::Success,
+        _running => Tone::Muted,
+    };
+
+    Block::new(label, facts.join(" · "), tone)
+}
+
+/// `Nms`, `Ns`, or `Nm Ns` — the same three shapes a tool row's elapsed time takes.
+fn elapsed_label(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else if milliseconds < 60_000 {
+        format!("{}s", milliseconds / 1_000)
+    } else {
+        format!(
+            "{}m {}s",
+            milliseconds / 60_000,
+            (milliseconds / 1_000) % 60
+        )
+    }
+}
+
+/// Splits a block of output into rows, bounded so one command cannot own the screen.
+pub fn body_rows(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::to_string)
+        .take(BLOCK_HEAD + BLOCK_TAIL + 1)
+        .collect()
+}
+
+fn render_runtime_block(
+    lines: &mut Vec<Line<'static>>,
+    block: &Block,
+    width: usize,
+    verbosity: Verbosity,
+) {
+    separate(lines);
+    lines.push(Line::from(Span::styled(
+        block.label.clone(),
+        Style::default()
+            .fg(colour(block.tone))
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if !block.detail.trim().is_empty() {
+        for row in wrap_limited(&block.detail, width.max(8).saturating_sub(2), 4) {
+            lines.push(Line::from(Span::styled(format!("  {row}"), theme::muted())));
+        }
+    }
+
+    if block.body.is_empty() {
+        return;
+    }
+
+    // Head and tail, like a tool result: the last rows of a command's output are where the
+    // failure is, and a head-only excerpt is why a collapsed row used to be worth nothing.
+    let budget = if verbosity.raw() {
+        block.body.len()
+    } else {
+        BLOCK_HEAD + BLOCK_TAIL
+    };
+
+    if block.body.len() <= budget {
+        for row in &block.body {
+            lines.push(Line::from(Span::styled(format!("  {row}"), theme::quiet())));
+        }
+        return;
+    }
+
+    for row in block.body.iter().take(BLOCK_HEAD) {
+        lines.push(Line::from(Span::styled(format!("  {row}"), theme::quiet())));
+    }
+
+    let omitted = block.body.len() - BLOCK_HEAD - BLOCK_TAIL;
+    lines.push(Line::from(Span::styled(
+        format!("  {}", more_lines(omitted, verbosity)),
+        theme::muted(),
+    )));
+
+    for row in block.body.iter().skip(block.body.len() - BLOCK_TAIL) {
+        lines.push(Line::from(Span::styled(format!("  {row}"), theme::quiet())));
+    }
 }
 
 fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
