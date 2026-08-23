@@ -608,7 +608,8 @@ defmodule Ouroboros.InteractiveSession do
   def rewind(session, to_turn, what \\ :both)
 
   def rewind(session, to_turn, what)
-      when is_integer(to_turn) and to_turn >= 0 and what in [:files, :conversation, :both],
+      when ((is_binary(to_turn) and to_turn != "") or (is_integer(to_turn) and to_turn >= 0)) and
+             what in [:files, :conversation, :both],
       do: call(session, {:rewind, to_turn, what})
 
   def rewind(_session, to_turn, what),

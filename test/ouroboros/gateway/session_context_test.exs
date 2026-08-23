@@ -148,6 +148,18 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert Methods.permits?(:read, table["interactive.rewind_points"])
     end
 
+    test "a turn id string reaches the session instead of dying at the facade", %{id: id} do
+      # `rewind_points` hands out turn ids and the wire admits them; a facade guard that only
+      # let integers through turned every id into `invalid_rewind` before the session saw it.
+      start_session(id)
+
+      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => "turn_abc"})
+
+      assert details["verb"] == "rewind"
+      retire_session(id)
+    end
+
     test "rewind on a non-native transport is refused by transport, as wire data", %{id: id} do
       start_session(id)
 
