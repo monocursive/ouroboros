@@ -449,6 +449,116 @@ async fn session_new_starts_the_session_on_the_editors_cwd_and_advertises_its_mo
 }
 
 #[tokio::test]
+async fn mcp_servers_the_runtime_cannot_carry_are_reported_rather_than_dropped() {
+    let mut harness = Harness::start(open_replies()).await;
+    harness.line(initialize()).await;
+
+    let frames = harness
+        .line(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": "/tmp/project",
+                "mcpServers": [
+                    {"name": "filesystem", "command": "/bin/mcp", "args": [], "env": []},
+                    {"name": "acme", "command": "/bin/acme", "args": [], "env": []}
+                ]
+            }
+        }))
+        .await;
+
+    // The session opens; the servers are the thing that did not happen.
+    let session = frames[0]["result"]["sessionId"]
+        .as_str()
+        .expect("a session id");
+
+    // The notice follows the answer, because it names a session the editor has only just
+    // been told about.
+    assert_eq!(frames[1]["method"], "session/update");
+    assert_eq!(frames[1]["params"]["sessionId"], session);
+
+    let text = frames[1]["params"]["update"]["content"]["text"]
+        .as_str()
+        .expect("a sentence");
+    assert!(text.contains("did not apply"), "{text}");
+    assert!(
+        text.contains("filesystem") && text.contains("acme"),
+        "{text}"
+    );
+
+    // Nothing about them reached the gateway: there is no parameter that could carry them.
+    let start = harness.sent("interactive.start");
+    assert!(start["params"].get("mcp_config").is_none());
+    assert!(start["params"].get("mcpServers").is_none());
+}
+
+#[tokio::test]
+async fn a_turn_that_ends_drops_its_unanswered_questions_and_its_last_tool_call() {
+    let mut harness = Harness::start(with_send(vec![
+        ("interactive.send_message", accepted()),
+        ("interactive.respond_approval", json!({})),
+    ]))
+    .await;
+
+    harness.opened().await;
+    harness.prompt(2, "one").await;
+
+    harness
+        .event(
+            1,
+            "tool_call",
+            json!({"call_id": "c1", "name": "bash", "input": {"command": "sleep 1"}}),
+        )
+        .await;
+    let asked = harness
+        .event_for(
+            2,
+            "approval_requested",
+            json!({"kind": "command", "tool_call": {"name": "bash", "command": "sleep 1"}}),
+            None,
+            Some("napp_stale"),
+        )
+        .await;
+    assert_eq!(asked[0]["method"], "session/request_permission");
+
+    // The turn ends with the question still on the editor's screen.
+    harness
+        .event_for(
+            3,
+            "turn_completed",
+            json!({"status": "completed"}),
+            Some("harness-turn-1"),
+            None,
+        )
+        .await;
+
+    // A late answer to a question the runtime has already settled is not forwarded.
+    let stale = asked[0]["id"].clone();
+    harness
+        .line(json!({
+            "jsonrpc": "2.0",
+            "id": stale,
+            "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        }))
+        .await;
+    harness.nothing_sent("interactive.respond_approval");
+
+    // And the next turn's file change does not attach itself to the last turn's call.
+    harness.prompt(3, "two").await;
+    let frames = harness
+        .event(
+            4,
+            "file_change",
+            json!({"changes": [{"path": "/tmp/project/c.rs", "kind": "add"}]}),
+        )
+        .await;
+
+    assert_eq!(frames.len(), 2, "the change announced its own call");
+    assert_ne!(frames[0]["params"]["update"]["toolCallId"], "c1");
+}
+
+#[tokio::test]
 async fn a_relative_cwd_is_refused_before_anything_is_started() {
     let mut harness = Harness::start(open_replies()).await;
     harness.line(initialize()).await;

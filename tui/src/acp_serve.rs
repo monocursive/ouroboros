@@ -393,6 +393,10 @@ pub struct Agent {
     permissions: BTreeMap<String, Permission>,
     /// Ids for the requests this agent sends *to* the editor.
     outbound: u64,
+    /// Frames a handler raised that are not its answer — the notice saying which of the
+    /// editor's MCP servers were not applied, and anything else this bridge owes a person
+    /// rather than a protocol. Drained by [`Agent::handle_line`] ahead of the answer.
+    notices: Vec<Frame>,
 }
 
 /// One thing to write on stdout: a JSON-RPC frame, already encoded as a value.
@@ -408,6 +412,7 @@ impl Agent {
             sessions: BTreeMap::new(),
             permissions: BTreeMap::new(),
             outbound: 0,
+            notices: Vec::new(),
         }
     }
 
@@ -478,11 +483,19 @@ impl Agent {
             return self.notification(&method, params).await;
         };
 
-        match self.dispatch(&method, params, &id).await {
+        let answer = self.dispatch(&method, params, &id).await;
+
+        let mut frames = match answer {
             Ok(None) => Vec::new(),
             Ok(Some(result)) => vec![result_frame(id, result)],
             Err(refusal) => vec![error_frame(id, refusal.code, &refusal.message)],
-        }
+        };
+
+        // Notices a handler raised go out *after* its answer, because a `session/update`
+        // names a session the editor may only have learned about from that answer.
+        frames.extend(std::mem::take(&mut self.notices));
+
+        frames
     }
 
     async fn notification(&mut self, method: &str, params: Value) -> Vec<Frame> {
@@ -763,9 +776,31 @@ impl Agent {
         let servers = mcp_server_names(&params);
         self.sessions.insert(id.clone(), session);
 
-        // Said out loud, in the transcript the operator is reading, rather than dropped.
+        // Said out loud in the transcript the operator is reading, rather than dropped.
+        // `interactive.start` has no `mcp_config` key at all — deliberately absent, because
+        // an inline server command inside a durable checkpoint is an execution vector — so
+        // there is nowhere to forward these to and the editor is owed the sentence.
         if !servers.is_empty() {
             log(&format!("{} MCP servers were not applied", servers.len()));
+
+            self.notices.push(update(
+                &id,
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": format!(
+                            "Ouroboros did not apply the MCP server{} this editor named \
+                             ({}). Its runtime refuses inline server definitions on a \
+                             session start — an executable command inside a durable \
+                             checkpoint is an execution vector — so only the servers \
+                             configured on the Ouroboros side are in play.",
+                            if servers.len() == 1 { "" } else { "s" },
+                            servers.join(", ")
+                        )
+                    }
+                }),
+            ));
         }
 
         Ok(Value::Object(result))
@@ -1650,7 +1685,7 @@ impl Agent {
         };
 
         let prompt = session.prompt.take().expect("the prompt checked above");
-        session.streamed = false;
+        self.ended(session_id);
 
         // An unreconciled send that a terminal event resolved is reconciled. One that a
         // terminal event did *not* resolve never reaches here.
@@ -1658,6 +1693,22 @@ impl Agent {
             prompt.id,
             json!({ "stopReason": reason.as_str() }),
         )]
+    }
+
+    /// What a turn leaves behind, dropped when it ends.
+    ///
+    /// An approval is raised inside a turn and is moot once that turn is over — the runtime
+    /// has already timed it out or denied it — so an outstanding question does not carry
+    /// into the next turn and eat the bound. The last tool call goes for the same reason: a
+    /// `file_change` in a later turn must not attach itself to a call from this one.
+    fn ended(&mut self, session_id: &str) {
+        self.permissions
+            .retain(|_id, permission| permission.session_id != session_id);
+
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.streamed = false;
+            session.last_tool = None;
+        }
     }
 
     /// Resolves the in-flight prompt as an error: a turn that failed did not stop for a
@@ -1693,7 +1744,7 @@ impl Agent {
             .get_mut(session_id)
             .expect("the session checked above");
         let prompt = session.prompt.take().expect("the prompt checked above");
-        session.streamed = false;
+        self.ended(session_id);
 
         let message = match &prompt.unreconciled {
             Some(unreconciled) => format!("{message}; {unreconciled}"),
