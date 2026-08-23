@@ -598,29 +598,52 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         ));
     }
 
+    // D9. The percentage is drawn only where *both* halves were reported, and the
+    // numerator is `context_used` — what the last request actually cost — never the
+    // session's cumulative spend, which crosses its own window many times over on a long
+    // conversation. What `/context` measured wins over the session row, because a row's
+    // `usage` is reduced by the runtime to tokens and cost and carries no window at all.
+    // A meter divided by a number this client invented would be a lie presented as a
+    // measurement, and so would one divided by the wrong number.
+    let share = app
+        .open_context_meter()
+        .and_then(crate::model::native::SessionContext::share)
+        .or_else(|| {
+            facts
+                .usage
+                .as_ref()
+                .and_then(crate::model::SessionUsage::context_share)
+        });
+
+    // The two are separate facts and either can arrive without the other: a session may
+    // have measured its window without any provider reporting a token total, and the row
+    // that carried the total may carry no window. Whichever is known is drawn.
+    match (
+        facts
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.total_tokens.filter(|total| *total > 0)),
+        share,
+    ) {
+        (Some(total), Some(share)) => segments.push(Segment::new(
+            format!("{} tokens · {share}%", tokens(total)),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (Some(total), None) => segments.push(Segment::new(
+            format!("{} tokens", tokens(total)),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (None, Some(share)) => segments.push(Segment::new(
+            format!("{share}% context"),
+            Style::default().fg(theme::muted()),
+            3,
+        )),
+        (None, None) => {}
+    }
+
     if let Some(usage) = &facts.usage {
-        if let Some(total) = usage.total_tokens.filter(|total| *total > 0) {
-            // D9. The percentage is drawn only where *both* halves were reported, and the
-            // numerator is `context_used` — what the last request actually cost — never
-            // the session's cumulative spend, which crosses its own window many times
-            // over on a long conversation. `/context` is preferred over the session row
-            // because a row's `usage` is reduced by the runtime to tokens and cost; a
-            // context meter divided by a number this client invented would be a lie
-            // presented as a measurement, and so would one divided by the wrong number.
-            let share = app
-                .open_context_meter()
-                .and_then(crate::model::native::SessionContext::share)
-                .or_else(|| usage.context_share())
-                .map(|share| format!(" · {share}%"))
-                .unwrap_or_default();
-
-            segments.push(Segment::new(
-                format!("{} tokens{share}", tokens(total)),
-                Style::default().fg(theme::muted()),
-                3,
-            ));
-        }
-
         if let Some(cost) = usage.cost_usd.filter(|cost| *cost > 0.0) {
             // I2. `[budget] max_cost_usd` is a soft limit: past it the cell turns WARN and
             // a notice is said once. Nothing is stopped — a client cannot refuse a turn the

@@ -504,6 +504,36 @@ fn the_context_overlay_reads_at_eighty_and_at_a_hundred_and_twenty_columns() {
     }
 }
 
+/// The footer's meter reads what `/context` measured, not what the row happens to carry:
+/// `interactive.list` reduces a row's `usage` to tokens and cost, so the window is only
+/// ever in this verb's answer.
+#[test]
+fn the_footer_percentage_comes_from_what_context_reported() {
+    let mut app = opened(native_capabilities());
+
+    let before = screen(&mut app).text();
+    assert!(
+        !before.contains("25%"),
+        "nothing is drawn before anything was measured: {before}"
+    );
+
+    let calls = send(&mut app, "/context");
+    let tag = call_named(&calls, "interactive.context")
+        .unwrap()
+        .tag
+        .clone();
+    answer(&mut app, tag, native_context());
+
+    // Leave the overlay so the footer is the thing being read.
+    app.apply(key(KeyCode::Esc));
+
+    let text = screen(&mut app).text();
+    assert!(
+        text.contains("25%"),
+        "50k of a 200k window is 25%, and the footer says so: {text}"
+    );
+}
+
 /// The subset a vendor session can honestly report, labelled as a subset.
 #[test]
 fn a_usage_context_says_which_answer_it_is_and_does_not_pad_the_shape() {
