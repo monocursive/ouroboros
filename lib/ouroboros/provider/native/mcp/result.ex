@@ -47,6 +47,12 @@ defmodule Ouroboros.Provider.Native.Mcp.Result do
   def describe_error(:not_ready), do: "the server has not finished its handshake yet"
   def describe_error(:broken), do: "the server failed to start repeatedly and is disabled"
 
+  def describe_error(:restarting),
+    do: "the server died and is inside its restart backoff; try again in a moment"
+
+  def describe_error(:too_many_servers),
+    do: "this node is already running the most MCP servers it allows"
+
   def describe_error(:shutting_down), do: "the server is shutting down"
 
   def describe_error({:rpc_error, code, message}) when is_binary(message),

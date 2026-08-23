@@ -143,8 +143,15 @@ defmodule Ouroboros.Provider.Native.Mcp.Pool do
 
   def handle_call({:checkout, key, definition, owner}, _from, state) do
     case start_if_needed(state, key, definition) do
-      {:ok, state, %{state: :broken} = _server} ->
+      {:ok, state, %{state: :broken}} ->
         {:reply, {:error, :broken}, state}
+
+      # A key inside its restart backoff has no pid to hand out. Saying so is the whole
+      # answer: waiting here would put the pool's mailbox behind a server that is not
+      # even running yet, and handing back `nil` would turn a known state into an
+      # `ArgumentError` two calls away.
+      {:ok, state, %{pid: nil}} ->
+        {:reply, {:error, :restarting}, state}
 
       {:ok, state, server} ->
         state = state |> claim(key, owner) |> touch(key)

@@ -331,7 +331,12 @@ defmodule Ouroboros.Provider.Native.Mcp.Servers do
     end
   end
 
-  defp entry_map(_name, %{} = entry, _scope), do: {:ok, entry}
+  # Node configuration is written with atom keys and a JSON file with string ones. They
+  # are normalised to strings here, once, so every rule below is written against one
+  # shape — and so an atom-keyed `url:` is refused as the wrong transport rather than as
+  # a missing command.
+  defp entry_map(_name, %{} = entry, _scope),
+    do: {:ok, Map.new(entry, fn {key, value} -> {to_string(key), value} end)}
 
   defp entry_map(name, other, scope),
     do: refuse(name, scope, :invalid_entry, "expected an object, got #{type_of(other)}")
@@ -433,14 +438,7 @@ defmodule Ouroboros.Provider.Native.Mcp.Servers do
   defp refuse(name, scope, reason, detail),
     do: {:error, %{name: name, scope: scope, reason: reason, detail: detail}}
 
-  defp get(entry, key) when is_map(entry) do
-    case Map.fetch(entry, key) do
-      {:ok, value} -> value
-      :error -> Map.get(entry, String.to_existing_atom(key), nil)
-    end
-  rescue
-    ArgumentError -> nil
-  end
+  defp get(entry, key) when is_map(entry), do: Map.get(entry, key)
 
   defp read(path) do
     case File.read(path) do

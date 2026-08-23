@@ -104,6 +104,19 @@ defmodule Ouroboros.Provider.Native.McpServersTest do
       end
     end
 
+    test "node configuration is atom-keyed, and its `url:` is refused as the wrong transport",
+         context do
+      Application.put_env(:ouroboros, :mcp_servers, %{
+        "remote" => %{url: "https://example.com/mcp"},
+        "local" => %{command: "x", args: ["--stdio"], env: %{"T" => "v"}}
+      })
+
+      loaded = load(context)
+
+      assert [%{name: "local", args: ["--stdio"], env: %{"T" => "v"}}] = loaded.servers
+      assert [%{name: "remote", reason: :unsupported_transport}] = loaded.refusals
+    end
+
     test "a `type` of stdio is not a refusal", context do
       write(context.user_path, %{
         "mcpServers" => %{"local" => %{"command" => "x", "type" => "stdio"}}
