@@ -550,6 +550,32 @@ defmodule Ouroboros.Gateway.OperateTest do
       end
     end
 
+    test "an approval answer may name a headless actor, and an actor outside the vocabulary is refused",
+         %{client: client} do
+      assert hello(client)["result"]
+
+      unknown =
+        call(client, "interactive.respond_approval", %{
+          "id" => "session",
+          "request_id" => "request",
+          "response" => %{"decision" => "approve", "actor" => "robot"}
+        })
+
+      assert unknown["error"]["code"] == -32602
+
+      # The envelope admits `headless`; the session it names does not exist, which is the
+      # next refusal along and not a parameter one.
+      headless =
+        call(client, "interactive.respond_approval", %{
+          "id" => "session",
+          "request_id" => "request",
+          "response" => %{"decision" => "approve", "actor" => "headless"}
+        })
+
+      assert headless["error"]
+      refute headless["error"]["code"] == -32602
+    end
+
     test "every operate call leaves one audit line naming the call and not its contents", %{
       client: client
     } do

@@ -1341,13 +1341,17 @@ impl<'a> Run<'a> {
             decision.as_str()
         ));
 
-        let params = self.routed(model::respond_approval_params_with_reason(
+        // Nobody is at the keyboard: the answer says so, and the runtime's ledger records
+        // `actor: headless` on the approval rather than crediting a person who was not there.
+        let mut answer = model::respond_approval_params_with_reason(
             &self.report.session_id,
             &request_id,
             decision,
             ApprovalScope::Once,
             reason,
-        ));
+        );
+        answer["response"]["actor"] = Value::String("headless".to_string());
+        let params = self.routed(answer);
 
         let client = self.client.clone();
         self.approvals.spawn(async move {

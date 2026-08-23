@@ -752,7 +752,9 @@ defmodule Ouroboros.Gateway.Methods do
                 {"decision", :required, {:enum_of, @approval_decisions}, nil},
                 {"scope", {:optional, "once"}, {:enum_of, @approval_scopes},
                  "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
-                {"reason", :optional, :string, nil}
+                {"reason", :optional, :string, nil},
+                {"actor", {:optional, "human"}, {:enum, ["human", "headless", "automation"]},
+                 "who answered: `headless` is `ouro run --approve-all`; the ledger's `approval` entry records it"}
               ]}
            ]}, "`provider_options` is deliberately not accepted: an approval is a yes or a no"},
          @session_node
@@ -2328,15 +2330,25 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
+  # `actor` is how a caller answering with nobody at the keyboard says so — `ouro run
+  # --approve-all` is the one that exists — and it is what the ledger's `approval` entry
+  # records. Unstated means a person; it is never inferred from the scope or the socket.
+  @approval_actors %{"human" => :human, "headless" => :headless, "automation" => :automation}
+
   defp structured_approval(response) do
-    unknown = Map.keys(response) -- ["decision", "scope", "reason"]
+    unknown = Map.keys(response) -- ["decision", "scope", "reason", "actor"]
 
     with [] <- unknown,
          {:ok, decision} <- Map.fetch(@approval_decisions, Map.get(response, "decision")),
          {:ok, scope} <- Map.fetch(@approval_scopes, Map.get(response, "scope", "once")),
-         {:ok, reason} <- fetch_optional_string(response, "reason") do
+         {:ok, reason} <- fetch_optional_string(response, "reason"),
+         {:ok, actor} <- Map.fetch(@approval_actors, Map.get(response, "actor", "human")) do
       approval = %{decision: decision, scope: scope}
-      {:ok, if(reason, do: Map.put(approval, :reason, reason), else: approval)}
+
+      approval =
+        if reason, do: Map.put(approval, :reason, reason), else: approval
+
+      {:ok, if(actor == :human, do: approval, else: Map.put(approval, :actor, actor))}
     else
       _refused -> {:invalid, approval_message()}
     end
