@@ -12,14 +12,18 @@ defmodule Ouroboros.Test.AllowEverythingPermissions do
   def evaluate(%{tool: "bash", command: "rm -rf /"}), do: {:deny, "Bash(rm *)"}
   def evaluate(_subject), do: {:ask, :no_rule}
 
-  def record(subject, verdict) do
+  # The engine's real contract: a caller-minted decision id and the answer. A fixture that
+  # accepted the subject here once hid that the bridge was calling the engine wrongly.
+  def record(decision_id, answer) when is_binary(decision_id) and is_map(answer) do
     case Process.whereis(:external_approval_engine_probe) do
-      pid when is_pid(pid) -> send(pid, {:permission_recorded, subject, verdict})
+      pid when is_pid(pid) -> send(pid, {:permission_recorded, decision_id, answer})
       nil -> :ok
     end
 
     :ok
   end
+
+  def record(_decision_id, _answer), do: {:error, :invalid_permission_record}
 
   def suggest(%{context: %{tool_name: name}}) when is_binary(name) and name != "",
     do: "#{name}(*)"
@@ -254,7 +258,10 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     assert allowed.decision == :allow
     assert allowed.source == :engine
     assert allowed.reason == "Read(**)"
-    assert_receive {:permission_recorded, %{tool: "read"}, %{decision: :allow}}, 500
+
+    assert_receive {:permission_recorded, <<_::binary>>,
+                    %{decision: :approve, actor: :rule, request: %{tool: "read"}}},
+                   500
 
     assert {:ok, denied} =
              InteractiveSession.request_approval(ref, %{
@@ -313,6 +320,45 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     [request] = events_of(ref, :approval_requested)
     assert is_binary(request.payload["suggested_rule"])
     assert request.payload["tool_call"]["name"] == "Bash"
+
+    retire_session(id)
+  end
+
+  test "the durable engine writes the bridge's decision to the effect ledger under a stable id",
+       %{id: id} do
+    Application.delete_env(:ouroboros, :permissions_engine)
+    ref = start_session(id)
+    {:ok, info} = InteractiveSession.info(ref)
+
+    principal = %{
+      session_id: id,
+      provider: info.provider,
+      node: node(),
+      workspace: info.workspace
+    }
+
+    assert {:ok, _rule} =
+             Ouroboros.Control.Permissions.remember(principal, "Bash(git *)", :allow, :session)
+
+    assert {:ok, allowed} =
+             InteractiveSession.request_approval(ref, %{
+               tool_name: "Bash",
+               input: %{"command" => "git log --oneline -1"},
+               tool_use_id: "toolu_ledgered",
+               cwd: info.workspace
+             })
+
+    assert allowed.decision == :allow
+    [request] = events_of(ref, :approval_requested)
+    request_id = request.payload["request_id"]
+    assert is_binary(request_id)
+
+    # The seams' id shape, so a retry after a lost acknowledgement finds this very entry.
+    assert {:ok, entry} = Ouroboros.Agent.EffectLedger.get("#{id}:#{request_id}")
+    assert entry.effect == :permission
+    assert entry.result.decision == :approve
+    assert entry.result.actor == :rule
+    assert entry.principal =~ id
 
     retire_session(id)
   end

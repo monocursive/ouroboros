@@ -2885,7 +2885,7 @@ defmodule Ouroboros.Interactive.Task do
 
     if pending do
       _ = Process.cancel_timer(pending.timer)
-      record_permission(runtime, pending.request, request_id, decision, source, nil)
+      record_permission(runtime, pending.request, request_id, decision, source, nil, scope)
 
       runtime =
         resolve_external_event(runtime, request_id, decision, source, reason, scope, effect_id)
@@ -2982,7 +2982,12 @@ defmodule Ouroboros.Interactive.Task do
     :exit, _reason -> {:ask, :engine_unavailable}
   end
 
-  defp record_permission(runtime, request, request_id, decision, source, rule) do
+  # `record/2` takes a caller-minted, stable decision id and the answer; the request map
+  # `evaluate/1` took rides along so the entry is attributed to this session rather than
+  # to "unattributed". Until 2026-08-23 this passed the subject where the id goes, which
+  # the engine refuses as `:invalid_permission_record` — so no bridged decision ever
+  # reached the ledger, and the test fixture mirrored the wrong shape.
+  defp record_permission(runtime, request, request_id, decision, source, rule, scope \\ :once) do
     case permissions_engine(:record, 2) do
       nil ->
         :ok
@@ -2990,8 +2995,15 @@ defmodule Ouroboros.Interactive.Task do
       engine ->
         _ =
           apply(engine, :record, [
-            permission_subject(runtime, request),
-            %{request_id: request_id, decision: decision, source: source, rule: rule}
+            permission_decision_id(runtime, request_id),
+            %{
+              decision: if(decision == :allow, do: :approve, else: :deny),
+              scope: scope,
+              actor: if(source == :engine, do: :rule, else: :human),
+              rule_ref: rule,
+              reason: nil,
+              request: permission_subject(runtime, request)
+            }
           ])
 
         :ok
@@ -3001,6 +3013,10 @@ defmodule Ouroboros.Interactive.Task do
   catch
     :exit, _reason -> :ok
   end
+
+  # The engine's seams use `"<session id>:<provider request id>"`: stable across a retry
+  # after a lost acknowledgement, so the same answer records one entry rather than two.
+  defp permission_decision_id(runtime, request_id), do: "#{runtime.session.id}:#{request_id}"
 
   # The "don't ask again" line a modal can offer. It is the engine's to phrase — this
   # module has no rule language — so the key is present only when C1 is loaded and
