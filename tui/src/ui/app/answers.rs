@@ -542,6 +542,66 @@ impl App {
                     self.submit_plan_exit(plane, id, request_id, choice, None);
                 }
             },
+            // B2. Success re-lists, exactly as `/model` does, so `options.plan` on the row
+            // catches up with the event that already moved the badge.
+            Tag::PlanMode { plane, id, want } => match result {
+                Ok(_value) => {
+                    self.inform(
+                        if want {
+                            format!("{id} is planning; it will not edit anything")
+                        } else {
+                            format!("{id} has left plan mode")
+                        },
+                        NoticeKind::Info,
+                    );
+                    self.refresh_session_lists();
+                }
+                Err(error) => {
+                    // The one refusal worth rendering as itself: plan mode is not a
+                    // Harness configuration key, so a transport that carries the posture
+                    // on every launch can only be told at start. The runtime says which
+                    // transport and what to do instead; the generic renderer would show
+                    // that sentence as one field of a JSON blob.
+                    let named = match &error {
+                        ClientError::Rpc(rpc) => rpc
+                            .data
+                            .as_ref()
+                            .filter(|data| {
+                                data.get("field").and_then(Value::as_str) == Some("plan")
+                            })
+                            .and_then(|data| {
+                                let reason =
+                                    data.get("reason").and_then(Value::as_str).unwrap_or("");
+                                let message = data.get("message").and_then(Value::as_str);
+
+                                message.map(|message| (reason.to_string(), message.to_string()))
+                            }),
+                        _other => None,
+                    };
+
+                    match named {
+                        Some((reason, message)) => self.inform(
+                            if reason.is_empty() {
+                                message
+                            } else {
+                                format!("{message} ({reason})")
+                            },
+                            NoticeKind::Warn,
+                        ),
+                        None => self.action_failed("plan mode", plane, &id, error),
+                    }
+                }
+            },
+            Tag::McpList { node } => match result {
+                Ok(value) => self.mcp_read(node, &value),
+                Err(error) => {
+                    let text = match &error {
+                        ClientError::Rpc(rpc) => format!("mcp.list: {}", model::refusal(rpc)),
+                        other => format!("mcp.list failed: {other}"),
+                    };
+                    self.inform(text, NoticeKind::Error);
+                }
+            },
             Tag::Start { plane, id } => match result {
                 Ok(value) => match StartedRef::decode(&value) {
                     Some(started) if started.id == id => {

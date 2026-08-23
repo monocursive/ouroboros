@@ -649,6 +649,8 @@ pub struct Watch {
     pub resync_again: bool,
     pub pending_approvals: BTreeMap<u64, ApprovalRequest>,
     approval_responses_in_flight: BTreeSet<String>,
+    /// B2. The newest planning posture an event reported, or `None` where none has.
+    planning: Option<bool>,
     /// Cumulative frames known lost, from either side. Shown, because a number that keeps
     /// climbing is the difference between "one hiccup" and "this connection is too slow".
     pub dropped: u64,
@@ -743,6 +745,7 @@ impl Watch {
             resync_again: false,
             pending_approvals: BTreeMap::new(),
             approval_responses_in_flight: BTreeSet::new(),
+            planning: None,
             dropped: 0,
             follow: true,
             scroll: 0,
@@ -919,6 +922,7 @@ impl Watch {
     pub fn absorb(&mut self, events: Vec<Event>) {
         for event in events {
             self.note_approval(&event);
+            self.note_planning(&event);
             self.events.insert(event.sequence, event);
         }
 
@@ -1180,6 +1184,46 @@ impl Watch {
         }
 
         entries
+    }
+
+    /// B2. Whether this session is planning, where an event said so since the last list.
+    ///
+    /// `None` means no event has spoken, and the caller falls back to `options.plan` from
+    /// the session row. It is not the same as `Some(false)`: a session list that predates
+    /// plan mode and a runtime that just left plan mode are different facts, and only the
+    /// second one should be able to take a badge *down*.
+    pub fn planning(&self) -> Option<bool> {
+        self.planning
+    }
+
+    /// The two events that report a change of planning posture, both of them the
+    /// runtime's own.
+    ///
+    /// `status {kind: "configured"}` carries `changed`, the keys a `interactive.configure`
+    /// actually moved — read from there rather than from the reply, because the reply is
+    /// seen only by the client that made the call and this has to be true for a second
+    /// terminal watching the same session. `provider_event {kind: "plan_exit"}` carries
+    /// `plan`, the posture the session runs under *after* the answer was applied, which is
+    /// the one that matters: a refused reconfiguration reports `plan: true` and
+    /// `applied: false`, and a client that read the choice instead of the posture would
+    /// take the badge down on a session still planning.
+    fn note_planning(&mut self, event: &Event) {
+        let payload = &event.payload;
+        let kind = json_nonempty_str(payload, "kind");
+
+        match (event.kind.clone(), kind.as_deref()) {
+            (EventType::ProviderEvent, Some("plan_exit")) => {
+                if let Some(planning) = payload.get("plan").and_then(Value::as_bool) {
+                    self.planning = Some(planning);
+                }
+            }
+            (EventType::Other(ref other), Some("configured")) if other == "status" => {
+                if let Some(planning) = payload.pointer("/changed/plan").and_then(Value::as_bool) {
+                    self.planning = Some(planning);
+                }
+            }
+            _other => {}
+        }
     }
 
     fn note_approval(&mut self, event: &Event) {

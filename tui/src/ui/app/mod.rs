@@ -331,6 +331,19 @@ pub enum Tag {
         /// whether anything was actually lost.
         had_follow_up: bool,
     },
+    /// D4. `mcp.list`, routed to the node the open session runs on.
+    McpList {
+        node: Option<String>,
+    },
+    /// B2. `interactive.configure {plan}`. Its own tag rather than [`Tag::Action`] because
+    /// its refusal is the interesting part: plan mode is not a Harness configuration key,
+    /// and the runtime's typed `at_start_only` answer names the thing to do instead —
+    /// which the generic renderer buries inside compact JSON.
+    PlanMode {
+        plane: Plane,
+        id: String,
+        want: bool,
+    },
     /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
     /// answer carries the id of a session that did not exist when the request was made.
     Start {
@@ -1754,6 +1767,25 @@ impl App {
     }
 
     /// The open session's sandbox caption, if a session is open.
+    /// B2. Whether the open session is planning, from the same three sources the badge
+    /// uses: a live event first, and the session row's `options.plan` where none has
+    /// spoken.
+    pub fn open_planning(&self) -> bool {
+        let Some((plane, id)) = self.sessions.open.as_ref() else {
+            return false;
+        };
+
+        self.sessions
+            .watches
+            .get(&(*plane, id.clone()))
+            .and_then(|watch| watch.planning())
+            .unwrap_or_else(|| {
+                self.sessions
+                    .open_info()
+                    .is_some_and(|session| session.plan)
+            })
+    }
+
     pub fn open_sandbox(&self) -> Option<(String, bool)> {
         let value = self.sessions.open_info().and_then(|session| {
             session

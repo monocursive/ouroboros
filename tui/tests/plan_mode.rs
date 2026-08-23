@@ -526,3 +526,282 @@ fn an_unrelated_refusal_is_not_treated_as_a_missing_provider_options() {
     let text = render(&mut app, 160, 40).text();
     assert!(text.contains("the session is no longer running"), "{text}");
 }
+
+// ---------------------------------------------------------------- /plan
+
+/// The composer types a slash verb; this is the whole path an operator takes.
+fn compose(app: &mut App, text: &str) {
+    for character in text.chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+    app.apply(key(KeyCode::Enter));
+}
+
+/// `/plan on` asks `interactive.configure` for exactly one field.
+#[test]
+fn plan_on_configures_the_one_field_and_nothing_else() {
+    let mut app = opened();
+    compose(&mut app, "/plan on");
+
+    let (tag, params) = sent(&mut app, "interactive.configure");
+
+    assert_eq!(
+        params,
+        json!({"id": SESSION, "plan": true}),
+        "a plan change names the session and the posture, and nothing else"
+    );
+    assert!(matches!(tag, Tag::PlanMode { want: true, .. }));
+}
+
+/// `/plan off` on a planning session is the mirror image.
+#[test]
+fn plan_off_leaves_plan_mode() {
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+    compose(&mut app, "/plan off");
+
+    let (_tag, params) = sent(&mut app, "interactive.configure");
+
+    assert_eq!(params, json!({"id": SESSION, "plan": false}));
+}
+
+/// The bare verb toggles against the posture the operator can actually see.
+#[test]
+fn bare_plan_toggles_from_the_posture_the_runtime_reported() {
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+    compose(&mut app, "/plan");
+
+    let (_tag, params) = sent(&mut app, "interactive.configure");
+    assert_eq!(params["plan"], false, "a planning session toggles off");
+
+    let mut app = opened();
+    compose(&mut app, "/plan");
+
+    let (_tag, params) = sent(&mut app, "interactive.configure");
+    assert_eq!(params["plan"], true, "a working session toggles on");
+}
+
+/// Asking for the posture the session is already in is answered here, not on the wire.
+#[test]
+fn plan_on_a_session_already_planning_is_not_a_call() {
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+    compose(&mut app, "/plan on");
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.configure"),
+        "a no-op posture change is not a round trip"
+    );
+
+    let text = render(&mut app, 120, 40).text();
+    assert!(text.contains("already planning"), "{text}");
+}
+
+/// An argument that is neither `on` nor `off` is refused rather than guessed at.
+#[test]
+fn plan_refuses_an_argument_it_cannot_read() {
+    let mut app = opened();
+    compose(&mut app, "/plan maybe");
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.configure"),
+        "an unreadable argument does not reach the wire"
+    );
+
+    let text = render(&mut app, 120, 40).text();
+    assert!(text.contains("takes on or off"), "{text}");
+}
+
+/// The runtime's `at_start_only` refusal is rendered as what it is: a sentence naming the
+/// thing to do instead.
+#[test]
+fn a_mid_life_plan_change_claude_refuses_is_rendered_as_data() {
+    let mut app = opened();
+    compose(&mut app, "/plan on");
+
+    let (tag, _params) = sent(&mut app, "interactive.configure");
+
+    app.apply(Msg::Answer {
+        tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "unsupported_configuration".into(),
+            data: Some(json!({
+                "provider": "claude",
+                "field": "plan",
+                "reason": "at_start_only",
+                "message": "claude can only be told to plan when the session starts \
+                            (it carries the posture as provider_options on every launch); \
+                            start a new session with `plan: true` instead."
+            })),
+        })),
+    });
+
+    // Wide enough to hold the runtime's whole sentence *and* the typed reason after it:
+    // the notice row is bounded by the terminal, and this test is about the words, not
+    // about where a narrow pane cuts them.
+    let text = render(&mut app, 220, 44).text();
+
+    assert!(
+        text.contains("can only be told to plan when the session starts"),
+        "the runtime's own sentence is shown, not a JSON blob\n{text}"
+    );
+    assert!(
+        text.contains("at_start_only"),
+        "and the typed reason is named\n{text}"
+    );
+}
+
+/// A gateway that does not serve `interactive.configure` is told apart from one that
+/// refuses the change.
+#[test]
+fn plan_is_refused_locally_where_the_gateway_does_not_serve_configure() {
+    let mut hello = full_hello();
+    hello
+        .methods
+        .retain(|method| method != "interactive.configure");
+
+    let mut app = opened_with(hello, json!({}));
+    compose(&mut app, "/plan on");
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.configure"),
+        "an unserved method is not called"
+    );
+
+    let text = render(&mut app, 160, 44).text();
+    assert!(text.contains("does not serve"), "{text}");
+    assert!(
+        text.contains("--plan"),
+        "and names the way that does work\n{text}"
+    );
+}
+
+// ---------------------------------------------------------------- the badge
+
+/// One event frame, for the two live sources of the planning posture.
+fn event(app: &mut App, sequence: u64, kind: &str, payload: Value) {
+    notify(
+        app,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "interactive.event",
+            "params": {
+                "id": SESSION,
+                "event": {
+                    "_struct": "Ouroboros.Interactive.Event",
+                    "id": format!("evt-{sequence}"),
+                    "session_id": SESSION,
+                    "sequence": sequence,
+                    "type": kind,
+                    "timestamp": "2026-01-01T00:00:00.000000Z",
+                    "payload": payload
+                }
+            }
+        }),
+    );
+}
+
+/// The `PLANNING` badge, from each of the three sources the runtime offers.
+#[test]
+fn the_planning_badge_rises_from_each_of_the_three_sources() {
+    // 1. `options.plan` on the session row.
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+    assert!(
+        render(&mut app, 160, 44).text().contains("PLANNING"),
+        "options.plan raises the badge"
+    );
+
+    // 2. the `configured` status event.
+    let mut app = opened();
+    assert!(
+        !render(&mut app, 160, 44).text().contains("PLANNING"),
+        "a session that is not planning has no badge"
+    );
+
+    event(
+        &mut app,
+        4,
+        "status",
+        json!({"kind": "configured", "applies": "now", "changed": {"plan": true}}),
+    );
+
+    assert!(
+        render(&mut app, 160, 44).text().contains("PLANNING"),
+        "the configured event raises the badge"
+    );
+
+    // 3. the `plan_exit` provider event — and this one can take it back down.
+    event(
+        &mut app,
+        5,
+        "provider_event",
+        json!({
+            "kind": "plan_exit",
+            "choice": "auto_edit",
+            "approval_mode": "auto_edit",
+            "sandbox_mode": "workspace_write",
+            "plan": false,
+            "applied": true,
+            "follow_up": false
+        }),
+    );
+
+    assert!(
+        !render(&mut app, 160, 44).text().contains("PLANNING"),
+        "an applied plan exit takes the badge down"
+    );
+}
+
+/// A plan exit the runtime could *not* apply reports `plan: true` and `applied: false`,
+/// and the badge must follow the posture rather than the choice.
+#[test]
+fn a_refused_plan_exit_leaves_the_badge_up() {
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+
+    event(
+        &mut app,
+        5,
+        "provider_event",
+        json!({
+            "kind": "plan_exit",
+            "choice": "auto_edit",
+            "approval_mode": "prompt",
+            "sandbox_mode": "read_only",
+            "plan": true,
+            "applied": false,
+            "follow_up": false
+        }),
+    );
+
+    assert!(
+        render(&mut app, 160, 44).text().contains("PLANNING"),
+        "the session is still planning, so the badge stays up"
+    );
+}
+
+/// A runtime that has said nothing about plan mode does not get a badge drawn from
+/// silence.
+#[test]
+fn a_gateway_that_never_mentions_plan_mode_raises_no_badge() {
+    let mut app = opened_with(full_hello(), json!({"approval_mode": "prompt"}));
+
+    let text = render(&mut app, 160, 44).text();
+    assert!(!text.contains("PLANNING"), "{text}");
+}
+
+/// The composer says the session is read-only while it plans, and names the lever that
+/// changes it.
+#[test]
+fn the_composer_hint_says_a_planning_session_is_read_only() {
+    let mut app = opened_with(full_hello(), json!({"plan": true}));
+
+    let text = render(&mut app, 160, 44).text();
+
+    assert!(text.contains("read-only"), "{text}");
+    assert!(text.contains("/plan off"), "{text}");
+}

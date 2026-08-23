@@ -1808,6 +1808,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     let (sandbox, sandbox_writable) = app
         .open_sandbox()
         .unwrap_or_else(|| ("unknown".to_string(), false));
+    let planning = app.open_planning();
     let sandbox_style = if sandbox_writable {
         Style::default().fg(theme::good())
     } else {
@@ -1922,7 +1923,12 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         key_footer(
             &format!(
                 "{}{steer}",
-                if sandbox_writable {
+                if planning {
+                    // B2. Supersedes both other hints: a planning session writes nothing
+                    // whatever its sandbox allows, so "/write to edit" would be pointing at
+                    // the wrong lever, and `/plan off` is the one that actually applies.
+                    "esc abort · planning: read-only until /plan off · / commands"
+                } else if sandbox_writable {
                     "esc abort · shift+↑ scroll · / commands"
                 } else {
                     "esc abort · /write to edit · / commands"

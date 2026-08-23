@@ -874,6 +874,197 @@ pub fn delegations(
     );
 }
 
+/// D4. `/mcp`: the MCP servers one node runs for the native agent, and every entry its
+/// loader read and refused.
+///
+/// The honesty rules here:
+///
+/// * **`configured` is not a failure.** A server declared and never started has no uptime
+///   and no tools, and saying so is different from saying it is broken.
+/// * **A broken server says why**, in the runtime's own words, because that string is the
+///   only thing that distinguishes a missing binary from a crash loop.
+/// * **Refusals are a section, not a footnote.** An entry the loader rejected is the only
+///   way to tell "my `mcp.json` was ignored" from "my `mcp.json` was read and found
+///   wanting", and each one carries its typed reason.
+/// * **An environment is a count.** The runtime puts `env_count` on the wire and never the
+///   names or the values, and there is no field on this panel that could hold one.
+pub fn mcp(
+    frame: &mut Frame,
+    area: Rect,
+    node: Option<&str>,
+    list: &crate::model::McpList,
+    choice: usize,
+) {
+    page(frame, area, "mcp servers", mcp_lines(node, list, choice), 0);
+}
+
+fn mcp_lines(
+    node: Option<&str>,
+    list: &crate::model::McpList,
+    choice: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let mut header = vec![node
+        .or(list.node.as_deref())
+        .unwrap_or("this node")
+        .to_string()];
+
+    // `enabled: false` is a posture, not an error: the servers list is empty because
+    // nothing was started, not because nothing was configured.
+    header.push(if list.enabled {
+        format!("{} server(s)", list.servers.len())
+    } else {
+        "MCP is off on this node".to_string()
+    });
+
+    if list.broken() > 0 {
+        header.push(format!("{} broken", list.broken()));
+    }
+
+    if let Some(version) = &list.protocol_version {
+        header.push(format!("protocol {version}"));
+    }
+
+    lines.push(Line::from(Span::styled(
+        header.join("  \u{b7} "),
+        theme::label(),
+    )));
+
+    // The transports this build implements, which is exactly why a `url` entry below is
+    // refused rather than attempted.
+    if !list.transports.is_empty() {
+        lines.push(note(format!("transports: {}", list.transports.join(", "))));
+    }
+
+    if list.servers.is_empty() && list.refusals.is_empty() {
+        lines.push(note(
+            "no MCP servers are configured for this node or workspace",
+        ));
+        return lines;
+    }
+
+    for (index, server) in list.servers.iter().enumerate() {
+        let selected = choice == index;
+
+        let state = server.state.as_deref().unwrap_or("unknown");
+        let mut facts = vec![state.to_string()];
+
+        if let Some(scope) = &server.scope {
+            facts.push(scope.clone());
+        }
+
+        // A tool count is only meaningful once a server has started; `configured` has not,
+        // and printing "0 tools" beside it would read as "it advertises none".
+        if state == "ready" {
+            facts.push(format!("{} tool(s)", server.tools));
+        }
+
+        if server.env_count > 0 {
+            facts.push(format!("{} env var(s)", server.env_count));
+        }
+
+        if server.restarts > 0 {
+            facts.push(format!("{} restart(s)", server.restarts));
+        }
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {}  {}",
+                if selected { "\u{25b8}" } else { " " },
+                server.name,
+                facts.join(" \u{b7} ")
+            ),
+            match (selected, state) {
+                (true, _) => Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
+                (false, "broken") => Style::default().fg(theme::warn()),
+                (false, "ready") => Style::default(),
+                (false, _) => Style::default().fg(theme::muted()),
+            },
+        )));
+
+        if let Some(command) = &server.command {
+            let argv = if server.args.is_empty() {
+                command.clone()
+            } else {
+                format!("{command} {}", server.args.join(" "))
+            };
+
+            lines.push(note(format!(
+                "    {}",
+                crate::ui::tree::truncate(&argv, 88)
+            )));
+        }
+
+        if let Some(reason) = &server.broken_reason {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", crate::ui::tree::truncate(reason, 88)),
+                Style::default().fg(theme::warn()),
+            )));
+        }
+
+        // Only for the selected row: the tool names are the thing a model actually sees,
+        // and every row's worth of them would bury the list.
+        if selected && !server.tool_names.is_empty() {
+            lines.push(note(format!(
+                "    {}",
+                crate::ui::tree::truncate(&server.tool_names.join("  "), 88)
+            )));
+        }
+
+        if selected {
+            if let Some(source) = &server.source {
+                lines.push(note(format!(
+                    "    from {}",
+                    crate::ui::tree::truncate(source, 82)
+                )));
+            }
+        }
+    }
+
+    if !list.refusals.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("REFUSED  {}", list.refusals.len()),
+            theme::label(),
+        )));
+
+        for (index, refusal) in list.refusals.iter().enumerate() {
+            let selected = choice == list.servers.len() + index;
+
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} {}  {}",
+                    if selected { "\u{25b8}" } else { " " },
+                    refusal.name.as_deref().unwrap_or("(unnamed entry)"),
+                    refusal.reason.as_deref().unwrap_or("refused")
+                ),
+                if selected {
+                    Style::default()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::warn())
+                },
+            )));
+
+            if let Some(detail) = &refusal.detail {
+                lines.push(note(format!(
+                    "    {}",
+                    crate::ui::tree::truncate(detail, 88)
+                )));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(note("r re-reads \u{b7} esc closes"));
+
+    lines
+}
+
 /// `choice` is `None` for the read-only list the `Ctrl+T` panel draws beside the plan.
 pub fn delegation_lines(
     rows: &[crate::model::native::DelegationRow],

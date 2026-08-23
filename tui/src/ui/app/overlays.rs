@@ -154,10 +154,15 @@ pub enum Command {
     Delegations,
     /// A10: cycle the palette. The one command that was reachable only as a verb.
     Theme,
+    /// B2: toggle plan mode on the open session. `/plan on|off` names the posture it
+    /// wants; the bare verb toggles whatever the session is in now.
+    Plan,
+    /// D4: the MCP servers this session's node runs, and the entries it refused.
+    Mcp,
 }
 
 impl Command {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 45] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -201,6 +206,8 @@ impl Command {
         Self::Delegate,
         Self::Delegations,
         Self::Theme,
+        Self::Plan,
+        Self::Mcp,
     ];
 
     pub fn group(self) -> &'static str {
@@ -235,6 +242,7 @@ impl Command {
             | Self::Delegate
             | Self::Delegations
             | Self::Theme
+            | Self::Plan
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -285,6 +293,8 @@ impl Command {
             Self::Delegate => "Delegate work to a coding task",
             Self::Delegations => "Show this conversation's delegations",
             Self::Theme => "Cycle the colour theme",
+            Self::Plan => "Plan without editing anything",
+            Self::Mcp => "Show this node's MCP servers",
         }
     }
 
@@ -338,6 +348,8 @@ impl Command {
             Self::Delegate => "/delegate",
             Self::Delegations => "/delegations",
             Self::Theme => "/theme",
+            Self::Plan => "/plan",
+            Self::Mcp => "/mcp",
         }
     }
 
@@ -408,6 +420,13 @@ impl App {
                 Command::Interrupt => self.open_capabilities().interrupt.offered(),
                 Command::Fork => self.fork_offered(),
                 Command::Model => self.hello.serves("interactive.configure"),
+                // B2/D4. Same rule: a control the runtime cannot serve is not offered.
+                // `/plan` additionally needs a session to be about — the posture belongs
+                // to one conversation, not to the client.
+                Command::Plan => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.configure")
+                }
+                Command::Mcp => self.hello.serves("mcp.list"),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
                 // drawn.
@@ -532,6 +551,14 @@ pub enum Overlay {
         /// the held terminal event instead of starting a turn — so an operator who just
         /// wants out of plan mode presses `Enter` and is done.
         follow_up: Option<String>,
+    },
+    /// D4. The MCP servers one node runs for the native agent, and the entries its loader
+    /// refused. Read fresh every time it opens: a server's state is exactly the thing that
+    /// changes while nobody is looking.
+    Mcp {
+        node: Option<String>,
+        list: Box<crate::model::McpList>,
+        choice: usize,
     },
     Confirm {
         title: String,
@@ -1063,6 +1090,20 @@ impl App {
                     _ => {}
                 }
             }
+            // D4. A reading overlay: there is no `mcp.add` on the wire, by design, so
+            // there is nothing here to press Enter on. `r` re-reads, because a server's
+            // state is exactly the thing that changes while it is on screen.
+            Overlay::Mcp { list, choice, .. } => {
+                let last = (list.servers.len() + list.refusals.len()).saturating_sub(1);
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
+                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
+                    KeyCode::Char('r') => self.open_mcp(),
+                    _ => {}
+                }
+            }
             Overlay::Prompt { buffer, .. } => match key.code {
                 KeyCode::Esc => self.resume_approval_choice(),
                 KeyCode::Backspace => {
@@ -1303,6 +1344,16 @@ impl App {
             Command::Theme => {
                 self.overlay = None;
                 self.cycle_theme();
+            }
+            // B2. The palette row toggles, because the palette has nowhere to type
+            // `on`/`off`; the slash verb takes both.
+            Command::Plan => {
+                self.overlay = None;
+                self.configure_plan(None);
+            }
+            Command::Mcp => {
+                self.overlay = None;
+                self.open_mcp();
             }
             Command::ShowDiff => {
                 self.overlay = None;

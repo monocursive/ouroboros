@@ -528,6 +528,19 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         ));
     }
 
+    // B2. Ranked above the approval mode, because it *supersedes* it: a planning session
+    // writes nothing whatever its approval mode says, so on a row too narrow for both the
+    // badge that has to survive is this one.
+    if facts.plan {
+        segments.push(Segment::new(
+            "PLANNING".to_string(),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+            11,
+        ));
+    }
+
     if let Some((badge, style)) = mode_badge(facts.approval_mode.as_deref()) {
         segments.push(Segment::new(badge, style, 9));
     }
@@ -934,6 +947,9 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         } => super::panels::rewind(frame, area, points, *choice, *what, *confirming),
         Overlay::Delegations { rows, choice, .. } => {
             super::panels::delegations(frame, area, rows, *choice)
+        }
+        Overlay::Mcp { node, list, choice } => {
+            super::panels::mcp(frame, area, node.as_deref(), list, *choice)
         }
         Overlay::Peek {
             title, text, id, ..
