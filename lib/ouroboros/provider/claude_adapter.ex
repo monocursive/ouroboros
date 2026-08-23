@@ -375,6 +375,11 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   # Both are visible to `ps` — the MCP server definition already puts the same four values
   # in argv — but only the second would also be readable by the model's own `Bash` tool as
   # `env`, and the gateway token *file* it names is operate scope on this runtime.
+  # No bridge, no hook. `ouro hook post-tool-use` talks to this node's gateway with the
+  # session id the bridge computed; a planning run that was not bridged has neither, and a
+  # hook command built from `nil` would be a crashed run rather than a missing diagnostic.
+  defp with_hooks(options, nil), do: options
+
   defp with_hooks(options, bridge) do
     case settings_object(Map.get(options, :settings)) do
       {:ok, base} ->

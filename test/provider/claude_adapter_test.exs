@@ -251,6 +251,114 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
     end
   end
 
+  # ---------------------------------------------------------------- plan mode (B2)
+
+  describe "plan mode" do
+    test "a planning run carries --permission-mode plan" do
+      argv = argv_for(request(approval_mode: :default, provider_options: %{plan: true}))
+
+      assert flag_value(argv, "--permission-mode") == "plan"
+      assert List.last(argv) == "do the thing"
+
+      # Before the separator, like every other flag this module splices in.
+      assert Enum.find_index(argv, &(&1 == "--permission-mode")) <
+               Enum.find_index(argv, &(&1 == "--"))
+    end
+
+    test "plan mode replaces whatever approval_mode chose, and only that" do
+      for {mode, without} <- [
+            {:prompt, "default"},
+            {:auto_edit, "acceptEdits"},
+            {:auto_approve, "bypassPermissions"}
+          ] do
+        plain = request(approval_mode: mode)
+        planning = request(approval_mode: mode, provider_options: %{plan: true})
+
+        assert flag_value(argv_for(plain), "--permission-mode") == without
+        assert flag_value(argv_for(planning), "--permission-mode") == "plan"
+
+        # Exactly one element differs: the mode. Nothing else about the session moved.
+        assert ClaudeAdapter.with_plan_mode(argv_for(plain), true) == argv_for(planning)
+      end
+    end
+
+    test "the key is read from provider_options in either spelling" do
+      assert ClaudeAdapter.planning?(request(provider_options: %{plan: true}))
+      assert ClaudeAdapter.planning?(request(provider_options: %{"plan" => true}))
+      refute ClaudeAdapter.planning?(request(provider_options: %{plan: false}))
+      refute ClaudeAdapter.planning?(request([]))
+    end
+
+    test "plan is a declared provider option, so the harness accepts it" do
+      assert :plan in ClaudeAdapter.spec().provider_options
+      # And the pinned adapter's six are still all there.
+      assert Enum.all?(Jido.Harness.Adapters.Claude.spec().provider_options, fn option ->
+               option in ClaudeAdapter.spec().provider_options
+             end)
+    end
+
+    test "a run that is not planning is byte-identical to the pinned adapter's" do
+      plain = request(approval_mode: :auto_edit)
+      assert argv_for(plain) == pinned_argv(plain)
+    end
+
+    test "a planning run is bridged as well when a person could be asked" do
+      bridge_available(%{})
+
+      argv =
+        argv_for(interactive_request(approval_mode: :prompt, provider_options: %{plan: true}))
+
+      assert flag_value(argv, "--permission-mode") == "plan"
+      assert flag_value(argv, "--permission-prompt-tool") == "mcp__ouroboros__approve"
+    end
+  end
+
+  describe "the plan-mode declaration" do
+    test "native applies plan mode now; claude applies it from the next turn" do
+      assert {:ok, %{applies: :now, settable: :any_time, via: :native_session}} =
+               Provider.plan_mode(:native)
+
+      assert {:ok, %{applies: :next_turn, settable: :at_start, via: :provider_options}} =
+               Provider.plan_mode(:claude)
+    end
+
+    test "every other transport refuses plan mode by declaration" do
+      for provider <- [:gemini, :opencode, :amp, :kimi, :pi] do
+        assert {:error, {:unsupported_configuration, refusal}} = Provider.plan_mode(provider),
+               "#{provider} accepted plan mode"
+
+        assert refusal.field == :plan
+        assert refusal.reason == :transport_cannot_plan
+        assert refusal.message =~ "declares no way to be told to plan"
+      end
+    end
+
+    test "codex is refused as pending rather than as unsupported" do
+      assert {:error, {:unsupported_configuration, refusal}} = Provider.plan_mode(:codex)
+
+      assert refusal.reason == :pending
+      assert refusal.message =~ "slice C3"
+      assert refusal.message =~ "refused rather than silently ignored"
+    end
+
+    test "an unknown provider or transport is refused by name" do
+      assert {:error, {:unsupported_configuration, %{reason: :unknown_provider}}} =
+               Provider.plan_mode(:nobody)
+
+      assert {:error, {:unsupported_configuration, %{reason: :unknown_session_transport}}} =
+               Provider.plan_mode(:claude, :not_a_transport)
+    end
+
+    test "plan is not an interactive.configure field, and configure still refuses it" do
+      assert {:error, {:invalid_configuration, refusal}} =
+               Provider.session_configuration(:native, %{plan: true}, :native)
+
+      assert refusal.reason == :unknown_field
+      assert refusal.field == :plan
+      assert refusal.fields == [:approval_mode, :model, :reasoning_effort, :sandbox_mode]
+    end
+  end
+
   test "with no ouro binary there is no hook to run" do
     argv = argv_for(interactive_request(approval_mode: :prompt))
     refute Enum.any?(argv, &String.contains?(&1, "post-tool-use"))
