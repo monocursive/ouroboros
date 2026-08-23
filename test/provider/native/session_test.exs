@@ -314,8 +314,15 @@ defmodule Ouroboros.Provider.Native.SessionTest do
     end
 
     test "a sandbox change takes effect on the next tool call, not the next turn", context do
+      # A write, not an `echo`: since C5 a `read_only` session with an OS sandbox *runs*
+      # commands, so what proves the reconfiguration landed is the write being stopped —
+      # by the sandbox where there is one, by the outright refusal where there is not.
+      # Both name `read_only`.
       script = [
-        [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+        [
+          {:tool_call,
+           %{id: "c1", name: "bash", input: %{"command" => "echo one > sandbox-probe.txt"}}}
+        ],
         [{:text, "done"}, {:finish, :stop}]
       ]
 
