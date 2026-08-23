@@ -336,7 +336,19 @@ impl SessionsTab {
             .get(&(plane, id.to_string()))
             .map(Vec::as_slice)
     }
+}
 
+/// One row of the session list, with the two things a renderer needs beside the session
+/// itself: which triage group it landed in, and how deep it is nested under a parent.
+#[derive(Debug, Clone, Copy)]
+pub struct TriageRow<'a> {
+    pub group: Triage,
+    /// `0` for a top-level row, `1` for a coding task its parent conversation delegated.
+    pub depth: usize,
+    pub session: &'a SessionInfo,
+}
+
+impl SessionsTab {
     /// Both planes' sessions in one list, across every fleet node, grouped by what each
     /// one needs (G2) and then ordered so the list does not reshuffle under the cursor
     /// between polls: newest activity first, ties broken by plane then id.
@@ -345,14 +357,11 @@ impl SessionsTab {
     /// — the rail, the picker, `ouro agents` — reads this one function, so a session that
     /// is first here is first everywhere.
     pub fn merged(&self) -> Vec<&SessionInfo> {
-        self.triaged()
-            .into_iter()
-            .map(|(_group, session)| session)
-            .collect()
+        self.triaged().into_iter().map(|row| row.session).collect()
     }
 
     /// The same list with each row's group beside it, for the surfaces that draw headings.
-    pub fn triaged(&self) -> Vec<(Triage, &SessionInfo)> {
+    pub fn triaged(&self) -> Vec<TriageRow<'_>> {
         let mut rows: Vec<(Triage, &SessionInfo)> = self
             .interactive
             .value
@@ -375,7 +384,57 @@ impl SessionsTab {
         let mut seen = HashSet::new();
         rows.retain(|(_group, session)| seen.insert((session.plane, session.id.clone())));
 
-        rows
+        Self::nest_children(rows)
+    }
+
+    /// G1. Moves each delegated coding task directly under the conversation that started
+    /// it, and marks it as nested.
+    ///
+    /// **Only within a group.** The two orderings this rail carries answer different
+    /// questions — "what needs me" and "who started this" — and where they disagree the
+    /// first one wins, because a child that needs a human must not be buried under a
+    /// parent that does not. A child whose parent sits in another group therefore keeps
+    /// its own place at depth zero, which is the honest answer rather than a tree drawn
+    /// across a heading.
+    fn nest_children(rows: Vec<(Triage, &SessionInfo)>) -> Vec<TriageRow<'_>> {
+        let mut ordered: Vec<TriageRow<'_>> = Vec::with_capacity(rows.len());
+        let mut taken: HashSet<(Plane, String)> = HashSet::new();
+
+        for (group, session) in &rows {
+            if taken.contains(&(session.plane, session.id.clone())) {
+                continue;
+            }
+
+            ordered.push(TriageRow {
+                group: *group,
+                depth: 0,
+                session,
+            });
+
+            if session.children.is_empty() {
+                continue;
+            }
+
+            for (child_group, child) in &rows {
+                let claimed = child.plane == Plane::Coding
+                    && (session.children.iter().any(|id| id == &child.id)
+                        || child
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| parent.id == session.id));
+
+                if claimed && child_group == group {
+                    taken.insert((child.plane, child.id.clone()));
+                    ordered.push(TriageRow {
+                        group: *child_group,
+                        depth: 1,
+                        session: child,
+                    });
+                }
+            }
+        }
+
+        ordered
     }
 
     /// Which group one row belongs to, counting the approvals this client is holding for
@@ -394,8 +453,8 @@ impl SessionsTab {
     pub fn triage_counts(&self) -> [usize; 3] {
         let mut counts = [0usize; 3];
 
-        for (group, _session) in self.triaged() {
-            counts[group as usize] += 1;
+        for row in self.triaged() {
+            counts[row.group as usize] += 1;
         }
 
         counts

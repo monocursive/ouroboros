@@ -127,13 +127,13 @@ fn the_row_waiting_on_a_human_is_first_however_old_it_is() {
     let app = fleet();
     let rows = app.sessions.triaged();
 
-    assert_eq!(rows[0].0, Triage::NeedsInput);
+    assert_eq!(rows[0].group, Triage::NeedsInput);
     assert_eq!(
-        rows[0].1.id, "session-waiting",
+        rows[0].session.id, "session-waiting",
         "the oldest row in the fixture, and still first: the group decides the order"
     );
 
-    let groups: Vec<Triage> = rows.iter().map(|(group, _session)| *group).collect();
+    let groups: Vec<Triage> = rows.iter().map(|row| row.group).collect();
     assert!(
         groups.windows(2).all(|pair| pair[0] <= pair[1]),
         "needs input, then working, then done: {groups:?}"
@@ -174,10 +174,10 @@ fn an_approval_this_client_is_holding_moves_its_row_into_needs_input() {
     let rows = app.sessions.triaged();
     let working = rows
         .iter()
-        .find(|(_group, session)| session.id == "session-working")
+        .find(|row| row.session.id == "session-working")
         .expect("the row is still listed");
 
-    assert_eq!(working.0, Triage::NeedsInput);
+    assert_eq!(working.group, Triage::NeedsInput);
     assert_eq!(app.sessions.triage_counts()[Triage::NeedsInput as usize], 2);
 }
 
@@ -203,17 +203,15 @@ fn an_offline_owners_rows_stay_in_their_group_and_keep_the_unavailable_mark() {
     app.apply(Msg::Tick);
 
     let rows = app.sessions.triaged();
-    let offline = rows
-        .iter()
-        .find(|(_group, session)| session.id == "task-offline");
+    let offline = rows.iter().find(|row| row.session.id == "task-offline");
 
-    if let Some((group, session)) = offline {
+    if let Some(row) = offline {
         assert!(
-            session.last_known,
+            row.session.last_known,
             "a retained row says it is a retained row"
         );
         assert_eq!(
-            *group,
+            row.group,
             Triage::Working,
             "unreachable is not the same claim as needs-input"
         );

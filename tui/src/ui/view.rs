@@ -1273,7 +1273,7 @@ const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
 fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(Plane, String)>) {
     let rows = app.sessions.triaged();
-    let sessions: Vec<_> = rows.iter().map(|(_group, session)| *session).collect();
+    let sessions: Vec<_> = rows.iter().map(|row| row.session).collect();
     let height = (sessions.len() + 5).clamp(7, 20) as u16;
     let popup = centered(area, 72, height);
     frame.render_widget(Clear, popup);
@@ -1316,10 +1316,18 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     let choice = app.sessions.picker_index(selected);
     let items = rows
         .iter()
-        .map(|(group, session)| {
+        .map(|row| {
+            let (group, session) = (row.group, row.session);
             let mut spans = vec![
                 Span::styled(
-                    format!("{:<12}", group.label().to_ascii_lowercase()),
+                    // G1. A delegated task is drawn under the conversation that started
+                    // it, where the two landed in the same group.
+                    format!(
+                        "{}{:<width$}",
+                        if row.depth > 0 { "\u{2514} " } else { "" },
+                        group.label().to_ascii_lowercase(),
+                        width = 12 - 2 * usize::from(row.depth > 0)
+                    ),
                     match group {
                         crate::model::Triage::NeedsInput => Style::default().fg(theme::warn()),
                         crate::model::Triage::Working => Style::default().fg(theme::system()),

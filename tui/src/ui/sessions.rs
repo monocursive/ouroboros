@@ -177,10 +177,12 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
     let mut drawn_group: Option<Triage> = None;
 
     for (offset, session) in sessions.iter().skip(start).take(visible_count).enumerate() {
-        let group = groups
-            .get(start + offset)
-            .map(|(group, _session)| *group)
-            .unwrap_or(Triage::Working);
+        let row = groups.get(start + offset);
+        let group = row.map(|row| row.group).unwrap_or(Triage::Working);
+        // G1. A delegated coding task is a child of the conversation that started it, and
+        // the rail draws that: one column of indent and a tree glyph in place of the
+        // signal, so the relationship is visible without a second list.
+        let nested = row.is_some_and(|row| row.depth > 0);
 
         if drawn_group != Some(group) && cursor < rows[1].bottom() {
             frame.render_widget(
@@ -244,7 +246,13 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 _ => Style::default().fg(theme::muted()),
             }
         };
-        let card = Rect::new(rows[1].x, cursor, rows[1].width, 4);
+        let indent = u16::from(nested) * 2;
+        let card = Rect::new(
+            rows[1].x.saturating_add(indent),
+            cursor,
+            rows[1].width.saturating_sub(indent),
+            4,
+        );
 
         if card.y.saturating_add(card.height) > rows[1].bottom() {
             break;
@@ -256,7 +264,11 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             .border_style(border_style);
         let content = block.inner(card);
         frame.render_widget(block, card);
-        let marker = if selected { "▌" } else { signal };
+        let marker = match (selected, nested) {
+            (true, _) => "▌",
+            (false, true) => "└",
+            (false, false) => signal,
+        };
         // D7. Dropped whole where the card cannot hold it, the same rule the node label
         // and the usage cell below follow.
         let badge = worktree_badge(session)

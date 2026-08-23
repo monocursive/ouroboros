@@ -1048,6 +1048,77 @@ fn the_delegations_list_opens_the_childs_own_transcript() {
     );
 }
 
+/// The child sits under its parent in the rail — and only within a group, because "what
+/// needs me" and "who started this" are different questions and the first one wins.
+#[test]
+fn a_delegated_task_nests_under_the_conversation_that_started_it() {
+    let mut app = app(full_hello());
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({ "account": Value::Null, "requiresOpenaiAuth": true }),
+    );
+    app.apply(key(KeyCode::Char('2')));
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": "parent-1",
+            "status": "running",
+            "provider": "native",
+            "node": "ouroboros@alpha",
+            "workspace": "/w",
+            "objective": "The conversation",
+            "children": ["task-7"],
+            "updated_at": "2026-01-01T00:00:00.000000Z"
+        }]),
+    );
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Coding),
+        json!([
+            {
+                "_struct": "Ouroboros.Coding.TaskState",
+                "id": "task-7",
+                "status": "running",
+                "provider": "codex",
+                "node": "ouroboros@alpha",
+                "workspace": "/w",
+                "objective": "The child",
+                "parent": {"plane": "interactive", "id": "parent-1"},
+                "updated_at": "2020-01-01T00:00:00.000000Z"
+            },
+            {
+                "_struct": "Ouroboros.Coding.TaskState",
+                "id": "task-alone",
+                "status": "running",
+                "provider": "codex",
+                "node": "ouroboros@alpha",
+                "workspace": "/w",
+                "objective": "Nobody's child",
+                "updated_at": "2026-01-01T00:00:05.000000Z"
+            }
+        ]),
+    );
+    app.apply(Msg::Tick);
+
+    let rows = app.sessions.triaged();
+    let ids: Vec<(&str, usize)> = rows
+        .iter()
+        .map(|row| (row.session.id.as_str(), row.depth))
+        .collect();
+
+    // Recency still orders the top level — `task-alone` is the newest row — and the child
+    // follows its own parent however old it is, at depth one.
+    assert_eq!(
+        ids,
+        vec![("task-alone", 0), ("parent-1", 0), ("task-7", 1)],
+        "the child follows its parent; an unrelated task keeps its own place"
+    );
+}
+
 /// `Ctrl+T` reads them, and the panel lists them beside the plan.
 #[test]
 fn the_plan_panel_lists_the_conversations_children() {
