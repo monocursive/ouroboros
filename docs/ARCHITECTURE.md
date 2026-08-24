@@ -810,11 +810,9 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
-- Permission rules decide what a provider is *asked* to do at the two seams where a
-  provider asks first, and nothing else. They are not an OS sandbox and not a substitute
-  for one. A vendor CLI that runs a tool without asking runs it; managed transports
-  (`claude`, `gemini`, `amp`, `grok`, `zai`, `codex exec`) have no approvals channel at
-  all, so no rule reaches them. Prefix matching is defeated by construction by command
+- Permission rules decide what the in-process Native loop and remaining ACP permission
+  seam may execute. They are not an OS sandbox and do not reach a vendor transport that
+  runs a tool without asking. Prefix matching is defeated by construction by command
   substitution, `eval`, variable expansion, aliases, and `sh -c`: nothing is expanded, and
   a rule matches the literal command line the provider reported. This is why the posture
   is an allowlist plus protected paths rather than a denylist, and why argument-

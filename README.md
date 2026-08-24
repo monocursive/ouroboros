@@ -79,7 +79,7 @@ iex -S mix
 Probe a provider without starting a paid inference:
 
 ```elixir
-Ouroboros.provider_status(:codex)
+Ouroboros.provider_status(:native)
 Ouroboros.providers()
 ```
 
@@ -89,7 +89,7 @@ posture — amp, opencode, kimi — refuse it by name rather than running withou
 ```elixir
 {:ok, task} =
   Ouroboros.CodingSession.start("Inspect this project and report the riskiest gap",
-    provider: :codex,
+    provider: :native,
     workspace: File.cwd!(),
     sandbox_mode: :read_only,
     approval_mode: :prompt
@@ -112,7 +112,7 @@ makes retries idempotent, while the returned reference routes over distribution:
 {:ok, session} =
   Ouroboros.InteractiveSession.start(
     id: "review-session",
-    provider: :codex,
+    provider: :native,
     workspace: File.cwd!()
   )
 
@@ -167,7 +167,7 @@ profile =
 
 {:ok, task} =
   Ouroboros.CodingSession.start("Review the current change",
-    provider: :codex,
+    provider: :native,
     workspace: File.cwd!(),
     agent_profile: profile,
     allowed_tools: ["Read"]
@@ -227,72 +227,24 @@ provider credentials in the service environment or a dedicated secret boundary,
 never in task options. Persisted normalized event payloads are redacted before they
 enter the Ouroboros store.
 
-The bundled Codex policy is usable in a genuinely empty workspace: it passes
-`skip_git_repo_check` and enables network access inside Codex's workspace-write sandbox,
-so a first turn can create a repository and fetch ordinary dependencies. These are
-durable, non-secret execution options and appear as the derived `provider_execution`
-summary in public session state. A library caller can explicitly set either boolean to
-`false`; explicit options win. Set `OUROBOROS_CODEX_NETWORK_ACCESS=0` to make the node's
-default network-off. Network access does not widen the filesystem sandbox or turn the
-gateway token into a sandbox.
+The default `native` provider calls models directly through ReqLLM and Finch. No Codex
+binary is resolved or spawned. `openai:<model>` uses the official OpenAI API and
+`OPENAI_API_KEY`; `openai_codex:<model>` uses ChatGPT subscription OAuth and the direct
+Codex Responses endpoint. The packaged default is `openai_codex:gpt-5.6-sol` and may be
+overridden with `OUROBOROS_NATIVE_MODEL`.
 
-When the runtime has a data directory, Codex also inherits managed language-tool homes
-under `<data-dir>/provider-cache/codex`. Ouroboros provisions and authorizes Cargo, Mix,
-Mix archives, Hex, and Rebar cache/config directories independently. Rust and Elixir
-dependency downloads therefore neither fail against read-only global caches nor require
-project-local tool homes; public session state reports which managed caches were actually
-established. An operator-supplied absolute value for any corresponding environment
-variable remains authoritative and is authorized explicitly. The managed Codex launcher
-pins only these non-secret cache paths through Codex's shell-environment policy. Provider
-commands keep the caller's inherited PATH and normal login-shell startup, while startup
-hooks cannot replace the effective cache homes. Runtime ownership is claimed before the
-launcher or provider configuration is touched; a losing runtime cannot rewrite the live
-owner's artifacts, and an owner restart rebuilds the provider boundary before Jido or any
-session consumer restarts.
+ChatGPT OAuth credentials live in a private `oauth.json` under the Ouroboros data
+directory (or `OUROBOROS_OAUTH_FILE`). Browser PKCE and device-code login are implemented
+by the runtime itself. Tokens never enter session options, checkpoints, events, logs, or
+gateway responses. OAuth refresh is serialized by ReqLLM immediately before a request.
 
-At startup, and again in the eventual request working directory before each provider
-invocation, Ouroboros runs the resolved upstream's local `codex sandbox` command with a
-five-second bound to verify the *effective* shell policy. The second check covers
-workspace-local Codex configuration without authenticating, starting a model turn, or
-using the network. Codex applies `set` before `include_only`, so an existing allowlist
-must retain its entries and append `CARGO_HOME`, `MIX_HOME`, `MIX_ARCHIVES`, `HEX_HOME`,
-`REBAR_CACHE_DIR`, and `REBAR_GLOBAL_CONFIG_DIR`. Ouroboros does not replace or widen
-that operator-authored allowlist. If the startup probe is unavailable, times out, filters
-a cache, or executable resolution would make the launcher call itself, Ouroboros
-installs a clear Codex-only refusal launcher; the core and every other provider still
-start. A workspace-only mismatch exits 78 before Codex receives the provider argv. Fix
-the named Codex policy or node-level executable and retry or restart as instructed.
-
-Interactive Codex sessions use app-server, so a sandbox escalation — `git commit` writing
-`.git`, extra writable directories, network — arrives as the existing approve/deny modal.
-A request for sandbox *permissions* rather than one command arrives there too, carrying
-the paths and network access it asks for; approving grants exactly the profile requested,
-for the turn or for the session, and refusing grants an empty one. Public
-`provider_execution` reports `interactive_approvals: true` and
-`escalation_behavior: :prompt` for those sessions. Deny-for-session is still `decline`:
-Codex has no persistent deny-for-session, and Ouroboros does not invent one.
-
-Where the app server proposes an execpolicy amendment — the argv prefix that would stop
-it asking about commands like this one — the modal says so, and approving for the session
-sends it back as well as writing the permission rule that stops *this* runtime asking.
-One answer, both policies; the option appears only on requests that carried a proposal,
-because it is the only case this transport can honour it.
-
-Steering is live on app-server: `Alt+Enter` injects into the running turn through
-`turn/steer`, carrying text and images the same way a turn does. The `codex exec`
-fallback declares no steering and the key says so — the same provider, two transports,
-two honest answers. Compaction is not offered on either: `interactive.compact` folds a
-conversation this runtime holds, and only a native session hands it one.
-
-Coding turns still use Harness's managed `exec --json` transport, which cannot carry an
-approval question back into Ouroboros. Coding public state, and interactive sessions that
-opt into `transport: :exec_jsonl_resume`, therefore report `interactive_approvals: false`
-and `escalation_behavior: :deny_when_provider_cannot_prompt`: an action that still needs
-provider escalation is denied rather than presenting a button that cannot answer it.
-`approval_mode: :prompt` configures Codex's policy; on app-server it is also a prompt this
-runtime can complete. Approving once or for the session leaves the sandbox for that
-command. Operators who want git without prompts still choose `unrestricted` or
-`auto_approve` on purpose.
+Because Ouroboros owns the direct loop, coding and interactive sessions share the same
+durable conversation, approvals, steering, cancellation, compaction, attachments,
+forking, tools, permission ledger, and checkpoint-before-terminal ordering. A finite
+coding approval is answered through `CodingSession.respond_approval/3` or
+`coding.respond_approval`; it is persisted before the model loop receives the answer.
+There is no automatic fallback to a vendor CLI when direct credentials or a model are
+missing.
 
 To enforce workspace admission, configure existing roots before application start:
 
@@ -308,20 +260,18 @@ claim a reservation. These leases are node-local admission, not distributed cons
 
 ### `native`: the provider whose loop Ouroboros owns
 
-Nine of the ten providers are vendor CLIs. Ouroboros hands each one a request and reads
-its events; the tools run inside that child process, which is why Ouroboros cannot ask
-before a command runs there, append a diagnostic to an edit, or veto anything. `native`
-is the tenth, and the exception: the model call, the tool dispatch, and the file writes
-all happen inside this runtime.
+`native` is the product default and the provider whose model call, tool dispatch, and
+file writes all happen inside this runtime. Other explicitly selected providers may use
+their vendor transports, but the removed `codex` provider can never reveal Harness's
+built-in `codex exec` adapter.
 
-It takes an API key for any provider `ReqLLM` ships — `anthropic`, `openai`,
-`openai_codex`, `google`, `openrouter`, `ollama`, and the rest — and reads each one from
-that provider's own environment variable. Name the model with `OUROBOROS_NATIVE_MODEL`,
-or per session with `model:`:
+It accepts any provider ReqLLM ships — `anthropic`, `openai`, `openai_codex`, `google`,
+`openrouter`, `ollama`, and the rest. Name the model with `OUROBOROS_NATIVE_MODEL` or per
+session with `model:`:
 
 ```sh
-export OUROBOROS_NATIVE_MODEL=anthropic:claude-sonnet-5
-export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY, GEMINI_API_KEY, …
+export OUROBOROS_NATIVE_MODEL=openai:gpt-5.6
+export OPENAI_API_KEY=...
 ```
 
 ```elixir
@@ -1039,11 +989,11 @@ editor's ACP agent configuration; the command is this binary and the argument is
 }
 ```
 
-`--provider` is required — a flag here or `defaults.provider` in the config file — because
-letting an editor's default decide which vendor runs your code is not a choice this client
-makes for you. The editor sends the workspace as `cwd`; `--workspace` is only a fallback for
-a client that sends none. `--approval-mode` sets the posture every session starts in, and
-the editor's own mode picker moves it afterwards wherever the transport accepts a change.
+`--provider` is optional: the config file wins when set, otherwise the direct `native`
+provider is used. The editor sends the workspace as `cwd`; `--workspace` is only a
+fallback for a client that sends none. `--approval-mode` sets the posture every session
+starts in, and the editor's own mode picker moves it afterwards wherever the transport
+accepts a change.
 
 What the editor gets: streamed text and thinking, tool calls with ACP's own `kind` taxonomy
 and the files they touch, diffs as tool-call content, the plan, mode changes, and permission
@@ -1653,7 +1603,7 @@ means “on this node.”
 
 {:ok, delegation} =
   Ouroboros.Team.delegate(team, worker.id, "Review this repository",
-    provider: :codex,
+    provider: :native,
     workspace: File.cwd!()
   )
 
@@ -1806,7 +1756,7 @@ config :ouroboros,
   orchestration_team_id: "review-team",
   orchestration_worker_id: "reviewer",
   orchestration_coding_options: [
-    provider: :codex,
+    provider: :native,
     workspace: "/srv/agent-worktrees/project",
     sandbox_mode: :workspace_write,
     approval_mode: :prompt
@@ -2540,7 +2490,7 @@ config :ouroboros,
 })
 
 Ouroboros.Control.Permissions.evaluate(%{
-  principal: %{session_id: "session-1", provider: :codex, node: node()},
+  principal: %{session_id: "session-1", provider: :native, node: node()},
   tool: "bash",
   command: "mix test --stale",
   mode: :execute,
@@ -2676,11 +2626,9 @@ everything else this engine decides.
 
 ### Honest limits
 
-- **This is not a sandbox, and it is not an OS boundary.** It decides what the runtime
-  *asks a provider to do* at the two points where a provider asks first. A vendor CLI
-  that runs a tool without asking runs it. Managed transports (`claude`, `gemini`, `amp`,
-  `grok`, `zai`, `codex exec`) have no approvals channel at all, so nothing here reaches
-  them.
+- **The permission engine is not the OS sandbox.** It decides what the in-process Native
+  loop and the remaining ACP permission seam may execute. Other explicitly selected
+  vendor transports that run a tool without asking remain outside that decision point.
 - **Prefix matching is defeated by construction** by command substitution (`$(…)`,
   backticks), `eval`, variable expansion, aliases, and `sh -c "…"`. Nothing is expanded;
   a rule matches the literal command line the provider reported. That is why the honest
