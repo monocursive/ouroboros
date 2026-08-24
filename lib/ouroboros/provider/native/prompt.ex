@@ -33,6 +33,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
   alias Ouroboros.AgentProfile
   alias Ouroboros.Prompt.Assembler
   alias Ouroboros.Provider.Native.Tools
+  alias Ouroboros.Provider.Native.Sandbox
 
   @doc """
   Builds the system prompt for one session.
@@ -72,6 +73,10 @@ defmodule Ouroboros.Provider.Native.Prompt do
     approval_mode = Keyword.get(opts, :approval_mode, :default)
     tools = Keyword.get(opts, :tools) || Tools.specs(nil, nil)
 
+    sandbox = Keyword.get(opts, :sandbox, Sandbox.detect())
+    scope = %{root: cwd, roots: [cwd | add_dirs], sandbox_mode: sandbox_mode}
+    sandbox_decision = Sandbox.decision(scope, sandbox)
+
     """
     You are the Ouroboros native agent: a coding agent whose tool loop runs inside the
     Ouroboros runtime itself, on the operator's own machine. You are talking to an
@@ -82,6 +87,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
     #{tool_lines(tools)}
 
+    #{tool_guidance(tools)}
     Call tools to find things out. Do not guess a file's contents, and do not describe
     an edit you have not made.
 
@@ -93,7 +99,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
     directories, symlinks included. Relative paths are resolved against the working
     directory. A path containing `..` is refused outright — give the absolute path.
 
-    #{posture(sandbox_mode, approval_mode)}
+    #{posture(sandbox_decision, approval_mode)}
     #{plan_section(approval_mode)}
     ## Rules
 
@@ -107,6 +113,14 @@ defmodule Ouroboros.Provider.Native.Prompt do
     4. **Report what you verified.** Say which checks you ran and what they returned.
        Name anything you changed but did not verify, and anything you could not do. An
        unverified claim is worse than an admitted gap: the operator can act on a gap.
+
+    ## Ouroboros sources
+
+    When the task is about Ouroboros itself and this workspace contains its source, read
+    `README.md` and the relevant document before answering from memory:
+    `docs/ARCHITECTURE.md` for runtime boundaries, `docs/PROTOCOL.md` for the gateway
+    contract, `docs/TUI.md` for the terminal client, and `docs/FLEET.md` for distributed
+    operation. Follow their cross-references before changing behavior.
 
     ## Style
 
@@ -132,30 +146,116 @@ defmodule Ouroboros.Provider.Native.Prompt do
     |> Kernel.<>(".")
   end
 
+  defp tool_guidance(tools) do
+    names = Enum.map(tools, & &1.name)
+    search_tools = Enum.filter(~w(grep glob ls), &(&1 in names))
+
+    guidelines =
+      [
+        if("read" in names, do: "Use `read`, not `bash`, to inspect file contents."),
+        if(search_tools != [],
+          do: "Use #{tool_names(search_tools)} for discovery instead of shell pipelines."
+        ),
+        if("code_intel" in names,
+          do: "Use `code_intel` for symbol-aware navigation, references, and diagnostics."
+        ),
+        if("edit" in names,
+          do: "Use `edit` for one exact, uniquely matched replacement in a file."
+        ),
+        if("apply_patch" in names,
+          do: "Use `apply_patch` for coordinated structural or multi-file changes."
+        ),
+        if("write" in names,
+          do: "Use `write` only for a new file or an intentional whole-file replacement."
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    case guidelines do
+      [] ->
+        ""
+
+      rows ->
+        "Use the most specific available tool:\n" <> Enum.map_join(rows, "\n", &("- " <> &1))
+    end
+  end
+
+  defp tool_names(names), do: Enum.map_join(names, ", ", &"`#{&1}`")
+
   defp extra_dirs([]), do: ""
 
   defp extra_dirs(dirs),
     do: " You may also work in: " <> Enum.join(dirs, ", ") <> "."
 
-  defp posture(:read_only, approval_mode) do
+  defp posture(_decision, :plan) do
     """
-    This session is **read-only**. `write` and `edit` are refused, and so is `bash` —
-    there is no OS sandbox in this build, so a shell cannot be made read-only, and
-    pretending otherwise would be a lie about containment. Investigate and report; if
-    the task needs a change, say what change you would make.#{approvals(approval_mode)}
+    This session is **read-only for planning**. The `## Plan mode` section below names
+    every operation that is refused.#{approvals(:plan)}
     """
     |> String.trim()
   end
 
-  defp posture(_sandbox_mode, approval_mode) do
+  defp posture({:sandboxed, label, %{mode: :read_only} = policy}, approval_mode) do
     """
-    There is **no OS sandbox**. A `bash` command runs with your operator's own
-    privileges and can reach the network. Containment is the path checks above, the
-    permission rules, and the approval prompt — nothing else. Treat destructive commands
-    accordingly.#{approvals(approval_mode)}
+    This session is **read-only**. `write`, `edit`, `apply_patch`, and writing
+    `code_intel` operations are refused. `bash` runs inside the #{label} OS sandbox; it
+    may write only to a private scratch directory, and #{network_posture(policy)}
+    Investigate and report; if the task needs a change, say what change you would
+    make.#{approvals(approval_mode)}
     """
     |> String.trim()
   end
+
+  defp posture({:sandboxed, label, %{mode: :workspace_write} = policy}, approval_mode) do
+    """
+    `bash` runs inside the #{label} OS sandbox. The workspace and declared roots are
+    writable; `.git`, `.ouroboros`, the runtime data directory, and the user's Ouroboros
+    configuration stay read-only. #{String.capitalize(network_posture(policy))}
+    A sandbox denial names the constraint it hit; do not retry it under a weaker
+    posture.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
+  defp posture({:refused, {:read_only_without_backend, _detection}}, approval_mode) do
+    """
+    This session is **read-only**. `write`, `edit`, `apply_patch`, and `bash` are refused:
+    this node has no OS sandbox that can make a shell read-only. Investigate and report;
+    if the task needs a change, say what change you would make.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
+  defp posture({:unsandboxed, {:no_backend, _detection}}, approval_mode) do
+    """
+    This node has **no OS sandbox available**. `bash` runs with the operator's own
+    privileges and can write outside the workspace or reach the network. Path checks
+    still contain the file tools, and permission rules and approvals still gate the
+    command. Treat destructive commands accordingly.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
+  defp posture({:unsandboxed, :unrestricted}, approval_mode) do
+    """
+    This session is explicitly **unrestricted**. `bash` has no OS sandbox and runs with
+    the operator's own filesystem and network access. Permission rules and approvals
+    still apply. Treat destructive commands accordingly.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
+  defp posture({:refused, reason}, approval_mode) do
+    """
+    `bash` is refused because the session has no sandbox policy for
+    `#{inspect(reason)}`. File tools remain bounded by the workspace path checks
+    above.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
+  defp network_posture(%{network: true}), do: "network access is enabled by node policy."
+  defp network_posture(_policy), do: "network access is denied."
 
   # B2. The instruction block that makes plan mode a *task* rather than a series of
   # refusals. Without it a model in a read-only session spends the turn discovering, one

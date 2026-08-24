@@ -323,13 +323,17 @@ happened when any of it runs. `[checks]` — a project-declared typecheck or lin
 the end of a turn that changed a file and injects the tail of what failed for the next
 model step, which is the universal fallback for languages with no good server.
 
-There is no OS sandbox. `sandbox_mode: :workspace_write` is those path checks and nothing
-more, `:read_only` refuses `write`, `edit`, `apply_patch`, and every `bash` command, and
-`:unrestricted` is not declared at all — a sandbox mode this runtime cannot enforce would
-be a promise no code keeps. `web_fetch` reaches the network and is bounded by the
-permission engine's `WebFetch(domain:)` rules rather than by a proxy; it refuses to follow
-a redirect off the host that was evaluated. The README states the same limits where an
-operator will read them.
+`Ouroboros.Provider.Native.Sandbox` gives the native `bash` tool the same posture the
+system prompt reports, both derived from `Sandbox.decision/2`. With macOS
+`sandbox-exec` or Linux `bwrap`, `:workspace_write` makes the workspace and declared
+roots writable while keeping `.git`, `.ouroboros`, runtime data and user configuration
+read-only; `:read_only` permits a shell with writes confined to per-call scratch. The
+network is denied by default in both modes. Without a backend, `:read_only` refuses
+`bash` and `:workspace_write` reports that the command is unsandboxed;
+`:unrestricted` is explicitly unsandboxed. `web_fetch` reaches the network and is
+bounded by the permission engine's `WebFetch(domain:)` rules rather than by a proxy; it
+refuses to follow a redirect off the host that was evaluated. The README states the same
+limits where an operator will read them.
 
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.

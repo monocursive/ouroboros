@@ -1248,6 +1248,8 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp context_options(state) do
+    context_window = Window.resolve(state.model_spec)
+
     [
       system_prompt: state.request.system_prompt,
       cwd: state.scope.root,
@@ -1256,10 +1258,13 @@ defmodule Ouroboros.Provider.Native.Session do
       approval_mode: loop_approval_mode(state),
       tools:
         Tools.specs(state.request.allowed_tools, state.request.disallowed_tools,
+          workspace: state.scope.root,
+          context_window: context_window,
           subagent_depth: state.subagent_depth
         ),
       model_module: state.model_module,
       model_spec: state.model_spec,
+      context_window: context_window,
       reasoning_effort: state.reasoning_effort,
       compactions: length(state.compactions)
     ]

@@ -3,8 +3,21 @@ defmodule Ouroboros.Provider.Native.PromptTest do
 
   alias Ouroboros.AgentProfile
   alias Ouroboros.Provider.Native.Prompt
+  alias Ouroboros.Provider.Native.Tools
 
-  @opts [cwd: "/w", sandbox_mode: :workspace_write, approval_mode: :prompt]
+  @sandbox %{
+    backend: :sandbox_exec,
+    executable: "/usr/bin/sandbox-exec",
+    version: nil,
+    notes: "test"
+  }
+  @none %{backend: :none, executable: nil, version: nil, notes: "test"}
+  @opts [
+    cwd: "/w",
+    sandbox_mode: :workspace_write,
+    approval_mode: :prompt,
+    sandbox: @sandbox
+  ]
 
   test "the provider's own prompt cannot forge a runtime block" do
     refute AgentProfile.reserved_delimiter?(Prompt.base(@opts))
@@ -44,18 +57,38 @@ defmodule Ouroboros.Provider.Native.PromptTest do
     assert prompt =~ "`..`"
   end
 
-  test "says there is no OS sandbox under a writable posture" do
+  test "describes a sandboxed writable posture from the enforcement decision" do
     prompt = Prompt.base(@opts)
-    assert prompt =~ "no OS sandbox"
-    assert prompt =~ "reach the network"
+
+    assert prompt =~ "`bash` runs inside the sandbox-exec OS sandbox"
+    assert prompt =~ "`.git`, `.ouroboros`"
+    assert prompt =~ "Network access is denied"
+    refute prompt =~ "no OS sandbox"
   end
 
-  test "says read_only refuses the shell, and why" do
-    prompt = Prompt.base(Keyword.put(@opts, :sandbox_mode, :read_only))
+  test "describes read-only shell behavior with and without a backend" do
+    sandboxed = Prompt.base(Keyword.put(@opts, :sandbox_mode, :read_only))
 
-    assert prompt =~ "read-only"
-    assert prompt =~ "so is `bash`"
-    assert prompt =~ "a shell cannot be made read-only"
+    assert sandboxed =~ "This session is **read-only**"
+    assert sandboxed =~ "`bash` runs inside the sandbox-exec OS sandbox"
+    assert sandboxed =~ "write only to a private scratch directory"
+
+    refused =
+      Prompt.base(
+        @opts
+        |> Keyword.put(:sandbox_mode, :read_only)
+        |> Keyword.put(:sandbox, @none)
+      )
+
+    assert refused =~ "`write`, `edit`, `apply_patch`, and `bash` are refused"
+    assert refused =~ "no OS sandbox that can make a shell read-only"
+  end
+
+  test "states when writable execution is unsandboxed" do
+    prompt = Prompt.base(Keyword.put(@opts, :sandbox, @none))
+
+    assert prompt =~ "no OS sandbox available"
+    assert prompt =~ "can write outside the workspace or reach the network"
   end
 
   test "describes the approval posture the session actually runs under" do
@@ -66,6 +99,27 @@ defmodule Ouroboros.Provider.Native.PromptTest do
              "Edits and writes inside the workspace run without asking"
 
     assert Prompt.base(@opts) =~ "put to the operator for approval"
+  end
+
+  test "tool guidance names only tools visible in this session" do
+    tools = Tools.specs(~w(read grep code_intel), nil)
+    prompt = Prompt.base(Keyword.put(@opts, :tools, tools))
+
+    assert prompt =~ "Use `read`, not `bash`, to inspect file contents"
+    assert prompt =~ "Use `grep` for discovery instead of shell pipelines"
+    assert prompt =~ "Use `code_intel` for symbol-aware navigation"
+    refute prompt =~ "Use `write` only"
+    refute prompt =~ "Use `glob`"
+  end
+
+  test "points source-tree questions at the authoritative documentation" do
+    prompt = Prompt.base(@opts)
+
+    assert prompt =~ "## Ouroboros sources"
+    assert prompt =~ "`README.md`"
+    assert prompt =~ "`docs/ARCHITECTURE.md`"
+    assert prompt =~ "`docs/PROTOCOL.md`"
+    assert prompt =~ "before answering from memory"
   end
 
   test "stays inside the two-thousand-token budget the slice sets" do

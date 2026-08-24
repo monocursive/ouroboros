@@ -164,7 +164,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def tool_call_marker(name, scope, detection \\ detect())
 
   def tool_call_marker("bash", scope, detection) do
-    case decide(scope, detection) do
+    case decision(scope, detection) do
       {:sandboxed, label, _policy} -> %{"sandbox" => label}
       _unsandboxed_or_refused -> %{"sandbox" => "none"}
     end
@@ -175,15 +175,15 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # ------------------------------------------------------------------- decision
 
   @doc """
-  Whether this command runs wrapped, runs plain, or does not run.
+  The pure sandbox decision shared by execution, event metadata, and the system prompt.
 
-  See the moduledoc for the three outcomes. An unrecognised `sandbox_mode` is refused:
-  a mode nobody wrote a policy for is not the same as `workspace_write`, and guessing
-  which way to round it is how a containment check grows a hole.
+  An unrecognised `sandbox_mode` is refused: a mode nobody wrote a policy for is not the
+  same as `workspace_write`, and guessing which way to round it is how a containment
+  check grows a hole.
   """
-  @spec decide(map(), detection()) ::
+  @spec decision(map(), detection()) ::
           {:sandboxed, String.t(), policy()} | {:unsandboxed, term()} | {:refused, term()}
-  def decide(scope, detection \\ detect()) do
+  def decision(scope, detection \\ detect()) do
     case normalize(Map.get(scope, :sandbox_mode)) do
       mode when mode in [:read_only, :workspace_write] ->
         case detection.backend do
@@ -193,15 +193,32 @@ defmodule Ouroboros.Provider.Native.Sandbox do
         end
 
       :unrestricted ->
-        Logger.warning(
-          "native bash running with no OS sandbox: sandbox_mode: :unrestricted was requested"
-        )
-
         {:unsandboxed, :unrestricted}
 
       other ->
         {:refused, {:unknown_sandbox_mode, other}}
     end
+  end
+
+  @doc """
+  Whether this command runs wrapped, runs plain, or does not run.
+
+  This is the operational form of `decision/2`: it additionally logs an explicitly
+  unrestricted posture. Prompt construction and event metadata use `decision/2` so
+  inspecting a session does not emit an execution warning.
+  """
+  @spec decide(map(), detection()) ::
+          {:sandboxed, String.t(), policy()} | {:unsandboxed, term()} | {:refused, term()}
+  def decide(scope, detection \\ detect()) do
+    result = decision(scope, detection)
+
+    if result == {:unsandboxed, :unrestricted} do
+      Logger.warning(
+        "native bash running with no OS sandbox: sandbox_mode: :unrestricted was requested"
+      )
+    end
+
+    result
   end
 
   @doc """

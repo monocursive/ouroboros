@@ -123,6 +123,40 @@ defmodule Ouroboros.Provider.Native.ContextTest do
       plan = Enum.find(context.tools, &(&1.name == "plan"))
       assert plan.description == Tools.spec(Ouroboros.Provider.Native.Tools.Plan).description
     end
+
+    test "uses a caller-resolved context window without looking it up again" do
+      {:ok, context} =
+        Context.build(
+          cwd: "/tmp",
+          instructions: false,
+          model_spec: "unknown:model",
+          context_window: 12_345
+        )
+
+      assert context.context_window == 12_345
+    end
+
+    test "a live session gives dynamic tool descriptions the workspace and model window",
+         context do
+      skill_dir = Path.join([context.workspace, ".agents", "skills", "deploy"])
+      File.mkdir_p!(skill_dir)
+
+      File.write!(
+        Path.join(skill_dir, "SKILL.md"),
+        "---\nname: deploy\ndescription: Ship the release.\n---\n\nRun the release pipeline.\n"
+      )
+
+      Application.put_env(:ouroboros, :native_context_window, 8_000)
+      session = open(context, [done()])
+      turn(session, "dynamic-tools")
+
+      [request | _rest] = NativeModelScript.requests(session.agent)
+      skill = Enum.find(request.tools, &(&1.name == "skill"))
+
+      assert skill.description =~ "deploy — Ship the release."
+      assert {:ok, info} = Session.info(session.handle)
+      assert info.context_window == 8_000
+    end
   end
 
   describe "prefix_fingerprint/1" do

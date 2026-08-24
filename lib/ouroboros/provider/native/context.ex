@@ -76,6 +76,8 @@ defmodule Ouroboros.Provider.Native.Context do
       instruction files entirely.
     * `:model_module` — the model module, asked whether it supports tool search.
     * `:model_spec` — the resolved model, for the context window.
+    * `:context_window` — a resolved window shared with dynamic tool descriptions, so
+      model metadata is looked up once while building the prefix.
     * `:compactions` — how many times this session has compacted, which is part of the
       fingerprint because compaction is a documented cache invalidator and pretending
       otherwise would make the fingerprint claim something it cannot.
@@ -100,7 +102,7 @@ defmodule Ouroboros.Provider.Native.Context do
         deferred: laid_out.deferred,
         instructions: discovery,
         model_spec: model_spec,
-        context_window: Window.resolve(model_spec),
+        context_window: Keyword.get(opts, :context_window) || Window.resolve(model_spec),
         compactions: Keyword.get(opts, :compactions, 0),
         fingerprint: nil
       }
