@@ -34,7 +34,9 @@ impl App {
 
                         if connected {
                             if self.config.defaults.provider.is_none() {
-                                self.config.defaults.provider = Some("codex".to_string());
+                                self.config.defaults.provider = Some("native".to_string());
+                                self.config.defaults.model =
+                                    Some("openai_codex:gpt-5.6-sol".to_string());
                                 self.save_pending = true;
                             }
 

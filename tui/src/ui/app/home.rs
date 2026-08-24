@@ -116,9 +116,8 @@ impl App {
         let provider = self.home_provider().to_string();
         let prompt = self.home_draft.submission();
 
-        // Navigation and account commands remain usable before Codex authentication. The
-        // draft is accepted only when the command itself was handled, so ordinary work text
-        // survives the login overlay and can be submitted unchanged afterwards.
+        // Navigation and account commands remain usable before direct OAuth completes. The
+        // draft survives the login overlay and can be submitted unchanged afterwards.
         if prompt
             .as_deref()
             .is_some_and(|prompt| self.activate_slash_command(prompt))
@@ -127,9 +126,9 @@ impl App {
             return;
         }
 
-        // An API-key install needs no sign-in, and pushing one at it would be offering a
-        // flow that cannot succeed and is not needed.
-        if provider == "codex" && !self.codex_usable() {
+        // Only the OAuth-backed direct model needs ChatGPT sign-in. API-key and unrelated
+        // providers must never be blocked by this account surface.
+        if self.home_requires_chatgpt() && !self.codex_usable() {
             self.open_account();
             return;
         }
@@ -161,6 +160,7 @@ impl App {
                 id: new_session_id(),
                 plane: Plane::Interactive,
                 provider: provider.clone(),
+                model: Some(self.home_model().to_string()),
                 machine: String::new(),
                 workspace: self.default_workspace(),
                 approval_mode: self.config.defaults.approval_mode(),
@@ -319,6 +319,7 @@ impl App {
             id: new_session_id(),
             plane: Plane::Interactive,
             provider,
+            model: Some(self.home_model().to_string()),
             machine: String::new(),
             workspace,
             approval_mode: self.config.defaults.approval_mode(),

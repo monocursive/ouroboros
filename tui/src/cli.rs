@@ -67,16 +67,15 @@ pub enum Command {
     /// nothing else is sent. Each one resolves the same way: the flag, then
     /// `[defaults]` in the config file, then whatever the plane does on its own.
     ///
-    /// The provider is the one parameter with no third step. This client still refuses to
-    /// *invent* one — letting a node's default decide would be a terminal choosing which
-    /// vendor runs your code — but it will use one you chose yourself, once, explicitly,
-    /// in a file you can read. That is what `--provider` and the settings overlay (`,`)
-    /// are two ways of saying.
+    /// With no `--provider` or stored default, the direct Native provider is used.
     New {
-        /// A provider this runtime serves. `ouro attach --print` lists them. Omitted, the
-        /// config file's `defaults.provider` is used, and with neither this refuses.
+        /// A provider this runtime serves. Omitted, the config file's default and then
+        /// `native`.
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
+        /// A full direct model spec. Omitted, `[defaults].model` or the runtime default.
+        #[arg(long, value_name = "SPEC")]
+        model: Option<String>,
 
         /// The directory the session works in. Local relative paths resolve where this
         /// command is typed. With --machine, this must already be an absolute destination
@@ -206,9 +205,9 @@ pub enum Command {
     ///
     /// Not typed at a prompt: an ACP client — Zed, JetBrains, a Neovim or VS Code plugin —
     /// spawns this process and speaks newline-framed JSON-RPC to its stdio, so stdout is a
-    /// protocol and carries nothing else. `--provider` is required because letting an
-    /// editor's default decide which vendor runs your code is not a choice this client
-    /// makes for you; `--workspace` is only a fallback for a client that sends no `cwd`.
+    /// protocol and carries nothing else. Omitted provider selection falls back to the
+    /// direct Native provider; `--workspace` is only a fallback for a client that sends no
+    /// `cwd`.
     ///
     /// Register it with your editor's ACP agent configuration (Zed and JetBrains both use
     /// an `agent_servers` map): the command is this binary and the argument is `acp`.
@@ -286,8 +285,8 @@ pub enum Command {
 /// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
 #[derive(Debug, Args)]
 pub struct AcpArgs {
-    /// A provider this runtime serves. Omitted, the config file's `defaults.provider` is
-    /// used, and with neither this refuses rather than letting the editor decide.
+    /// A provider this runtime serves. Omitted, the config file's default and then
+    /// `native`.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
 
@@ -494,7 +493,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "SESSION-ID",
-        conflicts_with_all = ["provider", "workspace", "approval_mode", "sandbox_mode", "machine"]
+        conflicts_with_all = ["provider", "model", "workspace", "approval_mode", "sandbox_mode", "machine"]
     )]
     pub resume: Option<String>,
 
@@ -514,10 +513,13 @@ pub struct RunArgs {
     #[arg(long, requires = "continue_session")]
     pub or_new: bool,
 
-    /// A provider this runtime serves. Omitted, the config file's `defaults.provider` is
-    /// used, and with neither this refuses.
+    /// A provider this runtime serves. Omitted, the config file's default and then
+    /// `native`.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
+    /// A full direct model spec. Omitted, `[defaults].model` or the runtime default.
+    #[arg(long, value_name = "SPEC")]
+    pub model: Option<String>,
 
     /// The directory the session works in. With --machine it must be an absolute
     /// destination path on that machine.
@@ -1044,7 +1046,8 @@ mod tests {
     #[test]
     fn resume_refuses_the_start_options_rather_than_ignoring_them() {
         for flag in [
-            vec!["--provider", "codex"],
+            vec!["--provider", "native"],
+            vec!["--model", "openai:gpt-5.6"],
             vec!["--workspace", "/srv/work"],
             vec!["--approval-mode", "auto_edit"],
             vec!["--sandbox-mode", "read_only"],

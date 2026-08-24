@@ -400,6 +400,9 @@ pub struct Defaults {
     /// fact only a running node can report, and this file is read before there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// A full direct model spec such as `openai_codex:gpt-5.6-sol`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// A workspace path, as the operator wrote it. Resolved where it is used, against the
     /// directory the command was typed in, exactly like `--workspace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +431,7 @@ impl Defaults {
     /// sentence for "nothing is set" than for "these are your answers".
     pub fn is_empty(&self) -> bool {
         self.provider.is_none()
+            && self.model.is_none()
             && self.workspace.is_none()
             && self.approval_mode.is_none()
             && self.sandbox_mode.is_none()
@@ -601,6 +605,7 @@ pub fn load(path: PathBuf) -> Loaded {
 /// operator never typed.
 fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.defaults.provider);
+    blank_to_none(&mut config.defaults.model);
     blank_to_none(&mut config.defaults.workspace);
     blank_to_none(&mut config.defaults.approval_mode);
     blank_to_none(&mut config.defaults.sandbox_mode);
@@ -817,6 +822,7 @@ impl Config {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartFlags {
     pub provider: Option<String>,
+    pub model: Option<String>,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
@@ -830,45 +836,32 @@ pub struct StartFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedStart {
     pub provider: String,
+    pub model: Option<String>,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
     pub machine: Option<String>,
 }
 
-/// The one thing no default can supply.
+/// Retained for API compatibility; direct Native is now always a provider fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
     Provider,
 }
 
 impl Missing {
-    /// Names both ways to answer, because a person who hit this has not been told there is
-    /// a second one.
-    pub fn message(&self, config_path: &Path) -> String {
-        match self {
-            Self::Provider => format!(
-                "no provider was named. Pass --provider NAME, or set one once with the \
-                 settings overlay (`,`) inside `ouro`, which writes {}:\n\n    [defaults]\n \
-                 \x20  provider = \"NAME\"\n\nWhich vendor runs your code stays a choice you \
-                 make explicitly; this client will not pick one for you.",
-                config_path.display()
-            ),
-        }
+    pub fn message(&self, _config_path: &Path) -> String {
+        "the direct Native provider could not be selected".to_string()
     }
 }
 
-/// Flag, then the config file, then a refusal. The same order for all four parameters.
-///
-/// Only the provider can fail: a workspace, an approval mode, and a sandbox mode that
-/// nobody stated are legitimately absent — the plane decides — while a provider that
-/// nobody stated would be the node's default deciding which vendor runs the operator's
-/// code.
+/// Flag, then the config file, then the direct Native default.
 pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> Result<ResolvedStart, Missing> {
-    let provider = first(&flags.provider, &defaults.provider).ok_or(Missing::Provider)?;
+    let provider = first(&flags.provider, &defaults.provider).unwrap_or_else(|| "native".into());
 
     Ok(ResolvedStart {
         provider,
+        model: first(&flags.model, &defaults.model),
         workspace: first(&flags.workspace, &defaults.workspace),
         approval_mode: first(&flags.approval_mode, &defaults.approval_mode),
         sandbox_mode: first(&flags.sandbox_mode, &defaults.sandbox_mode),
@@ -918,6 +911,7 @@ mod tests {
         let config = Config {
             defaults: Defaults {
                 provider: Some("claude".into()),
+                model: Some("anthropic:claude-sonnet-5".into()),
                 workspace: Some("/home/me/project".into()),
                 approval_mode: Some("auto_edit".into()),
                 sandbox_mode: Some("read_only".into()),
@@ -1272,6 +1266,7 @@ mod tests {
     fn a_flag_beats_the_file_and_the_file_beats_nothing() {
         let defaults = Defaults {
             provider: Some("claude".into()),
+            model: Some("anthropic:claude-sonnet-5".into()),
             workspace: Some("/home/me/project".into()),
             approval_mode: Some("auto_edit".into()),
             sandbox_mode: Some("read_only".into()),
@@ -1281,6 +1276,7 @@ mod tests {
         let resolved = resolve_start(&StartFlags::default(), &defaults).expect("a resolution");
 
         assert_eq!(resolved.provider, "claude");
+        assert_eq!(resolved.model.as_deref(), Some("anthropic:claude-sonnet-5"));
         assert_eq!(resolved.workspace.as_deref(), Some("/home/me/project"));
         assert_eq!(resolved.approval_mode.as_deref(), Some("auto_edit"));
         assert_eq!(resolved.sandbox_mode.as_deref(), Some("read_only"));
@@ -1309,36 +1305,24 @@ mod tests {
     }
 
     #[test]
-    fn nothing_anywhere_is_refused_by_naming_both_ways_to_answer() {
-        let refusal =
-            resolve_start(&StartFlags::default(), &Defaults::default()).expect_err("a refusal");
+    fn nothing_stated_uses_the_direct_native_default() {
+        let resolved =
+            resolve_start(&StartFlags::default(), &Defaults::default()).expect("a resolution");
 
-        assert_eq!(refusal, Missing::Provider);
-
-        let message = refusal.message(Path::new("/home/me/.config/ouroboros/config.toml"));
-
-        assert!(message.contains("--provider"), "{message}");
-        assert!(
-            message.contains("/home/me/.config/ouroboros/config.toml"),
-            "{message}"
-        );
-        assert!(message.contains('`') && message.contains(','), "{message}");
-        assert!(
-            message.contains("[defaults]") && message.contains("provider ="),
-            "the refusal shows the file it is asking for: {message}"
-        );
+        assert_eq!(resolved.provider, "native");
+        assert_eq!(resolved.model, None);
     }
 
     #[test]
     fn a_workspace_and_an_approval_mode_are_allowed_to_be_unstated() {
         let flags = StartFlags {
-            provider: Some("codex".into()),
+            provider: Some("native".into()),
             ..StartFlags::default()
         };
 
         let resolved = resolve_start(&flags, &Defaults::default()).expect("a resolution");
 
-        assert_eq!(resolved.provider, "codex");
+        assert_eq!(resolved.provider, "native");
         assert_eq!(resolved.workspace, None);
         assert_eq!(resolved.approval_mode, None);
         assert_eq!(resolved.sandbox_mode, None);

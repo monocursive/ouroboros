@@ -134,7 +134,18 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         Some(app.home_provider())
     };
 
-    let account = if visible_provider.is_some_and(|provider| provider != "codex") {
+    let visible_model = if app.sessions.open.is_some() {
+        app.sessions
+            .open_info()
+            .and_then(|session| session.model.as_deref())
+    } else {
+        Some(app.home_model())
+    };
+
+    let account_backed = visible_provider == Some("native")
+        && visible_model.is_some_and(|model| model.starts_with("openai_codex:"));
+
+    let account = if !account_backed && visible_provider.is_some() {
         Line::from(vec![
             Span::styled("Provider ", Style::default().fg(theme::muted())),
             Span::styled(
@@ -2332,6 +2343,14 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 dialog.provider,
                 !dialog.request.machine.trim().is_empty(),
             ),
+            NewField::Model => {
+                let model = dialog.request.model.as_deref().unwrap_or_default();
+                (
+                    "model",
+                    text_or_hint(model, "runtime default"),
+                    hint_style(model),
+                )
+            }
             NewField::Objective => (
                 "objective",
                 text_or_hint(&dialog.request.objective, "required"),

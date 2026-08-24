@@ -2085,6 +2085,7 @@ pub fn start_plan(
         id: session_id,
         plane: Plane::Interactive,
         provider: resolved.provider.clone(),
+        model: resolved.model.clone(),
         machine: machine.clone(),
         workspace: workspace(&machine, resolved.workspace.as_deref()).map_err(Refusal)?,
         approval_mode: match &resolved.approval_mode {

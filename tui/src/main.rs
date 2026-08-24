@@ -160,6 +160,7 @@ async fn run(cli: Cli) -> Result<()> {
         None => attach_local(&paths, cli.dev, config, continue_from).await,
         Some(Command::New {
             provider,
+            model,
             workspace,
             approval_mode,
             sandbox_mode,
@@ -175,6 +176,7 @@ async fn run(cli: Cli) -> Result<()> {
                 config,
                 StartFlags {
                     provider,
+                    model,
                     workspace: workspace.map(workspace_argument).transpose()?,
                     approval_mode,
                     sandbox_mode,
@@ -388,6 +390,7 @@ async fn new_session(
         id: session_id.clone(),
         plane: Plane::Interactive,
         provider: resolved.provider.clone(),
+        model: resolved.model.clone(),
         machine: machine.clone(),
         // A stored workspace is resolved the way a typed one is. A relative path across a
         // socket would be resolved against the *runtime's* working directory, which for a
@@ -803,6 +806,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
 
     let flags = StartFlags {
         provider: args.provider,
+        model: args.model,
         workspace: args.workspace.map(workspace_argument).transpose()?,
         approval_mode: args.approval_mode,
         sandbox_mode: args.sandbox_mode,
@@ -978,6 +982,7 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
     // so an operator who stated a provider once does not state it again in editor config.
     let flags = ouro::config::StartFlags {
         provider: args.provider,
+        model: None,
         workspace: args.workspace.map(workspace_argument).transpose()?,
         approval_mode: args.approval_mode,
         sandbox_mode: args.sandbox_mode,
@@ -1095,6 +1100,7 @@ fn continue_ignores(args: &RunArgs) -> Option<String> {
 
     let named: Vec<&str> = [
         args.provider.as_ref().map(|_| "--provider"),
+        args.model.as_ref().map(|_| "--model"),
         args.approval_mode.as_ref().map(|_| "--approval-mode"),
         args.sandbox_mode.as_ref().map(|_| "--sandbox-mode"),
         args.machine.as_ref().map(|_| "--machine"),
@@ -3387,6 +3393,7 @@ mod tests {
             id: "test-start-id".into(),
             plane: Plane::Interactive,
             provider: "stub".into(),
+            model: None,
             machine: machine.into(),
             workspace: "/tmp/workspace".into(),
             approval_mode: None,

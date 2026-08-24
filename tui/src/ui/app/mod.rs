@@ -1701,8 +1701,7 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Whether Codex can be started without asking anyone to sign in: a connected ChatGPT
-    /// subscription, or an install the runtime says needs no OpenAI auth at all.
+    /// Whether a direct ChatGPT-subscription model can start now.
     pub fn codex_usable(&self) -> bool {
         self.account
             .value
@@ -1711,15 +1710,24 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Whether the coding home can start its configured provider now. Codex keeps its
-    /// first-class managed sign-in gate; every other explicit provider owns its own auth
-    /// and must not be blocked by an unrelated OpenAI account state.
+    pub fn home_requires_chatgpt(&self) -> bool {
+        self.home_provider() == "native" && self.home_model().starts_with("openai_codex:")
+    }
+
     pub fn home_ready(&self) -> bool {
-        self.home_provider() != "codex" || self.codex_usable()
+        !self.home_requires_chatgpt() || self.codex_usable()
     }
 
     pub fn home_provider(&self) -> &str {
-        self.config.defaults.provider.as_deref().unwrap_or("codex")
+        self.config.defaults.provider.as_deref().unwrap_or("native")
+    }
+
+    pub fn home_model(&self) -> &str {
+        self.config
+            .defaults
+            .model
+            .as_deref()
+            .unwrap_or("openai_codex:gpt-5.6-sol")
     }
 
     /// Whether `account.read` has come back at all — with a state, or with a refusal.

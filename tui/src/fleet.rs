@@ -1332,7 +1332,6 @@ struct ServiceEnvironment {
     path: String,
     provider_paths: Vec<(String, String)>,
     workspace_roots: String,
-    codex_network_access: bool,
     gateway_max_frame: u64,
     gateway_queue_limit: u64,
 }
@@ -1340,7 +1339,7 @@ struct ServiceEnvironment {
 const DEFAULT_GATEWAY_MAX_FRAME: u64 = 1_048_576;
 const DEFAULT_GATEWAY_QUEUE_LIMIT: u64 = 1_000;
 
-const PROVIDER_PATH_VARIABLES: [&str; 3] = ["CODEX_PATH", "AMP_CLI_PATH", "GEMINI_CLI_PATH"];
+const PROVIDER_PATH_VARIABLES: [&str; 2] = ["AMP_CLI_PATH", "GEMINI_CLI_PATH"];
 const ADVANCED_SERVICE_AUTHORITY_VARIABLES: [&str; 15] = [
     "OUROBOROS_FORGE_BUILDER_NODE",
     "OUROBOROS_SIGNER_KEY_PATH",
@@ -1426,19 +1425,6 @@ fn capture_service_environment() -> Result<ServiceEnvironment> {
                 })?
         }
     };
-    let codex_network_access = match std::env::var("OUROBOROS_CODEX_NETWORK_ACCESS") {
-        Err(std::env::VarError::NotPresent) => true,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("OUROBOROS_CODEX_NETWORK_ACCESS is not valid UTF-8")
-        }
-        Ok(value) => match value.trim() {
-            "" | "1" | "true" => true,
-            "0" | "false" => false,
-            other => bail!(
-                "OUROBOROS_CODEX_NETWORK_ACCESS must be 1, 0, true, or false before installing recovery, got {other}"
-            ),
-        },
-    };
     let gateway_max_frame = capture_service_limit(
         "OUROBOROS_GATEWAY_MAX_FRAME",
         DEFAULT_GATEWAY_MAX_FRAME,
@@ -1463,7 +1449,6 @@ fn capture_service_environment() -> Result<ServiceEnvironment> {
         path,
         provider_paths,
         workspace_roots,
-        codex_network_access,
         gateway_max_frame,
         gateway_queue_limit,
     })
@@ -1510,16 +1495,6 @@ pub(crate) fn validated_runtime_authority_env(
         .to_string();
     validate_installed_workspace_roots(&workspace_roots)
         .context("validating inherited OUROBOROS_WORKSPACE_ROOTS")?;
-    let codex_network_access = match value("OUROBOROS_CODEX_NETWORK_ACCESS")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        None | Some("1" | "true") => "1",
-        Some("0" | "false") => "0",
-        Some(other) => bail!(
-            "OUROBOROS_CODEX_NETWORK_ACCESS must be 1, 0, true, or false before fleet startup, got {other}"
-        ),
-    };
     let gateway_max_frame = parse_service_limit(
         "OUROBOROS_GATEWAY_MAX_FRAME",
         value("OUROBOROS_GATEWAY_MAX_FRAME"),
@@ -1534,10 +1509,6 @@ pub(crate) fn validated_runtime_authority_env(
     )?;
     Ok(vec![
         ("OUROBOROS_WORKSPACE_ROOTS".into(), workspace_roots),
-        (
-            "OUROBOROS_CODEX_NETWORK_ACCESS".into(),
-            codex_network_access.into(),
-        ),
         (
             "OUROBOROS_GATEWAY_MAX_FRAME".into(),
             gateway_max_frame.to_string(),
@@ -1909,17 +1880,6 @@ pub fn render_service_status(data_dir: &Path) -> Result<String> {
             .unwrap_or_else(|| "not recorded".into())
     ));
     text.push_str(&format!(
-        "  Codex net    {}\n",
-        configured_identity
-            .as_ref()
-            .map(|identity| if identity.codex_network_access {
-                "allowed"
-            } else {
-                "disabled"
-            })
-            .unwrap_or("not recorded")
-    ));
-    text.push_str(&format!(
         "  gateway cap {} bytes/frame, {} queued frames\n",
         configured_identity
             .as_ref()
@@ -2062,7 +2022,6 @@ fn render_service_unit(
     let marker = service_marker(profile);
     let authority_marker = service_authority_marker(
         &environment.workspace_roots,
-        environment.codex_network_access,
         environment.gateway_max_frame,
         environment.gateway_queue_limit,
     );
@@ -2072,11 +2031,6 @@ fn render_service_unit(
             let data_dir = xml_escape(path_text(data_dir)?);
             let service_path = xml_escape(&environment.path);
             let workspace_roots = xml_escape(&environment.workspace_roots);
-            let codex_network_access = if environment.codex_network_access {
-                "1"
-            } else {
-                "0"
-            };
             let gateway_max_frame = environment.gateway_max_frame;
             let gateway_queue_limit = environment.gateway_queue_limit;
             let provider_paths = environment
@@ -2092,7 +2046,7 @@ fn render_service_unit(
                 .collect::<String>();
             let label = format!("dev.ouroboros.{}", profile.machine);
             Ok(format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {marker} -->\n<!-- {authority_marker} -->\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{label}</string>\n  <key>ProgramArguments</key>\n  <array><string>{executable}</string><string>service-run</string></array>\n  <key>EnvironmentVariables</key>\n  <dict><key>OUROBOROS_DATA_DIR</key><string>{data_dir}</string><key>PATH</key><string>{service_path}</string><key>OUROBOROS_WORKSPACE_ROOTS</key><string>{workspace_roots}</string><key>OUROBOROS_CODEX_NETWORK_ACCESS</key><string>{codex_network_access}</string><key>OUROBOROS_GATEWAY_MAX_FRAME</key><string>{gateway_max_frame}</string><key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>{gateway_queue_limit}</string>{provider_paths}</dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ThrottleInterval</key><integer>3</integer>\n  <key>ProcessType</key><string>Background</string>\n</dict>\n</plist>\n"
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {marker} -->\n<!-- {authority_marker} -->\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{label}</string>\n  <key>ProgramArguments</key>\n  <array><string>{executable}</string><string>service-run</string></array>\n  <key>EnvironmentVariables</key>\n  <dict><key>OUROBOROS_DATA_DIR</key><string>{data_dir}</string><key>PATH</key><string>{service_path}</string><key>OUROBOROS_WORKSPACE_ROOTS</key><string>{workspace_roots}</string><key>OUROBOROS_GATEWAY_MAX_FRAME</key><string>{gateway_max_frame}</string><key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>{gateway_queue_limit}</string>{provider_paths}</dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ThrottleInterval</key><integer>3</integer>\n  <key>ProcessType</key><string>Background</string>\n</dict>\n</plist>\n"
             ))
         }
         ServiceKind::SystemdUser => {
@@ -2103,14 +2057,6 @@ fn render_service_unit(
             let workspace_roots = systemd_quote(&format!(
                 "OUROBOROS_WORKSPACE_ROOTS={}",
                 environment.workspace_roots
-            ))?;
-            let codex_network_access = systemd_quote(&format!(
-                "OUROBOROS_CODEX_NETWORK_ACCESS={}",
-                if environment.codex_network_access {
-                    "1"
-                } else {
-                    "0"
-                }
             ))?;
             let gateway_max_frame = systemd_quote(&format!(
                 "OUROBOROS_GATEWAY_MAX_FRAME={}",
@@ -2129,7 +2075,7 @@ fn render_service_unit(
                 .map(|value| format!("Environment={value}\n"))
                 .collect::<String>();
             Ok(format!(
-                "# {marker}\n# {authority_marker}\n[Unit]\nDescription=Ouroboros fleet machine {}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} service-run\nEnvironment={data_environment}\nEnvironment={service_path}\nEnvironment={workspace_roots}\nEnvironment={codex_network_access}\nEnvironment={gateway_max_frame}\nEnvironment={gateway_queue_limit}\n{provider_paths}Restart=always\nRestartSec=3\nTimeoutStopSec=25\n\n[Install]\nWantedBy=default.target\n",
+                "# {marker}\n# {authority_marker}\n[Unit]\nDescription=Ouroboros fleet machine {}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} service-run\nEnvironment={data_environment}\nEnvironment={service_path}\nEnvironment={workspace_roots}\nEnvironment={gateway_max_frame}\nEnvironment={gateway_queue_limit}\n{provider_paths}Restart=always\nRestartSec=3\nTimeoutStopSec=25\n\n[Install]\nWantedBy=default.target\n",
                 profile.machine
             ))
         }
@@ -2187,7 +2133,6 @@ fn required_service_environment(
 struct ServiceUnitIdentity {
     provider_path: String,
     workspace_roots: String,
-    codex_network_access: bool,
     gateway_max_frame: u64,
     gateway_queue_limit: u64,
 }
@@ -2280,35 +2225,20 @@ fn validate_service_unit_identity_with_executable(
     let workspace_roots =
         required_service_environment(kind, contents, "OUROBOROS_WORKSPACE_ROOTS")?;
     validate_installed_workspace_roots(&workspace_roots)?;
-    let codex_network_access =
-        match required_service_environment(kind, contents, "OUROBOROS_CODEX_NETWORK_ACCESS")?
-            .as_str()
-        {
-            "1" => true,
-            "0" => false,
-            other => bail!(
-                "recovery unit OUROBOROS_CODEX_NETWORK_ACCESS must be exactly 1 or 0, got {other}"
-            ),
-        };
     let gateway_max_frame =
         required_service_limit(kind, contents, "OUROBOROS_GATEWAY_MAX_FRAME", 1_024)?;
     let gateway_queue_limit =
         required_service_limit(kind, contents, "OUROBOROS_GATEWAY_QUEUE_LIMIT", 1)?;
-    let authority_marker = service_authority_marker(
-        &workspace_roots,
-        codex_network_access,
-        gateway_max_frame,
-        gateway_queue_limit,
-    );
+    let authority_marker =
+        service_authority_marker(&workspace_roots, gateway_max_frame, gateway_queue_limit);
     if contents.match_indices(&authority_marker).count() != 1 {
         bail!(
-            "recovery unit authority policy digest does not match its admitted workspace roots and Codex network setting"
+            "recovery unit authority policy digest does not match its admitted workspace roots and gateway limits"
         );
     }
     Ok(ServiceUnitIdentity {
         provider_path,
         workspace_roots,
-        codex_network_access,
         gateway_max_frame,
         gateway_queue_limit,
     })
@@ -2367,13 +2297,11 @@ fn service_marker(profile: &Profile) -> String {
 
 fn service_authority_marker(
     workspace_roots: &str,
-    codex_network_access: bool,
     gateway_max_frame: u64,
     gateway_queue_limit: u64,
 ) -> String {
     let policy = format!(
-        "OUROBOROS_WORKSPACE_ROOTS={workspace_roots}\nOUROBOROS_CODEX_NETWORK_ACCESS={}\nOUROBOROS_GATEWAY_MAX_FRAME={gateway_max_frame}\nOUROBOROS_GATEWAY_QUEUE_LIMIT={gateway_queue_limit}",
-        if codex_network_access { "1" } else { "0" },
+        "OUROBOROS_WORKSPACE_ROOTS={workspace_roots}\nOUROBOROS_GATEWAY_MAX_FRAME={gateway_max_frame}\nOUROBOROS_GATEWAY_QUEUE_LIMIT={gateway_queue_limit}"
     );
     let digest = ring::digest::digest(&ring::digest::SHA256, policy.as_bytes());
     let hex = digest
@@ -2738,23 +2666,18 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
                             }
                             Ok(identity) => {
                                 checks.push(ok(format!(
-                                    "recovery unit identity matches the current ouro executable, foreground service-run, and data directory; provider CLI PATH is {}; admitted workspaces: {}; Codex network: {}; gateway bounds: {} bytes/frame and {} queued frames",
+                                    "recovery unit identity matches the current ouro executable, foreground service-run, and data directory; provider CLI PATH is {}; admitted workspaces: {}; gateway bounds: {} bytes/frame and {} queued frames",
                                     identity.provider_path,
                                     if identity.workspace_roots.is_empty() {
                                         "none"
                                     } else {
                                         &identity.workspace_roots
                                     },
-                                    if identity.codex_network_access {
-                                        "allowed"
-                                    } else {
-                                        "disabled"
-                                    },
                                     identity.gateway_max_frame,
                                     identity.gateway_queue_limit
                                 )));
                                 checks.push(ok(
-                                    "recovery leaves HOME to the user manager and copies only PATH, CODEX_PATH/AMP_CLI_PATH/GEMINI_CLI_PATH, admitted workspace roots, Codex network policy, and gateway resource bounds; API keys and arbitrary shell variables are not copied",
+                                    "recovery leaves HOME to the user manager and copies only PATH, AMP_CLI_PATH/GEMINI_CLI_PATH, admitted workspace roots, and gateway resource bounds; API keys and arbitrary shell variables are not copied",
                                 ));
                                 checks.push(ok(format!(
                                     "runtime log {} is live-rotated solely by OTP after {} MiB with {} private archives (.0 newest); rotation happens after a complete event",
@@ -7798,7 +7721,6 @@ mod tests {
             path: "/usr/local/bin:/usr/bin:/bin".into(),
             provider_paths: Vec::new(),
             workspace_roots: "/srv/ouro-work:/opt/project".into(),
-            codex_network_access: false,
             gateway_max_frame: 65_536,
             gateway_queue_limit: 64,
         };
@@ -7815,7 +7737,6 @@ mod tests {
             .unwrap();
             assert_eq!(identity.provider_path, environment.path);
             assert_eq!(identity.workspace_roots, environment.workspace_roots);
-            assert!(!identity.codex_network_access);
             assert_eq!(identity.gateway_max_frame, 65_536);
             assert_eq!(identity.gateway_queue_limit, 64);
 
@@ -7849,27 +7770,6 @@ mod tests {
             .to_string();
             assert!(error.contains("policy"), "{error}");
 
-            let drifted_authority = match kind {
-                ServiceKind::Launchd => rendered.replace(
-                    "<key>OUROBOROS_CODEX_NETWORK_ACCESS</key><string>0</string>",
-                    "<key>OUROBOROS_CODEX_NETWORK_ACCESS</key><string>1</string>",
-                ),
-                ServiceKind::SystemdUser => rendered.replace(
-                    "Environment=\"OUROBOROS_CODEX_NETWORK_ACCESS=0\"",
-                    "Environment=\"OUROBOROS_CODEX_NETWORK_ACCESS=1\"",
-                ),
-            };
-            let error = validate_service_unit_identity_with_executable(
-                kind,
-                &profile,
-                &data,
-                &executable,
-                &drifted_authority,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("authority policy digest"), "{error}");
-
             let widened_gateway = match kind {
                 ServiceKind::Launchd => rendered.replace(
                     "<key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>64</string>",
@@ -7901,9 +7801,8 @@ mod tests {
         let executable = Path::new("/Applications/Michael's Ouro & Tools/ouro");
         let environment = ServiceEnvironment {
             path: "/opt/provider sentinel/bin:/usr/local/bin:/usr/bin:/bin".into(),
-            provider_paths: vec![("CODEX_PATH".into(), "/opt/provider sentinel/codex".into())],
+            provider_paths: vec![("AMP_CLI_PATH".into(), "/opt/provider sentinel/amp".into())],
             workspace_roots: "/srv/provider workspace:/opt/project".into(),
-            codex_network_access: false,
             gateway_max_frame: 65_536,
             gateway_queue_limit: 64,
         };
@@ -7919,11 +7818,10 @@ mod tests {
         assert!(launchd.contains("Michael&apos;s Ouro &amp; Tools"));
         assert!(launchd.contains("<key>KeepAlive</key><true/>"));
         assert!(launchd.contains("<key>PATH</key><string>/opt/provider sentinel/bin:"));
-        assert!(launchd.contains("<key>CODEX_PATH</key><string>/opt/provider sentinel/codex"));
+        assert!(launchd.contains("<key>AMP_CLI_PATH</key><string>/opt/provider sentinel/amp"));
         assert!(launchd.contains(
             "<key>OUROBOROS_WORKSPACE_ROOTS</key><string>/srv/provider workspace:/opt/project</string>"
         ));
-        assert!(launchd.contains("<key>OUROBOROS_CODEX_NETWORK_ACCESS</key><string>0</string>"));
         assert!(launchd.contains("<key>OUROBOROS_GATEWAY_MAX_FRAME</key><string>65536</string>"));
         assert!(launchd.contains("<key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>64</string>"));
         assert!(!launchd.contains("cookie"));
@@ -7942,11 +7840,10 @@ mod tests {
         assert!(systemd.contains("Restart=always"));
         assert!(systemd.contains("Environment=\"OUROBOROS_DATA_DIR=/tmp/Ouro & fleet/data\""));
         assert!(systemd.contains("Environment=\"PATH=/opt/provider sentinel/bin:"));
-        assert!(systemd.contains("Environment=\"CODEX_PATH=/opt/provider sentinel/codex\""));
+        assert!(systemd.contains("Environment=\"AMP_CLI_PATH=/opt/provider sentinel/amp\""));
         assert!(systemd.contains(
             "Environment=\"OUROBOROS_WORKSPACE_ROOTS=/srv/provider workspace:/opt/project\""
         ));
-        assert!(systemd.contains("Environment=\"OUROBOROS_CODEX_NETWORK_ACCESS=0\""));
         assert!(systemd.contains("Environment=\"OUROBOROS_GATEWAY_MAX_FRAME=65536\""));
         assert!(systemd.contains("Environment=\"OUROBOROS_GATEWAY_QUEUE_LIMIT=64\""));
         assert!(!systemd.contains("cookie"));

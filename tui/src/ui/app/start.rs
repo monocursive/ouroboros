@@ -54,6 +54,7 @@ pub enum NewField {
     Plane,
     Machine,
     Provider,
+    Model,
     Workspace,
     ApprovalMode,
     SandboxMode,
@@ -124,6 +125,7 @@ impl NewSession {
             field: NewField::Provider,
             request: StartRequest {
                 workspace,
+                model: defaults.model.clone(),
                 ..StartRequest::new(plane)
             },
             provider: 0,
@@ -135,7 +137,7 @@ impl NewSession {
             pending_request: None,
             reconciling: false,
             inferred_local_workspace,
-            wanted_provider: defaults.provider.clone(),
+            wanted_provider: defaults.provider.clone().or_else(|| Some("native".into())),
         }
     }
 
@@ -157,6 +159,9 @@ impl NewSession {
         match providers.iter().position(|entry| entry.provider == wanted) {
             Some(index) => {
                 self.provider = index;
+                if wanted == "native" && self.request.model.is_none() {
+                    self.request.model = Some("openai_codex:gpt-5.6-sol".into());
+                }
                 None
             }
             None => Some(wanted),
@@ -165,7 +170,12 @@ impl NewSession {
 
     /// The rows this plane has. `objective` exists only where the gateway accepts it.
     pub fn fields(&self) -> Vec<NewField> {
-        let mut fields = vec![NewField::Plane, NewField::Machine, NewField::Provider];
+        let mut fields = vec![
+            NewField::Plane,
+            NewField::Machine,
+            NewField::Provider,
+            NewField::Model,
+        ];
 
         if self.request.plane == Plane::Coding {
             fields.push(NewField::Objective);
@@ -272,6 +282,7 @@ impl NewSession {
                 self.wanted_provider = None;
                 self.provider =
                     (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
+                self.request.model = None;
             }
             NewField::Machine if !machines.is_empty() => {
                 self.machine =
@@ -309,6 +320,7 @@ impl NewSession {
                 self.inferred_local_workspace = None;
                 Some(&mut self.request.workspace)
             }
+            NewField::Model => Some(self.request.model.get_or_insert_with(String::new)),
             NewField::Objective => Some(&mut self.request.objective),
             _ => None,
         }
@@ -527,6 +539,9 @@ impl App {
         dialog.error = None;
         dialog.pending = true;
         dialog.pending_request = Some(request.clone());
+        self.config.defaults.provider = Some(request.provider.clone());
+        self.config.defaults.model = request.model.clone();
+        self.save_pending = true;
 
         let plane = request.plane;
 

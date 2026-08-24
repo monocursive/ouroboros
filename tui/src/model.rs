@@ -1218,22 +1218,17 @@ impl ProviderEntry {
     }
 }
 
-/// The non-secret account metadata exposed by Codex app-server's `account/read`.
+/// Non-secret account metadata exposed by the runtime's direct OAuth boundary.
 ///
-/// Ouroboros never receives or stores an access token. The runtime keeps Codex's auth
-/// material; this shape is only enough for the shell to say whether the coding provider
-/// is ready and which ChatGPT plan is connected.
+/// Tokens stay in the runtime's private credential file. This shape is only enough for
+/// the shell to report ChatGPT subscription readiness and managed-login progress.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountState {
     #[serde(default)]
     pub account: Option<AccountIdentity>,
-    /// Whether this Codex install needs an OpenAI sign-in at all. `Some(false)` is an
-    /// API-key install: the credential is already on the runtime host.
-    ///
-    /// `Option` rather than a defaulted `bool`, because "the field was absent" and "the
-    /// runtime said no auth is required" are different claims and only one of them is safe
-    /// to act on.
+    /// Whether the selected ChatGPT-subscription model still needs OAuth. `Option`
+    /// distinguishes an absent claim from an explicit ready/not-ready answer.
     #[serde(default)]
     pub requires_openai_auth: Option<bool>,
     #[serde(default)]
@@ -1278,15 +1273,10 @@ impl AccountState {
             .unwrap_or(false)
     }
 
-    /// Whether Codex can run without this client asking anyone to sign in.
+    /// Whether an OAuth-backed `openai_codex:` model can run now.
     ///
-    /// An API-key install reports `requiresOpenaiAuth: false` and no ChatGPT identity.
-    /// Reading only [`connected`](Self::connected) left those installs looking at "Connect
-    /// ChatGPT" forever, with Enter pushing a login they do not need and cannot complete.
-    ///
-    /// An absent field is not a statement, so it counts as "sign-in required": offering a
-    /// login to someone who does not need one wastes a keystroke, and hiding the only way
-    /// in from someone who does is a client they cannot use.
+    /// Official `openai:` API-key models do not consult this account surface; the home
+    /// readiness gate checks the configured model prefix before calling this.
     pub fn usable(&self) -> bool {
         self.connected() || self.requires_openai_auth == Some(false)
     }
@@ -1932,6 +1922,7 @@ pub struct StartRequest {
     pub id: String,
     pub plane: Plane,
     pub provider: String,
+    pub model: Option<String>,
     /// A friendly fleet machine name. Blank means this machine, which is the safe and
     /// backwards-compatible default.
     pub machine: String,
@@ -1963,6 +1954,7 @@ impl StartRequest {
             id: new_session_id(),
             plane,
             provider: String::new(),
+            model: None,
             machine: String::new(),
             workspace: String::new(),
             approval_mode: None,
@@ -1994,6 +1986,15 @@ impl StartRequest {
         let mut params = serde_json::Map::new();
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("provider".into(), Value::String(provider.to_string()));
+
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            params.insert("model".into(), Value::String(model.to_string()));
+        }
 
         let machine = self.machine.trim();
 

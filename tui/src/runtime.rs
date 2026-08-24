@@ -2890,7 +2890,6 @@ mod tests {
                     "/private/gateway.token".into(),
                 ),
                 ("OUROBOROS_WORKSPACE_ROOTS".into(), "/srv/project".into()),
-                ("OUROBOROS_CODEX_NETWORK_ACCESS".into(), "0".into()),
                 ("OUROBOROS_GATEWAY_MAX_FRAME".into(), "65536".into()),
                 ("OUROBOROS_GATEWAY_QUEUE_LIMIT".into(), "64".into()),
                 ("RELEASE_VM_ARGS".into(), "/private/fleet/vm.args".into()),
@@ -2905,7 +2904,7 @@ mod tests {
         assert!(!environment.contains("OUROBOROS_SIGNER_KEY_PATH="));
         assert!(!environment.contains("OUROBOROS_CONTROL_ALLOW_FORGE_STEPS="));
         assert!(environment.contains("OUROBOROS_WORKSPACE_ROOTS=/srv/project"));
-        assert!(environment.contains("OUROBOROS_CODEX_NETWORK_ACCESS=0"));
+        assert!(!environment.contains("OUROBOROS_CODEX_NETWORK_ACCESS"));
         assert!(environment.contains("OUROBOROS_GATEWAY_MAX_FRAME=65536"));
         assert!(environment.contains("OUROBOROS_GATEWAY_QUEUE_LIMIT=64"));
         assert!(!environment.contains("OUROBOROS_GATEWAY_QUEUE_LIMIT=999999"));
@@ -3128,7 +3127,7 @@ mod tests {
         assert!(get("OUROBOROS_BOOT_COOKIE_DECOY").is_some());
         assert_eq!(get("OUROBOROS_FLEET_ID"), Some(profile.fleet_id.as_str()));
         assert_eq!(get("OUROBOROS_WORKSPACE_ROOTS"), Some("/srv/project"));
-        assert_eq!(get("OUROBOROS_CODEX_NETWORK_ACCESS"), Some("0"));
+        assert_eq!(get("OUROBOROS_CODEX_NETWORK_ACCESS"), None);
         assert_eq!(get("OUROBOROS_GATEWAY_MAX_FRAME"), Some("65536"));
         assert_eq!(get("OUROBOROS_GATEWAY_QUEUE_LIMIT"), Some("64"));
         assert_eq!(get("OUROBOROS_SIGNER_KEY_PATH"), None);
