@@ -63,7 +63,55 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
         assert is_binary(spec.description) and spec.description != ""
         assert %{"type" => "object", "properties" => properties} = spec.parameters
         assert is_map(properties)
+
+        required = spec.parameters["required"] || []
+        assert Enum.all?(required, &Map.has_key?(properties, &1))
       end
+    end
+
+    test "validates every advertised static tool before permission or execution" do
+      specs = Tools.specs(nil, nil)
+
+      for spec <- specs, (spec.parameters["required"] || []) != [] do
+        assert {:error, message} = Tools.validate_call(spec.name, %{}, specs)
+        assert message =~ "Invalid arguments for `#{spec.name}`"
+
+        for required <- spec.parameters["required"] do
+          assert message =~ required
+        end
+      end
+
+      assert {:ok, %{}} = Tools.validate_call("ls", %{}, specs)
+
+      assert {:error, message} =
+               Tools.validate_call("ls", %{"depth" => "deep"}, specs)
+
+      assert message =~ "depth"
+    end
+
+    test "validates exact and open MCP schemas by the contract shown to the model" do
+      exact = %{
+        name: "mcp__test__exact",
+        description: "exact",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{"query" => %{"type" => "string"}},
+          "required" => ["query"],
+          "additionalProperties" => false
+        }
+      }
+
+      open = %{
+        name: "mcp__test__open",
+        description: "open",
+        parameters: %{"type" => "object", "additionalProperties" => true}
+      }
+
+      assert {:error, message} = Tools.validate_call(exact.name, %{}, [exact, open])
+      assert message =~ "query"
+
+      assert {:ok, %{"anything" => 1}} =
+               Tools.validate_call(open.name, %{"anything" => 1}, [exact, open])
     end
 
     test "allowed_tools narrows the set and disallowed_tools always wins" do
@@ -598,6 +646,41 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
   end
 
   describe "execute/4" do
+    test "every static action with required arguments fails in band when they are absent", %{
+      context: context
+    } do
+      for module <- Tools.modules(),
+          Enum.any?(module.schema(), fn {_key, opts} -> opts[:required] == true end) do
+        result = Tools.execute(module, %{}, context, 5_000)
+
+        assert result.is_error,
+               "#{module.name()} unexpectedly executed without required arguments"
+
+        assert result.output =~ "required"
+      end
+    end
+
+    test "executor validation rejects wrong types and applies declared defaults", %{
+      context: context,
+      workspace: workspace
+    } do
+      invalid = run(Ouroboros.Provider.Native.Tools.Ls, %{"depth" => "deep"}, context)
+      assert invalid.is_error
+      assert invalid.output =~ "depth"
+
+      write_file(workspace, "lib/defaults.ex", "ok\n")
+
+      valid =
+        run(
+          Ouroboros.Provider.Native.Tools.Read,
+          %{"path" => "lib/defaults.ex"},
+          context
+        )
+
+      refute valid.is_error
+      assert valid.output =~ "     1\tok"
+    end
+
     test "a tool that raises becomes an error result, not a crash", %{context: context} do
       defmodule Exploding do
         use Jido.Action, name: "exploding", description: "raises", schema: []

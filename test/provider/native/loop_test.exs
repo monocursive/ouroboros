@@ -213,6 +213,27 @@ defmodule Ouroboros.Provider.Native.LoopTest do
   end
 
   describe "bounds" do
+    test "rejects missing required arguments before permission or execution", context do
+      script = [
+        [{:tool_call, %{id: "bad-read", name: "read", input: %{}}}],
+        [{:text, "recovered"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      call = find(events, :tool_call)
+      result = find(events, :tool_result)
+
+      refute Map.has_key?(call.payload, "ledger_ref")
+      assert result.payload["is_error"]
+      assert result.payload["output"] =~ "Invalid arguments for `read`"
+      assert result.payload["output"] =~ "path"
+      assert find(events, :turn_completed).payload["status"] == "completed"
+      refute find(events, :turn_failed)
+    end
+
     test "stops on the third identical call and names the doom loop", context do
       repeat = {:tool_call, %{id: "c", name: "read", input: %{"path" => "lib/a.ex"}}}
       script = List.duplicate([repeat], 6)

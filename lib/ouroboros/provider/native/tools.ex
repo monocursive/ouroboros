@@ -178,8 +178,12 @@ defmodule Ouroboros.Provider.Native.Tools do
     %{
       name: tool.name,
       description: description(module, tool.description, opts),
-      parameters: tool.parameter_schema
+      parameters: model_schema(module, tool.parameter_schema)
     }
+  end
+
+  defp model_schema(module, generated) do
+    if function_exported?(module, :model_schema, 0), do: module.model_schema(), else: generated
   end
 
   defp description(module, static, opts) do
@@ -247,6 +251,39 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   def interactive?(module) do
     function_exported?(module, :interactive?, 0) and module.interactive?() == true
+  end
+
+  @doc "Validates a model call against the exact JSON Schema shown in this turn."
+  @spec validate_call(String.t(), term(), [Model.tool_spec()]) ::
+          {:ok, map()} | {:error, String.t()}
+  def validate_call(name, input, specs)
+      when is_binary(name) and is_map(input) and is_list(specs) do
+    canonical = canonical(name)
+
+    case Enum.find(specs, &(&1.name == canonical or &1.name == name)) do
+      %{parameters: parameters} -> validate_json_input(canonical, input, parameters)
+      _not_advertised -> {:error, "Invalid arguments for `#{canonical}`: no schema is available."}
+    end
+  end
+
+  def validate_call(name, input, _specs),
+    do:
+      {:error,
+       "Invalid arguments for `#{canonical(to_string(name))}`: expected an object, got #{inspect(input)}."}
+
+  defp validate_json_input(name, input, parameters) do
+    case ReqLLM.Schema.validate(input, parameters) do
+      {:ok, validated} when is_map(validated) ->
+        {:ok, validated}
+
+      {:ok, other} ->
+        {:error, "Invalid arguments for `#{name}`: expected an object, got #{inspect(other)}."}
+
+      {:error, reason} ->
+        {:error, "Invalid arguments for `#{name}`: #{error_message(reason)}"}
+    end
+  rescue
+    error -> {:error, "Invalid arguments for `#{name}`: #{Exception.message(error)}"}
   end
 
   @doc """
@@ -379,8 +416,13 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp invoke(module, input, context) do
     case module do
-      {module, name} -> module.run(name, if(is_map(input), do: input, else: %{}), context)
-      module -> module.run(atomize(module, input), context)
+      {module, name} ->
+        module.run(name, if(is_map(input), do: input, else: %{}), context)
+
+      module ->
+        with {:ok, params} <- module.validate_params(atomize(module, input)) do
+          module.run(params, context)
+        end
     end
   rescue
     error -> {:error, {:tool_raised, Exception.message(error)}}
@@ -452,6 +494,10 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp describe(%{__exception__: true} = error), do: Exception.message(error)
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
+
+  defp error_message(%{__exception__: true} = error), do: Exception.message(error)
+  defp error_message(reason) when is_binary(reason), do: reason
+  defp error_message(reason), do: inspect(reason)
 
   defp bound(output) when byte_size(output) <= @max_result_bytes, do: output
 

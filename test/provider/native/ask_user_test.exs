@@ -186,7 +186,8 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
     assert Enum.filter(events, &(&1.type == :approval_requested)) == []
     [result] = Enum.filter(events, &(&1.type == :tool_result))
     assert result.payload["is_error"]
-    assert result.payload["output"] =~ "needs a `question`"
+    assert result.payload["output"] =~ "Invalid arguments for `ask_user`"
+    assert result.payload["output"] =~ "question"
   end
 
   describe "the payload itself" do

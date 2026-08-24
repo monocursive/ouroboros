@@ -442,13 +442,24 @@ defmodule Ouroboros.Provider.Native.Loop do
              is_error: true
            })}
         else
-          # Classified once, here, and handed to the gate: re-deriving it would run
-          # `code_intel`'s rename preview a second time for nothing.
-          classified = Tools.classify(call.name, call.input, state.scope)
-          effect_id = tool_effect_id(state, call)
-          emit_tool_call(state, call, effect_id)
+          case Tools.validate_call(call.name, call.input, tool_specs(state)) do
+            {:ok, input} ->
+              call = %{call | input: input}
 
-          gated(state, call, module, classified, effect_id)
+              # Classified once, here, and handed to the gate: re-deriving it would run
+              # `code_intel`'s rename preview a second time for nothing.
+              classified = Tools.classify(call.name, call.input, state.scope)
+              effect_id = tool_effect_id(state, call)
+              emit_tool_call(state, call, effect_id)
+
+              gated(state, call, module, classified, effect_id)
+
+            {:error, message} ->
+              # Invalid calls have no effect to admit or record. They remain paired tool
+              # call/results so the model can repair its arguments on the next iteration.
+              emit_tool_call(state, call, nil)
+              {:continue, tool_result(state, call, %{output: message, is_error: true})}
+          end
         end
     end
   end

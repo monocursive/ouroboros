@@ -2,6 +2,7 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Provider.Native.Model.ReqLLM, as: DirectModel
+  alias Ouroboros.Provider.Native.Tools
 
   setup do
     previous_options = Application.get_env(:ouroboros, :native_model_options)
@@ -65,7 +66,7 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
       model: "openai:gpt-5.6",
       system: "Be concise",
       messages: [%{role: :user, content: "say hello"}],
-      tools: [],
+      tools: Tools.specs(nil, nil),
       provider_session_id: "native-direct-test",
       turn_id: "turn-direct-test",
       reasoning_effort: :low,
@@ -84,8 +85,35 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
     assert String.downcase(raw) =~ "authorization: bearer test-openai-key"
     assert raw =~ ~s("model":"gpt-5.6")
     assert raw =~ "Be concise"
+
+    payload = request_payload(raw)
+    assert Enum.map(payload["tools"], & &1["name"]) == Enum.map(Tools.specs(nil, nil), & &1.name)
+
+    for tool <- payload["tools"] do
+      assert tool["strict"]
+
+      parameters = tool["parameters"]
+      assert MapSet.new(parameters["required"]) == MapSet.new(Map.keys(parameters["properties"]))
+    end
+
+    read = Enum.find(payload["tools"], &(&1["name"] == "read"))
+    refute nullable?(read["parameters"]["properties"]["path"])
+    assert nullable?(read["parameters"]["properties"]["offset"])
+
     assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
   end
+
+  defp request_payload(request) do
+    [_headers, body] = String.split(request, "\r\n\r\n", parts: 2)
+    Jason.decode!(body)
+  end
+
+  defp nullable?(%{"type" => "null"}), do: true
+
+  defp nullable?(%{"anyOf" => variants}) when is_list(variants),
+    do: Enum.any?(variants, &nullable?/1)
+
+  defp nullable?(_schema), do: false
 
   defp read_request(socket, acc) do
     case complete_request(acc) do

@@ -24,7 +24,10 @@ defmodule Ouroboros.Provider.Native.Tools.Plan do
         "Optional — use it when a task has enough steps that the operator should see them.",
     schema: [
       steps: [
-        type: {:list, :map},
+        # The exact nested contract is `model_schema/0`. Runtime input stays `:any`
+        # because model JSON uses string keys and NimbleOptions' `:map` type accepts
+        # atom-keyed maps only; `run/2` deliberately normalizes both forms.
+        type: {:list, :any},
         required: true,
         doc:
           "The full ordered plan. Each step is {\"step\": \"...\", " <>
@@ -32,6 +35,39 @@ defmodule Ouroboros.Provider.Native.Tools.Plan do
       ],
       explanation: [type: :string, default: "", doc: "One line on what the plan is for."]
     ]
+
+  @doc "The nested schema shown to the model; Jido's `:map` bridge cannot name map fields."
+  @spec model_schema() :: map()
+  def model_schema do
+    %{
+      "type" => "object",
+      "properties" => %{
+        "steps" => %{
+          "type" => "array",
+          "description" => "The full ordered plan. Each step has text and one lifecycle status.",
+          "items" => %{
+            "type" => "object",
+            "properties" => %{
+              "step" => %{"type" => "string", "description" => "The work item."},
+              "status" => %{
+                "type" => "string",
+                "enum" => ["pending", "in_progress", "completed"],
+                "description" => "The work item's current lifecycle state."
+              }
+            },
+            "required" => ["step", "status"],
+            "additionalProperties" => false
+          }
+        },
+        "explanation" => %{
+          "type" => "string",
+          "description" => "One line on what the plan is for."
+        }
+      },
+      "required" => ["steps"],
+      "additionalProperties" => false
+    }
+  end
 
   @statuses ~w(pending in_progress completed)
   @max_steps 40

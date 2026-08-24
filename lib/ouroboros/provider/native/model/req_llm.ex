@@ -18,6 +18,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   """
 
   @behaviour Ouroboros.Provider.Native.Model
+  alias Ouroboros.Provider.Native.Model.ToolSchema
+
   @generation_defaults [
     receive_timeout: 60_000,
     stream_idle_timeout: 60_000,
@@ -48,7 +50,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   @impl true
   def stream(request, opts) do
     with {:ok, configured} <- configured_options(),
-         {:ok, tools} <- build_tools(request.tools),
+         {:ok, tools} <- build_tools(request.tools, request.model),
          {:ok, context} <- build_context(request) do
       generation_opts =
         configured
@@ -59,7 +61,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         |> put_transport_options(request)
 
       case ReqLLM.stream_text(request.model, context, generation_opts) do
-        {:ok, response} -> {:ok, normalize(response)}
+        {:ok, response} -> {:ok, normalize(response, request.tools)}
         {:error, reason} -> {:error, reason}
       end
     end
@@ -106,22 +108,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp present?(_env), do: false
 
-  defp build_tools([]), do: {:ok, []}
+  defp build_tools([], _model_spec), do: {:ok, []}
 
-  defp build_tools(specs) do
-    tools =
-      Enum.map(specs, fn spec ->
-        ReqLLM.Tool.new!(
-          name: spec.name,
-          description: spec.description,
-          parameter_schema: spec.parameters,
-          # The loop dispatches every tool itself; this callback exists because
-          # `ReqLLM.Tool` requires one and is never reached.
-          callback: {__MODULE__, :unused_callback}
-        )
-      end)
-
-    {:ok, tools}
+  defp build_tools(specs, model_spec) do
+    {:ok, ToolSchema.prepare(specs, model_spec)}
   rescue
     error -> {:error, {:invalid_tool_schema, Exception.message(error)}}
   end
@@ -194,32 +184,40 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   # `ReqLLM` streams argument fragments for tool calls on some providers and complete
   # calls on others. Only complete calls (`name` present, arguments a map) become
   # `{:tool_call, …}`; a fragment without a name is dropped rather than guessed at.
-  defp normalize(%ReqLLM.StreamResponse{stream: stream}) do
-    Stream.flat_map(stream, &chunk/1)
+  defp normalize(%ReqLLM.StreamResponse{stream: stream}, specs) do
+    Stream.flat_map(stream, &chunk(&1, specs))
   end
 
-  defp normalize(stream), do: Stream.flat_map(stream, &chunk/1)
+  defp normalize(stream, specs), do: Stream.flat_map(stream, &chunk(&1, specs))
 
-  defp chunk(%ReqLLM.StreamChunk{type: :content, text: text}) when is_binary(text) and text != "",
-    do: [{:text, text}]
+  defp chunk(%ReqLLM.StreamChunk{type: :content, text: text}, _specs)
+       when is_binary(text) and text != "",
+       do: [{:text, text}]
 
-  defp chunk(%ReqLLM.StreamChunk{type: :thinking, text: text})
+  defp chunk(%ReqLLM.StreamChunk{type: :thinking, text: text}, _specs)
        when is_binary(text) and text != "",
        do: [{:thinking, text}]
 
-  defp chunk(%ReqLLM.StreamChunk{type: :tool_call, name: name, arguments: args, metadata: meta})
+  defp chunk(
+         %ReqLLM.StreamChunk{type: :tool_call, name: name, arguments: args, metadata: meta},
+         specs
+       )
        when is_binary(name) and name != "" do
+    input =
+      args |> Kernel.||(%{}) |> stringify() |> then(&ToolSchema.restore_input(specs, name, &1))
+
     [
       {:tool_call,
        %{
          id: call_id(meta),
          name: name,
-         input: stringify(args || %{})
+         input: input
        }}
     ]
   end
 
-  defp chunk(%ReqLLM.StreamChunk{type: :meta, metadata: metadata}) when is_map(metadata) do
+  defp chunk(%ReqLLM.StreamChunk{type: :meta, metadata: metadata}, _specs)
+       when is_map(metadata) do
     usage =
       case value(metadata, :usage) do
         usage when is_map(usage) -> [{:usage, usage}]
@@ -252,7 +250,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     usage ++ reasoning ++ provider ++ finish
   end
 
-  defp chunk(_other), do: []
+  defp chunk(_other, _specs), do: []
 
   defp call_id(meta) when is_map(meta) do
     case Map.get(meta, :id) || Map.get(meta, "id") do
