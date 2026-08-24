@@ -44,6 +44,14 @@ defmodule Ouroboros.Provider.NativeTest do
     test "appears in the runtime's own provider list, with no list to keep in sync" do
       assert :native in Enum.map(Ouroboros.providers(), & &1.provider)
     end
+
+    test "the removed Codex key cannot reveal Harness's built-in CLI adapter" do
+      assert {:ok, Ouroboros.Provider.RemovedCodex} = Jido.Harness.Registry.lookup(:codex)
+      refute :codex in Enum.map(Ouroboros.providers(), & &1.provider)
+      assert {:ok, status} = Ouroboros.provider_status(:codex)
+      refute status.installed
+      assert status.details["removed"]
+    end
   end
 
   describe "spec/0" do
@@ -117,10 +125,10 @@ defmodule Ouroboros.Provider.NativeTest do
                interrupt: :native,
                approvals: :native,
                steer: :native,
-               multimodal: false,
+               multimodal: :native,
                dynamic_model: :native,
                dynamic_configuration: :native,
-               fork: false,
+               fork: :native,
                # C4. `:native` because this runtime holds the conversation it folds, which
                # is what lets the report carry real token counts.
                compact: :native
@@ -284,6 +292,10 @@ defmodule Ouroboros.Provider.NativeTest do
     end
 
     test "refuses to run with no model rather than starting a turn it cannot finish", context do
+      previous_default = Application.get_env(:ouroboros, :native_model)
+      Application.delete_env(:ouroboros, :native_model)
+      on_exit(fn -> restore(:native_model, previous_default) end)
+
       request =
         RunRequest.new!(%{prompt: "hello", provider: :native, cwd: context.workspace})
 

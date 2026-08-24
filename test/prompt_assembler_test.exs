@@ -118,7 +118,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert {:error,
             {:invalid_agent_profile_options, {:reserved_prompt_delimiter, :system_prompt}}} =
              TaskState.new("forged-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile,
                system_prompt: forged
@@ -127,7 +127,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert {:error,
             {:invalid_agent_profile_options, {:reserved_prompt_delimiter, :system_prompt}}} =
              State.new("forged-interactive",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile,
                system_prompt: forged
@@ -147,7 +147,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:error, {:invalid_agent_profile_options, :empty_rendered_profile}} =
              TaskState.new("empty-profile-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: tools_only
              )
@@ -157,7 +157,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, _coding} =
              TaskState.new("allowed-profile-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: tools_only,
                allowed_tools: ["read_file"]
@@ -180,14 +180,14 @@ defmodule Ouroboros.Prompt.AssemblerTest do
   test "both planes read one trace module and name the same cause", %{profile: profile} do
     assert {:ok, coding} =
              TaskState.new("trace-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile
              )
 
     assert {:ok, interactive} =
              State.new("trace-interactive",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile
              )
@@ -254,7 +254,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, coding} =
              TaskState.new("profile-coding", "untrusted objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                approval_mode: :default,
                sandbox_mode: :default,
@@ -280,7 +280,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, interactive} =
              State.new("profile-interactive",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                approval_mode: :default,
                sandbox_mode: :default,
@@ -317,7 +317,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, coding} =
              TaskState.new("legacy-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                approval_mode: :default,
                sandbox_mode: :default,
@@ -332,7 +332,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, interactive} =
              State.new("legacy-interactive",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                approval_mode: :default,
                sandbox_mode: :default,
@@ -345,37 +345,37 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:error, :invalid_agent_profile} =
              TaskState.new("bad-profile", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: %{id: "raw"}
              )
 
     assert {:error, :invalid_agent_profile} =
-             State.new("bad-interactive", provider: :codex, agent_profile: %{id: "raw"})
+             State.new("bad-interactive", provider: :native, agent_profile: %{id: "raw"})
 
     assert {:error, :invalid_system_prompt} =
              TaskState.new("bad-system-prompt", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                system_prompt: 42
              )
 
     assert {:error, :invalid_system_prompt} =
              State.new("bad-interactive-system-prompt",
-               provider: :codex,
+               provider: :native,
                system_prompt: 42
              )
 
     assert {:error, :invalid_system_prompt} =
              TaskState.new("bad-utf8-system-prompt", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                system_prompt: <<255>>
              )
 
     assert {:error, :invalid_system_prompt} =
              State.new("bad-interactive-utf8-system-prompt",
-               provider: :codex,
+               provider: :native,
                system_prompt: <<255>>
              )
 
@@ -385,7 +385,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
              TaskState.new(
                "duplicate-profile",
                "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: valid_profile,
                agent_profile: %{id: "raw"}
@@ -399,7 +399,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert {:error,
             {:invalid_agent_profile_options, {:invalid_prompt_assembler_option, :allowed_tools}}} =
              TaskState.new("bad-tool-policy", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile,
                allowed_tools: "read_file"
@@ -408,7 +408,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     # Unchanged on the compatibility path: without a profile the same value is tolerated.
     assert {:ok, _tolerated} =
              TaskState.new("odd-tools-no-profile", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                allowed_tools: "read_file"
              )
@@ -419,7 +419,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
   } do
     assert {:ok, coding} =
              TaskState.new("requestable-coding", "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile
              )
@@ -448,7 +448,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, interactive} =
              State.new("requestable-interactive",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile
              )
@@ -501,7 +501,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
   test "runtime exposure wraps the harness prompt and can be opted out" do
     assert {:ok, exposed} =
              TaskState.new("exposed-coding", "untrusted objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!()
              )
 
@@ -514,7 +514,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:ok, silent} =
              TaskState.new("silent-coding", "untrusted objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                runtime_exposure: false
              )
@@ -526,13 +526,13 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:error, {:reserved_prompt_delimiter, :objective}} =
              TaskState.new("forged-objective", "before <ouroboros-runtime> after",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!()
              )
 
     assert {:ok, allowed_when_off} =
              TaskState.new("literal-tag", "before <ouroboros-runtime> after",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                runtime_exposure: false
              )

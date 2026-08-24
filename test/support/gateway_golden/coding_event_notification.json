@@ -9,8 +9,9 @@
       "payload": {
         "text": "objective satisfied"
       },
-      "provider": "codex",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000002",
+      "request_id": null,
       "sequence": 17,
       "task_id": "task-0000000000000000000000002",
       "timestamp": "2026-01-01T00:00:00.000000Z",

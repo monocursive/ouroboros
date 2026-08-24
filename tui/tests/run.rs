@@ -74,7 +74,8 @@ fn start_plan(prompt: &str) -> Plan {
     let request = StartRequest {
         id: SESSION.to_string(),
         plane: Plane::Interactive,
-        provider: "codex".into(),
+        provider: "native".into(),
+        model: Some("openai_codex:gpt-5.6-sol".into()),
         machine: String::new(),
         workspace: "/w".into(),
         approval_mode: None,
@@ -100,6 +101,7 @@ fn planning_start(prompt: &str) -> Plan {
         id: SESSION.to_string(),
         plane: Plane::Interactive,
         provider: "native".into(),
+        model: Some("openai_codex:gpt-5.6-sol".into()),
         machine: String::new(),
         workspace: "/w".into(),
         approval_mode: None,
@@ -252,7 +254,7 @@ where
 /// The handshake plus the two calls every start does, answered as the gateway answers
 /// them. Leaves the peer ready to notify events.
 async fn accept_start(peer: &mut Peer, backlog: Value) {
-    accept_start_of(peer, backlog, "codex", "do the thing").await;
+    accept_start_of(peer, backlog, "native", "do the thing").await;
 }
 
 /// The same, for a start this file makes with a different provider or prompt.
@@ -470,7 +472,7 @@ async fn stream_json_prints_the_wire_events_unchanged_and_then_the_result() {
     assert_eq!(result["session_id"], SESSION);
     assert_eq!(result["turn_id"], TURN);
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["provider"], "codex");
+    assert_eq!(result["provider"], "native");
     assert_eq!(result["usage"]["input_tokens"], 11);
     assert_eq!(result["usage"]["total_tokens"], 15);
     assert_eq!(result["files_changed"], json!(["lib/a.ex"]));
@@ -596,6 +598,7 @@ fn a_planning_start_asks_for_plan_mode_and_nothing_else() {
         json!({
             "id": SESSION,
             "provider": "native",
+            "model": "openai_codex:gpt-5.6-sol",
             "workspace": "/w",
             "plan": true,
         }),
@@ -1551,55 +1554,19 @@ async fn a_refused_start_carries_the_runtimes_own_words() {
     assert_eq!(run::Exit::USAGE.code(), 64);
 }
 
-/// The exit code and the two surfaces, end to end through the real binary.
-///
-/// This is the one property no driver test can prove: that a refusal costs 64, that it
-/// reaches both stderr and — because stdout is JSON here — stdout, and that it happens
-/// *before* a runtime is started. A `ouro run` that spawned a daemon and then refused
-/// would leave one behind on every misspelled flag.
+/// The actual binary documents the direct default and model selector without starting a
+/// runtime.
 #[test]
-fn the_binary_refuses_a_prompt_with_no_provider_before_it_starts_a_runtime() {
-    let home = std::env::temp_dir().join(format!("ouro-run-refusal-{}", std::process::id()));
-    let data = home.join("data");
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&data).expect("a scratch home");
-
+fn the_binary_help_names_the_native_default_and_model_selector() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ouro"))
-        .args(["run", "do the thing", "--json"])
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env("OUROBOROS_DATA_DIR", &data)
+        .args(["new", "--help"])
         .output()
         .expect("the ouro binary runs");
 
-    assert_eq!(
-        output.status.code(),
-        Some(64),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
+    assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
-
-    let object: Value = serde_json::from_str(stdout.trim()).expect("one JSON object on stdout");
-    assert_eq!(object["type"], "error");
-    assert!(
-        object["error"]
-            .as_str()
-            .expect("the refusal text")
-            .contains("no provider was named"),
-        "{object}"
-    );
-    assert!(stderr.contains("no provider was named"), "{stderr}");
-    assert!(
-        !data.join("gateway.json").exists(),
-        "a refusal must not leave a runtime behind it"
-    );
-
-    let _ = std::fs::remove_dir_all(&home);
+    assert!(stdout.contains("direct Native provider"), "{stdout}");
+    assert!(stdout.contains("--model <SPEC>"), "{stdout}");
 }
 
 /// The headless approval policy is documented where a person types the command.

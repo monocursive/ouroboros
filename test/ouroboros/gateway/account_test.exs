@@ -4,13 +4,14 @@ defmodule Ouroboros.Gateway.AccountTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Test.CodexAccountAdapter
+  alias Ouroboros.Test.OpenAIAccountAdapter
 
   test "the account surface is advertised with read and operate scopes" do
     table = Methods.table()
 
     assert table["account.read"].scope == :read
     assert table["account.login.start"].scope == :operate
+    assert table["account.login.complete"].scope == :operate
     assert table["account.login.cancel"].scope == :operate
     assert table["account.logout"].scope == :operate
   end
@@ -22,7 +23,7 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert {:ok, %{"loginId" => "browser-login", "authUrl" => auth_url}} =
              Methods.invoke("account.login.start", %{"flow" => "browser"})
 
-    assert auth_url =~ "chatgpt.com"
+    assert auth_url =~ "auth.openai.com"
 
     assert {:ok,
             %{
@@ -32,6 +33,13 @@ defmodule Ouroboros.Gateway.AccountTest do
             }} = Methods.invoke("account.login.start", %{"flow" => "device_code"})
 
     assert verification_url == "https://auth.openai.com/codex/device"
+
+    assert {:ok, %{}} =
+             Methods.invoke("account.login.complete", %{
+               "login_id" => "browser-login",
+               "code" => "auth-code",
+               "state" => "oauth-state"
+             })
   end
 
   test "cancels and logs out without accepting unknown fields" do
@@ -51,36 +59,37 @@ defmodule Ouroboros.Gateway.AccountTest do
 
   describe "a boundary that fails is answered in the terms it failed in" do
     setup do
-      on_exit(&CodexAccountAdapter.succeed/0)
+      on_exit(&OpenAIAccountAdapter.succeed/0)
       :ok
     end
 
     test "every account method maps timeout, unavailable, and upstream refusal" do
-      # Each of these shapes reaches the gateway only from the Codex boundary, and every
-      # account method can produce all three, so every method is asked for each of them.
+      # Every account method can produce these failures, so each method is asked.
       methods = [
         {"account.read", %{}},
         {"account.login.start", %{"flow" => "browser"}},
+        {"account.login.complete",
+         %{"login_id" => "login-1", "code" => "code", "state" => "state"}},
         {"account.login.cancel", %{"login_id" => "login-1"}},
         {"account.logout", %{}}
       ]
 
       for {method, params} <- methods do
-        CodexAccountAdapter.fail({:error, {:timeout, "account/read"}})
+        OpenAIAccountAdapter.fail({:error, {:timeout, "account/read"}})
         assert {:error, -32005, message} = Methods.invoke(method, params)
-        assert message == "Codex app-server timed out during account/read"
+        assert message == "OpenAI authentication timed out during account/read"
 
-        CodexAccountAdapter.fail(
-          {:error, {:unavailable, "the Codex account service is not running on this node"}}
+        OpenAIAccountAdapter.fail(
+          {:error, {:unavailable, "the OpenAI account service is not running on this node"}}
         )
 
         assert {:error, -32004, message} = Methods.invoke(method, params)
-        assert message == "the Codex account service is not running on this node"
+        assert message == "the OpenAI account service is not running on this node"
 
-        CodexAccountAdapter.fail({:error, {:upstream, "the app-server refused the request"}})
+        OpenAIAccountAdapter.fail({:error, {:upstream, "the OAuth server refused the request"}})
         assert {:error, -32006, message, data} = Methods.invoke(method, params)
         assert message == "the runtime failed the call"
-        assert data == ["codex_app_server", "the app-server refused the request"]
+        assert data == ["openai_auth", "the OAuth server refused the request"]
       end
     end
   end

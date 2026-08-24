@@ -263,7 +263,7 @@ defmodule Ouroboros.InteractiveUsageTest do
 
   defp session do
     assert {:ok, state} =
-             State.new("usage-#{System.unique_integer([:positive])}", provider: :codex)
+             State.new("usage-#{System.unique_integer([:positive])}", provider: :native)
 
     state
   end

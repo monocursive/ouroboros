@@ -23,12 +23,10 @@ defmodule Ouroboros.ProviderCapabilityTest do
   # its session transport does not, which is why the lookup is per plane. Pi's RPC
   # transport declares both, and refuses only the `:prompt` approval value.
   #
-  # Codex is the only provider left carrying the plane's `:prompt` default, because its
-  # app-server transport is the only default one that can actually ask. The four managed
-  # providers moved to `@interactive_prompt_refusals` below.
+  # Native is the default transport that can ask and enforce the workspace posture.
   @interactive_defaults %{
     amp: {:absent, :absent},
-    codex: {:prompt, :workspace_write},
+    native: {:prompt, :workspace_write},
     kimi: {:absent, :absent},
     opencode: {:absent, :absent},
     pi: {:absent, :absent}
@@ -53,10 +51,13 @@ defmodule Ouroboros.ProviderCapabilityTest do
   # provider that changes transports upstream fails here rather than in a session.
   @interactive_capabilities %{
     claude: %{transport: :stream_json_resume, approvals: false, steer: false, interrupt: :process},
-    # C3: the app server has `turn/steer`, so this transport declares it. The `codex exec`
-    # fallback still does not — see the pair asserted in `codex_session_test.exs`, which is
-    # the case this per-provider table cannot express because it names only the default.
-    codex: %{transport: :app_server, approvals: :native, steer: :native, interrupt: :native},
+    native: %{
+      transport: :native,
+      approvals: :native,
+      steer: :native,
+      interrupt: :native,
+      multimodal: :native
+    },
     opencode: %{transport: :acp, approvals: :native, steer: false, multimodal: :native},
     kimi: %{transport: :acp, approvals: :native, steer: false, multimodal: :native},
     pi: %{transport: :rpc, steer: :native, approvals: false, interrupt: :native}
@@ -66,7 +67,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
   @coding_refusals %{
     amp: [:approval_mode, :sandbox_mode],
     claude: [],
-    codex: [],
+    native: [],
     gemini: [],
     grok: [],
     kimi: [:approval_mode, :sandbox_mode],
@@ -111,48 +112,13 @@ defmodule Ouroboros.ProviderCapabilityTest do
       assert request.sandbox_mode == :workspace_write
     end
 
-    test "codex can start in an empty non-Git workspace and fetch dependencies" do
-      request = interactive_request(provider: :codex)
-
-      assert request.provider_options == %{
-               skip_git_repo_check: true,
-               network_access_enabled: true
-             }
-    end
-
-    test "explicit codex restrictions win over the node defaults" do
-      request =
-        interactive_request(
-          provider: :codex,
-          provider_options: %{network_access_enabled: false, skip_git_repo_check: false}
-        )
-
-      assert request.provider_options == %{
-               skip_git_repo_check: false,
-               network_access_enabled: false
-             }
-    end
-
-    test "interactive Codex public state advertises approvals the exec fallback cannot" do
-      assert {:ok, session} = State.new("capability-interactive-codex", provider: :codex)
+    test "native public state advertises direct approvals and transport readiness" do
+      assert {:ok, session} = State.new("capability-interactive-native", provider: :native)
       public = State.public(session)
       assert public.options.provider_execution.interactive_approvals
-      assert public.options.provider_execution.escalation_behavior == :prompt
-
-      # The exec fallback declares no approvals channel, so the plane's `:prompt` default
-      # is refused there outright; a mode it can honour has to be stated to reach it.
-      assert {:ok, exec} =
-               State.new("capability-exec-codex",
-                 provider: :codex,
-                 transport: :exec_jsonl_resume,
-                 approval_mode: :default
-               )
-
-      exec_public = State.public(exec)
-      refute exec_public.options.provider_execution.interactive_approvals
-
-      assert exec_public.options.provider_execution.escalation_behavior ==
-               :deny_when_provider_cannot_prompt
+      assert public.options.provider_execution.coding_approvals
+      assert public.options.provider_execution.transport == :direct
+      assert public.options.provider_execution.model =~ ":"
     end
   end
 
@@ -212,15 +178,12 @@ defmodule Ouroboros.ProviderCapabilityTest do
       # that is no longer running. Reading through the adapter is what keeps the two from
       # drifting when a dialect gains a capability.
       assert Session.dialect(Ouroboros.Provider.Session.ACP) == Dialect.ACP
-      assert Session.dialect(Ouroboros.Provider.CodexSession) == Dialect.Codex
       assert Session.dialect(Jido.Harness.SessionAdapters.Managed) == nil
 
-      for {provider, dialect} <- [opencode: Dialect.ACP, kimi: Dialect.ACP, codex: Dialect.Codex] do
-        declared = Map.from_struct(dialect.capabilities())
+      for provider <- [:opencode, :kimi] do
+        declared = Map.from_struct(Dialect.ACP.capabilities())
         resolved = Provider.session_capabilities(provider)
 
-        # `:fork` and `:compact` are derived beside the declared set rather than read from
-        # it, so they are compared against the declarations that produce them instead.
         for {key, value} <- Map.drop(resolved, [:fork, :compact]), key != :transport do
           assert Map.fetch!(declared, key) == value
         end
@@ -241,10 +204,12 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
 
     test "public session state carries the capabilities and survives re-projection" do
-      assert {:ok, session} = State.new("capability-public-codex", provider: :codex)
+      assert {:ok, session} = State.new("capability-public-native", provider: :native)
       public = State.public(session)
 
-      assert public.options.capabilities == Provider.session_capabilities(:codex)
+      assert Map.delete(public.options.capabilities, :sandbox) ==
+               Provider.session_capabilities(:native)
+
       assert public.options.capabilities.approvals == :native
       assert State.public(public) == public
     end
@@ -294,7 +259,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
 
     test "transports that can ask are untouched" do
-      for provider <- [:codex, :opencode, :kimi] do
+      for provider <- [:native, :opencode, :kimi] do
         assert Provider.session_capabilities(provider).approvals == :native
         assert {:ok, _session} = State.new("capability-asks-#{provider}", provider: provider)
       end
@@ -374,12 +339,14 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
 
     test "`:now` is claimed only by a transport that carries the change to a live process" do
-      # Pi's RPC transport is the only bundled one with `dynamic_configuration: :native`.
       assert {:ok, _changes, :now} = Provider.session_configuration(:pi, %{model: "pi-model"})
 
-      # Every managed transport re-executes the CLI per turn, and the Codex app server
-      # rebuilds its policy in `turn_params/2`; neither can move a turn already running.
-      for provider <- [:claude, :codex, :gemini, :grok, :zai] do
+      assert {:ok, _changes, :now} =
+               Provider.session_configuration(:native, %{approval_mode: :auto_approve})
+
+      # Managed transports re-execute their process per turn and cannot move a turn
+      # already running.
+      for provider <- [:claude, :gemini, :grok, :zai] do
         assert {:ok, _changes, :next_turn} =
                  Provider.session_configuration(provider, %{approval_mode: :auto_approve})
       end
@@ -459,15 +426,13 @@ defmodule Ouroboros.ProviderCapabilityTest do
 
   describe "branching a session" do
     test "every bundled provider's fork answer matches the wire it would use" do
-      # Claude, Zai and Grok take `--resume <id> --fork-session`; the Codex app server has
-      # `thread/fork`. Gemini and Amp declare no branch option at all, ACP publishes no
-      # branch verb, and Pi's `--fork` takes a session *name* and refuses to be combined
-      # with `provider_session_id`, so it is not credited on an unverified reading.
+      # Native copies its own checkpoint. Claude, Zai and Grok use their evidenced
+      # `--fork-session` flag; ACP and the remaining transports publish no branch verb.
       expected = %{
+        native: :native,
         claude: :native,
         zai: :native,
         grok: :native,
-        codex: :native,
         gemini: false,
         amp: false,
         opencode: false,
@@ -492,13 +457,10 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
 
     test "every bundled provider's compact answer names who would do the folding" do
-      # C4. `:native` is this runtime holding the conversation; `:provider` is the Codex
-      # app server folding its own thread on `thread/compact/start`. Everything else
-      # neither hands its conversation over nor publishes a fold, and `interactive.compact`
-      # refuses there by capability rather than inventing a summary.
+      # Native holds and folds its own conversation. Every other remaining transport
+      # neither hands its conversation over nor publishes a fold.
       expected = %{
         native: :native,
-        codex: :provider,
         claude: false,
         zai: false,
         grok: false,
@@ -516,8 +478,6 @@ defmodule Ouroboros.ProviderCapabilityTest do
         assert Provider.session_compact(provider) == compact
       end
 
-      # The `:provider` answer is the dialect's own declaration, not a table here.
-      assert Dialect.Codex.compact_option() == {:compact, :provider}
       refute function_exported?(Dialect.ACP, :compact_option, 0)
       assert Provider.session_compact(:nothing_by_this_name) == false
     end
@@ -550,22 +510,11 @@ defmodule Ouroboros.ProviderCapabilityTest do
       assert argv_pair(argv, "--resume") == "parent-session-id"
     end
 
-    test "the Codex app server's fork is the dialect's own declaration" do
-      assert Dialect.Codex.fork_option() == {:fork, true}
-      assert {:ok, %{fork: true}} = Provider.session_fork_options(:codex)
-
-      # The option has to be one the transport will accept, or the fork would be refused
-      # by the harness rather than by anything here.
-      assert :fork in Ouroboros.Provider.CodexAdapter.spec().provider_options
+    test "Native fork is declared by its in-process adapter" do
+      assert Ouroboros.Provider.Native.fork_option() == {:fork_session, true}
+      assert {:ok, %{fork_session: true}} = Provider.session_fork_options(:native)
+      assert :fork_session in Ouroboros.Provider.Native.spec().provider_options
       refute function_exported?(Dialect.ACP, :fork_option, 0)
-    end
-
-    test "the exec fallback cannot fork even though the provider can" do
-      # `thread/fork` is an app-server method. The exec transport's dialect is not this
-      # one, so a session pinned to it declares no fork, and the capability is per
-      # transport rather than per provider.
-      assert Provider.session_capabilities(:codex, :app_server).fork == :native
-      assert Provider.session_capabilities(:codex, :exec_jsonl_resume).fork == false
     end
 
     test "an unresolvable provider or transport is refused rather than guessed at" do
@@ -642,22 +591,13 @@ defmodule Ouroboros.ProviderCapabilityTest do
       assert task.options.sandbox_mode == :workspace_write
     end
 
-    test "codex execution policy is durable and publicly inspectable" do
-      assert {:ok, task} = coding_task(provider: :codex)
-
-      assert task.options.provider_options == %{
-               skip_git_repo_check: true,
-               network_access_enabled: true
-             }
+    test "native execution policy is durable and publicly inspectable" do
+      assert {:ok, task} = coding_task(provider: :native)
 
       public = TaskState.public(task)
-      assert public.options.provider_execution.network_access_enabled
-      refute public.options.provider_execution.git_repository_required
-      refute public.options.provider_execution.interactive_approvals
-
-      assert public.options.provider_execution.escalation_behavior ==
-               :deny_when_provider_cannot_prompt
-
+      assert public.options.provider_execution.transport == :direct
+      assert public.options.provider_execution.interactive_approvals
+      assert public.options.provider_execution.coding_approvals
       refute Map.has_key?(public.options, :provider_options)
       assert TaskState.public(public) == public
     end

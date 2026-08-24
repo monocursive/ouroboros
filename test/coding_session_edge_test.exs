@@ -164,12 +164,12 @@ defmodule Ouroboros.CodingSessionEdgeTest do
   test "public task state summarizes but never exposes private request material" do
     assert {:ok, task} =
              TaskState.new(unique_id("public"), "objective",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                system_prompt: "PRIVATE SYSTEM PROMPT",
                attachments: ["/private/attachment.png"],
                add_dirs: ["/private/source"],
-               provider_options: %{web_search_enabled: true}
+               provider_options: %{max_iterations: 7}
              )
 
     public = TaskState.public(task)
@@ -188,7 +188,7 @@ defmodule Ouroboros.CodingSessionEdgeTest do
     refute rendered =~ "PRIVATE SYSTEM PROMPT"
     refute rendered =~ "/private/attachment.png"
     refute rendered =~ "/private/source"
-    refute rendered =~ "web_search_enabled"
+    refute rendered =~ "max_iterations"
   end
 
   defp start_controlled_session(id, objective) do

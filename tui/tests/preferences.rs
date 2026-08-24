@@ -404,9 +404,7 @@ fn a_stored_provider_this_runtime_does_not_serve_is_shown_rather_than_dropped() 
     let screen = render(&mut app, 140, 34);
 
     assert!(
-        screen
-            .row("codex")
-            .contains("from the config file; this runtime does not report it"),
+        screen.contains("codex — from the config file; this runtime does not report it"),
         "a default written on another machine is a fact, not a value to silently discard: {}",
         screen.text()
     );

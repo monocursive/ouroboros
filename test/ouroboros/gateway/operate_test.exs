@@ -344,10 +344,10 @@ defmodule Ouroboros.Gateway.OperateTest do
       dead_id = "gateway-delete-dead-#{System.unique_integer([:positive, :monotonic])}"
 
       {:ok, live} =
-        Ouroboros.Interactive.State.new(live_id, provider: :codex, workspace: File.cwd!())
+        Ouroboros.Interactive.State.new(live_id, provider: :native, workspace: File.cwd!())
 
       {:ok, dead} =
-        Ouroboros.Interactive.State.new(dead_id, provider: :codex, workspace: File.cwd!())
+        Ouroboros.Interactive.State.new(dead_id, provider: :native, workspace: File.cwd!())
 
       assert :ok = InteractiveStore.create(live)
       assert :ok = InteractiveStore.create(%{dead | status: :lost, error: :provider_gone})
@@ -370,13 +370,13 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       {:ok, coding_live_task} =
         Ouroboros.Coding.TaskState.new(coding_live, "still running",
-          provider: :codex,
+          provider: :native,
           workspace: File.cwd!()
         )
 
       {:ok, coding_dead_task} =
         Ouroboros.Coding.TaskState.new(coding_dead, "already failed",
-          provider: :codex,
+          provider: :native,
           workspace: File.cwd!()
         )
 

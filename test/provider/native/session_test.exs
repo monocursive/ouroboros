@@ -129,6 +129,10 @@ defmodule Ouroboros.Provider.Native.SessionTest do
     end
 
     test "refuses to open with no model and no OUROBOROS_NATIVE_MODEL", context do
+      previous_default = Application.get_env(:ouroboros, :native_model)
+      Application.delete_env(:ouroboros, :native_model)
+      on_exit(fn -> restore(:native_model, previous_default) end)
+
       request = SessionRequest.new!(%{provider: :native, cwd: context.workspace})
 
       session_context = %{
@@ -491,6 +495,121 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       {:ok, checkpoint_path, _durable?} = Checkpoint.locate(ready.provider_session_id)
       {:ok, %File.Stat{mode: mode}} = File.stat(checkpoint_path)
       assert Bitwise.band(mode, 0o777) == 0o600
+    end
+  end
+
+  describe "direct model continuity" do
+    test "preserves reasoning metadata and stable request identities across tool turns",
+         context do
+      details = [
+        %{
+          text: "summary",
+          signature: "encrypted-reasoning",
+          encrypted?: true,
+          provider: :openai,
+          format: "openai-responses-v1",
+          index: 0,
+          provider_data: %{"id" => "reasoning-1"}
+        }
+      ]
+
+      script = [
+        [
+          {:reasoning_details, details},
+          {:tool_call, %{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      %{handle: handle, agent: agent} = open(context, script)
+      ready = await_event(:provider_event)
+      assert :ok = Session.send(handle, TurnRequest.new!("inspect"), "turn-reasoning")
+      collect_until(:turn_completed)
+
+      [first, second] = NativeModelScript.requests(agent)
+      assert first.provider_session_id == ready.provider_session_id
+      assert first.turn_id == "turn-reasoning"
+
+      assistant = Enum.find(second.messages, &(&1.role == :assistant))
+      assert assistant.reasoning_details == details
+      assert assistant.tool_calls == [%{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}]
+    end
+
+    test "stages authorized images as durable multimodal content", context do
+      png = Path.join(context.workspace, "diagram.png")
+      File.write!(png, <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3>>)
+
+      %{handle: handle, agent: agent} = open(context, @simple_script)
+      await_event(:provider_event)
+
+      turn = TurnRequest.new!(%{prompt: "inspect this", attachments: [png]})
+      assert :ok = Session.send(handle, turn, "turn-image")
+      collect_until(:turn_completed)
+
+      [request] = NativeModelScript.requests(agent)
+      user = List.last(request.messages)
+      assert [%{type: :text, text: "inspect this"}, image] = user.content
+      assert image.type == :image
+      assert image.media_type == "image/png"
+      assert image.path != png
+      assert File.read!(image.path) == File.read!(png)
+    end
+
+    test "fork copies the parent checkpoint to a fresh provider session", context do
+      {model_spec, agent} =
+        NativeModelScript.start([
+          [{:text, "parent answer"}, {:finish, :stop}],
+          [{:text, "child answer"}, {:finish, :stop}]
+        ])
+
+      parent_request =
+        SessionRequest.new!(%{
+          provider: :native,
+          cwd: context.workspace,
+          model: model_spec,
+          approval_mode: :auto_approve
+        })
+
+      parent_context = %{
+        session_id: "parent-session",
+        provider: :native,
+        owner: self(),
+        adapter: Ouroboros.Provider.Native,
+        config: %{},
+        process_manager: Jido.Harness.ProcessDriver.Erlexec,
+        telemetry_context: %{}
+      }
+
+      assert {:ok, parent} = Session.open(parent_request, parent_context)
+      parent_ready = await_event(:provider_event)
+      assert :ok = Session.send(parent, TurnRequest.new!("parent prompt"), "parent-turn")
+      collect_until(:turn_completed)
+      assert :ok = Session.close(parent)
+      await_event(:session_closed)
+
+      child_request =
+        SessionRequest.new!(%{
+          provider: :native,
+          cwd: context.workspace,
+          model: model_spec,
+          provider_session_id: parent_ready.provider_session_id,
+          provider_options: %{fork_session: true},
+          approval_mode: :auto_approve
+        })
+
+      child_context = %{parent_context | session_id: "child-session"}
+      assert {:ok, child} = Session.open(child_request, child_context)
+      child_ready = await_event(:provider_event)
+      refute child_ready.provider_session_id == parent_ready.provider_session_id
+
+      assert :ok = Session.send(child, TurnRequest.new!("child prompt"), "child-turn")
+      collect_until(:turn_completed)
+
+      [_parent_call, child_call] = NativeModelScript.requests(agent)
+      assert Enum.any?(child_call.messages, &(&1[:content] == "parent prompt"))
+      assert Enum.any?(child_call.messages, &(&1[:content] == "parent answer"))
+      assert List.last(child_call.messages).content == "child prompt"
+      assert :ok = Session.close(child)
     end
   end
 end

@@ -77,14 +77,6 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
 
       assert message =~ "not the one this connection serves"
     end
-
-    test "the app-server dialect serves no client method at all" do
-      assert Ouroboros.Provider.Session.Dialect.Codex.service_request(
-               "fs/read_text_file",
-               %{},
-               %{}
-             ) == :method_not_found
-    end
   end
 
   # ── fs/read_text_file ──────────────────────────────────────────────────────────────
@@ -561,20 +553,13 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
       assert :ok = ACP.close(handle)
     end
 
-    test "the ACP dialect declares modes and the app-server dialect does not" do
+    test "the ACP dialect declares agent-owned modes" do
       assert Dialect.mode_option() == {:mode, :agent_declared}
-
-      refute function_exported?(Ouroboros.Provider.Session.Dialect.Codex, :mode_option, 0)
 
       for provider <- [:opencode, :kimi] do
         assert {:ok, %{applies: :now, settable: :any_time, ids: :agent_declared}} =
                  Ouroboros.Provider.session_mode(provider)
       end
-
-      assert {:error, {:unsupported_configuration, %{field: :mode, reason: reason}}} =
-               Ouroboros.Provider.session_mode(:codex)
-
-      assert reason == :transport_has_no_modes
     end
 
     test "the gateway carries mode as a sixth interactive.configure key" do

@@ -79,7 +79,7 @@ defmodule Ouroboros.Runtime.ExposureTest do
   test "coding tasks reuse their admission snapshot and refuse a damaged one" do
     assert {:ok, task} =
              TaskState.new("runtime-snapshot", "build a Rust WebSocket server",
-               provider: :codex,
+               provider: :native,
                workspace: File.cwd!(),
                sandbox_mode: :read_only
              )

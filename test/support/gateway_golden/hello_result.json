@@ -4,6 +4,7 @@
   "result": {
     "methods": [
       "account.login.cancel",
+      "account.login.complete",
       "account.login.start",
       "account.logout",
       "account.read",
@@ -22,6 +23,7 @@
       "coding.info",
       "coding.list",
       "coding.replay",
+      "coding.respond_approval",
       "coding.start",
       "coding.subscribe",
       "coding.unsubscribe",

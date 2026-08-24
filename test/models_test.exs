@@ -74,10 +74,11 @@ defmodule Ouroboros.ModelsTest do
 
     test "the catalogue mapping is a default a node can correct" do
       assert Models.catalog(:claude) == :anthropic
-      assert Models.catalog(:codex) == :openai
+      assert Models.catalog(:native) == :openai
       assert Models.catalog(:gemini) == :google
       assert Models.catalog(:grok) == :xai
       assert Models.catalog(:kimi) == :moonshotai
+      assert Enum.all?(provider_row(:native).models, &String.starts_with?(&1.id, "openai_codex:"))
 
       # A provider whose atom is itself an llm_db provider id needs no entry.
       assert Models.catalog(:zai) == :zai

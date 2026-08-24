@@ -189,12 +189,12 @@ fn a_resolved_unauthenticated_home_still_gives_printable_keys_to_the_shell() {
     assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
 }
 
-/// An install whose Codex credential is an API key on the runtime host reports no ChatGPT
-/// identity and `requiresOpenaiAuth: false`. Reading only the identity left it looking at
-/// "Connect ChatGPT" forever, with Enter pushing a login it neither needs nor can complete.
+/// An official OpenAI API-key model needs no ChatGPT subscription. The account surface
+/// may still report OAuth missing; model-aware readiness must ignore it.
 #[test]
-fn an_api_key_codex_install_is_ready_without_a_chatgpt_sign_in() {
+fn an_openai_api_key_model_is_ready_without_a_chatgpt_sign_in() {
     let mut app = app(full_hello());
+    app.config.defaults.model = Some("openai:gpt-5.6".into());
     app.launch_dir = Some("/work/ouroboros".into());
     app.open_home();
     answer(
@@ -202,14 +202,15 @@ fn an_api_key_codex_install_is_ready_without_a_chatgpt_sign_in() {
         Tag::Account,
         json!({
             "account": serde_json::Value::Null,
-            "requiresOpenaiAuth": false,
+            "requiresOpenaiAuth": true,
             "login": { "status": "idle" }
         }),
     );
     let _ = app.drain();
 
     assert!(!app.chatgpt_connected(), "there is no subscription to name");
-    assert!(app.codex_usable());
+    assert!(!app.codex_usable());
+    assert!(!app.home_requires_chatgpt());
     assert!(app.home_ready());
 
     let screen = render(&mut app, 120, 34);
@@ -218,7 +219,7 @@ fn an_api_key_codex_install_is_ready_without_a_chatgpt_sign_in() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Codex ready"), "{}", screen.text());
+    assert!(screen.contains("PROVIDER native"), "{}", screen.text());
     assert!(
         !screen.contains("ChatGPT not connected"),
         "{}",
@@ -423,7 +424,7 @@ fn the_device_code_is_readable_on_an_eighty_column_terminal() {
 }
 
 #[test]
-fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_message() {
+fn typing_and_enter_start_native_in_the_current_folder_then_send_the_first_message() {
     let mut app = harness(true);
     type_text(&mut app, "fix the flaky reconnect test");
     app.apply(key(KeyCode::Enter));
@@ -434,7 +435,8 @@ fn typing_and_enter_start_codex_in_the_current_folder_then_send_the_first_messag
         .find(|call| call.method == "interactive.start")
         .expect("a session start");
 
-    assert_eq!(start.params["provider"], "codex");
+    assert_eq!(start.params["provider"], "native");
+    assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/work/ouroboros");
     let start_id = start.params["id"]
         .as_str()
@@ -977,7 +979,11 @@ fn account_completion_closes_the_gate_without_restarting_the_client() {
 
     assert!(app.chatgpt_connected());
     assert!(app.overlay.is_none());
-    assert_eq!(app.config.defaults.provider.as_deref(), Some("codex"));
+    assert_eq!(app.config.defaults.provider.as_deref(), Some("native"));
+    assert_eq!(
+        app.config.defaults.model.as_deref(),
+        Some("openai_codex:gpt-5.6-sol")
+    );
     let screen = render(&mut app, 120, 34);
     assert!(
         screen.contains("Ready in this workspace"),

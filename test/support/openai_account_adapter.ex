@@ -1,10 +1,8 @@
-defmodule Ouroboros.Test.CodexAccountAdapter do
+defmodule Ouroboros.Test.OpenAIAccountAdapter do
   @moduledoc false
 
-  # The real boundary answers four error shapes as well as four success shapes, and the
-  # gateway maps each of them differently. `:codex_account_failure` is how a test asks
-  # this adapter for the failing half; absent, every method succeeds as before.
-  @failure_key :codex_account_failure
+  # Tests may make the account boundary return one failure shape to every method.
+  @failure_key :openai_account_failure
 
   def read do
     answer(
@@ -28,7 +26,7 @@ defmodule Ouroboros.Test.CodexAccountAdapter do
        %{
          "type" => "chatgpt",
          "loginId" => "browser-login",
-         "authUrl" => "https://chatgpt.com/auth/ouroboros"
+         "authUrl" => "https://auth.openai.com/oauth/authorize"
        }}
     )
   end
@@ -44,6 +42,8 @@ defmodule Ouroboros.Test.CodexAccountAdapter do
        }}
     )
   end
+
+  def complete(_login_id, _code, _state), do: answer({:ok, %{}})
 
   def cancel(login_id), do: answer({:ok, %{"cancelled" => login_id}})
   def logout, do: answer({:ok, %{}})

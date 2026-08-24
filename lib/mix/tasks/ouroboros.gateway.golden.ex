@@ -206,7 +206,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         %{
           id: @task_id,
           node: :ouroboros@golden,
-          provider: :codex,
+          provider: :native,
           status: :running,
           created_at: @timestamp,
           updated_at: @timestamp
@@ -291,7 +291,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         type: :run_completed,
         timestamp: @timestamp,
         payload: %{"text" => "objective satisfied"},
-        provider: :codex,
+        provider: :native,
         provider_session_id: "provider-0000000000000002",
         harness_sequence: 31
       }
@@ -343,7 +343,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         type: :file_change,
         timestamp: @timestamp,
         payload: %{"diff" => String.duplicate("b", 600)},
-        provider: :codex,
+        provider: :native,
         provider_session_id: "provider-0000000000000002",
         harness_sequence: 32
       },

@@ -333,14 +333,6 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
       end
     end
 
-    test "codex is refused as pending rather than as unsupported" do
-      assert {:error, {:unsupported_configuration, refusal}} = Provider.plan_mode(:codex)
-
-      assert refusal.reason == :pending
-      assert refusal.message =~ "slice C3"
-      assert refusal.message =~ "refused rather than silently ignored"
-    end
-
     test "an unknown provider or transport is refused by name" do
       assert {:error, {:unsupported_configuration, %{reason: :unknown_provider}}} =
                Provider.plan_mode(:nobody)
