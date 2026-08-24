@@ -38,6 +38,26 @@ remote attachment uses device code. Session start and send remain disabled until
 runtime reports that the selected subscription model is usable. Tokens never cross the
 gateway into GPUI.
 
+## Visual system
+
+`tui/src/desktop_design.rs` is the native design-system boundary. It defines paired dark
+and light palettes, the page/panel/card/inset layer order, semantic tones, GPUI Component
+theme integration, and the shared panel, card, inset, status tag, field, empty-state,
+keycap, icon-tile, and button constructors. Desktop views should use those tokens and
+constructors instead of introducing raw colours or one-off radii. The application also
+registers `gpui-component-assets`; component icons are real bundled assets rather than
+text glyphs or placeholders.
+
+The system combines the compact AI-workspace grammar of
+[Beautiful UI](https://www.beautifului.dev/) with the native, quiet, precise desktop
+guidance of [GPUI Component](https://longbridge.github.io/gpui-component/docs/design-guides):
+neutral layers, hairline separation instead of nested cards, a small spacing and type
+scale, medium controls by default, compact controls in dense rails, scarce primary
+actions, and visible focus/loading/disabled/selected states. Ouroboros keeps approvals,
+warnings, success, and failures on separate semantic tones so an action highlight never
+implies an operational outcome. Routine acknowledgements stay in the transcript or
+session status; alert surfaces are reserved for warnings and failures.
+
 ## Current platform and release boundary
 
 The checked app bundle target is macOS. GPUI can support Linux, but an Ouroboros Linux
