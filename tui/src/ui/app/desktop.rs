@@ -22,6 +22,7 @@ pub enum DesktopTone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopCellKind {
     Message,
+    Activity,
     Thinking,
     Plan,
     Tool,
@@ -39,12 +40,16 @@ pub struct DesktopCell {
     pub body: String,
     pub tone: DesktopTone,
     pub streaming: bool,
+    /// Passive bookkeeping shown from the agent reply's hover affordance instead of as
+    /// standalone conversation rows.
+    pub metadata: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopSession {
     pub plane: Plane,
     pub id: String,
+    pub title: Option<String>,
     pub status: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -54,6 +59,9 @@ pub struct DesktopSession {
     pub selected: bool,
     pub pending_approvals: usize,
     pub last_known: bool,
+    pub terminal: bool,
+    pub can_rename: bool,
+    pub can_delete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +209,7 @@ impl App {
                 DesktopSession {
                     plane: row.session.plane,
                     id: row.session.id.clone(),
+                    title: row.session.title.clone(),
                     status: row.session.status.as_str().to_string(),
                     provider: row.session.provider.clone(),
                     model: row.session.model.clone(),
@@ -215,6 +224,15 @@ impl App {
                         .map(|watch| watch.pending_approvals.len())
                         .unwrap_or(0),
                     last_known: row.session.last_known,
+                    terminal: row.session.status.terminal(),
+                    can_rename: row.session.plane == Plane::Interactive
+                        && !row.session.last_known
+                        && self.hello.operates()
+                        && self.hello.serves("interactive.rename"),
+                    can_delete: self.hello.operates()
+                        && (row.session.last_known
+                            || (row.session.status.terminal()
+                                && self.hello.serves(&row.session.plane.method("delete")))),
                 }
             })
             .collect()
@@ -226,14 +244,31 @@ impl App {
             return Vec::new();
         };
 
-        transcript_cells::project(
+        let projected = transcript_cells::project(
             watch
                 .recent_entries(transcript_cells::CHAT_ENTRY_WINDOW)
                 .entries,
         )
         .into_iter()
         .map(desktop_cell)
-        .collect()
+        .collect::<Vec<_>>();
+        let mut cells = attach_passive_metadata(projected);
+
+        // The durable transcript cannot describe the RPC-to-first-token gap by itself.
+        // Keep that honest local state in the conversation flow so a native client never
+        // looks idle immediately after accepting a message.
+        if self.waiting_for_open_agent_reply() {
+            cells.push(DesktopCell {
+                kind: DesktopCellKind::Activity,
+                label: "Agent is working".to_string(),
+                body: String::new(),
+                tone: DesktopTone::Accent,
+                streaming: true,
+                metadata: Vec::new(),
+            });
+        }
+
+        cells
     }
 
     /// The oldest unanswered approval for the open session.
@@ -441,6 +476,99 @@ impl App {
         Ok(id)
     }
 
+    /// Renames one interactive session through the runtime-owned durable title field.
+    pub fn desktop_rename_session(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        if plane != Plane::Interactive {
+            return Err("coding tasks use their objective as their name".to_string());
+        }
+        if !self.hello.serves("interactive.rename") {
+            return Err("this gateway does not serve interactive.rename".to_string());
+        }
+        if !self.hello.operates() {
+            return Err(format!(
+                "renaming a session needs operate scope; this listener is {}",
+                self.hello.scope
+            ));
+        }
+
+        let Some(session) = self.sessions.get(plane, id) else {
+            return Err(format!("{id} is no longer in the session list"));
+        };
+        if session.last_known {
+            return Err(
+                "the session owner is offline, so its durable title cannot be changed".to_string(),
+            );
+        }
+
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("enter a session name".to_string());
+        }
+        if title.chars().count() > 120 {
+            return Err("a session name can be at most 120 characters".to_string());
+        }
+        if title.chars().any(char::is_control) {
+            return Err("a session name cannot contain control characters".to_string());
+        }
+
+        let params = self.routed_session_params(plane, id, json!({ "id": id, "title": title }));
+        self.issue(Call::new(
+            Tag::Action {
+                label: "rename",
+                plane,
+                id: id.to_string(),
+            },
+            "interactive.rename",
+            params,
+        ));
+        Ok(())
+    }
+
+    /// Deletes terminal durable state, or hides a last-known row whose owner is offline.
+    pub fn desktop_delete_session(&mut self, plane: Plane, id: &str) -> Result<(), String> {
+        if !self.hello.operates() {
+            return Err(format!(
+                "deleting a session needs operate scope; this listener is {}",
+                self.hello.scope
+            ));
+        }
+
+        let Some(session) = self.sessions.get(plane, id) else {
+            return Err(format!("{id} is no longer in the session list"));
+        };
+        let last_known = session.last_known;
+        let terminal = session.status.terminal();
+        if !terminal && !last_known {
+            return Err("finish or stop this session before deleting it".to_string());
+        }
+
+        if last_known {
+            self.session_removed(plane, id);
+            return Ok(());
+        }
+
+        let method = plane.method("delete");
+        if !self.hello.serves(&method) {
+            return Err(format!("this gateway does not serve {method}"));
+        }
+        let params = self.routed_session_params(plane, id, json!({ "id": id }));
+        self.issue(Call::new(
+            Tag::Action {
+                label: "remove",
+                plane,
+                id: id.to_string(),
+            },
+            method,
+            params,
+        ));
+        Ok(())
+    }
+
     /// Answers the current approval. The request id is rechecked to prevent a stale
     /// button from answering a newer prompt that appeared under it.
     pub fn desktop_respond_approval(
@@ -543,10 +671,11 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             .to_string(),
             body: text,
             tone: match speaker {
-                Speaker::You => DesktopTone::Accent,
-                Speaker::Agent => DesktopTone::Neutral,
+                Speaker::You => DesktopTone::Neutral,
+                Speaker::Agent => DesktopTone::Accent,
             },
             streaming,
+            metadata: Vec::new(),
         },
         Cell::Thinking { text, lines, state } => DesktopCell {
             kind: DesktopCellKind::Thinking,
@@ -554,12 +683,12 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 "Thinking · {lines} line{}",
                 if lines == 1 { "" } else { "s" }
             ),
-            body: match state {
-                ThinkingState::Collapsed => String::new(),
-                ThinkingState::Tail | ThinkingState::Full => text,
-            },
+            // GPUI has room to keep reasoning/status context inspectable. Its muted visual
+            // treatment, rather than removing its body, makes it secondary to the answer.
+            body: text,
             tone: DesktopTone::Muted,
             streaming: state == ThinkingState::Tail,
+            metadata: Vec::new(),
         },
         Cell::Plan(plan) => DesktopCell {
             kind: DesktopCellKind::Plan,
@@ -580,6 +709,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 .join("\n"),
             tone: DesktopTone::Neutral,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Usage(usage) => DesktopCell {
             kind: DesktopCellKind::Status,
@@ -594,6 +724,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             ),
             tone: DesktopTone::Muted,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Tool(tool) => {
             let summary = transcript_cells::summarise(&tool).line();
@@ -602,11 +733,12 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 label: summary,
                 body: tool.output.as_ref().map(model::compact).unwrap_or_default(),
                 tone: match tool.state {
-                    ToolState::Running => DesktopTone::Accent,
+                    ToolState::Running => DesktopTone::Muted,
                     ToolState::Completed => DesktopTone::Muted,
                     ToolState::Failed => DesktopTone::Error,
                 },
                 streaming: tool.state == ToolState::Running,
+                metadata: Vec::new(),
             }
         }
         Cell::Exploration(group) => DesktopCell {
@@ -624,6 +756,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 .join("\n"),
             tone: DesktopTone::Muted,
             streaming: !group.done,
+            metadata: Vec::new(),
         },
         Cell::CommandOutput(body) => DesktopCell {
             kind: DesktopCellKind::Tool,
@@ -631,6 +764,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body,
             tone: DesktopTone::Muted,
             streaming: true,
+            metadata: Vec::new(),
         },
         Cell::File(file) => DesktopCell {
             kind: DesktopCellKind::File,
@@ -638,6 +772,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body: file.path.unwrap_or_else(|| "Path not reported".to_string()),
             tone: DesktopTone::Muted,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Image(image) => DesktopCell {
             kind: DesktopCellKind::File,
@@ -645,6 +780,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body: image.label(),
             tone: DesktopTone::Muted,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Diff(diff) => DesktopCell {
             kind: DesktopCellKind::Diff,
@@ -666,6 +802,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 DesktopTone::Muted
             },
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::DiffStat {
             files,
@@ -681,6 +818,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             ),
             tone: DesktopTone::Muted,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Status {
             label,
@@ -692,6 +830,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body: detail,
             tone: desktop_tone(tone),
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::ChatNote { text } => DesktopCell {
             kind: DesktopCellKind::Status,
@@ -699,6 +838,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body: text,
             tone: DesktopTone::Muted,
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Runtime(block) => DesktopCell {
             kind: DesktopCellKind::Runtime,
@@ -710,6 +850,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 .join("\n"),
             tone: desktop_tone(block.tone),
             streaming: false,
+            metadata: Vec::new(),
         },
         Cell::Divider { text, tone, .. } => DesktopCell {
             kind: DesktopCellKind::Divider,
@@ -717,7 +858,59 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             body: String::new(),
             tone: desktop_tone(tone),
             streaming: false,
+            metadata: Vec::new(),
         },
+    }
+}
+
+fn attach_passive_metadata(cells: Vec<DesktopCell>) -> Vec<DesktopCell> {
+    let mut visible: Vec<DesktopCell> = Vec::with_capacity(cells.len());
+    let mut agent_message: Option<usize> = None;
+    let mut pending = Vec::new();
+
+    for mut cell in cells {
+        let user_message =
+            cell.kind == DesktopCellKind::Message && cell.label.eq_ignore_ascii_case("you");
+        let agent_reply = cell.kind == DesktopCellKind::Message && !user_message;
+        let passive = matches!(
+            cell.kind,
+            DesktopCellKind::Status | DesktopCellKind::Divider
+        ) && matches!(cell.tone, DesktopTone::Neutral | DesktopTone::Muted);
+
+        if passive {
+            let metadata = desktop_metadata_line(&cell);
+            if let Some(index) = agent_message {
+                visible[index].metadata.push(metadata);
+            } else {
+                pending.push(metadata);
+            }
+            continue;
+        }
+
+        if user_message {
+            // Session-start bookkeeping belongs to the session, not to the user's first
+            // prompt or the answer that eventually follows it.
+            pending.clear();
+            agent_message = None;
+        } else if agent_reply {
+            cell.metadata.append(&mut pending);
+            visible.push(cell);
+            agent_message = Some(visible.len() - 1);
+            continue;
+        }
+
+        visible.push(cell);
+    }
+
+    visible
+}
+
+fn desktop_metadata_line(cell: &DesktopCell) -> String {
+    let detail = cell.body.trim();
+    if detail.is_empty() {
+        cell.label.clone()
+    } else {
+        format!("{} · {}", cell.label, detail.replace('\n', " · "))
     }
 }
 

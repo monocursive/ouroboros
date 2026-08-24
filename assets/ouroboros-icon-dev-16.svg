@@ -1,0 +1,38 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="16" height="16" fill="#F5F5F5"/>
+<g id="Ouroboros / Dev Export Masters Board">
+<rect width="1800" height="1400" transform="translate(-1450 -739.5)" fill="#0E0F11"/>
+<g id="Export Frames">
+<g id="Export Item / 16" clip-path="url(#clip0_6_2)">
+<g id="Ouroboros Dev App Icon / 16">
+<rect width="16" height="16" rx="3.5" fill="#17181A"/>
+<g id="Mark / Loop Bite / Micro Eating Head" clip-path="url(#clip1_6_2)">
+<g id="Mark / Loop Bite / Micro Eating Head_2">
+<path id="Vector" d="M9.924 3.84C9.404 3.632 8.86667 3.528 8.312 3.528C7.61867 3.49333 6.96 3.58 6.336 3.788C5.67734 3.996 5.088 4.256 4.568 4.568C3.97867 4.94933 3.54534 5.4 3.268 5.92C2.92134 6.47466 2.696 7.04666 2.592 7.636C2.45334 8.26 2.436 8.86666 2.54 9.456C2.67867 10.1147 2.88667 10.7213 3.164 11.276C3.476 11.8653 3.85733 12.368 4.308 12.784C4.828 13.2347 5.36533 13.564 5.92 13.772C6.544 14.0147 7.168 14.1707 7.792 14.24C8.45067 14.2747 9.07467 14.2053 9.664 14.032C10.288 13.8587 10.8253 13.5987 11.276 13.252C11.7613 12.9053 12.16 12.4893 12.472 12.004C12.784 11.4493 13.0093 10.86 13.148 10.236C13.2867 9.612 13.304 8.988 13.2 8.364C13.096 7.70533 12.888 7.116 12.576 6.596C12.3333 6.14533 12.0387 5.78133 11.692 5.504" stroke="#F2EFE8" stroke-width="1.248" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_2" d="M9.92407 3.84003L10.7561 4.30803" stroke="#F2EFE8" stroke-width="0.624" stroke-linecap="round"/>
+<path id="Vector_3" d="M12.264 5.608C11.796 4.828 11.068 4.256 10.288 3.996C10.028 3.944 9.976 4.152 10.08 4.464L10.496 5.972C10.704 6.752 11.536 6.908 12.056 6.076C12.212 5.868 12.368 5.712 12.264 5.608Z" fill="#F2EFE8" stroke="#F2EFE8" stroke-width="0.26" stroke-linejoin="round"/>
+<path id="Vector_4" d="M11.3281 5.712C11.5866 5.712 11.7961 5.50247 11.7961 5.244C11.7961 4.98553 11.5866 4.776 11.3281 4.776C11.0696 4.776 10.8601 4.98553 10.8601 5.244C10.8601 5.50247 11.0696 5.712 11.3281 5.712Z" fill="#4FCB7D"/>
+<path id="Vector_5" opacity="0.5" d="M4.2561 12.4616C4.37097 12.4616 4.4641 12.3964 4.4641 12.316C4.4641 12.2356 4.37097 12.1704 4.2561 12.1704C4.14122 12.1704 4.0481 12.2356 4.0481 12.316C4.0481 12.3964 4.14122 12.4616 4.2561 12.4616Z" fill="#17181A"/>
+</g>
+</g>
+<g id="DEV / Chalk Lettering" clip-path="url(#clip2_6_2)">
+<path id="Vector_6" fill-rule="evenodd" clip-rule="evenodd" d="M3.5 10.1L4.5 10C5.3 10 5.8 10.5 5.8 11.5C5.8 12.5 5.3 13 4.5 13L3.5 12.9V10.1ZM4.1 10.7V12.3L4.5 12.4C4.9 12.4 5.2 12.1 5.2 11.5C5.2 10.9 4.9 10.6 4.5 10.6L4.1 10.7Z" fill="#4FCB7D"/>
+<path id="Vector_7" d="M6.6001 10.1L9.0001 10V10.6H7.3001V11.2H8.7001V11.8H7.3001V12.4H9.1001L9.0001 13L6.6001 12.9V10.1Z" fill="#4FCB7D"/>
+<path id="Vector_8" d="M9.69995 10.1L10.4 10L11.1 12.1L11.8 10L12.5 10.1L11.5 13L10.7 12.9L9.69995 10.1Z" fill="#4FCB7D"/>
+</g>
+</g>
+</g>
+</g>
+</g>
+<defs>
+<clipPath id="clip0_6_2">
+<rect width="84" height="41" fill="white"/>
+</clipPath>
+<clipPath id="clip1_6_2">
+<rect width="13" height="13" fill="white" transform="translate(1.5 1.5)"/>
+</clipPath>
+<clipPath id="clip2_6_2">
+<rect width="9" height="3" fill="white" transform="translate(3.5 10)"/>
+</clipPath>
+</defs>
+</svg>

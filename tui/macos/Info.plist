@@ -8,6 +8,8 @@
     <string>Ouroboros</string>
     <key>CFBundleExecutable</key>
     <string>ouro-desktop</string>
+    <key>CFBundleIconFile</key>
+    <string>Ouroboros.icns</string>
     <key>CFBundleIdentifier</key>
     <string>dev.ouroboros.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>

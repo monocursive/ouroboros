@@ -21,10 +21,14 @@ use gpui::{
     WindowOptions,
 };
 use gpui_component::alert::Alert;
+use gpui_component::button::ButtonVariant;
+use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
-use gpui_component::{Disableable as _, Icon, IconName, Root, Sizable as _};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{Disableable as _, Icon, IconName, Root, Sizable as _, WindowExt as _};
 use gpui_component_assets::Assets as ComponentAssets;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -40,6 +44,8 @@ use crate::ui::app::{
 use crate::ui::{self, TICK};
 
 const LAUNCHER_ERROR_LIMIT: usize = 16 * 1024;
+#[cfg(target_os = "macos")]
+const MACOS_APP_ICON: &str = "Ouroboros.icns";
 
 actions!(ouro_desktop, [QuitDesktop]);
 
@@ -56,6 +62,11 @@ pub fn run(options: LaunchOptions) -> Result<()> {
     Application::new()
         .with_assets(ComponentAssets)
         .run(move |cx: &mut GpuiApp| {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = install_macos_application_icon() {
+                eprintln!("warning: could not install the bundled app icon: {error:#}");
+            }
+
             gpui_component::init(cx);
             design::install_component_theme(cx);
             cx.bind_keys([KeyBinding::new("cmd-q", QuitDesktop, None)]);
@@ -96,6 +107,56 @@ pub fn run(options: LaunchOptions) -> Result<()> {
             .expect("opening the Ouroboros desktop window");
             cx.activate(true);
         });
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_macos_icon_path(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    Some(contents.join("Resources").join(MACOS_APP_ICON))
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_application_icon() -> Result<()> {
+    use cocoa::appkit::{NSApp, NSApplication, NSImage};
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::{NSAutoreleasePool, NSString};
+
+    let executable = std::env::current_exe().context("locating the desktop executable")?;
+    let Some(icon_path) = bundled_macos_icon_path(&executable) else {
+        return Ok(());
+    };
+    if !icon_path.is_file() {
+        return Ok(());
+    }
+    let icon_path = icon_path
+        .to_str()
+        .ok_or_else(|| anyhow!("the bundled app icon path is not valid UTF-8"))?;
+
+    // GPUI creates NSApplication before invoking this callback. Assigning the bundle image
+    // explicitly keeps a direct Contents/MacOS launch from inheriting AppKit's placeholder.
+    unsafe {
+        let native_path: id = NSString::alloc(nil).init_str(icon_path).autorelease();
+        let image: id = NSImage::alloc(nil)
+            .initWithContentsOfFile_(native_path)
+            .autorelease();
+        if image == nil {
+            bail!("AppKit could not read {icon_path}");
+        }
+        let app = NSApp();
+        if app == nil {
+            bail!("AppKit has no shared application");
+        }
+        app.setApplicationIconImage_(image);
+    }
 
     Ok(())
 }
@@ -371,6 +432,7 @@ struct DesktopView {
     provider: Entity<InputState>,
     model: Entity<InputState>,
     workspace: Entity<InputState>,
+    rename: Entity<InputState>,
     show_new: bool,
     action_error: Option<String>,
     transcript_scroll: ScrollHandle,
@@ -411,12 +473,14 @@ impl DesktopView {
                 .placeholder("Absolute workspace path")
                 .default_value(workspace_value)
         });
+        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let mut subscriptions = Vec::new();
         for input in [
             composer.clone(),
             provider.clone(),
             model.clone(),
             workspace.clone(),
+            rename.clone(),
         ] {
             subscriptions.push(cx.subscribe_in(
                 &input,
@@ -454,6 +518,7 @@ impl DesktopView {
             provider,
             model,
             workspace,
+            rename,
             show_new: false,
             action_error: None,
             transcript_scroll: ScrollHandle::new(),
@@ -559,6 +624,214 @@ impl DesktopView {
             self.flush_calls();
             cx.notify();
         }
+    }
+
+    fn rename_session(
+        &mut self,
+        plane: Plane,
+        id: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = self
+            .app
+            .as_mut()
+            .ok_or_else(|| "the runtime is not connected yet".to_string())
+            .and_then(|app| app.desktop_rename_session(plane, id, title));
+
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.action_error = Some(error);
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn delete_session(&mut self, plane: Plane, id: &str, cx: &mut Context<Self>) -> bool {
+        let result = self
+            .app
+            .as_mut()
+            .ok_or_else(|| "the runtime is not connected yet".to_string())
+            .and_then(|app| app.desktop_delete_session(plane, id));
+
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.action_error = Some(error);
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn open_rename_dialog(
+        &mut self,
+        plane: Plane,
+        id: String,
+        current_title: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.action_error = None;
+        self.rename.update(cx, |input, cx| {
+            input.set_value(current_title.unwrap_or_default(), window, cx)
+        });
+
+        let input = self.rename.clone();
+        let view = cx.entity().downgrade();
+        let dialog_id = id.clone();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let tokens = design::tokens(cx);
+            let error = view
+                .read_with(cx, |this, _| this.action_error.clone())
+                .ok()
+                .flatten();
+            let submit_input = input.clone();
+            let submit_view = view.clone();
+            let submit_id = id.clone();
+            let close_view = view.clone();
+
+            dialog
+                .title(format!("Rename {}", display_session_id(&dialog_id)))
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Rename")
+                        .cancel_text("Cancel"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(tokens.ink_2)
+                                .child("Give this session a short, recognisable name."),
+                        )
+                        .child(design::field(
+                            tokens,
+                            "Session name",
+                            Some("Up to 120 characters".into()),
+                            Input::new(&input).cleanable(true),
+                        ))
+                        .when_some(error, |content, error| {
+                            content.child(Alert::error("rename-session-error", error).small())
+                        }),
+                )
+                .on_ok(move |_, window, cx| {
+                    let title = submit_input.read(cx).value().to_string();
+                    let accepted = submit_view
+                        .update(cx, |this, cx| {
+                            this.rename_session(plane, &submit_id, &title, cx)
+                        })
+                        .unwrap_or(false);
+                    if !accepted {
+                        window.refresh();
+                    }
+                    accepted
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = close_view.update(cx, |this, cx| {
+                        this.action_error = None;
+                        cx.notify();
+                    });
+                })
+        });
+
+        let focus_input = self.rename.clone();
+        window.defer(cx, move |window, cx| {
+            focus_input.update(cx, |input, cx| input.focus(window, cx));
+        });
+    }
+
+    fn open_delete_dialog(
+        &mut self,
+        plane: Plane,
+        id: String,
+        title: String,
+        last_known: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.action_error = None;
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let tokens = design::tokens(cx);
+            let error = view
+                .read_with(cx, |this, _| this.action_error.clone())
+                .ok()
+                .flatten();
+            let submit_view = view.clone();
+            let submit_id = id.clone();
+            let close_view = view.clone();
+            let detail = if last_known {
+                "Its owner is offline. This hides the last-known row in this client; the durable record remains on its machine."
+            } else {
+                "This permanently removes the completed session from its owner. This cannot be undone by reconnecting."
+            };
+
+            dialog
+                .title(if last_known {
+                    "Hide offline session?"
+                } else {
+                    "Delete session?"
+                })
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(if last_known { "Hide session" } else { "Delete session" })
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .whitespace_normal()
+                                .child(title.clone()),
+                        )
+                        .child(div().text_sm().text_color(tokens.ink_2).child(detail))
+                        .when_some(error, |content, error| {
+                            content.child(Alert::error("delete-session-error", error).small())
+                        }),
+                )
+                .on_ok(move |_, window, cx| {
+                    let accepted = submit_view
+                        .update(cx, |this, cx| this.delete_session(plane, &submit_id, cx))
+                        .unwrap_or(false);
+                    if !accepted {
+                        window.refresh();
+                    }
+                    accepted
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = close_view.update(cx, |this, cx| {
+                        this.action_error = None;
+                        cx.notify();
+                    });
+                })
+        });
     }
 
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -722,6 +995,7 @@ impl DesktopView {
             .unwrap_or_default();
         let row_count = rows.len();
         let rows = Arc::new(rows);
+        let desktop_view = cx.entity().downgrade();
 
         div()
             .flex()
@@ -745,6 +1019,9 @@ impl DesktopView {
                         div()
                             .flex()
                             .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .gap_2()
                             .child(design::icon_tile(
                                 tokens,
@@ -756,11 +1033,15 @@ impl DesktopView {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .gap_1()
                                     .child(
                                         div()
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .truncate()
                                             .child("Ouroboros"),
                                     )
                                     .child(design::eyebrow(tokens, "WORKSPACE")),
@@ -768,6 +1049,7 @@ impl DesktopView {
                     )
                     .child(
                         design::secondary_button("new-session", "New")
+                            .flex_none()
                             .icon(IconName::Plus)
                             .tooltip("New session · ⌘N")
                             .disabled(self.app.is_none())
@@ -820,20 +1102,33 @@ impl DesktopView {
                                 row_count,
                                 cx.processor(
                                     move |_this, range: Range<usize>, _window, cx| {
+                                        let desktop_view = desktop_view.clone();
                                         range
                                             .filter_map(|index| {
                                                 rows.get(index).cloned().map(|row| (index, row))
                                             })
-                                            .map(|(index, row)| {
+                                            .map(move |(index, row)| {
                                                 let id = row.id.clone();
                                                 let plane = row.plane;
                                                 let selected = row.selected;
+                                                let current_title = row.title.clone();
+                                                let can_rename = row.can_rename;
+                                                let can_delete = row.can_delete;
+                                                let terminal = row.terminal;
+                                                let last_known = row.last_known;
                                                 let triage_tone = match row.triage {
                                                     Triage::NeedsInput => Tone::Warning,
                                                     Triage::Working => Tone::Accent,
                                                     Triage::Done => Tone::Neutral,
                                                 };
-                                                let title = display_session_id(&row.id);
+                                                let title = display_session_title(
+                                                    row.title.as_deref(),
+                                                    &row.id,
+                                                );
+                                                let full_title = row
+                                                    .title
+                                                    .clone()
+                                                    .unwrap_or_else(|| row.id.clone());
                                                 let meta = format!(
                                                     "{}{}{}",
                                                     row.plane.tag(),
@@ -849,9 +1144,15 @@ impl DesktopView {
                                                         String::new()
                                                     }
                                                 );
+                                                let select_id = id.clone();
+                                                let rename_id = id.clone();
+                                                let delete_id = id.clone();
+                                                let delete_title = full_title.clone();
+                                                let menu_view = desktop_view.clone();
                                                 div()
                                                     .id(("session", index))
                                                     .flex()
+                                                    .min_w_0()
                                                     .gap_2()
                                                     .mx_2()
                                                     .mb_1()
@@ -872,11 +1173,12 @@ impl DesktopView {
                                                         tokens.canvas
                                                     })
                                                     .hover(|style| style.bg(tokens.hover))
+                                                    .cursor_context_menu()
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             this.select_session(
                                                                 plane,
-                                                                id.clone(),
+                                                                select_id.clone(),
                                                                 window,
                                                                 cx,
                                                             );
@@ -908,30 +1210,103 @@ impl DesktopView {
                                                                     .gap_2()
                                                                     .child(
                                                                         div()
+                                                                            .id(("session-title", index))
                                                                             .flex_1()
                                                                             .min_w_0()
                                                                             .text_sm()
                                                                             .font_weight(
                                                                                 gpui::FontWeight::MEDIUM,
                                                                             )
-                                                                            .text_ellipsis()
-                                                                            .child(title),
+                                                                            .truncate()
+                                                                            .child(title)
+                                                                            .tooltip({
+                                                                                let full_title = full_title.clone();
+                                                                                move |window, cx| {
+                                                                                    Tooltip::new(full_title.clone()).build(window, cx)
+                                                                                }
+                                                                            }),
                                                                     )
-                                                                    .child(design::status_tag(
-                                                                        tokens,
-                                                                        cx,
-                                                                        triage_tone,
-                                                                        row.status,
-                                                                    )),
+                                                                    .child(
+                                                                        design::status_tag(
+                                                                            tokens,
+                                                                            cx,
+                                                                            triage_tone,
+                                                                            row.status,
+                                                                        )
+                                                                        .flex_none(),
+                                                                    ),
                                                             )
                                                             .child(
                                                                 div()
+                                                                    .id(("session-meta", index))
+                                                                    .w_full()
+                                                                    .min_w_0()
                                                                     .text_xs()
                                                                     .text_color(tokens.ink_3)
-                                                                    .text_ellipsis()
-                                                                    .child(meta),
+                                                                    .truncate()
+                                                                    .child(meta.clone())
+                                                                    .tooltip(move |window, cx| {
+                                                                        Tooltip::new(meta.clone()).build(window, cx)
+                                                                    }),
                                                             ),
                                                     )
+                                                    .context_menu(move |menu, _window, _cx| {
+                                                        let rename_view = menu_view.clone();
+                                                        let rename_id = rename_id.clone();
+                                                        let rename_title = current_title.clone();
+                                                        let delete_view = menu_view.clone();
+                                                        let delete_id = delete_id.clone();
+                                                        let delete_title = delete_title.clone();
+
+                                                        let menu = menu
+                                                            .min_w(px(190.0))
+                                                            .item(
+                                                                PopupMenuItem::new("Rename session…")
+                                                                    .icon(IconName::ALargeSmall)
+                                                                    .disabled(!can_rename)
+                                                                    .on_click(move |_, window, cx| {
+                                                                        let _ = rename_view.update(
+                                                                            cx,
+                                                                            |this, cx| {
+                                                                                this.open_rename_dialog(
+                                                                                    plane,
+                                                                                    rename_id.clone(),
+                                                                                    rename_title.clone(),
+                                                                                    window,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    }),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("Delete session…")
+                                                                    .icon(IconName::Delete)
+                                                                    .disabled(!can_delete)
+                                                                    .on_click(move |_, window, cx| {
+                                                                        let _ = delete_view.update(
+                                                                            cx,
+                                                                            |this, cx| {
+                                                                                this.open_delete_dialog(
+                                                                                    plane,
+                                                                                    delete_id.clone(),
+                                                                                    delete_title.clone(),
+                                                                                    last_known,
+                                                                                    window,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    }),
+                                                            );
+
+                                                        if !terminal && !last_known {
+                                                            menu.separator()
+                                                                .label("Finish session to delete")
+                                                        } else {
+                                                            menu
+                                                        }
+                                                    })
                                             })
                                             .collect::<Vec<_>>()
                                     },
@@ -954,7 +1329,7 @@ impl DesktopView {
                     .border_color(tokens.line)
                     .text_xs()
                     .text_color(tokens.ink_3)
-                    .child("Create a session")
+                    .child("Right-click to manage")
                     .child(design::keycap(tokens, "⌘N")),
             )
     }
@@ -1646,7 +2021,13 @@ impl Render for DesktopView {
             .app
             .as_ref()
             .and_then(|app| app.sessions.open_info())
-            .map(|session| format!("{} · {}", session.id, session.status.as_str()))
+            .map(|session| {
+                format!(
+                    "{} · {}",
+                    session.title.as_deref().unwrap_or(session.id.as_str()),
+                    session.status.as_str()
+                )
+            })
             .unwrap_or_else(|| "Ouroboros".to_string());
         let window_title = if open_title == "Ouroboros" {
             open_title.clone()
@@ -1658,7 +2039,7 @@ impl Render for DesktopView {
             .app
             .as_ref()
             .and_then(|app| app.sessions.open_info())
-            .map(|session| display_session_id(&session.id))
+            .map(|session| display_session_title(session.title.as_deref(), &session.id))
             .unwrap_or_else(|| "Ouroboros".to_string());
         let selected = self.app.as_ref().and_then(|app| {
             app.desktop_sessions()
@@ -1856,34 +2237,247 @@ fn render_cell(
     window: &mut Window,
     cx: &mut Context<DesktopView>,
 ) -> gpui::AnyElement {
-    let tone = match cell.tone {
-        DesktopTone::Neutral | DesktopTone::Muted => Tone::Neutral,
-        DesktopTone::Accent => Tone::Accent,
-        DesktopTone::Success => Tone::Success,
-        DesktopTone::Warning => Tone::Warning,
-        DesktopTone::Error => Tone::Danger,
+    match cell.kind {
+        DesktopCellKind::Message if cell.label.eq_ignore_ascii_case("you") => {
+            render_user_message(index, cell, tokens, window, cx)
+        }
+        DesktopCellKind::Message => render_agent_message(index, cell, tokens, window, cx),
+        DesktopCellKind::Activity => render_agent_activity(cell, tokens, cx),
+        DesktopCellKind::Divider => render_transcript_divider(cell, tokens, cx),
+        _ => render_meta_cell(index, cell, tokens, window, cx),
+    }
+}
+
+fn render_user_message(
+    index: usize,
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    window: &mut Window,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .justify_end()
+        .w_full()
+        .max_w(px(880.0))
+        .mx_auto()
+        .py_2()
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap_2()
+                .w_full()
+                .max_w(px(680.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.ink_3)
+                                .child(cell.label),
+                        )
+                        .child(
+                            design::card(tokens, cx, Tone::Neutral)
+                                .w_full()
+                                .px_4()
+                                .py_3()
+                                .child(
+                                    TextView::markdown(
+                                        ("transcript-user-markdown", index),
+                                        cell.body,
+                                        window,
+                                        cx,
+                                    )
+                                    .selectable(true)
+                                    .w_full()
+                                    .text_sm(),
+                                ),
+                        ),
+                )
+                .child(design::icon_tile(tokens, cx, Tone::Neutral, IconName::User)),
+        )
+        .into_any_element()
+}
+
+fn render_agent_message(
+    index: usize,
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    window: &mut Window,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    let metadata = Arc::new(cell.metadata);
+    let has_metadata = !metadata.is_empty();
+    let tooltip_metadata = metadata.clone();
+
+    div()
+        .flex()
+        .justify_start()
+        .w_full()
+        .max_w(px(880.0))
+        .mx_auto()
+        .py_2()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .w_full()
+                .max_w(px(760.0))
+                .child(design::icon_tile(tokens, cx, Tone::Accent, IconName::Bot))
+                .child(
+                    div()
+                        .id(("agent-message", index))
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.accent)
+                                .child(cell.label)
+                                .when(has_metadata, |row| {
+                                    row.child(
+                                        Icon::new(IconName::Info).xsmall().text_color(tokens.ink_3),
+                                    )
+                                })
+                                .when(cell.streaming, |row| {
+                                    row.child(Spinner::new().small().color(tokens.accent))
+                                }),
+                        )
+                        .child(
+                            design::card(tokens, cx, Tone::Accent).w_full().p_4().child(
+                                TextView::markdown(
+                                    ("transcript-agent-markdown", index),
+                                    cell.body,
+                                    window,
+                                    cx,
+                                )
+                                .selectable(true)
+                                .w_full()
+                                .text_sm(),
+                            ),
+                        )
+                        .when(has_metadata, move |message| {
+                            message.tooltip(move |window, cx| {
+                                let metadata = tooltip_metadata.clone();
+                                Tooltip::element(move |_, cx| {
+                                    let tokens = design::tokens(cx);
+                                    div().flex().flex_col().gap_1().max_w(px(360.0)).children(
+                                        metadata.iter().cloned().map(|line| {
+                                            div()
+                                                .text_xs()
+                                                .text_color(tokens.ink_2)
+                                                .whitespace_normal()
+                                                .child(line)
+                                        }),
+                                    )
+                                })
+                                .build(window, cx)
+                            })
+                        }),
+                ),
+        )
+        .into_any_element()
+}
+
+fn render_agent_activity(
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .justify_start()
+        .w_full()
+        .max_w(px(880.0))
+        .mx_auto()
+        .py_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .max_w(px(760.0))
+                .child(design::icon_tile(tokens, cx, Tone::Accent, IconName::Bot))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(tokens.radius)
+                        .text_sm()
+                        .text_color(tokens.ink_2)
+                        .child(Spinner::new().small().color(tokens.accent))
+                        .child(cell.label),
+                ),
+        )
+        .into_any_element()
+}
+
+fn render_transcript_divider(
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    let tone = desktop_tone(cell.tone);
+    let label_color = match cell.tone {
+        DesktopTone::Warning | DesktopTone::Error | DesktopTone::Success => {
+            tokens.tone(cx, tone).foreground
+        }
+        _ => tokens.ink_3,
     };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .max_w(px(760.0))
+        .py_2()
+        .child(div().h_px().flex_1().bg(tokens.line))
+        .child(div().text_xs().text_color(label_color).child(cell.label))
+        .child(div().h_px().flex_1().bg(tokens.line))
+        .into_any_element()
+}
+
+fn render_meta_cell(
+    index: usize,
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    window: &mut Window,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    let tone = desktop_tone(cell.tone);
     let colors = tokens.tone(cx, tone);
     let label_color = if cell.tone == DesktopTone::Muted {
         tokens.ink_3
     } else {
         colors.foreground
     };
-    let compact = matches!(
-        cell.kind,
-        DesktopCellKind::Divider | DesktopCellKind::Status | DesktopCellKind::Thinking
-    );
     let mono = matches!(cell.kind, DesktopCellKind::Tool | DesktopCellKind::Diff);
     let rich_text = matches!(
         cell.kind,
-        DesktopCellKind::Message
-            | DesktopCellKind::Plan
-            | DesktopCellKind::File
-            | DesktopCellKind::Runtime
+        DesktopCellKind::Plan | DesktopCellKind::File | DesktopCellKind::Runtime
     );
     let icon = match cell.kind {
-        DesktopCellKind::Message if cell.label.eq_ignore_ascii_case("you") => IconName::User,
-        DesktopCellKind::Message => IconName::Bot,
+        DesktopCellKind::Message | DesktopCellKind::Activity => IconName::Bot,
         DesktopCellKind::Thinking => IconName::LoaderCircle,
         DesktopCellKind::Plan => IconName::GalleryVerticalEnd,
         DesktopCellKind::Tool => IconName::SquareTerminal,
@@ -1897,26 +2491,29 @@ fn render_cell(
 
     div()
         .flex()
-        .gap_3()
+        .items_start()
+        .gap_2()
         .w_full()
-        .max_w(px(880.0))
-        .mx_auto()
-        .px_2()
-        .py(if compact { px(8.0) } else { px(12.0) })
-        .rounded(tokens.radius)
-        .when(cell.tone == DesktopTone::Accent, |row| {
-            row.bg(colors.background)
-                .border_1()
-                .border_color(colors.border)
-        })
-        .child(design::icon_tile(tokens, cx, tone, icon))
+        .max_w(px(760.0))
+        .py_1()
+        .text_color(tokens.ink_2)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size_6()
+                .flex_none()
+                .text_color(label_color)
+                .child(Icon::new(icon).small()),
+        )
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap_2()
+                .gap_1()
                 .child(
                     div()
                         .flex()
@@ -1927,24 +2524,16 @@ fn render_cell(
                         .text_color(label_color)
                         .child(cell.label)
                         .when(cell.streaming, |row| {
-                            row.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .font_weight(gpui::FontWeight::NORMAL)
-                                    .text_color(tokens.accent)
-                                    .child(Spinner::new().small().color(tokens.accent))
-                                    .child("Working"),
-                            )
+                            row.child(Spinner::new().small().color(tokens.accent))
                         }),
                 )
                 .when(!body.trim().is_empty(), |view| {
                     if mono {
                         view.child(
                             design::inset(tokens)
-                                .p_3()
-                                .text_sm()
+                                .px_3()
+                                .py_2()
+                                .text_xs()
                                 .font_family("monospace")
                                 .whitespace_normal()
                                 .child(body),
@@ -1954,12 +2543,12 @@ fn render_cell(
                             TextView::markdown(("transcript-markdown", index), body, window, cx)
                                 .selectable(true)
                                 .w_full()
-                                .text_sm(),
+                                .text_xs(),
                         )
                     } else {
                         view.child(
                             div()
-                                .text_sm()
+                                .text_xs()
                                 .whitespace_normal()
                                 .text_color(if cell.tone == DesktopTone::Muted {
                                     tokens.ink_2
@@ -1972,6 +2561,16 @@ fn render_cell(
                 }),
         )
         .into_any_element()
+}
+
+fn desktop_tone(tone: DesktopTone) -> Tone {
+    match tone {
+        DesktopTone::Neutral | DesktopTone::Muted => Tone::Neutral,
+        DesktopTone::Accent => Tone::Accent,
+        DesktopTone::Success => Tone::Success,
+        DesktopTone::Warning => Tone::Warning,
+        DesktopTone::Error => Tone::Danger,
+    }
 }
 
 fn display_session_id(id: &str) -> String {
@@ -1994,6 +2593,14 @@ fn display_session_id(id: &str) -> String {
         .rev()
         .collect::<String>();
     format!("{head}…{tail}")
+}
+
+fn display_session_title(title: Option<&str>, id: &str) -> String {
+    title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| display_session_id(id))
 }
 
 #[cfg(test)]
@@ -2029,5 +2636,14 @@ mod tests {
             display_session_id("ouro-session-f99c08009a6c9ac5d14171ff20f5cccd"),
             "ouro-session-f9…20f5cccd"
         );
+    }
+
+    #[test]
+    fn a_session_title_replaces_the_generated_id_without_losing_the_fallback() {
+        assert_eq!(
+            display_session_title(Some("  Investigate the flaky build  "), "session-1"),
+            "Investigate the flaky build"
+        );
+        assert_eq!(display_session_title(None, "session-1"), "session-1");
     }
 }

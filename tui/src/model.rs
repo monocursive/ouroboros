@@ -740,6 +740,9 @@ impl SessionUsage {
 pub struct SessionInfo {
     pub plane: Plane,
     pub id: String,
+    /// A human or runtime-generated title for interactive sessions. Coding tasks keep
+    /// using their objective; older gateways omit this field entirely.
+    pub title: Option<String>,
     pub status: SessionStatus,
     pub provider: Option<String>,
     pub node: Option<String>,
@@ -797,6 +800,8 @@ pub struct SessionInfo {
 struct RawSession {
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default = "unknown_status")]
     status: SessionStatus,
     #[serde(default)]
@@ -847,6 +852,10 @@ impl SessionInfo {
         Ok(Self {
             plane,
             id: raw.id,
+            title: raw
+                .title
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty()),
             status: raw.status,
             provider: raw.provider,
             node: raw.node,
