@@ -57,6 +57,9 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
          {:ok, response} <- fetch(uri, min(params.max_bytes, @max_bytes), @max_redirects) do
       {:ok, present(response)}
     else
+      {:error, {:http_status, _url, _status, _phrase, _body} = reason} ->
+        {:ok, %{output: describe(reason), is_error: true}}
+
       {:error, reason} ->
         {:ok, %{output: "web_fetch failed: #{describe(reason)}", is_error: true}}
     end
@@ -126,8 +129,9 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
       {:ok, {{_version, status, _phrase}, headers, _body}} when status in 300..399 ->
         redirect(uri, header(headers, "location"), max_bytes, remaining)
 
-      {:ok, {{_version, status, _phrase}, _headers, body}} ->
-        {:error, {:http_status, status, clamp(body, 2_000)}}
+      {:ok, {{_version, status, phrase}, _headers, body}} ->
+        {:error,
+         {:http_status, URI.to_string(uri), status, to_string(phrase), clamp(body, 2_000)}}
 
       {:error, reason} ->
         {:error, {:request_failed, reason}}
@@ -293,9 +297,27 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   defp describe(:redirect_without_location), do: "the response redirected without a Location."
   defp describe(:too_many_redirects), do: "more than #{@max_redirects} redirects on one host."
 
-  defp describe({:http_status, status, body}),
-    do: "HTTP #{status}. #{String.slice(to_string(body), 0, 500)}"
+  defp describe({:http_status, url, 404, phrase, _body}) do
+    "HTTP 404#{phrase_note(phrase)} from #{url}. " <>
+      "The server was reached, but no resource exists at that URL. " <>
+      "Verify the exact path and version/ref; do not retry the unchanged URL. " <>
+      "For dependency source, prefer the locally installed source or the dependency's " <>
+      "pinned tag/commit over a moving default branch."
+  end
+
+  defp describe({:http_status, url, status, phrase, body}) do
+    detail = String.slice(to_string(body), 0, 500) |> String.trim()
+    suffix = if detail == "", do: "", else: " #{detail}"
+    "HTTP #{status}#{phrase_note(phrase)} from #{url}.#{suffix}"
+  end
 
   defp describe({:request_failed, reason}), do: "the request failed: #{inspect(reason)}"
   defp describe(reason), do: inspect(reason)
+
+  defp phrase_note(phrase) do
+    case String.trim(to_string(phrase)) do
+      "" -> ""
+      text -> " #{text}"
+    end
+  end
 end

@@ -119,12 +119,30 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       refute result.output =~ "var x"
     end
 
-    test "a non-2xx status is an error result carrying the status", %{context: context} do
+    test "a 404 distinguishes a missing resource from a transport failure", %{context: context} do
       port = listen(fn _request -> response(404, [], "nope") end)
       result = fetch(port, "/missing", context)
 
       assert result.is_error
-      assert result.output =~ "HTTP 404"
+      assert result.output =~ "HTTP 404 X from http://127.0.0.1:#{port}/missing"
+      assert result.output =~ "The server was reached"
+      assert result.output =~ "Verify the exact path and version/ref"
+      assert result.output =~ "do not retry the unchanged URL"
+      refute result.output =~ "web_fetch failed"
+    end
+
+    test "another non-2xx status carries the URL, reason phrase, and response body", %{
+      context: context
+    } do
+      port = listen(fn _request -> response(503, [], "try later") end)
+      result = fetch(port, "/unavailable", context)
+
+      assert result.is_error
+
+      assert result.output ==
+               "HTTP 503 X from http://127.0.0.1:#{port}/unavailable. try later"
+
+      refute result.output =~ "web_fetch failed"
     end
 
     test "the byte cap bites and is reported", %{context: context} do

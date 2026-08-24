@@ -28,7 +28,8 @@ To attach to a listener explicitly:
 ouro-desktop --addr 127.0.0.1:7777 --token-file /absolute/path/gateway.token
 ```
 
-The composer is multi-line. `Command-Enter` sends, `Command-.` interrupts the active
+The composer is multi-line. `Enter` sends and `Shift-Enter` inserts a new line;
+`Command-Enter` remains an alternative send shortcut. `Command-.` interrupts the active
 turn, `Command-N` toggles the new-session form, and `Command-Q` quits the client. Closing
 the last window disconnects the client and leaves an adopted runtime running.
 

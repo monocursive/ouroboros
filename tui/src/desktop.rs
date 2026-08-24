@@ -5,6 +5,7 @@
 //! reducer the same `Msg` values as the terminal driver; every native action calls a
 //! semantic method on that reducer and drains its ordinary `Call` queue.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -16,9 +17,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context as _, Result};
 use gpui::{
     actions, div, prelude::*, px, size, uniform_list, App as GpuiApp, Application, Bounds, Context,
-    Entity, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem, ScrollHandle, Subscription,
-    SystemMenuType, Task, Timer, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions,
+    Entity, FocusHandle, Focusable as _, KeyBinding, KeyDownEvent, Menu, MenuItem, ScrollHandle,
+    Subscription, SystemMenuType, Task, Timer, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_component::alert::Alert;
 use gpui_component::button::ButtonVariant;
@@ -44,6 +45,12 @@ use crate::ui::app::{
 use crate::ui::{self, TICK};
 
 const LAUNCHER_ERROR_LIMIT: usize = 16 * 1024;
+const COLLAPSED_TOOL_LINES: usize = 12;
+const COLLAPSED_TOOL_HEAD_LINES: usize = 7;
+const COLLAPSED_TOOL_TAIL_LINES: usize = 4;
+const COLLAPSED_TOOL_CHARS: usize = 2_400;
+const COLLAPSED_TOOL_HEAD_CHARS: usize = 1_600;
+const COLLAPSED_TOOL_TAIL_CHARS: usize = 600;
 #[cfg(target_os = "macos")]
 const MACOS_APP_ICON: &str = "Ouroboros.icns";
 
@@ -438,6 +445,7 @@ struct DesktopView {
     transcript_scroll: ScrollHandle,
     session_scroll: UniformListScrollHandle,
     transcript_len: usize,
+    expanded_tool_cells: HashSet<String>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
@@ -524,6 +532,7 @@ impl DesktopView {
             transcript_scroll: ScrollHandle::new(),
             session_scroll: UniformListScrollHandle::new(),
             transcript_len: 0,
+            expanded_tool_cells: HashSet::new(),
             focus_handle,
             _subscriptions: subscriptions,
             _poll: poll,
@@ -619,6 +628,7 @@ impl DesktopView {
             self.composer
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.transcript_len = 0;
+            self.expanded_tool_cells.clear();
             self.transcript_scroll.scroll_to_bottom();
             self.action_error = None;
             self.flush_calls();
@@ -961,11 +971,29 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) {
         let modifiers = event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+        let composer_focused = self.composer.focus_handle(cx).is_focused(window);
+
+        // The composer follows chat conventions: bare Enter sends and Shift-Enter is left
+        // to gpui-component's multiline input handler, which inserts the newline. Keep the
+        // existing Command-Enter shortcut as an alternative.
+        if key == "enter"
+            && composer_focused
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+        {
+            self.send_message(window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+
         if !modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift {
             return;
         }
 
-        let handled = match event.keystroke.key.as_str() {
+        let handled = match key {
             "enter" => {
                 self.send_message(window, cx);
                 true
@@ -1655,7 +1683,17 @@ impl DesktopView {
         let rendered_cells = cells
             .into_iter()
             .enumerate()
-            .map(|(index, cell)| render_cell(index, cell, tokens, window, cx))
+            .map(|(index, cell)| {
+                let expansion_key = (cell.kind == DesktopCellKind::Tool).then(|| {
+                    cell.key
+                        .clone()
+                        .unwrap_or_else(|| format!("tool-row:{index}"))
+                });
+                let expanded = expansion_key
+                    .as_ref()
+                    .is_some_and(|key| self.expanded_tool_cells.contains(key));
+                render_cell(index, cell, expanded, expansion_key, tokens, window, cx)
+            })
             .collect::<Vec<_>>();
 
         div()
@@ -1968,7 +2006,7 @@ impl DesktopView {
                             .child(
                                 design::primary_button("send", "Send")
                                     .icon(IconName::ArrowUp)
-                                    .tooltip("Send message · ⌘↩")
+                                    .tooltip("Send message · ↩")
                                     .disabled(!can_send || composer_empty)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send_message(window, cx)
@@ -2006,7 +2044,11 @@ impl DesktopView {
                                             .child("Agent working")
                                     })
                                     .when(!working, |status| {
-                                        status.child("Send").child(design::keycap(tokens, "⌘↩"))
+                                        status
+                                            .child("Send")
+                                            .child(design::keycap(tokens, "↩"))
+                                            .child(" · New line")
+                                            .child(design::keycap(tokens, "⇧↩"))
                                     }),
                             ),
                     ),
@@ -2233,6 +2275,8 @@ impl Render for DesktopView {
 fn render_cell(
     index: usize,
     cell: DesktopCell,
+    expanded: bool,
+    expansion_key: Option<String>,
     tokens: DesktopTokens,
     window: &mut Window,
     cx: &mut Context<DesktopView>,
@@ -2244,7 +2288,7 @@ fn render_cell(
         DesktopCellKind::Message => render_agent_message(index, cell, tokens, window, cx),
         DesktopCellKind::Activity => render_agent_activity(cell, tokens, cx),
         DesktopCellKind::Divider => render_transcript_divider(cell, tokens, cx),
-        _ => render_meta_cell(index, cell, tokens, window, cx),
+        _ => render_meta_cell(index, cell, expanded, expansion_key, tokens, window, cx),
     }
 }
 
@@ -2460,6 +2504,8 @@ fn render_transcript_divider(
 fn render_meta_cell(
     index: usize,
     cell: DesktopCell,
+    expanded: bool,
+    expansion_key: Option<String>,
     tokens: DesktopTokens,
     window: &mut Window,
     cx: &mut Context<DesktopView>,
@@ -2488,6 +2534,25 @@ fn render_meta_cell(
         DesktopCellKind::Divider => IconName::Dash,
     };
     let body = cell.body;
+    let preview = (cell.kind == DesktopCellKind::Tool)
+        .then(|| collapsed_tool_body(&body))
+        .flatten();
+    let collapsible = preview.is_some();
+    let shown_body = if expanded {
+        body
+    } else {
+        preview
+            .as_ref()
+            .map(|preview| preview.body.clone())
+            .unwrap_or(body)
+    };
+    let toggle_label = preview.as_ref().map(|preview| {
+        if expanded {
+            "Collapse output".to_string()
+        } else {
+            format!("Expand output · {}", preview.extent)
+        }
+    });
 
     div()
         .flex()
@@ -2527,23 +2592,30 @@ fn render_meta_cell(
                             row.child(Spinner::new().small().color(tokens.accent))
                         }),
                 )
-                .when(!body.trim().is_empty(), |view| {
+                .when(!shown_body.trim().is_empty(), |view| {
                     if mono {
-                        view.child(
-                            design::inset(tokens)
-                                .px_3()
-                                .py_2()
-                                .text_xs()
-                                .font_family("monospace")
-                                .whitespace_normal()
-                                .child(body),
-                        )
+                        let output = design::inset(tokens)
+                            .id(("tool-output", index))
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .font_family("monospace")
+                            .whitespace_normal()
+                            .child(shown_body);
+                        view.child(output.when(collapsible && expanded, |output| {
+                            output.max_h(px(440.0)).overflow_y_scroll()
+                        }))
                     } else if rich_text {
                         view.child(
-                            TextView::markdown(("transcript-markdown", index), body, window, cx)
-                                .selectable(true)
-                                .w_full()
-                                .text_xs(),
+                            TextView::markdown(
+                                ("transcript-markdown", index),
+                                shown_body,
+                                window,
+                                cx,
+                            )
+                            .selectable(true)
+                            .w_full()
+                            .text_xs(),
                         )
                     } else {
                         view.child(
@@ -2555,12 +2627,99 @@ fn render_meta_cell(
                                 } else {
                                     tokens.ink
                                 })
-                                .child(body),
+                                .child(shown_body),
                         )
                     }
+                })
+                .when_some(toggle_label, |view, label| {
+                    let expansion_key =
+                        expansion_key.expect("a collapsible tool row always has an expansion key");
+                    view.child(
+                        div().flex().justify_end().child(
+                            design::secondary_button(("tool-output-toggle", index), label)
+                                .small()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_tool_cells.remove(&expansion_key) {
+                                        this.expanded_tool_cells.insert(expansion_key.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                    )
                 }),
         )
         .into_any_element()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollapsedToolBody {
+    body: String,
+    extent: String,
+}
+
+/// Keeps verbose tool results from owning the desktop transcript's layout by default.
+/// The complete value remains in the cell and is rendered on explicit expansion.
+fn collapsed_tool_body(body: &str) -> Option<CollapsedToolBody> {
+    let lines = body.lines().collect::<Vec<_>>();
+    let line_count = lines.len();
+    let char_count = body.chars().count();
+    if line_count <= COLLAPSED_TOOL_LINES && char_count <= COLLAPSED_TOOL_CHARS {
+        return None;
+    }
+
+    let extent = if line_count > COLLAPSED_TOOL_LINES {
+        format!(
+            "{line_count} line{}",
+            if line_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "{char_count} character{}",
+            if char_count == 1 { "" } else { "s" }
+        )
+    };
+
+    let line_preview = if line_count > COLLAPSED_TOOL_LINES {
+        let hidden = line_count - COLLAPSED_TOOL_HEAD_LINES - COLLAPSED_TOOL_TAIL_LINES;
+        let head = lines[..COLLAPSED_TOOL_HEAD_LINES].join("\n");
+        let tail = lines[line_count - COLLAPSED_TOOL_TAIL_LINES..].join("\n");
+        format!(
+            "{head}\n… {hidden} line{} hidden …\n{tail}",
+            if hidden == 1 { "" } else { "s" }
+        )
+    } else {
+        body.to_string()
+    };
+
+    Some(CollapsedToolBody {
+        body: collapse_tool_chars(&line_preview),
+        extent,
+    })
+}
+
+fn collapse_tool_chars(body: &str) -> String {
+    let char_count = body.chars().count();
+    if char_count <= COLLAPSED_TOOL_CHARS {
+        return body.to_string();
+    }
+
+    let hidden = char_count - COLLAPSED_TOOL_HEAD_CHARS - COLLAPSED_TOOL_TAIL_CHARS;
+    let head = body
+        .chars()
+        .take(COLLAPSED_TOOL_HEAD_CHARS)
+        .collect::<String>();
+    let tail = body
+        .chars()
+        .rev()
+        .take(COLLAPSED_TOOL_TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!(
+        "{head}\n… {hidden} character{} hidden …\n{tail}",
+        if hidden == 1 { "" } else { "s" }
+    )
 }
 
 fn desktop_tone(tone: DesktopTone) -> Tone {
@@ -2645,5 +2804,41 @@ mod tests {
             "Investigate the flaky build"
         );
         assert_eq!(display_session_title(None, "session-1"), "session-1");
+    }
+
+    #[test]
+    fn short_tool_output_stays_fully_visible() {
+        assert_eq!(collapsed_tool_body("one\ntwo\nthree"), None);
+    }
+
+    #[test]
+    fn long_tool_output_defaults_to_a_bounded_head_and_tail() {
+        let body = (0..30)
+            .map(|line| format!("result {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = collapsed_tool_body(&body).expect("long output should collapse");
+
+        assert_eq!(preview.extent, "30 lines");
+        assert!(preview.body.starts_with("result 0\nresult 1"));
+        assert!(preview.body.contains("… 19 lines hidden …"));
+        assert!(preview.body.ends_with("result 29"));
+        assert!(!preview.body.contains("result 15\n"));
+        assert_eq!(preview.body.lines().count(), COLLAPSED_TOOL_LINES);
+    }
+
+    #[test]
+    fn a_long_single_line_preview_is_unicode_safe_and_bounded() {
+        let body = "🌀".repeat(COLLAPSED_TOOL_CHARS + 500);
+        let preview = collapsed_tool_body(&body).expect("long output should collapse");
+
+        assert_eq!(
+            preview.extent,
+            format!("{} characters", COLLAPSED_TOOL_CHARS + 500)
+        );
+        assert!(preview.body.contains("… 700 characters hidden …"));
+        assert!(preview.body.chars().count() < COLLAPSED_TOOL_CHARS);
+        assert!(preview.body.starts_with('🌀'));
+        assert!(preview.body.ends_with('🌀'));
     }
 }

@@ -35,6 +35,9 @@ pub enum DesktopCellKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopCell {
+    /// Stable identity for renderer-local affordances such as expanding one tool result.
+    /// This is presentation state only; the durable transcript remains authoritative.
+    pub key: Option<String>,
     pub kind: DesktopCellKind,
     pub label: String,
     pub body: String,
@@ -259,6 +262,7 @@ impl App {
         // looks idle immediately after accepting a message.
         if self.waiting_for_open_agent_reply() {
             cells.push(DesktopCell {
+                key: None,
                 kind: DesktopCellKind::Activity,
                 label: "Agent is working".to_string(),
                 body: String::new(),
@@ -663,6 +667,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             text,
             streaming,
         } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Message,
             label: match speaker {
                 Speaker::You => "You",
@@ -678,6 +683,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Thinking { text, lines, state } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Thinking,
             label: format!(
                 "Thinking · {lines} line{}",
@@ -691,6 +697,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Plan(plan) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Plan,
             label: format!("Plan · {} steps", plan.step_count),
             body: plan
@@ -712,6 +719,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Usage(usage) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Status,
             label: "Usage".to_string(),
             body: format!(
@@ -729,6 +737,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
         Cell::Tool(tool) => {
             let summary = transcript_cells::summarise(&tool).line();
             DesktopCell {
+                key: tool.call_id.as_ref().map(|id| format!("tool:{id}")),
                 kind: DesktopCellKind::Tool,
                 label: summary,
                 body: tool.output.as_ref().map(model::compact).unwrap_or_default(),
@@ -742,6 +751,11 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             }
         }
         Cell::Exploration(group) => DesktopCell {
+            key: group
+                .calls
+                .first()
+                .and_then(|call| call.call_id.as_ref())
+                .map(|id| format!("exploration:{id}")),
             kind: DesktopCellKind::Tool,
             label: if group.done {
                 format!("Explored {} items", group.total())
@@ -759,6 +773,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::CommandOutput(body) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Tool,
             label: "Command output".to_string(),
             body,
@@ -767,6 +782,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::File(file) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::File,
             label: file.kind.unwrap_or_else(|| "File".to_string()),
             body: file.path.unwrap_or_else(|| "Path not reported".to_string()),
@@ -775,6 +791,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Image(image) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::File,
             label: "Image".to_string(),
             body: image.label(),
@@ -783,6 +800,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Diff(diff) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Diff,
             label: format!(
                 "{} · +{} −{}{}",
@@ -810,6 +828,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             deletions,
             in_excerpt,
         } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Diff,
             label: "Changes".to_string(),
             body: format!(
@@ -825,6 +844,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             detail,
             tone,
         } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Status,
             label,
             body: detail,
@@ -833,6 +853,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::ChatNote { text } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Status,
             label: "Note".to_string(),
             body: text,
@@ -841,6 +862,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Runtime(block) => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Runtime,
             label: block.label,
             body: [block.detail, block.body.join("\n")]
@@ -853,6 +875,7 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             metadata: Vec::new(),
         },
         Cell::Divider { text, tone, .. } => DesktopCell {
+            key: None,
             kind: DesktopCellKind::Divider,
             label: text,
             body: String::new(),
@@ -920,5 +943,29 @@ fn desktop_tone(tone: Tone) -> DesktopTone {
         Tone::Success => DesktopTone::Success,
         Tone::Warning => DesktopTone::Warning,
         Tone::Error => DesktopTone::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::transcript_cells::ToolCell;
+    use serde_json::json;
+
+    #[test]
+    fn desktop_tool_rows_keep_their_call_identity_for_local_expansion_state() {
+        let cell = desktop_cell(Cell::Tool(ToolCell {
+            call_id: Some("call-42".to_string()),
+            name: "bash".to_string(),
+            kind: Some("execute".to_string()),
+            input: json!({"command": "printf hello"}),
+            output: Some(json!("hello")),
+            state: ToolState::Completed,
+            started_at: Some(10),
+            settled_at: Some(20),
+        }));
+
+        assert_eq!(cell.key.as_deref(), Some("tool:call-42"));
+        assert_eq!(cell.kind, DesktopCellKind::Tool);
     }
 }
