@@ -12,10 +12,12 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+.PHONY: help dev desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
+	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
+	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
 	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
@@ -30,6 +32,17 @@ dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
 	@test -d deps || $(MIX) deps.get
 	cd tui && $(CARGO) run -- --dev
+
+desktop-dev:
+	@echo "==> desktop-dev: building the native client and its lifecycle helper"
+	cd tui && $(CARGO) build --features desktop --bin ouro --bin ouro-desktop
+	./scripts/bundle-macos-desktop.sh debug
+
+desktop-app: release-tarball
+	@echo "==> desktop-app: embedding the runtime in both macOS app executables"
+	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
+	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features "embed desktop" --bin ouro --bin ouro-desktop
+	./scripts/bundle-macos-desktop.sh release
 
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an

@@ -1672,7 +1672,7 @@ impl App {
         })
     }
 
-    fn submit_composer(&mut self) {
+    pub(super) fn submit_composer(&mut self) {
         let open_key = self.sessions.open.clone();
         if open_key
             .as_ref()

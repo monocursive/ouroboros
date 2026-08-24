@@ -12,6 +12,8 @@ pub mod cli;
 pub mod clipboard;
 pub mod config;
 pub mod continuation;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod fleet;
 pub mod fleet_add;
 pub mod hook;

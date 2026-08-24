@@ -52,6 +52,7 @@ use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod desktop;
 mod details;
 mod footer;
 mod home;
@@ -71,6 +72,10 @@ use session::{
     PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
 };
 
+pub use desktop::{
+    DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell, DesktopCellKind,
+    DesktopSession, DesktopTone,
+};
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{
     AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,

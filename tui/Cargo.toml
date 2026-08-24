@@ -12,12 +12,21 @@ publish = false
 name = "ouro"
 path = "src/main.rs"
 
+[[bin]]
+name = "ouro-desktop"
+path = "src/desktop_main.rs"
+required-features = ["desktop"]
+
 [features]
 default = []
 # Compiles the release extractor. The embedded bytes themselves arrive separately, via
 # OUROBOROS_RELEASE_TARBALL at build time, so the extractor stays testable without a
 # `mix release` having run.
 embed = ["dep:flate2", "dep:tar", "dep:sha2"]
+# Native desktop client. Exact pre-1.0 versions are intentional: GPUI and
+# gpui-component evolve together, and a floating compatible range can compile two
+# different framework APIs into one binary.
+desktop = ["dep:gpui", "dep:gpui-component"]
 
 [dependencies]
 anyhow = "1"
@@ -73,6 +82,9 @@ tokio = { version = "1", features = [
 ] }
 zeroize = "1"
 x509-parser = { version = "0.16", features = ["verify"] }
+
+gpui = { version = "=0.2.2", optional = true, features = ["runtime_shaders"] }
+gpui-component = { version = "=0.5.1", optional = true }
 
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
