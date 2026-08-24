@@ -91,7 +91,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
-  alias Ouroboros.Provider.CodexAppServer
+  alias Ouroboros.Provider.OpenAIAuth
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
@@ -281,6 +281,7 @@ defmodule Ouroboros.Gateway.Methods do
     "permissions.remove" => %{scope: :operate, timeout: @default_timeout},
     "interactive.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
     "account.login.start" => %{scope: :operate, timeout: @default_timeout},
+    "account.login.complete" => %{scope: :operate, timeout: @default_timeout},
     "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
     "account.logout" => %{scope: :operate, timeout: @default_timeout},
     # Both calls checkpoint intent before dispatch. A gateway ceiling can therefore fire
@@ -343,6 +344,7 @@ defmodule Ouroboros.Gateway.Methods do
     "interactive.kill" => %{scope: :operate, timeout: @default_timeout},
     "interactive.delete" => %{scope: :operate, timeout: @default_timeout},
     "coding.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
+    "coding.respond_approval" => %{scope: :operate, timeout: @default_timeout},
     "coding.cancel" => %{scope: :operate, timeout: @default_timeout},
     "coding.delete" => %{scope: :operate, timeout: @default_timeout},
     "teams.add_worker" => %{scope: :operate, timeout: @team_timeout},
@@ -391,6 +393,29 @@ defmodule Ouroboros.Gateway.Methods do
   # no, and this is the narrowest door a plan-aware client needs.
   @plan_exit_choices ["auto_edit", "prompt", "keep_planning"]
   @max_follow_up_bytes 32 * 1024
+  @approval_response_param {"response", :required,
+                            {:either,
+                             [
+                               {:enum_of, @approval_decisions},
+                               {:object,
+                                [
+                                  {"decision", :required, {:enum_of, @approval_decisions}, nil},
+                                  {"scope", {:optional, "once"}, {:enum_of, @approval_scopes},
+                                   "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
+                                  {"reason", :optional, :string, nil},
+                                  {"actor", {:optional, "human"},
+                                   {:enum, ["human", "headless", "automation"]},
+                                   "who answered; the durable approval record preserves it"},
+                                  {"provider_options", :optional,
+                                   {:object,
+                                    [
+                                      {"choice", :optional, {:enum, @plan_exit_choices},
+                                       "a plan-exit question's explicit answer"},
+                                      {"follow_up", :optional, :string,
+                                       "the bounded prompt to run after leaving plan mode"}
+                                    ]}, "accepted only for a plan-exit answer"}
+                                ]}
+                             ]}, "an approval is a yes or a no"}
 
   # The permission engine's own vocabulary, spelled out for the same reason as the rest:
   # a client string is matched against these terms, never converted into one.
@@ -615,6 +640,13 @@ defmodule Ouroboros.Gateway.Methods do
     "account.read" => {:closed, []},
     "account.login.start" =>
       {:closed, [{"flow", {:optional, "browser"}, {:enum, ["browser", "device_code"]}, nil}]},
+    "account.login.complete" =>
+      {:closed,
+       [
+         {"login_id", :required, :string, "the loginId returned by account.login.start"},
+         {"code", :required, :string, "the OAuth authorization code"},
+         {"state", :required, :string, "the OAuth state returned to the callback"}
+       ]},
     "account.login.cancel" =>
       {:closed,
        [{"login_id", :required, :string, "correlates with the `loginId` the start reply carried"}]},
@@ -768,30 +800,7 @@ defmodule Ouroboros.Gateway.Methods do
        [
          @session_id,
          {"request_id", :required, :string, "the id the `approval_requested` event carried"},
-         {"response", :required,
-          {:either,
-           [
-             {:enum_of, @approval_decisions},
-             {:object,
-              [
-                {"decision", :required, {:enum_of, @approval_decisions}, nil},
-                {"scope", {:optional, "once"}, {:enum_of, @approval_scopes},
-                 "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
-                {"reason", :optional, :string, nil},
-                {"actor", {:optional, "human"}, {:enum, ["human", "headless", "automation"]},
-                 "who answered: `headless` is `ouro run --approve-all`; the ledger's `approval` entry records it"},
-                {"provider_options", :optional,
-                 {:object,
-                  [
-                    {"choice", :optional, {:enum, @plan_exit_choices},
-                     "a plan-exit question's explicit answer (B2); otherwise the decision and scope decide"},
-                    {"follow_up", :optional, :string,
-                     "the prompt to run once the session has left plan mode; at most 32 KiB"}
-                  ]},
-                 "accepted only in this shape, for a plan-exit question; anything else is refused"}
-              ]}
-           ]},
-          "an approval is a yes or a no; `provider_options` is admitted only as a plan-exit answer"},
+         @approval_response_param,
          @session_node
        ]},
     "interactive.configure" =>
@@ -865,6 +874,14 @@ defmodule Ouroboros.Gateway.Methods do
     "interactive.kill" => {:closed, [@session_id, @session_node]},
     "interactive.delete" => {:closed, [@session_id, @session_node], "terminal sessions only"},
     "coding.start" => {:closed, [{"objective", :required, :string, nil} | @start_params]},
+    "coding.respond_approval" =>
+      {:closed,
+       [
+         @task_id,
+         {"request_id", :required, :string, "the id the approval_requested event carried"},
+         @approval_response_param,
+         @task_node
+       ]},
     "coding.cancel" => {:closed, [@task_id, @task_node]},
     "coding.delete" => {:closed, [@task_id, @task_node], "terminal tasks only"},
     "teams.add_worker" =>
@@ -1124,6 +1141,17 @@ defmodule Ouroboros.Gateway.Methods do
     with :ok <- only_keys(params, ["flow"]),
          {:ok, flow} <- account_flow(Map.get(params, "flow", "browser")) do
       safe(fn -> account_reply(account_adapter().login(flow)) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("account.login.complete", params) do
+    with :ok <- only_keys(params, ["login_id", "code", "state"]),
+         {:ok, login_id} <- fetch_string(params, "login_id"),
+         {:ok, code} <- fetch_string(params, "code"),
+         {:ok, state} <- fetch_string(params, "state") do
+      safe(fn -> account_reply(account_adapter().complete(login_id, code, state)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1713,6 +1741,19 @@ defmodule Ouroboros.Gateway.Methods do
            {:ok, opts} <- options(params, @start_options, ["objective"]) do
         {owner, opts} = Keyword.pop(opts, :node, node())
         start_coding_on(owner, objective, opts)
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  def invoke("coding.respond_approval", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["id", "request_id", "response", "node"]),
+           {:ok, task} <- session_target(:coding, params),
+           {:ok, request_id} <- fetch_string(params, "request_id"),
+           {:ok, response} <- approval_response(params) do
+        reply(CodingSession.respond_approval(task, request_id, response))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -3223,7 +3264,7 @@ defmodule Ouroboros.Gateway.Methods do
     do: {:invalid, "params.flow must be browser or device_code"}
 
   defp account_adapter do
-    Application.get_env(:ouroboros, :codex_account_adapter, CodexAppServer)
+    Application.get_env(:ouroboros, :account_adapter, OpenAIAuth)
   end
 
   # An absent optional string is `nil` rather than an error; a present one is held to the
@@ -3522,19 +3563,14 @@ defmodule Ouroboros.Gateway.Methods do
      }}
   end
 
-  # The account boundary is the one upstream that names Codex in its errors, and those
-  # sentences are only true of it. `{:error, {:timeout, _}}` and `{:error, {:upstream, _}}`
-  # are shapes any plane could answer with for its own reasons; mapping them in the shared
-  # `reply/1` would tell an operator that Codex timed out during something Codex was never
-  # asked to do. So the attribution lives here, with the four methods that actually call it.
+  # Account failures are attributed here rather than in the shared reply mapper: these
+  # shapes are also used by unrelated planes, and only these methods call OpenAI OAuth.
   defp account_reply({:error, {:timeout, operation}}),
-    do: {:error, code(:upstream_timeout), "Codex app-server timed out during #{operation}"}
+    do: {:error, code(:upstream_timeout), "OpenAI authentication timed out during #{operation}"}
 
   defp account_reply({:error, {:upstream, message}}) when is_binary(message),
-    do: upstream_error({:codex_app_server, message})
+    do: upstream_error({:openai_auth, message})
 
-  # `{:unavailable, message}` already reads as a sentence about whatever was unavailable,
-  # and `reply/1` maps it without attributing it to anyone.
   defp account_reply(result), do: reply(result)
 
   defp forget_session_owner_reply({:ok, result}), do: {:ok, result}

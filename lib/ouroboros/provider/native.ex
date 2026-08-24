@@ -49,7 +49,7 @@ defmodule Ouroboros.Provider.Native do
   alias Jido.Harness.ProviderStatus
   alias Jido.Harness.RunRequest
   alias Jido.Harness.SessionTransportSpec
-  alias Ouroboros.Provider.Native.Loop
+  alias Ouroboros.Provider.Native.Run
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Session
@@ -116,10 +116,14 @@ defmodule Ouroboros.Provider.Native do
         :event_limit,
         :plan,
         :subagent_model,
+        :fork_session,
         :subagent_deadline_ms
       ]
     )
   end
+
+  @doc false
+  def fork_option, do: {:fork_session, true}
 
   # One transport, and it is a process this runtime supervises. `steer: :native` is the
   # capability eight of the nine vendor providers cannot declare: the loop is here, so a
@@ -147,10 +151,9 @@ defmodule Ouroboros.Provider.Native do
           interrupt: :native,
           approvals: :native,
           steer: :native,
-          # `:attachments` is a normalized option so the coding plane accepts the name,
-          # but no tool reads an image yet. Declaring multimodal would let an interactive
-          # turn carry an attachment this loop silently drops.
-          multimodal: false,
+          # Authorized images are copied into the session's private attachment store and
+          # sent as ReqLLM image content parts; other files are named for the read tool.
+          multimodal: :native,
           dynamic_model: :native,
           dynamic_configuration: :native
         ),
@@ -166,15 +169,14 @@ defmodule Ouroboros.Provider.Native do
   Reports which model credentials this node can see, never what they are.
 
   `installed` is whether the loop's dependencies are loadable; `authenticated` is
-  whether at least one ReqLLM provider's key is readable from the environment. The
-  detail map carries environment variable *names* and a boolean, which is the whole
-  point: a status probe that echoed a key would put it in every `runtime.providers`
-  reply, and those cross the gateway.
+  whether the configured model's provider has a usable key or OAuth credential. Detail
+  rows expose names and booleans only.
   """
   @impl true
   def status(_config) do
     credentials = Model.credential_report()
-    authenticated? = Enum.any?(credentials, & &1.present)
+    model = Model.configured_model()
+    authenticated? = Model.credential_ready?(model)
     available? = Model.available?()
     sandbox = Sandbox.detect()
 
@@ -184,14 +186,14 @@ defmodule Ouroboros.Provider.Native do
        installed: available?,
        compatible: available?,
        authenticated: authenticated?,
-       smoke_ready: available? and authenticated? and not is_nil(Model.configured_model()),
+       smoke_ready: available? and authenticated? and is_binary(model),
        executable: "in-process",
        version: version(),
        capabilities: spec().capabilities,
        session_transports: spec().session_transports,
        details: %{
          "model_env" => Model.model_env(),
-         "model" => Model.configured_model(),
+         "model" => model,
          "credentials" => Enum.map(credentials, &Map.new(&1, fn {k, v} -> {to_string(k), v} end)),
          # The one capability a client needs to stop guessing: the footer may say "no OS
          # sandbox" for a native session only when this says `none`. A string naming the
@@ -207,12 +209,14 @@ defmodule Ouroboros.Provider.Native do
   Runs one finite coding-plane turn to completion and returns its event stream.
 
   The run worker owns `run_started`/`run_completed`/`run_failed`; everything between
-  them is this loop's. The loop runs in a task and the returned stream is that task's
-  output, so a consumer that stops reading tears the task down with it.
+  them is the session-backed bridge's stream. Coding and interactive turns therefore
+  restore and checkpoint the same conversation instead of maintaining two implementations.
   """
   @impl true
   def run(%RunRequest{} = request, context) do
-    Loop.run_stream(request, context)
+    with {:ok, pid, _provider_session_id} <- Run.start(request, context) do
+      {:ok, Run.stream(pid)}
+    end
   end
 
   defp enforced(%{backend: :none}),

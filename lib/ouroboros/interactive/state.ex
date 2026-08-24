@@ -780,6 +780,9 @@ defmodule Ouroboros.Interactive.State do
     system_prompt = Map.get(options, :system_prompt)
 
     cond do
+      state.provider == :codex ->
+        {:legacy_transport_unavailable, :codex}
+
       Map.has_key?(options, :agent_profile) ->
         :agent_profile_in_durable_options
 

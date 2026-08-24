@@ -447,27 +447,6 @@ if gateway_data_dir do
   config :ouroboros, :data_dir, gateway_data_dir
 end
 
-# A scratch-workspace turn is a first-class path, not a provider escape hatch. Codex's
-# non-interactive CLI refuses a directory with no Git metadata unless the host states
-# that it already admitted the workspace, and dependency-based work needs network access
-# inside the still-bounded workspace-write sandbox. Network is on for the local coding
-# product and can be narrowed explicitly at boot; malformed policy never degrades to a
-# guess.
-codex_network_access =
-  case gateway_value.("OUROBOROS_CODEX_NETWORK_ACCESS") do
-    nil -> true
-    value when value in ["1", "true"] -> true
-    value when value in ["0", "false"] -> false
-    other -> raise "OUROBOROS_CODEX_NETWORK_ACCESS must be 1, 0, true, or false, got: #{other}"
-  end
-
-config :ouroboros, :provider_execution_defaults, %{
-  codex: %{
-    skip_git_repo_check: true,
-    network_access_enabled: codex_network_access
-  }
-}
-
 # Language servers are a liability as much as an asset — OpenCode turned theirs off by
 # default over memory and staleness, and Anthropic tells users to disable plugins under
 # pressure (R4 §1). So the two switches an operator reaches for under pressure are

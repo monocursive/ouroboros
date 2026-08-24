@@ -3084,12 +3084,11 @@ defmodule Ouroboros.Interactive.Task do
   # ---------------------------------------------------------------------------
   # C2 — the external-approval path
   #
-  # A managed transport (`claude`, `amp`, `zai`, `codex exec`) runs one process per turn
-  # and declares no approvals channel, so nothing inside the Harness can ask before a tool
-  # runs. What Claude Code *does* offer is `--permission-prompt-tool`: an MCP tool it calls
-  # instead of prompting. `ouro mcp-serve` is that tool's server, and this is where its
-  # call lands. The runtime relays; it does not decide, except where C1's rule engine has
-  # already decided and where a bound has been reached.
+  # A managed transport such as Claude runs one process per turn and may declare no
+  # approvals channel, so Harness cannot ask before a tool runs. Claude Code offers
+  # `--permission-prompt-tool` instead; `ouro mcp-serve` is that tool's server.
+  # Calls land here. The runtime relays; it does not decide, except where C1's rule
+  # engine already decided or a bound was reached.
   # ---------------------------------------------------------------------------
 
   defp open_external_approval(runtime, request_ref, request, from) do

@@ -49,6 +49,9 @@ defmodule Ouroboros.MixProject do
     [
       {:jido, "~> 2.3"},
       {:jido_ai, "~> 2.3"},
+      # Ouroboros calls ReqLLM directly from the in-process provider. Keep that boundary
+      # explicit rather than relying on Jido.AI's transitive dependency.
+      {:req_llm, "~> 1.20"},
       # `ouroboros.toml` — the native agent's hooks and `[checks]` — is TOML because
       # every other agent's project configuration is. The library is already in the tree
       # as `llm_db`'s dependency; it is declared here so the runtime reads a dependency

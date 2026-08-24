@@ -163,13 +163,9 @@ defmodule Ouroboros.Application do
           # without reading another supervisor's private state.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Native.Registry},
-          # C4. The same idea for the JSONL transports, keyed by harness session id. The
-          # pinned harness exposes its session *worker* but never the transport handle
-          # underneath it, and the three verbs that have to reach a dialect directly — a
-          # Codex `thread/compact/start`, a live `model/list`, an ACP `session/set_mode` —
-          # are exactly the ones it has no vocabulary for. Its own registry cannot be
-          # borrowed for this: `Jido.Harness.SessionManager.list/1` selects every key in it
-          # and calls each pid as a session worker.
+          # C4. The same idea for the remaining ACP JSONL transport, keyed by harness
+          # session id. The pinned harness exposes its worker but not the transport handle
+          # underneath it; ACP `session/set_mode` is a dialect verb the worker cannot carry.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Session.Registry},
           {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Coding.Registry},
@@ -208,18 +204,15 @@ defmodule Ouroboros.Application do
     # one more reason for it to be downstream of everything rather than upstream of
     # anything.
     #
-    # The Codex account boundary is in that same tail category, and immediately before the
-    # gateway because the gateway is its only caller. It owns a port to a program that can
-    # die or refuse to speak the protocol, and none of the planes rebuild anything from
-    # what it knows: a crash there must not restart a single live session. It stays
-    # unconditional because it is lazy — no `codex` process is spawned until a client
-    # actually asks about the account.
+    # Direct OAuth state is in the same tail category, immediately before the gateway
+    # because the gateway is its only caller. It owns a private credential file and
+    # short-lived browser/device login tasks; none of the planes rebuilds from its process
+    # state, and model calls resolve credentials from the durable file through ReqLLM.
     #
     # The language-server pool joins the same operator-surface tail, downstream of every
     # plane and of cluster formation. It owns no durable state and nothing rebuilds from
     # it, so no session may be restarted by a language server dying — and none is, because
-    # every plane starts above it. It is unconditional for the reason the Codex account
-    # boundary is: it is lazy, and no language server exists until a caller asks for one.
+    # every plane starts above it. It is unconditional and lazy.
     #
     # It starts last, after the gateway: under `rest_for_one` a crash of this subtree then
     # restarts nothing, and a crash of the account boundary or the gateway restarts only a
@@ -236,7 +229,7 @@ defmodule Ouroboros.Application do
     # and less load-bearing of the two, and because nothing in either depends on the
     # other.
     children ++
-      [Ouroboros.Cluster, Ouroboros.Provider.CodexAppServer] ++
+      [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
       gateway_children() ++
       [Ouroboros.CodeIntel.Supervisor, Ouroboros.Provider.Native.Mcp.Supervisor]
   end

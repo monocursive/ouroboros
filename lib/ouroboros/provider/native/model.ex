@@ -20,8 +20,15 @@ defmodule Ouroboros.Provider.Native.Model do
 
   @typedoc "A message in the loop's own conversation shape. String-keyed on the wire."
   @type message ::
-          %{role: :system | :user, content: String.t()}
-          | %{role: :assistant, content: String.t() | nil, tool_calls: [tool_call()]}
+          %{role: :system, content: String.t()}
+          | %{role: :user, content: String.t() | [map()]}
+          | %{
+              required(:role) => :assistant,
+              required(:content) => String.t() | nil,
+              required(:tool_calls) => [tool_call()],
+              optional(:reasoning_details) => [map()],
+              optional(:provider_metadata) => map()
+            }
           | %{
               role: :tool,
               tool_call_id: String.t(),
@@ -43,6 +50,8 @@ defmodule Ouroboros.Provider.Native.Model do
           {:text, String.t()}
           | {:thinking, String.t()}
           | {:tool_call, tool_call()}
+          | {:reasoning_details, [map()]}
+          | {:provider_metadata, map()}
           | {:usage, map()}
           | {:finish, atom()}
 
@@ -51,6 +60,8 @@ defmodule Ouroboros.Provider.Native.Model do
           system: String.t() | nil,
           messages: [message()],
           tools: [tool_spec()],
+          provider_session_id: String.t(),
+          turn_id: String.t(),
           reasoning_effort: :low | :medium | :high | nil,
           max_tokens: pos_integer() | nil
         }
@@ -118,6 +129,36 @@ defmodule Ouroboros.Provider.Native.Model do
       do: module.credential_report(),
       else: []
   end
+
+  @doc "Whether the configured model's own provider has usable credentials."
+  @spec credential_ready?(String.t() | nil) :: boolean()
+  def credential_ready?(model \\ configured_model())
+
+  def credential_ready?(model) when is_binary(model) do
+    case String.split(model, ":", parts: 2) do
+      ["ollama", _id] ->
+        true
+
+      [provider, _id] ->
+        case existing_provider(provider) do
+          nil -> false
+          provider -> Enum.any?(credential_report(), &(&1.provider == provider and &1.present))
+        end
+
+      _invalid ->
+        false
+    end
+  end
+
+  def credential_ready?(_model), do: false
+
+  defp existing_provider(provider) when is_binary(provider) do
+    String.to_existing_atom(provider)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp existing_provider(_provider), do: nil
 
   defp configured_default, do: Application.get_env(:ouroboros, :native_model)
 end

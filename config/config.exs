@@ -133,16 +133,30 @@ config :ouroboros,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.
   session_call_timeout: 30_000,
+  # Direct model calls are bounded at the node boundary. Per-session requests may choose
+  # a model and reasoning effort, but they cannot replace transport/auth configuration.
+  # `openai_codex` starts on SSE; a stable session id and the Ouroboros originator are
+  # injected for each request by `Provider.Native.Model.ReqLLM`.
+  native_model_options: [
+    receive_timeout: 60_000,
+    stream_idle_timeout: 60_000,
+    total_timeout: 300_000,
+    max_retries: 0,
+    provider_options: [openai_stream_transport: :sse, codex_originator: "ouroboros"]
+  ],
+  # The packaged direct default uses ChatGPT subscription OAuth. API-key deployments may
+  # set `OUROBOROS_NATIVE_MODEL=openai:<model>` or override this node setting.
+  native_model: "openai_codex:gpt-5.6-sol",
   # How long a terminal coding task or interactive session is retained before the
   # recovery sweep deletes it. `nil` disables the sweep and keeps everything.
   terminal_retention_ms: 7 * 24 * 60 * 60 * 1_000,
   # How long a closed provider session may keep a dispatched turn unresolved before
   # the turn is settled as ambiguous so the session can reach its terminal state.
   interactive_unresolved_turn_deadline_ms: 10 * 60 * 1_000,
-  codex_account_adapter:
+  account_adapter:
     if(config_env() == :test,
-      do: Ouroboros.Test.CodexAccountAdapter,
-      else: Ouroboros.Provider.CodexAppServer
+      do: Ouroboros.Test.OpenAIAccountAdapter,
+      else: Ouroboros.Provider.OpenAIAuth
     ),
   # Language servers, owned by this node rather than by any session. Everything here is a
   # bound; `Ouroboros.CodeIntel.Config` documents each one and refuses a value that would
@@ -174,14 +188,13 @@ config :ouroboros,
 # managed transport needs to have a human in the loop at all — `--permission-prompt-tool`
 # pointed at `ouro mcp-serve` — and is otherwise the pinned adapter.
 #
-# `native` is not an override of an upstream adapter: it is a tenth provider, and the
-# only one whose tool loop runs in this VM. It registers through the same map for the
-# same reason the three overrides do — `Jido.Harness.Registry` merges this map over its
-# built-ins, so nothing else in the runtime needs a list of providers to keep in sync.
+# Harness bundles a Codex CLI adapter. Override it with an explicit removed boundary so
+# deleting Ouroboros's old override cannot silently expose `codex exec` again. `native`
+# is the in-process direct provider and the product default.
 config :jido_harness,
   providers: %{
     claude: Ouroboros.Provider.ClaudeAdapter,
-    codex: Ouroboros.Provider.CodexAdapter,
+    codex: Ouroboros.Provider.RemovedCodex,
     kimi: Ouroboros.Provider.KimiAdapter,
     opencode: Ouroboros.Provider.OpenCodeAdapter,
     native: Ouroboros.Provider.Native

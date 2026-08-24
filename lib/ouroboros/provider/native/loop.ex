@@ -88,14 +88,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Checkpoint
-  alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Instructions
   alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.CodeIntel
   alias Ouroboros.Provider.Native.Cost
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Model
-  alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Permissions
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Subagent
@@ -194,8 +192,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   Returns the loop state — the caller keeps `messages`, `reads`, and `session_grants`
   for the next turn — plus the terminal event that was already emitted.
   """
-  @spec run_turn(t(), String.t()) :: {:ok, t()}
-  def run_turn(%__MODULE__{} = state, prompt) do
+  @spec run_turn(t(), String.t() | map()) :: {:ok, t()}
+  def run_turn(%__MODULE__{} = state, prompt) when is_binary(prompt),
+    do: run_turn(state, %{role: :user, content: prompt})
+
+  def run_turn(%__MODULE__{} = state, %{role: :user} = user_message) do
     state = %{
       state
       | hooks: state.hooks || Hooks.load(state.scope.root),
@@ -205,8 +206,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         turn_commands: []
     }
 
-    prompt = prompt <> injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))
-    state = %{state | messages: state.messages ++ [%{role: :user, content: prompt}]}
+    injected = injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))
+    user_message = append_user_text(user_message, injected)
+    state = %{state | messages: state.messages ++ [user_message]}
 
     emit(state, :turn_started, %{
       "model" => state.model_spec,
@@ -260,13 +262,14 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       true ->
         case call_model(state) do
-          {:ok, state, text, calls} ->
+          {:ok, state, text, calls, reasoning_details, provider_metadata} ->
             state = drain_control(state)
 
             if state.interrupted? do
               interrupted(state)
             else
-              state = append_assistant(state, text, calls)
+              state =
+                append_assistant(state, text, calls, reasoning_details, provider_metadata)
 
               if calls == [] do
                 complete(state, iteration)
@@ -293,6 +296,8 @@ defmodule Ouroboros.Provider.Native.Loop do
       system: state.system,
       messages: state.messages,
       tools: tool_specs(state),
+      provider_session_id: state.provider_session_id,
+      turn_id: state.turn_id,
       reasoning_effort: state.reasoning_effort,
       max_tokens: nil
     }
@@ -304,36 +309,40 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp consume(state, stream) do
-    {text, calls, usages} =
-      Enum.reduce(stream, {[], [], []}, fn chunk, {text, calls, usages} ->
+    {text, calls, usages, reasoning_details, provider_metadata} =
+      Enum.reduce(stream, {[], [], [], [], %{}}, fn chunk,
+                                                    {text, calls, usages, details, metadata} ->
         case chunk do
           {:text, delta} when is_binary(delta) and delta != "" ->
             emit(state, :output_text_delta, %{"text" => delta})
-            {[text, delta], calls, usages}
+            {[text, delta], calls, usages, details, metadata}
 
           {:thinking, delta} when is_binary(delta) and delta != "" ->
             emit(state, :thinking_delta, %{"text" => delta})
-            {text, calls, usages}
+            {text, calls, usages, details, metadata}
 
           {:tool_call, call} ->
-            {text, calls ++ [call], usages}
+            {text, calls ++ [call], usages, details, metadata}
+
+          {:reasoning_details, next} when is_list(next) ->
+            {text, calls, usages, next, metadata}
+
+          {:provider_metadata, next} when is_map(next) ->
+            {text, calls, usages, details, Map.merge(metadata, next)}
 
           {:usage, usage} ->
-            {text, calls, usages ++ [usage]}
+            {text, calls, usages ++ [usage], details, metadata}
 
           _ignored ->
-            {text, calls, usages}
+            {text, calls, usages, details, metadata}
         end
       end)
 
     final = IO.iodata_to_binary(text)
     if final != "", do: emit(state, :output_text_final, %{"text" => final})
 
-    # Usage arrives in a provider's last meta chunk, but the assembled final message is
-    # what a reader wants first. Emitting the accounting after the message keeps the
-    # transcript in the order a person reads it, and costs nothing: both are terminal to
-    # this model response.
-    {:ok, Enum.reduce(usages, state, &record_usage(&2, &1)), final, calls}
+    state = Enum.reduce(usages, state, &record_usage(&2, &1))
+    {:ok, state, final, calls, reasoning_details, provider_metadata}
   rescue
     error -> {:error, state, {:stream_failed, Exception.message(error)}}
   catch
@@ -362,13 +371,19 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
   end
 
-  defp append_assistant(state, text, []) when text == "", do: state
+  defp append_assistant(state, "", [], [], metadata) when metadata == %{}, do: state
 
-  defp append_assistant(state, text, calls) do
-    %{
-      state
-      | messages: state.messages ++ [%{role: :assistant, content: text, tool_calls: calls}]
-    }
+  defp append_assistant(state, text, calls, reasoning_details, provider_metadata) do
+    message =
+      %{
+        role: :assistant,
+        content: text,
+        tool_calls: calls
+      }
+      |> put_nonempty(:reasoning_details, reasoning_details)
+      |> put_nonempty(:provider_metadata, provider_metadata)
+
+    %{state | messages: state.messages ++ [message]}
   end
 
   # ---------------------------------------------------------------- tools
@@ -1784,19 +1799,23 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp drain_control(state) do
     receive do
       :native_interrupt -> drain_control(%{state | interrupted?: true})
-      {:native_steer, text} -> drain_control(%{state | steer: state.steer ++ [text]})
+      {:native_steer, message} -> drain_control(%{state | steer: state.steer ++ [message]})
     after
       0 -> state
     end
   end
 
-  # The steered text becomes an ordinary user message after the tool results it
+  # A steered message becomes an ordinary user message after the tool results it
   # interrupted, so the next model call reads it as the operator speaking mid-task.
   defp apply_steer(%{steer: []} = state), do: state
 
   defp apply_steer(state) do
     messages =
-      state.messages ++ Enum.map(state.steer, &%{role: :user, content: &1})
+      state.messages ++
+        Enum.map(state.steer, fn
+          %{role: :user} = message -> message
+          text when is_binary(text) -> %{role: :user, content: text}
+        end)
 
     %{state | messages: messages, steer: []}
   end
@@ -1990,6 +2009,16 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp reject_nils(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
+  defp put_nonempty(map, _key, value) when value in [nil, [], %{}], do: map
+  defp put_nonempty(map, key, value), do: Map.put(map, key, value)
+
+  defp append_user_text(message, ""), do: message
+
+  defp append_user_text(%{content: content} = message, text) when is_binary(content),
+    do: %{message | content: content <> text}
+
+  defp append_user_text(%{content: content} = message, text) when is_list(content),
+    do: %{message | content: content ++ [%{type: :text, text: text}]}
 
   defp deadline(:infinity), do: :infinity
   defp deadline(ms), do: System.monotonic_time(:millisecond) + ms
@@ -2002,92 +2031,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
 
-  # ---------------------------------------------------------------- coding plane
-
   @doc """
-  Runs one finite coding-plane request and returns its event stream.
+  Builds a Harness event for the session owner, redacted at the live boundary.
 
-  The loop runs in a task; the stream is that task's events. `Stream.resource/3` ties
-  the task's life to the consumer, so a run the caller stops reading is torn down rather
-  than left streaming into nobody's mailbox.
-  """
-  @spec run_stream(Jido.Harness.RunRequest.t(), map()) ::
-          {:ok, Enumerable.t()} | {:error, term()}
-  def run_stream(request, context) do
-    with {:ok, state, provider_session_id} <- build_run_state(request, context) do
-      turn_id = "turn_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-
-      {:ok,
-       Stream.resource(
-         fn -> start_run_task(state, request.prompt, turn_id) end,
-         &next_run_event(&1, context.provider, provider_session_id),
-         &stop_run_task/1
-       )}
-    end
-  end
-
-  # `async_nolink` deliberately: a loop that crashes must fail this run, not take the
-  # harness run worker's stream consumer down with it. The monitor is what ends the
-  # stream in that case, and the `:DOWN` reason becomes the run's failure.
-  defp start_run_task(state, prompt, turn_id) do
-    consumer = self()
-    reference = make_ref()
-
-    emit = fn event -> send(consumer, {:native_run_event, reference, event}) end
-
-    task =
-      Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
-        run_turn(%{state | emit: emit, turn_id: turn_id}, prompt)
-      end)
-
-    %{task: task, reference: reference, turn_id: turn_id, done?: false}
-  end
-
-  defp next_run_event(%{done?: true} = acc, _provider, _provider_session_id), do: {:halt, acc}
-
-  defp next_run_event(acc, provider, provider_session_id) do
-    reference = acc.reference
-    task_ref = acc.task.ref
-
-    receive do
-      {:native_run_event, ^reference, event} ->
-        harness_event = to_event(event, provider, provider_session_id)
-        done? = event.type in [:turn_completed, :turn_failed, :turn_interrupted]
-        {[harness_event], %{acc | done?: done?}}
-
-      {^task_ref, {:ok, _state}} ->
-        Process.demonitor(task_ref, [:flush])
-        {[], %{acc | done?: true}}
-
-      {:DOWN, ^task_ref, :process, _pid, :normal} ->
-        {[], %{acc | done?: true}}
-
-      {:DOWN, ^task_ref, :process, _pid, reason} ->
-        event = %{
-          type: :turn_failed,
-          payload: %{"error" => "native loop crashed: #{inspect(reason)}", "reason" => "crash"},
-          turn_id: acc.turn_id,
-          request_id: nil
-        }
-
-        {[to_event(event, provider, provider_session_id)], %{acc | done?: true}}
-    end
-  end
-
-  defp stop_run_task(%{task: task}) do
-    _ = Task.shutdown(task, :brutal_kill)
-    :ok
-  end
-
-  @doc """
-  Builds the harness event for one loop event, redacted at this boundary.
-
-  `Jido.Harness.EventStore` redacts again before anything is journaled, so this is
-  belt and braces — but it is the same belt `Ouroboros.Provider.CodexAdapter` already
-  wears, and for the same reason: a `bash` result is a normal tool result that this
-  runtime puts on the wire, and a command that echoed `$ANTHROPIC_API_KEY` must not
-  reach a live subscriber in the clear on its way to a journal that would have caught
-  it. `Redaction.redact/1` covers this node's own sensitive environment values.
+  `Jido.Harness.EventStore` redacts again before journalling. This first pass protects
+  live subscribers from a tool result that echoed a credential.
   """
   @spec to_event(map(), atom(), String.t() | nil) :: Jido.Harness.Event.t()
   def to_event(event, provider, provider_session_id) do
@@ -2099,56 +2047,6 @@ defmodule Ouroboros.Provider.Native.Loop do
       request_id: event.request_id,
       payload: Jido.Harness.Redaction.redact(event.payload)
     )
-  end
-
-  defp build_run_state(request, context) do
-    provider_session_id =
-      request.provider_session_id || Paths.new_session_id()
-
-    with {:ok, scope} <-
-           Paths.scope(
-             request.cwd,
-             request.add_dirs,
-             sandbox_mode(request.sandbox_mode)
-           ),
-         {:ok, model_spec} <- resolve_model(request.model),
-         {:ok, prefix} <-
-           Context.build(
-             system_prompt: request.system_prompt,
-             cwd: scope.root,
-             add_dirs: scope.roots -- [scope.root],
-             sandbox_mode: scope.sandbox_mode,
-             approval_mode: approval_mode(request.approval_mode),
-             tools: Tools.specs(request.allowed_tools, request.disallowed_tools),
-             model_module: Model.module(),
-             model_spec: model_spec,
-             reasoning_effort: request.reasoning_effort
-           ),
-         {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
-      options = Map.new(request.provider_options || %{})
-
-      state = %__MODULE__{
-        emit: fn _event -> :ok end,
-        model_module: Model.module(),
-        model_spec: model_spec,
-        system: prefix.system,
-        tool_specs: prefix.tools,
-        context_window: prefix.context_window,
-        rules: Context.rules(prefix),
-        scope: scope,
-        session_dir: session_dir,
-        session_id: context.run_id,
-        provider_session_id: provider_session_id,
-        reasoning_effort: request.reasoning_effort,
-        approval_mode: approval_mode(request.approval_mode),
-        allowed_tools: request.allowed_tools,
-        disallowed_tools: request.disallowed_tools,
-        max_iterations: max_iterations(options, request.max_turns),
-        tool_timeout_ms: tool_timeout(options)
-      }
-
-      {:ok, state, provider_session_id}
-    end
   end
 
   @doc false

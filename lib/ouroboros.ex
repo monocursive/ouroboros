@@ -87,9 +87,9 @@ defmodule Ouroboros do
     }
   end
 
-  @doc "Returns the normalized coding-provider capabilities exposed by Jido Harness."
+  @doc "Returns the normalized coding-provider capabilities this runtime serves."
   @spec providers() :: [Jido.Harness.AdapterSpec.t()]
-  def providers, do: Jido.Harness.providers()
+  def providers, do: Enum.reject(Jido.Harness.providers(), &(&1.provider == :codex))
 
   @doc "Probes one coding provider's installation and compatibility."
   @spec provider_status(atom()) :: {:ok, Jido.Harness.ProviderStatus.t()} | {:error, term()}

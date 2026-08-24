@@ -7,6 +7,7 @@ defmodule Ouroboros.CodingSession do
   deliberate local-node convenience.
   """
 
+  alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Coding.{Store, Task, TaskRef, TaskState}
 
   @type task :: TaskRef.t() | String.t()
@@ -161,6 +162,25 @@ defmodule Ouroboros.CodingSession do
   @doc "Requests cancellation; inspect or await the final state afterward."
   @spec cancel(task()) :: :ok | {:error, term()}
   def cancel(task), do: call(task, :cancel)
+
+  @doc "Validates and durably responds to a Native coding-run approval request."
+  @spec respond_approval(task(), String.t(), map()) :: :ok | {:error, term()}
+  def respond_approval(task, request_id, response) do
+    with true <- is_binary(request_id) and String.trim(request_id) != "",
+         true <- is_map(response),
+         actor when actor in [:human, :headless, :automation] <-
+           Map.get(response, :actor, :human),
+         {:ok, approval} <-
+           ApprovalResponse.new(
+             Map.take(response, [:decision, :scope, :reason, :provider_options])
+           ) do
+      call(task, {:respond_approval, request_id, approval, actor})
+    else
+      false -> {:error, :invalid_approval_response}
+      {:error, reason} -> {:error, {:invalid_approval_response, reason}}
+      invalid -> {:error, {:invalid_approval_actor, invalid}}
+    end
+  end
 
   @doc """
   Deletes a terminal coding task's durable record.

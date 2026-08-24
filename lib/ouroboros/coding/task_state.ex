@@ -59,6 +59,7 @@ defmodule Ouroboros.Coding.TaskState do
     :log_level,
     :max_budget_usd,
     :model_provider,
+    :max_iterations,
     :model_reasoning_summary,
     :network_access_enabled,
     :no_color,
@@ -76,6 +77,7 @@ defmodule Ouroboros.Coding.TaskState do
     # Native and Claude both declare it (`Ouroboros.Provider.plan_mode/2`); every other
     # provider's adapter spec does not list it, so `allowed_by_adapter` refuses it there.
     :plan,
+    :event_limit,
     :project_trust,
     :resume_last,
     :session_dir,
@@ -92,6 +94,7 @@ defmodule Ouroboros.Coding.TaskState do
     # them would be a request that could forge a lineage.
     :subagent_deadline_ms,
     :subagent_model,
+    :tool_timeout_ms,
     :thinking,
     :title,
     :visibility,
@@ -210,7 +213,7 @@ defmodule Ouroboros.Coding.TaskState do
 
   defp do_new(id, objective, opts, plane) do
     workspace_option = Keyword.get(opts, :workspace, File.cwd!())
-    provider = Keyword.get(opts, :provider, :codex)
+    provider = Keyword.get(opts, :provider, :native)
     sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     origin_digest = Keyword.get(opts, :origin_digest)
@@ -231,6 +234,11 @@ defmodule Ouroboros.Coding.TaskState do
 
       not is_atom(provider) or is_nil(provider) ->
         {:error, :invalid_provider}
+
+      provider == :codex ->
+        {:error,
+         {:provider_removed, :codex,
+          "Codex CLI execution was removed; use provider :native with an openai: or openai_codex: model"}}
 
       not is_binary(workspace_option) ->
         {:error, {:invalid_workspace, workspace_option}}
@@ -336,6 +344,9 @@ defmodule Ouroboros.Coding.TaskState do
     system_prompt = Map.get(options, :system_prompt)
 
     cond do
+      state.provider == :codex ->
+        {:legacy_transport_unavailable, :codex}
+
       Map.has_key?(options, :agent_profile) ->
         :agent_profile_in_durable_options
 

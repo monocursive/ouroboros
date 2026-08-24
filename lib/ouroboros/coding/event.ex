@@ -9,7 +9,7 @@ defmodule Ouroboros.Coding.Event do
 
   @enforce_keys [:id, :task_id, :sequence, :type, :timestamp, :payload]
   defstruct @enforce_keys ++
-              [provider: nil, provider_session_id: nil, harness_sequence: nil]
+              [provider: nil, provider_session_id: nil, harness_sequence: nil, request_id: nil]
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -20,7 +20,8 @@ defmodule Ouroboros.Coding.Event do
           payload: map(),
           provider: atom() | nil,
           provider_session_id: String.t() | nil,
-          harness_sequence: non_neg_integer() | nil
+          harness_sequence: non_neg_integer() | nil,
+          request_id: String.t() | nil
         }
 
   @spec from_harness(String.t(), pos_integer(), Jido.Harness.Event.t()) :: t()
@@ -36,7 +37,8 @@ defmodule Ouroboros.Coding.Event do
       payload: Jido.Harness.Redaction.redact(payload),
       provider: event.provider,
       provider_session_id: event.provider_session_id,
-      harness_sequence: event.sequence
+      harness_sequence: event.sequence,
+      request_id: event.request_id
     }
   end
 

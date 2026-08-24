@@ -52,7 +52,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
   alias Ouroboros.Provider.Native.Paths
 
-  @version 1
+  @version 2
   @default_limit 400
 
   @manifest_version 1
@@ -82,7 +82,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   def write(path, messages, opts \\ []) do
     limit = Keyword.get(opts, :event_limit, @default_limit)
     trimmed = trim(messages, limit)
-    encoded = Enum.map(trimmed, &encode/1)
+    encoded = trimmed |> Enum.map(&encode/1) |> canonical()
     digest = digest(encoded)
 
     payload = %{
@@ -169,7 +169,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     _error -> {:error, :checkpoint_corrupt}
   end
 
-  defp verify_version(%{"version" => @version}), do: :ok
+  defp verify_version(%{"version" => version}) when version in [1, @version], do: :ok
   defp verify_version(%{"version" => other}), do: {:error, {:checkpoint_version, other}}
   defp verify_version(_payload), do: {:error, :checkpoint_corrupt}
 
@@ -191,6 +191,8 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     |> Base.encode16(case: :lower)
   end
 
+  defp canonical(value), do: value |> JSON.encode!() |> JSON.decode!()
+
   defp encode(%{role: :assistant} = message) do
     %{
       "role" => "assistant",
@@ -198,7 +200,10 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
       "tool_calls" =>
         Enum.map(message[:tool_calls] || [], fn call ->
           %{"id" => call.id, "name" => call.name, "input" => call.input}
-        end)
+        end),
+      "reasoning_details" =>
+        Enum.map(message[:reasoning_details] || [], &encode_reasoning_detail/1),
+      "provider_metadata" => encode_provider_metadata(message[:provider_metadata] || %{})
     }
   end
 
@@ -216,7 +221,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     do: %{"role" => Atom.to_string(role), "content" => message[:content] || ""}
 
   defp decode(%{"role" => "assistant"} = message) do
-    %{
+    base = %{
       role: :assistant,
       content: Map.get(message, "content", ""),
       tool_calls:
@@ -230,6 +235,18 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
           }
         end)
     }
+
+    details =
+      message
+      |> Map.get("reasoning_details", [])
+      |> Enum.map(&decode_reasoning_detail/1)
+
+    base
+    |> put_nonempty(:reasoning_details, details)
+    |> put_nonempty(
+      :provider_metadata,
+      decode_provider_metadata(Map.get(message, "provider_metadata", %{}))
+    )
   end
 
   defp decode(%{"role" => "tool"} = message) do
@@ -246,6 +263,68 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     do: %{role: :system, content: Map.get(message, "content", "")}
 
   defp decode(message), do: %{role: :user, content: Map.get(message, "content", "")}
+
+  defp encode_reasoning_detail(detail) when is_map(detail) do
+    %{
+      "text" => field(detail, :text),
+      "signature" => field(detail, :signature),
+      "encrypted" => field(detail, :encrypted?) == true,
+      "provider" => provider_name(field(detail, :provider)),
+      "format" => field(detail, :format),
+      "index" => field(detail, :index) || 0,
+      "provider_data" => safe_map(field(detail, :provider_data))
+    }
+  end
+
+  defp encode_reasoning_detail(_detail), do: %{}
+
+  defp decode_reasoning_detail(detail) when is_map(detail) do
+    %{
+      text: Map.get(detail, "text"),
+      signature: Map.get(detail, "signature"),
+      encrypted?: Map.get(detail, "encrypted") == true,
+      provider: Map.get(detail, "provider"),
+      format: Map.get(detail, "format"),
+      index: Map.get(detail, "index", 0),
+      provider_data: safe_map(Map.get(detail, "provider_data"))
+    }
+  end
+
+  defp decode_reasoning_detail(_detail), do: %{}
+
+  defp encode_provider_metadata(metadata) when is_map(metadata) do
+    metadata
+    |> Enum.reduce(%{}, fn
+      {key, value}, acc when is_binary(value) or is_number(value) or is_boolean(value) ->
+        Map.put(acc, to_string(key), value)
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp encode_provider_metadata(_metadata), do: %{}
+
+  defp decode_provider_metadata(metadata) when is_map(metadata) do
+    Map.new(metadata, fn {key, value} -> {safe_metadata_key(key), value} end)
+  end
+
+  defp decode_provider_metadata(_metadata), do: %{}
+
+  defp safe_metadata_key("request_id"), do: :request_id
+  defp safe_metadata_key("response_id"), do: :response_id
+  defp safe_metadata_key("service_tier"), do: :service_tier
+  defp safe_metadata_key(key), do: key
+
+  defp field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+  defp provider_name(provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp provider_name(provider) when is_binary(provider), do: provider
+  defp provider_name(_provider), do: nil
+
+  defp put_nonempty(map, _key, value) when value in [nil, [], %{}], do: map
+  defp put_nonempty(map, key, value), do: Map.put(map, key, value)
+  defp safe_map(value) when is_map(value), do: value
+  defp safe_map(_value), do: %{}
 
   # ================================================================ file store
 

@@ -1,12 +1,10 @@
 defmodule Ouroboros.Control.Permissions.Seam do
   @moduledoc """
-  The two places a provider asks first, and what the engine says there.
+  The ACP process boundary where a provider asks first and what the engine says there.
 
-  `Dialect.ACP.approval_request/2` and `Dialect.Codex.approval_request/2` are the only
-  pre-tool points this runtime has: everywhere else a vendor CLI has already run the tool
-  by the time Ouroboros sees an event ([M3 §5c](../../../../docs/research/agent-ux-2026/M3-provider-tool-layer-map.md)).
-  Both are called inside the `Session.Jsonl` process, and both receive only a method and
-  the provider's params — no session id, no workspace, no provider name.
+  `Dialect.ACP.approval_request/2` is the remaining pre-tool point for a vendor process.
+  It runs inside `Session.Jsonl` and receives only the method and provider params; the
+  native direct provider evaluates permissions in its own loop.
 
   ## How the principal gets here
 
@@ -21,18 +19,9 @@ defmodule Ouroboros.Control.Permissions.Seam do
   matches and nothing about the principal is invented. That is the safe direction, and it
   is why the existing dialect tests keep passing untouched.
 
-  ## What each provider carries
-
   ACP `session/request_permission` gives a `toolCall` with `kind`, `title`, `rawInput`,
   and `locations`; the command line is in `rawInput.command` and the paths in `locations`.
-  Codex names the shape in the method: `item/commandExecution/requestApproval` carries
-  `command` and `cwd`, `item/fileChange/requestApproval` carries changed paths, and
-  `item/permissions/requestApproval` carries a `permissions` profile whose
-  `fileSystem.entries` are the paths being asked for — each a literal path, a glob, or a
-  named special location — beside the legacy `fileSystem.read`/`fileSystem.write` arrays
-  the schema marks as going away in `entries`' favour (`PermissionsRequestApprovalParams`,
-  codex-cli 0.147.0). Both providers are mapped onto the one request shape
-  `Ouroboros.Control.Permissions.evaluate/1` takes.
+  It is mapped onto the request shape `Ouroboros.Control.Permissions.evaluate/1` takes.
 
   ## What the seam does with the answer
 
@@ -89,7 +78,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
   `suggested_rule` added, and on `:allow`/`:deny` the caller answers the provider instead
   of emitting anything.
   """
-  @spec decide(:acp | :app_server, String.t(), map(), map()) :: verdict()
+  @spec decide(:acp, String.t(), map(), map()) :: verdict()
   def decide(dialect, method, params, payload) do
     bound = principal()
     request = request(dialect, method, params, bound)
@@ -125,7 +114,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
   existing file is `tool: "edit"` and a write that creates one is `tool: "write"`, so
   `Edit(…)` and `Write(…)` each mean what they say.
   """
-  @spec decide_service(:acp | :app_server, map(), map()) :: verdict()
+  @spec decide_service(:acp, map(), map()) :: verdict()
   def decide_service(dialect, fields, payload) do
     bound = principal()
     request = service_request(dialect, fields, bound)
@@ -153,7 +142,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
   `session/request_permission` shape from a `fs/write_text_file` frame would write a
   ledger entry describing something that never happened.
   """
-  @spec answered(:acp | :app_server, String.t(), map(), map()) :: :ok
+  @spec answered(:acp, String.t(), map(), map()) :: :ok
   def answered(dialect, decision_id, %{service: fields} = stash, response)
       when is_map(fields) do
     record_answer(decision_id, service_request(dialect, fields, principal()), stash, response)
@@ -266,20 +255,6 @@ defmodule Ouroboros.Control.Permissions.Seam do
     })
   end
 
-  defp request(:app_server, method, params, bound) do
-    command = params["command"]
-
-    base(bound)
-    |> Map.merge(%{
-      tool: codex_tool(method),
-      command: text(command),
-      paths: codex_paths(method, params),
-      mode: codex_mode(method),
-      domains: [],
-      context: context(bound, %{"kind" => codex_kind(method)})
-    })
-  end
-
   # The caller already normalised this one, so nothing is inferred here: `tool`, `mode`,
   # `command` and `paths` are what `Session.Service` resolved, and only the principal and
   # the workspace are added. `method` travels in the context so the ledger row says which
@@ -355,74 +330,6 @@ defmodule Ouroboros.Control.Permissions.Seam do
       _other -> value
     end
   end
-
-  defp codex_tool("item/commandExecution/requestApproval"), do: "bash"
-  defp codex_tool("item/fileChange/requestApproval"), do: "edit"
-  defp codex_tool("item/permissions/requestApproval"), do: "permissions"
-  defp codex_tool(_method), do: "unknown"
-
-  defp codex_kind("item/fileChange/requestApproval"), do: "file_change"
-  defp codex_kind("item/permissions/requestApproval"), do: "permissions"
-  defp codex_kind(_method), do: "sandbox_escalation"
-
-  defp codex_mode("item/commandExecution/requestApproval"), do: :execute
-  defp codex_mode(_method), do: :write
-
-  defp codex_paths("item/fileChange/requestApproval", params) do
-    changes = params["changes"] || params["files"] || []
-
-    paths =
-      case changes do
-        list when is_list(list) -> Enum.map(list, &location_path/1)
-        map when is_map(map) -> Map.keys(map)
-        _other -> []
-      end
-
-    (paths ++ [params["path"], params["grantRoot"]])
-    |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.uniq()
-  end
-
-  # A permissions escalation asks for paths, so the engine has to see them: evaluating it
-  # with none meant no `Read`/`Edit` rule could ever match the one request that most needs
-  # deciding. A glob is passed through as itself — `Pattern` reads globs — while a named
-  # special location (`project_roots`, `tmpdir`) is deliberately *not* resolved to a path
-  # here, because guessing which directory the app server meant would hand the engine a
-  # target nothing verified.
-  defp codex_paths("item/permissions/requestApproval", params) do
-    file_system = get_in(params, ["permissions", "fileSystem"]) || %{}
-
-    entries =
-      case file_system["entries"] do
-        list when is_list(list) -> Enum.map(list, &permission_entry_path/1)
-        _absent -> []
-      end
-
-    legacy =
-      Enum.flat_map(["read", "write"], fn access ->
-        case file_system[access] do
-          list when is_list(list) -> list
-          _absent -> []
-        end
-      end)
-
-    (entries ++ legacy ++ [params["cwd"]])
-    |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.uniq()
-  end
-
-  defp codex_paths(_method, params) do
-    [params["grantRoot"], params["path"]]
-    |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.uniq()
-  end
-
-  defp permission_entry_path(%{"path" => %{"type" => "path", "path" => path}}), do: path
-
-  defp permission_entry_path(%{"path" => %{"type" => "glob_pattern", "pattern" => pattern}}),
-    do: pattern
-
-  defp permission_entry_path(_entry), do: nil
 
   defp text(value) when is_binary(value), do: value
   defp text(value) when is_list(value), do: Enum.map_join(value, " ", &to_string/1)

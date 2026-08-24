@@ -5,8 +5,9 @@ defmodule Ouroboros.Coding.Task do
 
   require Logger
 
-  alias Jido.Harness.{Run, RunResult}
+  alias Jido.Harness.{ApprovalResponse, Run, RunResult}
   alias Ouroboros.Coding.{Store, TaskState}
+  alias Ouroboros.Provider.Native.Run, as: NativeRun
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Worktree
@@ -143,6 +144,35 @@ defmodule Ouroboros.Coding.Task do
     reply = safe_run_call(fn -> Run.cancel(task.harness_run_id) end)
     runtime = schedule_poll(runtime, 0)
     {:reply, reply, runtime}
+  end
+
+  def handle_call(
+        {:respond_approval, request_id, %ApprovalResponse{} = response, actor},
+        _from,
+        %{task: %TaskState{provider: :native, harness_run_id: run_id} = task} = runtime
+      )
+      when is_binary(run_id) do
+    payload = %{
+      request_id: request_id,
+      decision: response.decision,
+      scope: response.scope,
+      actor: actor,
+      reason: response.reason
+    }
+
+    {task, event} = append_internal(task, :approval_resolved, payload)
+
+    case persist(runtime, touch(task), [event]) do
+      {:ok, runtime} ->
+        {:reply, NativeRun.respond(run_id, request_id, response), runtime}
+
+      {:error, runtime} ->
+        {:reply, {:error, :approval_checkpoint_failed}, runtime}
+    end
+  end
+
+  def handle_call({:respond_approval, _request_id, _response, _actor}, _from, runtime) do
+    {:reply, {:error, :provider_has_no_coding_approval_channel}, runtime}
   end
 
   @impl true

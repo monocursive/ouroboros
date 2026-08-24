@@ -1,7 +1,7 @@
 defmodule Ouroboros.Provider.Session do
   @moduledoc """
-  Interactive JSONL session dialects, so a new ACP (or app-server) provider cannot
-  omit a feature by forgetting an optional callback.
+  Interactive JSONL session dialects, so a new ACP provider cannot omit a feature by
+  forgetting an optional callback.
 
   `Jido.Harness.SessionAdapter` is the process boundary the planes already call.
   Its optional `respond_approval` / `steer` / `configure` callbacks are exactly how
@@ -20,7 +20,7 @@ defmodule Ouroboros.Provider.Session do
   @doc "Every JSONL dialect this runtime ships. Completeness tests walk this list."
   @spec dialects() :: [module()]
   def dialects do
-    [Dialect.Codex, Dialect.ACP]
+    [Dialect.ACP]
   end
 
   @doc "Points an upstream ACP `SessionTransportSpec` at this runtime's adapter."

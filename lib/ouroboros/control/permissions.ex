@@ -52,13 +52,11 @@ defmodule Ouroboros.Control.Permissions do
 
   ## What this is not
 
-  It is not a sandbox. It decides what the runtime *asks* a provider to do at the two
-  seams where a provider asks first — `Dialect.ACP.approval_request/2` and
-  `Dialect.Codex.approval_request/2` — and nothing else. A vendor CLI that runs a tool
-  without asking runs it. There is no classifier here; `auto` mode is a later slice on
-  top of this engine and never a replacement for rules (D5). Command substitution,
-  `eval`, and `sh -c` defeat prefix matching by construction, which is why the honest
-  posture is an allowlist plus protected paths rather than a denylist (R3 §8d).
+  It is not a sandbox. It decides what the in-process Native loop may execute and what
+  the remaining ACP dialect asks permission to execute. A vendor CLI that runs a tool
+  without asking still runs it outside this engine. Command substitution, `eval`, and
+  `sh -c` defeat prefix matching by construction, which is why the honest posture is an
+  allowlist plus protected paths rather than a denylist (R3 §8d).
 
   This module lives under `Ouroboros.Control.` for the same reason `Control.Grants` does:
   the prefix is in `Ouroboros.Upgrade.Verifier`'s protected set, so the fast patch lane

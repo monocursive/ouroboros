@@ -18,16 +18,45 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   """
 
   @behaviour Ouroboros.Provider.Native.Model
+  @generation_defaults [
+    receive_timeout: 60_000,
+    stream_idle_timeout: 60_000,
+    total_timeout: 300_000,
+    max_retries: 0
+  ]
+  @generation_option_keys [
+    :auth_file,
+    :oauth_file,
+    :base_url,
+    :pool_timeout,
+    :receive_timeout,
+    :req_http_options,
+    :stream_idle_timeout,
+    :total_timeout,
+    :max_retries,
+    :provider_options
+  ]
+  @codex_option_keys [
+    :codex_originator,
+    :openai_parallel_tool_calls,
+    :openai_stream_transport,
+    :service_tier,
+    :verbosity
+  ]
+  @provider_metadata_keys [:request_id, :response_id, :service_tier]
 
   @impl true
   def stream(request, opts) do
-    with {:ok, tools} <- build_tools(request.tools),
+    with {:ok, configured} <- configured_options(),
+         {:ok, tools} <- build_tools(request.tools),
          {:ok, context} <- build_context(request) do
       generation_opts =
-        opts
+        configured
+        |> Keyword.merge(opts)
         |> Keyword.merge(tools: tools)
         |> put_unless_nil(:reasoning_effort, request[:reasoning_effort])
         |> put_unless_nil(:max_tokens, request[:max_tokens])
+        |> put_transport_options(request)
 
       case ReqLLM.stream_text(request.model, context, generation_opts) do
         {:ok, response} -> {:ok, normalize(response)}
@@ -46,12 +75,20 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   @impl true
   def credential_report do
     if Code.ensure_loaded?(ReqLLM.Providers) do
-      ReqLLM.Providers.list()
-      |> Enum.map(fn provider ->
-        env = ReqLLM.Keys.env_var_name(provider)
-        %{provider: provider, env: env, present: present?(env)}
-      end)
-      |> Enum.sort_by(& &1.provider)
+      rows =
+        ReqLLM.Providers.list()
+        |> Enum.map(fn provider ->
+          env = ReqLLM.Keys.env_var_name(provider)
+          %{provider: provider, env: env, present: present?(env)}
+        end)
+
+      oauth = %{
+        provider: :openai_codex,
+        env: "OUROBOROS_OAUTH_FILE",
+        present: Ouroboros.Provider.OpenAIAuth.credential_present?()
+      }
+
+      Enum.sort_by([oauth | rows], &{&1.provider, &1.env})
     else
       []
     end
@@ -112,23 +149,32 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error -> {:error, {:invalid_context, Exception.message(error)}}
   end
 
-  defp to_messages(%{role: :user, content: content}), do: [ReqLLM.Context.user(content)]
+  defp to_messages(%{role: :user, content: content}) when is_binary(content),
+    do: [ReqLLM.Context.user(content)]
+
+  defp to_messages(%{role: :user, content: content}) when is_list(content),
+    do: [ReqLLM.Context.user(Enum.map(content, &content_part/1))]
+
   defp to_messages(%{role: :system, content: content}), do: [ReqLLM.Context.system(content)]
 
   defp to_messages(%{role: :assistant} = message) do
     text = message[:content] || ""
     calls = message[:tool_calls] || []
+    details = Enum.map(message[:reasoning_details] || [], &reasoning_detail/1)
+    metadata = provider_metadata(message[:provider_metadata] || %{})
 
-    cond do
-      calls != [] ->
-        tool_calls = Enum.map(calls, fn call -> {call.name, call.input, [id: call.id]} end)
-        [ReqLLM.Context.assistant(text, tool_calls: tool_calls)]
+    if text != "" or calls != [] or details != [] do
+      tool_calls = Enum.map(calls, fn call -> {call.name, call.input, [id: call.id]} end)
 
-      text != "" ->
-        [ReqLLM.Context.assistant(text)]
+      assistant =
+        ReqLLM.Context.assistant(text,
+          tool_calls: tool_calls,
+          metadata: metadata
+        )
 
-      true ->
-        []
+      [%{assistant | reasoning_details: empty_to_nil(details)}]
+    else
+      []
     end
   end
 
@@ -175,18 +221,35 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp chunk(%ReqLLM.StreamChunk{type: :meta, metadata: metadata}) when is_map(metadata) do
     usage =
-      case Map.get(metadata, :usage) || Map.get(metadata, "usage") do
+      case value(metadata, :usage) do
         usage when is_map(usage) -> [{:usage, usage}]
         _absent -> []
       end
 
+    reasoning =
+      case value(metadata, :reasoning_details) do
+        details when is_list(details) and details != [] ->
+          [{:reasoning_details, Enum.map(details, &encode_reasoning_detail/1)}]
+
+        _absent ->
+          []
+      end
+
+    provider =
+      metadata
+      |> provider_metadata()
+      |> case do
+        empty when empty == %{} -> []
+        selected -> [{:provider_metadata, selected}]
+      end
+
     finish =
-      case Map.get(metadata, :finish_reason) || Map.get(metadata, "finish_reason") do
+      case value(metadata, :finish_reason) do
         nil -> []
         reason -> [{:finish, finish_reason(reason)}]
       end
 
-    usage ++ finish
+    usage ++ reasoning ++ provider ++ finish
   end
 
   defp chunk(_other), do: []
@@ -230,6 +293,149 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   defp stringify(other), do: other
+
+  defp configured_options do
+    configured = Application.get_env(:ouroboros, :native_model_options, [])
+
+    with {:ok, options} <- keyword_options(configured),
+         :ok <- validate_option_keys(options, @generation_option_keys),
+         {:ok, provider_options} <-
+           keyword_options(Keyword.get(options, :provider_options, [])),
+         :ok <- validate_option_keys(provider_options, @codex_option_keys) do
+      {:ok,
+       @generation_defaults
+       |> Keyword.merge(options)
+       |> Keyword.put(:provider_options, provider_options)}
+    end
+  end
+
+  defp keyword_options(options) when is_list(options) do
+    if Keyword.keyword?(options),
+      do: {:ok, options},
+      else: {:error, {:invalid_native_model_options, :not_keyword}}
+  end
+
+  defp keyword_options(options) when is_map(options), do: {:ok, Map.to_list(options)}
+  defp keyword_options(_options), do: {:error, {:invalid_native_model_options, :not_keyword}}
+
+  defp validate_option_keys(options, allowed) do
+    case Enum.find(Keyword.keys(options), &(&1 not in allowed)) do
+      nil -> :ok
+      key -> {:error, {:invalid_native_model_option, key}}
+    end
+  end
+
+  defp put_transport_options(options, %{model: "openai_codex:" <> _} = request) do
+    provider_options =
+      options
+      |> Keyword.get(:provider_options, [])
+      |> Keyword.put_new(:openai_stream_transport, :sse)
+      |> Keyword.put_new(:codex_originator, "ouroboros")
+      |> Keyword.put(:session_id, request.provider_session_id)
+
+    options
+    |> Keyword.put_new(:oauth_file, Ouroboros.Provider.OpenAIAuth.credential_path())
+    |> Keyword.put(:provider_options, provider_options)
+  end
+
+  defp put_transport_options(options, _request), do: Keyword.delete(options, :provider_options)
+
+  defp reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail), do: detail
+
+  defp reasoning_detail(detail) when is_map(detail) do
+    %ReqLLM.Message.ReasoningDetails{
+      text: value(detail, :text),
+      signature: value(detail, :signature),
+      encrypted?: value(detail, :encrypted?) == true,
+      provider: provider_atom(value(detail, :provider)),
+      format: value(detail, :format),
+      index: integer(value(detail, :index)),
+      provider_data: map(value(detail, :provider_data))
+    }
+  end
+
+  defp reasoning_detail(_detail), do: %ReqLLM.Message.ReasoningDetails{}
+
+  defp encode_reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail) do
+    %{
+      text: detail.text,
+      signature: detail.signature,
+      encrypted?: detail.encrypted?,
+      provider: detail.provider,
+      format: detail.format,
+      index: detail.index,
+      provider_data: detail.provider_data
+    }
+  end
+
+  defp encode_reasoning_detail(detail) when is_map(detail) do
+    detail
+    |> reasoning_detail()
+    |> encode_reasoning_detail()
+  end
+
+  defp encode_reasoning_detail(_detail), do: %{}
+
+  defp provider_metadata(metadata) when is_map(metadata) do
+    Enum.reduce(@provider_metadata_keys, %{}, fn key, selected ->
+      case value(metadata, key) do
+        value when is_binary(value) or is_number(value) or is_boolean(value) ->
+          Map.put(selected, key, value)
+
+        _absent ->
+          selected
+      end
+    end)
+  end
+
+  defp provider_metadata(_metadata), do: %{}
+
+  defp provider_atom(provider) when is_atom(provider), do: provider
+
+  defp provider_atom(provider) when is_binary(provider) do
+    Enum.find(ReqLLM.Providers.list(), &(Atom.to_string(&1) == provider))
+  rescue
+    _error -> nil
+  end
+
+  defp provider_atom(_provider), do: nil
+
+  defp value(map, key) when is_map(map),
+    do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp content_part(part) when is_map(part) do
+    case value(part, :type) do
+      type when type in [:text, "text"] ->
+        ReqLLM.Message.ContentPart.text(value(part, :text) || "")
+
+      type when type in [:image, "image"] ->
+        path = value(part, :path)
+        expected = value(part, :sha256)
+        media_type = value(part, :media_type) || "application/octet-stream"
+
+        with true <- is_binary(path),
+             {:ok, bytes} <- File.read(path),
+             true <- digest(bytes) == expected do
+          ReqLLM.Message.ContentPart.image(bytes, media_type)
+        else
+          _invalid -> raise ArgumentError, "staged image attachment is unavailable or changed"
+        end
+
+      other ->
+        raise ArgumentError, "unsupported native content part: #{inspect(other)}"
+    end
+  end
+
+  defp content_part(_part), do: raise(ArgumentError, "invalid native content part")
+
+  defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  defp empty_to_nil([]), do: nil
+  defp empty_to_nil(value), do: value
+  defp integer(value) when is_integer(value), do: value
+  defp integer(_value), do: 0
+  defp map(value) when is_map(value), do: value
+  defp map(_value), do: %{}
 
   defp put_unless_nil(opts, _key, nil), do: opts
   defp put_unless_nil(opts, key, value), do: Keyword.put(opts, key, value)

@@ -52,6 +52,7 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Jido.Harness.Event
   alias Jido.Harness.SessionAdapter
   alias Jido.Harness.TurnRequest
+  alias Ouroboros.Provider.Native.Attachments
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Archive
@@ -265,14 +266,19 @@ defmodule Ouroboros.Provider.Native.Session do
   @impl GenServer
   def init({request, context}) do
     options = Map.new(request.provider_options || %{})
+    fork? = truthy_option(options, "fork_session")
+    requested_id = if(fork?, do: nil, else: request.provider_session_id)
+    checkpoint_limit = Checkpoint.limit(options)
 
-    with {:ok, provider_session_id} <- session_id(request.provider_session_id),
+    with {:ok, provider_session_id} <- session_id(requested_id),
+         :ok <-
+           seed_fork(request.provider_session_id, provider_session_id, fork?, checkpoint_limit),
          {:ok, scope} <-
            Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
          {:ok, model_spec} <- Loop.resolve_model(request.model),
          {:ok, session_dir, durable?} <- Paths.session_dir(provider_session_id),
          {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(provider_session_id),
-         {:ok, messages} <- restore(checkpoint_path, request.provider_session_id) do
+         {:ok, messages} <- restore(checkpoint_path) do
       posture = restore_posture(session_dir, request, options)
       scope = if posture.plan?, do: %{scope | sandbox_mode: :read_only}, else: scope
 
@@ -284,7 +290,7 @@ defmodule Ouroboros.Provider.Native.Session do
         session_dir: session_dir,
         checkpoint_path: checkpoint_path,
         checkpoint_durable?: durable?,
-        checkpoint_limit: Checkpoint.limit(options),
+        checkpoint_limit: checkpoint_limit,
         model_module: Model.module(),
         model_spec: model_spec,
         reasoning_effort: request.reasoning_effort,
@@ -352,7 +358,7 @@ defmodule Ouroboros.Provider.Native.Session do
         # dropped once it has been sent. It never joins the system prompt: the prefix has
         # a fingerprint and a session-scoped instruction in it would cost the cache.
         start_context: [],
-        resumed?: not is_nil(request.provider_session_id)
+        resumed?: not fork? and not is_nil(request.provider_session_id)
       }
 
       case build_context(state) do
@@ -413,8 +419,14 @@ defmodule Ouroboros.Provider.Native.Session do
     do: {:reply, {:error, :no_active_turn}, state}
 
   def handle_call({:steer, request, _request_id}, _from, state) do
-    Kernel.send(state.loop.pid, {:native_steer, TurnRequest.text(request)})
-    {:reply, :ok, state}
+    case Attachments.message(TurnRequest.text(request), request.attachments, state.session_dir) do
+      {:ok, message} ->
+        Kernel.send(state.loop.pid, {:native_steer, message})
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   # An interrupt while the plan-exit question is open cancels the question, not the turn:
@@ -839,8 +851,12 @@ defmodule Ouroboros.Provider.Native.Session do
   # ---------------------------------------------------------------- turns
 
   defp start_turn(state, request, turn_id) do
+    text = TurnRequest.text(request) <> injected(state.start_context)
+
     with {:ok, state} <- maybe_compact(state),
-         {:ok, state} <- ensure_context(state) do
+         {:ok, state} <- ensure_context(state),
+         {:ok, user_message} <-
+           Attachments.message(text, request.attachments, state.session_dir) do
       owner = self()
 
       loop = %Loop{
@@ -887,11 +903,9 @@ defmodule Ouroboros.Provider.Native.Session do
         subagent_task_id: state.subagent_task_id
       }
 
-      prompt = TurnRequest.text(request) <> injected(state.start_context)
-
       task =
         Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
-          {:ok, _finished} = Loop.run_turn(loop, prompt)
+          {:ok, _finished} = Loop.run_turn(loop, user_message)
           :ok
         end)
 
@@ -1050,12 +1064,33 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  # Only a session that asked to resume reads a checkpoint. A fresh id has no history by
-  # definition, and a corrupt file must fail the open rather than silently start an
-  # empty session under an id whose transcript the operator believes still exists.
-  defp restore(_path, nil), do: {:ok, []}
+  defp seed_fork(_source_id, _child_id, false, _limit), do: :ok
 
-  defp restore(path, _requested) do
+  defp seed_fork(source_id, child_id, true, limit)
+       when is_binary(source_id) and is_binary(child_id) do
+    with :ok <- Paths.validate_session_id(source_id),
+         {:ok, source_path, _durable?} <- Checkpoint.locate(source_id),
+         {:ok, messages} <- Checkpoint.read(source_path),
+         {:ok, child_path, _durable?} <- Checkpoint.locate(child_id),
+         :ok <- Checkpoint.write(child_path, messages, event_limit: limit) do
+      :ok
+    else
+      {:error, :no_checkpoint} -> {:error, :fork_source_unavailable}
+      {:error, reason} -> {:error, {:fork_source_unusable, reason}}
+    end
+  end
+
+  defp seed_fork(_source_id, _child_id, true, _limit), do: {:error, :fork_source_required}
+
+  defp truthy_option(options, key) do
+    Map.get(options, key) == true or Map.get(options, String.to_existing_atom(key)) == true
+  rescue
+    ArgumentError -> Map.get(options, key) == true
+  end
+
+  # A corrupt checkpoint fails the open rather than silently starting an empty session
+  # under an id whose transcript the operator believes still exists.
+  defp restore(path) do
     case Checkpoint.read(path) do
       {:ok, messages} -> {:ok, messages}
       {:error, :no_checkpoint} -> {:ok, []}
@@ -1491,6 +1526,8 @@ defmodule Ouroboros.Provider.Native.Session do
         system: instruction,
         messages: messages ++ [%{role: :user, content: instruction}],
         tools: [],
+        provider_session_id: state.provider_session_id,
+        turn_id: "compact_" <> Integer.to_string(state.turns + 1),
         reasoning_effort: nil,
         max_tokens: nil
       }

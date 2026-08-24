@@ -38,7 +38,6 @@ defmodule Ouroboros.Models do
   # Each is a statement about which vendor's models the CLI runs, not about the CLI.
   @catalogs %{
     claude: :anthropic,
-    codex: :openai,
     gemini: :google,
     grok: :xai,
     kimi: :moonshotai
@@ -78,6 +77,19 @@ defmodule Ouroboros.Models do
 
   @doc "Returns the `llm_db` provider a given Ouroboros provider draws its models from."
   @spec catalog(atom()) :: atom() | nil
+  def catalog(:native) do
+    case native_model_provider() do
+      :openai_codex ->
+        :openai
+
+      provider when is_atom(provider) and not is_nil(provider) ->
+        if known_catalog?(provider), do: provider
+
+      _unknown ->
+        nil
+    end
+  end
+
   def catalog(provider) when is_atom(provider) do
     case Map.fetch(configured_catalogs(), provider) do
       {:ok, catalog} -> catalog
@@ -94,6 +106,8 @@ defmodule Ouroboros.Models do
   this module holds: a default nobody configured is `nil`, not a model picked here.
   """
   @spec default_model(atom()) :: String.t() | nil
+  def default_model(:native), do: Ouroboros.Provider.Native.Model.configured_model()
+
   def default_model(provider) when is_atom(provider) do
     config = provider_config(provider)
 
@@ -109,6 +123,7 @@ defmodule Ouroboros.Models do
   defp provider_models(provider) do
     catalog = catalog(provider)
     models = catalog_models(catalog)
+    prefix = model_prefix(provider)
 
     %{
       provider: provider,
@@ -118,7 +133,7 @@ defmodule Ouroboros.Models do
       # every other capability is. A client that greys the picker reads this.
       model_option: model_option?(provider),
       total: length(models),
-      models: models |> Enum.take(@max_models) |> Enum.map(&model/1)
+      models: models |> Enum.take(@max_models) |> Enum.map(&model(&1, prefix))
     }
   end
 
@@ -140,11 +155,11 @@ defmodule Ouroboros.Models do
       Map.get(model, :catalog_only) == true
   end
 
-  defp model(model) do
+  defp model(model, prefix) do
     limits = Map.get(model, :limits) || %{}
 
     %{
-      id: model.id,
+      id: model_id(prefix, model.id),
       name: Map.get(model, :name),
       # The two numbers a context meter needs: how much fits, and how much can come back.
       context_window: number(Map.get(limits, :context)),
@@ -194,6 +209,36 @@ defmodule Ouroboros.Models do
     match?({:ok, _provider}, LLMDB.provider(provider))
   rescue
     _unavailable -> false
+  end
+
+  defp model_prefix(:native) do
+    case native_model_provider() do
+      provider when is_atom(provider) and not is_nil(provider) -> Atom.to_string(provider)
+      _unknown -> nil
+    end
+  end
+
+  defp model_prefix(_provider), do: nil
+  defp model_id(nil, id), do: id
+  defp model_id(prefix, id), do: prefix <> ":" <> id
+
+  defp native_model_provider do
+    case Ouroboros.Provider.Native.Model.configured_model() do
+      model when is_binary(model) ->
+        case String.split(model, ":", parts: 2) do
+          [provider, _id] -> existing_provider(provider)
+          _bare -> nil
+        end
+
+      _unset ->
+        nil
+    end
+  end
+
+  defp existing_provider(provider) do
+    String.to_existing_atom(provider)
+  rescue
+    ArgumentError -> nil
   end
 
   defp configured_catalogs do
