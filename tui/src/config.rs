@@ -615,6 +615,19 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.keys.backtrack);
     blank_to_none(&mut config.theme.name);
 
+    // `codex` used to name Harness's Codex CLI transport. The direct-runtime cutover
+    // removed that provider and made the equivalent ChatGPT-backed path a Native model.
+    // An explicit value in an older config otherwise wins over the new Native fallback
+    // forever and every home submission is rejected by the current gateway. This is an
+    // unambiguous compatibility migration, so preserve an explicitly selected model and
+    // supply the direct ChatGPT default only where the old file could not have named one.
+    if config.defaults.provider.as_deref() == Some("codex") {
+        config.defaults.provider = Some("native".to_string());
+        if config.defaults.model.is_none() {
+            config.defaults.model = Some("openai_codex:gpt-5.6-sol".to_string());
+        }
+    }
+
     if let Some(name) = config.theme.name.clone() {
         if ThemeName::parse(&name).is_none() {
             problems.push(format!(
@@ -963,6 +976,40 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_codex_default_migrates_to_the_direct_native_model() {
+        let dir = scratch("codex-to-native");
+        let path = dir.join(CONFIG_FILE);
+
+        fs::write(&path, "[defaults]\nprovider = \"codex\"\n")
+            .expect("a config from before the direct-runtime cutover");
+
+        let loaded = load(path.clone());
+
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.6-sol")
+        );
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+
+        fs::write(
+            &path,
+            "[defaults]\nprovider = \"codex\"\nmodel = \"openai_codex:gpt-5.5\"\n",
+        )
+        .expect("an old provider with an explicit direct model");
+
+        let loaded = load(path.clone());
+
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.5")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn keys_a_newer_ouro_wrote_are_ignored_rather_than_refused() {
         let dir = scratch("unknown-keys");
         let path = dir.join(CONFIG_FILE);
@@ -983,7 +1030,7 @@ mod tests {
 
         let loaded = load(path);
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
         assert!(loaded.config.onboarding.welcomed);
         assert!(
             loaded.problems.is_empty(),
@@ -1011,7 +1058,7 @@ mod tests {
 
         let loaded = load(path.clone());
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
         assert!(loaded.config.onboarding.welcomed);
         assert!(
             loaded.problems.is_empty(),
@@ -1094,7 +1141,7 @@ mod tests {
         let loaded = load(path);
 
         // The rest of the file still counts: one bad value is not a bad file.
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
         assert_eq!(loaded.config.defaults.approval_mode, None);
         assert_eq!(loaded.config.defaults.approval_mode(), None);
         assert_eq!(loaded.problems.len(), 1);
@@ -1120,7 +1167,7 @@ mod tests {
 
         let loaded = load(path);
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
         assert_eq!(loaded.config.defaults.sandbox_mode, None);
         assert_eq!(loaded.config.defaults.sandbox_mode(), None);
         assert_eq!(loaded.problems.len(), 1);
