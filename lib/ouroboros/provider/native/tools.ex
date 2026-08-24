@@ -269,7 +269,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   def validate_call(name, input, _specs),
     do:
       {:error,
-       "Invalid arguments for `#{canonical(to_string(name))}`: expected an object, got #{inspect(input)}."}
+       "Invalid arguments for `#{canonical(to_string(name))}`: expected an object, got #{value_kind(input)}. " <>
+         "Retry with a JSON object matching the advertised schema; do not repeat the unchanged call."}
 
   defp validate_json_input(name, input, parameters) do
     case ReqLLM.Schema.validate(input, parameters) do
@@ -277,14 +278,117 @@ defmodule Ouroboros.Provider.Native.Tools do
         {:ok, validated}
 
       {:ok, other} ->
-        {:error, "Invalid arguments for `#{name}`: expected an object, got #{inspect(other)}."}
+        {:error, "Invalid arguments for `#{name}`: expected an object, got #{value_kind(other)}."}
 
       {:error, reason} ->
-        {:error, "Invalid arguments for `#{name}`: #{error_message(reason)}"}
+        {:error, validation_message(name, parameters, reason)}
     end
   rescue
-    error -> {:error, "Invalid arguments for `#{name}`: #{Exception.message(error)}"}
+    error ->
+      {:error,
+       "Invalid arguments for `#{name}`: #{Exception.message(error)} Retry with corrected " <>
+         "arguments matching the advertised schema; do not repeat the unchanged call."}
   end
+
+  defp validation_message(name, parameters, reason) do
+    required = parameters |> value(:required) |> List.wrap() |> Enum.map(&to_string/1)
+
+    details =
+      [
+        validation_reason(reason),
+        required_summary(required),
+        property_summary(parameters, required),
+        "Retry with corrected arguments; do not repeat the unchanged call."
+      ]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join(" ")
+
+    "Invalid arguments for `#{name}`: #{details}"
+  end
+
+  defp validation_reason(%{__exception__: true} = reason),
+    do: reason |> Exception.message() |> validation_reason()
+
+  defp validation_reason(reason) when is_map(reason) do
+    case value(reason, :errors) do
+      errors when is_list(errors) ->
+        errors
+        |> Enum.map(fn
+          error when is_map(error) -> value(error, :message)
+          error -> error_message(error)
+        end)
+        |> Enum.filter(&(is_binary(&1) and &1 != ""))
+        |> Enum.uniq()
+        |> Enum.join("; ")
+
+      _other ->
+        error_message(reason)
+    end
+  end
+
+  defp validation_reason(reason) when is_binary(reason) do
+    case Regex.run(~r/message: "([^"]+)"/, reason, capture: :all_but_first) do
+      [message] -> message
+      _no_embedded_message when byte_size(reason) <= 240 -> reason
+      _opaque -> "Arguments do not match the advertised schema."
+    end
+  end
+
+  defp validation_reason(reason), do: error_message(reason)
+
+  defp required_summary([]), do: "Required arguments: none."
+  defp required_summary(required), do: "Required arguments: #{Enum.join(required, ", ")}."
+
+  defp property_summary(parameters, required) do
+    required = MapSet.new(required)
+
+    fields =
+      parameters
+      |> value(:properties)
+      |> case do
+        properties when is_map(properties) ->
+          properties
+          |> Enum.map(fn {name, schema} ->
+            name = to_string(name)
+            necessity = if MapSet.member?(required, name), do: "required", else: "optional"
+            "#{name}: #{schema_type(schema)} (#{necessity})"
+          end)
+          |> Enum.sort()
+
+        _none ->
+          []
+      end
+
+    if fields == [], do: nil, else: "Argument schema: #{Enum.join(fields, ", ")}."
+  end
+
+  defp schema_type(schema) when is_map(schema) do
+    cond do
+      values = value(schema, :enum) ->
+        "one of #{Enum.map_join(values, ", ", &inspect/1)}"
+
+      type = value(schema, :type) ->
+        type |> List.wrap() |> Enum.map_join(" or ", &to_string/1)
+
+      variants = value(schema, :anyOf) ->
+        variants |> Enum.map(&schema_type/1) |> Enum.join(" or ")
+
+      variants = value(schema, :oneOf) ->
+        variants |> Enum.map(&schema_type/1) |> Enum.join(" or ")
+
+      true ->
+        "value"
+    end
+  end
+
+  defp schema_type(_schema), do: "value"
+
+  defp value_kind(value) when is_list(value), do: "an array"
+  defp value_kind(value) when is_binary(value), do: "a string"
+  defp value_kind(value) when is_number(value), do: "a number"
+  defp value_kind(value) when is_boolean(value), do: "a boolean"
+  defp value_kind(nil), do: "null"
+  defp value_kind(_value), do: "a non-object value"
 
   @doc """
   Describes one attempted call for the permission engine.
@@ -495,9 +599,13 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
 
-  defp error_message(%{__exception__: true} = error), do: Exception.message(error)
   defp error_message(reason) when is_binary(reason), do: reason
   defp error_message(reason), do: inspect(reason)
+
+  defp value(map, key) when is_map(map),
+    do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
+
+  defp value(_not_a_map, _key), do: nil
 
   defp bound(output) when byte_size(output) <= @max_result_bytes, do: output
 

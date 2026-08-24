@@ -75,6 +75,10 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       for spec <- specs, (spec.parameters["required"] || []) != [] do
         assert {:error, message} = Tools.validate_call(spec.name, %{}, specs)
         assert message =~ "Invalid arguments for `#{spec.name}`"
+        assert message =~ "Required arguments:"
+        assert message =~ "Argument schema:"
+        assert message =~ "do not repeat the unchanged call"
+        refute message =~ "evaluationPath"
 
         for required <- spec.parameters["required"] do
           assert message =~ required
@@ -87,6 +91,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                Tools.validate_call("ls", %{"depth" => "deep"}, specs)
 
       assert message =~ "depth"
+      assert message =~ "depth: integer (optional)"
     end
 
     test "validates exact and open MCP schemas by the contract shown to the model" do

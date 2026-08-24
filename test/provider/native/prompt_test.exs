@@ -110,6 +110,8 @@ defmodule Ouroboros.Provider.Native.PromptTest do
     assert prompt =~ "Use `code_intel` for symbol-aware navigation"
     refute prompt =~ "Use `write` only"
     refute prompt =~ "Use `glob`"
+    assert prompt =~ "include every required argument"
+    assert prompt =~ "never repeat the unchanged call"
   end
 
   test "points source-tree questions at the authoritative documentation" do

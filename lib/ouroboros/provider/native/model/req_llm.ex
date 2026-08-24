@@ -19,6 +19,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   @behaviour Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Model.ToolSchema
+  alias ReqLLM.Provider.ChunkAccumulator
 
   @generation_defaults [
     receive_timeout: 60_000,
@@ -181,14 +182,46 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp to_messages(_other), do: []
 
-  # `ReqLLM` streams argument fragments for tool calls on some providers and complete
-  # calls on others. Only complete calls (`name` present, arguments a map) become
-  # `{:tool_call, …}`; a fragment without a name is dropped rather than guessed at.
   defp normalize(%ReqLLM.StreamResponse{stream: stream}, specs) do
-    Stream.flat_map(stream, &chunk(&1, specs))
+    normalize(stream, specs)
   end
 
-  defp normalize(stream, specs), do: Stream.flat_map(stream, &chunk(&1, specs))
+  # ReqLLM emits a streamed function call in two pieces: a `:tool_call` header with the
+  # name/id, followed by one or more `:meta` chunks containing JSON argument fragments.
+  # Dispatching the header immediately turns every such call into `{}` and discards the
+  # actual input. Use ReqLLM's own accumulator so every provider's fragment convention is
+  # reconstructed consistently, while text/thinking/usage still stream through unchanged.
+  defp normalize(stream, specs) do
+    Stream.transform(
+      stream,
+      &ChunkAccumulator.new/0,
+      fn raw, acc ->
+        output = if raw.type == :tool_call, do: [], else: chunk(raw, specs)
+        {output, ChunkAccumulator.push(acc, raw)}
+      end,
+      fn acc -> {finalized_tool_calls(acc, specs), acc} end,
+      fn _acc -> :ok end
+    )
+  end
+
+  defp finalized_tool_calls(acc, specs) do
+    acc
+    |> ChunkAccumulator.finalize_tool_calls_for_response()
+    |> Enum.flat_map(fn
+      %{id: id, name: name, arguments: arguments}
+      when is_binary(id) and is_binary(name) and name != "" ->
+        input =
+          arguments
+          |> Kernel.||(%{})
+          |> stringify()
+          |> then(&ToolSchema.restore_input(specs, name, &1))
+
+        [{:tool_call, %{id: id, name: name, input: input}}]
+
+      _invalid ->
+        []
+    end)
+  end
 
   defp chunk(%ReqLLM.StreamChunk{type: :content, text: text}, _specs)
        when is_binary(text) and text != "",
@@ -197,24 +230,6 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp chunk(%ReqLLM.StreamChunk{type: :thinking, text: text}, _specs)
        when is_binary(text) and text != "",
        do: [{:thinking, text}]
-
-  defp chunk(
-         %ReqLLM.StreamChunk{type: :tool_call, name: name, arguments: args, metadata: meta},
-         specs
-       )
-       when is_binary(name) and name != "" do
-    input =
-      args |> Kernel.||(%{}) |> stringify() |> then(&ToolSchema.restore_input(specs, name, &1))
-
-    [
-      {:tool_call,
-       %{
-         id: call_id(meta),
-         name: name,
-         input: input
-       }}
-    ]
-  end
 
   defp chunk(%ReqLLM.StreamChunk{type: :meta, metadata: metadata}, _specs)
        when is_map(metadata) do
@@ -251,16 +266,6 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   defp chunk(_other, _specs), do: []
-
-  defp call_id(meta) when is_map(meta) do
-    case Map.get(meta, :id) || Map.get(meta, "id") do
-      id when is_binary(id) and id != "" -> id
-      _absent -> "call_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-    end
-  end
-
-  defp call_id(_meta),
-    do: "call_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
   defp finish_reason(reason) when is_atom(reason), do: reason
 

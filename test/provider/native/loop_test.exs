@@ -234,6 +234,27 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       refute find(events, :turn_failed)
     end
 
+    test "warns a model to change a repeated invalid call before the doom guard", context do
+      invalid = {:tool_call, %{id: "bad-read", name: "read", input: %{}}}
+
+      script = [
+        [invalid],
+        [put_elem(invalid, 1, %{id: "bad-read-again", name: "read", input: %{}})],
+        [{:text, "continued without it"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      [first, second] = Enum.filter(events, &(&1.type == :tool_result))
+      refute first.payload["output"] =~ "has now failed 2 times"
+      assert second.payload["output"] =~ "This exact invalid call has now failed 2 times"
+      assert second.payload["output"] =~ "repeating it again will stop the turn"
+      assert find(events, :turn_completed).payload["status"] == "completed"
+      refute find(events, :turn_failed)
+    end
+
     test "stops on the third identical call and names the doom loop", context do
       repeat = {:tool_call, %{id: "c", name: "read", input: %{"path" => "lib/a.ex"}}}
       script = List.duplicate([repeat], 6)

@@ -89,7 +89,9 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
     #{tool_guidance(tools)}
     Call tools to find things out. Do not guess a file's contents, and do not describe
-    an edit you have not made.
+    an edit you have not made. Every tool input must match its advertised schema and
+    include every required argument. After an invalid-arguments result, correct the
+    input; never repeat the unchanged call.
 
     ## Workspace
 

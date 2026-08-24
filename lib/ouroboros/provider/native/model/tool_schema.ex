@@ -22,7 +22,8 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
   @spec prepare([map()], String.t()) :: [ReqLLM.Tool.t()]
   def prepare(specs, model_spec) when is_list(specs) do
     strict_transport? = responses_protocol?(model_spec)
-    Enum.map(specs, &prepare_one(&1, strict_transport?))
+    lite_transport? = responses_lite?(model_spec)
+    Enum.map(specs, &prepare_one(&1, strict_transport?, lite_transport?))
   end
 
   @doc "Restores optional nulls introduced solely to satisfy an OpenAI strict schema."
@@ -55,15 +56,24 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
     schema |> stringify_keys() |> strictify()
   end
 
-  defp prepare_one(spec, true) do
-    if strict_compatible?(spec.parameters) do
+  defp prepare_one(spec, strict_transport?, lite_transport?) do
+    compatible? = strict_transport? and strict_compatible?(spec.parameters)
+
+    # Responses Lite supplies client tools in a developer `additional_tools` item rather
+    # than the public API's top-level `tools` field. Keep the JSON Schema, but name its
+    # required keys in prose as well so a Lite model can repair a call even when that
+    # transport does not constrain arguments as strongly as the public Responses API.
+    spec =
+      if lite_transport? or (strict_transport? and not compatible?),
+        do: %{spec | description: required_hint(spec)},
+        else: spec
+
+    if compatible? do
       req_tool(spec, strict_schema(spec.parameters), true)
     else
-      req_tool(%{spec | description: required_hint(spec)}, spec.parameters, false)
+      req_tool(spec, spec.parameters, false)
     end
   end
-
-  defp prepare_one(spec, false), do: req_tool(spec, spec.parameters, false)
 
   defp req_tool(spec, parameters, strict?) do
     ReqLLM.Tool.new!(
@@ -93,6 +103,16 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
          wire when is_map(wire) <- value(extra, :wire),
          protocol when is_binary(protocol) <- value(wire, :protocol) do
       protocol in @responses_protocols
+    else
+      _unknown -> false
+    end
+  rescue
+    _unresolvable -> false
+  end
+
+  defp responses_lite?(model_spec) do
+    with {:ok, model} <- ReqLLM.model(model_spec) do
+      ReqLLM.Providers.OpenAICodex.ResponsesLite.enabled?(model)
     else
       _unknown -> false
     end

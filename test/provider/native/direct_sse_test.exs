@@ -36,6 +36,11 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
         body =
           [
             ~s(data: {"type":"response.output_text.delta","delta":"hello"}\n\n),
+            ~s(data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc-read-1","call_id":"call-read-1","name":"read","arguments":"","status":"in_progress"}}\n\n),
+            ~s(data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc-bash-1","call_id":"call-bash-1","name":"bash","arguments":"","status":"in_progress"}}\n\n),
+            ~s(data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc-read-1","delta":"{\\"path\\":\\"README.md\\","}\n\n),
+            ~s(data: {"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc-bash-1","delta":"{\\"command\\":\\"pwd\\"}"}\n\n),
+            ~s(data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc-read-1","delta":"\\"offset\\":0,\\"limit\\":1}"}\n\n),
             ~s(data: {"type":"response.completed","response":{"id":"resp-direct-1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n),
             "data: [DONE]\n\n"
           ]
@@ -76,6 +81,16 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
     assert {:ok, stream} = DirectModel.stream(request, [])
     chunks = Enum.to_list(stream)
     assert {:text, "hello"} in chunks
+
+    assert {:tool_call,
+            %{
+              id: "call-read-1",
+              name: "read",
+              input: %{"path" => "README.md", "offset" => 0, "limit" => 1}
+            }} in chunks
+
+    assert {:tool_call, %{id: "call-bash-1", name: "bash", input: %{"command" => "pwd"}}} in chunks
+
     assert {:provider_metadata, %{response_id: "resp-direct-1"}} in chunks
     assert Enum.any?(chunks, &match?({:usage, %{input_tokens: 3, output_tokens: 1}}, &1))
     assert {:finish, :stop} in chunks

@@ -10,6 +10,9 @@ defmodule Ouroboros.Provider.Native.ModelToolSchemaTest do
 
     assert Enum.all?(tools, & &1.strict)
 
+    read_tool = Enum.find(tools, &(&1.name == "read"))
+    assert read_tool.description =~ "Required arguments: `path`."
+
     context = ReqLLM.Context.new([ReqLLM.Context.user("inspect the workspace")])
 
     body =
@@ -49,6 +52,9 @@ defmodule Ouroboros.Provider.Native.ModelToolSchemaTest do
 
     assert Enum.map(additional["tools"], & &1["name"]) == Enum.map(specs, & &1.name)
     assert Enum.all?(additional["tools"], & &1["strict"])
+
+    lite_read = Enum.find(additional["tools"], &(&1["name"] == "read"))
+    assert lite_read["description"] =~ "Required arguments: `path`."
   end
 
   test "restores only nulls added for optional strict properties" do
@@ -129,6 +135,7 @@ defmodule Ouroboros.Provider.Native.ModelToolSchemaTest do
     [tool] = ToolSchema.prepare([exact], "openai_codex:gpt-5.6-sol")
 
     assert tool.strict
+    assert tool.description =~ "Required arguments: `query`."
     assert MapSet.new(tool.parameter_schema["required"]) == MapSet.new(["query", "limit"])
     refute accepts_null?(tool.parameter_schema["properties"]["query"])
     assert accepts_null?(tool.parameter_schema["properties"]["limit"])
@@ -139,6 +146,7 @@ defmodule Ouroboros.Provider.Native.ModelToolSchemaTest do
 
     refute read.strict
     assert read.parameter_schema["required"] == ["path"]
+    refute read.description =~ "Required arguments:"
   end
 
   test "the plan schema names and validates every nested field" do

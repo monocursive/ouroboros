@@ -458,6 +458,9 @@ defmodule Ouroboros.Provider.Native.Loop do
               # Invalid calls have no effect to admit or record. They remain paired tool
               # call/results so the model can repair its arguments on the next iteration.
               emit_tool_call(state, call, nil)
+
+              attempts = Map.get(state.signatures, signature(call), 1)
+              message = invalid_call_message(message, attempts)
               {:continue, tool_result(state, call, %{output: message, is_error: true})}
           end
         end
@@ -2013,6 +2016,14 @@ defmodule Ouroboros.Provider.Native.Loop do
       )
 
   defp signature(call), do: {call.name, call.input}
+
+  defp invalid_call_message(message, attempts) when attempts > 1 do
+    message <>
+      " This exact invalid call has now failed #{attempts} times. Change its arguments or " <>
+      "continue without this tool; repeating it again will stop the turn."
+  end
+
+  defp invalid_call_message(message, _attempts), do: message
 
   defp emit(state, type, payload, request_id \\ nil) do
     state.emit.(%{type: type, payload: payload, turn_id: state.turn_id, request_id: request_id})
