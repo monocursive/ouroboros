@@ -24,6 +24,7 @@ defmodule Ouroboros.Provider.Native.Exec do
   @exit_drain_ms 50
   @exit_drain_deadline_ms @exit_drain_ms * 4
   @startup_timeout_ms 5_000
+  @release_runtime_env ~w(BINDIR EMU PROGNAME ROOTDIR)
 
   @type result :: %{
           status: integer(),
@@ -171,9 +172,53 @@ defmodule Ouroboros.Provider.Native.Exec do
 
     # Erlexec's manager was started with the VM and does not observe later
     # `System.put_env/2` calls. Passing the current environment preserves Port.open's
-    # per-command inheritance semantics; explicit tool variables win.
-    inherited = Map.merge(System.get_env(), overrides)
-    [{:env, Map.to_list(inherited)} | options]
+    # per-command inheritance semantics. A release VM also carries the boot wrapper's
+    # ROOTDIR/BINDIR/EMU/PROGNAME and its embedded ERTS directories at the front of
+    # PATH; those describe this daemon, not an operator command. Letting them cross the
+    # boundary makes a plain `mix` or `elixir` look for start.boot inside the cached
+    # Ouroboros release. Strip only that inherited release context, then apply explicit
+    # tool variables so an operator-provided override still wins.
+    inherited =
+      System.get_env()
+      |> without_release_environment()
+      |> Map.merge(overrides)
+
+    # `:clear` matters: erlexec otherwise overlays these values onto the environment its
+    # manager captured when the release booted, so merely omitting ROOTDIR still leaves
+    # the stale value in the child.
+    [{:env, [:clear | Map.to_list(inherited)]} | options]
+  end
+
+  defp without_release_environment(environment) do
+    runtime_paths =
+      [Map.get(environment, "BINDIR"), release_bin(Map.get(environment, "ROOTDIR"))]
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    environment
+    |> Map.reject(fn {name, _value} ->
+      name in @release_runtime_env or String.starts_with?(name, "RELEASE_")
+    end)
+    |> without_runtime_paths(runtime_paths)
+  end
+
+  defp release_bin(root) when is_binary(root) and root != "", do: Path.join(root, "bin")
+  defp release_bin(_root), do: nil
+
+  defp without_runtime_paths(environment, runtime_paths) do
+    case Map.fetch(environment, "PATH") do
+      {:ok, path} ->
+        cleaned =
+          path
+          |> String.split(":")
+          |> Enum.reject(&MapSet.member?(runtime_paths, &1))
+          |> Enum.join(":")
+
+        Map.put(environment, "PATH", cleaned)
+
+      :error ->
+        environment
+    end
   end
 
   defp collect(exec_pid, os_pid, output, max_bytes, deadline) do

@@ -31,10 +31,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   ## Bounds
 
-  `max_iterations` (default 50) caps model round-trips per turn. `tool_timeout_ms` caps
-  one tool. The doom-loop guard stops a turn on the third identical `(name, input)`
-  call — OpenCode's rule, and the cheapest defence against a model that has found a
-  loop it likes. Each bound fails the turn by name rather than running out quietly.
+  `max_iterations` (default 100) caps model round-trips per turn. During the final ten
+  calls the system prompt exposes the remaining budget, becoming urgent for the final
+  three, so a productive long turn has a chance to validate and report instead of
+  discovering the ceiling after another tool call. `tool_timeout_ms` caps one tool. The
+  doom-loop guard stops a turn on the third identical `(name, input)` call — OpenCode's
+  rule, and the cheapest defence against a model that has found a loop it likes. Each
+  bound fails the turn by name rather than running out quietly.
 
   ## The ledger (I1)
 
@@ -102,9 +105,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Tools.AgentResult
   alias Ouroboros.Provider.Native.Tools.AskUser
 
-  @default_max_iterations 50
+  @default_max_iterations 100
   @default_tool_timeout_ms 120_000
   @doom_loop_repeats 3
+  @iteration_warning_at 10
+  @iteration_urgent_at 3
   @max_injected_context_bytes 8 * 1024
 
   defstruct [
@@ -261,7 +266,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         interrupted(state)
 
       true ->
-        case call_model(state) do
+        case call_model(state, iteration) do
           {:ok, state, text, calls, reasoning_details, provider_metadata} ->
             state = drain_control(state)
 
@@ -290,10 +295,10 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- model
 
-  defp call_model(state) do
+  defp call_model(state, iteration) do
     request = %{
       model: state.model_spec,
-      system: state.system,
+      system: iteration_system(state.system, iteration, state.max_iterations),
       messages: state.messages,
       tools: tool_specs(state),
       provider_session_id: state.provider_session_id,
@@ -307,6 +312,29 @@ defmodule Ouroboros.Provider.Native.Loop do
       {:error, reason} -> {:error, state, reason}
     end
   end
+
+  defp iteration_system(system, iteration, max_iterations) when is_binary(system) do
+    remaining = max_iterations - iteration + 1
+
+    if remaining <= @iteration_warning_at do
+      urgency =
+        if remaining <= @iteration_urgent_at do
+          " Do not begin optional work. Complete required validation now and return an " <>
+            "honest final answer before the limit; state anything unverified explicitly."
+        else
+          " Prioritize the work required to validate the result and finish the turn."
+        end
+
+      system <>
+        "\n\n## Turn budget\n" <>
+        "#{remaining} model round-trip(s) remain in this turn, including this one." <>
+        urgency
+    else
+      system
+    end
+  end
+
+  defp iteration_system(system, _iteration, _max_iterations), do: system
 
   defp consume(state, stream) do
     {text, calls, usages, reasoning_details, provider_metadata} =

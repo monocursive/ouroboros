@@ -143,6 +143,15 @@ pending until the scheduler has durable per-step callback evidence; that evidenc
 whether no execution existed, a request was accepted, or provider termination remains
 unconfirmed. It never equates request acceptance with an observed provider exit.
 
+A terminal evaluator may additionally return a versioned `Control.EvidenceContract`.
+The contract maps acceptance-criterion IDs and claim IDs to typed evidence references,
+classifies claims as observed/inferred/assumed, and preserves unknown, ambiguous, and
+unverified outcomes rather than coercing them to success. Control checkpoints contain
+only transport-safe IDs, enums, timestamps, and SHA-256 digests—not command output,
+model prose, file content, or credentials. Decisive criterion and claim statuses require
+at least one evidence reference; unknown statuses may honestly carry none. Older
+evaluators remain valid and complete runs with `evidence_contract: nil`.
+
 `:control_allow_forge_steps` (default false) widens what a plan may express by exactly
 one shape: a step of kind `forge` whose input is a capability module name and a
 workspace-relative source path. The coding-step schema is unchanged by the flag, both

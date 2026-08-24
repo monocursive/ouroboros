@@ -21,7 +21,12 @@ defmodule Ouroboros.Control.Evaluator do
           required(:plan) => Plan.t()
         }
 
-  @type decision :: :accept | {:accept, term()} | {:revise, term()} | {:fail, term()}
+  @type decision ::
+          :accept
+          | {:accept, term()}
+          | {:accept, term(), Ouroboros.Control.EvidenceContract.t()}
+          | {:revise, term()}
+          | {:fail, term()}
 
   @callback evaluate(context(), keyword()) :: {:ok, decision()} | {:error, term()}
 end

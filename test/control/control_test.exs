@@ -450,12 +450,63 @@ defmodule Ouroboros.ControlTest do
     assert completed.status == :completed
     assert completed.decision == :accept
     assert completed.result == %{summary: "verified"}
+    assert completed.evidence_contract == nil
     assert Enum.map(completed.history, & &1.decision) == [:revise, :accept]
 
     assert {:ok, plans} = Scheduler.list(context.scheduler)
 
     assert MapSet.new(Enum.map(plans, & &1.id)) ==
              MapSet.new([Run.plan_id(first.id, 0), Run.plan_id(first.id, 1)])
+  end
+
+  test "accepts a terminal result with content-minimized evidence", context do
+    digest = String.duplicate("b", 64)
+
+    evidence_contract = %{
+      "version" => 1,
+      "evidence" => [
+        %{
+          "id" => "targeted-test",
+          "kind" => "test",
+          "outcome" => "pass",
+          "digest" => digest,
+          "recorded_at" => 1_700_000_000_000
+        }
+      ],
+      "criteria" => [
+        %{"id" => "verified", "status" => "met", "evidence_ids" => ["targeted-test"]}
+      ],
+      "claims" => [
+        %{
+          "id" => "change-works",
+          "classification" => "observed",
+          "status" => "supported",
+          "statement_digest" => digest,
+          "evidence_ids" => ["targeted-test"]
+        }
+      ]
+    }
+
+    start_control(context,
+      plans: %{0 => [%{id: "work", input: %{objective: "work"}}]},
+      decisions: %{0 => {:accept, %{summary: "verified"}, evidence_contract}}
+    )
+
+    assert {:ok, submitted} = Server.submit(context.server, "evidenced", "verify work", 0)
+    run = await_run(context.server, submitted.id, &(&1.status == :running))
+    complete_step!(context.scheduler, run.current_plan_id, "work", %{artifact: "digest-only"})
+    assert {:ok, %Run{status: :evaluating}} = Server.reconcile(context.server, submitted.id)
+
+    completed = await_run(context.server, submitted.id, &(&1.status == :completed))
+    assert completed.evidence_contract.version == 1
+    assert hd(completed.evidence_contract.evidence).kind == :test
+    assert hd(completed.evidence_contract.claims).classification == :observed
+    assert [%{evidence_contract_digest: history_digest}] = completed.history
+
+    assert {:ok, ^history_digest} =
+             Ouroboros.Control.EvidenceContract.digest(completed.evidence_contract)
+
+    assert Run.validate(completed) == :ok
   end
 
   test "fails closed when evaluator requests revision beyond the budget", context do

@@ -92,6 +92,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
              (deny file-write* (regex #"/\\.git($|/)"))
              (deny file-write* (regex #"/\\.ouroboros($|/)"))
              (deny network*)
+             (allow network-bind (local ip "localhost:*"))
+             (allow network-inbound (local ip "localhost:*"))
+             (allow network-outbound (remote ip "localhost:*"))
              """
     end
 
@@ -117,13 +120,22 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
              (deny file-write* (regex #"/\\.git($|/)"))
              (deny file-write* (regex #"/\\.ouroboros($|/)"))
              (deny network*)
+             (allow network-bind (local ip "localhost:*"))
+             (allow network-inbound (local ip "localhost:*"))
+             (allow network-outbound (remote ip "localhost:*"))
              """
     end
 
-    test "denies the network unless the policy allows it, and never by omission" do
-      assert SandboxExec.profile(fixed_policy(:workspace_write)) =~ "(deny network*)"
+    test "denies external network while retaining loopback unless policy opens everything" do
+      denied = SandboxExec.profile(fixed_policy(:workspace_write))
+      assert denied =~ "(deny network*)"
+      assert denied =~ "(allow network-bind (local ip \"localhost:*\"))"
+      assert denied =~ "(allow network-inbound (local ip \"localhost:*\"))"
+      assert denied =~ "(allow network-outbound (remote ip \"localhost:*\"))"
+
       assert SandboxExec.profile(fixed_policy(:workspace_write, true)) =~ "(allow network*)"
       refute SandboxExec.profile(fixed_policy(:workspace_write, true)) =~ "(deny network*)"
+      refute SandboxExec.profile(fixed_policy(:workspace_write, true)) =~ "localhost:*"
     end
 
     test "carries every path as a -D parameter, so a workspace name cannot become policy" do
@@ -429,12 +441,15 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert escalation =~ "Do not retry the same command"
     end
 
-    test "reads a denied connection as the network constraint, not a filesystem one" do
+    test "reads a denied external connection as the network constraint, not a filesystem one" do
       policy = fixed_policy(:workspace_write)
-      output = "nc: connectx to 127.0.0.1 port 9 (tcp) failed: Operation not permitted\n"
+      output = "nc: connectx to 192.0.2.1 port 9 (tcp) failed: Operation not permitted\n"
 
       assert %{constraint: :network} = violation = Sandbox.violation(policy, output, 1)
-      assert Sandbox.escalation(violation, policy, "sandbox-exec") =~ "denies all network access"
+
+      assert Sandbox.escalation(violation, policy, "sandbox-exec") =~
+               "denies external network access"
+
       assert Sandbox.escalation(violation, policy, "sandbox-exec") =~ "native_sandbox_network"
     end
 
@@ -622,21 +637,71 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert String.trim(log) |> String.split("\n") |> length() == 1
     end
 
-    test "denies a connection by policy, which reads differently from a port refusing it", %{
+    test "permits loopback IPC while continuing to deny external connections", %{
       context: context
     } do
-      sandboxed = run(Bash, %{"command" => "nc -vz 127.0.0.1 9 2>&1"}, context)
+      bind =
+        run(
+          Bash,
+          %{
+            "command" =>
+              "/usr/bin/python3 -c \"import socket; s=socket.socket(); " <>
+                "s.bind(('127.0.0.1', 0)); print(s.getsockname()[0]); s.close()\""
+          },
+          context
+        )
 
-      assert sandboxed.is_error
-      # EPERM from Seatbelt, not ECONNREFUSED from a closed port: the port is closed
-      # either way, so the text is the only thing that says which one stopped it.
-      assert sandboxed.output =~ "Operation not permitted"
-      refute sandboxed.output =~ "Connection refused"
-      assert sandboxed.output =~ "denies all network access"
+      refute bind.is_error
+      assert bind.output =~ "127.0.0.1"
 
-      {plain, 1} = System.cmd("/usr/bin/nc", ["-vz", "127.0.0.1", "9"], stderr_to_stdout: true)
-      assert plain =~ "Connection refused"
-      refute plain =~ "Operation not permitted"
+      loopback = run(Bash, %{"command" => "nc -vz 127.0.0.1 9 2>&1"}, context)
+      assert loopback.is_error
+      assert loopback.output =~ "Connection refused"
+      refute loopback.output =~ "Operation not permitted"
+
+      external = run(Bash, %{"command" => "nc -vz 192.0.2.1 9 2>&1"}, context)
+
+      assert external.is_error
+      assert external.output =~ "Operation not permitted"
+      assert external.output =~ "denies external network access"
+    end
+
+    test "runs Mix compilation with its loopback coordination intact", %{
+      context: context,
+      workspace: workspace
+    } do
+      File.write!(
+        Path.join(workspace, "mix.exs"),
+        """
+        defmodule SandboxFixture.MixProject do
+          use Mix.Project
+
+          def project do
+            [app: :sandbox_fixture, version: "0.1.0", elixir: "~> 1.14"]
+          end
+        end
+        """
+      )
+
+      File.mkdir_p!(Path.join(workspace, "lib"))
+
+      File.write!(
+        Path.join(workspace, "lib/sandbox_fixture.ex"),
+        "defmodule SandboxFixture do\n  def ok?, do: true\nend\n"
+      )
+
+      result = run(Bash, %{"command" => "mix compile --warnings-as-errors"}, context)
+
+      refute result.is_error, result.output
+      refute result.output =~ "failed to acquire filesystem lock using TCP"
+      refute result.output =~ "failed to subscribe to Mix events using TCP"
+
+      assert File.exists?(
+               Path.join(
+                 workspace,
+                 "_build/dev/lib/sandbox_fixture/ebin/Elixir.SandboxFixture.beam"
+               )
+             )
     end
 
     test "gives the command a writable $TMPDIR in both modes, so a build with a temp file runs",

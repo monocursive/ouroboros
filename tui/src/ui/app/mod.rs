@@ -73,8 +73,8 @@ use session::{
 };
 
 pub use desktop::{
-    DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell, DesktopCellKind,
-    DesktopSession, DesktopTone,
+    DesktopAccount, DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell,
+    DesktopCellKind, DesktopSession, DesktopTone,
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{

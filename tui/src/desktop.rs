@@ -31,7 +31,7 @@ use crate::runtime::{self, Paths};
 use crate::transport::{self, Secret, TransportConfig};
 use crate::ui::app::{
     App, Call, Connection, DesktopApprovalChoice, DesktopCell, DesktopCellKind, DesktopTone, Mode,
-    Msg,
+    Msg, NoticeKind,
 };
 use crate::ui::{self, TICK};
 
@@ -420,7 +420,7 @@ impl DesktopView {
             };
             if view
                 .update(cx, |this, cx| {
-                    this.poll();
+                    this.poll(cx);
                     cx.notify();
                 })
                 .is_err()
@@ -449,7 +449,7 @@ impl DesktopView {
         }
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, cx: &mut Context<Self>) {
         while let Ok(event) = self.driver.events.try_recv() {
             match event {
                 DriverEvent::Status(status) => self.status = status,
@@ -485,8 +485,19 @@ impl DesktopView {
             }
         }
 
-        if let Some(app) = self.app.as_mut() {
+        let open_url = self.app.as_mut().and_then(|app| {
             app.apply(Msg::Tick);
+            app.take_open_url()
+        });
+        if let Some(url) = open_url {
+            if url.starts_with("https://") {
+                cx.open_url(&url);
+            } else {
+                self.action_error = Some(
+                    "the account service returned a non-HTTPS sign-in URL; it was not opened"
+                        .to_string(),
+                );
+            }
         }
         self.flush_calls();
         if let Some(app) = self.app.as_ref() {
@@ -580,6 +591,33 @@ impl DesktopView {
                 self.flush_calls();
             }
             Err(error) => self.action_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn start_chatgpt_login(&mut self, cx: &mut Context<Self>) {
+        let result = self
+            .app
+            .as_mut()
+            .ok_or_else(|| "the runtime is not connected yet".to_string())
+            .and_then(|app| {
+                let local_runtime = app.data_dir.is_some();
+                app.desktop_start_chatgpt_login(local_runtime)
+            });
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+            }
+            Err(error) => self.action_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn cancel_chatgpt_login(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = self.app.as_mut() {
+            app.desktop_cancel_chatgpt_login();
+            self.flush_calls();
         }
         cx.notify();
     }
@@ -788,6 +826,19 @@ impl DesktopView {
     }
 
     fn render_new_session(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let requires_chatgpt = self.provider.read(cx).value().trim() == "native"
+            && self
+                .model
+                .read(cx)
+                .value()
+                .trim()
+                .starts_with("openai_codex:");
+        let account_usable = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.desktop_account().usable);
+        let can_start = !requires_chatgpt || account_usable;
+
         div()
             .flex()
             .flex_col()
@@ -832,12 +883,143 @@ impl DesktopView {
                     .child(
                         Button::new("start-new")
                             .primary()
-                            .label("Start session")
+                            .label(if can_start {
+                                "Start session"
+                            } else {
+                                "Connect ChatGPT first"
+                            })
+                            .disabled(!can_start)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.start_session(window, cx);
                             })),
                     ),
             )
+    }
+
+    fn render_account(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let requires_chatgpt = if self.show_new {
+            self.provider.read(cx).value().trim() == "native"
+                && self
+                    .model
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .starts_with("openai_codex:")
+        } else {
+            self.app
+                .as_ref()
+                .and_then(|app| {
+                    app.desktop_sessions()
+                        .into_iter()
+                        .find(|session| session.selected)
+                })
+                .is_some_and(|session| {
+                    session.provider.as_deref() == Some("native")
+                        && session
+                            .model
+                            .as_deref()
+                            .is_some_and(|model| model.starts_with("openai_codex:"))
+                })
+        };
+        if !requires_chatgpt {
+            return None;
+        }
+
+        let account = self.app.as_ref()?.desktop_account();
+        if account.usable {
+            return None;
+        }
+        let pending = account.pending;
+        let url = account.url.clone();
+        let code = account.code.clone();
+        let error = account.error.clone();
+        let title = if !account.resolved {
+            "Checking ChatGPT sign-in…"
+        } else if pending {
+            "Waiting for ChatGPT sign-in"
+        } else {
+            "ChatGPT sign-in required"
+        };
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .mx_5()
+                .mt_3()
+                .p_4()
+                .rounded_lg()
+                .bg(rgb(0x211b12))
+                .border_1()
+                .border_color(rgb(AMBER))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(AMBER))
+                        .child(title),
+                )
+                .child(div().text_sm().text_color(rgb(MUTED)).child(
+                    "The selected openai_codex model uses ChatGPT subscription OAuth. Credentials remain private on the runtime host.",
+                ))
+                .when_some(code, |view, code| {
+                    view.child(
+                        div()
+                            .text_lg()
+                            .font_family("monospace")
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(format!("Device code · {code}")),
+                    )
+                })
+                .when_some(url.clone(), |view, url| {
+                    view.child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(rgb(MUTED))
+                            .child(url),
+                    )
+                })
+                .when_some(error, |view, error| {
+                    view.child(div().text_sm().text_color(rgb(RED)).child(error))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .when_some(url, |row, url| {
+                            row.child(
+                                Button::new("open-chatgpt-login")
+                                    .label("Open sign-in page")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        if url.starts_with("https://") {
+                                            cx.open_url(&url);
+                                        }
+                                    })),
+                            )
+                        })
+                        .when(!pending && account.resolved, |row| {
+                            row.child(
+                                Button::new("start-chatgpt-login")
+                                    .primary()
+                                    .label("Connect ChatGPT")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_chatgpt_login(cx);
+                                    })),
+                            )
+                        })
+                        .when(pending, |row| {
+                            row.child(
+                                Button::new("cancel-chatgpt-login")
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_chatgpt_login(cx);
+                                    })),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_transcript(&self) -> impl IntoElement {
@@ -1027,11 +1209,24 @@ impl DesktopView {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_send = self
+        let selected = self.app.as_ref().and_then(|app| {
+            app.desktop_sessions()
+                .into_iter()
+                .find(|session| session.selected)
+        });
+        let requires_chatgpt = selected.as_ref().is_some_and(|session| {
+            session.provider.as_deref() == Some("native")
+                && session
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model.starts_with("openai_codex:"))
+        });
+        let account_usable = self
             .app
             .as_ref()
-            .and_then(|app| app.sessions.open.as_ref())
-            .is_some_and(|(plane, _)| *plane == Plane::Interactive);
+            .is_some_and(|app| app.desktop_account().usable);
+        let can_send = selected.is_some_and(|session| session.plane == Plane::Interactive)
+            && (!requires_chatgpt || account_usable);
         div()
             .flex()
             .gap_3()
@@ -1082,11 +1277,16 @@ impl Render for DesktopView {
             .action_error
             .clone()
             .or_else(|| self.fatal.clone())
+            .map(|text| (text, 0x281719, RED, 0xffb0b0))
             .or_else(|| {
                 self.app
                     .as_ref()
                     .and_then(|app| app.notice.as_ref())
-                    .map(|notice| notice.text.clone())
+                    .map(|notice| match notice.kind {
+                        NoticeKind::Info => (notice.text.clone(), 0x102128, CYAN, TEXT),
+                        NoticeKind::Warn => (notice.text.clone(), 0x211b12, AMBER, TEXT),
+                        NoticeKind::Error => (notice.text.clone(), 0x281719, RED, 0xffb0b0),
+                    })
             });
         let connection_color = match self.app.as_ref().map(|app| &app.connection) {
             Some(Connection::Live) => rgb(GREEN),
@@ -1143,7 +1343,7 @@ impl Render for DesktopView {
                     .when(self.show_new, |view| {
                         view.child(self.render_new_session(cx))
                     })
-                    .when_some(notice, |view, notice| {
+                    .when_some(notice, |view, (notice, background, border, text)| {
                         view.child(
                             div()
                                 .mx_5()
@@ -1151,13 +1351,14 @@ impl Render for DesktopView {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x281719))
+                                .bg(rgb(background))
                                 .border_1()
-                                .border_color(rgb(RED))
-                                .text_color(rgb(0xffb0b0))
+                                .border_color(rgb(border))
+                                .text_color(rgb(text))
                                 .child(notice),
                         )
                     })
+                    .children(self.render_account(cx))
                     .child(self.render_transcript())
                     .children(self.render_approval(cx))
                     .child(self.render_composer(cx)),

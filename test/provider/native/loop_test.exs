@@ -292,6 +292,31 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert failed.payload["error"] =~ "max_iterations (2)"
     end
 
+    test "warns the model to validate and finish as the iteration budget expires", context do
+      script = [
+        [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+        [{:tool_call, %{id: "c2", name: "bash", input: %{"command" => "echo two"}}}],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, agent} = start_loop(context, script, max_iterations: 3)
+      run(loop)
+      events = collect()
+
+      assert find(events, :turn_completed)
+      [first, second, third] = NativeModelScript.requests(agent)
+      assert first.system =~ "3 model round-trip(s) remain"
+      assert second.system =~ "2 model round-trip(s) remain"
+      assert third.system =~ "1 model round-trip(s) remain"
+      assert third.system =~ "Do not begin optional work"
+      assert third.system =~ "state anything unverified explicitly"
+    end
+
+    test "allows substantial interactive turns by default while retaining the hard cap" do
+      assert Loop.max_iterations(%{}, nil) == 100
+      assert Loop.max_iterations(%{"max_iterations" => 900}, nil) == 500
+    end
+
     test "a model error fails the turn rather than crashing it", context do
       defmodule FailingModel do
         @behaviour Ouroboros.Provider.Native.Model

@@ -32,8 +32,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   | mode | filesystem | network |
   |---|---|---|
-  | `:read_only` | reads anywhere the process could already read; writes **only** into a per-call scratch directory that `$TMPDIR` points at | denied |
-  | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | denied unless the node opts in |
+  | `:read_only` | reads anywhere the process could already read; writes **only** into a per-call scratch directory that `$TMPDIR` points at | external network denied; loopback available for local IPC |
+  | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | external network denied unless the node opts in; loopback available for local IPC |
   | `:unrestricted` | no sandbox, logged | no sandbox |
 
   The protected set mirrors `Ouroboros.Control.Permissions.Rules`' own protected paths
@@ -52,11 +52,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   No seccomp filter on Linux, so a bubblewrap session constrains the filesystem and the
   network namespace but not the syscall surface. No domain allowlist and no proxy:
-  network is on or off, never "these hosts". `sandbox-exec` is deprecated by Apple —
-  it still works on macOS 26 and it is what Codex ships, but it carries that warning.
-  The bubblewrap path is unit-tested only: `bwrap` is not installed on the machine this
-  slice was written on, so its argv is pinned byte for byte and its behaviour is not
-  claimed.
+  external network is on or off, never "these hosts". A network-denied macOS command
+  retains loopback for build-tool IPC; bubblewrap keeps its isolated network namespace.
+  `sandbox-exec` is deprecated by Apple — it still works on macOS 26 and it is what
+  Codex ships, but it carries that warning. The bubblewrap path is unit-tested only:
+  `bwrap` is not installed on the machine this slice was written on, so its argv is
+  pinned byte for byte and its behaviour is not claimed.
   """
 
   require Logger
@@ -565,7 +566,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   end
 
   defp constraint_text(:network, _policy),
-    do: "This session's sandbox denies all network access."
+    do: "This session's sandbox denies external network access; loopback remains local-only."
 
   defp constraint_text(:filesystem, %{mode: :read_only}),
     do:

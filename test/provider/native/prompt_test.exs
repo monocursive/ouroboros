@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.PromptTest do
 
     assert prompt =~ "`bash` runs inside the sandbox-exec OS sandbox"
     assert prompt =~ "`.git`, `.ouroboros`"
-    assert prompt =~ "Network access is denied"
+    assert prompt =~ "External network access is denied; loopback is available for local IPC"
     refute prompt =~ "no OS sandbox"
   end
 

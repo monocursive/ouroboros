@@ -572,7 +572,7 @@ write or a command and blocks until a human answers or the timeout denies;
 `:auto_edit` auto-approves writes inside the workspace only, and still asks for
 commands; `:auto_approve` asks for nothing. `steer` delivers a message at the next tool
 boundary of a running turn, which no other provider here supports. A turn stops after
-the current tool on interrupt, at `max_iterations` (50 by default), and on the third
+the current tool on interrupt, at `max_iterations` (100 by default), and on the third
 identical tool call.
 
 **Plan mode.** A session can be told to plan rather than build:
@@ -635,8 +635,8 @@ override is read ahead of the cache, so it takes effect without a restart.
 
 | `sandbox_mode` | backend present | backend absent |
 |---|---|---|
-| `read_only` | reads anywhere the process could already read; **no writes at all** except a per-call scratch directory `$TMPDIR` points at; no network | **`bash` refused**, and the refusal names what was missing |
-| `workspace_write` | the above, plus writes under the workspace and every `add_dirs` root — with `.git` and `.ouroboros` beneath them, the node's data directory and `~/.config/ouroboros` read-only; no network | runs **unsandboxed**, exactly as it did before C5 |
+| `read_only` | reads anywhere the process could already read; **no writes at all** except a per-call scratch directory `$TMPDIR` points at; no external network, with loopback retained for local IPC | **`bash` refused**, and the refusal names what was missing |
+| `workspace_write` | the above, plus writes under the workspace and every `add_dirs` root — with `.git` and `.ouroboros` beneath them, the node's data directory and `~/.config/ouroboros` read-only; no external network, with loopback retained for local IPC | runs **unsandboxed**, exactly as it did before C5 |
 
 macOS gets a Seatbelt profile shaped after Codex CLI's published base policy: `(deny
 default)`, `(allow file-read*)`, the handful of operations `/bin/sh` needs to exist, and

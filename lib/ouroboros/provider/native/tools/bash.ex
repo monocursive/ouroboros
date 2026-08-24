@@ -10,15 +10,16 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
     * **`read_only` with a backend** — the command runs inside it. macOS Seatbelt or
       Linux bubblewrap makes the whole filesystem read-only except a scratch `$TMPDIR`
-      this call owns, and denies the network. This is what a read-only shell means; it
-      is not "no shell" any more, because there is finally something that can hold the
-      promise.
+      this call owns, and denies external network access. On macOS, loopback remains
+      available for local IPC. This is what a read-only shell means; it is not "no
+      shell" any more, because there is finally something that can hold the promise.
     * **`read_only` with no backend** — refused, as before, and the refusal now names
       what was missing. A shell that cannot be made read-only under a read-only label
       is a lie about the label.
     * **`workspace_write`** — runs sandboxed where a backend exists (workspace and
       declared roots writable, `.git` and `.ouroboros` beneath them read-only, the
-      node's data directory and the user's ouroboros config read-only, no network), and
+      node's data directory and the user's ouroboros config read-only, no external
+      network, with loopback retained for local IPC), and
       runs unsandboxed where none does. The second case is what this provider did
       before C5; it is reported rather than hidden, through `sandbox: "none"` on the
       tool call and through the provider's status.

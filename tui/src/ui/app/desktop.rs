@@ -88,7 +88,109 @@ pub struct DesktopApprovalDiff {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopAccount {
+    pub resolved: bool,
+    pub connected: bool,
+    pub usable: bool,
+    pub pending: bool,
+    pub identity: Option<String>,
+    pub url: Option<String>,
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
 impl App {
+    /// Non-secret ChatGPT readiness and managed-login state for a native shell.
+    pub fn desktop_account(&self) -> DesktopAccount {
+        let state = self.account.value.as_ref();
+        let dialog = match self.overlay.as_ref() {
+            Some(Overlay::Account(dialog)) => Some(dialog.as_ref()),
+            _ => None,
+        };
+        let identity = state.and_then(|state| {
+            state.account.as_ref().map(|account| {
+                account
+                    .email
+                    .clone()
+                    .or_else(|| state.plan_label())
+                    .unwrap_or_else(|| "ChatGPT subscription".to_string())
+            })
+        });
+
+        DesktopAccount {
+            resolved: state.is_some() || self.account.error.is_some(),
+            connected: state.is_some_and(AccountState::connected),
+            usable: state.is_some_and(AccountState::usable),
+            pending: dialog.is_some_and(|dialog| dialog.pending)
+                || state.is_some_and(|state| state.login.status == "pending"),
+            identity,
+            url: dialog.and_then(|dialog| dialog.url.clone()),
+            code: dialog.and_then(|dialog| dialog.code.clone()),
+            error: dialog
+                .and_then(|dialog| dialog.error.clone())
+                .or_else(|| state.and_then(|state| state.login.error.clone()))
+                .or_else(|| self.account.error.clone()),
+        }
+    }
+
+    /// Starts the runtime-owned OAuth flow. Local clients can receive the loopback browser
+    /// callback; an explicitly attached client uses device code on the runtime host.
+    pub fn desktop_start_chatgpt_login(&mut self, local_runtime: bool) -> Result<(), String> {
+        if self.chatgpt_connected() {
+            return Ok(());
+        }
+        if !self.hello.serves("account.login.start") {
+            return Err(
+                "this gateway does not expose managed ChatGPT sign-in; update the runtime"
+                    .to_string(),
+            );
+        }
+        if !self.hello.operates() {
+            return Err(format!(
+                "ChatGPT sign-in changes the runtime host, and this listener runs at scope `{}`",
+                self.hello.scope
+            ));
+        }
+        if self.desktop_account().pending {
+            return Err("ChatGPT sign-in is already waiting for completion".to_string());
+        }
+
+        let flow = if local_runtime {
+            AccountFlow::Browser
+        } else {
+            AccountFlow::DeviceCode
+        };
+        self.overlay = Some(Overlay::Account(Box::new(AccountDialog::new(flow))));
+        self.issue(Call::new(
+            Tag::AccountLogin,
+            "account.login.start",
+            json!({
+                "flow": match flow {
+                    AccountFlow::Browser => "browser",
+                    AccountFlow::DeviceCode => "device_code",
+                }
+            }),
+        ));
+        Ok(())
+    }
+
+    /// Cancels a managed login without leaving an invisible request on the runtime host.
+    pub fn desktop_cancel_chatgpt_login(&mut self) {
+        let login_id = match self.overlay.as_ref() {
+            Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
+            _ => None,
+        };
+        self.overlay = None;
+        if let Some(login_id) = login_id {
+            self.issue(Call::new(
+                Tag::AccountCancel,
+                "account.login.cancel",
+                json!({ "login_id": login_id }),
+            ));
+        }
+    }
+
     /// Rows for a native rail, preserving the TUI's attention-first ordering and nesting.
     pub fn desktop_sessions(&self) -> Vec<DesktopSession> {
         self.sessions
@@ -246,6 +348,16 @@ impl App {
                 "{id} is a coding task and does not accept follow-up messages"
             ));
         }
+        let requires_chatgpt = self.sessions.open_info().is_some_and(|session| {
+            session.provider.as_deref() == Some("native")
+                && session
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model.starts_with("openai_codex:"))
+        });
+        if requires_chatgpt && !self.codex_usable() {
+            return Err("connect ChatGPT before sending to this session".to_string());
+        }
 
         self.compose(ComposerVerb::Message);
         let Some(composer) = self.sessions.composer.as_mut() else {
@@ -286,11 +398,24 @@ impl App {
             ));
         }
 
+        let provider = provider.trim().to_string();
+        let model = model
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if provider == "native"
+            && model
+                .as_deref()
+                .is_some_and(|model| model.starts_with("openai_codex:"))
+            && !self.codex_usable()
+        {
+            return Err("connect ChatGPT before starting this model".to_string());
+        }
+
         let request = StartRequest {
             id: new_session_id(),
             plane: Plane::Interactive,
-            provider: provider.trim().to_string(),
-            model: model.filter(|value| !value.trim().is_empty()),
+            provider,
+            model,
             machine: String::new(),
             workspace: workspace.trim().to_string(),
             approval_mode: self.config.defaults.approval_mode(),

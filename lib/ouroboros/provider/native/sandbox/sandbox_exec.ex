@@ -37,10 +37,10 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   ## Denials, as they actually appear
 
   Seatbelt returns `EPERM`, so a denied write surfaces as the program's own
-  `Operation not permitted` and a denied connection as `nc: connectx to … failed:
-  Operation not permitted` — distinguishable from a closed port, which is `ECONNREFUSED`
-  and reads `Connection refused`. `Ouroboros.Provider.Native.Sandbox.violation/3`
-  matches only the former.
+  `Operation not permitted` and a denied external connection as
+  `nc: connectx to … failed: Operation not permitted` — distinguishable from a closed
+  loopback port, which is `ECONNREFUSED` and reads `Connection refused`.
+  `Ouroboros.Provider.Native.Sandbox.violation/3` matches only the former.
   """
 
   @doc """
@@ -69,7 +69,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     |> Enum.concat(protected_rules(policy))
     |> Enum.concat(reallow_rules(policy))
     |> Enum.concat(segment_rules(policy))
-    |> Enum.concat([network_rule(policy)])
+    |> Enum.concat(network_rules(policy))
     |> Enum.join("\n")
     |> Kernel.<>("\n")
   end
@@ -170,6 +170,18 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     end)
   end
 
-  defp network_rule(%{network: true}), do: "(allow network*)"
-  defp network_rule(_denied), do: "(deny network*)"
+  defp network_rules(%{network: true}), do: ["(allow network*)"]
+
+  # Mix coordinates concurrent compilers and its event bus through TCP sockets bound
+  # to loopback. Denying network* without this local exception makes ordinary
+  # `mix compile` fail with :eperm even though it is not reaching another machine.
+  # SBPL is last-match-wins, so the narrow allows must follow the broad deny.
+  defp network_rules(_denied) do
+    [
+      "(deny network*)",
+      "(allow network-bind (local ip \"localhost:*\"))",
+      "(allow network-inbound (local ip \"localhost:*\"))",
+      "(allow network-outbound (remote ip \"localhost:*\"))"
+    ]
+  end
 end

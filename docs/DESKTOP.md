@@ -32,6 +32,12 @@ The composer is multi-line. `Command-Enter` sends, `Command-.` interrupts the ac
 turn, `Command-N` toggles the new-session form, and `Command-Q` quits the client. Closing
 the last window disconnects the client and leaves an adopted runtime running.
 
+For `openai_codex:` models, the desktop shell reads only non-secret account readiness and
+starts the runtime-owned ChatGPT OAuth flow. A local runtime uses browser PKCE; an explicit
+remote attachment uses device code. Session start and send remain disabled until the
+runtime reports that the selected subscription model is usable. Tokens never cross the
+gateway into GPUI.
+
 ## Current platform and release boundary
 
 The checked app bundle target is macOS. GPUI can support Linux, but an Ouroboros Linux

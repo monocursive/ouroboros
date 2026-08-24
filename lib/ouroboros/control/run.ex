@@ -7,6 +7,7 @@ defmodule Ouroboros.Control.Run do
   without serializing runtime ownership or credentials.
   """
 
+  alias Ouroboros.Control.EvidenceContract
   alias Ouroboros.Orchestration.{Plan, Serializable}
 
   @statuses [
@@ -41,6 +42,7 @@ defmodule Ouroboros.Control.Run do
                 feedback: nil,
                 decision: nil,
                 result: nil,
+                evidence_contract: nil,
                 failure: nil,
                 cancellation: nil,
                 history: []
@@ -81,6 +83,7 @@ defmodule Ouroboros.Control.Run do
           feedback: term(),
           decision: term(),
           result: term(),
+          evidence_contract: EvidenceContract.t() | nil,
           failure: term(),
           cancellation: cancellation() | nil,
           history: [map()],
@@ -135,6 +138,7 @@ defmodule Ouroboros.Control.Run do
          :ok <- validate_request_ids(run),
          :ok <- validate_plan_ids(run),
          :ok <- validate_history(run.history, run.revision),
+         :ok <- validate_evidence_contract(run.evidence_contract),
          :ok <- validate_status_shape(run),
          true <- Serializable.valid?(run) or {:error, :unserializable_run} do
       :ok
@@ -233,6 +237,16 @@ defmodule Ouroboros.Control.Run do
   end
 
   defp validate_history(_history, _revision), do: {:error, :invalid_history}
+
+  defp validate_evidence_contract(nil), do: :ok
+
+  defp validate_evidence_contract(contract) do
+    case EvidenceContract.normalize(contract) do
+      {:ok, ^contract} -> :ok
+      {:ok, _normalized} -> {:error, :noncanonical_evidence_contract}
+      {:error, reason} -> {:error, {:invalid_evidence_contract, reason}}
+    end
+  end
 
   defp validate_status_shape(%__MODULE__{status: :planning} = run) do
     require_shape(run, current?: false, pending?: false, evaluation?: false)

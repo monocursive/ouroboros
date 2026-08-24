@@ -53,15 +53,27 @@ fn opened() -> App {
             "id": SESSION,
             "node": "ouroboros@golden",
             "provider": "native",
-            "model": "openai_codex:gpt-5.6-sol",
             "workspace": "/tmp/desktop-workspace",
             "status": "running",
-            "options": { "approval_mode": "prompt", "sandbox_mode": "workspace_write" },
+            "options": {
+                "model": "openai_codex:gpt-5.6-sol",
+                "approval_mode": "prompt",
+                "sandbox_mode": "workspace_write"
+            },
             "created_at": "2026-01-01T00:00:00.000000Z",
             "updated_at": "2026-01-01T00:00:00.000000Z"
         }]),
     );
     answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
     app.open_session(Plane::Interactive, SESSION.into());
 
     let subscribe = app
@@ -95,6 +107,10 @@ fn desktop_session_and_transcript_are_reducer_projections() {
     assert_eq!(sessions[0].id, SESSION);
     assert!(sessions[0].selected);
     assert_eq!(sessions[0].provider.as_deref(), Some("native"));
+    assert_eq!(
+        sessions[0].model.as_deref(),
+        Some("openai_codex:gpt-5.6-sol")
+    );
 
     let cells = app.desktop_transcript();
     assert_eq!(cells.len(), 2);
@@ -120,6 +136,30 @@ fn desktop_send_uses_the_existing_follow_up_reconciliation() {
     assert_eq!(send.params["id"], SESSION);
     assert_eq!(send.params["input"], "Run the focused checks.");
     assert!(send.params["turn_id"].as_str().is_some());
+}
+
+#[test]
+fn desktop_blocks_codex_send_until_the_runtime_reports_oauth_ready() {
+    let mut app = opened();
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": true,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.drain();
+
+    let error = app
+        .desktop_submit_message("Do not dispatch this yet.")
+        .expect_err("the direct model cannot run without OAuth");
+    assert!(error.contains("connect ChatGPT"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.follow_up"));
 }
 
 #[test]
@@ -208,6 +248,15 @@ fn desktop_approval_is_complete_and_rejects_a_stale_button() {
 #[test]
 fn desktop_new_session_keeps_operator_choices_explicit() {
     let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
     app.drain();
 
     let id = app
@@ -226,4 +275,73 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
     assert_eq!(start.params["provider"], "native");
     assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/tmp/desktop-workspace");
+}
+
+#[test]
+fn desktop_gates_codex_work_and_uses_the_runtime_owned_login_flow() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    app.data_dir = Some("/tmp/ouroboros-desktop".into());
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": true,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.drain();
+
+    let error = app
+        .desktop_start_session(
+            "native".into(),
+            Some("openai_codex:gpt-5.6-sol".into()),
+            "/tmp/desktop-workspace".into(),
+        )
+        .expect_err("an OAuth-backed model cannot start before sign-in");
+    assert!(error.contains("connect ChatGPT"));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.start"));
+
+    let account = app.desktop_account();
+    assert!(account.resolved);
+    assert!(!account.usable);
+    app.desktop_start_chatgpt_login(true)
+        .expect("the local desktop can start browser PKCE");
+    let login = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "account.login.start")
+        .expect("the desktop emits the managed login call");
+    assert_eq!(login.params, json!({ "flow": "browser" }));
+
+    answer(
+        &mut app,
+        Tag::AccountLogin,
+        json!({
+            "type": "chatgpt",
+            "loginId": "desktop-login-1",
+            "authUrl": "https://chatgpt.com/auth/ouroboros"
+        }),
+    );
+    let pending = app.desktop_account();
+    assert!(pending.pending);
+    assert_eq!(
+        pending.url.as_deref(),
+        Some("https://chatgpt.com/auth/ouroboros")
+    );
+    assert_eq!(
+        app.take_open_url().as_deref(),
+        Some("https://chatgpt.com/auth/ouroboros")
+    );
+
+    app.desktop_cancel_chatgpt_login();
+    let cancel = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "account.login.cancel")
+        .expect("cancelling the card cancels the runtime login");
+    assert_eq!(cancel.params["login_id"], "desktop-login-1");
 }

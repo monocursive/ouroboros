@@ -212,7 +212,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
     """
     `bash` runs inside the #{label} OS sandbox. The workspace and declared roots are
     writable; `.git`, `.ouroboros`, the runtime data directory, and the user's Ouroboros
-    configuration stay read-only. #{String.capitalize(network_posture(policy))}
+    configuration stay read-only. #{sentence(network_posture(policy))}
     A sandbox denial names the constraint it hit; do not retry it under a weaker
     posture.#{approvals(approval_mode)}
     """
@@ -257,7 +257,12 @@ defmodule Ouroboros.Provider.Native.Prompt do
   end
 
   defp network_posture(%{network: true}), do: "network access is enabled by node policy."
-  defp network_posture(_policy), do: "network access is denied."
+
+  defp network_posture(_policy),
+    do: "external network access is denied; loopback is available for local IPC."
+
+  defp sentence(<<first::utf8, rest::binary>>),
+    do: String.upcase(<<first::utf8>>) <> rest
 
   # B2. The instruction block that makes plan mode a *task* rather than a series of
   # refusals. Without it a model in a read-only session spends the turn discovering, one

@@ -29,7 +29,7 @@ defmodule Ouroboros.Control.Server do
 
   use GenServer
 
-  alias Ouroboros.Control.{Run, Store}
+  alias Ouroboros.Control.{EvidenceContract, Run, Store}
   alias Ouroboros.Orchestration.{Plan, Scheduler, Serializable, Step}
 
   @terminal_plan_statuses [:completed, :failed, :blocked, :cancelled]
@@ -754,6 +754,22 @@ defmodule Ouroboros.Control.Server do
     end
   end
 
+  defp apply_decision(run, plan, {:ok, :accept, result, evidence_contract}, state) do
+    entry = history_entry(run, plan, :accept, result, evidence_contract)
+
+    complete =
+      Run.transition(run, %{
+        status: :completed,
+        decision: :accept,
+        result: result,
+        evidence_contract: evidence_contract,
+        feedback: nil,
+        history: run.history ++ [entry]
+      })
+
+    persist_transition(complete, state)
+  end
+
   defp apply_decision(run, plan, {:ok, :accept, result}, state) do
     entry = history_entry(run, plan, :accept, result)
 
@@ -966,6 +982,17 @@ defmodule Ouroboros.Control.Server do
 
   defp normalize_decision(:accept), do: {:ok, :accept, :accepted}
   defp normalize_decision({:accept, result}), do: serializable_decision(:accept, result)
+
+  defp normalize_decision({:accept, result, evidence_contract}) do
+    with {:ok, result} <- serializable_value(result),
+         {:ok, evidence_contract} <- EvidenceContract.normalize(evidence_contract) do
+      {:ok, :accept, result, evidence_contract}
+    else
+      {:error, :unserializable_decision} = error -> error
+      {:error, reason} -> {:error, {:invalid_evidence_contract, Serializable.safe(reason)}}
+    end
+  end
+
   defp normalize_decision({:revise, feedback}), do: serializable_decision(:revise, feedback)
   defp normalize_decision({:fail, reason}), do: serializable_decision(:fail, reason)
 
@@ -988,13 +1015,20 @@ defmodule Ouroboros.Control.Server do
   defp normalize_decision(_other), do: {:error, :invalid_decision}
 
   defp serializable_decision(kind, value) do
+    case serializable_value(value) do
+      {:ok, value} -> {:ok, kind, value}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp serializable_value(value) do
     if Serializable.valid?(value),
-      do: {:ok, kind, value},
+      do: {:ok, value},
       else: {:error, :unserializable_decision}
   end
 
-  defp history_entry(run, plan, decision, detail) do
-    %{
+  defp history_entry(run, plan, decision, detail, evidence_contract \\ nil) do
+    entry = %{
       revision: run.revision,
       plan_id: plan.id,
       plan_status: plan.status,
@@ -1003,6 +1037,13 @@ defmodule Ouroboros.Control.Server do
       detail: detail,
       evaluated_at: System.system_time(:millisecond)
     }
+
+    if evidence_contract do
+      {:ok, digest} = EvidenceContract.digest(evidence_contract)
+      Map.put(entry, :evidence_contract_digest, digest)
+    else
+      entry
+    end
   end
 
   defp fail_run(run, failure, state, history \\ nil) do
