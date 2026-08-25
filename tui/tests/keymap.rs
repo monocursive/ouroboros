@@ -282,15 +282,17 @@ fn a_key_whose_value_is_not_a_string_is_named_rather_than_refusing_the_file() {
     let dir = std::env::temp_dir().join(format!("ouro-keys-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let path = dir.join("config.toml");
+    // `claude`, not `codex`: an explicit codex default is migrated to native by
+    // `config::normalise`, and this test's canary must be a value that survives loading.
     std::fs::write(
         &path,
-        "[defaults]\nprovider = \"codex\"\n[keys]\nverbose = true\nplan_panel = \"ctrl+y\"\n",
+        "[defaults]\nprovider = \"claude\"\n[keys]\nverbose = true\nplan_panel = \"ctrl+y\"\n",
     )
     .expect("a config");
 
     let loaded = ouro::config::load(path);
 
-    assert_eq!(loaded.config.defaults.provider.as_deref(), Some("codex"));
+    assert_eq!(loaded.config.defaults.provider.as_deref(), Some("claude"));
     assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
     assert!(
         loaded.problems[0].contains("keys.verbose"),
