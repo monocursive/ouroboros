@@ -458,17 +458,31 @@ defmodule Ouroboros.InteractiveSessionTest do
       controller = Keyword.fetch!(opts, :controller)
       fallback = Keyword.fetch!(opts, :fallback)
       fallback_opts = Keyword.fetch!(opts, :fallback_opts)
+      session_id = Keyword.fetch!(opts, :session_id)
+      store_key = Keyword.fetch!(opts, :store_key)
 
-      if Agent.get_and_update(controller, fn count ->
-           {count, count + 1}
-         end) < 2 do
-        # Version 2 creates the per-session checkpoint and then the bounded index. The
-        # outage begins after both pieces of the create are durable.
-        apply(fallback, :put_checkpoint, [key, value, fallback_opts])
+      if target_write?(key, value, store_key, session_id) do
+        if Agent.get_and_update(controller, fn count -> {count, count + 1} end) < 2 do
+          # Version 2 creates the per-session checkpoint and then the bounded index. The
+          # outage begins after both pieces of this session's create are durable.
+          apply(fallback, :put_checkpoint, [key, value, fallback_opts])
+        else
+          {:error, :disk_full}
+        end
       else
-        {:error, :disk_full}
+        # Recovery and coordinators from other tests share the global Store process.
+        # Their writes must not consume this session's deliberately tiny allowance.
+        apply(fallback, :put_checkpoint, [key, value, fallback_opts])
       end
     end
+
+    defp target_write?({store_key, :session, 2, session_id}, _value, store_key, session_id),
+      do: true
+
+    defp target_write?(store_key, %{version: 2, ids: ids}, store_key, session_id),
+      do: session_id in ids
+
+    defp target_write?(_key, _value, _store_key, _session_id), do: false
   end
 
   test "a coordinator whose checkpoints keep failing answers start waiters at the deadline", %{
@@ -494,6 +508,8 @@ defmodule Ouroboros.InteractiveSessionTest do
         | adapter: FailAfterCreateStorage,
           opts: [
             controller: controller,
+            session_id: id,
+            store_key: state.key,
             fallback: state.adapter,
             fallback_opts: state.opts
           ]

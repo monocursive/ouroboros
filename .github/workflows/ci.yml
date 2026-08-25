@@ -49,6 +49,9 @@ jobs:
 
       - run: mix deps.get
 
+      - run: mix format --check-formatted
+      - run: sh scripts/test-dev.sh
+
       # The tree is warning-free today, checked before this file was written. `--force`
       # because a cached `_build` would otherwise hide a warning nothing recompiled.
       - run: mix compile --force --warnings-as-errors

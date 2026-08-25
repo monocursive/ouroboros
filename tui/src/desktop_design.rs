@@ -402,10 +402,12 @@ mod tests {
 
     #[test]
     fn palettes_keep_the_same_semantic_layer_order() {
-        assert!(DARK.page < DARK.canvas);
-        assert!(DARK.canvas < DARK.surface);
-        assert!(LIGHT.page > LIGHT.canvas);
-        assert!(LIGHT.surface > LIGHT.canvas);
+        const {
+            assert!(DARK.page < DARK.canvas);
+            assert!(DARK.canvas < DARK.surface);
+            assert!(LIGHT.page > LIGHT.canvas);
+            assert!(LIGHT.surface > LIGHT.canvas);
+        }
         assert_ne!(DARK.line, DARK.surface);
         assert_ne!(LIGHT.line, LIGHT.surface);
     }

@@ -131,6 +131,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # reported as unreachable while it is still opening a session.
   @remote_spawn_timeout @open_timeout + 20_000
   @remote_stop_timeout 15_000
+  @registry Ouroboros.Provider.Native.Registry
   @max_summary_bytes 16 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
@@ -146,6 +147,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
           required(:request_attrs) => map(),
           required(:context) => map(),
           optional(:node) => node(),
+          optional(:remote) => boolean(),
           optional(:worktree) => boolean(),
           optional(:deadline_ms) => pos_integer(),
           optional(:background) => boolean(),
@@ -160,8 +162,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   Returns
   `{:ok, %{pid:, task_id:, provider_session_id:, session_dir:, worktree:, workspace:, node:, remote:}}`,
-  or `{:error, reason}` with nothing started. The open is synchronous and bounded: a caller
-  that got `:ok` has a child that is running, not one that may yet fail to start.
+  or `{:error, reason}`. The open is synchronous and bounded: a caller that got `:ok` has
+  a child that is running, not one that may yet fail to start. A remote transport failure
+  is explicitly reported as ambiguous if the target cannot be reconciled; it never claims
+  that nothing ran after `:erpc` has admitted that the call may have been applied.
 
   `spec.node` places the child. When it names another node the whole start — this process,
   the worktree, the request, the session — happens **there**, and the `pid` that comes back
@@ -198,26 +202,57 @@ defmodule Ouroboros.Provider.Native.Subagent do
             error
         end
 
+      {:error, {:already_started, pid}} ->
+        recover_started(pid, spec)
+
       {:error, reason} ->
         {:error, {:subagent_unstartable, reason}}
     end
   end
 
-  # Every way an erpc can fail becomes an ordinary `{:error, reason}` this module's callers
-  # already handle, because the alternative is an exception thrown through the loop process
-  # in the middle of a turn — a node that went away must cost a tool result, not a session.
+  # `:erpc` documents timeout and connection loss as ambiguous: the target function may or
+  # may not have been applied. `start_and_launch/1` is therefore idempotent by `task_id`, and
+  # the second call is reconciliation rather than a second child. If both calls lose their
+  # answer, say exactly that; the subscriber monitor still stops any applied child when the
+  # parent turn/session disappears.
   defp spawn_remote(target, spec) do
-    case :erpc.call(target, __MODULE__, :start_and_launch, [spec], @remote_spawn_timeout) do
-      {:ok, started} -> {:ok, started}
-      {:error, _reason} = error -> error
-      other -> {:error, {:subagent_unstartable, {:remote_spawn_failed, target, other}}}
+    case remote_start_call(target, spec) do
+      {:returned, result} -> remote_start_result(target, result)
+      {:ambiguous, first} -> reconcile_remote_start(target, spec, first)
     end
-  catch
-    :error, {:erpc, reason} ->
-      {:error, {:subagent_unstartable, {:node_unreachable, target, reason}}}
+  end
 
-    kind, reason ->
-      {:error, {:subagent_unstartable, {:remote_spawn_failed, target, {kind, reason}}}}
+  defp reconcile_remote_start(target, spec, first) do
+    case remote_start_call(target, spec) do
+      {:returned, result} ->
+        remote_start_result(target, result)
+
+      {:ambiguous, second} ->
+        {:error,
+         {:subagent_unstartable, {:remote_start_ambiguous, target, spec.task_id, {first, second}}}}
+    end
+  end
+
+  defp remote_start_call(target, spec) do
+    {:returned, :erpc.call(target, __MODULE__, :start_and_launch, [spec], @remote_spawn_timeout)}
+  catch
+    :error, {:erpc, reason} -> {:ambiguous, reason}
+    kind, reason -> {:ambiguous, {kind, reason}}
+  end
+
+  defp remote_start_result(_target, {:ok, started}), do: {:ok, started}
+  defp remote_start_result(_target, {:error, _reason} = error), do: error
+
+  defp remote_start_result(target, other),
+    do: {:error, {:subagent_unstartable, {:remote_spawn_failed, target, other}}}
+
+  defp recover_started(pid, spec) do
+    provider_session_id = Map.get(spec.request_attrs, :provider_session_id)
+
+    case safe_call(pid, {:recover_start, provider_session_id}, @open_timeout + 5_000) do
+      {:ok, _started} = ok -> ok
+      {:error, reason} -> {:error, {:subagent_unstartable, reason}}
+    end
   end
 
   @doc "This child's summary now, whether or not it has settled."
@@ -288,7 +323,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   @doc false
-  def start_link(spec), do: GenServer.start_link(__MODULE__, spec)
+  def start_link(spec),
+    do: GenServer.start_link(__MODULE__, spec, name: via(spec.task_id))
 
   # ---------------------------------------------------------------- server
 
@@ -358,20 +394,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   def handle_call(:launch, _from, %{status: :starting} = state) do
     case launch(state) do
       {:ok, state} ->
-        {:reply,
-         {:ok,
-          %{
-            task_id: state.task_id,
-            provider_session_id: state.provider_session_id,
-            session_dir: state.session_dir,
-            worktree: state.worktree,
-            # The directory the child actually runs in, and the node it runs on, both
-            # settled here rather than guessed by the caller: for a remote child neither is
-            # knowable on the parent's side until this launch has run.
-            workspace: state.workspace,
-            node: node(),
-            remote: state.remote?
-          }}, state}
+        {:reply, {:ok, started_of(state)}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -379,6 +402,21 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   def handle_call(:launch, _from, state), do: {:reply, {:error, :already_launched}, state}
+
+  def handle_call({:recover_start, provider_session_id}, _from, state) do
+    expected = Map.get(state.request_attrs, :provider_session_id)
+
+    cond do
+      provider_session_id != expected ->
+        {:reply, {:error, {:subagent_task_id_collision, state.task_id}}, state}
+
+      state.status == :starting ->
+        {:reply, {:error, :subagent_still_starting}, state}
+
+      true ->
+        {:reply, {:ok, started_of(state)}, state}
+    end
+  end
 
   def handle_call(:summary, _from, state), do: {:reply, {:ok, summary_of(state)}, state}
 
@@ -839,6 +877,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp add_cost(running, _unpriced), do: running
 
   defp random(bytes), do: Base.url_encode64(:crypto.strong_rand_bytes(bytes), padding: false)
+
+  defp started_of(state) do
+    %{
+      pid: self(),
+      task_id: state.task_id,
+      provider_session_id: state.provider_session_id,
+      session_dir: state.session_dir,
+      worktree: state.worktree,
+      # The directory the child actually runs in, and the node it runs on, both settle on
+      # the target rather than being guessed by a remote caller.
+      workspace: state.workspace,
+      node: node(),
+      remote: state.remote?
+    }
+  end
+
+  defp via(task_id), do: {:via, Registry, {@registry, {:subagent, task_id}}}
 
   # `Ouroboros.Workspace.Worktree` validates this as a directory name, so it is minted in
   # the shape that validator accepts rather than borrowed from a caller.

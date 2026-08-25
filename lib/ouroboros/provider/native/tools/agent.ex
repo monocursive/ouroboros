@@ -155,6 +155,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
 
   alias Ouroboros.Cluster
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Subagent
 
   @max_depth 2
   @max_concurrent 4
@@ -206,7 +207,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defect `docs/FLEET.md` records as F2. `Subagent`'s launch, which runs on the child's own
   node, does both.
   """
-  @spec plan(map(), map()) :: {:ok, map()} | {:error, String.t()}
+  @spec plan(map(), map()) :: {:ok, Subagent.spec()} | {:error, String.t()}
   def plan(input, parent) when is_map(input) and is_map(parent) do
     with {:ok, prompt} <- prompt(input),
          :ok <- depth_ok(parent),
@@ -236,32 +237,72 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         }
         |> portable(placement.remote?)
 
-      {:ok,
-       %{
-         task_id: task_id(),
-         prompt: prompt,
-         description: description(input),
-         subscriber: subscriber,
-         node: placement.node,
-         remote: placement.remote?,
-         request_attrs: request_attrs,
-         # The parent's own harness context, so the child belongs to the parent's
-         # interactive session — the same `session_id`, the same principal in every ledger
-         # entry the child writes. `Subagent` replaces `owner` with itself; nothing else
-         # about it changes, which is what makes a child the parent's and not a stranger's.
-         #
-         # For a remote child the context is scrubbed first: a closure, a port or a
-         # reference in it names something only this VM has, and shipping one would hand
-         # the target a value that cannot mean there what it means here.
-         context: context(parent, placement.remote?),
-         worktree: placement.worktree?,
-         background: background?,
-         depth: parent.depth + 1,
-         tools: tools,
-         deadline_ms: deadline_ms(parent)
-       }}
+      validate_spec(%{
+        task_id: task_id(),
+        prompt: prompt,
+        description: description(input),
+        subscriber: subscriber,
+        node: placement.node,
+        remote: placement.remote?,
+        request_attrs: request_attrs,
+        # The parent's own harness context, so the child belongs to the parent's
+        # interactive session — the same `session_id`, the same principal in every ledger
+        # entry the child writes. `Subagent` replaces `owner` with itself; nothing else
+        # about it changes, which is what makes a child the parent's and not a stranger's.
+        #
+        # For a remote child the context is scrubbed first: a closure, a port or a
+        # reference in it names something only this VM has, and shipping one would hand
+        # the target a value that cannot mean there what it means here.
+        context: context(parent, placement.remote?),
+        worktree: placement.worktree?,
+        background: background?,
+        depth: parent.depth + 1,
+        tools: tools,
+        deadline_ms: deadline_ms(parent)
+      })
     end
   end
+
+  # `plan/2` is public because the loop uses it, but its parent map is assembled from
+  # live session state rather than a struct. Validate the boundary before handing the
+  # result to `Subagent.spawn/1`; this keeps a malformed internal parent from becoming a
+  # crashed child and makes the cross-module contract truthful to Dialyzer as well.
+  defp validate_spec(
+         %{
+           task_id: task_id,
+           prompt: prompt,
+           description: description,
+           subscriber: subscriber,
+           node: node,
+           remote: remote?,
+           request_attrs: request_attrs,
+           context: context,
+           worktree: worktree?,
+           background: background?,
+           depth: depth,
+           tools: tools,
+           deadline_ms: deadline_ms
+         } = spec
+       )
+       when is_binary(task_id) and is_binary(prompt) and is_binary(description) and
+              is_pid(subscriber) and is_atom(node) and is_boolean(remote?) and
+              is_map(request_attrs) and is_map(context) and is_boolean(worktree?) and
+              is_boolean(background?) and is_integer(depth) and depth >= 0 and
+              is_list(tools) and is_integer(deadline_ms) and deadline_ms > 0 do
+    if Enum.all?(tools, &is_binary/1) do
+      {:ok, spec}
+    else
+      invalid_parent_spec()
+    end
+  end
+
+  defp validate_spec(_spec), do: invalid_parent_spec()
+
+  defp invalid_parent_spec,
+    do:
+      {:error,
+       "Refused: the parent session could not provide a valid subagent execution context. " <>
+         "Nothing ran and there is no task to collect."}
 
   @doc """
   The `provider_event` payload emitted when a child is spawned.
@@ -604,13 +645,21 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   def start_refusal({:subagent_unstartable, {:node_unreachable, target, reason}}),
     do:
       "Refused: #{target} could not be reached to start the child (#{inspect(reason)}). " <>
-        "Nothing ran there and there is no task to collect. Name another machine, or omit " <>
-        "`machine:` to run the child here."
+        "No start acknowledgement was received. Name another machine, or omit `machine:` " <>
+        "to run the child here."
+
+  def start_refusal({:subagent_unstartable, {:remote_start_ambiguous, target, task_id, detail}}),
+    do:
+      "Refused: the start of subagent #{task_id} on #{target} is ambiguous after two " <>
+        "idempotent attempts (#{inspect(detail)}). It may have started, but no collectible " <>
+        "handle reached this session. Any such child still monitors this parent and stops " <>
+        "when the parent turn/session disappears; do not assume that nothing ran. Check " <>
+        "that machine before retrying materially different work."
 
   def start_refusal({:subagent_unstartable, {:remote_spawn_failed, target, detail}}),
     do:
-      "Refused: #{target} refused to start the child (#{inspect(detail)}). Nothing ran " <>
-        "there and there is no task to collect."
+      "Refused: #{target} returned an invalid start result (#{inspect(detail)}). No " <>
+        "collectible task handle was returned."
 
   def start_refusal(reason),
     do:

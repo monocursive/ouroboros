@@ -1616,8 +1616,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     );
                     if !forget_commands.is_empty() {
                         println!(
-                            "\nOffline session-owner evidence for removed machines is still preserved locally. After this runtime restarts, only if you explicitly accept losing that offline discovery evidence, run the matching command below on every remaining fleet machine:\n{}\nThis is irreversible per machine; skip it while you may need to recover or find sessions from a removed owner.",
-                            forget_commands
+                            "\nOffline session-owner evidence for removed machines is still preserved locally. After this runtime restarts, only if you explicitly accept losing that offline discovery evidence, run the matching command below on every remaining fleet machine:\n{forget_commands}\nThis is irreversible per machine; skip it while you may need to recover or find sessions from a removed owner."
                         );
                     }
                 } else {
@@ -1669,8 +1668,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 let (result_machine, node, roster_revision) =
                     parse_forget_session_owner_result(&machine, &result)?;
                 println!(
-                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {}\n  node         {}\n  roster       revision {}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {} may now be unavailable while that former owner is offline. This changed only the local evidence checkpoint; it did not delete journals on the removed machine and did not revoke fleet credentials. Repeat this exact command on every remaining fleet machine after each has imported the signed roster and restarted.",
-                    result_machine, node, roster_revision, result_machine
+                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {result_machine}\n  node         {node}\n  roster       revision {roster_revision}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {result_machine} may now be unavailable while that former owner is offline. This changed only the local evidence checkpoint; it did not delete journals on the removed machine and did not revoke fleet credentials. Repeat this exact command on every remaining fleet machine after each has imported the signed roster and restarted."
                 );
                 Ok(())
             }

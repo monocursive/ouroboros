@@ -747,6 +747,72 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     end
   end
 
+  describe "idempotent launch" do
+    test "the same task_id recovers the original child instead of starting a second", context do
+      {model_spec, _agent} = NativeModelScript.start([finish("child done")])
+      task_id = "sub-idempotent-#{System.unique_integer([:positive])}"
+      provider_session_id = "native-idempotent-#{System.unique_integer([:positive])}"
+
+      spec = %{
+        task_id: task_id,
+        prompt: "finish",
+        description: "idempotent child",
+        subscriber: self(),
+        request_attrs: %{
+          provider: :native,
+          cwd: context.workspace,
+          model: model_spec,
+          provider_session_id: provider_session_id,
+          approval_mode: :auto_approve,
+          sandbox_mode: :workspace_write,
+          approval_timeout_ms: :infinity,
+          provider_options: %{}
+        },
+        context: %{
+          session_id: "sess-idempotent",
+          provider: :native,
+          owner: self(),
+          adapter: Ouroboros.Provider.Native,
+          config: %{},
+          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          telemetry_context: %{}
+        },
+        worktree: false,
+        background: false,
+        depth: 1,
+        tools: [],
+        deadline_ms: 30_000
+      }
+
+      assert {:ok, first} = Subagent.start_and_launch(spec)
+      assert {:ok, second} = Subagent.start_and_launch(spec)
+      assert first.pid == second.pid
+      assert first.task_id == task_id
+      assert second.provider_session_id == provider_session_id
+
+      collision = put_in(spec.request_attrs.provider_session_id, provider_session_id <> "-other")
+
+      assert {:error, {:subagent_unstartable, {:subagent_task_id_collision, ^task_id}}} =
+               Subagent.start_and_launch(collision)
+
+      assert {:ok, _summary} = Subagent.stop(first.pid)
+    end
+
+    test "an ambiguous remote start never claims that nothing ran" do
+      message =
+        AgentTool.start_refusal(
+          {:subagent_unstartable,
+           {:remote_start_ambiguous, :core@peer, "sub-abc", {:timeout, :noconnection}}}
+        )
+
+      assert message =~ "is ambiguous"
+      assert message =~ "It may have started"
+      assert message =~ "do not assume that nothing ran"
+      assert message =~ "sub-abc"
+      refute message =~ "Nothing ran there"
+    end
+  end
+
   # ---------------------------------------------------------------- background
 
   describe "a background child" do

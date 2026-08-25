@@ -91,16 +91,20 @@ defmodule Ouroboros.Provider.Native.CodingApprovalTest do
   test "a sandbox escalation reaches a coding operator and re-runs the command", %{
     workspace: workspace
   } do
-    outside =
-      Path.join(System.tmp_dir!(), "native-coding-escape-#{System.unique_integer([:positive])}")
-
-    on_exit(fn -> File.rm(outside) end)
+    target = Path.join(workspace, ".git/escalated.txt")
+    File.mkdir_p!(Path.dirname(target))
 
     {model, _agent} =
       NativeModelScript.start([
         [
           {:tool_call,
-           %{id: "c1", name: "bash", input: %{"command" => "echo escaped > #{outside}"}}}
+           %{
+             id: "c1",
+             name: "bash",
+             input: %{
+               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+             }
+           }}
         ],
         [{:text, "done"}, {:finish, :stop}]
       ])
@@ -108,7 +112,7 @@ defmodule Ouroboros.Provider.Native.CodingApprovalTest do
     id = "coding-escalation-#{System.unique_integer([:positive])}"
 
     assert {:ok, task} =
-             CodingSession.start("write outside the workspace",
+             CodingSession.start("write repository metadata",
                id: id,
                provider: :native,
                model: model,
@@ -133,7 +137,7 @@ defmodule Ouroboros.Provider.Native.CodingApprovalTest do
 
     assert {:ok, final} = CodingSession.await(task, 20_000)
     assert final.status == :completed
-    assert File.read!(outside) == "escaped\n"
+    assert File.read!(target) == "escaped\n"
   end
 
   defp await_approval(id) do

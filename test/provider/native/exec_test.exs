@@ -51,6 +51,58 @@ defmodule Ouroboros.Provider.Native.ExecTest do
     assert output =~ "ROOTDIR=/tmp/explicit-tool-root\n"
   end
 
+  test "child commands inherit execution variables but not daemon settings or credentials" do
+    environment = %{
+      "REVIEW_FAKE_API_KEY" => "review-super-secret-api-key",
+      "REVIEW_DATABASE_URL" => "postgres://review:database-password@127.0.0.1/review",
+      "REVIEW_SERVICE_SETTING" => "daemon-internal-setting",
+      "ERL_AFLAGS" => "-setcookie review-erlang-cookie -kernel shell_history enabled",
+      "ERL_FLAGS" => "-setcookie=review-equals-cookie +sbwt none",
+      "MIX_ENV" => "exec-filter-test"
+    }
+
+    previous = Map.take(System.get_env(), Map.keys(environment))
+
+    on_exit(fn ->
+      Enum.each(Map.keys(environment), &System.delete_env/1)
+      Enum.each(previous, fn {name, value} -> System.put_env(name, value) end)
+    end)
+
+    System.put_env(environment)
+
+    assert {:ok, %{status: 0, output: output}} = Exec.run("/usr/bin/env", [])
+
+    assert output =~ "MIX_ENV=exec-filter-test\n"
+    assert output =~ "HOME=#{System.user_home!()}\n"
+    refute output =~ "REVIEW_FAKE_API_KEY="
+    refute output =~ "review-super-secret-api-key"
+    refute output =~ "REVIEW_DATABASE_URL="
+    refute output =~ "database-password"
+    refute output =~ "REVIEW_SERVICE_SETTING="
+    refute output =~ "daemon-internal-setting"
+    refute output =~ "ERL_AFLAGS="
+    refute output =~ "review-erlang-cookie"
+    refute output =~ "ERL_FLAGS="
+    refute output =~ "review-equals-cookie"
+  end
+
+  test "explicit command variables cross the boundary only when they are safe" do
+    assert {:ok, %{status: 0, output: output}} =
+             Exec.run("/usr/bin/env", [],
+               env: [
+                 {"REVIEW_SAFE_OVERRIDE", "command-specific-setting"},
+                 {"REVIEW_API_KEY", "explicit-super-secret"},
+                 {"REVIEW_ENDPOINT", "postgres://user:password@127.0.0.1/review"}
+               ]
+             )
+
+    assert output =~ "REVIEW_SAFE_OVERRIDE=command-specific-setting\n"
+    refute output =~ "REVIEW_API_KEY="
+    refute output =~ "explicit-super-secret"
+    refute output =~ "REVIEW_ENDPOINT="
+    refute output =~ "user:password"
+  end
+
   defp restore_env(name, nil), do: System.delete_env(name)
   defp restore_env(name, value), do: System.put_env(name, value)
 end

@@ -313,5 +313,13 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   defp describe({:wrapper_unavailable, failure}),
     do: "the priv/provider-exec umask wrapper is unusable: #{inspect(failure)}"
 
-  defp describe({:spawn_failed, message}), do: message
+  defp describe({:spawn_failed, kind, reason}),
+    do: "could not start the child process (#{kind}): #{inspect(reason)}"
+
+  defp describe({:spawn_failed, message}) when is_binary(message), do: message
+
+  defp describe({:spawn_failed, reason}),
+    do: "could not start the child process: #{inspect(reason)}"
+
+  defp describe(reason), do: inspect(reason)
 end

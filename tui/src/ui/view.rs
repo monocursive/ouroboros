@@ -145,19 +145,17 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
     let account_backed = visible_provider == Some("native")
         && visible_model.is_some_and(|model| model.starts_with("openai_codex:"));
 
-    let account = if !account_backed && visible_provider.is_some() {
-        Line::from(vec![
-            Span::styled("Provider ", Style::default().fg(theme::muted())),
-            Span::styled(
-                visible_provider.expect("checked provider"),
-                Style::default().fg(theme::accent()),
-            ),
-        ])
-    } else if visible_provider.is_none() {
-        Line::from(Span::styled(
-            "Provider unknown",
-            Style::default().fg(theme::muted()),
-        ))
+    let account = if !account_backed {
+        match visible_provider {
+            Some(provider) => Line::from(vec![
+                Span::styled("Provider ", Style::default().fg(theme::muted())),
+                Span::styled(provider, Style::default().fg(theme::accent())),
+            ]),
+            None => Line::from(Span::styled(
+                "Provider unknown",
+                Style::default().fg(theme::muted()),
+            )),
+        }
     } else if let Some(state) = &app.account.value {
         if let Some(identity) = &state.account {
             let plan = state

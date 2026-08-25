@@ -28,7 +28,7 @@ help:
 	@echo "make logs             follow the dev runtime's log"
 	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
 	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
-	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
+	@echo "make test             formatting, script checks, mix test, cargo test/fmt/clippy"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
@@ -91,7 +91,9 @@ desktop-app: release-tarball
 # client never waits on a release, which also means the extractor is not compiled — and an
 # extractor nobody compiled is an extractor nobody tested.
 test:
-	@echo "==> test: mix test, then cargo test/fmt/clippy with and without the embed feature"
+	@echo "==> test: formatting and scripts, then mix and Rust with both feature sets"
+	$(MIX) format --check-formatted
+	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
 	cd tui && $(CARGO) test
 	cd tui && $(CARGO) test --features embed

@@ -1895,7 +1895,6 @@ defmodule Ouroboros.Gateway.Methods do
     {:error, code(:method_not_found), "this build does not serve #{method}"}
   end
 
-
   defp signing_decisions(signing_node) do
     if Node.alive?() do
       erpc_decisions(signing_node)

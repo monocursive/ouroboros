@@ -101,6 +101,59 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   # ---------------------------------------------------------------- the round trip
 
   describe "a child placed on another machine" do
+    test "a repeated remote start with the same task_id recovers one child", context do
+      {model_spec, _agent} =
+        peer_call(context.peer, NativeModelScript, :start_unlinked, [
+          [[{:text, "done once"}, {:finish, :stop}]]
+        ])
+
+      task_id = "sub-remote-idempotent-#{unique()}"
+      provider_session_id = "native-remote-idempotent-#{unique()}"
+
+      spec = %{
+        task_id: task_id,
+        prompt: "finish",
+        description: "remote idempotent child",
+        subscriber: self(),
+        request_attrs: %{
+          provider: :native,
+          cwd: context.peer_workspace,
+          model: model_spec,
+          provider_session_id: provider_session_id,
+          approval_mode: :auto_approve,
+          sandbox_mode: :workspace_write,
+          approval_timeout_ms: :infinity,
+          provider_options: %{}
+        },
+        context: %{
+          session_id: "sess-remote-idempotent",
+          provider: :native,
+          owner: nil,
+          adapter: Ouroboros.Provider.Native,
+          config: %{},
+          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          telemetry_context: %{}
+        },
+        worktree: false,
+        background: false,
+        depth: 1,
+        tools: [],
+        deadline_ms: 30_000
+      }
+
+      assert {:ok, first} = peer_call(context.peer, Subagent, :start_and_launch, [spec])
+
+      on_exit(fn ->
+        if Node.ping(context.peer) == :pong, do: Subagent.stop(first.pid)
+      end)
+
+      assert {:ok, second} = peer_call(context.peer, Subagent, :start_and_launch, [spec])
+      assert first.pid == second.pid
+      assert node(first.pid) == context.peer
+      assert first.task_id == task_id
+      assert second.provider_session_id == provider_session_id
+    end
+
     test "runs there, reads a file there, and reports back here", context do
       %{handle: handle} =
         open(
@@ -531,7 +584,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   defp send_turn(handle, text \\ "go", turn_id \\ "turn-1"),
     do: :ok = Session.send(handle, TurnRequest.new!(text), turn_id)
 
-  defp collect_until(type, acc \\ [], timeout \\ 60_000) do
+  defp collect_until(type, acc, timeout) do
     receive do
       {:session_adapter_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
       {:session_adapter_event, event} -> collect_until(type, [event | acc], timeout)

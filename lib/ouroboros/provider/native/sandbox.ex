@@ -36,6 +36,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | external network denied unless the node opts in; loopback available for local IPC |
   | `:unrestricted` | no sandbox, logged | no sandbox |
 
+  An approved one-command filesystem escalation uses a fourth, internal policy:
+  `:workspace_write_escalated`. It keeps the same writable roots, protected data/config
+  roots, `.ouroboros` segment fence, and network policy as `workspace_write`; it lifts
+  only the `.git` segment fence. That is sufficient for the ordinary escalation case
+  (`git commit`) without ever turning an opaque shell command into an unsandboxed one.
+
   The protected set mirrors `Ouroboros.Control.Permissions.Rules`' own protected paths
   — the same policy, enforced a second time by the kernel rather than by a rule the
   shell never crosses. It is recomputed here rather than imported so the sandbox keeps
@@ -66,6 +72,11 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       is textual — a shell command cannot be decomposed into the paths it will touch —
       so it is conservative by construction: it refuses to offer an escalation whenever
       those names appear at all, in either the configured or the canonicalized spelling.
+
+  That text check is only a user-experience filter, not the security boundary. A shell
+  can hide a path behind an environment variable, symlink, command substitution, or
+  another process. The approved re-run therefore remains inside the OS sandbox, whose
+  protected roots are path-based and still enforced after every such indirection.
 
   ## What it does not do
 
@@ -98,11 +109,11 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   @typedoc "The resolved rules one wrapped command runs under."
   @type policy :: %{
-          mode: :read_only | :workspace_write,
+          mode: :read_only | :workspace_write | :workspace_write_escalated,
           writable: [String.t()],
           protected: [String.t()],
           protected_segments: [String.t()],
-          scratch: String.t(),
+          scratch: String.t() | nil,
           network: boolean()
         }
 
@@ -213,6 +224,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
           _present -> {:sandboxed, label(detection), policy(scope, mode)}
         end
 
+      :workspace_write_escalated ->
+        case detection.backend do
+          :none -> {:refused, {:escalation_without_backend, detection}}
+          _present -> {:sandboxed, label(detection), policy(scope, :workspace_write_escalated)}
+        end
+
       :unrestricted ->
         {:unsandboxed, :unrestricted}
 
@@ -248,13 +265,13 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   `scratch/0` fills the last field; `policy/2` is separate from it so the profile can be
   generated and compared in a test without a directory being created on disk.
   """
-  @spec policy(map(), :read_only | :workspace_write) :: policy()
+  @spec policy(map(), :read_only | :workspace_write | :workspace_write_escalated) :: policy()
   def policy(scope, mode) do
     %{
       mode: mode,
       writable: writable(scope, mode),
       protected: protected_roots(),
-      protected_segments: @protected_segments,
+      protected_segments: protected_segments(mode),
       scratch: nil,
       network: network_allowed?()
     }
@@ -375,6 +392,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   def env(_policy), do: []
 
+  @doc "Marks one approved re-run for the fenced escalation policy."
+  @spec escalated_scope(map()) :: map()
+  def escalated_scope(scope), do: Map.put(scope, :sandbox_mode, :workspace_write_escalated)
+
   # ------------------------------------------------------------------ violation
 
   @doc """
@@ -453,8 +474,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     do:
       "Do not retry the same command. This runtime offers the operator a one-command " <>
         "escalation for a denial like this one: approving it re-runs the command once " <>
-        "with no OS sandbox, and that re-run's result is what you would be reading " <>
-        "instead of this. Reading this means no escalation was granted — so do not ask " <>
+        "inside a fenced profile that permits workspace `.git` writes but still protects " <>
+        "runtime data, config, `.ouroboros`, and the network. That re-run's result is what " <>
+        "you would be reading instead of this. Reading this means no escalation was " <>
+        "granted — so do not ask " <>
         "for one again with `ask_user`. Either " <>
         escalation_text(constraint, policy) <>
         " Or find a way to do this that stays inside the sandbox."
@@ -472,7 +495,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   end
 
   @doc """
-  Whether this denial is one an operator may lift by approving a single unsandboxed re-run.
+  Whether this denial is one an operator may lift by approving a single fenced re-run.
 
   Filesystem only, `workspace_write` only, and never when the evidence or the command
   line names a protected root or an `.ouroboros` directory. See the moduledoc for why
@@ -591,7 +614,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   defp writable(_scope, :read_only), do: []
 
-  defp writable(scope, :workspace_write) do
+  defp writable(scope, mode) when mode in [:workspace_write, :workspace_write_escalated] do
     scope
     |> Map.get(:roots, [])
     |> List.wrap()
@@ -600,6 +623,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     |> Enum.uniq()
     |> Enum.sort()
   end
+
+  defp protected_segments(:workspace_write_escalated), do: [".ouroboros"]
+  defp protected_segments(_ordinary), do: @protected_segments
 
   @doc """
   The roots the sandbox keeps read-only under every mode, canonicalized.
@@ -705,6 +731,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
         " — and never into a `.git` or `.ouroboros` directory beneath them, the node's " <>
         "data directory, or the user's ouroboros config."
 
+  defp constraint_text(:filesystem, %{
+         mode: :workspace_write_escalated,
+         writable: writable
+       }),
+       do:
+         "This approved re-run still allows writes only under " <>
+           Enum.join(writable, ", ") <>
+           " — including `.git`, but never `.ouroboros`, the node's data directory, or " <>
+           "the user's ouroboros config."
+
   defp escalation_text(:network, _policy),
     do:
       "allow this session's shell to reach the network. This node turns that on with " <>
@@ -720,9 +756,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   defp escalation_text(:filesystem, %{mode: :workspace_write}),
     do:
-      "add the directory this needs to the session's `add_dirs`, or move this session " <>
-        "to `sandbox_mode: unrestricted` — which turns the OS sandbox off for the shell " <>
-        "and leaves the file tools' path containment, the permission rules, and the " <>
-        "approvals exactly where they are. A write into `.git` is the case that mode " <>
-        "exists for: a commit is deliberately outside what this sandbox permits."
+      "approve the one-command fenced re-run if this is a `.git` write, or add the " <>
+        "directory this needs to the session's `add_dirs`. The fenced re-run keeps the " <>
+        "runtime's own data, config, `.ouroboros`, and network protections in force."
 end

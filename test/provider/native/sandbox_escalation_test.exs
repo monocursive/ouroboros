@@ -4,10 +4,11 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
   Nothing here stubs the sandbox or the shell: a scripted model asks for a `bash` command
   that genuinely cannot run under this node's sandbox, and the loop is left to do what it
-  does — put the denial to the operator once, and re-run the identical command outside the
-  sandbox if they say yes. The permission engine is the one thing swapped out, and only in
-  the tests that are about the engine: `config :ouroboros, :permissions_engine` is the
-  seam `Ouroboros.Provider.Native.Permissions` already reads.
+  does — put the denial to the operator once, and re-run the identical command in a fenced
+  escalation profile if they say yes. The permission engine is the one thing swapped out,
+  and only in the tests that are about the engine:
+  `config :ouroboros, :permissions_engine` is the seam
+  `Ouroboros.Provider.Native.Permissions` already reads.
 
   A node with no OS sandbox has no denial to escalate — `workspace_write` there is already
   unsandboxed — so these skip with the reason printed rather than passing green having
@@ -56,8 +57,11 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
   setup do
     root = Path.join(System.tmp_dir!(), "native-escalate-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(root, "workspace/lib"))
+    File.mkdir_p!(Path.join(root, "workspace/.git"))
     File.mkdir_p!(Path.join(root, "session"))
     File.write!(Path.join(root, "workspace/lib/a.ex"), "defmodule A do\n  def x, do: 1\nend\n")
+    escalation_target = Path.join(root, "workspace/.git/escalated.txt")
+
     on_exit(fn -> File.rm_rf(root) end)
 
     {:ok, scope} = Paths.scope(Path.join(root, "workspace"), [], :workspace_write)
@@ -67,9 +71,9 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       scope: scope,
       session_dir: Path.join(root, "session"),
       workspace: scope.root,
-      # Outside the workspace and outside every declared root: a write the sandbox denies
-      # and a plain shell performs.
-      outside: Path.join(root, "outside.txt")
+      # `.git` is inside the workspace but deliberately read-only in the ordinary profile.
+      # The approved profile lifts this segment fence and nothing broader.
+      outside: escalation_target
     }
   end
 
@@ -143,14 +147,16 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       |> all(:provider_event)
       |> Enum.find(&(&1.payload["kind"] == "sandbox_escalation"))
 
-  defp escape_script(context, id \\ "c1") do
+  defp escape_script(_context, id \\ "c1") do
     [
       [
         {:tool_call,
          %{
            id: id,
            name: "bash",
-           input: %{"command" => "echo escaped > #{context.outside}"}
+           input: %{
+             "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+           }
          }}
       ],
       [{:text, "done"}, {:finish, :stop}]
@@ -168,12 +174,20 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       assert ask.payload["kind"] == "sandbox_escalation"
       assert ask.payload["tool_call"]["name"] == "bash"
-      assert ask.payload["tool_call"]["command"] == "echo escaped > #{context.outside}"
+
+      assert ask.payload["tool_call"]["command"] ==
+               "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+
       assert ask.payload["tool_call"]["cwd"] == context.workspace
       assert ask.payload["reason"] =~ "Operation not permitted"
       assert ask.payload["reason"] =~ "allows writes only under"
       assert ask.payload["reason"] =~ context.workspace
-      assert ask.payload["suggested_rule"] == %{"tool" => "bash", "command_prefix" => "echo"}
+
+      assert ask.payload["suggested_rule"] == %{
+               "tool" => "bash",
+               "command_prefix" => "dir=$(printf"
+             }
+
       assert is_binary(ask.request_id)
 
       send(
@@ -184,7 +198,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       collect()
     end
 
-    test "approving re-runs the same command with no OS sandbox, in the same turn", context do
+    test "approving re-runs the same command in the fenced profile, in the same turn", context do
       {loop, _agent} = start_loop(context, escape_script(context))
       pid = run(loop)
 
@@ -206,6 +220,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       # a command that partly succeeded before the denial has now run twice.
       assert result.payload["output"] =~ "The OS sandbox stopped the first attempt"
       assert result.payload["output"] =~ "has now happened twice"
+      assert result.payload["output"] =~ "Runtime data, config, `.ouroboros`"
 
       # And the transcript keeps the half the tool result no longer carries.
       event = escalation_event(events)
@@ -278,7 +293,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
-      assert result.payload["output"] =~ "interrupted while the request"
+      assert result.payload["output"] =~ "interrupted while the fenced escalation request"
       assert escalation_event(events).payload["granted_by"] == "interrupted"
     end
 
@@ -286,11 +301,23 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       script = [
         [
           {:tool_call,
-           %{id: "c1", name: "bash", input: %{"command" => "echo escaped > #{context.outside}"}}}
+           %{
+             id: "c1",
+             name: "bash",
+             input: %{
+               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+             }
+           }}
         ],
         [
           {:tool_call,
-           %{id: "c2", name: "bash", input: %{"command" => "echo escaped > #{context.outside}"}}}
+           %{
+             id: "c2",
+             name: "bash",
+             input: %{
+               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+             }
+           }}
         ],
         [{:text, "done"}, {:finish, :stop}]
       ]
@@ -325,7 +352,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
   describe "what the permission engine may pre-answer" do
     @describetag @needs_sandbox
 
-    test "an engine allow escalates without putting anything to a human", context do
+    test "an engine allow uses the fenced profile without putting anything to a human", context do
       with_engine(ScriptedEngine, {:allow, "escalation-rule"})
 
       {loop, _agent} = start_loop(context, escape_script(context))
@@ -339,6 +366,52 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       event = escalation_event(events)
       assert event.payload["decision"] == "approved"
       assert event.payload["granted_by"] == "rule"
+    end
+
+    test "an obfuscated protected-root target remains denied after an engine allow", context do
+      with_engine(ScriptedEngine, {:allow, "escalation-rule"})
+
+      data_dir = Path.join(context.root, "data-obfuscated")
+      File.mkdir_p!(data_dir)
+      previous = Application.get_env(:ouroboros, :native_data_dir)
+      Application.put_env(:ouroboros, :native_data_dir, data_dir)
+      on_exit(fn -> restore(:native_data_dir, previous) end)
+
+      target = Path.join(data_dir, "ledger.db")
+      link = Path.join(context.workspace, "runtime-link")
+      File.ln_s!(data_dir, link)
+
+      # Neither the command nor the shell's EPERM text names the protected root. The
+      # kernel profile, not textual inspection, must be the boundary on the approved run.
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "bash",
+             input: %{
+               "command" =>
+                 "sh -c 'echo escaped > runtime-link/ledger.db' 2>&1 || " <>
+                   "echo 'Operation not permitted' >&2; exit 1"
+             }
+           }}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      refute File.exists?(target)
+      assert all(events, :approval_requested) == []
+      assert escalation_event(events).payload["decision"] == "approved"
+      assert escalation_event(events).payload["granted_by"] == "rule"
+
+      [result] = all(events, :tool_result)
+      assert result.payload["is_error"]
+      assert result.payload["output"] =~ "fenced workspace profile"
+      assert result.payload["output"] =~ "Operation not permitted"
     end
 
     test "an engine deny refuses the escalation without putting anything to a human",
@@ -355,7 +428,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
-      assert result.payload["output"] =~ "refuses to re-run this command outside the sandbox"
+      assert result.payload["output"] =~ "refuses the fenced escalation re-run"
       assert result.payload["output"] =~ "no-escapes"
       assert escalation_event(events).payload["granted_by"] == "rule"
     end
@@ -398,7 +471,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert result.payload["output"] =~ "Operation not permitted"
       # The pre-escalation advice, unchanged: ask a human, do not expect a way out.
       assert result.payload["output"] =~ "ask_user"
-      refute result.payload["output"] =~ "re-runs the command once with no OS sandbox"
+      refute result.payload["output"] =~ "re-runs the command once inside a fenced profile"
     end
 
     test "plan mode never reaches an escalation: the write is refused before bash runs",

@@ -1136,8 +1136,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   #
   # Before this, a denial was a dead end: `bash` failed, the guidance told the model to
   # ask a human with `ask_user`, and the human's best option was to do the work
-  # themselves. Codex and Claude Code both answer the same denial by asking once and
-  # re-running the same command outside the sandbox, and that is what this is.
+  # themselves. The useful answer is to ask once and re-run the same command in a
+  # narrowly widened sandbox profile, and that is what this is.
   #
   # The shape, exactly:
   #
@@ -1160,12 +1160,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   #   * A human `approve` at `scope: session` is remembered under a key of its own —
   #     `{:sandbox_escalation, command}` — so approving a *bash call* for the session
   #     never leaks into approving an *escape* for it.
-  #   * Approval re-runs the identical command once, with the scope's `sandbox_mode`
-  #     overridden to `:unrestricted` for that single call, which is how the re-run goes
-  #     through the same `Sandbox.decide/2` (and the same warning log) as a session that
-  #     asked for full access by name. The re-run's result is what the model sees, with a
-  #     header saying the first attempt happened — a command that partly succeeded before
-  #     the denial has now run twice, and the model has to know that.
+  #   * Approval re-runs the identical command once under Sandbox's internal escalated
+  #     profile. It permits `.git` beneath the declared writable roots, but preserves the
+  #     protected data/config roots, `.ouroboros`, and network policy. This is deliberately
+  #     not `:unrestricted`: the shell is opaque and a text check cannot prove which paths
+  #     it will resolve after environment expansion, symlinks, or command substitution.
   #   * Deny, an unanswered deadline, and an interrupt all mean *not re-run*: the
   #     sandboxed failure stands, with a line saying the escalation was declined.
   #
@@ -1274,10 +1273,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  # The same command, once, with this one call's scope moved to `:unrestricted`. Nothing
-  # about the session changes: the next `bash` call is sandboxed again.
+  # The same command, once, in the fenced escalation profile. Nothing about the session
+  # changes: the next `bash` call uses the ordinary workspace-write profile again.
   defp rerun(state, pending, granted_by, request_id) do
-    context = %{pending.context | scope: %{state.scope | sandbox_mode: :unrestricted}}
+    context = %{pending.context | scope: Sandbox.escalated_scope(state.scope)}
 
     # Emitted before the re-run rather than after it: everything the event states is
     # already known, and a command that takes its full deadline should not leave a client
@@ -1290,8 +1289,9 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     output =
       "The OS sandbox stopped the first attempt at this command (#{pending.offer.evidence}). " <>
-        "The escalation to re-run it with no OS sandbox was granted, and this is that " <>
-        "re-run. Anything the sandboxed attempt had already completed before the denial " <>
+        "The escalation to re-run it in the fenced workspace profile was granted, and " <>
+        "this is that re-run. Runtime data, config, `.ouroboros`, and network protections " <>
+        "remained enforced. Anything the first attempt completed before the denial " <>
         "has now happened twice — check for that before you trust this output.\n\n" <>
         Map.get(result, :output, "")
 
@@ -1311,23 +1311,25 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp decline_text(:human, reason),
     do:
-      "The operator was asked whether to re-run this command with no OS sandbox and " <>
+      "The operator was asked whether to re-run this command in the fenced escalation " <>
+        "profile and " <>
         "declined" <> reason_suffix(reason) <> ". Do not ask for it again for this command."
 
   defp decline_text(:rule, rule),
     do:
-      "A permission rule (#{inspect(rule)}) refuses to re-run this command outside the " <>
-        "sandbox, so it was not re-run."
+      "A permission rule (#{inspect(rule)}) refuses the fenced escalation re-run, so the " <>
+        "command was not re-run."
 
   defp decline_text(:timeout, timeout),
     do:
-      "Nobody answered the request to re-run this command with no OS sandbox within " <>
+      "Nobody answered the request to re-run this command in the fenced escalation " <>
+        "profile within " <>
         "#{inspect(timeout)} ms, so it was declined and the command was not re-run."
 
   defp decline_text(:interrupted, _detail),
     do:
-      "The turn was interrupted while the request to re-run this command with no OS " <>
-        "sandbox was outstanding, so it was declined and the command was not re-run."
+      "The turn was interrupted while the fenced escalation request was outstanding, " <>
+        "so it was declined and the command was not re-run."
 
   defp decline_text(:plan_mode, _detail),
     do:
@@ -1382,7 +1384,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: binary_part(text, 0, limit) <> "\n… #{byte_size(text) - limit} bytes elided …"
 
   defp clip(text, _limit) when is_binary(text), do: text
-  defp clip(_text, _limit), do: ""
 
   defp new_request_id,
     do: "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

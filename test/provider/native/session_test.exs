@@ -350,6 +350,9 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       System.put_env("OUROBOROS_NATIVE_SESSION_API_KEY", "sk-live-do-not-emit-me")
       on_exit(fn -> System.delete_env("OUROBOROS_NATIVE_SESSION_API_KEY") end)
 
+      # Native child processes deliberately do not inherit this credential. Put the same
+      # value in the scripted command itself so this test continues to exercise the
+      # independent live-event redaction boundary rather than ambient env inheritance.
       # `Jido.Harness.Redaction` caches this node's sensitive environment per process,
       # and the session process is started below, after the variable is set.
       script = [
@@ -358,7 +361,7 @@ defmodule Ouroboros.Provider.Native.SessionTest do
            %{
              id: "c1",
              name: "bash",
-             input: %{"command" => "echo $OUROBOROS_NATIVE_SESSION_API_KEY"}
+             input: %{"command" => "printf '%s\\n' sk-live-do-not-emit-me"}
            }}
         ],
         [{:text, "printed it"}, {:finish, :stop}]

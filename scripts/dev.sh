@@ -17,6 +17,7 @@ set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DATA_DIR="${OUROBOROS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ouroboros-dev}"
+DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ouroboros-dev"
 GATEWAY="$DATA_DIR/gateway.json"
 OURO="$REPO/tui/target/debug/ouro"
 APP="$REPO/tui/target/debug/Ouroboros.app"
@@ -138,7 +139,12 @@ daemon_stop() {
         return 0
     fi
     say "==> stopping dev daemon (pid $pid)"
-    (cd "$REPO" && "$OURO" --dev stop) || kill -TERM "$pid" 2>/dev/null || true
+    if ! (cd "$REPO" && "$OURO" --dev stop); then
+        if alive "$pid"; then
+            say "safe stop failed; pid $pid was not signalled because the publication may be stale or reused" >&2
+            exit 1
+        fi
+    fi
     i=0
     while alive "$pid" && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
     if alive "$pid"; then
@@ -212,35 +218,90 @@ status() {
     if [ -z "$found" ]; then say "strays     none"; fi
 }
 
-# A fresh runtime: the daemon stopped, then the data directory emptied — except
-# oauth.json, because "start over" should not also mean "sign in to ChatGPT again";
-# delete it yourself when that is what you mean. The desktop app is left alone: it only
-# shows disconnected once its daemon is gone, and `make gui` is the verb that brings it
-# back. The directory itself survives, so its 0700 permissions do. The guard on the name
-# is for a mis-set OUROBOROS_DATA_DIR: this verb must never be able to empty a directory
-# that is not an ouroboros data dir.
-reset() {
-    case "$(basename "$DATA_DIR")" in
-    *ouro*) ;;
+# Print a portable numeric stat field. macOS/BSD and GNU spell these differently.
+stat_number() {
+    case "$(uname -s)" in
+    Darwin) stat -f "$1" "$2" 2>/dev/null ;;
+    *) stat -c "$3" "$2" 2>/dev/null ;;
+    esac
+}
+
+# Resolve and authenticate the directory before any stop or delete. An arbitrary leaf
+# containing "ouro" is not identity: the normal dev path is selected by this script,
+# while an explicit path must carry the persistent recovery marker written by a real
+# Ouroboros runtime. The physical path is returned and is the only path reset deletes.
+reset_target() {
+    case "$DATA_DIR" in
+    /*) ;;
     *)
-        say "refusing to reset $DATA_DIR: its name does not look like an ouroboros data dir" >&2
-        exit 64
+        say "refusing to reset $DATA_DIR: OUROBOROS_DATA_DIR must be absolute" >&2
+        return 64
         ;;
     esac
-    if [ "$DATA_DIR" = "/" ] || [ "$DATA_DIR" = "$HOME" ] || [ "$DATA_DIR" = "$REPO" ]; then
-        say "refusing to reset $DATA_DIR" >&2
-        exit 64
+
+    if [ ! -e "$DATA_DIR" ]; then
+        return 0
+    fi
+    if [ ! -d "$DATA_DIR" ] || [ -L "$DATA_DIR" ]; then
+        say "refusing to reset $DATA_DIR: it must be a real directory, not a file or symlink" >&2
+        return 64
     fi
 
-    daemon_stop
+    target="$(cd "$DATA_DIR" 2>/dev/null && pwd -P)" || {
+        say "refusing to reset $DATA_DIR: its physical path cannot be resolved" >&2
+        return 64
+    }
 
-    if [ ! -d "$DATA_DIR" ]; then
+    case "$target/" in
+    // | "$HOME/" | "$REPO/" | "$REPO"/*)
+        say "refusing to reset $DATA_DIR: it resolves to protected path $target" >&2
+        return 64
+        ;;
+    esac
+
+    uid="$(stat_number %u "$target" %u)"
+    mode="$(stat_number %Lp "$target" %a)"
+    if [ "$uid" != "$(id -u)" ] || [ "$mode" != "700" ]; then
+        say "refusing to reset $DATA_DIR: $target must be owned by this user with mode 0700" >&2
+        return 64
+    fi
+
+    if [ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]; then
+        marker="$target/runtime.owner.recovery"
+        marker_text="$(sed -n '1p' "$marker" 2>/dev/null || true)"
+        marker_uid="$(stat_number %u "$marker" %u || true)"
+        marker_mode="$(stat_number %Lp "$marker" %a || true)"
+
+        if [ ! -f "$marker" ] || [ -L "$marker" ] || \
+           [ "$marker_text" != "ouro-runtime-recovery-v2" ] || \
+           [ "$marker_uid" != "$(id -u)" ] || [ "$marker_mode" != "600" ]; then
+            say "refusing to reset explicit data dir $DATA_DIR: no valid Ouroboros runtime marker was found" >&2
+            return 64
+        fi
+    fi
+
+    say "$target"
+}
+
+# A fresh runtime: the daemon stopped, then the data directory emptied — except
+# oauth.json, because "start over" should not also mean "sign in to ChatGPT again";
+# delete it yourself when that is what you mean. The persistent recovery marker also
+# stays: it is both the runtime's lock inode and the identity required before a custom
+# directory may be reset again. The desktop app is left alone: it only shows
+# disconnected once its daemon is gone, and `make gui` is the verb that brings it back.
+reset() {
+    RESET_DIR="$(reset_target)" || exit $?
+
+    if [ -z "$RESET_DIR" ]; then
         say "nothing to reset: $DATA_DIR does not exist"
         return 0
     fi
 
-    say "==> emptying $DATA_DIR (oauth.json kept)"
-    find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name oauth.json -exec rm -rf {} +
+    daemon_stop
+
+    say "==> emptying $RESET_DIR (oauth.json and runtime recovery marker kept)"
+    find "$RESET_DIR" -mindepth 1 -maxdepth 1 \
+        ! -name oauth.json ! -name runtime.owner.recovery -exec rm -rf {} +
     say "reset. make daemon or make gui starts a fresh runtime"
 }
 

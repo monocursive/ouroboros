@@ -60,8 +60,7 @@ mod embedded {
         let source = format!(
             "pub const VERSION: &str = {version:?};\n\
              pub const SHA256: &str = {digest:?};\n\
-             pub const TARBALL: &[u8] = include_bytes!({:?});\n",
-            tarball
+             pub const TARBALL: &[u8] = include_bytes!({tarball:?});\n"
         );
 
         fs::write(&out, source).expect("the build script can write to OUT_DIR");

@@ -250,9 +250,8 @@ fn five_thousand_entries_render_one_frame_inside_the_budget() {
 
     assert!(
         worst <= FRAME_CEILING,
-        "a warm frame at {} entries took {worst:?}, over the {FRAME_CEILING:?} ceiling \
-         (cold frame {cold:?})",
-        WINDOW
+        "a warm frame at {WINDOW} entries took {worst:?}, over the {FRAME_CEILING:?} ceiling \
+         (cold frame {cold:?})"
     );
 }
 

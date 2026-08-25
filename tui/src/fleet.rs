@@ -4709,7 +4709,11 @@ fn start_owned_epmd(
     loop {
         if let Some(status) = child.try_wait()? {
             drop(lock.take());
-            remove_unlocked_epmd_lock(&lock_path)?;
+            // Reaping the wrapper and observing the inherited flock disappear are not
+            // one atomic event under load. Use the bounded cleanup path here too instead
+            // of turning that short release window into a failed startup and stranded
+            // ownership file.
+            clean_failed_epmd_child(&mut child, &lock_path)?;
             bail!(
                 "packaged EPMD exited before owning {}:{} ({status}); no ownership marker was written",
                 address,

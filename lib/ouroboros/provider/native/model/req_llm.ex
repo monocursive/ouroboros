@@ -259,7 +259,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     finish =
       case value(metadata, :finish_reason) do
         nil -> []
-        reason -> [{:finish, finish_reason(reason)}]
+        reason -> [{:finish, normalize_finish_reason(reason)}]
       end
 
     usage ++ reasoning ++ provider ++ finish
@@ -267,29 +267,39 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp chunk(_other, _specs), do: []
 
-  defp finish_reason(reason) when is_atom(reason), do: reason
+  @doc false
+  @spec normalize_finish_reason(term()) ::
+          :stop
+          | :tool_calls
+          | :length
+          | :content_filter
+          | :error
+          | :cancelled
+          | :incomplete
+          | :unknown
+  def normalize_finish_reason(reason) when is_atom(reason),
+    do: reason |> Atom.to_string() |> normalize_finish_reason()
 
-  defp finish_reason(reason) when is_binary(reason) do
+  def normalize_finish_reason(reason) when is_binary(reason) do
     case reason do
       "tool_calls" -> :tool_calls
       "tool_use" -> :tool_calls
       "stop" -> :stop
+      "completed" -> :stop
       "end_turn" -> :stop
       "length" -> :length
       "max_tokens" -> :length
-      other -> String.to_atom(sanitize(other))
+      "max_output_tokens" -> :length
+      "content_filter" -> :content_filter
+      "error" -> :error
+      "cancelled" -> :cancelled
+      "incomplete" -> :incomplete
+      "unknown" -> :unknown
+      _provider_extension -> :unknown
     end
   end
 
-  defp finish_reason(_reason), do: :stop
-
-  # A provider is free to invent a finish reason; a raw one must not become an atom
-  # with arbitrary bytes in it.
-  defp sanitize(value) do
-    value
-    |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
-    |> String.slice(0, 40)
-  end
+  def normalize_finish_reason(_reason), do: :unknown
 
   defp stringify(map) when is_map(map) do
     Map.new(map, fn {key, value} -> {to_string(key), value} end)

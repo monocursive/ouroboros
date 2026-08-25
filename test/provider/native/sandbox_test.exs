@@ -370,9 +370,30 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       end
     end
 
-    # `writable/2` has clauses for `:read_only` and `:workspace_write` only. That is safe
-    # because `decision/2` answers `:unrestricted` before any policy is built — pinned
-    # here so a future edit to `decision/2` that reordered those two cannot land quietly.
+    test "an approved escalation stays sandboxed and only lifts the .git segment", %{
+      workspace: workspace
+    } do
+      {:ok, scope} = Paths.scope(workspace, [], :workspace_write)
+      escalated = Sandbox.escalated_scope(scope)
+
+      assert {:refused, {:escalation_without_backend, _}} = Sandbox.decision(escalated, @none)
+
+      case Sandbox.detect() do
+        %{backend: :none} ->
+          :ok
+
+        detection ->
+          assert {:sandboxed, _label, policy} = Sandbox.decision(escalated, detection)
+          assert policy.mode == :workspace_write_escalated
+          assert ".ouroboros" in policy.protected_segments
+          refute ".git" in policy.protected_segments
+          assert policy.protected == Sandbox.protected_roots()
+      end
+    end
+
+    # `writable/2` has clauses for sandboxed modes only. `decision/2` answers
+    # `:unrestricted` before any policy is built — pinned here so a future edit that
+    # reordered those two cannot land quietly.
     test "never builds a policy for :unrestricted, so `writable/2` never sees it", %{
       workspace: workspace
     } do
@@ -588,14 +609,15 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       offered = Sandbox.escalation(violation, policy, "sandbox-exec", offered: true)
 
       assert plain =~ "ask_user"
-      assert offered =~ "re-runs the command once with no OS sandbox"
+      assert offered =~ "re-runs the command once inside a fenced profile"
       assert offered =~ "no escalation was granted"
+      assert offered =~ "still protects runtime data"
 
       # The sentence C5 shipped is now false, and is gone from both.
       refute plain =~ "does not offer a full-access mode"
       refute offered =~ "does not offer a full-access mode"
-      assert plain =~ "sandbox_mode: unrestricted"
-      assert offered =~ "sandbox_mode: unrestricted"
+      refute plain =~ "sandbox_mode: unrestricted"
+      refute offered =~ "sandbox_mode: unrestricted"
     end
   end
 

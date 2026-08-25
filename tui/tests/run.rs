@@ -454,8 +454,7 @@ async fn stream_json_prints_the_wire_events_unchanged_and_then_the_result() {
     assert_eq!(
         objects.len(),
         6,
-        "five events then one result: {:#?}",
-        objects
+        "five events then one result: {objects:#?}"
     );
 
     // Byte-for-byte the gateway's own object. Not a shape this client invented, and not a
@@ -514,7 +513,7 @@ async fn json_prints_the_result_object_and_nothing_before_it() {
     assert_eq!(ran.report().status, Status::Completed);
 
     let objects = ran.objects();
-    assert_eq!(objects.len(), 1, "only the result: {:#?}", objects);
+    assert_eq!(objects.len(), 1, "only the result: {objects:#?}");
     assert_eq!(objects[0]["type"], "result");
     assert_eq!(objects[0]["status"], "completed");
 }

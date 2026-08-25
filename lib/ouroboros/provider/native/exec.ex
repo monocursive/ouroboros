@@ -26,6 +26,40 @@ defmodule Ouroboros.Provider.Native.Exec do
   @startup_timeout_ms 5_000
   @release_runtime_env ~w(BINDIR EMU PROGNAME ROOTDIR)
 
+  # A native tool is an operator-controlled child, not part of the service process. It
+  # needs the ordinary login and toolchain environment, but it must not inherit model
+  # keys, database URLs, deployment credentials, or arbitrary application settings from
+  # the daemon. Keep this list deliberately about process execution and builds. Explicit
+  # `env:` entries still work (after the credential checks below), which is how a caller
+  # supplies a command-specific setting without widening ambient inheritance again.
+  @inherited_env_names MapSet.new(~w(
+                           AR AS CC CFLAGS CI CLICOLOR CLICOLOR_FORCE COLORTERM
+                           COMMAND_MODE CPP CPPFLAGS CPATH CXX CXXFLAGS
+                           C_INCLUDE_PATH CPLUS_INCLUDE_PATH DEVELOPER_DIR EDITOR
+                           FORCE_COLOR GITLAB_CI GIT_EDITOR GIT_PAGER HOME INFOPATH
+                           LANG LANGUAGE LD LDFLAGS LD_LIBRARY_PATH LESS LIBRARY_PATH
+                           LOGNAME MAKE MAKEFLAGS MAKELEVEL MANPAGER MallocNanoZone
+                           NINJA_STATUS NM NO_COLOR OBJCOPY OBJDUMP OLDPWD OSLogRateLimit
+                           PAGER PATH PREFIX PWD RANLIB SDKROOT SHELL SHLVL STRIP
+                           TEAMCITY_VERSION TERM TERM_PROGRAM TERM_PROGRAM_VERSION
+                           TF_BUILD TMP TMPDIR TEMP TRAVIS USER VISUAL
+                           __CF_USER_TEXT_ENCODING
+                         ))
+
+  @inherited_env_prefixes ~w(
+    ANDROID_ ASDF_ BUNDLE_ BUN_ CARGO_ CMAKE_ CONDA_ DENO_ DOTNET_ ELIXIR_ ERL_
+    GEM_ GOENV_ GRADLE_ HEX_ HOMEBREW_ JAVA_ JDK_ KERL_ LC_ MAVEN_ MESON_ MISE_
+    MIX_ M2_ NODE_ NPM_ NUGET_ NVM_ OPENSSL_ PIP_ PKG_CONFIG_ PNPM_ POETRY_
+    PYENV_ PYTHON_ RBENV_ REBAR_ RUBY_ RUST_ RUSTUP_ SWIFT_ UV_ VIRTUAL_ENV
+    VOLTA_ XCODE_ YARN_
+  )
+
+  @sensitive_env_name ~r/(^|_)(AUTH|AUTHORIZATION|COOKIE|CREDENTIALS?|DATABASE_URL|DB_URL|DSN|MONGODB_URI|MONGO_URL|AMQP_URL|BROKER_URL|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_?KEY|ACCESS_?KEY|API_?KEY|SECRET|TOKEN)($|_)/i
+  @credential_uri ~r{[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@}i
+  @credential_assignment ~r/(^|[^a-zA-Z0-9])(?:authorization|credential|password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\s*[:=]\s*[^\s;&]+/i
+  @erlang_cookie_flag ~r/(^|\s)-?setcookie(?:\s+|=)\S+/i
+  @private_key ~r/-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/
+
   @type result :: %{
           status: integer(),
           output: binary(),
@@ -37,9 +71,11 @@ defmodule Ouroboros.Provider.Native.Exec do
   @doc """
   Runs `executable` with `args`, with no shell between them.
 
-  Options: `cd`, `env` (`{name, value}` string pairs), `timeout_ms` (default
-  #{@default_timeout_ms}, capped at #{@max_timeout_ms}), `max_bytes` (default
-  #{@default_max_bytes}).
+  Options: `cd`, `env` (non-credential `{name, value}` string pairs), `timeout_ms`
+  (default #{@default_timeout_ms}, capped at #{@max_timeout_ms}), `max_bytes` (default
+  #{@default_max_bytes}). Ambient inheritance is limited to login, terminal, and
+  toolchain variables; arbitrary daemon settings and credentials do not cross this
+  boundary.
 
   stdout and stderr are merged: the callers of this shape want ripgrep's diagnostics
   interleaved where they happened, and none of them reads stderr as a contract.
@@ -168,19 +204,23 @@ defmodule Ouroboros.Provider.Native.Exec do
         {name, value} when is_binary(name) and is_binary(value) -> [{name, value}]
         _other -> []
       end)
+      |> Enum.reject(fn {name, value} -> sensitive_environment?(name, value) end)
       |> Map.new()
 
     # Erlexec's manager was started with the VM and does not observe later
-    # `System.put_env/2` calls. Passing the current environment preserves Port.open's
-    # per-command inheritance semantics. A release VM also carries the boot wrapper's
-    # ROOTDIR/BINDIR/EMU/PROGNAME and its embedded ERTS directories at the front of
-    # PATH; those describe this daemon, not an operator command. Letting them cross the
+    # `System.put_env/2` calls. Passing a filtered snapshot of the current environment
+    # preserves the execution variables a child actually needs without handing an
+    # operator-controlled process every secret owned by the daemon. A release VM also
+    # carries the boot wrapper's ROOTDIR/BINDIR/EMU/PROGNAME and its embedded ERTS
+    # directories at the front of PATH. Those describe this daemon, not an operator
+    # command. Letting them cross the
     # boundary makes a plain `mix` or `elixir` look for start.boot inside the cached
     # Ouroboros release. Strip only that inherited release context, then apply explicit
     # tool variables so an operator-provided override still wins.
     inherited =
       System.get_env()
       |> without_release_environment()
+      |> execution_environment()
       |> Map.merge(overrides)
 
     # `:clear` matters: erlexec otherwise overlays these values onto the environment its
@@ -200,6 +240,27 @@ defmodule Ouroboros.Provider.Native.Exec do
       name in @release_runtime_env or String.starts_with?(name, "RELEASE_")
     end)
     |> without_runtime_paths(runtime_paths)
+  end
+
+  defp execution_environment(environment) do
+    Map.filter(environment, fn {name, value} ->
+      inherited_environment?(name) and not sensitive_environment?(name, value)
+    end)
+  end
+
+  defp inherited_environment?(name) do
+    MapSet.member?(@inherited_env_names, name) or
+      Enum.any?(@inherited_env_prefixes, &String.starts_with?(name, &1))
+  end
+
+  defp sensitive_environment?(name, value) do
+    normalized_name = String.replace(name, ~r/[^a-zA-Z0-9]+/, "_")
+
+    Regex.match?(@sensitive_env_name, normalized_name) or
+      Regex.match?(@credential_uri, value) or
+      Regex.match?(@credential_assignment, value) or
+      Regex.match?(@erlang_cookie_flag, value) or
+      Regex.match?(@private_key, value)
   end
 
   defp release_bin(root) when is_binary(root) and root != "", do: Path.join(root, "bin")
