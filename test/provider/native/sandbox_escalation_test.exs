@@ -105,7 +105,9 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
           provider_session_id: "native-escalate",
           turn_id: "turn-1",
           approval_mode: :auto_approve,
-          approval_timeout_ms: 5_000
+          # `:infinity` so an answered escalation never races a deadline on a loaded
+          # machine; the unanswered path is tested with an explicit short deadline.
+          approval_timeout_ms: :infinity
         },
         overrides
       )
@@ -534,7 +536,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
           cwd: context.workspace,
           model: model_spec,
           approval_mode: :auto_approve,
-          approval_timeout_ms: 10_000
+          approval_timeout_ms: :infinity
         })
 
       {:ok, handle} =

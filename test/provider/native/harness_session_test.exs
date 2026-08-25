@@ -53,7 +53,9 @@ defmodule Ouroboros.Provider.Native.HarnessSessionTest do
             cwd: context.workspace,
             model: model_spec,
             approval_mode: :auto_approve,
-            approval_timeout_ms: 3_000
+            # `:infinity` so an answered approval never races a deadline on a loaded
+            # machine; the unanswered path is tested with an explicit short deadline.
+            approval_timeout_ms: :infinity
           },
           overrides
         )

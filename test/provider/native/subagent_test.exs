@@ -82,7 +82,9 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
             cwd: Map.get(overrides, :cwd, context.workspace),
             model: parent_spec,
             approval_mode: Map.get(overrides, :approval_mode, :auto_approve),
-            approval_timeout_ms: 5_000,
+            # `:infinity` so a child's forwarded approval never races a deadline on a
+            # loaded machine; a child's own bounds are exercised explicitly where tested.
+            approval_timeout_ms: :infinity,
             provider_options: options
           },
           Map.drop(overrides, [:provider_options, :approval_mode, :cwd])

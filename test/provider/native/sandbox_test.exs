@@ -851,7 +851,11 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
         "defmodule SandboxFixture do\n  def ok?, do: true\nend\n"
       )
 
-      result = run(Bash, %{"command" => "mix compile --warnings-as-errors"}, context)
+      # `MIX_ENV=dev` is pinned because the test runner's own environment leaks into the
+      # sandboxed command: a shell (or CI) that exported MIX_ENV=test would steer this
+      # compile into _build/test and fail the _build/dev assertion below.
+      result =
+        run(Bash, %{"command" => "MIX_ENV=dev mix compile --warnings-as-errors"}, context)
 
       refute result.is_error, result.output
       refute result.output =~ "failed to acquire filesystem lock using TCP"

@@ -42,7 +42,9 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
           provider_session_id: "native-x-y",
           turn_id: "turn-1",
           approval_mode: :auto_approve,
-          approval_timeout_ms: 2_000
+          # `:infinity` so an answered question never races a deadline on a loaded
+          # machine; the unanswered path is tested with an explicit short deadline.
+          approval_timeout_ms: :infinity
         },
         overrides
       )

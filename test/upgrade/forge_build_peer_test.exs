@@ -134,7 +134,12 @@ defmodule Ouroboros.Upgrade.ForgeBuildPeerTest do
           send(parent, {:peer, peer})
           BuildPeer.call(peer, :timer, :sleep, [30_000], 30_000)
         end,
-        timeout: 1_500
+        # The overall deadline includes peer boot, and a loaded machine boots this peer
+        # in 1-5s (measured under 2x CPU oversubscription). The deadline must leave the
+        # callback running when it fires — that is what the test proves — so it is sized
+        # to twice the worst measured boot. Its full length is also this test's wall
+        # time, which is why it is not rounded up further.
+        timeout: 10_000
       )
 
     assert {:error, {:build_timeout, _remaining}} = result
@@ -178,7 +183,7 @@ defmodule Ouroboros.Upgrade.ForgeBuildPeerTest do
 
   defp wait_until_dead!(pid) do
     reference = Process.monitor(pid)
-    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, 5_000
+    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, 15_000
     :ok
   end
 end

@@ -37,7 +37,12 @@ defmodule Ouroboros.Provider.Native.LoopTest do
           provider_session_id: "native-x-y",
           turn_id: "turn-1",
           approval_mode: :auto_approve,
-          approval_timeout_ms: 2_000
+          # `:infinity`, as in production: a test that answers or interrupts an approval
+          # must not race a second deadline that denies it first — on a loaded machine
+          # the deadline wins and the turn completes past the late answer. `collect/1`'s
+          # flunk bounds a wait nobody ends; the timeout path is tested with an explicit
+          # short deadline.
+          approval_timeout_ms: :infinity
         },
         overrides
       )

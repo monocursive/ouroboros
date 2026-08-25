@@ -51,7 +51,9 @@ defmodule Ouroboros.Provider.Native.SessionTest do
             cwd: context.workspace,
             model: model_spec,
             approval_mode: :auto_approve,
-            approval_timeout_ms: 2_000
+            # `:infinity` so an answered approval never races a deadline on a loaded
+            # machine; expiry belongs to tests that set an explicit short deadline.
+            approval_timeout_ms: :infinity
           },
           overrides
         )

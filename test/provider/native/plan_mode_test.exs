@@ -62,7 +62,10 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
             cwd: context.workspace,
             model: model_spec,
             approval_mode: :auto_approve,
-            approval_timeout_ms: 5_000,
+            # `:infinity` so an answered plan-exit approval never races the session's
+            # own deadline on a loaded machine; the unanswered path is tested with an
+            # explicit short deadline.
+            approval_timeout_ms: :infinity,
             provider_options: %{plan: true}
           },
           overrides
@@ -805,7 +808,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
           cwd: context.workspace,
           model: model_spec,
           approval_mode: :prompt,
-          approval_timeout_ms: 10_000,
+          approval_timeout_ms: :infinity,
           provider_options: %{plan: true}
         })
 

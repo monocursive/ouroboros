@@ -18,9 +18,19 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
   @responses_protocols ~w(openai_responses openai_codex_responses)
   @schema_shape_keys ~w(type anyOf oneOf allOf $ref enum const not if)
 
+  # The callback every tool hands ReqLLM. It is never called — the Native loop executes
+  # tools itself — but `ReqLLM.Tool.new!` verifies it exists with `function_exported?/3`,
+  # which does not load code. On a lazily-loading node this name is data until something
+  # calls the module, so `prepare/2` loads it itself rather than depending on whatever
+  # happened to run first.
+  @unused_callback {Ouroboros.Provider.Native.Model.ReqLLM, :unused_callback}
+
   @doc "Builds the ReqLLM tools for one model, preserving the original callable contract."
   @spec prepare([map()], String.t()) :: [ReqLLM.Tool.t()]
   def prepare(specs, model_spec) when is_list(specs) do
+    {callback_module, _function} = @unused_callback
+    _ = Code.ensure_loaded(callback_module)
+
     strict_transport? = responses_protocol?(model_spec)
     lite_transport? = responses_lite?(model_spec)
     Enum.map(specs, &prepare_one(&1, strict_transport?, lite_transport?))
@@ -81,8 +91,7 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
       description: spec.description,
       parameter_schema: parameters,
       strict: strict?,
-      # The Native loop executes tools. ReqLLM requires a callback but never reaches it.
-      callback: {Ouroboros.Provider.Native.Model.ReqLLM, :unused_callback}
+      callback: @unused_callback
     )
   end
 
