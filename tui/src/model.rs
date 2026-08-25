@@ -474,8 +474,8 @@ impl Event {
 
         match &self.payload {
             Value::Object(fields) if fields.is_empty() => String::new(),
-            Value::Object(fields) => fields
-                .iter()
+            Value::Object(fields) => sorted_fields(fields)
+                .into_iter()
                 .map(|(key, value)| format!("{key}={}", compact(value)))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -504,9 +504,42 @@ pub fn compact(value: &Value) -> String {
                 return format!("<{} base64 bytes>", encoded.len());
             }
 
-            value.to_string()
+            sorted_json(value).to_string()
         }
-        other => other.to_string(),
+        other => sorted_json(other).to_string(),
+    }
+}
+
+/// A map's entries in sorted key order, whatever order the map itself iterates in.
+///
+/// `serde_json::Map` is only a `BTreeMap` until something turns on `preserve_order` — and
+/// the desktop build's gpui dependency tree does, for the whole crate graph, features
+/// being additive. A rendering that followed the map's own order would therefore say
+/// different things in `ouro` and `ouro-desktop`. Every user-facing walk of a payload map
+/// sorts instead, so the same payload reads the same in both binaries.
+pub fn sorted_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    let mut entries: Vec<_> = fields.iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    entries
+}
+
+/// The same value rebuilt with every object's keys in sorted order, ready to serialise.
+///
+/// [`sorted_fields`] settles what a *walk* says; this settles what a *serialisation*
+/// says. `Value`'s `Display` and `to_string_pretty` write keys in whatever order the
+/// `Map` holds, so a JSON blob shown to a person or written to an export would otherwise
+/// differ between the two binaries. Key order is not part of what a JSON object says, so
+/// sorting it is a canonical form, not a reshaping.
+pub fn sorted_json(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            sorted_fields(fields)
+                .into_iter()
+                .map(|(key, value)| (key.clone(), sorted_json(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(sorted_json).collect()),
+        scalar => scalar.clone(),
     }
 }
 
@@ -936,8 +969,9 @@ pub struct RuntimeStatus {
     /// it stays a tree rather than a type.
     #[serde(default)]
     pub cluster: Value,
-    /// Sorted by construction: `serde_json::Map` is a `BTreeMap` unless `preserve_order`
-    /// is on, and a `BTreeMap` here says so rather than relying on it.
+    /// Sorted by construction: `serde_json::Map` is only a `BTreeMap` until
+    /// `preserve_order` is on — and the desktop build's gpui tree turns it on — so a
+    /// `BTreeMap` here says sorted rather than relying on it.
     #[serde(default)]
     pub availability: BTreeMap<String, Availability>,
     #[serde(default)]
@@ -1431,8 +1465,8 @@ fn humanise_unknown_outcome(data: &Value) -> Option<String> {
         line.push(')');
     }
 
-    let rest: Vec<String> = payload
-        .iter()
+    let rest: Vec<String> = sorted_fields(payload)
+        .into_iter()
         .filter(|(key, _value)| !used.contains(&key.as_str()))
         .map(|(key, value)| format!("{key}={}", compact(value)))
         .collect();
@@ -1504,8 +1538,8 @@ fn humanise(data: &Value) -> Option<String> {
         line.push(')');
     }
 
-    let rest: Vec<String> = payload
-        .iter()
+    let rest: Vec<String> = sorted_fields(payload)
+        .into_iter()
         .filter(|(key, _value)| !used.contains(&key.as_str()))
         .map(|(key, value)| format!("{key}={}", compact(value)))
         .collect();
@@ -1536,7 +1570,7 @@ fn flatten(details: &Value) -> Option<String> {
 
     let mut parts = Vec::with_capacity(fields.len());
 
-    for (key, value) in fields {
+    for (key, value) in sorted_fields(fields) {
         match value {
             Value::String(text) => parts.push(format!("{key}: {text}")),
             Value::Number(number) => parts.push(format!("{key}: {number}")),

@@ -15,9 +15,10 @@
 //!   the payload, and a reader who cannot see it will read a partial tree as a whole one.
 //!   Same for `_opaque`: a pid is not a value, and showing it as one would invite someone
 //!   to believe it round-trips.
-//! * **Nothing is dropped for being unrecognized.** Keys are rendered in the order
-//!   `serde_json` holds them, which is sorted — its `Map` is a `BTreeMap` unless
-//!   `preserve_order` is enabled, and it is not.
+//! * **Nothing is dropped for being unrecognized.** Keys are rendered in sorted order —
+//!   sorted here, at render time, rather than read off the `Map`: `serde_json`'s `Map` is
+//!   only a `BTreeMap` until something enables `preserve_order`, and the desktop build's
+//!   gpui dependency tree does. The same tree must read the same in both binaries.
 
 use std::collections::HashSet;
 
@@ -352,11 +353,14 @@ fn children<'a>(value: &'a Value, marker: &Marker) -> Vec<(String, &'a Value)> {
         Marker::Struct(_) | Marker::Map => value
             .as_object()
             .map(|fields| {
-                fields
+                let mut entries: Vec<(String, &Value)> = fields
                     .iter()
                     .filter(|(key, _)| key.as_str() != "_struct")
                     .map(|(key, value)| (key.clone(), value))
-                    .collect()
+                    .collect();
+                // Sorted at render time, not read off the map — see the module doc.
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                entries
             })
             .unwrap_or_default(),
         Marker::List => value

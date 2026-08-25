@@ -160,13 +160,17 @@ fn string(value: &Value, key: &str) -> Option<String> {
 }
 
 /// The whole answer, as the bytes Claude Code reads.
+///
+/// Serialised canonically — keys sorted via [`crate::model::sorted_json`] — so the bytes
+/// are the same from the plain and desktop binaries, whose `serde_json` holds keys in
+/// different orders.
 pub fn frame(additional_context: &str) -> String {
-    let value = json!({
+    let value = crate::model::sorted_json(&json!({
         "hookSpecificOutput": {
             "hookEventName": HOOK_EVENT,
             "additionalContext": additional_context
         }
-    });
+    }));
 
     serde_json::to_string(&value).unwrap_or_else(|_unencodable| {
         // Unreachable for a string, and still not a reason to fail an edit.

@@ -285,9 +285,11 @@ fn write_document(path: &Path, document: &Map<String, Value>) -> Result<()> {
     }
 
     // Pretty, with a trailing newline: this file is read and edited by people, and a
-    // one-line blob is one an operator cannot diff.
-    let mut body = serde_json::to_string_pretty(&Value::Object(document.clone()))
-        .context("encoding mcp.json")?;
+    // one-line blob is one an operator cannot diff. Keys sorted, so the plain and desktop
+    // binaries rewrite the same file as the same bytes and an edit diffs as an edit.
+    let mut body =
+        serde_json::to_string_pretty(&crate::model::sorted_json(&Value::Object(document.clone())))
+            .context("encoding mcp.json")?;
     body.push('\n');
 
     let temp = parent.join(format!(".mcp.json.{}.tmp", std::process::id()));

@@ -47,6 +47,7 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::model::sorted_json;
 use crate::model::transcript::{PlanStatus, PresentationEvent};
 
 use super::transcript::{Entry, Watch};
@@ -94,8 +95,12 @@ pub fn transcript(watch: &Watch, width: usize) -> String {
 ///   fact about the file, not a record in it, so it is said in the notice that names the
 ///   path rather than written into a stream something else has to parse.
 ///
-/// Deterministic: `serde_json::Map` is a `BTreeMap` here, so the same events produce the
-/// same bytes on every run and on every machine.
+/// Deterministic: object keys are written sorted — [`sorted_json`] — so the same events
+/// produce the same bytes on every run, on every machine, and from either binary. The
+/// plain build's `serde_json::Map` is already sorted; the desktop build's gpui tree
+/// enables `preserve_order`, and an export that differed between `ouro` and
+/// `ouro-desktop` would make "byte for byte" mean two different files. Key order is not
+/// part of what a JSON object says, so this is a canonical form, not a reshaping.
 pub fn events_ndjson(watch: &Watch) -> String {
     let mut out = String::new();
 
@@ -104,7 +109,7 @@ pub fn events_ndjson(watch: &Watch) -> String {
             continue;
         };
 
-        match serde_json::to_string(&event.raw) {
+        match serde_json::to_string(&sorted_json(&event.raw)) {
             Ok(line) => {
                 out.push_str(&line);
                 out.push('\n');
@@ -527,8 +532,9 @@ fn verbatim(out: &mut String, text: &str) {
 /// difference here is that it applies no byte cap, because an export whose whole purpose
 /// is the untruncated result must not truncate.
 ///
-/// Anything else is pretty-printed, which is stable: this crate's `serde_json` has no
-/// `preserve_order` feature, so object keys come back sorted.
+/// Anything else is pretty-printed canonically — object keys sorted via [`sorted_json`] —
+/// so the exported text is the same from either binary, whatever order the build's
+/// `serde_json` holds keys in.
 fn value_text(value: &serde_json::Value) -> String {
     use serde_json::Value;
 
@@ -545,7 +551,8 @@ fn value_text(value: &serde_json::Value) -> String {
 }
 
 fn pretty(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    let canonical = sorted_json(value);
+    serde_json::to_string_pretty(&canonical).unwrap_or_else(|_| canonical.to_string())
 }
 
 /// Word wrapping in terminal cells, preserving the text's own line breaks.
