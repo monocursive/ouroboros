@@ -108,10 +108,12 @@ ensure_ouro() {
     fi
 }
 
+# Always rebuilt and repackaged, not just built when missing: `open` launches whatever
+# binary the bundle holds, so an existence check leaves `make gui` claiming "restarting
+# onto this build" while showing yesterday's UI. cargo makes this cheap when nothing
+# changed, and the bundle script is a copy.
 ensure_app() {
-    if [ ! -x "$APP/Contents/MacOS/ouro-desktop" ]; then
-        (cd "$REPO" && make desktop-dev)
-    fi
+    (cd "$REPO" && make desktop-dev)
 }
 
 # Matched by bundle-relative suffix, not absolute path: the app is launched both ways
