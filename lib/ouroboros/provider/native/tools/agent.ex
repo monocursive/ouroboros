@@ -20,8 +20,11 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
 
   ## A child may never be more permissive than its parent
 
-  That is enforced by construction rather than by review, and this tool has **no
-  parameter that could widen anything**:
+  That is enforced by construction rather than by review. No parameter of this tool widens
+  the child's **posture**, and the two placement parameters — `machine:` and `workspace:` —
+  do not widen it either: they move where the posture is applied, and the node they move it
+  to enforces its own fences on top (see "A child on another machine"). What a child gets
+  is therefore always the intersection:
 
     * `approval_mode` is the parent's own effective mode. A planning parent hands its
       child `plan: true`, so the child plans too.
@@ -34,6 +37,27 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       inherited only when there is no worktree; a worktree means isolation, and quietly
       re-attaching the parent's extra roots to it would be the opposite.
     * `agent` itself disappears from the child's tool list at the depth cap.
+
+  ## A child on another machine
+
+  `machine:` places the child on another connected node of this fleet, and `workspace:`
+  names the absolute path it works in **there**. The two are one parameter in two halves:
+  a remote child without a workspace has nothing to work in — this session's paths name
+  directories on *this* machine — and a workspace without a machine is refused, because a
+  local child works in this session's own tree by construction and that is the containment
+  rule rather than a default worth overriding.
+
+  What travels is the parent's **posture**: the approval mode, the resolved sandbox mode,
+  the plan flag, the tool intersection, the model, the turn and deadline bounds. What does
+  not travel, and cannot, is the parent machine's *filesystem authority*: the child is
+  fenced by the target node's own `workspace_allowed_roots`, judged by the target node's
+  permission engine and hooks, and its transcript and ledger entries are written there.
+  `add_dirs` is empty for a remote child for the same reason a worktree child gets none —
+  a root of this machine is not a root of that one. Approvals still reach **this**
+  session's human, relayed back by `Ouroboros.Provider.Native.Subagent`.
+
+  Depth is unchanged by distance: a remote child is one level deeper than its parent, and
+  its own `machine:` resolves against the nodes *it* can see.
 
   ## Bounds, all of them
 
@@ -99,6 +123,20 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
           "Run the child in its own git worktree of this workspace, so its edits cannot " <>
             "touch your tree. Refused with a reason when this node cannot provision one."
       ],
+      machine: [
+        type: :string,
+        default: "",
+        doc:
+          "Run the child on another machine of this fleet. Name a connected machine; omit " <>
+            "to run it on this one."
+      ],
+      workspace: [
+        type: :string,
+        default: "",
+        doc:
+          "Absolute path of the child's workspace on that machine. Required with " <>
+            "`machine:`; refused without it."
+      ],
       background: [
         type: :boolean,
         default: false,
@@ -113,9 +151,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       ]
     ]
 
-  alias Jido.Harness.SessionRequest
+  alias Ouroboros.Cluster
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Workspace.Worktree
 
   @max_depth 2
   @max_concurrent 4
@@ -158,6 +195,14 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   Every refusal is a sentence the model can act on, because the alternative — a tool
   result that says "invalid arguments" — teaches it to retry the same call. Returns
   `{:ok, spec}` for `Ouroboros.Provider.Native.Subagent.spawn/1`, or `{:error, message}`.
+
+  The spec carries `request_attrs` — a plain map — rather than a
+  `Jido.Harness.SessionRequest`, and `worktree` is the *request* for one rather than a
+  provisioned one. Both are deliberate and both are the same reason: `SessionRequest.new/1`
+  validates `File.dir?(cwd)`, and a worktree is a directory on a disk. Building either here
+  would answer a question about the **target's** filesystem by looking at this node's — the
+  defect `docs/FLEET.md` records as F2. `Subagent`'s launch, which runs on the child's own
+  node, does both.
   """
   @spec plan(map(), map()) :: {:ok, map()} | {:error, String.t()}
   def plan(input, parent) when is_map(input) and is_map(parent) do
@@ -167,26 +212,27 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
          {:ok, tools} <- tools(input, parent),
          background? = truthy(Map.get(input, "background")),
          :ok <- background_ok(background?, tools, parent),
-         {:ok, workspace, worktree} <- workspace(input, parent) do
+         {:ok, placement} <- placement(input, parent) do
       child_id = Paths.new_session_id()
       subscriber = subscriber(parent, background?)
 
-      request =
-        SessionRequest.new!(%{
+      request_attrs =
+        %{
           provider: :native,
-          cwd: workspace,
+          cwd: placement.root,
           model: model(parent),
           provider_session_id: child_id,
           system_prompt: parent.request.system_prompt,
           allowed_tools: tools,
           disallowed_tools: parent.request.disallowed_tools,
-          add_dirs: add_dirs(parent, worktree),
+          add_dirs: add_dirs(parent, placement),
           approval_mode: child_approval_mode(parent.approval_mode),
           sandbox_mode: parent.scope.sandbox_mode,
           reasoning_effort: parent.request.reasoning_effort,
           approval_timeout_ms: parent.request.approval_timeout_ms,
           provider_options: child_options(parent, input, child_id)
-        })
+        }
+        |> portable(placement.remote?)
 
       {:ok,
        %{
@@ -194,13 +240,19 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
          prompt: prompt,
          description: description(input),
          subscriber: subscriber,
-         request: request,
+         node: placement.node,
+         remote: placement.remote?,
+         request_attrs: request_attrs,
          # The parent's own harness context, so the child belongs to the parent's
          # interactive session — the same `session_id`, the same principal in every ledger
          # entry the child writes. `Subagent` replaces `owner` with itself; nothing else
          # about it changes, which is what makes a child the parent's and not a stranger's.
-         context: parent.context,
-         worktree: worktree,
+         #
+         # For a remote child the context is scrubbed first: a closure, a port or a
+         # reference in it names something only this VM has, and shipping one would hand
+         # the target a value that cannot mean there what it means here.
+         context: context(parent, placement.remote?),
+         worktree: placement.worktree?,
          background: background?,
          depth: parent.depth + 1,
          tools: tools,
@@ -209,21 +261,32 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  @doc "The `provider_event` payload emitted when a child is spawned."
+  @doc """
+  The `provider_event` payload emitted when a child is spawned.
+
+  `workspace` and `worktree` are read from `started` rather than from the spec, because
+  for a remote child the spec only asked: the directory the child actually runs in — the
+  worktree's root, or the target path as the target's own filesystem resolved it — is
+  known on the target and returned from the launch.
+  """
   @spec spawned_payload(map(), map()) :: map()
   def spawned_payload(spec, started) do
+    child_node = Map.get(started, :node) || spec.node
+
     %{
       "phase" => "spawned",
       "task_id" => spec.task_id,
       "description" => spec.description,
       "provider_session_id" => started.provider_session_id,
-      "workspace" => spec.request.cwd,
-      "worktree" => spec.worktree != nil,
+      "workspace" => Map.get(started, :workspace) || spec.request_attrs.cwd,
+      "worktree" => Map.get(started, :worktree) != nil,
       "tools" => spec.tools,
       "background" => spec.background,
       "depth" => spec.depth,
-      "max_turns" => Map.get(spec.request.provider_options, "max_iterations"),
-      "deadline_ms" => spec.deadline_ms
+      "max_turns" => Map.get(spec.request_attrs.provider_options, "max_iterations"),
+      "deadline_ms" => spec.deadline_ms,
+      "node" => Atom.to_string(child_node),
+      "remote" => child_node != node()
     }
   end
 
@@ -342,41 +405,254 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  # ---------------------------------------------------------------- workspace
+  # ---------------------------------------------------------------- placement
 
-  defp workspace(input, parent) do
-    if truthy(Map.get(input, "worktree")) do
-      provision_worktree(parent)
-    else
-      {:ok, parent.scope.root, nil}
+  # Where the child runs, and in which directory. One function because the two questions
+  # are one question: `workspace` is admissible exactly when the child runs on a *different*
+  # node, and refused in both of the other cases for reasons that are opposites of each
+  # other — nothing to inherit there, everything already inherited here.
+  defp placement(input, parent) do
+    machine = text(Map.get(input, "machine"))
+    workspace = text(Map.get(input, "workspace"))
+    worktree? = truthy(Map.get(input, "worktree"))
+
+    with {:ok, target} <- chosen_machine(machine),
+         remote? = target != node(),
+         {:ok, root} <- placement_root(remote?, machine, workspace, parent, target) do
+      {:ok, %{node: target, remote?: remote?, root: root, worktree?: worktree?}}
     end
   end
+
+  defp chosen_machine(""), do: {:ok, node()}
+
+  defp chosen_machine(name) do
+    if Node.alive?() do
+      match_machine(name)
+    else
+      {:error, not_distributed_refusal(name)}
+    end
+  end
+
+  # `Cluster.ensure_placeable/1` runs on the **chosen** target and never on the candidates.
+  # Probing every connected node to answer one spawn would put a fleet-wide round trip in
+  # front of every tool call, and the answer about the nodes nobody named is not wanted.
+  defp match_machine(name) do
+    with {:ok, target} <- resolve_machine(name, [node() | Node.list()]),
+         do: ensure_placeable(target)
+  end
+
+  @doc """
+  Resolves one `machine:` argument against a list of candidate nodes.
+
+  Full node name first, then an unambiguous fragment, and the order matters: `core@a` is
+  both the whole name of one machine and part of `core@a2`, and a caller who typed the
+  whole name meant the whole name.
+
+  Public and pure because resolution is a fact about a name and a list rather than about a
+  fleet, and a refusal that names the candidates has to be readable back without one.
+  `{:error, message}` is the sentence the model is shown.
+  """
+  @spec resolve_machine(String.t(), [node()]) :: {:ok, node()} | {:error, String.t()}
+  def resolve_machine(name, candidates) when is_binary(name) and is_list(candidates) do
+    case Enum.filter(candidates, &(Atom.to_string(&1) == name)) do
+      [target] ->
+        {:ok, target}
+
+      _none_or_ambiguous ->
+        case Enum.filter(candidates, &String.contains?(Atom.to_string(&1), name)) do
+          [target] -> {:ok, target}
+          [] -> {:error, unknown_machine_refusal(name, candidates)}
+          many -> {:error, ambiguous_machine_refusal(name, many)}
+        end
+    end
+  end
+
+  # A `machine:` naming this node is simply local: there is no erpc, no remote workspace,
+  # and nothing to place — so there is also nothing to check.
+  defp ensure_placeable(target) when target == node(), do: {:ok, target}
+
+  defp ensure_placeable(target) do
+    case Cluster.ensure_placeable(target) do
+      :ok -> {:ok, target}
+      {:error, reason} -> {:error, unplaceable_refusal(target, reason)}
+    end
+  end
+
+  defp placement_root(false, _machine, "", parent, _target), do: {:ok, parent.scope.root}
+
+  defp placement_root(false, _machine, workspace, _parent, _target),
+    do: {:error, local_workspace_refusal(workspace)}
+
+  defp placement_root(true, machine, "", _parent, target),
+    do: {:error, missing_workspace_refusal(machine, target)}
+
+  defp placement_root(true, _machine, workspace, _parent, target) do
+    if String.starts_with?(workspace, "/") do
+      {:ok, workspace}
+    else
+      {:error, relative_workspace_refusal(workspace, target)}
+    end
+  end
+
+  # A worktree means isolation and a remote child means another filesystem. In both cases
+  # this node's extra roots are roots of the wrong tree, and re-attaching them would be the
+  # opposite of what was asked for.
+  defp add_dirs(_parent, %{worktree?: true}), do: []
+  defp add_dirs(_parent, %{remote?: true}), do: []
+  defp add_dirs(parent, _local), do: parent.scope.roots -- [parent.scope.root]
+
+  # ---------------------------------------------------------------- placement refusals
+
+  defp not_distributed_refusal(name),
+    do:
+      "Refused: `machine: \"#{name}\"` asks for another machine, and this node is not part " <>
+        "of a fleet — it runs without distribution, so there is no other machine to reach. " <>
+        "An operator forms a fleet with OUROBOROS_CLUSTER_STRATEGY (see docs/FLEET.md). " <>
+        "Omit `machine:` to run the child here."
+
+  defp unknown_machine_refusal(name, candidates) do
+    case Enum.reject(candidates, &(&1 == node())) do
+      [] ->
+        "Refused: no machine matches `machine: \"#{name}\"` — this node is distributed but " <>
+          "no other machine is connected to it right now, so there is nowhere to place a " <>
+          "child. Omit `machine:` to run it here."
+
+      connected ->
+        "Refused: no machine matches `machine: \"#{name}\"`. The machines connected to this " <>
+          "one are: #{join_nodes(connected)}. Name one of those — in full, or by a fragment " <>
+          "that fits only it — or omit `machine:` to run the child here."
+    end
+  end
+
+  defp ambiguous_machine_refusal(name, matches),
+    do:
+      "Refused: `machine: \"#{name}\"` matches #{length(matches)} connected machines: " <>
+        "#{join_nodes(matches)}. Name one of them in full — a fragment that fits two " <>
+        "machines cannot choose between them."
+
+  @doc """
+  Renders one `Ouroboros.Cluster.ensure_placeable/1` refusal as the sentence the model sees.
+
+  Public for the same reason `resolve_machine/2` is: the wording is the interface, and a
+  reason this runtime already knows how to explain should not need a fleet to read back.
+  """
+  @spec unplaceable_refusal(node(), term()) :: String.t()
+  def unplaceable_refusal(target, reason),
+    do:
+      "Refused: #{target} is connected but cannot take placed work: #{placement_reason(reason)}. " <>
+        "Placement needs a `:core` node running this same Ouroboros and OTP release. Name " <>
+        "another machine, or omit `machine:` to run the child here."
+
+  defp placement_reason(:node_not_connected), do: "it is not connected any more"
+  defp placement_reason(:runtime_not_running), do: "its Ouroboros runtime is not running"
+
+  defp placement_reason({:role, actual, expected}),
+    do: "its role is #{actual}, and placement needs #{expected}"
+
+  defp placement_reason({:runtime_incompatible, actual, expected}),
+    do: "its runtime #{inspect(actual)} is not this one's #{inspect(expected)}"
+
+  defp placement_reason({:fleet_probe_failed, detail}),
+    do: "it could not be probed (#{inspect(detail)})"
+
+  defp placement_reason(other), do: inspect(other)
+
+  defp local_workspace_refusal(workspace),
+    do:
+      "Refused: `workspace: \"#{workspace}\"` means something only together with `machine:`. " <>
+        "A child running on this machine works in this session's own tree — its root, or a " <>
+        "git worktree of it — and that is the containment rule rather than a default worth " <>
+        "overriding. Drop `workspace:`, or name the `machine:` that path belongs to."
+
+  defp missing_workspace_refusal(name, target),
+    do:
+      "Refused: `machine: \"#{name}\"` resolves to #{target}, and a child there needs a " <>
+        "`workspace:` — the absolute path of the tree it should work in on that machine. " <>
+        "This session's own paths name directories on this machine and mean nothing on that " <>
+        "one, so there is nothing for the child to inherit."
+
+  defp relative_workspace_refusal(workspace, target),
+    do:
+      "Refused: `workspace: \"#{workspace}\"` is not an absolute path. It would be resolved " <>
+        "against a working directory on this machine and name something else entirely on " <>
+        "#{target} — give the absolute path of the tree there."
+
+  defp join_nodes(nodes),
+    do: nodes |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", ")
+
+  # ---------------------------------------------------------------- start refusals
+
+  @doc """
+  Renders one `Ouroboros.Provider.Native.Subagent.spawn/1` failure as a sentence.
+
+  The reasons a launch can fail are now mostly facts about the **target** node — its
+  worktree root, its filesystem, its reachability — and each of them has an action
+  attached, so each gets said rather than inspected into the transcript.
+  """
+  @spec start_refusal(term()) :: String.t()
+  def start_refusal({:subagent_worktree_root_not_admitted, target}),
+    do: worktree_root_refusal(target)
+
+  def start_refusal({:subagent_worktree_unprovisionable, target, reason}),
+    do: worktree_create_refusal(target, reason)
+
+  def start_refusal({:subagent_request_invalid, target, cwd, message}),
+    do: workspace_unusable_refusal(target, cwd, message)
+
+  def start_refusal({:subagent_unstartable, {:node_unreachable, target, reason}}),
+    do:
+      "Refused: #{target} could not be reached to start the child (#{inspect(reason)}). " <>
+        "Nothing ran there and there is no task to collect. Name another machine, or omit " <>
+        "`machine:` to run the child here."
+
+  def start_refusal({:subagent_unstartable, {:remote_spawn_failed, target, detail}}),
+    do:
+      "Refused: #{target} refused to start the child (#{inspect(detail)}). Nothing ran " <>
+        "there and there is no task to collect."
+
+  def start_refusal(reason),
+    do:
+      "Refused: the subagent could not be started (#{inspect(reason)}). Nothing ran, " <>
+        "and there is no task to collect."
 
   # A refusal here is never a silent fall back to the parent's tree. A model that asked
   # for isolation and got the parent's working copy would make edits it believes are
   # contained, which is the worst of the three possible outcomes.
-  defp provision_worktree(parent) do
-    if Worktree.admissible?() do
-      case Worktree.create(parent.scope.root, worktree_id()) do
-        {:ok, worktree} ->
-          {:ok, worktree.root, Worktree.public(worktree)}
+  defp worktree_root_refusal(target) when target == node(),
+    do:
+      "Refused: this node's worktree root is not inside `workspace_allowed_roots`, so a " <>
+        "worktree cannot be leased. An operator can add it with OUROBOROS_WORKSPACE_ROOTS. " <>
+        "Spawn the child without `worktree: true` if sharing this tree is acceptable."
 
-        {:error, reason} ->
-          {:error,
-           "Refused: a worktree was asked for and could not be provisioned " <>
-             "(#{inspect(reason)}). The child was not started in this session's own tree " <>
-             "instead — you asked for isolation, and running without it would not be that."}
-      end
-    else
-      {:error,
-       "Refused: this node's worktree root is not inside `workspace_allowed_roots`, so a " <>
-         "worktree cannot be leased. An operator can add it with OUROBOROS_WORKSPACE_ROOTS. " <>
-         "Spawn the child without `worktree: true` if sharing this tree is acceptable."}
-    end
-  end
+  defp worktree_root_refusal(target),
+    do:
+      "Refused: #{target}'s worktree root is not inside its `workspace_allowed_roots`, so a " <>
+        "worktree cannot be leased there. An operator can add it with " <>
+        "OUROBOROS_WORKSPACE_ROOTS on that machine. Spawn the child without " <>
+        "`worktree: true` if sharing that tree is acceptable."
 
-  defp add_dirs(_parent, worktree) when is_map(worktree), do: []
-  defp add_dirs(parent, _none), do: parent.scope.roots -- [parent.scope.root]
+  defp worktree_create_refusal(target, reason) when target == node(),
+    do:
+      "Refused: a worktree was asked for and could not be provisioned " <>
+        "(#{inspect(reason)}). The child was not started in this session's own tree " <>
+        "instead — you asked for isolation, and running without it would not be that."
+
+  defp worktree_create_refusal(target, reason),
+    do:
+      "Refused: a worktree was asked for on #{target} and could not be provisioned there " <>
+        "(#{inspect(reason)}). The child was not started in that machine's tree instead — " <>
+        "you asked for isolation, and running without it would not be that."
+
+  defp workspace_unusable_refusal(target, cwd, message) when target == node(),
+    do:
+      "Refused: #{cwd} is not a usable workspace on this machine (#{message}). Nothing " <>
+        "ran and there is no task to collect."
+
+  defp workspace_unusable_refusal(target, cwd, message),
+    do:
+      "Refused: #{cwd} is not a usable workspace on #{target} (#{message}). A path that " <>
+        "exists on this machine does not exist on that one for being named here — give " <>
+        "`workspace:` a directory that exists there."
 
   # Who the child reports to, and the whole of the foreground/background difference. The
   # loop can put an approval in front of a person and cannot outlive the turn; the session
@@ -384,6 +660,74 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   # them, which is why a background child is refused above unless it cannot ask.
   defp subscriber(parent, true), do: parent.background_subscriber
   defp subscriber(parent, false), do: parent.subscriber
+
+  # ---------------------------------------------------------------- portability
+
+  # A local spec is handed on exactly as it always was: nothing about it crosses a node
+  # boundary, and scrubbing it would be a behaviour change bought for nothing.
+  defp context(parent, false), do: parent.context
+
+  defp context(parent, true), do: portable_context(parent.context)
+
+  @doc """
+  The parent's harness context in the shape it can cross a node boundary in.
+
+  Two things happen to it, and each has one reason:
+
+    * every fun, port and reference is dropped, at any depth, because each of them names
+      something only the parent's VM has. `config` is where one would arrive — it is
+      whatever an operator put in `:jido_harness, :provider_config` — and dropping the
+      offending entry rather than the whole map keeps the rest of the operator's
+      configuration reaching the child;
+    * `owner` is emptied rather than carried. `Ouroboros.Provider.Native.Subagent` sets it
+      to itself on the target anyway, and a pid of the parent node left in the field a
+      child session emits every raw event to would be one mistake away from a child
+      streaming its whole stream across the fleet into the parent's harness worker.
+
+  Everything else — the session id that makes the child's ledger entries the parent's, the
+  provider, the adapter and process-manager modules — is atoms and binaries, and means the
+  same on any node of one fleet.
+  """
+  @spec portable_context(map()) :: map()
+  def portable_context(context) when is_map(context),
+    do: context |> scrub() |> Map.put(:owner, nil)
+
+  defp portable(attrs, false), do: attrs
+
+  defp portable(attrs, true),
+    do: Map.update(attrs, :provider_options, %{}, &scrub/1)
+
+  # Everything a term can hold that means something only in the VM that made it. A fun
+  # closes over this node's modules and captured state; a port and a reference name
+  # something this VM alone has. **Pids are deliberately portable** — the subscriber is
+  # one, and reaching back to it across the fleet is the entire point of a remote child.
+  defp scrub(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.flat_map(fn {key, value} ->
+      cond do
+        not portable?(key) -> []
+        is_map(value) and not is_struct(value) -> [{key, scrub(value)}]
+        portable?(value) -> [{key, value}]
+        true -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  defp scrub(value), do: value
+
+  @doc "Whether one term means on another node what it means here."
+  @spec portable?(term()) :: boolean()
+  def portable?(value) when is_function(value) or is_port(value) or is_reference(value), do: false
+  def portable?(value) when is_list(value), do: Enum.all?(value, &portable?/1)
+
+  def portable?(value) when is_tuple(value),
+    do: value |> Tuple.to_list() |> Enum.all?(&portable?/1)
+
+  def portable?(value) when is_map(value),
+    do: Enum.all?(value, fn {key, inner} -> portable?(key) and portable?(inner) end)
+
+  def portable?(_value), do: true
 
   # ---------------------------------------------------------------- options
 
@@ -465,11 +809,6 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
 
     "sub-" <> node_tag <> "-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
   end
-
-  # `Ouroboros.Workspace.Worktree` validates this as a directory name, so it is minted in
-  # the shape that validator accepts rather than borrowed from a caller.
-  defp worktree_id,
-    do: "subagent-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
   defp truthy(true), do: true
   defp truthy("true"), do: true
