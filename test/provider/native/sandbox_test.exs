@@ -342,6 +342,35 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       end
     end
 
+    # The mode the provider now offers by name. It answers the same on every backend,
+    # which is the whole claim: "no OS sandbox" is not a property of the node here, it is
+    # what the session asked for.
+    test "answers :unrestricted the same whatever this node can sandbox with", %{
+      workspace: workspace
+    } do
+      {:ok, scope} = Paths.scope(workspace, [], :unrestricted)
+
+      for detection <- [@none, Sandbox.detect()] do
+        assert Sandbox.decision(scope, detection) == {:unsandboxed, :unrestricted}
+      end
+    end
+
+    # `writable/2` has clauses for `:read_only` and `:workspace_write` only. That is safe
+    # because `decision/2` answers `:unrestricted` before any policy is built — pinned
+    # here so a future edit to `decision/2` that reordered those two cannot land quietly.
+    test "never builds a policy for :unrestricted, so `writable/2` never sees it", %{
+      workspace: workspace
+    } do
+      {:ok, scope} = Paths.scope(workspace, [], :unrestricted)
+
+      refute match?({:sandboxed, _label, _policy}, Sandbox.decision(scope, Sandbox.detect()))
+
+      # Through `apply/3` on purpose: the call is deliberately outside `policy/2`'s
+      # declared domain, and going through the compiler's type checker to say so would
+      # only produce a warning about a call this test exists to make.
+      assert_raise FunctionClauseError, fn -> apply(Sandbox, :policy, [scope, :unrestricted]) end
+    end
+
     test "makes only the scratch directory writable under read_only", %{read_only: read_only} do
       policy = read_only |> Sandbox.policy(:read_only) |> Sandbox.with_scratch("/scratch")
       assert policy.writable == ["/scratch"]
@@ -420,6 +449,138 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       assert Sandbox.tool_call_marker("read", scope, Sandbox.detect()) == %{}
       assert Sandbox.tool_call_marker("write", scope, @none) == %{}
+    end
+
+    # The one line a client footer reads to say "no OS sandbox" for a native session. An
+    # unrestricted session must say `none` on a node that *has* a backend, because the
+    # session declined it — a marker that named the backend there would be a lie by
+    # omission.
+    test "says none for an unrestricted session even where this node has a backend", %{
+      workspace: workspace
+    } do
+      {:ok, scope} = Paths.scope(workspace, [], :unrestricted)
+
+      assert Sandbox.tool_call_marker("bash", scope, Sandbox.detect()) == %{"sandbox" => "none"}
+      assert Sandbox.tool_call_marker("bash", scope, @none) == %{"sandbox" => "none"}
+    end
+  end
+
+  describe "which denials an operator may lift" do
+    test "offers a filesystem denial under workspace_write" do
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+
+      assert Sandbox.escalatable?(violation, policy, "git commit -am wip")
+    end
+
+    test "never offers a network denial: that is a node setting, not one command's answer" do
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "nc: connectx: Operation not permitted\n", 1)
+
+      assert violation.constraint == :network
+      refute Sandbox.escalatable?(violation, policy, "nc example.com 9")
+    end
+
+    test "never offers one under read_only: a label a shell can step out of is not a label" do
+      policy = fixed_policy(:read_only)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+
+      refute Sandbox.escalatable?(violation, policy, "touch x")
+    end
+
+    test "never offers one that names a protected root or an .ouroboros directory" do
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+
+      for root <- Sandbox.protected_roots() do
+        refute Sandbox.escalatable?(violation, policy, "rm -rf #{root}/store")
+      end
+
+      refute Sandbox.escalatable?(violation, policy, "rm -rf .ouroboros/state")
+      refute Sandbox.escalatable?(violation, policy, "rm -rf /tmp/ws/.ouroboros/state")
+
+      denial = %{constraint: :filesystem, evidence: "rm: .ouroboros/x: Operation not permitted"}
+      refute Sandbox.escalatable?(denial, policy, nil)
+    end
+
+    test "does offer a `.git` write, because a commit is the case this exists for" do
+      policy = fixed_policy(:workspace_write)
+
+      violation = %{
+        constraint: :filesystem,
+        evidence: "error: cannot lock ref: .git/index.lock: Operation not permitted"
+      }
+
+      assert Sandbox.escalatable?(violation, policy, "git commit -am wip")
+    end
+
+    # The bug this pins: on macOS a data directory an operator configures as
+    # `/var/folders/…` canonicalizes to `/private/var/folders/…`, and a command names
+    # whichever one the person typed. Matching only the canonical form offered an
+    # escalation straight into the runtime's own store.
+    test "matches a protected root in the form it was configured, not only canonicalized" do
+      raw =
+        Path.join(System.tmp_dir!(), "ouroboros-protected-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(raw)
+      on_exit(fn -> File.rm_rf(raw) end)
+
+      previous = Application.get_env(:ouroboros, :native_data_dir)
+      Application.put_env(:ouroboros, :native_data_dir, raw)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:ouroboros, :native_data_dir)
+          value -> Application.put_env(:ouroboros, :native_data_dir, value)
+        end
+      end)
+
+      names = Sandbox.protected_names()
+      assert raw in names
+      assert Enum.all?(Sandbox.protected_roots(), &(&1 in names))
+
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+
+      refute Sandbox.escalatable?(violation, policy, "echo x > #{raw}/ledger.db")
+
+      for canonical <- Sandbox.protected_roots() do
+        refute Sandbox.escalatable?(violation, policy, "echo x > #{canonical}/ledger.db")
+      end
+    end
+
+    test "says nothing at all when there was no violation" do
+      refute Sandbox.escalatable?(nil, fixed_policy(:workspace_write), "true")
+      refute Sandbox.escalatable?(%{constraint: :filesystem}, nil, "true")
+    end
+
+    test "the reason an approval carries names what was stopped and which constraint" do
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+      reason = Sandbox.escalation_reason(violation, policy, "sandbox-exec")
+
+      assert reason =~ "sandbox-exec sandbox (sandbox_mode: workspace_write) stopped"
+      assert reason =~ "Operation not permitted"
+      assert reason =~ "allows writes only under"
+      refute reason =~ "ask_user"
+    end
+
+    test "the guidance changes when an escalation is actually on offer" do
+      policy = fixed_policy(:workspace_write)
+      violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
+
+      plain = Sandbox.escalation(violation, policy, "sandbox-exec")
+      offered = Sandbox.escalation(violation, policy, "sandbox-exec", offered: true)
+
+      assert plain =~ "ask_user"
+      assert offered =~ "re-runs the command once with no OS sandbox"
+      assert offered =~ "no escalation was granted"
+
+      # The sentence C5 shipped is now false, and is gone from both.
+      refute plain =~ "does not offer a full-access mode"
+      refute offered =~ "does not offer a full-access mode"
+      assert plain =~ "sandbox_mode: unrestricted"
+      assert offered =~ "sandbox_mode: unrestricted"
     end
   end
 

@@ -111,6 +111,10 @@ defmodule Ouroboros.Provider.Native.Loop do
   @iteration_warning_at 10
   @iteration_urgent_at 3
   @max_injected_context_bytes 8 * 1024
+  # How much of a sandboxed attempt's own output the escalation event carries. Enough to
+  # read the denial and what led to it; not the whole spill file, which the tool result
+  # already names a path for.
+  @max_escalation_output_bytes 4 * 1024
 
   defstruct [
     :emit,
@@ -554,6 +558,21 @@ defmodule Ouroboros.Provider.Native.Loop do
     started = System.monotonic_time(:millisecond)
     result = Tools.execute(module, call.input, context, state.tool_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - started
+
+    # C5+. A sandbox denial an operator could lift is put to them *here*, because this is
+    # the process that owns an approval channel, and the command is re-run in the same
+    # turn if they grant it. `elapsed` then describes the attempt whose result this entry
+    # carries — the re-run — rather than the sum of both, which would misreport a pair of
+    # in-budget runs as one that overran.
+    {state, result, elapsed} =
+      escalate(state, %{
+        call: call,
+        module: module,
+        classified: classified,
+        context: context,
+        result: result,
+        elapsed: elapsed
+      })
 
     # Settled before the result is broadcast, and against the tool's own output rather
     # than the annotated one: diagnostics and hook context are this runtime talking, and
@@ -1110,6 +1129,254 @@ defmodule Ouroboros.Provider.Native.Loop do
         {:continue, tool_result(state, call, append_context(result, hook_context))}
     end
   end
+
+  # ------------------------------------------------------- sandbox escalation
+
+  # C5+. What happens after `Ouroboros.Provider.Native.Sandbox` stopped a command.
+  #
+  # Before this, a denial was a dead end: `bash` failed, the guidance told the model to
+  # ask a human with `ask_user`, and the human's best option was to do the work
+  # themselves. Codex and Claude Code both answer the same denial by asking once and
+  # re-running the same command outside the sandbox, and that is what this is.
+  #
+  # The shape, exactly:
+  #
+  #   * The offer comes from the tool, not from here. `Tools.Bash` reports
+  #     `escalation: %{constraint:, evidence:, reason:, …}` when — and only when —
+  #     `Sandbox.escalatable?/3` says this denial is liftable: a **filesystem** denial in
+  #     a **`workspace_write`** session whose evidence and command line name no protected
+  #     root. Network is a node setting, `read_only` is a label that must hold, and the
+  #     runtime's own data directory is nobody's to escalate into.
+  #   * The engine answers first, on the **same `Bash(…)` subject the command already
+  #     has** — same tool, same command, same paths, with `context.sandbox_escalation`
+  #     set. That is the simplest honest mapping onto C1's existing vocabulary and it has
+  #     a sharp edge worth naming: a rule that allows *running* this command therefore
+  #     also allows *escalating* it, because the engine is being asked about the same
+  #     subject. If that is too coarse it wants a dimension in
+  #     `Ouroboros.Control.Permissions`, not a second vocabulary invented here.
+  #   * `approval_mode` does **not** answer it. `auto_approve` means "do not ask me about
+  #     tool calls"; it has never meant "leave the OS sandbox", and reading it that way
+  #     would turn a convenience into a hole. Only an engine rule or a human grants this.
+  #   * A human `approve` at `scope: session` is remembered under a key of its own —
+  #     `{:sandbox_escalation, command}` — so approving a *bash call* for the session
+  #     never leaks into approving an *escape* for it.
+  #   * Approval re-runs the identical command once, with the scope's `sandbox_mode`
+  #     overridden to `:unrestricted` for that single call, which is how the re-run goes
+  #     through the same `Sandbox.decide/2` (and the same warning log) as a session that
+  #     asked for full access by name. The re-run's result is what the model sees, with a
+  #     header saying the first attempt happened — a command that partly succeeded before
+  #     the denial has now run twice, and the model has to know that.
+  #   * Deny, an unanswered deadline, and an interrupt all mean *not re-run*: the
+  #     sandboxed failure stands, with a line saying the escalation was declined.
+  #
+  # Plan mode never reaches here — `Permissions.evaluate/1` refuses `:execute` while
+  # planning, before a tool runs — and that is checked rather than assumed.
+  defp escalate(state, pending) do
+    case Map.get(pending.result, :escalation) do
+      offer when is_map(offer) -> consider_escalation(state, Map.put(pending, :offer, offer))
+      _none -> {state, pending.result, pending.elapsed}
+    end
+  end
+
+  defp consider_escalation(%{approval_mode: :plan} = state, pending),
+    do: declined(state, pending, :plan_mode, nil)
+
+  defp consider_escalation(state, pending) do
+    case Permissions.evaluate(escalation_request(state, pending.classified)) do
+      {:allow, rule} ->
+        ref = escalation_ref(rule)
+        _ = record(state, :approve, :once, :rule, ref)
+        rerun(state, pending, "rule", nil)
+
+      {:deny, rule} ->
+        ref = escalation_ref(rule)
+        _ = record(state, :deny, :once, :rule, ref)
+        declined(state, pending, :rule, rule)
+
+      {:ask, _reason} ->
+        if MapSet.member?(state.session_grants, escalation_key(pending.classified)) do
+          rerun(state, pending, "session_grant", nil)
+        else
+          ask_escalation(state, pending)
+        end
+    end
+  end
+
+  defp ask_escalation(state, pending) do
+    request_id = new_request_id()
+    classified = pending.classified
+
+    emit(
+      state,
+      :approval_requested,
+      %{
+        # A kind clients already render as an approval modal. The payload is deliberately
+        # the same shape `ask/5` emits for an ordinary command approval, so a client that
+        # has not learned this kind still shows a legible question with the command, the
+        # working directory, and why it is being asked.
+        "kind" => "sandbox_escalation",
+        "tool_call" =>
+          %{
+            "name" => pending.call.name,
+            "command" => classified.command,
+            "cwd" => state.scope.root
+          }
+          |> reject_nils(),
+        "paths" => classified.paths,
+        "reason" => pending.offer.reason,
+        "suggested_rule" =>
+          Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
+      },
+      request_id
+    )
+
+    _ =
+      Hooks.notify(
+        state.hooks,
+        :notification,
+        Map.put(hook_base(state), "tool_name", classified.tool)
+      )
+
+    wait_for_escalation(state, pending, request_id, deadline(state.approval_timeout_ms))
+  end
+
+  defp wait_for_escalation(state, pending, request_id, deadline) do
+    remaining = remaining(deadline)
+
+    receive do
+      {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
+        state = grant_escalation(state, pending.classified, response.scope)
+        _ = record(state, :approve, response.scope, :human, escalation_ref(nil))
+        rerun(state, pending, "human", request_id)
+
+      {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
+        _ = record(state, :deny, response.scope, :human, escalation_ref(nil))
+        declined(state, pending, :human, response.reason, request_id)
+
+      {:native_approval, _other_id, _response} ->
+        wait_for_escalation(state, pending, request_id, deadline)
+
+      # The turn stops after this tool either way; an escalation nobody is left to answer
+      # is a declined one, not a wedged one.
+      :native_interrupt ->
+        declined(%{state | interrupted?: true}, pending, :interrupted, nil, request_id)
+
+      {:native_steer, text} ->
+        wait_for_escalation(
+          %{state | steer: state.steer ++ [text]},
+          pending,
+          request_id,
+          deadline
+        )
+    after
+      remaining ->
+        declined(state, pending, :timeout, state.approval_timeout_ms, request_id)
+    end
+  end
+
+  # The same command, once, with this one call's scope moved to `:unrestricted`. Nothing
+  # about the session changes: the next `bash` call is sandboxed again.
+  defp rerun(state, pending, granted_by, request_id) do
+    context = %{pending.context | scope: %{state.scope | sandbox_mode: :unrestricted}}
+
+    started = System.monotonic_time(:millisecond)
+    result = Tools.execute(pending.module, pending.call.input, context, state.tool_timeout_ms)
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    emit_escalation(state, pending, "approved", granted_by, request_id)
+
+    output =
+      "The OS sandbox stopped the first attempt at this command (#{pending.offer.evidence}). " <>
+        "The escalation to re-run it with no OS sandbox was granted, and this is that " <>
+        "re-run. Anything the sandboxed attempt had already completed before the denial " <>
+        "has now happened twice — check for that before you trust this output.\n\n" <>
+        Map.get(result, :output, "")
+
+    {state, result |> Map.put(:output, output) |> Map.put(:escalation, nil), elapsed}
+  end
+
+  defp declined(state, pending, source, detail, request_id \\ nil) do
+    emit_escalation(state, pending, "declined", to_string(source), request_id)
+
+    result =
+      pending.result
+      |> Map.put(:output, pending.result.output <> "\n" <> decline_text(source, detail))
+      |> Map.put(:escalation, nil)
+
+    {state, result, pending.elapsed}
+  end
+
+  defp decline_text(:human, reason),
+    do:
+      "The operator was asked whether to re-run this command with no OS sandbox and " <>
+        "declined" <> reason_suffix(reason) <> ". Do not ask for it again for this command."
+
+  defp decline_text(:rule, rule),
+    do:
+      "A permission rule (#{inspect(rule)}) refuses to re-run this command outside the " <>
+        "sandbox, so it was not re-run."
+
+  defp decline_text(:timeout, timeout),
+    do:
+      "Nobody answered the request to re-run this command with no OS sandbox within " <>
+        "#{inspect(timeout)} ms, so it was declined and the command was not re-run."
+
+  defp decline_text(:interrupted, _detail),
+    do:
+      "The turn was interrupted while the request to re-run this command with no OS " <>
+        "sandbox was outstanding, so it was declined and the command was not re-run."
+
+  defp decline_text(:plan_mode, _detail),
+    do:
+      "This session is planning, so no escalation out of the sandbox is offered. Record " <>
+        "the plan instead."
+
+  # The transcript's own record. The `tool_result` carries whichever attempt's output the
+  # model is meant to act on; this carries the other half, so "it ran twice" is a fact a
+  # reader can find rather than infer from a header in a tool result.
+  defp emit_escalation(state, pending, decision, granted_by, request_id) do
+    emit(
+      state,
+      :provider_event,
+      %{
+        "kind" => "sandbox_escalation",
+        "decision" => decision,
+        "granted_by" => granted_by,
+        "call_id" => pending.call.id,
+        "command" => pending.classified.command,
+        "constraint" => to_string(pending.offer.constraint),
+        "evidence" => pending.offer.evidence,
+        "sandbox" => pending.offer.label,
+        "sandboxed_output" => clip(pending.result.output, @max_escalation_output_bytes)
+      },
+      request_id
+    )
+  end
+
+  defp escalation_request(state, classified) do
+    request = permission_request(state, classified)
+    %{request | context: Map.put(request.context, :sandbox_escalation, true)}
+  end
+
+  # A rule reference that says which decision this was, so a `:permission` entry for an
+  # escalation cannot be read as one for the command itself.
+  defp escalation_ref(rule), do: {:sandbox_escalation, rule}
+
+  # Deliberately not `grant_key/1`. Approving a `bash` call for the session must not also
+  # approve escaping the sandbox for it; these are two different questions and they get
+  # two different keys in the one set the session already carries across turns.
+  defp escalation_key(classified), do: {:sandbox_escalation, classified.command}
+
+  defp grant_escalation(state, classified, :session),
+    do: %{state | session_grants: MapSet.put(state.session_grants, escalation_key(classified))}
+
+  defp grant_escalation(state, _classified, _once), do: state
+
+  defp clip(text, limit) when is_binary(text) and byte_size(text) > limit,
+    do: binary_part(text, 0, limit) <> "\n… #{byte_size(text) - limit} bytes elided …"
+
+  defp clip(text, _limit) when is_binary(text), do: text
+  defp clip(_text, _limit), do: ""
 
   defp new_request_id,
     do: "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
