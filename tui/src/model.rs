@@ -1825,7 +1825,7 @@ impl ApprovalMode {
 /// Transcribed from `Gateway.Methods` `@sandbox_modes`. Sending anything else is `-32602`
 /// naming the parameter. The TUI default is to omit this field so the plane can apply
 /// workspace write where the provider allows it, and omit it where the provider cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SandboxMode {
     Default,
     ReadOnly,
@@ -1855,12 +1855,29 @@ impl SandboxMode {
     }
 
     /// Short caption for the composer chrome, in the terms an operator is deciding in.
+    ///
+    /// `unrestricted` is the wire word and stays on the wire. Every surface a person reads
+    /// says **full access** instead: "unrestricted" describes the parameter, not what the
+    /// operator is agreeing to, and an operator scanning a footer has to be able to tell
+    /// what this posture costs without translating a schema term.
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "provider default",
             Self::ReadOnly => "read-only",
             Self::WorkspaceWrite => "can edit",
-            Self::Unrestricted => "unrestricted",
+            Self::Unrestricted => "full access",
+        }
+    }
+
+    /// The label a picker row wears, capitalised as a choice rather than a caption. The
+    /// full-access row carries its consequence in the title because that row is the one an
+    /// operator must not choose by accident.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Default => "Provider default",
+            Self::ReadOnly => "Read only",
+            Self::WorkspaceWrite => "Workspace write",
+            Self::Unrestricted => "Full access — no sandbox",
         }
     }
 
@@ -1869,12 +1886,61 @@ impl SandboxMode {
             Self::Default => "whatever the provider does on its own",
             Self::ReadOnly => "cannot create or edit files",
             Self::WorkspaceWrite => "can edit files in the workspace",
-            Self::Unrestricted => "no filesystem sandbox",
+            Self::Unrestricted => "shell runs with no OS sandbox",
         }
+    }
+
+    /// Whether choosing this posture is a decision to draw in the warning tone.
+    ///
+    /// It is a *risk posture*, not an action highlight: the only mode that removes the OS
+    /// sandbox is the only one that earns the colour, and nothing here calls it a danger.
+    pub fn warns(self) -> bool {
+        matches!(self, Self::Unrestricted)
     }
 
     pub fn writable(self) -> bool {
         matches!(self, Self::WorkspaceWrite | Self::Unrestricted)
+    }
+
+    /// The word `/sandbox` takes for this mode. `default` has none: the verb changes a
+    /// *running* session's posture, and "whatever the provider does on its own" is a
+    /// start-time absence rather than a mode to move to.
+    pub fn verb_argument(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::ReadOnly => Some("read-only"),
+            Self::WorkspaceWrite => Some("workspace"),
+            Self::Unrestricted => Some("full"),
+        }
+    }
+
+    /// The three postures `/sandbox` and the desktop picker offer on an open session, in
+    /// the order they are drawn: least power first.
+    pub const CHANGEABLE: [SandboxMode; 3] = [
+        SandboxMode::ReadOnly,
+        SandboxMode::WorkspaceWrite,
+        SandboxMode::Unrestricted,
+    ];
+
+    /// Parses one `/sandbox` argument. Deliberately not [`Self::parse`]: the verb's words
+    /// are what an operator types, and the wire's words are what the gateway takes.
+    pub fn from_verb_argument(argument: &str) -> Option<Self> {
+        Self::CHANGEABLE
+            .into_iter()
+            .find(|mode| mode.verb_argument() == Some(argument))
+    }
+
+    /// `full, workspace, read-only` — the words a refusal names, in the order the verb's
+    /// own grammar writes them. [`Self::CHANGEABLE`] is least-power-first because that is
+    /// the order a *picker* should be read in; a one-line refusal reads the other way,
+    /// widest first, so it matches `/sandbox full|workspace|read-only` verbatim.
+    pub fn verb_arguments() -> String {
+        let mut words: Vec<&'static str> = Self::CHANGEABLE
+            .iter()
+            .filter_map(|mode| mode.verb_argument())
+            .collect();
+        words.reverse();
+        words.join(", ")
     }
 }
 

@@ -455,6 +455,7 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
             "native".into(),
             Some("openai_codex:gpt-5.6-sol".into()),
             "/tmp/desktop-workspace".into(),
+            None,
         )
         .expect("the operate-capable gateway can start a session");
     let start = app
@@ -466,6 +467,62 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
     assert_eq!(start.params["provider"], "native");
     assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/tmp/desktop-workspace");
+    assert!(
+        start.params.get("sandbox_mode").is_none(),
+        "an untouched form with no stored default states no posture: {}",
+        start.params
+    );
+}
+
+/// The native form's file-access answer reaches the wire, and beats the config file.
+///
+/// The stored default is where the control *starts*; what an operator picked in the form
+/// is what gets sent. Full access is the case worth pinning, because it is the one whose
+/// wire word (`unrestricted`) and operator word ("Full access — no sandbox") differ.
+#[test]
+fn desktop_new_session_sends_the_chosen_sandbox_over_the_stored_default() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.config.defaults.sandbox_mode = Some("read_only".into());
+    app.drain();
+
+    // Untouched, the stored default is what the form sends.
+    app.desktop_start_session("native".into(), None, "/tmp/desktop-workspace".into(), None)
+        .expect("the operate-capable gateway can start a session");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("an interactive.start call");
+    assert_eq!(start.params["sandbox_mode"], "read_only");
+
+    for mode in App::desktop_sandbox_choices() {
+        app.desktop_start_session(
+            "native".into(),
+            None,
+            "/tmp/desktop-workspace".into(),
+            Some(mode),
+        )
+        .expect("the operate-capable gateway can start a session");
+        let start = app
+            .drain()
+            .into_iter()
+            .find(|call| call.method == "interactive.start")
+            .expect("an interactive.start call");
+        assert_eq!(
+            start.params["sandbox_mode"],
+            mode.as_str(),
+            "the operator's choice outranks defaults.sandbox_mode"
+        );
+    }
 }
 
 #[test]
@@ -488,6 +545,7 @@ fn desktop_gates_codex_work_and_uses_the_runtime_owned_login_flow() {
             "native".into(),
             Some("openai_codex:gpt-5.6-sol".into()),
             "/tmp/desktop-workspace".into(),
+            None,
         )
         .expect_err("an OAuth-backed model cannot start before sign-in");
     assert!(error.contains("connect ChatGPT"));
@@ -617,6 +675,189 @@ fn desktop_auto_approve_needs_an_open_session() {
         .desktop_set_auto_approve(true)
         .expect_err("no session, no toggle");
     assert!(error.contains("no session is open"), "{error}");
+}
+
+/// The composer footer's posture picker: it reads the session row the runtime published,
+/// and changing it is one `interactive.configure` with the wire's own word.
+#[test]
+fn desktop_sandbox_picker_reads_the_runtimes_posture_and_configures_it() {
+    let mut app = opened();
+    assert_eq!(
+        app.desktop_sandbox_mode(),
+        Some(ouro::model::SandboxMode::WorkspaceWrite),
+        "the opened session was listed as workspace_write"
+    );
+
+    app.desktop_set_sandbox_mode(ouro::model::SandboxMode::Unrestricted)
+        .expect("a session is open on a gateway that serves interactive.configure");
+    let configure = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.configure")
+        .expect("the picker issues the runtime's own configure verb");
+    assert_eq!(configure.params["id"], SESSION);
+    assert_eq!(
+        configure.params["sandbox_mode"], "unrestricted",
+        "the wire keeps the schema's word; only the labels say full access"
+    );
+
+    // Until the runtime answers and the row is re-listed, the label is still what the
+    // runtime last published: the picker never shows a posture nobody confirmed.
+    assert_eq!(
+        app.desktop_sandbox_mode(),
+        Some(ouro::model::SandboxMode::WorkspaceWrite)
+    );
+
+    answer(
+        &mut app,
+        configure.tag,
+        json!({ "id": SESSION, "applies": "now" }),
+    );
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": SESSION,
+            "node": "ouroboros@golden",
+            "provider": "native",
+            "workspace": "/tmp/desktop-workspace",
+            "status": "running",
+            "options": { "sandbox_mode": "unrestricted" },
+            "updated_at": "2026-01-01T00:02:00.000000Z"
+        }]),
+    );
+    assert_eq!(
+        app.desktop_sandbox_mode(),
+        Some(ouro::model::SandboxMode::Unrestricted)
+    );
+
+    // The mode it is already on is refused rather than sent again.
+    let error = app
+        .desktop_set_sandbox_mode(ouro::model::SandboxMode::Unrestricted)
+        .expect_err("a no-op configure is not a call");
+    assert!(error.contains("already on full access"), "{error}");
+}
+
+/// With no session open, and with a session whose row names no posture, the control has
+/// nothing to draw — and says so by being absent rather than by guessing a default.
+#[test]
+fn desktop_sandbox_picker_is_absent_where_no_posture_was_stated() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    assert_eq!(app.desktop_sandbox_mode(), None);
+    let error = app
+        .desktop_set_sandbox_mode(ouro::model::SandboxMode::ReadOnly)
+        .expect_err("no session, no posture to change");
+    assert!(error.contains("open a session"), "{error}");
+
+    let mut app = opened();
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": SESSION,
+            "node": "ouroboros@golden",
+            "provider": "native",
+            "workspace": "/tmp/desktop-workspace",
+            "status": "running",
+            "options": { "model": "openai_codex:gpt-5.6-sol" },
+            "updated_at": "2026-01-01T00:02:00.000000Z"
+        }]),
+    );
+    assert_eq!(
+        app.desktop_sandbox_mode(),
+        None,
+        "a row with no sandbox_mode leaves the picker off rather than inventing one"
+    );
+}
+
+/// The runtime half's `sandbox_escalation` payload, exactly as it arrives: the card has to
+/// carry the kind, the command, the cwd, the reason the command was stopped, and the rule
+/// a "don't ask again" would write.
+#[test]
+fn desktop_sandbox_escalation_card_carries_the_reason_the_command_was_stopped() {
+    let mut app = opened();
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-12",
+            "kind": "sandbox_escalation",
+            "reason": "the sandbox refused a write outside the workspace",
+            "suggested_rule": "Bash(cargo test *)",
+            "tool_call": {
+                "name": "exec_command",
+                "command": "cargo test --all",
+                "cwd": "/tmp/desktop-workspace"
+            }
+        }),
+    );
+
+    let approval = app.desktop_approval().expect("a pending desktop approval");
+    assert_eq!(approval.kind.as_deref(), Some("sandbox escalation"));
+    assert_eq!(approval.command.as_deref(), Some("cargo test --all"));
+    assert_eq!(approval.cwd.as_deref(), Some("/tmp/desktop-workspace"));
+    assert_eq!(
+        approval.reason.as_deref(),
+        Some("the sandbox refused a write outside the workspace"),
+        "the provider's own reason is carried, not summarised away"
+    );
+    assert_eq!(
+        approval.suggested_rule.as_deref(),
+        Some("Bash(cargo test *)")
+    );
+    assert!(
+        !approval.question,
+        "an escalation is a permission, so auto-approve may answer it"
+    );
+}
+
+/// Composition: `sandbox_escalation` is a permission, not a question, so the client-side
+/// auto-approve mode answers it — full access and auto-approve are separate decisions and
+/// an operator can hold both.
+#[test]
+fn desktop_auto_approve_answers_a_sandbox_escalation() {
+    let mut app = opened();
+    app.desktop_set_auto_approve(true)
+        .expect("a session is open");
+    app.drain();
+
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-13",
+            "kind": "sandbox_escalation",
+            "reason": "the sandbox refused a write outside the workspace",
+            "suggested_rule": "Bash(cargo test *)",
+            "tool_call": {
+                "name": "exec_command",
+                "command": "cargo test --all",
+                "cwd": "/tmp/desktop-workspace"
+            }
+        }),
+    );
+
+    assert!(
+        app.desktop_approval().is_none(),
+        "an escalation on an auto-approve session never becomes a card"
+    );
+    let calls = app.drain();
+    let answered = calls
+        .iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("it is answered instead");
+    assert_eq!(answered.params["request_id"], "req-desktop-13");
+    assert_eq!(answered.params["response"]["decision"], "approve");
+    assert_eq!(answered.params["response"]["scope"], "once");
+    assert_eq!(answered.params["response"]["actor"], "automation");
+    assert!(
+        calls.iter().all(|call| call.method != "permissions.add"),
+        "auto-approve answers one request; it never writes the durable rule"
+    );
 }
 
 /// An `ask_user` question on an auto-approve session still becomes a card — a robot

@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 45] = [
+pub(crate) const COMMANDS: [(&str, &str); 46] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -49,6 +49,10 @@ pub(crate) const COMMANDS: [(&str, &str); 45] = [
     (
         "/auto-approve",
         "answer yes to everything this session asks ([on|off])",
+    ),
+    (
+        "/sandbox",
+        "file access: full, workspace, read-only (bare reports)",
     ),
     ("/mcp", "the MCP servers this node runs"),
     ("/editor", "edit this prompt in $EDITOR"),

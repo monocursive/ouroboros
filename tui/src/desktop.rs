@@ -35,7 +35,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::config;
 use crate::desktop_design::{self as design, DesktopTokens, Tone};
-use crate::model::{ApprovalDecision, ApprovalScope, Plane, Triage};
+use crate::model::{ApprovalDecision, ApprovalScope, Plane, SandboxMode, Triage};
 use crate::runtime::{self, Paths};
 use crate::transport::{self, Secret, TransportConfig};
 use crate::ui::app::{
@@ -455,6 +455,10 @@ struct DesktopView {
     model: Entity<InputState>,
     workspace: Entity<InputState>,
     rename: Entity<InputState>,
+    /// The new-session form's file-access answer. `None` until the operator picks one, so
+    /// an untouched form still starts the session the stored configuration describes —
+    /// including the case where it describes nothing and the plane decides.
+    new_sandbox: Option<SandboxMode>,
     show_new: bool,
     action_error: Option<String>,
     transcript_scroll: ScrollHandle,
@@ -542,6 +546,7 @@ impl DesktopView {
             model,
             workspace,
             rename,
+            new_sandbox: None,
             show_new: false,
             action_error: None,
             transcript_scroll: ScrollHandle::new(),
@@ -893,6 +898,7 @@ impl DesktopView {
         let provider = self.provider.read(cx).value().to_string();
         let model = self.model.read(cx).value().to_string();
         let workspace = self.workspace.read(cx).value().to_string();
+        let sandbox = self.new_sandbox;
         let result = self
             .app
             .as_mut()
@@ -902,6 +908,7 @@ impl DesktopView {
                     provider,
                     (!model.trim().is_empty()).then_some(model),
                     workspace,
+                    sandbox,
                 )
             });
 
@@ -979,6 +986,24 @@ impl DesktopView {
         let result = match self.app.as_mut() {
             None => Err("the runtime is not connected".to_string()),
             Some(app) => app.desktop_set_auto_approve(on),
+        };
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+            }
+            Err(error) => self.action_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// Moves the open session's file-access posture. The label does not follow until the
+    /// runtime's answer re-lists the session, so what the trigger shows is always a
+    /// posture the runtime confirmed rather than the one this window asked for.
+    fn set_sandbox_mode(&mut self, mode: SandboxMode, cx: &mut Context<Self>) {
+        let result = match self.app.as_mut() {
+            None => Err("the runtime is not connected".to_string()),
+            Some(app) => app.desktop_set_sandbox_mode(mode),
         };
         match result {
             Ok(()) => {
@@ -1400,6 +1425,13 @@ impl DesktopView {
             .is_some_and(|app| app.desktop_account().usable);
         let can_start = !requires_chatgpt || account_usable;
         let starting = self.status.starts_with("Starting ");
+        // What the form will actually send: the operator's pick, else the stored default,
+        // else nothing — and "nothing" is drawn as itself rather than as a guessed row.
+        let configured_sandbox = self
+            .app
+            .as_ref()
+            .and_then(|app| app.config.defaults.sandbox_mode());
+        let sandbox = self.new_sandbox.or(configured_sandbox);
 
         design::panel(tokens)
             .flex()
@@ -1496,9 +1528,91 @@ impl DesktopView {
                             .cleanable(true)
                             .prefix(Icon::new(IconName::Folder).small()),
                     ))
-                    .child(div().text_xs().text_color(tokens.ink_3).child(
-                        "Approval and sandbox defaults come from your Ouroboros configuration.",
-                    )),
+                    .child(design::field(
+                        tokens,
+                        "File access",
+                        Some(
+                            if self.new_sandbox.is_some() {
+                                "Your choice"
+                            } else {
+                                "From your configuration"
+                            }
+                            .into(),
+                        ),
+                        div().flex().flex_col().gap_2().children(
+                            App::desktop_sandbox_choices().into_iter().enumerate().map(
+                                |(index, mode)| {
+                                    let chosen = sandbox == Some(mode);
+                                    // The full-access row wears the warning tone whether or
+                                    // not it is the current answer: it is a standing property
+                                    // of that posture, not a highlight for having picked it.
+                                    // Chosen rows are otherwise accent, the ordinary
+                                    // "this is selected" language of the rest of the window.
+                                    let tone = match (mode.warns(), chosen) {
+                                        (true, _) => Tone::Warning,
+                                        (false, true) => Tone::Accent,
+                                        (false, false) => Tone::Neutral,
+                                    };
+                                    design::card(tokens, cx, tone)
+                                        .id(("new-sandbox", index))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .p_2()
+                                        .when(!chosen, |row| row.bg(tokens.surface))
+                                        .border_color(if chosen {
+                                            tokens.tone(cx, tone).border
+                                        } else {
+                                            tokens.line
+                                        })
+                                        .hover(|style| style.bg(tokens.hover))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.new_sandbox = Some(mode);
+                                            this.action_error = None;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .text_sm()
+                                                .font_weight(if chosen {
+                                                    gpui::FontWeight::SEMIBOLD
+                                                } else {
+                                                    gpui::FontWeight::NORMAL
+                                                })
+                                                .when(mode.warns(), |title| {
+                                                    title.text_color(
+                                                        tokens.tone(cx, Tone::Warning).foreground,
+                                                    )
+                                                })
+                                                .child(mode.title())
+                                                .when(chosen, |title| {
+                                                    title.child(
+                                                        Icon::new(IconName::Check)
+                                                            .small()
+                                                            .text_color(tokens.ink_2),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(tokens.ink_3)
+                                                .child(mode.describe()),
+                                        )
+                                },
+                            ),
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.ink_3)
+                            .child("Approval defaults come from your Ouroboros configuration."),
+                    ),
             )
             .child(
                 div()
@@ -2010,6 +2124,10 @@ impl DesktopView {
             .and_then(|session| session.model.clone())
             .unwrap_or_else(|| "Interactive session".to_string());
         let auto_approve = self.app.as_ref().and_then(|app| app.desktop_auto_approve());
+        // Absent means the runtime named no posture for this session. The control is then
+        // omitted rather than guessed at: a picker with a checked row is a claim about
+        // what the agent may touch, and this client does not have one to make.
+        let sandbox = self.app.as_ref().and_then(|app| app.desktop_sandbox_mode());
         let picker_view = cx.entity().downgrade();
         div()
             .px_6()
@@ -2130,6 +2248,50 @@ impl DesktopView {
                                                     )
                                                     .separator()
                                                     .label("This session only; questions still ask")
+                                            })
+                                    }))
+                                    // The OS sandbox, beside the approvals mode and read
+                                    // the same way: what this session may touch, in the
+                                    // runtime's own words. Warning-variant on full access
+                                    // for the reason the row above wears it — a risk
+                                    // posture, not an action highlight.
+                                    .children(sandbox.map(|current| {
+                                        let picker_view = picker_view.clone();
+                                        let trigger =
+                                            design::secondary_button("sandbox-mode", current.label());
+                                        let trigger = if current.warns() {
+                                            trigger.warning()
+                                        } else {
+                                            trigger
+                                        };
+                                        trigger
+                                            .tooltip("What this session's shell may touch")
+                                            .dropdown_menu(move |menu, _window, _cx| {
+                                                let picker_view = picker_view.clone();
+                                                App::desktop_sandbox_choices()
+                                                    .into_iter()
+                                                    .fold(
+                                                        menu.min_w(px(280.0)),
+                                                        move |menu, mode| {
+                                                            let view = picker_view.clone();
+                                                            menu.item(
+                                                                PopupMenuItem::new(mode.title())
+                                                                    .checked(mode == current)
+                                                                    .on_click(move |_, _, cx| {
+                                                                        let _ = view.update(
+                                                                            cx,
+                                                                            |this, cx| {
+                                                                                this.set_sandbox_mode(
+                                                                                    mode, cx,
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    }),
+                                                            )
+                                                        },
+                                                    )
+                                                    .separator()
+                                                    .label("The runtime's own posture, for this session")
                                             })
                                     }))
                                     .child(

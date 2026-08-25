@@ -594,6 +594,28 @@ impl App {
                     }
                 }
             },
+            // The same shape as `Tag::PlanMode`, for the same reasons. Success re-lists so
+            // the footer's C5 cell and the desktop's posture picker read the mode off the
+            // session row the runtime just updated, rather than off a value this client
+            // assumed took hold: whether a change applies now or next turn is the
+            // runtime's answer, and only its own row can report which happened.
+            Tag::SandboxMode { plane, id, want } => match result {
+                Ok(_value) => {
+                    self.inform(
+                        format!("{id} is on {} — {}", want.label(), want.describe()),
+                        if want.warns() {
+                            NoticeKind::Warn
+                        } else {
+                            NoticeKind::Info
+                        },
+                    );
+                    self.refresh_session_lists();
+                }
+                Err(error) => match sandbox_refusal(&error) {
+                    Some(sentence) => self.inform(sentence, NoticeKind::Warn),
+                    None => self.action_failed("file access", plane, &id, error),
+                },
+            },
             Tag::McpList { node } => match result {
                 Ok(value) => self.mcp_read(node, &value),
                 Err(error) => {
@@ -1026,6 +1048,56 @@ fn project_team(value: &Value) -> Option<Row> {
         id,
         raw: value.clone(),
     })
+}
+
+/// The one `interactive.configure {sandbox_mode}` refusal worth rendering as itself.
+///
+/// The runtime's typed answers name `field: "sandbox_mode"` and say, in their own words,
+/// *which* of the several no's this is: a transport that declares no
+/// `dynamic_configuration` at all, one whose `configuration_options` exclude the field, or
+/// a provider whose `normalized_values` do not list the mode. Those are different problems
+/// with different fixes, and the generic renderer shows all of them as one JSON blob.
+///
+/// `None` means "not one of those", and the caller falls back to the generic report rather
+/// than paraphrasing an error it did not recognise.
+fn sandbox_refusal(error: &ClientError) -> Option<String> {
+    let ClientError::Rpc(rpc) = error else {
+        return None;
+    };
+
+    let data = rpc.data.as_ref()?;
+
+    if data.get("field").and_then(Value::as_str) != Some("sandbox_mode") {
+        return None;
+    }
+
+    let reason = data.get("reason").and_then(Value::as_str).unwrap_or("");
+
+    if let Some(message) = data.get("message").and_then(Value::as_str) {
+        return Some(if reason.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message} ({reason})")
+        });
+    }
+
+    // `value_not_accepted` carries the allowlist instead of a sentence, and the allowlist
+    // is the whole answer: it says which postures this provider *would* take.
+    let accepted = data
+        .get("accepted_values")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(model::compact)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|accepted| !accepted.is_empty())?;
+
+    Some(format!(
+        "this session's provider takes only {accepted} for sandbox_mode ({reason})"
+    ))
 }
 
 fn project_plan(value: &Value) -> Option<Row> {

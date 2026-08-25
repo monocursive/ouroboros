@@ -425,11 +425,17 @@ impl App {
     }
 
     /// Starts an interactive session with choices visible in the native form.
+    ///
+    /// `sandbox_mode` is the form's own answer, and `None` means the operator did not
+    /// state one — only then does the stored default apply. An explicit choice wins over
+    /// the config file for the same reason the TUI's dialog works that way: what a file
+    /// supplies is where a control *starts*, never what gets sent.
     pub fn desktop_start_session(
         &mut self,
         provider: String,
         model: Option<String>,
         workspace: String,
+        sandbox_mode: Option<SandboxMode>,
     ) -> Result<String, String> {
         if !self.hello.serves("interactive.start") {
             return Err("this gateway does not serve interactive.start".to_string());
@@ -462,7 +468,7 @@ impl App {
             machine: String::new(),
             workspace: workspace.trim().to_string(),
             approval_mode: self.config.defaults.approval_mode(),
-            sandbox_mode: self.config.defaults.sandbox_mode(),
+            sandbox_mode: sandbox_mode.or_else(|| self.config.defaults.sandbox_mode()),
             objective: String::new(),
             worktree: false,
             plan: false,
@@ -666,6 +672,32 @@ impl App {
 
         self.set_auto_approve(Some(on));
         Ok(())
+    }
+
+    /// The open session's file-access posture, for the composer footer's picker.
+    ///
+    /// `None` means "the runtime has not said", and the native control is *omitted* rather
+    /// than defaulted: a picker showing `Workspace write` for a session whose posture
+    /// nobody stated would be this client inventing a safety fact, and the checked row
+    /// would make the invention look confirmed.
+    pub fn desktop_sandbox_mode(&self) -> Option<SandboxMode> {
+        self.open_sandbox_mode()
+    }
+
+    /// The three postures the picker offers, in the order it draws them.
+    pub fn desktop_sandbox_choices() -> [SandboxMode; 3] {
+        SandboxMode::CHANGEABLE
+    }
+
+    /// Moves the open session's file access, through the same call `/sandbox` sends.
+    ///
+    /// Returns as soon as the request is *issued*; the picker's label does not move until
+    /// the runtime's answer re-lists the session, so what it shows is always a posture the
+    /// runtime confirmed. Local refusals — no session, wrong plane, a gateway that does
+    /// not serve `interactive.configure`, or the mode it is already on — come back here as
+    /// the window's inline error rather than as a notice the desktop never draws.
+    pub fn desktop_set_sandbox_mode(&mut self, mode: SandboxMode) -> Result<(), String> {
+        self.configure_sandbox(mode)
     }
 }
 

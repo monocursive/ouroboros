@@ -24,7 +24,7 @@ use super::transcript::ApprovalDetail;
 use super::transcript_cells::wrap_limited;
 use crate::keymap::{Action, Scope};
 use crate::model::transcript::PlanStatus;
-use crate::model::{Plane, ProviderEntry};
+use crate::model::{Plane, ProviderEntry, SandboxMode};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // The scriptable status line gets its own row above the footer, and only when a
@@ -811,12 +811,21 @@ fn mode_badge(approval_mode: Option<&str>) -> Option<(String, Style)> {
 ///
 /// The unconfined case is the only one coloured differently. `no OS sandbox` is a fact an
 /// operator would want to notice, and the runtime stated it: this is not the client
-/// deciding that silence is dangerous.
+/// deciding that silence is dangerous. A session *started* into `unrestricted` is the same
+/// kind of fact — the runtime said which posture it holds — so it earns the colour too,
+/// and reads as `full access` rather than the schema's word for the parameter.
 fn sandbox_cell(facts: &SessionFacts) -> Option<Segment> {
-    let policy = facts
-        .sandbox_mode
-        .as_deref()
-        .map(|mode| mode.replace('_', "-"));
+    let mode = facts.sandbox_mode.as_deref().and_then(SandboxMode::parse);
+    let policy = facts.sandbox_mode.as_deref().map(|name| {
+        match mode {
+            // Only the full-access row is re-worded: `workspace-write` and `read-only`
+            // already say what they mean, and an operator matching the footer against
+            // `--sandbox-mode` should still recognise them.
+            Some(SandboxMode::Unrestricted) => SandboxMode::Unrestricted.label(),
+            _named_plainly => return name.replace('_', "-"),
+        }
+        .to_string()
+    });
     let mechanism = facts.capabilities.os_sandbox();
 
     let text = match (policy, mechanism) {
@@ -826,7 +835,7 @@ fn sandbox_cell(facts: &SessionFacts) -> Option<Segment> {
         (None, None) => return None,
     };
 
-    let unconfined = mechanism == Some("no OS sandbox");
+    let unconfined = mechanism == Some("no OS sandbox") || mode == Some(SandboxMode::Unrestricted);
     let colour = if unconfined {
         theme::warn()
     } else {
@@ -2395,13 +2404,24 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 ),
                 None => ("approval", dialog.approval_label(), Style::default()),
             },
+            // The full-access row wears the warn colour and states its consequence on the
+            // same line: it is the one value here that takes the OS sandbox away, and a
+            // row an operator cycles past must say so before Enter, not after.
             NewField::SandboxMode => match dialog.sandbox_refusal(providers) {
                 Some(reason) => (
                     "files",
                     format!("{} — {reason}", sandbox_mode_name(dialog)),
                     unavailable_style(),
                 ),
-                None => ("files", dialog.sandbox_label(), Style::default()),
+                None => (
+                    "files",
+                    dialog.sandbox_label(),
+                    if dialog.sandbox_mode().is_some_and(SandboxMode::warns) {
+                        Style::default().fg(theme::warn())
+                    } else {
+                        Style::default()
+                    },
+                ),
             },
             // D7. Two gates, and the row says which one is closed. A gateway that does
             // not serve `interactive.start`'s worktree option cannot honour the toggle,
@@ -3556,6 +3576,11 @@ fn help_keys(app: &App) -> Vec<(&'static str, String, &'static str)> {
         "session",
         "/model /effort".to_string(),
         "the model, and reasoning effort for the next turn only",
+    ));
+    rows.push((
+        "session",
+        "/sandbox".to_string(),
+        "file access: full / workspace / read-only; bare reports",
     ));
     rows.push((
         "session",

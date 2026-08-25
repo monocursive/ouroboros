@@ -1446,6 +1446,113 @@ impl App {
         }
     }
 
+    /// The open session's file-access posture, as the last session list reported it.
+    ///
+    /// `None` covers three different silences on purpose — no session open, no
+    /// `sandbox_mode` on the row, or a name this build cannot parse — because every caller
+    /// of this wants the same thing from all three: say nothing rather than draw a posture
+    /// nobody stated. The footer's C5 cell is the surface that reports an unparseable
+    /// value verbatim; a *picker* cannot, because it would have no row to check.
+    pub fn open_sandbox_mode(&self) -> Option<SandboxMode> {
+        self.sessions
+            .open_info()
+            .and_then(|session| session.sandbox_mode.as_deref())
+            .and_then(SandboxMode::parse)
+    }
+
+    /// `/sandbox full|workspace|read-only`: `interactive.configure {sandbox_mode}`, the
+    /// one path the desktop's posture picker shares.
+    ///
+    /// No toggle and no bare-verb action. Three values have no "the other one", and the
+    /// widest of them removes the OS sandbox — a verb that guessed which way an operator
+    /// meant to move would eventually guess that one. The bare verb reports instead; see
+    /// the slash dispatch.
+    ///
+    /// Whether the change takes hold now or next turn is the *runtime's* answer, not this
+    /// client's: a native session applies it immediately, a managed transport re-executes
+    /// per turn, and an undeclared one refuses. So the notice says what was asked for, and
+    /// the success answer re-lists so the footer catches up with what actually happened —
+    /// exactly what `/plan` and `/model` do.
+    pub(super) fn configure_sandbox(&mut self, want: SandboxMode) -> Result<(), String> {
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            return Err("open a session before changing its file access".to_string());
+        };
+
+        if plane != Plane::Interactive {
+            return Err(format!(
+                "{id} is a coding task; its file access is fixed at start"
+            ));
+        }
+
+        let method = "interactive.configure";
+
+        if !self.hello.serves(method) {
+            return Err(format!(
+                "this gateway does not serve {method}, so file access cannot be changed on a \
+                 running session; start a new one with --sandbox-mode {}",
+                want.as_str()
+            ));
+        }
+
+        if self.open_sandbox_mode() == Some(want) {
+            return Err(format!(
+                "{id} is already on {} — {}",
+                want.label(),
+                want.describe()
+            ));
+        }
+
+        let params = self.routed_session_params(
+            plane,
+            &id,
+            json!({ "id": id, "sandbox_mode": want.as_str() }),
+        );
+
+        self.issue(Call::new(
+            Tag::SandboxMode {
+                plane,
+                id: id.clone(),
+                want,
+            },
+            method,
+            params,
+        ));
+
+        self.inform(
+            format!("asking {id} for {} — {}", want.label(), want.describe()),
+            if want.warns() {
+                NoticeKind::Warn
+            } else {
+                NoticeKind::Info
+            },
+        );
+
+        Ok(())
+    }
+
+    /// What bare `/sandbox` answers with: the posture the session is on, and the words
+    /// that move it. A report rather than a toggle — see [`Self::configure_sandbox`].
+    fn report_sandbox(&mut self) {
+        let accepted = SandboxMode::verb_arguments();
+
+        let text = match (self.sessions.open.as_ref(), self.open_sandbox_mode()) {
+            (None, _) => format!("open a session first; /sandbox takes {accepted}"),
+            (Some((_, id)), Some(mode)) => format!(
+                "{id} is on {} — {}; /sandbox takes {accepted}",
+                mode.label(),
+                mode.describe()
+            ),
+            // The runtime never named one. Saying "workspace write" here would be this
+            // client inventing the answer the footer already declines to invent.
+            (Some((_, id)), None) => format!(
+                "{id} names no file-access mode, so the provider's own applies; /sandbox \
+                 takes {accepted}"
+            ),
+        };
+
+        self.inform(text, NoticeKind::Info);
+    }
+
     /// `/model <name>`: `interactive.configure`, where the gateway serves it.
     ///
     /// The method is behind the `hello.methods` gate like every other verb. A gateway that
@@ -2294,6 +2401,32 @@ impl App {
                     NoticeKind::Info,
                 ),
             }
+            return true;
+        }
+
+        // Three postures, so no toggle: bare `/sandbox` reports and names the words. The
+        // arguments are the operator's vocabulary (`full`), not the wire's
+        // (`unrestricted`) — nothing an operator types should be a schema term.
+        if let Some(argument) = slash_arg(trimmed, "/sandbox") {
+            let argument = argument.to_ascii_lowercase();
+
+            if argument.is_empty() {
+                self.report_sandbox();
+            } else if let Some(want) = SandboxMode::from_verb_argument(&argument) {
+                if let Err(refusal) = self.configure_sandbox(want) {
+                    self.inform(refusal, NoticeKind::Info);
+                }
+            } else {
+                self.inform(
+                    format!(
+                        "/sandbox takes {}, not {argument:?}; bare /sandbox reports the \
+                         posture this session is on",
+                        SandboxMode::verb_arguments()
+                    ),
+                    NoticeKind::Info,
+                );
+            }
+
             return true;
         }
 

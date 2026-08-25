@@ -161,12 +161,16 @@ pub enum Command {
     /// approval the session raises until it is turned off. Client-side — the runtime's
     /// `approval_mode` is untouched, and plan-exit questions still ask.
     AutoApprove,
+    /// The open session's OS file-access posture: `/sandbox full|workspace|read-only`,
+    /// carried by `interactive.configure {sandbox_mode}`. Unlike auto-approve this moves
+    /// the *runtime's* posture rather than a client mode, so it is gated on the method.
+    Sandbox,
     /// D4: the MCP servers this session's node runs, and the entries it refused.
     Mcp,
 }
 
 impl Command {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -212,6 +216,7 @@ impl Command {
         Self::Theme,
         Self::Plan,
         Self::AutoApprove,
+        Self::Sandbox,
         Self::Mcp,
     ];
 
@@ -249,6 +254,7 @@ impl Command {
             | Self::Theme
             | Self::Plan
             | Self::AutoApprove
+            | Self::Sandbox
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -301,6 +307,7 @@ impl Command {
             Self::Theme => "Cycle the colour theme",
             Self::Plan => "Plan without editing anything",
             Self::AutoApprove => "Auto-approve everything this session asks",
+            Self::Sandbox => "Change file access (OS sandbox)",
             Self::Mcp => "Show this node's MCP servers",
         }
     }
@@ -357,6 +364,7 @@ impl Command {
             Self::Theme => "/theme",
             Self::Plan => "/plan",
             Self::AutoApprove => "/auto-approve",
+            Self::Sandbox => "/sandbox",
             Self::Mcp => "/mcp",
         }
     }
@@ -438,6 +446,11 @@ impl App {
                 // Client-side, so no `hello.methods` gate — but like `/plan` it needs a
                 // session to be about.
                 Command::AutoApprove => self.sessions.open.is_some(),
+                // The runtime's own posture, so the same two questions `/plan` asks: is
+                // there a session, and does this gateway serve the verb that moves one.
+                Command::Sandbox => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.configure")
+                }
                 Command::Mcp => self.hello.serves("mcp.list"),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
@@ -1366,6 +1379,14 @@ impl App {
             Command::AutoApprove => {
                 self.overlay = None;
                 self.set_auto_approve(None);
+            }
+            // Three postures have no toggle, so the palette teaches the verb by
+            // prefilling it — the same thing `/model` does with an argument the operator
+            // has to state rather than have guessed for them. The widest of the three
+            // takes the OS sandbox away; a palette row that picked for them could pick it.
+            Command::Sandbox => {
+                self.overlay = None;
+                self.prefill_composer("/sandbox ");
             }
             Command::Mcp => {
                 self.overlay = None;
