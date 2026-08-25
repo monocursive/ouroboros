@@ -43,6 +43,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   alias Jido.Harness.SessionRequest
   alias Jido.Harness.TurnRequest
   alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Provider.Native.Subagent
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -266,11 +267,44 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
       assert node(child) == context.peer
       assert peer_call(context.peer, Process, :alive?, [child])
 
+      # The collection seam, across the link: `agent_result` reaches a child by pid, and
+      # this one's pid is on another machine. A settled child answers without being
+      # released, so the containment claim below is still about a child that exists.
+      assert {:ok, summary} = Subagent.await(child, 10_000)
+      assert summary.status == :completed
+      assert summary.node == context.peer
+      assert summary.remote == true
+      assert Subagent.render(summary) =~ "completed on #{context.peer}."
+
       # Killed rather than closed. `Session.close/1` stops its children on purpose; what is
       # under test is the monitor, which is the only thing left when the parent dies badly.
       Process.exit(handle, :kill)
 
       wait_until(fn -> not peer_call(context.peer, Process, :alive?, [child]) end, 60_000)
+    end
+
+    test "counting a running child on another node does not take the session down", context do
+      %{handle: handle} =
+        open(
+          context,
+          [[{:text, "unused"}, {:finish, :stop}]],
+          [[{:text, "unused"}, {:finish, :stop}]]
+        )
+
+      # A live process on the peer, tracked exactly as a real remote spawn tracks one.
+      # `Process.alive?/1` **raises** for a pid of another node, and the running count is the
+      # one place a session asks that question about every child it holds — so before this
+      # was node-aware, one remote child made `agent`'s own capacity check kill the session.
+      remote = Node.spawn(context.peer, :timer, :sleep, [60_000])
+      assert node(remote) == context.peer
+
+      assert :ok = GenServer.call(handle, {:subagent_track, "remote-live", remote, %{}})
+      assert %{running: 1, tracked: 1} = GenServer.call(handle, :subagent_counts)
+      assert Process.alive?(handle)
+
+      # …and the close path walks the same table with a remote pid in it.
+      assert :ok = Session.close(handle)
+      assert peer_call(context.peer, Process, :exit, [remote, :kill])
     end
   end
 
