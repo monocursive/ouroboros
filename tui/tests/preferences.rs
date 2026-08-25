@@ -24,10 +24,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::json;
 
 use ouro::config::{self, Config, Defaults, Onboarding};
-use ouro::model::{ApprovalMode, Plane};
+use ouro::model::{ApprovalMode, Plane, SandboxMode};
 use ouro::ui::app::{
-    approval_at, approval_index, provider_choices, App, Msg, NewField, Overlay, ProviderChoice,
-    SettingsField, Tab, Tag,
+    approval_at, approval_index, provider_choices, sandbox_at, sandbox_index, App, Msg, NewField,
+    Overlay, ProviderChoice, SettingsField, Tab, Tag,
 };
 
 use support::{app, full_hello, render};
@@ -470,6 +470,93 @@ fn the_approval_cycler_agrees_with_itself_in_both_directions() {
     }
 
     assert_eq!(approval_at(99), None);
+}
+
+/// The sandbox cycler offers every value the schema declares, `unrestricted` included, and
+/// the two directions agree about which row each one is.
+#[test]
+fn the_sandbox_cycler_reaches_every_mode_the_schema_declares() {
+    assert_eq!(sandbox_at(0), None, "row zero is an absent parameter");
+    assert_eq!(sandbox_index(None), 0);
+
+    for mode in SandboxMode::ALL {
+        let index = sandbox_index(Some(mode));
+        assert_eq!(sandbox_at(index), Some(mode), "{mode:?}");
+    }
+
+    assert_eq!(sandbox_at(99), None);
+}
+
+/// `defaults.sandbox_mode = "unrestricted"` survives a write and a read.
+///
+/// [`config::normalise`] drops a value outside [`SandboxMode::ALL`] with a problem naming
+/// it, because sending one would be a `-32602`. `unrestricted` is inside that list, so it
+/// must round-trip untouched and reach the start dialog as a prefilled row — a stored
+/// posture silently downgraded on load would be the worst possible failure here.
+#[test]
+fn full_access_survives_a_config_round_trip() {
+    let dir = scratch("sandbox-round-trip");
+    let path = dir.join(config::CONFIG_FILE);
+
+    let mut written = Config::default();
+    written.defaults.sandbox_mode = Some("unrestricted".into());
+    written.save(&path).expect("a written config");
+
+    let loaded = config::load(path.clone());
+
+    assert!(
+        loaded.problems.is_empty(),
+        "a documented value is not a problem: {:?}",
+        loaded.problems
+    );
+    assert_eq!(
+        loaded.config.defaults.sandbox_mode(),
+        Some(SandboxMode::Unrestricted)
+    );
+    assert!(
+        fs::read_to_string(&path)
+            .expect("a readable config")
+            .contains("unrestricted"),
+        "the file keeps the wire's own word"
+    );
+
+    // And a value that is not one of the four is still dropped, with a problem naming it.
+    let mut invalid = Config::default();
+    invalid.defaults.sandbox_mode = Some("yolo".into());
+    invalid.save(&path).expect("a written config");
+
+    let loaded = config::load(path);
+    assert_eq!(loaded.config.defaults.sandbox_mode, None);
+    assert!(
+        loaded
+            .problems
+            .iter()
+            .any(|problem| problem.contains("yolo") && problem.contains("unrestricted")),
+        "the problem names the value and the four it could have been: {:?}",
+        loaded.problems
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A stored full-access default reaches the start dialog as the row it prefills.
+#[test]
+fn the_start_dialog_opens_on_a_stored_full_access_default() {
+    let mut app = ready_for_n(Defaults {
+        sandbox_mode: Some("unrestricted".into()),
+        ..Defaults::default()
+    });
+
+    apply_leader(&mut app, 'N');
+
+    let screen = render(&mut app, 130, 34);
+    assert!(
+        screen
+            .row("files")
+            .contains("full access — shell runs with no OS sandbox"),
+        "{}",
+        screen.text()
+    );
 }
 
 // ----- prefilling the start dialog -----------------------------------------------------

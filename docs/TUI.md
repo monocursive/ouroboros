@@ -2252,6 +2252,55 @@ with the session or the client, whichever ends first. Auto-answered requests do 
 the needs-input bell, do not count in the footer's approvals cell, and do not triage the
 session as waiting — nothing is waiting on a person.
 
+### Full access, from the client
+
+`sandbox_mode` has four documented values — `default`, `read_only`, `workspace_write`,
+`unrestricted` — and `interactive.configure` takes it on a running session exactly as
+`interactive.start` takes it on a new one. **`/sandbox full`**, **`/sandbox workspace`**,
+and **`/sandbox read-only`** are the three the verb offers; the palette entry ("Change file
+access (OS sandbox)") teaches the verb by prefilling it rather than picking for you, and is
+gated like `/plan` on an open session and a gateway that serves `interactive.configure`.
+
+**No toggle, and bare `/sandbox` reports.** Three postures have no "the other one", and the
+widest of them removes the OS sandbox: a verb that guessed which way you meant to move
+would eventually guess that one. Bare `/sandbox` answers with the posture the session is on
+and the three words that move it — and where the runtime named no posture at all, it says
+*that*, rather than reporting the workspace-write default this client would otherwise be
+inventing.
+
+**The wire says `unrestricted`; every surface says "full access".** `--sandbox-mode
+unrestricted` and the `defaults.sandbox_mode` key keep the schema's word, because they name
+the parameter. What an operator reads never does: the footer's C5 cell draws `full access ·
+no OS sandbox` in the warn colour, the `n` dialog's `files` row reads `full access — shell
+runs with no OS sandbox` in the same colour, and the refusal for an argument the verb
+cannot read names `full, workspace, read-only`. The colour is a *risk posture*, not an
+action highlight — the runtime stated the session runs unconfined, and the cell repeats it.
+
+**Refusals are rendered as themselves**, the way `/plan`'s `at_start_only` is. A transport
+that declares no `dynamic_configuration`, or whose `configuration_options` exclude the
+field, answers with a typed `unsupported_configuration` naming `sandbox_mode` and saying in
+its own words what to do instead; a provider whose `normalized_values` exclude the mode
+answers `value_not_accepted` with the allowlist it *would* take, which is quoted verbatim.
+Anything else falls back to the generic report rather than being paraphrased. A success
+re-lists, so the footer follows a posture the runtime confirmed rather than the one this
+client asked for — whether a change applies now or next turn is the runtime's answer, and
+only its own session row can report which happened.
+
+**The new approval kind.** A command the sandbox stopped arrives as an
+`approval_requested` with `kind: "sandbox_escalation"`, the `tool_call` that was stopped
+(its `command` and `cwd`), the `reason` the sandbox gave, and — where
+`Control.Permissions` suggested one — a `suggested_rule`. The modal states all of them, and
+the fifth answer ("approve, and don't ask again for …") appears exactly where a rule can
+actually be saved: the gateway serves `permissions.add` and the session names a workspace
+to scope it to. Where it cannot, the modal says which of the two is missing rather than
+offering an answer that would fail.
+
+**It composes with auto-approve.** An escalation is a *permission*, not a question, so a
+session in `/auto-approve on` answers it like any other — `approve, once, actor:
+automation`. The mode never writes the durable rule the fifth answer would: a standing yes
+for one session is not consent to a workspace allow rule that outlives it. Full access and
+auto-approve are separate decisions, and holding both is an operator's to make.
+
 ### `ouro mcp` and `/mcp` (D4)
 
 `mcp.list` is the read, and it is the only half that touches the socket. `/mcp` asks the

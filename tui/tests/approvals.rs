@@ -829,3 +829,73 @@ fn auto_approve_never_answers_an_ask_user_question() {
         screen.text()
     );
 }
+
+/// Composition: full access and auto-approve are two separate decisions, and an operator
+/// can hold both.
+///
+/// A `sandbox_escalation` is a **permission** — `kind` is not `"question"` — so the mode
+/// answers it like any other, `approve, once, actor: automation`. What it does *not* do is
+/// write the durable rule the modal's fifth answer would: a standing yes for this session
+/// is not consent to a workspace allow rule that outlives it, and `scope: once` is the
+/// whole of what the robot grants.
+#[test]
+fn auto_approve_answers_a_sandbox_escalation_without_writing_its_rule() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    // The exact payload the runtime raises when a command is stopped by the sandbox: the
+    // kind, the command and cwd it stopped, the reason, and the rule that would end it.
+    approve(&mut app, codex_sandbox_escalation());
+
+    let calls = app.drain();
+    let answered = calls
+        .iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("an escalation is a permission, so the mode answers it");
+
+    assert_eq!(
+        answered.params,
+        json!({
+            "id": SESSION,
+            "request_id": "req-17",
+            "response": { "decision": "approve", "scope": "once", "actor": "automation" }
+        })
+    );
+    assert!(
+        calls.iter().all(|call| call.method != "permissions.add"),
+        "the durable rule belongs to the fifth answer a person chooses, not to the mode"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        !screen.contains("sandbox escalation"),
+        "an answered escalation raises no modal:\n{}",
+        screen.text()
+    );
+}
+
+/// The escalation modal a person *does* see states every field the payload carries — the
+/// command that was stopped, where it ran, and the reason the sandbox gave — beside the
+/// fifth answer that would stop it being asked again.
+#[test]
+fn the_escalation_modal_states_the_command_the_cwd_the_reason_and_the_rule() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(screen.contains("approval requested — sandbox escalation"));
+    assert!(screen.contains("cargo test --all"), "{}", screen.text());
+    assert!(screen.contains("cwd /tmp/w"), "{}", screen.text());
+    assert!(
+        screen.contains("the sandbox refused a write outside the workspace"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("approve, and don't ask again for Bash(cargo test *)"),
+        "the fifth answer is present where a rule can actually be saved:\n{}",
+        screen.text()
+    );
+}

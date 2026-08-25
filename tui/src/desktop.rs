@@ -1543,11 +1543,14 @@ impl DesktopView {
                             App::desktop_sandbox_choices().into_iter().enumerate().map(
                                 |(index, mode)| {
                                     let chosen = sandbox == Some(mode);
-                                    // The full-access row wears the warning tone whether or
-                                    // not it is the current answer: it is a standing property
-                                    // of that posture, not a highlight for having picked it.
-                                    // Chosen rows are otherwise accent, the ordinary
-                                    // "this is selected" language of the rest of the window.
+                                    // Two separate signals, deliberately. The full-access
+                                    // row's *title* is warning-coloured always, because
+                                    // that is a standing property of the posture and an
+                                    // operator should see it before choosing. The card's
+                                    // fill and border are the ordinary "this is selected"
+                                    // language of the rest of the window — accent for the
+                                    // two safe rows, warning for this one, so picking it
+                                    // never reads as an action highlight.
                                     let tone = match (mode.warns(), chosen) {
                                         (true, _) => Tone::Warning,
                                         (false, true) => Tone::Accent,
@@ -2254,11 +2257,15 @@ impl DesktopView {
                                     // the same way: what this session may touch, in the
                                     // runtime's own words. Warning-variant on full access
                                     // for the reason the row above wears it — a risk
-                                    // posture, not an action highlight.
+                                    // posture, not an action highlight. The trigger wears
+                                    // the same words as the menu row it corresponds to,
+                                    // consequence included: a control that abbreviated
+                                    // what the checked row spells out would be the one
+                                    // place an operator could misread the posture.
                                     .children(sandbox.map(|current| {
                                         let picker_view = picker_view.clone();
                                         let trigger =
-                                            design::secondary_button("sandbox-mode", current.label());
+                                            design::secondary_button("sandbox-mode", current.title());
                                         let trigger = if current.warns() {
                                             trigger.warning()
                                         } else {
