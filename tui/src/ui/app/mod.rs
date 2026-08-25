@@ -2020,24 +2020,31 @@ impl App {
         (owner != local).then_some(owner)
     }
 
+    /// Why an outbound request for this session must not be sent, if it must not.
+    ///
+    /// The sentence lives here rather than at each call site so the two ways of refusing —
+    /// a notice for a keypress, a returned `Err` for a native control that draws its own
+    /// errors — cannot drift into two different explanations of the same fact.
+    fn owner_conflict_refusal(&self, plane: Plane, id: &str) -> Option<String> {
+        let owners = self
+            .sessions
+            .owner_conflict(plane, id)
+            .map(|owners| owners.join(" and "))?;
+
+        Some(format!(
+            "session ID {id} belongs to {owners}; no request was sent. Explicit IDs must be fleet-unique (generated IDs already are); stop or restart one duplicate with a unique ID, then reconnect this TUI"
+        ))
+    }
+
     /// V1 stream notifications do not carry an owner node. Until that wire contract is
     /// versioned, two explicit IDs on different machines cannot be distinguished safely.
     /// Every outbound session path calls this before it can choose or omit a route.
     fn refuse_owner_conflict(&mut self, plane: Plane, id: &str) -> bool {
-        let Some(owners) = self
-            .sessions
-            .owner_conflict(plane, id)
-            .map(|owners| owners.join(" and "))
-        else {
+        let Some(refusal) = self.owner_conflict_refusal(plane, id) else {
             return false;
         };
 
-        self.inform(
-            format!(
-                "session ID {id} belongs to {owners}; no request was sent. Explicit IDs must be fleet-unique (generated IDs already are); stop or restart one duplicate with a unique ID, then reconnect this TUI"
-            ),
-            NoticeKind::Error,
-        );
+        self.inform(refusal, NoticeKind::Error);
         true
     }
 

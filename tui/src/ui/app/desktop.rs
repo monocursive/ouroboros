@@ -695,9 +695,12 @@ impl App {
     /// the runtime's answer re-lists the session, so what it shows is always a posture the
     /// runtime confirmed. Local refusals — no session, wrong plane, a gateway that does
     /// not serve `interactive.configure`, or the mode it is already on — come back here as
-    /// the window's inline error rather than as a notice the desktop never draws.
+    /// the window's inline error rather than as a notice the desktop never draws. Their
+    /// severity is dropped rather than translated: the window has one error slot, and a
+    /// refused change is a refused change in it.
     pub fn desktop_set_sandbox_mode(&mut self, mode: SandboxMode) -> Result<(), String> {
         self.configure_sandbox(mode)
+            .map_err(|(_kind, refusal)| refusal)
     }
 }
 

@@ -1473,32 +1473,53 @@ impl App {
     /// per turn, and an undeclared one refuses. So the notice says what was asked for, and
     /// the success answer re-lists so the footer catches up with what actually happened —
     /// exactly what `/plan` and `/model` do.
-    pub(super) fn configure_sandbox(&mut self, want: SandboxMode) -> Result<(), String> {
+    ///
+    /// A local refusal comes back with the severity it deserves rather than the severity
+    /// of whichever surface asked: "already on that posture" is a remark, and "this id
+    /// names two machines" is an error, on the terminal and in the native window alike.
+    pub(super) fn configure_sandbox(
+        &mut self,
+        want: SandboxMode,
+    ) -> Result<(), (NoticeKind, String)> {
         let Some((plane, id)) = self.sessions.open.clone() else {
-            return Err("open a session before changing its file access".to_string());
+            return Err((
+                NoticeKind::Info,
+                "open a session before changing its file access".to_string(),
+            ));
         };
 
         if plane != Plane::Interactive {
-            return Err(format!(
-                "{id} is a coding task; its file access is fixed at start"
+            return Err((
+                NoticeKind::Info,
+                format!("{id} is a coding task; its file access is fixed at start"),
             ));
+        }
+
+        // This call routes itself with `routed_session_params`, so it is one of the
+        // outbound paths that must not guess which machine an ambiguous id names — and
+        // moving an OS sandbox on the wrong machine's session is the worst way to find
+        // out that two of them share an id.
+        if let Some(refusal) = self.owner_conflict_refusal(plane, &id) {
+            return Err((NoticeKind::Error, refusal));
         }
 
         let method = "interactive.configure";
 
         if !self.hello.serves(method) {
-            return Err(format!(
-                "this gateway does not serve {method}, so file access cannot be changed on a \
-                 running session; start a new one with --sandbox-mode {}",
-                want.as_str()
+            return Err((
+                NoticeKind::Warn,
+                format!(
+                    "this gateway does not serve {method}, so file access cannot be changed on \
+                     a running session; start a new one with --sandbox-mode {}",
+                    want.as_str()
+                ),
             ));
         }
 
         if self.open_sandbox_mode() == Some(want) {
-            return Err(format!(
-                "{id} is already on {} — {}",
-                want.label(),
-                want.describe()
+            return Err((
+                NoticeKind::Info,
+                format!("{id} is already on {} — {}", want.label(), want.describe()),
             ));
         }
 
@@ -2413,8 +2434,8 @@ impl App {
             if argument.is_empty() {
                 self.report_sandbox();
             } else if let Some(want) = SandboxMode::from_verb_argument(&argument) {
-                if let Err(refusal) = self.configure_sandbox(want) {
-                    self.inform(refusal, NoticeKind::Info);
+                if let Err((kind, refusal)) = self.configure_sandbox(want) {
+                    self.inform(refusal, kind);
                 }
             } else {
                 self.inform(

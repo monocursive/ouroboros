@@ -1000,6 +1000,31 @@ mod tests {
         assert!(print);
     }
 
+    /// `--sandbox-mode unrestricted` reaches the start unmolested.
+    ///
+    /// The flag is a wire word by design: it is validated against `SandboxMode::ALL` and
+    /// sent verbatim, with no client-side allowlist narrower than the gateway's own. The
+    /// clients' *labels* say "full access"; nothing translates the flag on the way in.
+    #[test]
+    fn ouro_new_carries_every_documented_sandbox_mode_verbatim() {
+        for mode in crate::model::SandboxMode::ALL {
+            let Some(Command::New { sandbox_mode, .. }) =
+                parse(&["new", "--sandbox-mode", mode.as_str()]).command
+            else {
+                panic!("`ouro new --sandbox-mode {}` must parse", mode.as_str());
+            };
+
+            assert_eq!(sandbox_mode.as_deref(), Some(mode.as_str()));
+            assert_eq!(
+                sandbox_mode
+                    .as_deref()
+                    .and_then(crate::model::SandboxMode::parse),
+                Some(mode),
+                "the string the flag carries is the string the start validates"
+            );
+        }
+    }
+
     /// There is no `--token` anywhere, and that is a property worth failing a build over.
     #[test]
     fn no_subcommand_accepts_a_token_on_the_command_line() {
