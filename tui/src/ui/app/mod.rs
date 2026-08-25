@@ -74,7 +74,7 @@ use session::{
 
 pub use desktop::{
     DesktopAccount, DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell,
-    DesktopCellKind, DesktopSession, DesktopTone,
+    DesktopCellKind, DesktopQuickStart, DesktopSession, DesktopTone,
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{
@@ -932,6 +932,15 @@ pub struct App {
     /// The coding home's first prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<PendingFirstMessage>,
+    /// A quick-start prompt a refused start took with it, waiting for the desktop to take
+    /// it back.
+    ///
+    /// The terminal keeps a refused first message in its own home draft or restores it into
+    /// the session composer; a native window renders neither, so without this hand-back the
+    /// operator's text would disappear leaving only an error behind. Set only for starts
+    /// [`App::desktop_quick_start`] issued, and drained by
+    /// [`App::desktop_take_restored_draft`].
+    desktop_restored_draft: Option<String>,
     /// A start launched from an existing composer (currently `/write`) has no modal to
     /// retain its retry boundary. Keep it here until success or a definite refusal.
     pending_background_start: Option<StartRequest>,
@@ -1114,6 +1123,7 @@ impl App {
             save_pending: false,
             save_quiet: false,
             first_message: None,
+            desktop_restored_draft: None,
             pending_background_start: None,
             open_url_pending: None,
             leader_until: None,

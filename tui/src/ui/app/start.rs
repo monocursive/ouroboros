@@ -589,12 +589,20 @@ impl App {
         // error would trap the caller in same-id reconciliation despite a known outcome.
         if let Some(failure) = start_failure {
             if let Some(first_message) = self.first_message.take() {
-                self.restore_refused_first_message(
-                    plane,
-                    &started.id,
-                    first_message.input,
-                    ComposerVerb::Message,
-                );
+                // A native window draws neither the session composer nor its saved drafts,
+                // so a prompt it typed goes back through the desktop seam instead. One
+                // owner rather than two: text left in both places would collide with the
+                // terminal-draft guard in `desktop_submit_message`.
+                if first_message.desktop {
+                    self.desktop_restored_draft = Some(first_message.input);
+                } else {
+                    self.restore_refused_first_message(
+                        plane,
+                        &started.id,
+                        first_message.input,
+                        ComposerVerb::Message,
+                    );
+                }
             }
 
             self.inform(
@@ -650,14 +658,6 @@ impl App {
                 // the most, and it is the one the coding home's tips were beside.
                 self.count_prompt();
             } else {
-                if let Some(composer) = self.sessions.composer.as_mut() {
-                    composer.editor.clear_text();
-                    composer
-                        .editor
-                        .paste(&first_message.input, &self.completion_catalog);
-                    composer.user_changed_draft();
-                }
-                self.remember_composer_history();
                 // The session exists and the message does not. Saying which is the only
                 // honest answer; the composer below is where it can be retyped.
                 self.inform(
@@ -667,6 +667,22 @@ impl App {
                     ),
                     NoticeKind::Warn,
                 );
+
+                // A native window has no session composer to retype it in; its prompt goes
+                // back through the desktop seam.
+                if first_message.desktop {
+                    self.desktop_restored_draft = Some(first_message.input);
+                    return;
+                }
+
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.editor.clear_text();
+                    composer
+                        .editor
+                        .paste(&first_message.input, &self.completion_catalog);
+                    composer.user_changed_draft();
+                }
+                self.remember_composer_history();
 
                 self.restore_refused_first_message(
                     plane,
@@ -914,8 +930,18 @@ impl App {
         {
             self.home_pending = false;
             if outcome_unknown {
+                let mut handed_back = None;
                 if let Some(pending) = self.first_message.as_mut() {
                     pending.start_outcome_unknown = true;
+                    if pending.desktop {
+                        handed_back = Some(pending.input.clone());
+                    }
+                }
+                // The terminal still has this prompt in its home draft. A native window
+                // cleared its box when the start was issued, so the text goes back there —
+                // resubmitting it unchanged is what replays this same session id.
+                if let Some(text) = handed_back {
+                    self.desktop_restored_draft = Some(text);
                 }
                 self.home_error = Some(format!(
                     "{message}. Session {id} may already exist; press Enter to reconcile the \
@@ -924,7 +950,9 @@ impl App {
             } else {
                 // A definite refusal means this id cannot become a session. Keep the
                 // visible draft, but the next submission mints a fresh start identity.
-                self.first_message = None;
+                if let Some(pending) = self.first_message.take().filter(|pending| pending.desktop) {
+                    self.desktop_restored_draft = Some(pending.input);
+                }
                 self.home_error = Some(message);
             }
             return;

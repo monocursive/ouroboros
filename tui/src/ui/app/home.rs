@@ -151,6 +151,38 @@ impl App {
             return;
         }
 
+        if let Err(refusal) = self.issue_quick_start(provider, prompt, false) {
+            self.home_error = Some(refusal);
+        }
+    }
+
+    /// Issues one interactive quick start and holds `prompt` as that session's first
+    /// message until the start answers.
+    ///
+    /// The terminal home and the desktop's no-session composer both submit through here so
+    /// that the request they build, the same-id replay after an outcome-unknown refusal,
+    /// and the bookkeeping [`App::started`] dispatches the prompt from cannot drift apart.
+    ///
+    /// Callers keep their own refusals: capability, scope, empty-prompt, and account checks
+    /// read differently on a home screen and in a window, and this function makes none of
+    /// them. The one refusal it can produce is the request's own — a `StartRequest` that
+    /// does not describe a session — returned rather than displayed, because the two
+    /// surfaces show it in different places.
+    ///
+    /// `desktop` records which surface typed the prompt, so a refused start can hand the
+    /// text back to a composer that surface actually draws.
+    ///
+    /// The stored provider default and the welcome marker are written for both callers: the
+    /// provider written down is exactly the one this start used, and reaching a first
+    /// session is the same event whichever composer it was typed in. The desktop driver
+    /// does not drain [`App::take_config_save`] today, so there the two are in-memory state
+    /// rather than a file write — nothing on screen says otherwise.
+    pub(super) fn issue_quick_start(
+        &mut self,
+        provider: String,
+        prompt: String,
+        desktop: bool,
+    ) -> Result<(), String> {
         let request = self
             .first_message
             .as_ref()
@@ -172,13 +204,7 @@ impl App {
                 plan: false,
             });
 
-        let params = match request.params() {
-            Ok(params) => params,
-            Err(refusal) => {
-                self.home_error = Some(refusal.message());
-                return;
-            }
-        };
+        let params = request.params().map_err(|refusal| refusal.message())?;
 
         self.home_pending = true;
         self.home_error = None;
@@ -189,6 +215,7 @@ impl App {
                     && pending.start.id == request.id =>
             {
                 pending.start_outcome_unknown = false;
+                pending.desktop = desktop;
             }
             _ => {
                 self.first_message = Some(PendingFirstMessage {
@@ -196,6 +223,7 @@ impl App {
                     turn_id: new_turn_id(),
                     start: request.clone(),
                     start_outcome_unknown: false,
+                    desktop,
                 });
             }
         }
@@ -214,6 +242,7 @@ impl App {
             )
             .with_timeout(START_TIMEOUT),
         );
+        Ok(())
     }
 
     /// Starts a new interactive session that can edit the workspace.

@@ -102,6 +102,34 @@ pub struct DesktopApprovalDiff {
     pub text: String,
 }
 
+/// What a quick start would do, read from the same functions that would do it.
+///
+/// The window shows this beside the composer so the shortest path to a session is not also
+/// the least legible one: the provider, model, and workspace here are the values
+/// [`App::desktop_quick_start`] will send, not a second description of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopQuickStart {
+    pub provider: String,
+    pub model: String,
+    /// The stored default workspace, or the directory this client was launched in. Empty
+    /// where neither exists, in which case the runtime resolves the session's own.
+    pub workspace: String,
+    /// Whether this gateway would take a start at all: it serves `interactive.start` and
+    /// this listener runs at operate scope.
+    ///
+    /// Not a promise that the next start succeeds. A ChatGPT-gated default model is refused
+    /// at submit time, where the account card that fixes it is already on screen — a
+    /// composer greyed out for that reason would hide the one thing worth acting on.
+    pub ready: bool,
+    /// Whether the composer has to wait: a start is in flight, or a first message is still
+    /// waiting for the session it belongs to.
+    ///
+    /// False once a start's outcome is *unknown*, because that is a state the operator can
+    /// act on — resubmitting the same prompt reconciles that same session id, and a box
+    /// disabled at that moment would hide the only move available.
+    pub pending: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopAccount {
     pub resolved: bool,
@@ -422,6 +450,96 @@ impl App {
         composer.user_changed_draft();
         self.submit_composer();
         Ok(())
+    }
+
+    /// What the no-session composer will start, before it is asked to start it.
+    pub fn desktop_quick_start_context(&self) -> DesktopQuickStart {
+        DesktopQuickStart {
+            provider: self.home_provider().to_string(),
+            model: self.home_model().to_string(),
+            workspace: self.default_workspace(),
+            ready: self.hello.serves("interactive.start") && self.hello.operates(),
+            // The same two conditions `desktop_quick_start` refuses on, so a live Start
+            // button and an accepted start are the same answer.
+            pending: self.home_pending
+                || self
+                    .first_message
+                    .as_ref()
+                    .is_some_and(|pending| !pending.start_outcome_unknown),
+        }
+    }
+
+    /// Starts an interactive session with the stored defaults and sends `text` as its
+    /// first message.
+    ///
+    /// The window's composer with no session open. Everything about the request — provider,
+    /// model, workspace, the approval and sandbox defaults, the first-message bookkeeping,
+    /// and the same-id replay after an outcome-unknown refusal — comes from the same
+    /// function the terminal home submits through, so the two clients cannot mean different
+    /// things by "quick start".
+    ///
+    /// A leading `/` is sent as text rather than run. Slash commands are a terminal grammar
+    /// with a completion catalog and overlays behind them; a window that silently swallowed
+    /// a line instead of sending it would be claiming a command surface it does not draw.
+    ///
+    /// Returning `Err` leaves the prompt with the caller: the window keeps what was typed.
+    pub fn desktop_quick_start(&mut self, text: &str) -> Result<(), String> {
+        if !self.hello.serves("interactive.start") {
+            return Err("this gateway does not serve interactive.start".to_string());
+        }
+        if !self.hello.operates() {
+            return Err(format!(
+                "starting a session mutates the runtime, and this listener runs at scope `{}`",
+                self.hello.scope
+            ));
+        }
+
+        let prompt = text.trim().to_string();
+        if prompt.is_empty() {
+            return Err("type what you want the agent to do".to_string());
+        }
+
+        // Only the OAuth-backed direct model needs ChatGPT sign-in, and the account card
+        // that grants it is on the same screen as this refusal.
+        if self.home_requires_chatgpt() && !self.codex_usable() {
+            return Err(format!(
+                "connect ChatGPT before starting a session on {}",
+                self.home_model()
+            ));
+        }
+
+        if self.home_pending {
+            return Err("a session start is already in flight".to_string());
+        }
+        if let Some(pending) = self.first_message.as_ref() {
+            if !pending.start_outcome_unknown {
+                return Err(
+                    "a first message is already waiting for its session to start".to_string(),
+                );
+            }
+            // The previous start's outcome is unknown, so its id is still the only safe
+            // thing to send. Editing the prompt would mint a new id and risk a duplicate
+            // session; resubmitting it unchanged replays the same one.
+            if pending.input != prompt {
+                return Err(format!(
+                    "start {} may already exist; send that same prompt again to reconcile its \
+                     session id before changing it",
+                    pending.start.id
+                ));
+            }
+        }
+
+        let provider = self.home_provider().to_string();
+        self.issue_quick_start(provider, prompt, true)
+    }
+
+    /// Takes back a quick-start prompt whose start the runtime refused.
+    ///
+    /// The reducer restores a refused first message into terminal state — the home draft or
+    /// the session composer — that a native window never renders. This hands the same text
+    /// to the window instead, once, so a failed start costs an error and not the typing.
+    pub fn desktop_take_restored_draft(&mut self) -> Option<String> {
+        self.desktop_restored_draft.take()
     }
 
     /// Starts an interactive session with choices visible in the native form.

@@ -181,6 +181,12 @@ pub(super) struct PendingFirstMessage {
     pub(super) turn_id: String,
     pub(super) start: StartRequest,
     pub(super) start_outcome_unknown: bool,
+    /// Whether the desktop seam issued this start rather than the terminal home.
+    ///
+    /// The two clients never share a process, so this is not a mode flag: it records which
+    /// surface typed the prompt, so a refused start hands the text back to a composer that
+    /// surface actually draws.
+    pub(super) desktop: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

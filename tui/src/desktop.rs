@@ -51,6 +51,12 @@ const COLLAPSED_TOOL_TAIL_LINES: usize = 4;
 const COLLAPSED_TOOL_CHARS: usize = 2_400;
 const COLLAPSED_TOOL_HEAD_CHARS: usize = 1_600;
 const COLLAPSED_TOOL_TAIL_CHARS: usize = 600;
+/// The three things the one composer can be, said in the box itself. Enter does something
+/// different in each, and the placeholder is the only part of the control that can say so
+/// before it is pressed.
+const COMPOSER_MESSAGE_PLACEHOLDER: &str = "Message the open session…";
+const COMPOSER_QUICK_START_PLACEHOLDER: &str = "Start a new session…";
+const COMPOSER_UNAVAILABLE_PLACEHOLDER: &str = "Connect a runtime to start a session";
 #[cfg(target_os = "macos")]
 const MACOS_APP_ICON: &str = "Ouroboros.icns";
 
@@ -455,6 +461,9 @@ struct DesktopView {
     model: Entity<InputState>,
     workspace: Entity<InputState>,
     rename: Entity<InputState>,
+    /// What the composer's placeholder currently says, so it is only rewritten when the
+    /// answer changes: `set_placeholder` notifies, and notifying every frame never settles.
+    composer_placeholder: &'static str,
     /// The new-session form's file-access answer. `None` until the operator picks one, so
     /// an untouched form still starts the session the stored configuration describes —
     /// including the case where it describes nothing and the plane decides.
@@ -477,7 +486,7 @@ impl DesktopView {
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(2, 8)
-                .placeholder("Message the open session…")
+                .placeholder(COMPOSER_MESSAGE_PLACEHOLDER)
         });
         let provider = cx.new(|cx| {
             InputState::new(window, cx)
@@ -520,14 +529,14 @@ impl DesktopView {
             ));
         }
 
-        let poll = cx.spawn(async move |view, cx| loop {
+        // Spawned against the window rather than the app: the tick puts a refused
+        // quick-start prompt back into the composer, and writing an input's value needs the
+        // window that draws it.
+        let poll = cx.spawn_in(window, async move |view, cx| loop {
             Timer::after(TICK).await;
-            let Some(view) = view.upgrade() else {
-                break;
-            };
             if view
-                .update(cx, |this, cx| {
-                    this.poll(cx);
+                .update_in(cx, |this, window, cx| {
+                    this.poll(window, cx);
                     cx.notify();
                 })
                 .is_err()
@@ -546,6 +555,7 @@ impl DesktopView {
             model,
             workspace,
             rename,
+            composer_placeholder: COMPOSER_MESSAGE_PLACEHOLDER,
             new_sandbox: None,
             show_new: false,
             action_error: None,
@@ -559,7 +569,7 @@ impl DesktopView {
         }
     }
 
-    fn poll(&mut self, cx: &mut Context<Self>) {
+    fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Ok(event) = self.driver.events.try_recv() {
             match event {
                 DriverEvent::Status(status) => self.status = status,
@@ -609,6 +619,19 @@ impl DesktopView {
                 );
             }
         }
+
+        // A start the runtime refused takes the prompt that was typed into it. The reducer
+        // holds that text for exactly one hand-back and this window is the only place it
+        // can go. A draft typed since the failure is newer and wins — the same rule the
+        // reducer's own restore paths follow.
+        let restored = self.app.as_mut().and_then(App::desktop_take_restored_draft);
+        if let Some(restored) = restored {
+            if self.composer.read(cx).value().trim().is_empty() {
+                self.composer
+                    .update(cx, |input, cx| input.set_value(restored, window, cx));
+            }
+        }
+
         self.flush_calls();
         if let Some(app) = self.app.as_ref() {
             let len = app.desktop_transcript().len();
@@ -864,19 +887,37 @@ impl DesktopView {
         });
     }
 
+    /// Sends the composer's draft: to the open session, or — with none open — as the first
+    /// message of a session this starts with the stored defaults.
+    ///
+    /// The refusal path keeps the text. A start can still be refused asynchronously, and
+    /// the reducer hands that prompt back through `poll`.
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
+        let quick_start = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.sessions.open.is_none());
         let result = self
             .app
             .as_mut()
             .ok_or_else(|| "the runtime is not connected yet".to_string())
-            .and_then(|app| app.desktop_submit_message(&text));
+            .and_then(|app| {
+                if quick_start {
+                    app.desktop_quick_start(&text)
+                } else {
+                    app.desktop_submit_message(&text)
+                }
+            });
 
         match result {
             Ok(()) => {
                 self.composer
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.action_error = None;
+                if quick_start {
+                    self.status = "Starting a new session…".to_string();
+                }
                 self.flush_calls();
             }
             Err(error) => self.action_error = Some(error),
@@ -1820,6 +1861,28 @@ impl DesktopView {
             .as_ref()
             .and_then(|app| app.sessions.open.as_ref())
             .is_some();
+        // The composer below this state starts a session when none is open, so the empty
+        // state points at it. Only where the reducer would actually take a start: on a
+        // read-scope listener, or before the runtime answers, the composer is disabled and
+        // "type below" would be a promise this client cannot keep.
+        let idle_body = match self
+            .app
+            .as_ref()
+            .filter(|app| app.sessions.open.is_none())
+            .map(App::desktop_quick_start_context)
+            .filter(|quick| quick.ready)
+        {
+            Some(quick) if !quick.workspace.is_empty() => format!(
+                "Type below to start immediately in {}, or press New session to choose \
+                 provider, model, and workspace.",
+                quick.workspace
+            ),
+            Some(_) => "Type below to start immediately, or press New session to choose \
+                        provider, model, and workspace."
+                .to_string(),
+            None => "Choose a workspace and model, then let Ouroboros keep the work visible."
+                .to_string(),
+        };
         let rendered_cells = cells
             .into_iter()
             .enumerate()
@@ -1868,11 +1931,11 @@ impl DesktopView {
                             "Start a focused session"
                         },
                         if self.show_new {
-                            "The session will appear here as soon as it starts."
+                            "The session will appear here as soon as it starts.".to_string()
                         } else if has_open_session {
-                            "Send a message below to begin this session."
+                            "Send a message below to begin this session.".to_string()
                         } else {
-                            "Choose a workspace and model, then let Ouroboros keep the work visible."
+                            idle_body
                         },
                     )
                     .when(!has_open_session && !self.show_new, |state| {
@@ -2096,6 +2159,26 @@ impl DesktopView {
         )
     }
 
+    /// Keeps the composer's placeholder saying what pressing Enter will actually do.
+    ///
+    /// Written through the input's own state rather than the element, and only when the
+    /// answer changes: `set_placeholder` notifies, and a notify every frame never settles.
+    fn sync_composer_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = match self.app.as_ref() {
+            Some(app) if app.sessions.open.is_some() => COMPOSER_MESSAGE_PLACEHOLDER,
+            Some(app) if app.desktop_quick_start_context().ready => {
+                COMPOSER_QUICK_START_PLACEHOLDER
+            }
+            _ => COMPOSER_UNAVAILABLE_PLACEHOLDER,
+        };
+        if self.composer_placeholder == wanted {
+            return;
+        }
+        self.composer_placeholder = wanted;
+        self.composer
+            .update(cx, |input, cx| input.set_placeholder(wanted, window, cx));
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = design::tokens(cx);
         let selected = self.app.as_ref().and_then(|app| {
@@ -2114,18 +2197,56 @@ impl DesktopView {
             .app
             .as_ref()
             .is_some_and(|app| app.desktop_account().usable);
-        let can_send = selected
+        // With nothing open the composer is a quick start rather than a disabled box that
+        // offers to message a session that does not exist: the reducer starts one on the
+        // stored defaults and sends what was typed as its first message.
+        let quick_start = self
+            .app
             .as_ref()
-            .is_some_and(|session| session.plane == Plane::Interactive)
-            && (!requires_chatgpt || account_usable);
+            .filter(|app| app.sessions.open.is_none())
+            .map(App::desktop_quick_start_context);
+        let can_send = match quick_start.as_ref() {
+            Some(quick) => quick.ready && !quick.pending,
+            None => {
+                selected
+                    .as_ref()
+                    .is_some_and(|session| session.plane == Plane::Interactive)
+                    && (!requires_chatgpt || account_usable)
+            }
+        };
         let working = selected
             .as_ref()
             .is_some_and(|session| session.triage == Triage::Working);
         let composer_empty = self.composer.read(cx).value().trim().is_empty();
-        let session_context = selected
-            .as_ref()
-            .and_then(|session| session.model.clone())
-            .unwrap_or_else(|| "Interactive session".to_string());
+        let (send_label, send_tooltip) = match quick_start.as_ref() {
+            Some(_) => ("Start", "Start a session with this prompt · ↩"),
+            None => ("Send", "Send message · ↩"),
+        };
+        // What Enter will do, in the same words the button wears.
+        let (session_context, context_tooltip) = match quick_start.as_ref() {
+            Some(quick) => {
+                let mut parts = vec![
+                    "New session".to_string(),
+                    quick.provider.clone(),
+                    quick.model.clone(),
+                ];
+                if !quick.workspace.is_empty() {
+                    parts.push(workspace_tail(&quick.workspace).to_string());
+                }
+                let tooltip =
+                    (!quick.workspace.is_empty()).then(|| format!("Starts in {}", quick.workspace));
+                (parts.join(" · "), tooltip)
+            }
+            None if selected.is_some() => (
+                selected
+                    .as_ref()
+                    .and_then(|session| session.model.clone())
+                    .unwrap_or_else(|| "Interactive session".to_string()),
+                None,
+            ),
+            // Neither a session nor a runtime to start one on.
+            None => ("No session open".to_string(), None),
+        };
         let auto_approve = self.app.as_ref().and_then(|app| app.desktop_auto_approve());
         // Absent means the runtime named no posture for this session. The control is then
         // omitted rather than guessed at: a picker with a checked row is a claim about
@@ -2170,9 +2291,9 @@ impl DesktopView {
                                 )
                             })
                             .child(
-                                design::primary_button("send", "Send")
+                                design::primary_button("send", send_label)
                                     .icon(IconName::ArrowUp)
-                                    .tooltip("Send message · ↩")
+                                    .tooltip(send_tooltip)
                                     .disabled(!can_send || composer_empty)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send_message(window, cx)
@@ -2301,13 +2422,24 @@ impl DesktopView {
                                                     .label("The runtime's own posture, for this session")
                                             })
                                     }))
-                                    .child(
-                                        div()
+                                    .child({
+                                        let context = div()
                                             .flex_1()
                                             .min_w_0()
                                             .text_ellipsis()
-                                            .child(session_context),
-                                    ),
+                                            .child(session_context);
+                                        // The workspace is shortened to fit one line, so
+                                        // the path it stands for stays reachable.
+                                        match context_tooltip {
+                                            Some(full) => context
+                                                .id("composer-context")
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(full.clone()).build(window, cx)
+                                                })
+                                                .into_any_element(),
+                                            None => context.into_any_element(),
+                                        }
+                                    }),
                             )
                             .child(
                                 div()
@@ -2322,7 +2454,7 @@ impl DesktopView {
                                     })
                                     .when(!working, |status| {
                                         status
-                                            .child("Send")
+                                            .child(send_label)
                                             .child(design::keycap(tokens, "↩"))
                                             .child(" · New line")
                                             .child(design::keycap(tokens, "⇧↩"))
@@ -2336,6 +2468,7 @@ impl DesktopView {
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = design::tokens(cx);
+        self.sync_composer_placeholder(window, cx);
         let open_title = self
             .app
             .as_ref()
@@ -3010,6 +3143,16 @@ fn desktop_tone(tone: DesktopTone) -> Tone {
     }
 }
 
+/// The last component of a workspace path, for a footer line that has to fit beside a
+/// provider and a model. The full path stays in the tooltip; this never replaces it.
+fn workspace_tail(workspace: &str) -> &str {
+    workspace
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(workspace)
+}
+
 fn display_session_id(id: &str) -> String {
     const HEAD: usize = 15;
     const TAIL: usize = 8;
@@ -3090,6 +3233,18 @@ mod tests {
             display_session_id("ouro-session-f99c08009a6c9ac5d14171ff20f5cccd"),
             "ouro-session-f9…20f5cccd"
         );
+    }
+
+    /// The quick-start footer shortens the workspace to fit one line beside a provider and
+    /// a model. It must never shorten it to nothing — the tooltip carries the full path,
+    /// but this is the part an operator reads first.
+    #[test]
+    fn the_quick_start_workspace_shortens_to_a_name_that_is_still_a_name() {
+        assert_eq!(workspace_tail("/Users/dev/code/ouroboros"), "ouroboros");
+        assert_eq!(workspace_tail("/Users/dev/code/ouroboros/"), "ouroboros");
+        assert_eq!(workspace_tail("ouroboros"), "ouroboros");
+        assert_eq!(workspace_tail("/"), "/");
+        assert_eq!(workspace_tail(""), "");
     }
 
     #[test]

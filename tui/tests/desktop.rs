@@ -7,7 +7,7 @@
 mod support;
 
 use ouro::model::{ApprovalDecision, ApprovalScope, Plane};
-use ouro::proto::Notification;
+use ouro::proto::{ErrorCode, Notification, RpcError};
 use ouro::transport::ClientError;
 use ouro::ui::app::{App, DesktopCellKind, DesktopTone, Mode, Msg, Tag};
 use serde_json::{json, Value};
@@ -85,6 +85,246 @@ fn opened() -> App {
     answer(&mut app, subscribe.tag, json!([]));
     app.drain();
     app
+}
+
+/// A connected window with nothing open: the state the quick-start composer is drawn in.
+fn no_session_open() -> App {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
+    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.config.defaults.workspace = Some("/tmp/desktop-workspace".into());
+    app.drain();
+    app
+}
+
+/// The no-session composer starts a session on the stored defaults and sends what was
+/// typed as its first message — the same two steps in the same order as the terminal home.
+#[test]
+fn desktop_quick_start_uses_the_stored_defaults_and_sends_the_typed_prompt() {
+    let mut app = no_session_open();
+
+    let context = app.desktop_quick_start_context();
+    assert!(context.ready, "an operate listener serving start is ready");
+    assert!(!context.pending);
+    assert_eq!(context.provider, "native");
+    assert_eq!(context.model, "openai_codex:gpt-5.6-sol");
+    assert_eq!(context.workspace, "/tmp/desktop-workspace");
+
+    app.desktop_quick_start("  Inspect the seam.  ")
+        .expect("a connected operate listener takes a quick start");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the quick start emits an interactive.start call");
+    assert_eq!(start.params["provider"], context.provider);
+    assert_eq!(start.params["model"], context.model);
+    assert_eq!(start.params["workspace"], context.workspace);
+    let id = start.params["id"]
+        .as_str()
+        .expect("the client mints the session id")
+        .to_string();
+    assert!(
+        app.desktop_quick_start_context().pending,
+        "the context says a start is in flight"
+    );
+
+    // `interactive.start` waits for provider readiness, so the prompt is dispatched on its
+    // answer rather than beside it.
+    answer(
+        &mut app,
+        start.tag,
+        json!({ "id": id, "node": "ouroboros@golden" }),
+    );
+    let first = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.send_message")
+        .expect("the typed prompt becomes the session's first message");
+    assert_eq!(first.params["id"], id);
+    assert_eq!(first.params["input"], "Inspect the seam.");
+    assert!(first.params["turn_id"].as_str().is_some());
+    assert!(
+        app.desktop_take_restored_draft().is_none(),
+        "a start that succeeded hands nothing back"
+    );
+}
+
+/// A quick start is a start, not a command line: a slash prompt is sent as text.
+#[test]
+fn desktop_quick_start_refuses_an_empty_prompt_and_never_runs_a_slash_command() {
+    let mut app = no_session_open();
+
+    let error = app
+        .desktop_quick_start("   \n  ")
+        .expect_err("there is nothing to start a session for");
+    assert!(error.contains("type what you want"), "{error}");
+    assert!(app.drain().is_empty());
+
+    app.desktop_quick_start("/settings")
+        .expect("a window has no command grammar to swallow this");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the prompt starts a session like any other");
+    assert!(start.params["id"].as_str().is_some());
+}
+
+/// Scope and capability are two gates, and the context reports the same answer the seam
+/// enforces.
+#[test]
+fn desktop_quick_start_needs_operate_scope() {
+    let mut app = no_session_open();
+    app.hello.scope = "read".into();
+
+    assert!(!app.desktop_quick_start_context().ready);
+    let error = app
+        .desktop_quick_start("Inspect the seam.")
+        .expect_err("a read listener refuses every start");
+    assert!(error.contains("scope `read`"), "{error}");
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.start"));
+}
+
+/// The OAuth-backed default model needs an account. The refusal names the fix, and the
+/// composer stays live: the account card that grants it is on the same screen.
+#[test]
+fn desktop_quick_start_waits_for_the_account_the_default_model_needs() {
+    let mut app = no_session_open();
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": true,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.drain();
+
+    let error = app
+        .desktop_quick_start("Inspect the seam.")
+        .expect_err("the direct model cannot start without OAuth");
+    assert!(error.contains("connect ChatGPT"), "{error}");
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.start"));
+    assert!(
+        app.desktop_quick_start_context().ready,
+        "the gateway would still take a start; the account is the obstacle"
+    );
+}
+
+/// A start refused after the window cleared its box must not cost the typing.
+#[test]
+fn desktop_quick_start_hands_a_refused_prompt_back_to_the_window() {
+    let mut app = no_session_open();
+    app.desktop_quick_start("Inspect the seam.")
+        .expect("a connected operate listener takes a quick start");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the quick start emits an interactive.start call");
+    assert!(
+        app.desktop_take_restored_draft().is_none(),
+        "nothing is handed back while the start is still in flight"
+    );
+
+    app.apply(Msg::Answer {
+        tag: start.tag,
+        result: Err(ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "the runtime refused these start parameters".into(),
+            data: None,
+        })),
+    });
+
+    assert_eq!(
+        app.desktop_take_restored_draft().as_deref(),
+        Some("Inspect the seam."),
+        "the refused prompt comes back through the desktop seam"
+    );
+    assert!(
+        app.desktop_take_restored_draft().is_none(),
+        "it is handed back once, not on every tick"
+    );
+    assert!(
+        !app.desktop_quick_start_context().pending,
+        "a definite refusal releases the composer"
+    );
+
+    // A definite refusal cannot become a session, so the next attempt mints a fresh id.
+    app.desktop_quick_start("Inspect the seam.")
+        .expect("the composer is usable again");
+    let retry = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a second interactive.start call");
+    assert_ne!(retry.params["id"], start.params["id"]);
+}
+
+/// A start whose outcome nobody knows keeps its id. The prompt comes back so resubmitting
+/// it unchanged reconciles that same session rather than minting a second billable one.
+#[test]
+fn desktop_quick_start_replays_one_id_when_the_start_outcome_is_unknown() {
+    let mut app = no_session_open();
+    app.desktop_quick_start("Inspect the seam.")
+        .expect("a connected operate listener takes a quick start");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the quick start emits an interactive.start call");
+
+    app.apply(Msg::Answer {
+        tag: start.tag,
+        result: Err(ClientError::ConnectionClosed),
+    });
+
+    assert_eq!(
+        app.desktop_take_restored_draft().as_deref(),
+        Some("Inspect the seam.")
+    );
+    assert!(
+        !app.desktop_quick_start_context().pending,
+        "reconciling is the operator's move, so the composer stays live for it"
+    );
+
+    let error = app
+        .desktop_quick_start("Something else entirely.")
+        .expect_err("a changed prompt would mint a second id for the same work");
+    assert!(error.contains("may already exist"), "{error}");
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.start"));
+
+    app.desktop_quick_start("Inspect the seam.")
+        .expect("the same prompt reconciles the same id");
+    let replay = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the replay is a start call");
+    assert_eq!(
+        replay.params["id"], start.params["id"],
+        "reconciliation reuses the id whose outcome is unknown"
+    );
 }
 
 #[test]
