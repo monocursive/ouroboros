@@ -23,12 +23,24 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       runs unsandboxed where none does. The second case is what this provider did
       before C5; it is reported rather than hidden, through `sandbox: "none"` on the
       tool call and through the provider's status.
+    * **`unrestricted`** — runs with no OS sandbox on any node, because that is what the
+      session asked for by name. `Sandbox.decide/2` logs it every time.
 
   When the sandbox stops a command, the result says which constraint was hit and what
   to ask a human for, so the model escalates instead of retrying (Cursor's rule, R3
   §11). When the *backend* fails — a profile that will not compile — the command is
   refused rather than re-run under a weaker posture, because a sandbox that silently
   is not there is worse than one that is absent and says so.
+
+  ## The escalation offer
+
+  A denial `Sandbox.escalatable?/3` says an operator could lift comes back as an
+  `escalation:` key on the result, beside the output rather than inside it. This tool
+  cannot ask anybody anything — only `Ouroboros.Provider.Native.Loop` owns an approval
+  channel — so it describes the denial and says whether it is liftable, and the loop
+  decides whether a human sees it and re-runs the command. That split is why a `bash`
+  call made outside a loop reads exactly as honestly as one made inside: the guidance
+  text never claims somebody is being asked.
 
   ## Everything else is unchanged
 

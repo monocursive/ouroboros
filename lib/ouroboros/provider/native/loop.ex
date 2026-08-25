@@ -1279,11 +1279,14 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp rerun(state, pending, granted_by, request_id) do
     context = %{pending.context | scope: %{state.scope | sandbox_mode: :unrestricted}}
 
+    # Emitted before the re-run rather than after it: everything the event states is
+    # already known, and a command that takes its full deadline should not leave a client
+    # holding an answered approval with nothing to show for it.
+    emit_escalation(state, pending, "approved", granted_by, request_id)
+
     started = System.monotonic_time(:millisecond)
     result = Tools.execute(pending.module, pending.call.input, context, state.tool_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - started
-
-    emit_escalation(state, pending, "approved", granted_by, request_id)
 
     output =
       "The OS sandbox stopped the first attempt at this command (#{pending.offer.evidence}). " <>
@@ -1346,7 +1349,10 @@ defmodule Ouroboros.Provider.Native.Loop do
         "command" => pending.classified.command,
         "constraint" => to_string(pending.offer.constraint),
         "evidence" => pending.offer.evidence,
-        "sandbox" => pending.offer.label,
+        # Not `"sandbox"`: on a `tool_call` that key means "what this ran under", and a
+        # reader who carried that meaning here would read an approved escalation as
+        # having run sandboxed. This names the thing that *stopped* the first attempt.
+        "stopped_by" => pending.offer.label,
         "sandboxed_output" => clip(pending.result.output, @max_escalation_output_bytes)
       },
       request_id

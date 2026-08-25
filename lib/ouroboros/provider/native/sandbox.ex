@@ -60,12 +60,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     * a **`read_only`** session — the honest advice there is still `workspace_write`,
       because a read-only label the shell can step out of is the lie this module was
       written to stop telling;
-    * a denial whose evidence, or whose command line, names one of `protected_roots/0`
+    * a denial whose evidence, or whose command line, names one of `protected_names/0`
       or an `.ouroboros` directory. Those are the runtime's own state and the
       operator's own configuration; the answer there stays "do it yourself". The check
       is textual — a shell command cannot be decomposed into the paths it will touch —
       so it is conservative by construction: it refuses to offer an escalation whenever
-      those names appear at all.
+      those names appear at all, in either the configured or the canonicalized spelling.
 
   ## What it does not do
 

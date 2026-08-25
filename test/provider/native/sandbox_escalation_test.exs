@@ -212,6 +212,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert event.payload["call_id"] == "c1"
       assert event.payload["constraint"] == "filesystem"
       assert event.payload["evidence"] =~ "Operation not permitted"
+      assert event.payload["stopped_by"] == Sandbox.label(Sandbox.detect())
       assert event.payload["sandboxed_output"] =~ "Operation not permitted"
       assert event.request_id == ask.request_id
     end
