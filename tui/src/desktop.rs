@@ -24,7 +24,7 @@ use gpui::{
 use gpui_component::alert::Alert;
 use gpui_component::button::ButtonVariant;
 use gpui_component::dialog::DialogButtonProps;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Enter as InputEnter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
@@ -54,7 +54,19 @@ const COLLAPSED_TOOL_TAIL_CHARS: usize = 600;
 #[cfg(target_os = "macos")]
 const MACOS_APP_ICON: &str = "Ouroboros.icns";
 
-actions!(ouro_desktop, [QuitDesktop]);
+actions!(ouro_desktop, [QuitDesktop, SubmitComposer]);
+
+fn composer_key_bindings() -> [KeyBinding; 3] {
+    [
+        KeyBinding::new("enter", SubmitComposer, Some("Input")),
+        KeyBinding::new("secondary-enter", SubmitComposer, Some("Input")),
+        KeyBinding::new(
+            "shift-enter",
+            InputEnter { secondary: false },
+            Some("Input"),
+        ),
+    ]
+}
 
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
@@ -76,6 +88,9 @@ pub fn run(options: LaunchOptions) -> Result<()> {
 
             gpui_component::init(cx);
             design::install_component_theme(cx);
+            // These are registered after gpui-component's defaults so the chat composer can
+            // override multiline Enter without changing the behavior of the other inputs.
+            cx.bind_keys(composer_key_bindings());
             cx.bind_keys([KeyBinding::new("cmd-q", QuitDesktop, None)]);
             cx.on_action(|_: &QuitDesktop, cx| cx.quit());
             cx.set_menus(vec![Menu {
@@ -864,6 +879,16 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn submit_composer(&mut self, _: &SubmitComposer, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.focus_handle(cx).is_focused(window) {
+            self.send_message(window, cx);
+        } else {
+            // The binding shares gpui-component's Input context. Let the component's
+            // ordinary Enter action handle every field except the chat composer.
+            cx.propagate();
+        }
+    }
+
     fn start_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let provider = self.provider.read(cx).value().to_string();
         let model = self.model.read(cx).value().to_string();
@@ -972,32 +997,12 @@ impl DesktopView {
     ) {
         let modifiers = event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
-        let composer_focused = self.composer.focus_handle(cx).is_focused(window);
-
-        // The composer follows chat conventions: bare Enter sends and Shift-Enter is left
-        // to gpui-component's multiline input handler, which inserts the newline. Keep the
-        // existing Command-Enter shortcut as an alternative.
-        if key == "enter"
-            && composer_focused
-            && !modifiers.control
-            && !modifiers.alt
-            && !modifiers.shift
-        {
-            self.send_message(window, cx);
-            window.prevent_default();
-            cx.stop_propagation();
-            return;
-        }
 
         if !modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift {
             return;
         }
 
         let handled = match key {
-            "enter" => {
-                self.send_message(window, cx);
-                true
-            }
             "." => {
                 self.interrupt(cx);
                 true
@@ -2171,6 +2176,7 @@ impl Render for DesktopView {
 
         div()
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::submit_composer))
             .capture_key_down(cx.listener(Self::handle_key_down))
             .flex()
             .size_full()
@@ -2765,6 +2771,23 @@ fn display_session_title(title: Option<&str>, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_enter_bindings_separate_send_from_newline() {
+        let [enter, secondary_enter, shift_enter] = composer_key_bindings();
+
+        assert!(enter.action().partial_eq(&SubmitComposer));
+        assert!(secondary_enter.action().partial_eq(&SubmitComposer));
+        assert!(shift_enter
+            .action()
+            .partial_eq(&InputEnter { secondary: false }));
+        assert_eq!(enter.keystrokes()[0].inner().unparse(), "enter");
+        assert_eq!(
+            secondary_enter.keystrokes()[0].inner().unparse(),
+            gpui::Keystroke::parse("secondary-enter").unwrap().unparse()
+        );
+        assert_eq!(shift_enter.keystrokes()[0].inner().unparse(), "shift-enter");
+    }
 
     #[test]
     fn explicit_remote_endpoint_requires_a_token_file() {
