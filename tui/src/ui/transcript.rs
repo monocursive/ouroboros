@@ -351,6 +351,24 @@ pub struct ApprovalEdit {
 }
 
 impl ApprovalRequest {
+    /// Whether this request is a question for a person rather than a permission: the
+    /// plan-exit question (B2), or the native agent's `ask_user` tool riding the
+    /// approval channel with `kind: "question"`.
+    ///
+    /// The auto-approve mode reads this before answering. Leaving plan mode changes
+    /// what every later turn may do, and `ouro run --approve-all` already established
+    /// that "answer the approvals" does not include "reconfigure the session" (see
+    /// `run.rs::answer_plan_exit`). An `ask_user` question is worse: a robot `approve`
+    /// carries no `choice`, so the runtime hands the agent "the operator acknowledged
+    /// the question without giving an answer" — the one outcome the tool exists to
+    /// prevent.
+    pub fn question(&self) -> bool {
+        matches!(
+            json_nonempty_str(&self.payload, "kind").as_deref(),
+            Some("plan_exit") | Some("question")
+        )
+    }
+
     /// The tool call the provider is asking permission for, as one line.
     ///
     /// A sandbox escalation should read as `git commit … — writes to .git`, not as the
@@ -1027,6 +1045,34 @@ impl Watch {
                 .approval_responses_in_flight
                 .contains(&request.request_id)
         })
+    }
+
+    /// Whether one request is still waiting on an answer: pending, and no response in
+    /// flight for it. The auto-approve toggle closes an open modal only where this says
+    /// its request was actually answered underneath it — a plan-exit or `ask_user`
+    /// question the flush skipped keeps its modal.
+    pub fn awaiting_answer(&self, request_id: &str) -> bool {
+        self.pending_approvals
+            .values()
+            .any(|request| request.request_id == request_id)
+            && !self.approval_responses_in_flight.contains(request_id)
+    }
+
+    /// How many approvals are actually waiting on an answer: pending, minus the ones a
+    /// response is already in flight for. The footer's count, the bell, and triage all
+    /// want this rather than [`pending_approvals`](Self::pending_approvals) — an approval
+    /// this client has answered but the runtime has not resolved yet is not waiting on
+    /// anyone here, and under auto-approve it would otherwise read as "needs input" for
+    /// the round-trip's duration on every tool call.
+    pub fn unanswered_approvals(&self) -> usize {
+        self.pending_approvals
+            .values()
+            .filter(|request| {
+                !self
+                    .approval_responses_in_flight
+                    .contains(&request.request_id)
+            })
+            .count()
     }
 
     /// The transcript in order, with the dividers interleaved where they belong.

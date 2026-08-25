@@ -157,12 +157,16 @@ pub enum Command {
     /// B2: toggle plan mode on the open session. `/plan on|off` names the posture it
     /// wants; the bare verb toggles whatever the session is in now.
     Plan,
+    /// Auto-approve for the open session: this client answers yes to every ordinary
+    /// approval the session raises until it is turned off. Client-side — the runtime's
+    /// `approval_mode` is untouched, and plan-exit questions still ask.
+    AutoApprove,
     /// D4: the MCP servers this session's node runs, and the entries it refused.
     Mcp,
 }
 
 impl Command {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 46] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -207,6 +211,7 @@ impl Command {
         Self::Delegations,
         Self::Theme,
         Self::Plan,
+        Self::AutoApprove,
         Self::Mcp,
     ];
 
@@ -243,6 +248,7 @@ impl Command {
             | Self::Delegations
             | Self::Theme
             | Self::Plan
+            | Self::AutoApprove
             | Self::Help => "Coding",
             _ => "Runtime & distribution",
         }
@@ -294,6 +300,7 @@ impl Command {
             Self::Delegations => "Show this conversation's delegations",
             Self::Theme => "Cycle the colour theme",
             Self::Plan => "Plan without editing anything",
+            Self::AutoApprove => "Auto-approve everything this session asks",
             Self::Mcp => "Show this node's MCP servers",
         }
     }
@@ -349,6 +356,7 @@ impl Command {
             Self::Delegations => "/delegations",
             Self::Theme => "/theme",
             Self::Plan => "/plan",
+            Self::AutoApprove => "/auto-approve",
             Self::Mcp => "/mcp",
         }
     }
@@ -373,6 +381,7 @@ impl Command {
             Self::Settings => Action::Settings,
             Self::Help => Action::Help,
             Self::Backtrack => Action::Backtrack,
+            Self::AutoApprove => Action::LeaderAutoApprove,
             _slash_only => return None,
         })
     }
@@ -426,6 +435,9 @@ impl App {
                 Command::Plan => {
                     self.sessions.open.is_some() && self.hello.serves("interactive.configure")
                 }
+                // Client-side, so no `hello.methods` gate — but like `/plan` it needs a
+                // session to be about.
+                Command::AutoApprove => self.sessions.open.is_some(),
                 Command::Mcp => self.hello.serves("mcp.list"),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
@@ -1350,6 +1362,10 @@ impl App {
             Command::Plan => {
                 self.overlay = None;
                 self.configure_plan(None);
+            }
+            Command::AutoApprove => {
+                self.overlay = None;
+                self.set_auto_approve(None);
             }
             Command::Mcp => {
                 self.overlay = None;

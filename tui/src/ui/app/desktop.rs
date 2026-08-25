@@ -82,6 +82,9 @@ pub struct DesktopApproval {
     pub request_id: String,
     pub subject: String,
     pub kind: Option<String>,
+    /// A question for a person — the plan exit or `ask_user` — rather than a
+    /// permission. Auto-approve never answers these, so the card must not offer it.
+    pub question: bool,
     pub title: Option<String>,
     pub reason: Option<String>,
     pub command: Option<String>,
@@ -224,7 +227,7 @@ impl App {
                         .sessions
                         .watches
                         .get(&key)
-                        .map(|watch| watch.pending_approvals.len())
+                        .map(Watch::unanswered_approvals)
                         .unwrap_or(0),
                     last_known: row.session.last_known,
                     terminal: row.session.status.terminal(),
@@ -335,6 +338,7 @@ impl App {
             session_id: id.clone(),
             request_id: request.request_id.clone(),
             subject: request.subject(),
+            question: request.question(),
             kind: detail.kind,
             title: detail.title,
             reason: detail.reason,
@@ -641,6 +645,27 @@ impl App {
     /// Interrupts the active turn using the same capability and routing checks as Ctrl-C.
     pub fn desktop_interrupt(&mut self) {
         self.interrupt_turn();
+    }
+
+    /// Whether the open session is in this client's auto-approve mode. `None` when no
+    /// session is open, which is also "there is nothing to toggle".
+    pub fn desktop_auto_approve(&self) -> Option<bool> {
+        self.sessions
+            .open
+            .as_ref()
+            .map(|key| self.sessions.auto_approve.contains(key))
+    }
+
+    /// Switches the open session's client-side auto-approve mode, through the same path
+    /// as `/auto-approve`: turning it on answers the whole backlog immediately (the card
+    /// the window is showing included), plan-exit questions keep asking either way.
+    pub fn desktop_set_auto_approve(&mut self, on: bool) -> Result<(), String> {
+        if self.sessions.open.is_none() {
+            return Err("no session is open".to_string());
+        }
+
+        self.set_auto_approve(Some(on));
+        Ok(())
     }
 }
 

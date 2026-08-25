@@ -2193,6 +2193,26 @@ pub fn respond_approval_params(
     respond_approval_params_with_reason(session_id, request_id, decision, scope, None)
 }
 
+/// The auto-approve mode's one answer, stated once: `approve`, scope `once`, and an
+/// `actor` that says a robot pressed the button.
+///
+/// Scope stays `once` because the mode itself is the session-wide fact — every later
+/// request is answered as it arrives — while a `session` scope would additionally write a
+/// durable engine rule for this subject that outlives the toggle. `actor: automation`
+/// keeps the runtime's approval ledger honest the same way `ouro run` marks its headless
+/// answers, and is why this is not a call site of [`respond_approval_params`] plus a
+/// mutation: the extra key is part of the answer's meaning, not a decoration.
+pub fn respond_approval_params_as_automation(session_id: &str, request_id: &str) -> Value {
+    let mut params = respond_approval_params(
+        session_id,
+        request_id,
+        ApprovalDecision::Approve,
+        ApprovalScope::Once,
+    );
+    params["response"]["actor"] = Value::String("automation".to_string());
+    params
+}
+
 /// The same answer with the operator's optional `reason`.
 ///
 /// The gateway's closed envelope accepts `{decision, scope?, reason?}`; an absent reason

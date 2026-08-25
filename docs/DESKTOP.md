@@ -33,6 +33,19 @@ The composer is multi-line. `Enter` sends and `Shift-Enter` inserts a new line;
 turn, `Command-N` toggles the new-session form, and `Command-Q` quits the client. Closing
 the last window disconnects the client and leaves an adopted runtime running.
 
+The composer footer carries the approvals-mode picker: "Ask first" (the default) or
+"Auto-approve", which has this client answer every ordinary approval the open session
+raises with `approve, once, actor: automation` — the same client-side mechanism as the
+TUI's `/auto-approve` and `ouro run --approve-all`, so it works identically on every
+transport and leaves a per-request ledger trail. Questions — the plan exit and
+`ask_user`'s `kind: "question"` — are never auto-answered and keep their card. The
+approval card offers "Auto-approve session" for the same switch on ordinary permissions,
+since the composer is hidden while a card is showing; it also does not override the OS
+sandbox — a native session's protected paths (`.git`, `.ouroboros`, the data dir) stay
+protected whatever the approval posture. The mode is per session, this client
+only, and not persisted; the trigger wears the warning tone while active because a
+standing yes is a risk posture, not an action highlight.
+
 For `openai_codex:` models, the desktop shell reads only non-secret account readiness and
 starts the runtime-owned ChatGPT OAuth flow. A local runtime uses browser PKCE; an explicit
 remote attachment uses device code. Session start and send remain disabled until the

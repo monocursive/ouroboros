@@ -552,6 +552,20 @@ fn footer_facts(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         ));
     }
 
+    // The client-side auto-approve mode, ranked with PLANNING for the same reason: it
+    // supersedes the approval-mode badge below it — whatever the runtime asks, this
+    // client answers yes — and on a narrow row that is the fact that has to survive.
+    // Warn-coloured because it is a risk posture, not an action highlight.
+    if app.open_auto_approve() {
+        segments.push(Segment::new(
+            "AUTO-APPROVE".to_string(),
+            Style::default()
+                .fg(theme::warn())
+                .add_modifier(Modifier::BOLD),
+            11,
+        ));
+    }
+
     if let Some((badge, style)) = mode_badge(facts.approval_mode.as_deref()) {
         segments.push(Segment::new(badge, style, 9));
     }

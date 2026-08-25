@@ -2221,6 +2221,37 @@ Two shapes because the runtime produces two and they are not the same artifact. 
 **absent** where no plan was made, so a script tests for it rather than interpreting an
 empty object, and the step list is bounded at 64.
 
+### Auto-approve, from the client
+
+**`/auto-approve`, `/auto-approve on`, `/auto-approve off`** (palette entry, leader
+`ctrl+x A`) switch the open session into a client-side mode that answers every ordinary
+approval request the moment it arrives: `approve, once`, with `actor: automation` so the
+runtime's approval ledger records that a robot pressed the button — the interactive
+sibling of `ouro run --approve-all`, and the same argument for its exceptions:
+**questions are never auto-answered**. The plan exit, because "answer the approvals" is
+not "reconfigure the session"; and `ask_user`'s `kind: "question"`, because a robot
+`approve` carries no `choice` and reaches the agent as "the operator acknowledged the
+question without giving an answer" — the one outcome the tool exists to prevent. Both
+keep their modal, still count as waiting, and still ring the needs-input bell.
+
+Client-side deliberately. The runtime's `approval_mode` is a start-time posture that
+providers renegotiate unevenly (native applies it now, Claude only at start, ACP refuses
+by declaration), while an answering robot works identically on every transport, on both
+planes, and leaves a per-request trail. The runtime's mode badge is therefore untouched;
+the footer wears a warn-coloured `AUTO-APPROVE` badge — ranked with `PLANNING`, because
+both supersede the approval-mode badge below them — for as long as the mode is on.
+
+Turning the mode on answers the whole backlog immediately (a four-way modal already open
+for one of those requests closes under it; a question's modal stays). Turning it off
+reopens the modal for anything still unanswered. Answers ride the ordinary
+`Tag::Approval` path, so a refused send un-marks the request and reports the way a
+keypress's would; an answer already in flight is never sent twice, which is what makes
+replay overlap safe. The mode is this-client-only session state: it is not persisted, not
+written into the permission engine (`scope: once`, never a durable rule), and it dies
+with the session or the client, whichever ends first. Auto-answered requests do not ring
+the needs-input bell, do not count in the footer's approvals cell, and do not triage the
+session as waiting — nothing is waiting on a person.
+
 ### `ouro mcp` and `/mcp` (D4)
 
 `mcp.list` is the read, and it is the only half that touches the socket. `/mcp` asks the
@@ -2349,6 +2380,7 @@ different leader verbs, and `shift+s` and `s` do not.
 | | `leader.editor_view` | `v` |
 | | `leader.steer` | `s` |
 | | `leader.approval` | `a` |
+| | `leader.auto_approve` | `A` |
 | | `leader.end` | `x` |
 | | `leader.details` | `d` |
 | | `leader.quit` | `q` |

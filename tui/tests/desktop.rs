@@ -536,3 +536,125 @@ fn desktop_gates_codex_work_and_uses_the_runtime_owned_login_flow() {
         .expect("cancelling the card cancels the runtime login");
     assert_eq!(cancel.params["login_id"], "desktop-login-1");
 }
+
+/// The auto-approve toggle is one reducer call: turning it on answers the backlog —
+/// the card the window is showing included — and every later request before a card can
+/// render, always as `approve, once, actor: automation`.
+#[test]
+fn desktop_auto_approve_toggles_and_answers_the_backlog() {
+    let mut app = opened();
+    assert_eq!(
+        app.desktop_auto_approve(),
+        Some(false),
+        "an open session starts in ask-first"
+    );
+
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-9",
+            "kind": "sandbox_escalation",
+            "tool_call": { "name": "exec_command", "command": "cargo test --all" }
+        }),
+    );
+    assert!(app.desktop_approval().is_some());
+
+    app.desktop_set_auto_approve(true)
+        .expect("a session is open");
+    assert_eq!(app.desktop_auto_approve(), Some(true));
+
+    let answer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the pending card is answered by the toggle");
+    assert_eq!(answer.params["request_id"], "req-desktop-9");
+    assert_eq!(answer.params["response"]["decision"], "approve");
+    assert_eq!(answer.params["response"]["scope"], "once");
+    assert_eq!(
+        answer.params["response"]["actor"], "automation",
+        "the ledger must not credit a person who never saw the request"
+    );
+    assert!(
+        app.desktop_approval().is_none(),
+        "an answered request renders no card"
+    );
+
+    notify(
+        &mut app,
+        2,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-10",
+            "tool_call": { "name": "exec_command", "command": "cargo build" }
+        }),
+    );
+    assert!(
+        app.desktop_approval().is_none(),
+        "a request on an auto-approve session never becomes a card"
+    );
+    let answer = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("it is answered instead");
+    assert_eq!(answer.params["request_id"], "req-desktop-10");
+
+    app.desktop_set_auto_approve(false)
+        .expect("a session is open");
+    assert_eq!(app.desktop_auto_approve(), Some(false));
+}
+
+/// With no session open there is nothing to toggle, and the picker knows it.
+#[test]
+fn desktop_auto_approve_needs_an_open_session() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+
+    assert_eq!(app.desktop_auto_approve(), None);
+    let error = app
+        .desktop_set_auto_approve(true)
+        .expect_err("no session, no toggle");
+    assert!(error.contains("no session is open"), "{error}");
+}
+
+/// An `ask_user` question on an auto-approve session still becomes a card — a robot
+/// `approve` would reach the agent as "acknowledged without an answer" — and the card
+/// does not offer the mode that skipped it.
+#[test]
+fn desktop_auto_approve_leaves_ask_user_questions_for_the_person() {
+    let mut app = opened();
+    app.desktop_set_auto_approve(true)
+        .expect("a session is open");
+    app.drain();
+
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-11",
+            "kind": "question",
+            "header": "Commit blocked",
+            "question": "The sandbox forbids writes to `.git`. Commit yourself, or grant it?",
+            "options": [
+                {"optionId": "self", "name": "I'll commit it myself", "kind": "reject_once"},
+                {"optionId": "grant", "name": "Grant the session permission", "kind": "allow_once"}
+            ]
+        }),
+    );
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "the question is not auto-answered"
+    );
+
+    let approval = app
+        .desktop_approval()
+        .expect("the question still renders as a card");
+    assert_eq!(approval.request_id, "req-desktop-11");
+    assert!(approval.question, "and the card knows it is a question");
+}

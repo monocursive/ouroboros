@@ -22,10 +22,10 @@ use gpui::{
     WindowBounds, WindowOptions,
 };
 use gpui_component::alert::Alert;
-use gpui_component::button::ButtonVariant;
+use gpui_component::button::{ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Enter as InputEnter, Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
@@ -972,6 +972,24 @@ impl DesktopView {
         cx.notify();
     }
 
+    /// Switches the open session's client-side auto-approve mode. The reducer answers
+    /// the pending backlog inside the call, so the flush right after it is what actually
+    /// clears an approval card the window is showing.
+    fn set_auto_approve(&mut self, on: bool, cx: &mut Context<Self>) {
+        let result = match self.app.as_mut() {
+            None => Err("the runtime is not connected".to_string()),
+            Some(app) => app.desktop_set_auto_approve(on),
+        };
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+            }
+            Err(error) => self.action_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         if let Some(app) = self.app.as_mut() {
             app.desktop_interrupt();
@@ -1764,6 +1782,17 @@ impl DesktopView {
             .reason
             .clone()
             .filter(|reason| !approval.subject.contains(reason));
+        // Questions — the plan exit and `ask_user` — are the approvals auto-approve
+        // never answers, so offering the mode from their card would be a button that
+        // visibly does not do the thing it says. A card that survives with the mode
+        // already on (a question, or a refused send reopened for a person) hides the
+        // switch too: it is already flipped.
+        let question = approval.question;
+        let auto_approve_on = self
+            .app
+            .as_ref()
+            .and_then(|app| app.desktop_auto_approve())
+            .unwrap_or(false);
         let actions = div()
             .flex()
             .flex_wrap()
@@ -1796,7 +1825,16 @@ impl DesktopView {
                                 this.respond(request_id.clone(), choice_for_click.clone(), cx);
                             }))
                     }),
-            );
+            )
+            .when(!question && !auto_approve_on, |row| {
+                row.child(
+                    design::secondary_button("approval-auto-approve", "Auto-approve session")
+                        .tooltip("Approve this and everything after it, for this session")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_auto_approve(true, cx);
+                        })),
+                )
+            });
 
         Some(
             design::card(tokens, cx, Tone::Warning)
@@ -1971,6 +2009,8 @@ impl DesktopView {
             .as_ref()
             .and_then(|session| session.model.clone())
             .unwrap_or_else(|| "Interactive session".to_string());
+        let auto_approve = self.app.as_ref().and_then(|app| app.desktop_auto_approve());
+        let picker_view = cx.entity().downgrade();
         div()
             .px_6()
             .pt_3()
@@ -2034,8 +2074,71 @@ impl DesktopView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_ellipsis()
-                                    .child(session_context),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    // The approvals-mode picker, in the slot that already
+                                    // narrates the session. Warning-variant while active:
+                                    // a standing yes is a risk posture, not an action
+                                    // highlight (docs/DESKTOP.md tone rule).
+                                    .children(auto_approve.map(|on| {
+                                        let picker_view = picker_view.clone();
+                                        let trigger = if on {
+                                            design::secondary_button(
+                                                "approval-mode",
+                                                "Auto-approve",
+                                            )
+                                            .warning()
+                                        } else {
+                                            design::secondary_button("approval-mode", "Ask first")
+                                        };
+                                        trigger
+                                            .tooltip(
+                                                "How this session's approval requests are answered",
+                                            )
+                                            .dropdown_menu(move |menu, _window, _cx| {
+                                                let ask_view = picker_view.clone();
+                                                let auto_view = picker_view.clone();
+                                                menu.min_w(px(260.0))
+                                                    .item(
+                                                        PopupMenuItem::new("Ask first")
+                                                            .checked(!on)
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ = ask_view.update(
+                                                                    cx,
+                                                                    |this, cx| {
+                                                                        this.set_auto_approve(
+                                                                            false, cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }),
+                                                    )
+                                                    .item(
+                                                        PopupMenuItem::new("Auto-approve")
+                                                            .checked(on)
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ = auto_view.update(
+                                                                    cx,
+                                                                    |this, cx| {
+                                                                        this.set_auto_approve(
+                                                                            true, cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }),
+                                                    )
+                                                    .separator()
+                                                    .label("This session only; questions still ask")
+                                            })
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .child(session_context),
+                                    ),
                             )
                             .child(
                                 div()

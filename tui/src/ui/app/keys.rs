@@ -240,6 +240,7 @@ impl App {
             Some(Action::LeaderOpenImage) => self.open_newest_image(),
             Some(Action::LeaderSteer) => self.compose(ComposerVerb::Steer),
             Some(Action::LeaderApproval) => self.reopen_approval(),
+            Some(Action::LeaderAutoApprove) => self.set_auto_approve(None),
             Some(Action::LeaderShellRule) => self.add_shell_rule(),
             Some(Action::LeaderEnd) => self.open_close_confirm(),
             Some(Action::LeaderDetails) => self.toggle_session_details(),

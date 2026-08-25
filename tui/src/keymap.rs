@@ -90,6 +90,9 @@ pub enum Action {
     LeaderOpenImage,
     LeaderSteer,
     LeaderApproval,
+    /// Toggle the client-side auto-approve mode on the open session: `a` answers the
+    /// approval that is asking; `A` answers everything the session will ask.
+    LeaderAutoApprove,
     /// B7. Save the permission rule a refused `!` command's refusal named.
     LeaderShellRule,
     LeaderEnd,
@@ -110,7 +113,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 42] = [
+    pub const ALL: [Action; 43] = [
         Self::Send,
         Self::Steer,
         Self::Newline,
@@ -139,6 +142,7 @@ impl Action {
         Self::LeaderOpenImage,
         Self::LeaderSteer,
         Self::LeaderApproval,
+        Self::LeaderAutoApprove,
         Self::LeaderShellRule,
         Self::LeaderEnd,
         Self::LeaderDetails,
@@ -186,6 +190,7 @@ impl Action {
             Self::LeaderOpenImage => "leader.open_image",
             Self::LeaderSteer => "leader.steer",
             Self::LeaderApproval => "leader.approval",
+            Self::LeaderAutoApprove => "leader.auto_approve",
             Self::LeaderShellRule => "leader.shell_rule",
             Self::LeaderEnd => "leader.end",
             Self::LeaderDetails => "leader.details",
@@ -223,6 +228,7 @@ impl Action {
             | Self::LeaderOpenImage
             | Self::LeaderSteer
             | Self::LeaderApproval
+            | Self::LeaderAutoApprove
             | Self::LeaderShellRule
             | Self::LeaderEnd
             | Self::LeaderDetails
@@ -273,6 +279,7 @@ impl Action {
             Self::LeaderOpenImage => "i",
             Self::LeaderSteer => "s",
             Self::LeaderApproval => "a",
+            Self::LeaderAutoApprove => "A",
             Self::LeaderShellRule => "r",
             Self::LeaderEnd => "x",
             Self::LeaderDetails => "d",
@@ -321,6 +328,7 @@ impl Action {
             Self::LeaderOpenImage => "newest image in the system viewer",
             Self::LeaderSteer => "steer",
             Self::LeaderApproval => "approval",
+            Self::LeaderAutoApprove => "auto-approve everything this session asks",
             Self::LeaderShellRule => "save the rule a refused ! command named",
             Self::LeaderEnd => "end or remove session",
             Self::LeaderDetails => "event details",

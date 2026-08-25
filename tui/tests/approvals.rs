@@ -590,3 +590,242 @@ fn the_bar_is_gone_once_nothing_is_pending() {
         .and_then(Watch::next_approval)
         .is_none());
 }
+
+// ---------------------------------------------------------------- auto-approve
+
+/// The composer types a slash verb; this is the whole path an operator takes.
+fn compose(app: &mut App, text: &str) {
+    for character in text.chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+    app.apply(key(KeyCode::Enter));
+}
+
+/// The mode's whole contract on the wire: an approval that arrives on an auto-approve
+/// session is answered `approve, once` with `actor: automation` — the ledger must not
+/// credit a person who never saw the request — and no modal opens over it.
+#[test]
+fn auto_approve_answers_an_incoming_approval_as_automation_and_opens_no_modal() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    approve(&mut app, codex_sandbox_escalation());
+
+    let calls = app.drain();
+    let answer = calls
+        .iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the approval is answered without a keypress");
+    assert_eq!(
+        answer.params,
+        json!({
+            "id": SESSION,
+            "request_id": "req-17",
+            "response": { "decision": "approve", "scope": "once", "actor": "automation" }
+        }),
+        "the answer says a robot pressed the button"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        !screen.contains("approve (once)"),
+        "an answered request raises no modal:\n{}",
+        screen.text()
+    );
+
+    // The toggle's notice owns the footer row until it expires; the badge is what stays.
+    for _ in 0..64 {
+        app.apply(Msg::Tick);
+    }
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("AUTO-APPROVE"),
+        "the footer wears the mode while it is on:\n{}",
+        screen.text()
+    );
+}
+
+/// Turning the mode on answers the backlog: the request the modal was showing included.
+#[test]
+fn turning_auto_approve_on_answers_the_pending_backlog() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+    app.drain();
+
+    // The modal owns the keys while it is open; the operator leaves it first.
+    app.apply(key(KeyCode::Esc));
+    compose(&mut app, "/auto-approve on");
+
+    let calls = app.drain();
+    let answer = calls
+        .iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the backlog is answered the moment the mode turns on");
+    assert_eq!(answer.params["request_id"], "req-17");
+    assert_eq!(answer.params["response"]["actor"], "automation");
+}
+
+/// B2. The plan-exit question is never auto-answered: leaving plan mode changes what
+/// every later turn may do, and `--approve-all` already settled that "answer the
+/// approvals" is not "reconfigure the session". The modal still opens for it.
+#[test]
+fn auto_approve_never_answers_a_plan_exit() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    approve(
+        &mut app,
+        json!({
+            "kind": "plan_exit",
+            "header": "Plan ready",
+            "question": "Ready to build it?",
+            "options": [
+                {"optionId": "auto_edit", "name": "Yes, auto-accept edits", "kind": "allow_always"},
+                {"optionId": "prompt", "name": "Yes, manual approvals", "kind": "allow_once"},
+                {"optionId": "keep_planning", "name": "No, keep planning", "kind": "reject_once"}
+            ]
+        }),
+    );
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "a plan exit is a question only a person answers"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("keep planning"),
+        "the plan-exit modal opens as it always did:\n{}",
+        screen.text()
+    );
+}
+
+/// Replay overlap re-inserts a pending request until its `approval_resolved` lands; the
+/// in-flight mark is what keeps the robot from answering it twice.
+#[test]
+fn a_replayed_approval_is_not_answered_twice() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    approve(&mut app, codex_sandbox_escalation());
+    assert_eq!(
+        app.drain()
+            .iter()
+            .filter(|call| call.method == "interactive.respond_approval")
+            .count(),
+        1
+    );
+
+    // The same frame again — the overlap a resync can deliver.
+    approve(&mut app, codex_sandbox_escalation());
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "an answer already in flight is not sent again"
+    );
+}
+
+/// `/auto-approve off` hands the next request back to the modal.
+#[test]
+fn auto_approve_off_asks_again() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    compose(&mut app, "/auto-approve off");
+    app.drain();
+
+    approve(&mut app, codex_sandbox_escalation());
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "with the mode off nothing is answered for anyone"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("approve (once)"),
+        "the modal is back:\n{}",
+        screen.text()
+    );
+    assert!(
+        !screen.contains("AUTO-APPROVE"),
+        "and the footer no longer wears the mode:\n{}",
+        screen.text()
+    );
+}
+
+/// `ctrl+x A` — the capital sibling of `ctrl+x a`: one answers the approval that is
+/// asking, the other answers everything the session will ask.
+#[test]
+fn the_leader_chord_toggles_auto_approve() {
+    let mut app = opened(full_hello());
+
+    app.apply(ctrl('x'));
+    app.apply(Msg::Key(KeyEvent::new(
+        KeyCode::Char('A'),
+        KeyModifiers::SHIFT,
+    )));
+
+    for _ in 0..64 {
+        app.apply(Msg::Tick);
+    }
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("AUTO-APPROVE"),
+        "the chord flips the mode:\n{}",
+        screen.text()
+    );
+
+    approve(&mut app, codex_sandbox_escalation());
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "and the mode it flipped is the real one"
+    );
+}
+
+/// The native agent's `ask_user` tool rides the approval channel with `kind:
+/// "question"`. A robot `approve` carries no `choice`, which the runtime reports to the
+/// agent as "acknowledged without an answer" — so auto-approve leaves the question for
+/// the person, modal and all.
+#[test]
+fn auto_approve_never_answers_an_ask_user_question() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    approve(
+        &mut app,
+        json!({
+            "kind": "question",
+            "header": "Commit blocked",
+            "question": "The sandbox forbids writes to `.git`. Commit yourself, or grant it?",
+            "options": [
+                {"optionId": "self", "name": "I'll commit it myself", "kind": "reject_once"},
+                {"optionId": "grant", "name": "Grant the session permission", "kind": "allow_once"}
+            ]
+        }),
+    );
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "a question the agent asked a person is not answered by a robot"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("Commit blocked"),
+        "the question modal opens as it always did:\n{}",
+        screen.text()
+    );
+}

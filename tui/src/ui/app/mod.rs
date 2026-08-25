@@ -1481,11 +1481,13 @@ impl App {
     }
 
     /// What a live stream frame is worth interrupting someone for, and which session it
-    /// was about.
+    /// was about. The final `bool` says whether an approval frame is a *question* — a
+    /// plan exit or `ask_user`'s `kind: "question"` — which auto-approve leaves for a
+    /// person and must therefore still ring.
     ///
     /// Live frames only — this is read from [`Msg::Notification`], never from a replay
     /// answer, so opening a session with history rings nothing.
-    fn live_signal(notification: &Notification) -> Option<(Plane, String, notify::Signal)> {
+    fn live_signal(notification: &Notification) -> Option<(Plane, String, notify::Signal, bool)> {
         let plane = match notification.method.as_str() {
             "interactive.event" => Plane::Interactive,
             "coding.event" => Plane::Coding,
@@ -1506,7 +1508,16 @@ impl App {
             _uninteresting => return None,
         };
 
-        Some((plane, id.to_string(), signal))
+        let question = matches!(EventType::parse(kind), EventType::ApprovalRequested)
+            && matches!(
+                notification
+                    .params
+                    .pointer("/event/payload/kind")
+                    .and_then(Value::as_str),
+                Some("plan_exit") | Some("question")
+            );
+
+        Some((plane, id.to_string(), signal, question))
     }
 
     pub fn take_open_url(&mut self) -> Option<String> {
@@ -1799,6 +1810,16 @@ impl App {
             })
     }
 
+    /// Whether the open session is in this client's auto-approve mode — every ordinary
+    /// approval answered `approve` on arrival, plan-exit questions still asked. See
+    /// `SessionsTab::auto_approve` for why this is client state.
+    pub fn open_auto_approve(&self) -> bool {
+        self.sessions
+            .open
+            .as_ref()
+            .is_some_and(|key| self.sessions.auto_approve.contains(key))
+    }
+
     pub fn open_sandbox(&self) -> Option<(String, bool)> {
         let value = self.sessions.open_info().and_then(|session| {
             session
@@ -2046,9 +2067,17 @@ impl App {
 
                 // Armed after the dispatch, so a frame for a session this client is no
                 // longer subscribed to — the one frame that can cross an unsubscribe —
-                // does not ring for a conversation nobody is following.
-                if let Some((plane, id, signal)) = candidate {
-                    if self.sessions.watches.contains_key(&(plane, id)) {
+                // does not ring for a conversation nobody is following. An approval on an
+                // auto-approve session was answered inside that dispatch and needs no
+                // input from anyone, so it does not ring either — unless it was a
+                // question (plan exit, `ask_user`), which the flush skipped and a person
+                // still owes; turn signals always ring.
+                if let Some((plane, id, signal, question)) = candidate {
+                    let auto_answered = matches!(signal, notify::Signal::NeedsInput)
+                        && !question
+                        && self.sessions.auto_approve.contains(&(plane, id.clone()));
+
+                    if !auto_answered && self.sessions.watches.contains_key(&(plane, id)) {
                         self.notify(signal);
                     }
                 }

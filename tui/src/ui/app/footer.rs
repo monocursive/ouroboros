@@ -300,9 +300,7 @@ impl App {
             usage: info.and_then(|info| info.usage.clone()),
             elapsed_ms: transcript.elapsed_ms,
             queued: transcript.queued,
-            approvals: watch
-                .map(|watch| watch.pending_approvals.len())
-                .unwrap_or(0),
+            approvals: watch.map(Watch::unanswered_approvals).unwrap_or(0),
         })
     }
 
@@ -323,11 +321,14 @@ impl App {
     /// cached: a cache would answer with the previous tick's numbers, and these are the
     /// numbers the footer is claiming are current.
     pub(super) fn activity_of(&self, facts: Option<&SessionFacts>) -> Activity {
+        // Unanswered, not pending: an approval whose answer is already in flight — a
+        // keypress or the auto-approve robot — is not waiting on the person this title
+        // glyph is trying to reach.
         if self
             .sessions
             .watches
             .values()
-            .any(|watch| !watch.pending_approvals.is_empty())
+            .any(|watch| watch.unanswered_approvals() > 0)
         {
             return Activity::NeedsInput;
         }

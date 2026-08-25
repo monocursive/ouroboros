@@ -247,6 +247,16 @@ pub struct SessionsTab {
     /// back does not lose them and an interrupt does not either (Claude Code #16905: Esc
     /// must keep working *and* keep the queue).
     pub(super) queued_drafts: HashMap<(Plane, String), Vec<QueuedDraft>>,
+    /// Sessions this client auto-approves: every ordinary approval request is answered
+    /// `approve, once` the moment it arrives, marked `actor: automation` in the runtime's
+    /// ledger. Plan-exit questions still ask — see `ApprovalRequest::plan_exit`.
+    ///
+    /// Client-side and this-client-only, deliberately: the runtime's `approval_mode` is
+    /// what the session was *started* with and providers renegotiate changes to it
+    /// unevenly, while an answering robot at the keyboard works identically for every
+    /// transport and leaves an honest per-request ledger trail. Not persisted — the mode
+    /// is an operator's live decision about a running session, not a preference.
+    pub auto_approve: HashSet<(Plane, String)>,
 }
 
 impl SessionsTab {
@@ -438,12 +448,14 @@ impl SessionsTab {
     }
 
     /// Which group one row belongs to, counting the approvals this client is holding for
-    /// it as well as the status the plane declared.
+    /// it as well as the status the plane declared. Unanswered ones, that is: an approval
+    /// the auto-approve robot (or a keypress) has already answered is not a reason to
+    /// triage the row as waiting on a person.
     pub fn triage_of(&self, session: &SessionInfo) -> Triage {
         let pending = self
             .watches
             .get(&(session.plane, session.id.clone()))
-            .map(|watch| watch.pending_approvals.len())
+            .map(Watch::unanswered_approvals)
             .unwrap_or(0);
 
         session.triage(pending)
@@ -1351,6 +1363,89 @@ impl App {
         );
     }
 
+    /// `/auto-approve [on|off]`: the client-side mode that answers every ordinary
+    /// approval this session raises with `approve, once, actor: automation`.
+    ///
+    /// Client-side on purpose — see [`SessionsTab::auto_approve`]. Turning it on answers
+    /// the backlog immediately (including the request an open modal is showing, whose
+    /// modal then closes under it); turning it off reopens the modal for anything still
+    /// unanswered. Plan-exit questions are never auto-answered on either path.
+    pub(super) fn set_auto_approve(&mut self, want: Option<bool>) {
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform(
+                "open a session before switching it to auto-approve",
+                NoticeKind::Info,
+            );
+            return;
+        };
+
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        let key = (plane, id.clone());
+        let current = self.sessions.auto_approve.contains(&key);
+        let want = want.unwrap_or(!current);
+
+        if want == current {
+            self.inform(
+                if want {
+                    format!("{id} is already auto-approving; /auto-approve off stops it")
+                } else {
+                    format!("{id} is not auto-approving; /auto-approve on starts it")
+                },
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        if want {
+            self.sessions.auto_approve.insert(key.clone());
+            self.auto_answer_approvals(plane, &id);
+
+            // A modal whose request the flush just answered is a question with no
+            // answerer left; one it skipped — a plan exit or an `ask_user` question —
+            // keeps its modal, because a person still owes that answer.
+            if let Some(Overlay::Approval {
+                plane: modal_plane,
+                id: modal_id,
+                request_id,
+                ..
+            }) = self.overlay.as_ref()
+            {
+                let answered_under_it = *modal_plane == plane
+                    && *modal_id == id
+                    && !self
+                        .sessions
+                        .watches
+                        .get(&key)
+                        .is_some_and(|watch| watch.awaiting_answer(request_id));
+
+                if answered_under_it {
+                    self.overlay = None;
+                }
+            }
+
+            self.inform(
+                format!(
+                    "auto-approve on: this client answers yes to everything {id} asks, \
+                     for this session; plan and ask-user questions still ask. \
+                     /auto-approve off stops it"
+                ),
+                NoticeKind::Warn,
+            );
+        } else {
+            self.sessions.auto_approve.remove(&key);
+            self.inform(
+                format!("auto-approve off: {id} asks before acting again"),
+                NoticeKind::Info,
+            );
+            // Anything that arrived un-answerable while the toggle flipped — a failed
+            // send, a plan exit behind another overlay — gets its modal back.
+            self.open_approval(plane, id);
+        }
+    }
+
     /// `/model <name>`: `interactive.configure`, where the gateway serves it.
     ///
     /// The method is behind the `hello.methods` gate like every other verb. A gateway that
@@ -2185,6 +2280,23 @@ impl App {
             return true;
         }
 
+        // The same `on`/`off`/toggle grammar as `/plan`, for the same reason: a verb that
+        // turns every safety question into a yes must not guess what "of" meant.
+        if let Some(argument) = slash_arg(trimmed, "/auto-approve") {
+            match argument.to_ascii_lowercase().as_str() {
+                "" => self.set_auto_approve(None),
+                "on" => self.set_auto_approve(Some(true)),
+                "off" => self.set_auto_approve(Some(false)),
+                other => self.inform(
+                    format!(
+                        "/auto-approve takes on or off, not {other:?}; bare /auto-approve toggles"
+                    ),
+                    NoticeKind::Info,
+                ),
+            }
+            return true;
+        }
+
         let command = match trimmed {
             "/new" => Some(Command::NewSession),
             "/switch" | "/sessions" => Some(Command::SwitchSession),
@@ -2723,6 +2835,7 @@ impl App {
         let key = (plane, id.to_string());
         self.cursors.forget(plane, id);
         self.sessions.watches.remove(&key);
+        self.sessions.auto_approve.remove(&key);
         self.sessions.rounds.remove(&key);
         self.sessions.clear_reply_pending(plane, id);
         self.sessions.composer_history.remove(&key);

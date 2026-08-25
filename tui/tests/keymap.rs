@@ -420,6 +420,7 @@ fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
         (Action::LeaderOpenImage, "i"),
         (Action::LeaderSteer, "s"),
         (Action::LeaderApproval, "a"),
+        (Action::LeaderAutoApprove, "A"),
         (Action::LeaderShellRule, "r"),
         (Action::LeaderEnd, "x"),
         (Action::LeaderDetails, "d"),

@@ -66,6 +66,7 @@ impl App {
                 }
 
                 if approval {
+                    self.auto_answer_approvals(plane, id);
                     self.open_approval(plane, id.to_string());
                 }
             }
@@ -436,6 +437,7 @@ impl App {
                 }
 
                 if approvals {
+                    self.auto_answer_approvals(plane, &id);
                     self.open_approval(plane, id);
                 }
             }
@@ -633,6 +635,70 @@ impl App {
 
         if let Some(composer) = self.sessions.composer.as_mut() {
             composer.verb = ComposerVerb::FollowUp;
+        }
+    }
+
+    /// Answers every ordinary pending approval on a session the operator switched to
+    /// auto-approve: `approve, once, actor: automation` per request, on the same
+    /// `Tag::Approval` path a keypress uses, so failures un-mark and report identically.
+    ///
+    /// Runs before [`open_approval`](Self::open_approval) at both ingress points (live
+    /// event and replay) and from the toggle itself. Idempotence against replay is
+    /// `mark_approval_response`: a request re-inserted by `recompute_interactive_state`
+    /// until its `approval_resolved` lands is already in flight and is not answered
+    /// twice. Questions — the plan exit and `ask_user`'s `kind: "question"` — are
+    /// skipped and left for the modal: auto-approve answers permissions; it does not
+    /// reconfigure the session (the `ouro run --approve-all` rule), and a robot cannot
+    /// answer a question the agent asked a person.
+    pub(super) fn auto_answer_approvals(&mut self, plane: Plane, id: &str) {
+        let key = (plane, id.to_string());
+
+        if !self.sessions.auto_approve.contains(&key) {
+            return;
+        }
+
+        // An unrouteable session cannot be answered; the modal path says so out loud,
+        // and the pending request stays visible for it.
+        if self.sessions.owner_conflict(plane, id).is_some() {
+            return;
+        }
+
+        let Some(watch) = self.sessions.watches.get(&key) else {
+            return;
+        };
+
+        let eligible: Vec<String> = watch
+            .pending_approvals
+            .values()
+            .filter(|request| !request.question())
+            .map(|request| request.request_id.clone())
+            .collect();
+
+        for request_id in eligible {
+            let marked = self
+                .sessions
+                .watches
+                .get_mut(&key)
+                .is_some_and(|watch| watch.mark_approval_response(&request_id));
+
+            if !marked {
+                continue;
+            }
+
+            let params = self.routed_session_params(
+                plane,
+                id,
+                model::respond_approval_params_as_automation(id, &request_id),
+            );
+            self.issue(Call::new(
+                Tag::Approval {
+                    plane,
+                    id: id.to_string(),
+                    request_id,
+                },
+                plane.method("respond_approval"),
+                params,
+            ));
         }
     }
 
