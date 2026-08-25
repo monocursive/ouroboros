@@ -187,6 +187,20 @@ defmodule Ouroboros.Provider.NativeTest do
       assert Keyword.get(options, :sandbox_mode) == :read_only
     end
 
+    # The workspace lease posture is derived from the sandbox mode, and `:shared_read` is
+    # for sessions that cannot write. A session that asked for no sandbox at all must take
+    # the exclusive lease like `:workspace_write` does — never the read one.
+    test "an unrestricted interactive session takes the exclusive workspace lease", context do
+      assert {:ok, session} =
+               Ouroboros.Interactive.State.new("native-unrestricted-lease",
+                 provider: :native,
+                 workspace: context.workspace,
+                 sandbox_mode: :unrestricted
+               )
+
+      assert session.workspace_mode == :exclusive
+    end
+
     test "accepts unrestricted on both planes, because it is now a mode this provider has" do
       assert {:ok, coding} =
                Provider.safety_options(:native, [sandbox_mode: :unrestricted], :coding)

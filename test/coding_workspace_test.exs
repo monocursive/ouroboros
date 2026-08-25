@@ -121,6 +121,20 @@ defmodule Ouroboros.CodingWorkspaceTest do
              )
   end
 
+  # `:shared_read` is the posture for a session that cannot write, and it is derived from
+  # the sandbox mode. A session that asked for *no* sandbox at all must never land there:
+  # only `:read_only` is a read lease, and everything else — `:workspace_write` and
+  # `:unrestricted` alike — takes the exclusive one.
+  test "an unrestricted session takes the exclusive lease, never the shared read one", %{
+    nested: nested
+  } do
+    assert {:ok, %TaskState{workspace_mode: :exclusive}} =
+             TaskState.new(unique_id("unrestricted-default"), "full access",
+               workspace: nested,
+               sandbox_mode: :unrestricted
+             )
+  end
+
   test "exclusive overlap is rejected and cancellation releases the lease", %{nested: nested} do
     first_id = unique_id("writer")
     second_id = unique_id("conflict")
