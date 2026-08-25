@@ -12,10 +12,19 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop logs desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
+	@echo "make tui              the same, under the name of the thing it opens"
+	@echo "make daemon           start the dev runtime headless and leave it running"
+	@echo "make daemon-restart   recompile, then swap the dev runtime onto the new code"
+	@echo "make daemon-stop      stop the dev runtime"
+	@echo "make gui              build the desktop app and (re)launch it against the checkout"
+	@echo "make gui-stop         quit the desktop app"
+	@echo "make status           what is running, on which port, and whether it is stale"
+	@echo "make stop             everything down: app, daemon, and any stray daemons"
+	@echo "make logs             follow the dev runtime's log"
 	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
 	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
 	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
@@ -32,6 +41,35 @@ dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
 	@test -d deps || $(MIX) deps.get
 	cd tui && $(CARGO) run -- --dev
+
+tui: dev
+
+# The daemon/gui/status/stop family is one script, so the knowledge of where the dev
+# gateway publishes, how staleness is judged, and what counts as a stray daemon has a
+# single home. See scripts/dev.sh.
+daemon:
+	@sh scripts/dev.sh daemon
+
+daemon-stop:
+	@sh scripts/dev.sh daemon-stop
+
+daemon-restart:
+	@sh scripts/dev.sh daemon-restart
+
+gui:
+	@sh scripts/dev.sh gui
+
+gui-stop:
+	@sh scripts/dev.sh gui-stop
+
+status:
+	@sh scripts/dev.sh status
+
+stop:
+	@sh scripts/dev.sh stop-all
+
+logs:
+	@sh scripts/dev.sh logs
 
 desktop-dev:
 	@echo "==> desktop-dev: building the native client and its lifecycle helper"

@@ -68,6 +68,23 @@ fails before opening durable state; raw release and Docker launch packaging are 
 supported deployment path. Joining a cluster is deliberate configuration through
 `ouro fleet`; see [Running a cluster](#running-a-cluster).
 
+For day-to-day development from this checkout, the Makefile carries the whole lifecycle —
+each verb builds what it needs first:
+
+```sh
+make status          # what is running, on which port, and whether it is stale
+make daemon          # the dev runtime, headless, in its isolated ouroboros-dev data dir
+make daemon-restart  # recompile, then swap the runtime onto the new code
+make tui             # the terminal client, attached to the checkout runtime
+make gui             # the macOS desktop app, (re)launched against the checkout
+make stop            # everything down, stray daemons included
+make logs            # follow the dev runtime's log
+```
+
+`make status` says when a running daemon predates the code on disk, and `make stop` also
+finds daemons this checkout leaked outside the published gateway. Set `OUROBOROS_DATA_DIR`
+to run the same verbs against a scratch runtime without touching the dev one.
+
 For the library from a checkout, the project currently targets Elixir 1.20 and OTP 29.
 
 ```sh
