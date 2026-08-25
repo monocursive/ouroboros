@@ -259,6 +259,26 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert escalation_event(events).payload["granted_by"] == "timeout"
     end
 
+    test "an interrupt while the escalation is outstanding declines it and stops the turn",
+         context do
+      {loop, _agent} = start_loop(context, escape_script(context))
+      pid = run(loop)
+
+      assert_receive {:event, %{type: :approval_requested}}, 10_000
+
+      send(pid, :native_interrupt)
+
+      events = collect()
+
+      refute File.exists?(context.outside)
+      assert find(events, :turn_interrupted)
+
+      [result] = all(events, :tool_result)
+      assert result.payload["is_error"]
+      assert result.payload["output"] =~ "interrupted while the request"
+      assert escalation_event(events).payload["granted_by"] == "interrupted"
+    end
+
     test "a session-scope approval is not asked a second time in the same session", context do
       script = [
         [
