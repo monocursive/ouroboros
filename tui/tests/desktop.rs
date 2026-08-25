@@ -474,6 +474,61 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
     );
 }
 
+/// The wire meaning of the form's "Runtime default" row: the key is absent, not `null` and
+/// not empty.
+///
+/// The whole row rests on this. It tells an operator the request carries no model option
+/// and that the runtime will apply whatever it configured — which is only true if the
+/// client genuinely omits the key rather than sending something the runtime must interpret.
+#[test]
+fn desktop_new_session_omits_the_model_key_when_no_model_was_chosen() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({
+            "account": Value::Null,
+            "requiresOpenaiAuth": false,
+            "login": { "status": "idle" }
+        }),
+    );
+    app.drain();
+
+    app.desktop_start_session("claude".into(), None, "/tmp/desktop-workspace".into(), None)
+        .expect("the operate-capable gateway can start a session");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("the native form emits an interactive.start call");
+
+    assert!(
+        start.params.get("model").is_none(),
+        "\"Runtime default\" must leave the key out entirely: {}",
+        start.params
+    );
+    assert_eq!(start.params["provider"], "claude");
+
+    // And a model that is only whitespace is the same statement, not a model named " ".
+    app.desktop_start_session(
+        "claude".into(),
+        Some("   ".into()),
+        "/tmp/desktop-workspace".into(),
+        None,
+    )
+    .expect("a session still starts");
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .expect("a second interactive.start call");
+    assert!(
+        start.params.get("model").is_none(),
+        "a blank model is no model: {}",
+        start.params
+    );
+}
+
 /// The native form's file-access answer reaches the wire, and beats the config file.
 ///
 /// The stored default is where the control *starts*; what an operator picked in the form
