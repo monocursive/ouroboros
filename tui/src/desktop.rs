@@ -471,7 +471,7 @@ struct DesktopView {
     /// answer changes: `set_placeholder` notifies, and notifying every frame never settles.
     composer_placeholder: &'static str,
     provider_select: Entity<SelectState<Vec<ProviderRow>>>,
-    model_select: Entity<SelectState<SearchableVec<ModelRow>>>,
+    model_picker: ModelPicker,
     /// The rows currently installed in the two pickers. Held so a frame that would install
     /// the same rows installs nothing: `set_items` cannot compare them itself, and
     /// re-seeding a selection every frame would fight the operator's own pick.
@@ -520,7 +520,57 @@ struct DesktopView {
     _poll: Task<()>,
 }
 
+/// The model picker and the subscription that reads its confirmations.
+///
+/// One value rather than two fields because the picker is *replaced* whenever the form
+/// opens, and a subscription left watching the entity it replaced would fail silently: the
+/// operator would click a model, nothing would record it, and the form would keep sending
+/// the previous one — a worse fault than the search-box residue the replacement exists to
+/// clear. Bound together, the compiler will not let one be stored without the other, and
+/// overwriting the pair drops the old subscription, which is what detaches it
+/// (`Subscription`'s `Drop` unsubscribes).
+///
+/// Built in exactly one place: [`DesktopView::new_model_picker`].
+struct ModelPicker {
+    select: Entity<SelectState<SearchableVec<ModelRow>>>,
+    _subscription: Subscription,
+}
+
 impl DesktopView {
+    /// Builds the model picker together with the subscription that reads its confirmations.
+    ///
+    /// The single registration site, called by the constructor and by every replacement, so
+    /// the two cannot be created apart and cannot drift — see [`ModelPicker`].
+    fn new_model_picker(window: &mut Window, cx: &mut Context<Self>) -> ModelPicker {
+        let select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(Vec::<ModelRow>::new()), None, window, cx)
+                .searchable(true)
+        });
+
+        let subscription = cx.subscribe_in(
+            &select,
+            window,
+            |this, _select, event: &SelectEvent<SearchableVec<ModelRow>>, window, cx| {
+                // Read from the event, never from `selected_value()`: confirming out of a
+                // filtered list is exactly the case where the component's cache is
+                // resolved against rows that are not the whole list.
+                let SelectEvent::Confirm(choice) = event;
+                this.model_choice = choice.clone().unwrap_or(ModelChoice::RuntimeDefault);
+                // A confirmed search leaves the delegate filtered and the list index
+                // pointing into it. Reinstalling unfiltered rows and re-asserting the
+                // choice puts the closed label back in agreement with what will be sent.
+                this.reinstall_model_rows(window, cx);
+                this.action_error = None;
+                cx.notify();
+            },
+        );
+
+        ModelPicker {
+            select,
+            _subscription: subscription,
+        }
+    }
+
     fn new(driver: Driver, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -549,10 +599,7 @@ impl DesktopView {
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let provider_select =
             cx.new(|cx| SelectState::new(Vec::<ProviderRow>::new(), None, window, cx));
-        let model_select = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(Vec::<ModelRow>::new()), None, window, cx)
-                .searchable(true)
-        });
+        let model_picker = Self::new_model_picker(window, cx);
         let mut subscriptions = Vec::new();
         for input in [
             composer.clone(),
@@ -591,23 +638,6 @@ impl DesktopView {
                 cx.notify();
             },
         ));
-        subscriptions.push(cx.subscribe_in(
-            &model_select,
-            window,
-            |this, _select, event: &SelectEvent<SearchableVec<ModelRow>>, window, cx| {
-                // Read from the event, never from `selected_value()`: confirming out of a
-                // filtered list is exactly the case where the component's cache is
-                // resolved against rows that are not the whole list.
-                let SelectEvent::Confirm(choice) = event;
-                this.model_choice = choice.clone().unwrap_or(ModelChoice::RuntimeDefault);
-                // A confirmed search leaves the delegate filtered and the list index
-                // pointing into it. Reinstalling unfiltered rows and re-asserting the
-                // choice puts the closed label back in agreement with what will be sent.
-                this.reinstall_model_rows(window, cx);
-                this.action_error = None;
-                cx.notify();
-            },
-        ));
 
         // Spawned against the window rather than the app: the tick puts a refused
         // quick-start prompt back into the composer, and writing an input's value needs the
@@ -637,7 +667,7 @@ impl DesktopView {
             rename,
             composer_placeholder: COMPOSER_MESSAGE_PLACEHOLDER,
             provider_select,
-            model_select,
+            model_picker,
             provider_rows: Vec::new(),
             model_field: ModelField::Text { hint: None },
             provider_choice: None,
@@ -1125,7 +1155,7 @@ impl DesktopView {
         };
         let choice = self.model_choice.clone();
 
-        self.model_select.update(cx, |state, cx| {
+        self.model_picker.select.update(cx, |state, cx| {
             state.set_items(SearchableVec::new(rows), window, cx);
             state.set_selected_value(&choice, window, cx);
         });
@@ -1420,19 +1450,34 @@ impl DesktopView {
         }
     }
 
-    /// Asks the runtime to fill the form's pickers, and puts the model rows back to the
-    /// whole list.
+    /// Asks the runtime to fill the form's pickers, and gives the model picker a clean
+    /// slate.
     ///
     /// Both fetches are no-ops while an answer is held or outstanding, so opening the form
     /// repeatedly asks nothing extra — but a fetch that failed earlier gets its retry here
-    /// rather than on a poll cadence. The reinstall is what clears a filter left behind by
-    /// a search the operator abandoned last time the form was open.
+    /// rather than on a poll cadence.
+    ///
+    /// The picker is rebuilt rather than reset because the crate offers no way to reset it.
+    /// Text typed into the popup's search box lives in `ListState::query_input`
+    /// (list/list.rs:73), which is `pub(crate)` and survives close, reopen, and any
+    /// delegate swap — and the box is an ordinary text input, so a second search *appends*
+    /// to the first ("terra" then "terra" becomes "terraterra", matching nothing). A fresh
+    /// entity is the only way to hand back an empty box. `model_choice` is this window's
+    /// own, so nothing the operator chose is lost in the exchange; the reinstall below
+    /// carries the rows and the selection onto the new picker.
+    ///
+    /// Only the model picker needs this. The provider picker is never `.searchable(true)`,
+    /// and `ListState` renders no query input unless it is (list/list.rs:585), so no text
+    /// can reach a box that is never drawn.
     fn open_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(app) = self.app.as_mut() {
             app.desktop_fetch_pickers();
             self.flush_calls();
         }
+
+        self.model_picker = Self::new_model_picker(window, cx);
         self.reinstall_model_rows(window, cx);
+
         self.action_error = None;
         cx.notify();
     }
@@ -1885,7 +1930,7 @@ impl DesktopView {
             ModelField::Unsupported => (
                 Some(SharedString::from("Not accepted")),
                 div().flex().flex_col().gap_1().child(
-                    Select::new(&self.model_select)
+                    Select::new(&self.model_picker.select)
                         .small()
                         .w_full()
                         .disabled(true)
@@ -1924,7 +1969,7 @@ impl DesktopView {
                         .flex_col()
                         .gap_1()
                         .child(
-                            Select::new(&self.model_select)
+                            Select::new(&self.model_picker.select)
                                 .small()
                                 .w_full()
                                 .menu_width(px(420.0))
