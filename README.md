@@ -637,6 +637,7 @@ override is read ahead of the cache, so it takes effect without a restart.
 |---|---|---|
 | `read_only` | reads anywhere the process could already read; **no writes at all** except a per-call scratch directory `$TMPDIR` points at; no external network, with loopback retained for local IPC | **`bash` refused**, and the refusal names what was missing |
 | `workspace_write` | the above, plus writes under the workspace and every `add_dirs` root — with `.git` and `.ouroboros` beneath them, the node's data directory and `~/.config/ouroboros` read-only; no external network, with loopback retained for local IPC | runs **unsandboxed**, exactly as it did before C5 |
+| `unrestricted` | **no OS sandbox at all**, asked for by name and logged every time a command takes it. The structured file tools keep their workspace/`add_dirs` path containment, and the permission engine, `approval_mode`, hooks and the ledger are untouched: this answers "what can be written", never "who is asked" | the same, and the same |
 
 macOS gets a Seatbelt profile shaped after Codex CLI's published base policy: `(deny
 default)`, `(allow file-read*)`, the handful of operations `/bin/sh` needs to exist, and
@@ -650,7 +651,28 @@ filesystem, `--bind` per writable root, `--ro-bind` back over each root's `.git`
 
 **`.git` read-only means `git commit` fails inside the sandbox.** That is Codex's rule
 and it is kept for Codex's reason — the repository's history is the thing a session must
-not rewrite behind you. Commits are yours.
+not rewrite behind you. Commits are yours, and now you are asked about them: see the
+escalation below.
+
+**A filesystem denial is put to you once, and re-run if you say yes.** When
+`workspace_write` stops a *filesystem* write, the session raises an approval with
+`kind: "sandbox_escalation"` carrying the command, the working directory, and the
+constraint the kernel enforced. Approve it and the identical command is re-run once with
+no OS sandbox, in the same turn; the model is shown the re-run's result and told the
+first attempt happened, because a command that partly succeeded before the denial has now
+run twice. Deny it, or leave it unanswered past `approval_timeout_ms`, and the sandboxed
+failure stands. `approval_mode` deliberately does not answer this — `auto_approve` means
+"do not ask me about tool calls", never "leave the OS sandbox" — so only a permission
+rule or a person grants it, and `scope: session` remembers it for that command alone.
+
+Three denials are never offered: a **network** denial, because external network is the
+node-level `native_sandbox_network` setting rather than one command's answer; anything
+under **`read_only`**, because a read-only label a shell can step out of is not a label;
+and any denial whose evidence or command line names the node's data directory, the
+native provider's data directory, `~/.config/ouroboros`, or an `.ouroboros` directory.
+That last check is textual and therefore conservative — a shell line cannot be decomposed
+into the paths it will touch, so a command that mentions those names at all is refused
+the offer.
 
 When the sandbox stops a command the tool result quotes the line that proves it, names
 the constraint (a write outside the writable set, or the network), and says what to ask a
@@ -764,9 +786,22 @@ transcript it never had would be a claim with nothing behind it.
   macOS `mktemp` with no template asks libc for `_CS_DARWIN_USER_TEMP_DIR`, which is
   outside the scratch directory. `mktemp "$TMPDIR/x.XXXXXX"` works; bare `mktemp` does
   not.
-- **`:unrestricted` is still not offered.** C5 gave this provider a sandbox to relax, not
-  a reason to offer a mode that switches everything off. The escalation from a sandbox
-  denial is a human, `add_dirs`, or `workspace_write` — not a flag.
+- **`:unrestricted` is offered, and it is exactly one thing.** It turns the OS sandbox off
+  for the shell. It does not widen the file tools' path containment, it does not touch
+  `approval_mode`, the permission rules, the hooks or the ledger, and plan mode still
+  overrides it. A session running under it says `sandbox: "none"` on every `bash` call and
+  writes a warning line to the log each time a command takes it.
+- **An escalation is one command, not a session.** Approving a sandbox denial re-runs that
+  command with no OS sandbox and changes nothing about the session; the next `bash` call
+  is sandboxed again. A `scope: session` answer remembers that one command line, under a
+  key of its own — approving a `bash` call for the session never also approves escaping
+  the sandbox for it.
+- **A permission rule that allows a command also allows escalating it.** The engine is
+  asked about the same `Bash(…)` subject the command already has, which is the simplest
+  honest mapping onto the rule vocabulary that exists — and means an `allow` rule covering
+  the command pre-answers the escalation without a person seeing it. If that is too
+  coarse it wants a dimension in `Ouroboros.Control.Permissions`, not a second vocabulary
+  in the provider.
 - **Command deadlines cover the process group.** `bash`, hooks, checks, and argv helpers
   start in an Erlexec-owned group. A timeout sends TERM to the group, drains bounded
   output, then sends KILL; an ordinary background child cannot survive the result.

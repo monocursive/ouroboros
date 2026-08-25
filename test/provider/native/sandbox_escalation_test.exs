@@ -478,6 +478,104 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
     end
   end
 
+  # The loop tests above drive the loop process directly. This one goes through the real
+  # session transport, because that is where the approval *lifecycle* lives: the session
+  # tracks the request id off the `approval_requested` event, `respond_approval/3` refuses
+  # an id it is not holding, and `Jido.Harness.Session.Lifecycle` auto-denies an approval
+  # raised for a turn that is no longer active. An escalation is raised mid-turn, before
+  # any terminal event, so it must route like an ordinary tool approval does.
+  describe "through the session transport" do
+    @describetag @needs_sandbox
+
+    setup context do
+      data_dir = Path.join(context.root, "data")
+      File.mkdir_p!(data_dir)
+
+      previous_dir = Application.get_env(:ouroboros, :native_data_dir)
+      previous_model = Application.get_env(:ouroboros, :native_model_module)
+      Application.put_env(:ouroboros, :native_data_dir, data_dir)
+      Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
+
+      on_exit(fn ->
+        restore(:native_data_dir, previous_dir)
+        restore(:native_model_module, previous_model)
+      end)
+
+      :ok
+    end
+
+    test "the operator's answer reaches the loop through respond_approval/3", context do
+      {model_spec, _agent} = NativeModelScript.start(escape_script(context))
+
+      request =
+        Jido.Harness.SessionRequest.new!(%{
+          provider: :native,
+          cwd: context.workspace,
+          model: model_spec,
+          approval_mode: :auto_approve,
+          approval_timeout_ms: 10_000
+        })
+
+      {:ok, handle} =
+        Ouroboros.Provider.Native.Session.open(request, %{
+          session_id: "sess-escalate-transport",
+          provider: :native,
+          owner: self(),
+          adapter: Ouroboros.Provider.Native,
+          config: %{},
+          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          telemetry_context: %{}
+        })
+
+      on_exit(fn ->
+        if Process.alive?(handle), do: Ouroboros.Provider.Native.Session.close(handle)
+      end)
+
+      assert_receive {:session_adapter_event, %{type: :provider_event}}, 10_000
+
+      Ouroboros.Provider.Native.Session.send(
+        handle,
+        Jido.Harness.TurnRequest.new!("escape"),
+        "turn-1"
+      )
+
+      ask = await_session_event(:approval_requested)
+      assert ask.payload["kind"] == "sandbox_escalation"
+
+      # An id the session is not holding is refused, which is what makes the id it *is*
+      # holding meaningful: the escalation was tracked off its own `approval_requested`
+      # event like any other approval, not admitted because something answered.
+      assert {:error, :unknown_request} =
+               Ouroboros.Provider.Native.Session.respond_approval(
+                 handle,
+                 "napp_not_a_real_request",
+                 %ApprovalResponse{decision: :approve, scope: :once}
+               )
+
+      assert :ok =
+               Ouroboros.Provider.Native.Session.respond_approval(
+                 handle,
+                 ask.request_id,
+                 %ApprovalResponse{
+                   decision: :approve,
+                   scope: :once
+                 }
+               )
+
+      assert %{type: :turn_completed} = await_session_event(:turn_completed)
+      assert File.read!(context.outside) == "escaped\n"
+    end
+  end
+
+  defp await_session_event(type) do
+    receive do
+      {:session_adapter_event, %{type: ^type} = event} -> event
+      {:session_adapter_event, _other} -> await_session_event(type)
+    after
+      20_000 -> flunk("no #{type} within 20s")
+    end
+  end
+
   defp sandbox_kind?(%{payload: %{"kind" => "sandbox_escalation"}}), do: true
   defp sandbox_kind?(_event), do: false
 end

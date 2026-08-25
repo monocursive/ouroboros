@@ -213,8 +213,11 @@ defmodule Ouroboros.Provider.Native.Prompt do
     `bash` runs inside the #{label} OS sandbox. The workspace and declared roots are
     writable; `.git`, `.ouroboros`, the runtime data directory, and the user's Ouroboros
     configuration stay read-only. #{sentence(network_posture(policy))}
-    A sandbox denial names the constraint it hit; do not retry it under a weaker
-    posture.#{approvals(approval_mode)}
+    A sandbox denial names the constraint it hit; do not retry it under a weaker posture.
+    A **filesystem** denial is put to the operator for you, once, as an approval: if they
+    grant it the same command is re-run outside the sandbox and that re-run's result is
+    what you get back. So do not ask for one with `ask_user`, and do not repeat a command
+    whose result already tells you the escalation was declined.#{approvals(approval_mode)}
     """
     |> String.trim()
   end
