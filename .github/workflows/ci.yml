@@ -53,7 +53,39 @@ jobs:
       # because a cached `_build` would otherwise hide a warning nothing recompiled.
       - run: mix compile --force --warnings-as-errors
 
+      # Linux CI is the node that can actually run bubblewrap. Install it before
+      # `mix test` so the live bwrap suite is not skipped, and print the version so a
+      # green log names the binary it ran under.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: bwrap --version
+
       - run: mix test
+
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - run: mix deps.get
+
+      # Gradual: `:error_handling` only, PLTs under `_build/plts` (inside the mix cache
+      # above). The first hosted run still builds a PLT; treat that as the debugging
+      # session the honesty note at the top of this file already named.
+      - run: mix dialyzer
 
   rust:
     name: Rust

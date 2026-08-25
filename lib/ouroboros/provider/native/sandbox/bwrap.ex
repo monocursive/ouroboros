@@ -12,13 +12,13 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   seccomp filter each of them adds. **Seccomp is out of scope for this slice**: the
   filesystem and the network namespace are constrained, the syscall surface is not.
 
-  ## Not verified on a machine
+  ## Verified where the live suite runs
 
-  `bwrap` was not installed on the node this backend was written on, so nothing here
-  claims observed behaviour. What is tested is the argv — pinned byte for byte in
-  `test/provider/native/sandbox_test.exs` — and what that argv means is read from
-  bubblewrap's own documented options. The first person to run it on a Linux node
-  should expect to correct something.
+  The argv is still pinned byte for byte in `test/provider/native/sandbox_test.exs`.
+  Live behaviour — a read-only bind denying writes, a workspace bind allowing them,
+  `$HOME` and `.git` staying read-only — is claimed only on Linux CI with `bwrap`
+  installed (ubuntu-24.04). It is not claimed on the Mac this backend was written on,
+  which still has no `bwrap`, and there is still no seccomp filter.
 
   ## The argv, and why it is in this order
 

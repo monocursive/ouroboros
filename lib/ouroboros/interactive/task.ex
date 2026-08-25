@@ -7,6 +7,7 @@ defmodule Ouroboros.Interactive.Task do
 
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
+  alias Ouroboros.Interactive.Task.{Approvals, Resume, Turns}
   alias Ouroboros.Provider
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Session, as: NativeSession
@@ -16,7 +17,6 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Exec
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
-  alias Ouroboros.Workspace.Path, as: WorkspacePath
   alias Ouroboros.Workspace.Worktree
 
   @poll_interval 25
@@ -48,29 +48,6 @@ defmodule Ouroboros.Interactive.Task do
   # this one is smaller because it is a sentence, not a document.
   @max_delegation_objective_bytes 8_192
 
-  # C2 — external approvals. One session may hold at most this many unanswered questions
-  # at once; the next is denied rather than queued, because a provider that can ask nine
-  # times without being answered is a provider nobody is reading, and an unbounded table
-  # of waiting callers is an unbounded table.
-  @max_external_approvals 8
-
-  # I1. How many `request_id => ledger effect id` stamps this coordinator keeps in memory
-  # so a later `approval_resolved` can name its entry. Comfortably above the eight
-  # approvals that can be outstanding at once, and bounded because it is memory.
-  @max_approval_effects 64
-
-  # The coordinator's own wait, when the session states none. Layered deliberately below
-  # `Ouroboros.InteractiveSession`'s transport wait and the gateway's method ceiling, so
-  # the answer a caller gets is this module's honest denial rather than a killed task.
-  @external_approval_default_timeout_ms 10 * 60 * 1_000
-  @external_approval_min_timeout_ms 1_000
-  @external_approval_ceiling_ms 13 * 60 * 1_000
-
-  # Consulted through `Code.ensure_loaded?/1` on purpose: C1 lands separately, and a
-  # runtime without it must still ask a human rather than fail or invent a verdict. The
-  # name is read from application environment rather than hard-called so that this module
-  # compiles, and behaves, on a node where the engine does not exist yet.
-  @default_permissions_engine Ouroboros.Control.Permissions
   def child_spec(id) do
     %{
       id: {__MODULE__, id},
@@ -133,7 +110,7 @@ defmodule Ouroboros.Interactive.Task do
     # the call waiting on it died with the gateway task that held it. Closing those rows
     # as denials before anything else keeps the journal from claiming a question that
     # nobody is going to answer, and keeps the deny-by-default posture across a restart.
-    runtime = deny_orphaned_external_approvals(runtime)
+    runtime = Approvals.deny_orphaned_external_approvals(runtime)
 
     if State.terminal?(runtime.session) do
       {:noreply, runtime |> reply_ready_waiters() |> schedule_retire()}
@@ -198,7 +175,7 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   def handle_call({:send_turn, mode, id, input, opts}, _from, runtime) do
-    case dispatch_turn(runtime, mode, id, input, opts) do
+    case Turns.dispatch_turn(runtime, mode, id, input, opts) do
       {:ok, turn, runtime} -> {:reply, {:ok, State.public_turn(turn)}, runtime}
       {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
     end
@@ -241,31 +218,7 @@ defmodule Ouroboros.Interactive.Task do
   # a terminal session, a refused checkpoint, and a deadline all deny, and each says why.
   def handle_call({:request_approval, request_ref, request}, from, runtime)
       when is_reference(request_ref) and is_map(request) do
-    cond do
-      State.terminal?(runtime.session) ->
-        {:reply,
-         {:ok,
-          external_answer(
-            nil,
-            :deny,
-            :session_terminal,
-            "session #{runtime.session.id} is #{runtime.session.status}"
-          )}, runtime}
-
-      map_size(runtime.external_approvals) >= @max_external_approvals ->
-        {:reply,
-         {:ok,
-          external_answer(
-            nil,
-            :deny,
-            :capacity,
-            "session #{runtime.session.id} already has #{@max_external_approvals} " <>
-              "unanswered approval requests outstanding"
-          )}, runtime}
-
-      true ->
-        open_external_approval(runtime, request_ref, request, from)
-    end
+    Approvals.request(runtime, request_ref, request, from)
   end
 
   def handle_call({:respond_approval, _request_id, response}, _from, runtime)
@@ -293,61 +246,12 @@ defmodule Ouroboros.Interactive.Task do
   # untouched, which is what keeps the existing modal working for Codex and ACP.
   def handle_call({:respond_approval, request_id, response}, _from, runtime)
       when is_map_key(runtime.external_approvals, request_id) do
-    decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
-
-    reason =
-      case Map.get(response, :reason) do
-        text when is_binary(text) and text != "" -> text
-        _absent -> nil
-      end
-
-    scope = Map.get(response, :scope, :once)
-
-    # I1. Recorded before the answer reaches the caller waiting on it, for the same reason
-    # the request was recorded before it was asked.
-    {effect_id, runtime} =
-      record_approval(
-        runtime,
-        request_id,
-        decision,
-        scope,
-        response,
-        external_approval_subject(runtime, request_id),
-        "external"
-      )
-
-    {:reply, :ok,
-     close_external_approval(runtime, request_id, decision, :human, reason, scope, effect_id)}
+    {:reply, :ok, Approvals.respond_external(runtime, request_id, response)}
   end
 
   def handle_call({:respond_approval, request_id, response}, _from, runtime) do
-    # I1. Written before the answer is forwarded to the transport. Every provider reaches
-    # this clause — the native session, the Codex and ACP dialects — so one entry per human
-    # answer holds however the provider asked the question.
-    decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
-
-    runtime =
-      case harness_approval_subject(runtime, request_id) do
-        :unknown ->
-          runtime
-
-        subject ->
-          {_effect_id, runtime} =
-            record_approval(
-              runtime,
-              request_id,
-              decision,
-              Map.get(response, :scope, :once),
-              response,
-              subject,
-              "provider"
-            )
-
-          runtime
-      end
-
-    reply = with_harness_session(runtime, &Session.respond_approval(&1, request_id, response))
-    {:reply, reply, schedule_poll(runtime, 0)}
+    {reply, runtime} = Approvals.respond_provider(runtime, request_id, response)
+    {:reply, reply, runtime}
   end
 
   def handle_call({:configure, changes}, _from, runtime) do
@@ -525,7 +429,7 @@ defmodule Ouroboros.Interactive.Task do
   # reviving a session someone asked to close would be the worse mistake.
   def handle_call(:close, _from, runtime) do
     reply = with_harness_session(runtime, &Session.close/1)
-    {:reply, reply, schedule_poll(settle_resume(runtime), 0)}
+    {:reply, reply, schedule_poll(Resume.settle_resume(runtime), 0)}
   end
 
   def handle_call(:kill, _from, %{session: session} = runtime)
@@ -535,7 +439,7 @@ defmodule Ouroboros.Interactive.Task do
 
   def handle_call(:kill, _from, runtime) do
     reply = with_harness_session(runtime, &Session.kill/1)
-    {:reply, reply, schedule_poll(settle_resume(runtime), 0)}
+    {:reply, reply, schedule_poll(Resume.settle_resume(runtime), 0)}
   end
 
   def handle_call(_message, _from, runtime),
@@ -565,7 +469,7 @@ defmodule Ouroboros.Interactive.Task do
          end) do
       {request_id, _pending} ->
         {:noreply,
-         close_external_approval(
+         Approvals.close_external_approval(
            runtime,
            request_id,
            :deny,
@@ -621,7 +525,7 @@ defmodule Ouroboros.Interactive.Task do
     ms = runtime.external_approvals[request_id].timeout_ms
 
     {:noreply,
-     close_external_approval(
+     Approvals.close_external_approval(
        runtime,
        request_id,
        :deny,
@@ -677,46 +581,16 @@ defmodule Ouroboros.Interactive.Task do
   defp attach_or_start(%{session: %State{harness_session_id: id}} = runtime) when is_binary(id) do
     case safe_session_call(fn -> Session.info(id) end) do
       {:ok, %SessionInfo{}} -> runtime |> clear_retry() |> schedule_poll(0)
-      {:error, :not_found} -> resume_or_lose(runtime, :harness_session_not_found)
+      {:error, :not_found} -> Resume.resume_or_lose(runtime, :harness_session_not_found)
       {:error, reason} -> retry(runtime, :harness_session_info_failed, reason)
     end
   end
 
   defp attach_or_start(runtime) do
-    case find_adoptable_session(runtime.session.id) do
-      {:ok, id} -> adopt(runtime, id)
+    case Resume.find_adoptable_session(runtime.session.id) do
+      {:ok, id} -> Resume.adopt(runtime, id)
       :not_found -> start_harness_session(runtime)
       {:error, reason} -> fail_start(runtime, reason)
-    end
-  end
-
-  defp find_adoptable_session(ouroboros_id) do
-    sessions = safe_session_call(&Session.list/0)
-
-    matches =
-      if is_list(sessions) do
-        Enum.filter(sessions, fn info ->
-          metadata = info.metadata || %{}
-
-          Map.get(metadata, :ouroboros_session_id) == ouroboros_id or
-            Map.get(metadata, "ouroboros_session_id") == ouroboros_id
-        end)
-      else
-        []
-      end
-
-    case {sessions, matches} do
-      {{:error, reason}, _matches} ->
-        {:error, reason}
-
-      {_sessions, []} ->
-        :not_found
-
-      {_sessions, [info]} ->
-        {:ok, info.session_id}
-
-      {_sessions, infos} ->
-        {:error, {:ambiguous_adoptable_sessions, Enum.map(infos, & &1.session_id)}}
     end
   end
 
@@ -728,24 +602,12 @@ defmodule Ouroboros.Interactive.Task do
         case safe_session_call(fn ->
                Session.start(session.provider, State.request(session))
              end) do
-          {:ok, id} -> adopt(runtime, id)
+          {:ok, id} -> Resume.adopt(runtime, id)
           {:error, reason} -> fail_start(runtime, reason)
         end
 
       reason ->
         fail_start(runtime, {:unrequestable_session_state, reason})
-    end
-  end
-
-  defp adopt(runtime, harness_session_id) do
-    session =
-      runtime.session
-      |> Map.put(:harness_session_id, harness_session_id)
-      |> State.touch()
-
-    case persist(runtime, session, []) do
-      {:ok, runtime} -> schedule_poll(runtime, 0)
-      {:error, runtime} -> retry(runtime, :session_adoption_checkpoint_failed, :storage_error)
     end
   end
 
@@ -771,7 +633,7 @@ defmodule Ouroboros.Interactive.Task do
         refresh_session(runtime)
 
       {:error, :not_found} ->
-        resume_or_lose(runtime, :harness_session_not_found)
+        Resume.resume_or_lose(runtime, :harness_session_not_found)
 
       {:error, reason} ->
         retry(runtime, :harness_session_replay_failed, reason)
@@ -846,7 +708,9 @@ defmodule Ouroboros.Interactive.Task do
     # user side of the chat without changing Harness or inventing client-local rows.
     reconciled = reconcile_turn_ids(runtime.session, projected)
     projected = Enum.map(projected, &enrich_chat_input(&1, reconciled))
-    projected = Enum.map(projected, &enrich_approval_resolved(&1, runtime.approval_effects))
+
+    projected =
+      Enum.map(projected, &Approvals.enrich_approval_resolved(&1, runtime.approval_effects))
 
     {projected, pending_steers} =
       Enum.map_reduce(projected, runtime.pending_steers, &enrich_steer_input/2)
@@ -979,7 +843,7 @@ defmodule Ouroboros.Interactive.Task do
         end
 
       {:error, :not_found} ->
-        resume_or_lose(runtime, :harness_session_not_found)
+        Resume.resume_or_lose(runtime, :harness_session_not_found)
 
       {:error, reason} ->
         retry(runtime, :harness_session_info_failed, reason)
@@ -1012,7 +876,7 @@ defmodule Ouroboros.Interactive.Task do
               # than the mirrored event log. Finishing now would reply to an awaiter
               # whose subsequent replay is missing the completion it just waited for.
               if mirrored_through_result?(runtime) do
-                finish_turn(runtime, turn.id, result)
+                Turns.finish_turn(runtime, turn.id, result)
               else
                 runtime
               end
@@ -1028,11 +892,11 @@ defmodule Ouroboros.Interactive.Task do
             # session rather than about what happened to the work.
             {:error, :not_found} ->
               if harness_session_present?(runtime),
-                do: mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found),
+                do: Turns.mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found),
                 else: runtime
 
             {:error, reason} ->
-              mark_turn_ambiguous(runtime, turn.id, {:harness_turn_await_failed, reason})
+              Turns.mark_turn_ambiguous(runtime, turn.id, {:harness_turn_await_failed, reason})
           end
       end
     end)
@@ -1113,7 +977,7 @@ defmodule Ouroboros.Interactive.Task do
     |> Enum.map(&elem(&1, 0))
     |> Enum.sort()
     |> Enum.reduce(runtime, fn turn_id, runtime ->
-      mark_turn_ambiguous(runtime, turn_id, {:unresolved_at_session_close, turn_id})
+      Turns.mark_turn_ambiguous(runtime, turn_id, {:unresolved_at_session_close, turn_id})
     end)
   end
 
@@ -1148,327 +1012,8 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp dispatch_turn(runtime, mode, id, input, opts)
-       when mode in [:message, :follow_up] and is_binary(id) and is_list(opts) do
-    with :ok <- validate_turn_id(id),
-         true <- Keyword.keyword?(opts) || {:error, :invalid_turn_options},
-         {:ok, request} <- build_turn_request(runtime.session.provider, input, opts),
-         {:ok, request} <- authorize_turn_attachments(request, runtime.session.workspace),
-         :ok <- ensure_serializable(request),
-         :ok <- ensure_secret_free_options(request),
-         :ok <- ensure_exposable_turn(runtime.session, request),
-         turn = State.new_turn(id, mode, request) do
-      case Map.fetch(runtime.session.turns, id) do
-        {:ok, existing} ->
-          cond do
-            existing.fingerprint != turn.fingerprint ->
-              {:error, {:turn_id_conflict, id}, runtime}
-
-            # These are not acknowledgements. `:dispatching` is the last durable state
-            # both before a recovered send and after Harness accepted a turn whose
-            # correlation checkpoint failed; `:ambiguous` means the Harness call exited
-            # without a trustworthy answer. Replaying either as `{:ok, existing}` makes
-            # a stable-id client clear its input even though nothing proved the turn was
-            # accepted. Keep the outcome unknown and let polling/transcript evidence
-            # reconcile it without ever dispatching a duplicate here.
-            existing.status in [:dispatching, :ambiguous] ->
-              {:error, {:turn_dispatch_ambiguous, id}, runtime}
-
-            true ->
-              {:ok, existing, runtime}
-          end
-
-        :error ->
-          case unresolved_dispatches(runtime.session) do
-            [] -> persist_and_dispatch_turn(runtime, turn, request)
-            ids -> {:error, {:turn_dispatch_unresolved, ids}, runtime}
-          end
-      end
-    else
-      false -> {:error, :invalid_turn_options, runtime}
-      {:error, reason} -> {:error, reason, runtime}
-    end
-  end
-
-  defp dispatch_turn(runtime, _mode, _id, _input, _opts),
-    do: {:error, :invalid_turn_request, runtime}
-
-  defp persist_and_dispatch_turn(runtime, turn, request) do
-    session =
-      %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, turn)} |> State.touch()
-
-    case persist(runtime, session, []) do
-      {:ok, runtime} ->
-        dispatch_persisted_turn(runtime, turn, request)
-
-      {:error, runtime} ->
-        {:error, {:turn_intent_checkpoint_failed, :storage_error}, runtime}
-    end
-  end
-
-  defp dispatch_persisted_turn(runtime, turn, request) do
-    with {:ok, harness_request} <- expose_turn_request(runtime.session, request) do
-      call =
-        case turn.mode do
-          :message -> fn id -> Session.send_message(id, harness_request) end
-          :follow_up -> fn id -> Session.follow_up(id, harness_request) end
-        end
-
-      case with_harness_session(runtime, call) do
-        {:ok, harness_turn_id} ->
-          updated =
-            turn
-            |> Map.put(:harness_turn_id, harness_turn_id)
-            |> Map.put(:status, if(turn.mode == :follow_up, do: :queued, else: :running))
-            |> State.touch_turn()
-
-          session =
-            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, updated)}
-            |> State.touch()
-
-          case persist(runtime, session, []) do
-            {:ok, runtime} ->
-              {:ok, updated, schedule_poll(runtime, 0)}
-
-            {:error, runtime} ->
-              {:error, {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id},
-               schedule_poll(runtime, 0)}
-          end
-
-        {:error, reason}
-        when is_tuple(reason) and elem(reason, 0) in [:harness_call_exception, :harness_call_exit] ->
-          ambiguous =
-            turn
-            |> Map.put(:status, :ambiguous)
-            |> Map.put(:error, durable(reason))
-            |> State.touch_turn()
-
-          session =
-            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, ambiguous)}
-            |> State.touch()
-
-          case persist(runtime, session, []) do
-            {:ok, runtime} ->
-              {:error, {:turn_dispatch_ambiguous, turn.id}, reply_turn_waiters(runtime, turn.id)}
-
-            {:error, runtime} ->
-              {:error, {:turn_dispatch_ambiguous, turn.id, :checkpoint_failed}, runtime}
-          end
-
-        {:error, reason} ->
-          failed =
-            turn
-            |> Map.put(:status, :failed)
-            |> Map.put(:error, durable(reason))
-            |> State.touch_turn()
-
-          session =
-            %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, failed)}
-            |> State.touch()
-
-          case persist(runtime, session, []) do
-            {:ok, runtime} ->
-              {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
-
-            {:error, runtime} ->
-              # Harness refused this call synchronously, but the failed checkpoint leaves
-              # the durable turn at `:dispatching`. Recovery still owns that intent and
-              # may send it once the Harness session becomes idle, so the caller cannot
-              # safely mint a replacement id. Preserve both the reconciliation id and the
-              # original refusal as a diagnostic while classifying the outcome unknown.
-              {:error,
-               {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
-                {:harness_refused, reason}}, schedule_poll(runtime, 0)}
-          end
-      end
-    else
-      {:error, reason} ->
-        failed =
-          turn
-          |> Map.put(:status, :failed)
-          |> Map.put(:error, durable(reason))
-          |> State.touch_turn()
-
-        session =
-          %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, failed)}
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} ->
-            {:error, {:turn_dispatch_failed, reason}, reply_turn_waiters(runtime, turn.id)}
-
-          {:error, runtime} ->
-            # Exposure failed before Harness was called, but the only durable record is
-            # still `:dispatching`. Recovery owns that intent and can send it after the
-            # capture is repaired, so a fresh caller id could duplicate the recovered turn.
-            {:error,
-             {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
-              {:request_exposure_failed, reason}}, schedule_poll(runtime, 0)}
-        end
-    end
-  end
-
-  defp expose_turn_request(session, request) do
-    if Map.get(session.options, :runtime_exposure, true) do
-      Exposure.wrap_turn_request_capture(request, Map.get(session, :runtime_snapshot))
-    else
-      {:ok, request}
-    end
-  end
-
-  defp ensure_exposable_turn(session, %{prompt: prompt}) when is_binary(prompt) do
-    if Map.get(session.options, :runtime_exposure, true) and
-         Ouroboros.AgentProfile.reserved_delimiter?(prompt) do
-      {:error, {:reserved_prompt_delimiter, :prompt}}
-    else
-      :ok
-    end
-  end
-
-  defp ensure_exposable_turn(_session, _request), do: :ok
-
-  defp build_turn_request(provider, input, opts) do
-    allowed = [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
-
-    case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
-      nil ->
-        attrs =
-          case input do
-            prompt when is_binary(prompt) ->
-              Map.put(Map.new(opts), :prompt, prompt)
-
-            map when is_map(map) ->
-              Map.merge(map, Map.new(opts))
-
-            list when is_list(list) ->
-              if Keyword.keyword?(list), do: Map.merge(Map.new(list), Map.new(opts)), else: list
-
-            other ->
-              other
-          end
-
-        with {:ok, request} <- TurnRequest.new(attrs) do
-          {:ok, Provider.apply_runtime_provider_policy(request, provider)}
-        end
-
-      key ->
-        {:error, {:unknown_turn_option, key}}
-    end
-  end
-
-  defp authorize_turn_attachments(%TurnRequest{attachments: []} = request, _workspace),
-    do: {:ok, request}
-
-  defp authorize_turn_attachments(%TurnRequest{} = request, workspace) do
-    with {:ok, root} <- WorkspacePath.canonicalize(workspace),
-         {:ok, attachments} <- canonical_attachments(request.attachments, root) do
-      {:ok, %{request | attachments: attachments}}
-    else
-      {:error, {:attachment_outside_workspace, _path} = reason} -> {:error, reason}
-      {:error, {:invalid_attachment, _path, _reason} = reason} -> {:error, reason}
-      {:error, reason} -> {:error, {:invalid_attachment_workspace, reason}}
-    end
-  end
-
-  defp canonical_attachments(attachments, root) do
-    Enum.reduce_while(attachments, {:ok, []}, fn path, {:ok, authorized} ->
-      candidate =
-        if Path.type(path) == :absolute,
-          do: path,
-          else: Path.join(root, path)
-
-      lexical = Path.expand(candidate)
-
-      cond do
-        not WorkspacePath.within?(lexical, root) ->
-          {:halt, {:error, {:attachment_outside_workspace, path}}}
-
-        true ->
-          case WorkspacePath.canonicalize_file(candidate) do
-            {:ok, canonical} ->
-              if WorkspacePath.within?(canonical, root) do
-                {:cont, {:ok, [canonical | authorized]}}
-              else
-                {:halt, {:error, {:attachment_outside_workspace, path}}}
-              end
-
-            {:error, reason} ->
-              {:halt, {:error, {:invalid_attachment, path, reason}}}
-          end
-      end
-    end)
-    |> case do
-      {:ok, authorized} -> {:ok, Enum.reverse(authorized)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp finish_turn(runtime, turn_id, result) do
-    case Map.fetch(runtime.session.turns, turn_id) do
-      :error ->
-        runtime
-
-      {:ok, turn} ->
-        status =
-          if result.status in [:completed, :failed, :interrupted],
-            do: result.status,
-            else: :ambiguous
-
-        updated =
-          turn
-          |> Map.put(:status, status)
-          |> Map.put(:result, turn_result_summary(result))
-          |> Map.put(:error, durable(result.error))
-          |> State.touch_turn()
-
-        session =
-          runtime.session
-          |> put_in([Access.key(:turns), turn_id], updated)
-          |> maybe_provider_session(result.provider_session_id)
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} -> reply_turn_waiters(runtime, turn_id)
-          {:error, runtime} -> runtime
-        end
-    end
-  end
-
-  # An ambiguity already recorded is not relabelled by a later, less specific one: the
-  # first observation is the one this coordinator actually made. A turn finalised
-  # outcome-unknown at a resume would otherwise be rewritten on the next poll by the new
-  # Harness session's entirely correct "I have never heard of that turn" — a sentence
-  # about a session that did not run it. It also stops a permanently unresolvable turn
-  # from rewriting the whole session aggregate to disk every 25 ms to record the same
-  # reason it already holds.
-  defp mark_turn_ambiguous(runtime, turn_id, reason) do
-    case Map.fetch(runtime.session.turns, turn_id) do
-      {:ok, %{status: :ambiguous}} ->
-        runtime
-
-      {:ok, turn} ->
-        turn =
-          turn
-          |> Map.put(:status, :ambiguous)
-          |> Map.put(:error, durable(reason))
-          |> State.touch_turn()
-
-        session =
-          %{runtime.session | turns: Map.put(runtime.session.turns, turn_id, turn)}
-          |> State.touch()
-
-        case persist(runtime, session, []) do
-          {:ok, runtime} -> reply_turn_waiters(runtime, turn_id)
-          {:error, runtime} -> runtime
-        end
-
-      :error ->
-        runtime
-    end
-  end
-
   defp recover_checkpointed_dispatch(runtime, %SessionInfo{} = info) do
-    case unresolved_dispatches(runtime.session) do
+    case Turns.unresolved_dispatches(runtime.session) do
       [] ->
         {:ok, runtime}
 
@@ -1480,10 +1025,10 @@ defmodule Ouroboros.Interactive.Task do
              request =
                Provider.apply_runtime_provider_policy(request, runtime.session.provider),
              {:ok, request} <-
-               authorize_turn_attachments(request, runtime.session.workspace) do
+               Turns.authorize_turn_attachments(request, runtime.session.workspace) do
           case checkpoint_recovered_turn_request(runtime, turn, request) do
             {:ok, turn, runtime} ->
-              case dispatch_persisted_turn(runtime, turn, request) do
+              case Turns.dispatch_persisted_turn(runtime, turn, request) do
                 {:ok, _turn, runtime} -> {:ok, runtime}
                 {:error, _reason, runtime} -> {:ok, runtime}
               end
@@ -1506,13 +1051,21 @@ defmodule Ouroboros.Interactive.Task do
           # input is gone or outside the workspace, so that input cannot be reproduced.
           {:error, reason} ->
             {:ok,
-             mark_turn_ambiguous(runtime, turn_id, {:invalid_checkpointed_turn_request, reason})}
+             Turns.mark_turn_ambiguous(
+               runtime,
+               turn_id,
+               {:invalid_checkpointed_turn_request, reason}
+             )}
         end
 
       ids ->
         {:ok,
          Enum.reduce(ids, runtime, fn turn_id, runtime ->
-           mark_turn_ambiguous(runtime, turn_id, {:dispatch_could_not_be_correlated, info.state})
+           Turns.mark_turn_ambiguous(
+             runtime,
+             turn_id,
+             {:dispatch_could_not_be_correlated, info.state}
+           )
          end)}
     end
   end
@@ -1542,8 +1095,8 @@ defmodule Ouroboros.Interactive.Task do
 
   defp settle_terminal_dispatch_intents(runtime, %SessionInfo{state: state}) do
     if terminal_session_state?(state) do
-      Enum.reduce(unresolved_dispatches(runtime.session), runtime, fn turn_id, runtime ->
-        mark_turn_ambiguous(
+      Enum.reduce(Turns.unresolved_dispatches(runtime.session), runtime, fn turn_id, runtime ->
+        Turns.mark_turn_ambiguous(
           runtime,
           turn_id,
           {:session_terminal_before_dispatch_reconciliation, state}
@@ -1560,18 +1113,9 @@ defmodule Ouroboros.Interactive.Task do
     end)
   end
 
-  defp unresolved_dispatches(session) do
-    session.turns
-    |> Enum.filter(fn {_id, turn} ->
-      turn.status == :dispatching and is_nil(turn.harness_turn_id)
-    end)
-    |> Enum.map(&elem(&1, 0))
-    |> Enum.sort()
-  end
-
   defp mark_gap_ambiguities(session, events) do
     if Enum.any?(events, &replay_gap?/1) do
-      Enum.reduce(unresolved_dispatches(session), session, fn turn_id, session ->
+      Enum.reduce(Turns.unresolved_dispatches(session), session, fn turn_id, session ->
         turn = Map.fetch!(session.turns, turn_id)
 
         turn =
@@ -1709,20 +1253,6 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp turn_result_summary(result) do
-    %{
-      session_id: result.session_id,
-      turn_id: result.turn_id,
-      provider: result.provider,
-      provider_session_id: result.provider_session_id,
-      status: result.status,
-      text: durable(result.text),
-      text_truncated?: result.text_truncated?,
-      usage: durable(result.usage),
-      metadata: durable(result.metadata)
-    }
-  end
-
   defp fail_start(runtime, reason) do
     session =
       runtime.session
@@ -1736,110 +1266,6 @@ defmodule Ouroboros.Interactive.Task do
 
       {:error, runtime} ->
         schedule_poll(runtime, @poll_interval)
-    end
-  end
-
-  # Settled means this coordinator has nothing left to decide about resuming: it already
-  # attempted one, already explained why it could not, or was told to end the session.
-  defp settle_resume(runtime), do: %{runtime | resume_settled: true}
-
-  # A Harness session Harness no longer knows is not the same thing as a provider
-  # session that is gone. `provider_session_id` is durable, and every transport that
-  # declares it can be handed it again — `claude --resume`, Codex `thread/resume`, ACP
-  # `session/load`. So the answer to "Harness does not know this session" is to open a
-  # new one against the same provider session and keep going; `:lost` is what is left
-  # when there is nothing to resume with, or when the provider refuses.
-  #
-  # Bounded to one decision per coordinator incarnation — one attempt, or one refusal
-  # explained once. A provider that loses the session again ends the session honestly
-  # instead of spinning up a start loop, and a genuinely transient outage still gets a
-  # fresh decision the next time recovery restarts the coordinator.
-  defp resume_or_lose(%{resume_settled: true} = runtime, reason), do: lose(runtime, reason)
-
-  defp resume_or_lose(runtime, reason) do
-    runtime = settle_resume(runtime)
-
-    case State.resume_support(runtime.session) do
-      :ok ->
-        attempt_resume(runtime)
-
-      {:error, unsupported} ->
-        Logger.info(
-          "interactive session #{runtime.session.id} cannot be resumed " <>
-            "(#{inspect(unsupported)}); losing it"
-        )
-
-        lose(runtime, reason)
-    end
-  end
-
-  defp attempt_resume(runtime) do
-    session = runtime.session
-
-    case State.unrequestable_reason(session) do
-      nil ->
-        case safe_session_call(fn ->
-               Session.start(session.provider, State.request(session))
-             end) do
-          {:ok, harness_session_id} ->
-            adopt_resumed(runtime, harness_session_id, session.harness_session_id)
-
-          {:error, reason} ->
-            lose(runtime, {:resume_failed, reason})
-        end
-
-      unrequestable ->
-        lose(runtime, {:resume_failed, {:unrequestable_session_state, unrequestable}})
-    end
-  end
-
-  # What the resume does and does not restore, recorded where a client can read it: the
-  # journal and the turn ledger are Ouroboros's and survive intact; the conversation
-  # itself is the provider's and comes back only as far as the provider carries it. The
-  # turn that was in flight at the break is finalised outcome-unknown rather than
-  # retried — the provider may well have completed it, and nothing here can tell.
-  # The workspace lease is untouched: this coordinator has held it since admission and
-  # goes on holding it, exactly as it does across a restart.
-  defp adopt_resumed(runtime, harness_session_id, previous_harness_session_id) do
-    session = runtime.session
-    sequence = session.cursor + 1
-
-    event =
-      Event.from_runtime(
-        session.id,
-        sequence,
-        :status,
-        %{
-          "kind" => "resumed",
-          "provider_session_id" => session.provider_session_id,
-          "previous_harness_session_id" => previous_harness_session_id
-        },
-        harness_session_id: harness_session_id,
-        provider: session.provider,
-        provider_session_id: session.provider_session_id
-      )
-
-    resumed =
-      session
-      |> finalize_unresolved_turns({:session_resumed, :outcome_unknown})
-      |> Map.put(:harness_session_id, harness_session_id)
-      |> Map.put(:sequence_offset, sequence)
-      |> Map.put(:cursor, sequence)
-      |> Map.put(:resumes, State.resumes(session) + 1)
-      |> Map.put(:error, nil)
-      |> append_event(event)
-      |> State.touch()
-
-    case persist(runtime, resumed, [event]) do
-      {:ok, runtime} ->
-        runtime |> clear_retry() |> reply_all_terminal_turn_waiters() |> schedule_poll(0)
-
-      # A resume whose checkpoint was refused did not happen. Close the new Harness
-      # session rather than leave it running unreferenced; the attempt stays spent, so
-      # the next poll finds the old session still missing and loses honestly.
-      {:error, runtime} ->
-        _ = safe_session_call(fn -> Session.close(harness_session_id) end)
-        retry(runtime, :session_resume_checkpoint_failed, :storage_error)
     end
   end
 
@@ -2473,7 +1899,7 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp evaluate_shell_permission(runtime, command) do
-    case permissions_engine(:evaluate, 1) do
+    case Approvals.permissions_engine(:evaluate, 1) do
       nil ->
         {:ask, :no_permission_engine}
 
@@ -2520,7 +1946,7 @@ defmodule Ouroboros.Interactive.Task do
   defp rule_reference(_rule), do: nil
 
   defp shell_suggestion(session, command) do
-    case permissions_engine(:suggest, 1) do
+    case Approvals.permissions_engine(:suggest, 1) do
       nil ->
         nil
 
@@ -2740,7 +2166,7 @@ defmodule Ouroboros.Interactive.Task do
     )
   end
 
-  defp safe_ledger(fun) do
+  def safe_ledger(fun) do
     fun.()
   rescue
     error -> {:error, {:effect_ledger_exception, Exception.message(error)}}
@@ -2937,32 +2363,11 @@ defmodule Ouroboros.Interactive.Task do
     opts
   end
 
-  defp lose(runtime, reason) do
-    session =
-      runtime.session
-      |> finalize_unresolved_turns({:session_lost, reason})
-      |> Map.put(:status, :lost)
-      |> Map.put(:error, durable(reason))
-      |> State.touch()
-
-    case persist(runtime, session, []) do
-      {:ok, runtime} ->
-        runtime
-        |> release_workspace()
-        |> reply_ready_waiters()
-        |> reply_all_terminal_turn_waiters()
-        |> schedule_retire()
-
-      {:error, runtime} ->
-        schedule_poll(runtime, @poll_interval)
-    end
-  end
-
   # A wedged provider used to be retried every 25ms, rewriting the whole session
   # aggregate to disk on every attempt to record an error identical to the one
   # already checkpointed. Back off, and only checkpoint the error the first time it
   # is seen or when it changes.
-  defp retry(runtime, kind, reason) do
+  def retry(runtime, kind, reason) do
     error = {kind, durable(reason)}
     {repeat?, runtime} = note_retry(runtime, error)
     delay = runtime.retry.delay
@@ -2988,10 +2393,10 @@ defmodule Ouroboros.Interactive.Task do
     {repeat?, %{runtime | retry: %{signature: signature, count: retry.count + 1, delay: delay}}}
   end
 
-  defp clear_retry(%{retry: %{count: 0}} = runtime), do: runtime
-  defp clear_retry(runtime), do: %{runtime | retry: no_retry()}
+  def clear_retry(%{retry: %{count: 0}} = runtime), do: runtime
+  def clear_retry(runtime), do: %{runtime | retry: no_retry()}
 
-  defp finalize_unresolved_turns(session, reason) do
+  def finalize_unresolved_turns(session, reason) do
     reason = durable(reason)
 
     turns =
@@ -3010,7 +2415,7 @@ defmodule Ouroboros.Interactive.Task do
     %{session | turns: turns}
   end
 
-  defp persist(runtime, session, events) do
+  def persist(runtime, session, events) do
     case Store.put(session) do
       :ok ->
         Enum.each(runtime.subscribers, fn {pid, _monitor} ->
@@ -3065,7 +2470,7 @@ defmodule Ouroboros.Interactive.Task do
     |> schedule_retire()
   end
 
-  defp append_event(session, event), do: append_events(session, [event])
+  def append_event(session, event), do: append_events(session, [event])
 
   defp append_events(session, new_events) do
     events = session.events ++ new_events
@@ -3081,349 +2486,11 @@ defmodule Ouroboros.Interactive.Task do
     %{session | events: events, event_floor: floor}
   end
 
-  # ---------------------------------------------------------------------------
-  # C2 — the external-approval path
-  #
-  # A managed transport such as Claude runs one process per turn and may declare no
-  # approvals channel, so Harness cannot ask before a tool runs. Claude Code offers
-  # `--permission-prompt-tool` instead; `ouro mcp-serve` is that tool's server.
-  # Calls land here. The runtime relays; it does not decide, except where C1's rule
-  # engine already decided or a bound was reached.
-  # ---------------------------------------------------------------------------
-
-  defp open_external_approval(runtime, request_ref, request, from) do
-    request_id = "ouro-approval-" <> Jido.Signal.ID.generate!()
-    verdict = evaluate_permission(runtime, request)
-
-    case emit_runtime_event(
-           runtime,
-           :approval_requested,
-           external_request_payload(runtime, request_id, request, verdict),
-           request_id: request_id,
-           provider: runtime.session.provider,
-           harness_session_id: runtime.session.harness_session_id,
-           provider_session_id: runtime.session.provider_session_id
-         ) do
-      # Checkpoint before broadcast, and before the tool. A request that could not be
-      # recorded is a request no replaying client will ever see, so it is denied here
-      # rather than allowed against a journal that does not mention it.
-      {:error, runtime} ->
-        {:reply,
-         {:ok,
-          external_answer(
-            request_id,
-            :deny,
-            :checkpoint_failed,
-            "the approval request could not be recorded durably"
-          )}, runtime}
-
-      {:ok, runtime} ->
-        settle_external_verdict(runtime, request_id, request_ref, request, from, verdict)
-    end
-  end
-
-  defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:allow, rule}) do
-    record_permission(runtime, request, request_id, :allow, :engine, rule)
-
-    runtime =
-      resolve_external_event(runtime, request_id, :allow, :engine, rule_reason(rule), :once)
-
-    {:reply, {:ok, external_answer(request_id, :allow, :engine, rule_reason(rule))}, runtime}
-  end
-
-  defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:deny, rule}) do
-    record_permission(runtime, request, request_id, :deny, :engine, rule)
-
-    runtime =
-      resolve_external_event(runtime, request_id, :deny, :engine, rule_reason(rule), :once)
-
-    {:reply, {:ok, external_answer(request_id, :deny, :engine, rule_reason(rule))}, runtime}
-  end
-
-  defp settle_external_verdict(runtime, request_id, request_ref, request, from, {:ask, _reason}) do
-    timeout_ms = external_approval_timeout_ms(runtime.session)
-    timer = Process.send_after(self(), {:external_approval_timeout, request_id}, timeout_ms)
-
-    pending = %{
-      from: from,
-      request_ref: request_ref,
-      request: request,
-      timer: timer,
-      timeout_ms: timeout_ms
-    }
-
-    {:noreply,
-     %{runtime | external_approvals: Map.put(runtime.external_approvals, request_id, pending)}}
-  end
-
-  defp close_external_approval(
-         runtime,
-         request_id,
-         decision,
-         source,
-         reason,
-         scope,
-         effect_id \\ nil
-       ) do
-    {pending, table} = Map.pop(runtime.external_approvals, request_id)
-    runtime = %{runtime | external_approvals: table}
-
-    if pending do
-      _ = Process.cancel_timer(pending.timer)
-      record_permission(runtime, pending.request, request_id, decision, source, nil, scope)
-
-      runtime =
-        resolve_external_event(runtime, request_id, decision, source, reason, scope, effect_id)
-
-      GenServer.reply(pending.from, {:ok, external_answer(request_id, decision, source, reason)})
-      runtime
-    else
-      runtime
-    end
-  end
-
-  defp resolve_external_event(
-         runtime,
-         request_id,
-         decision,
-         source,
-         reason,
-         scope,
-         effect_id \\ nil
-       ) do
-    payload =
-      %{
-        "decision" => if(decision == :allow, do: "approve", else: "deny"),
-        "scope" => Atom.to_string(scope),
-        "source" => Atom.to_string(source),
-        "origin" => "external",
-        "request_id" => request_id
-      }
-      |> put_present("reason", reason)
-      |> put_present("ledger_ref", effect_id && ledger_ref(effect_id))
-
-    case emit_runtime_event(runtime, :approval_resolved, payload,
-           request_id: request_id,
-           provider: runtime.session.provider,
-           harness_session_id: runtime.session.harness_session_id,
-           provider_session_id: runtime.session.provider_session_id
-         ) do
-      {:ok, runtime} ->
-        runtime
-
-      # The answer still goes back to the caller: a resolution that could not be recorded
-      # is a gap in the journal, not a reason to strand the tool call or to allow it.
-      {:error, runtime} ->
-        Logger.warning(
-          "interactive session #{runtime.session.id} could not checkpoint the " <>
-            "resolution of external approval #{request_id}"
-        )
-
-        runtime
-    end
-  end
-
-  # The shape the Codex and ACP dialects already emit, so the modal that reads
-  # `tool_call` and `request_id` needs no new case. `input` rather than `command`,
-  # because a `--permission-prompt-tool` call carries the tool's arguments object.
-  defp external_request_payload(runtime, request_id, request, verdict) do
-    tool_call =
-      %{"name" => Map.get(request, :tool_name)}
-      |> put_present("input", Map.get(request, :input))
-      |> put_present("cwd", Map.get(request, :cwd))
-
-    %{
-      "tool_call" => tool_call,
-      "kind" => "permissions",
-      "request_id" => request_id,
-      "origin" => "external"
-    }
-    |> put_present("tool_use_id", Map.get(request, :tool_use_id))
-    |> put_present(
-      "suggested_rule",
-      suggested_rule(permission_subject(runtime, request), verdict)
-    )
-  end
-
-  # `evaluate/1` is C1's contract: `{:allow, rule} | {:deny, rule} | {:ask, reason}`. With
-  # no engine on the node every request is `:ask`, which is the honest default — the
-  # runtime has no rules, so it has no basis to skip the human.
-  defp evaluate_permission(runtime, request) do
-    case permissions_engine(:evaluate, 1) do
-      nil ->
-        {:ask, :no_permission_engine}
-
-      engine ->
-        case apply(engine, :evaluate, [permission_subject(runtime, request)]) do
-          {:allow, rule} -> {:allow, rule}
-          {:deny, rule} -> {:deny, rule}
-          {:ask, reason} -> {:ask, reason}
-          _unrecognised -> {:ask, :engine_answer_unrecognised}
-        end
-    end
-  rescue
-    exception -> {:ask, {:engine_failed, Exception.message(exception)}}
-  catch
-    :exit, _reason -> {:ask, :engine_unavailable}
-  end
-
-  # `record/2` takes a caller-minted, stable decision id and the answer; the request map
-  # `evaluate/1` took rides along so the entry is attributed to this session rather than
-  # to "unattributed". Until 2026-08-23 this passed the subject where the id goes, which
-  # the engine refuses as `:invalid_permission_record` — so no bridged decision ever
-  # reached the ledger, and the test fixture mirrored the wrong shape.
-  defp record_permission(runtime, request, request_id, decision, source, rule, scope \\ :once) do
-    case permissions_engine(:record, 2) do
-      nil ->
-        :ok
-
-      engine ->
-        _ =
-          apply(engine, :record, [
-            permission_decision_id(runtime, request_id),
-            %{
-              decision: if(decision == :allow, do: :approve, else: :deny),
-              scope: scope,
-              actor: if(source == :engine, do: :rule, else: :human),
-              rule_ref: rule,
-              reason: nil,
-              request: permission_subject(runtime, request)
-            }
-          ])
-
-        :ok
-    end
-  rescue
-    _exception -> :ok
-  catch
-    :exit, _reason -> :ok
-  end
-
-  # The engine's seams use `"<session id>:<provider request id>"`: stable across a retry
-  # after a lost acknowledgement, so the same answer records one entry rather than two.
-  defp permission_decision_id(runtime, request_id), do: "#{runtime.session.id}:#{request_id}"
-
-  # The "don't ask again" line a modal can offer. It is the engine's to phrase — this
-  # module has no rule language — so the key is present only when C1 is loaded and
-  # answered with one, and absent rather than invented when it is not.
-  defp suggested_rule(subject, _verdict) do
-    case permissions_engine(:suggest, 1) do
-      nil ->
-        nil
-
-      engine ->
-        case apply(engine, :suggest, [subject]) do
-          rule when is_binary(rule) and rule != "" -> rule
-          _nothing_to_suggest -> nil
-        end
-    end
-  rescue
-    _exception -> nil
-  catch
-    :exit, _reason -> nil
-  end
-
-  # The engine's own request shape — the same one `shell_request/2` and the native agent
-  # build — so a bridged Claude approval is judged by the rules an operator wrote, not
-  # normalised to an unknown tool that no rule can match. Claude's prompt-tool input names
-  # the tool in its own vocabulary (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`,
-  # `WebFetch`, `mcp__server__tool`); what each one reads or writes is taken from its
-  # input, and anything unrecognised is classified as an execution so it asks.
-  defp permission_subject(runtime, request) do
-    session = runtime.session
-    tool_name = to_string(Map.get(request, :tool_name) || "")
-    input = if(is_map(Map.get(request, :input)), do: Map.get(request, :input), else: %{})
-    cwd = Map.get(request, :cwd) || session.workspace
-    tool = permission_tool(tool_name)
-
-    %{
-      principal: %{session_id: session.id, provider: session.provider, node: node()},
-      tool: tool,
-      command: if(tool == "bash", do: string_field(input, ["command"]), else: nil),
-      paths: permission_paths(input, cwd),
-      mode: permission_mode(tool),
-      domains: permission_domains(input),
-      context: %{
-        workspace: session.workspace,
-        cwd: cwd,
-        tool_name: tool_name,
-        tool_use_id: Map.get(request, :tool_use_id),
-        transport: Map.get(session.options, :transport),
-        origin: :external
-      }
-    }
-  end
-
-  defp permission_tool(name) do
-    case String.downcase(name) do
-      "bash" -> "bash"
-      "powershell" -> "bash"
-      "write" -> "write"
-      "edit" -> "edit"
-      "multiedit" -> "edit"
-      "notebookedit" -> "edit"
-      "read" -> "read"
-      "glob" -> "glob"
-      "grep" -> "grep"
-      "ls" -> "ls"
-      "webfetch" -> "web_fetch"
-      "websearch" -> "web_search"
-      "mcp__" <> _rest = mcp -> mcp
-      other when other != "" -> other
-      _blank -> "unknown"
-    end
-  end
-
-  defp permission_mode("bash"), do: :execute
-  defp permission_mode(tool) when tool in ["write", "edit"], do: :write
-  defp permission_mode(tool) when tool in ["read", "glob", "grep", "ls"], do: :read
-  defp permission_mode(tool) when tool in ["web_fetch", "web_search"], do: :network
-  defp permission_mode(_tool), do: :execute
-
-  defp permission_paths(input, cwd) do
-    ["file_path", "path", "notebook_path"]
-    |> Enum.map(&string_field(input, [&1]))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.map(&Path.expand(&1, cwd))
-    |> Enum.uniq()
-  end
-
-  defp permission_domains(input) do
-    case string_field(input, ["url"]) do
-      nil ->
-        []
-
-      url ->
-        case URI.parse(url) do
-          %URI{host: host} when is_binary(host) and host != "" -> [host]
-          _other -> []
-        end
-    end
-  end
-
-  defp string_field(input, keys) do
-    Enum.find_value(keys, fn key ->
-      case Map.get(input, key) || Map.get(input, String.to_atom(key)) do
-        value when is_binary(value) and value != "" -> value
-        _other -> nil
-      end
-    end)
-  end
-
-  defp permissions_engine(function, arity) do
-    engine =
-      Application.get_env(:ouroboros, :permissions_engine, @default_permissions_engine)
-
-    if is_atom(engine) and not is_nil(engine) and Code.ensure_loaded?(engine) and
-         function_exported?(engine, function, arity),
-       do: engine
-  end
-
   # A runtime-native event on the session's own log. `sequence_offset` moves with the
   # cursor because it *is* the distance between the two number spaces: an event no Harness
   # log contains widens that distance by exactly one, and `harness_cursor/1` has to go on
   # pointing at the same Harness row or the next poll would skip one.
-  defp emit_runtime_event(runtime, type, payload, fields) do
+  def emit_runtime_event(runtime, type, payload, fields) do
     session = runtime.session
     sequence = session.cursor + 1
     event = Event.from_runtime(session.id, sequence, type, payload, fields)
@@ -3438,280 +2505,12 @@ defmodule Ouroboros.Interactive.Task do
     persist(runtime, session, [event])
   end
 
-  # Best effort by construction: the pending table is memory, so the durable trace of an
-  # unanswered question is an `approval_requested` this runtime minted with no matching
-  # `approval_resolved` after it. A journal trimmed to `event_limit` can have lost the
-  # pair, and then there is nothing to close — which is the same honest silence as a
-  # session whose events aged out.
-  defp deny_orphaned_external_approvals(runtime) do
-    resolved =
-      runtime.session.events
-      |> Enum.filter(&(&1.type == :approval_resolved and is_binary(&1.request_id)))
-      |> MapSet.new(& &1.request_id)
-
-    runtime.session.events
-    |> Enum.filter(fn event ->
-      event.type == :approval_requested and is_binary(event.request_id) and
-        Map.get(event.payload, "origin") == "external" and
-        not MapSet.member?(resolved, event.request_id)
-    end)
-    |> Enum.reduce(runtime, fn event, runtime ->
-      resolve_external_event(
-        runtime,
-        event.request_id,
-        :deny,
-        :coordinator_restart,
-        "the session coordinator restarted before this was answered",
-        :once
-      )
-    end)
-  end
-
-  # ---------------------------------------------------------------------------
-  # I1 — the human answer, in the effect ledger
-  #
-  # `Ouroboros.Control.Permissions` already records what the *engine* decided as a
-  # `:permission` entry. This records what a *person* decided, which is the one answer no
-  # rule can reconstruct afterwards, and it records it on every provider: the external
-  # bridge above, the native session's approval channel, and the Codex and ACP dialects
-  # all pass through `respond_approval`.
-  #
-  # Written before the answer is forwarded, and — unlike `workspace.exec` — best effort
-  # rather than a hard gate. The difference is deliberate: refusing to forward an answer
-  # because the ledger is down would strand a tool call the operator has already decided
-  # about, on a provider waiting for exactly one reply. Here the cheaper failure is the
-  # missing row, and it is missing visibly.
-  # ---------------------------------------------------------------------------
-
-  defp record_approval(runtime, request_id, decision, scope, response, subject, origin) do
-    session = runtime.session
-    effect_id = approval_effect_id(session.id, request_id)
-
-    attrs = %{
-      id: effect_id,
-      effect: :approval,
-      principal: "session:" <> session.id,
-      attempt:
-        %{
-          session_id: session.id,
-          request_id: request_id,
-          provider: session.provider,
-          subject: subject.subject,
-          node: node()
-        }
-        |> put_present(:tool, subject.tool),
-      authority: %{
-        decision: decision,
-        reason: "human",
-        constraints: %{scope: scope, actor: approval_actor(response), origin: origin}
-      },
-      cause: %{signal_type: "interactive.respond_approval", signal_id: request_id},
-      result:
-        %{
-          decision: decision,
-          scope: scope,
-          actor: approval_actor(response),
-          origin: origin
-        }
-        |> put_present(:rule_id, approval_rule_id(response))
-    }
-
-    write =
-      if decision == :deny do
-        fn -> EffectLedger.record_denied(Map.put(attrs, :error, :approval_denied)) end
-      else
-        fn -> EffectLedger.record_settled(attrs) end
-      end
-
-    case safe_ledger(write) do
-      {:ok, _entry, _disposition} ->
-        {effect_id, remember_approval_effect(runtime, request_id, effect_id)}
-
-      other ->
-        Logger.warning(
-          "interactive session #{session.id} could not record the answer to approval " <>
-            "#{request_id} in the effect ledger (#{inspect(durable(other))}); the answer " <>
-            "still stands and the session's own approval_resolved event carries it"
-        )
-
-        {nil, runtime}
-    end
-  end
-
-  # Who answered. The runtime observes a `respond_approval` and nothing about the caller
-  # behind it, so `:human` is the honest default and anything else has to be *said*: a
-  # caller that answers without a person at the keyboard — `ouro run --approve-all` is the
-  # one that exists — names itself in the response. See TUI.md §2.4.
-  defp approval_actor(response) do
-    case Map.get(response, :actor) do
-      actor when actor in [:human, :headless, :automation] -> actor
-      "headless" -> :headless
-      "automation" -> :automation
-      _unstated -> :human
-    end
-  end
-
-  # Present only when the answer wrote a durable rule and said so. The "don't ask again"
-  # button is a separate `permissions.add` call this seam never sees, so inventing an id
-  # from the `suggested_rule` in the request would claim a rule that may not exist.
-  defp approval_rule_id(response) do
-    case Map.get(response, :rule_id) do
-      id when is_binary(id) and id != "" -> id
-      _absent -> nil
-    end
-  end
-
-  # The subject of an approval this coordinator is holding: the request the bridge handed
-  # in, which is the same shape `permission_subject/2` reads.
-  defp external_approval_subject(runtime, request_id) do
-    case Map.get(runtime.external_approvals, request_id) do
-      %{request: request} when is_map(request) ->
-        input = if is_map(Map.get(request, :input)), do: Map.get(request, :input), else: %{}
-        tool = to_string(Map.get(request, :tool_name) || "")
-
-        %{
-          tool: presence(tool),
-          subject:
-            approval_subject_fields(
-              tool,
-              string_field(input, ["command"]),
-              permission_paths(input, Map.get(request, :cwd) || runtime.session.workspace)
-            )
-        }
-
-      _absent ->
-        %{tool: nil, subject: %{}}
-    end
-  end
-
-  # The subject of an approval a *provider* asked for: read back off the durable
-  # `approval_requested` event, which is where every dialect and the native session put the
-  # same three facts. An event aged out of the retained window leaves the subject empty
-  # rather than guessed.
-  # An answer to a request this session never asked is not a human decision to record — it
-  # is a caller naming an id, and a ledger that wrote a row for each of those would be both
-  # unbounded and untrue. `:unknown` is that case. A session that *is* waiting on an
-  # approval whose request event has aged out of the retained window still records, with an
-  # empty subject: the answer happened, and only its subject is beyond recall.
-  defp harness_approval_subject(runtime, request_id) do
-    case Enum.find(runtime.session.events, fn event ->
-           event.type == :approval_requested and event.request_id == request_id
-         end) do
-      %Event{payload: payload} when is_map(payload) ->
-        call = Map.get(payload, "tool_call")
-        call = if is_map(call), do: call, else: %{}
-        tool = to_string(Map.get(call, "name") || "")
-
-        %{
-          tool: presence(tool),
-          subject:
-            approval_subject_fields(
-              tool,
-              string_field(call, ["command"]),
-              Map.get(payload, "paths")
-            )
-        }
-
-      _absent ->
-        if runtime.session.status == :awaiting_approval,
-          do: %{tool: nil, subject: %{}},
-          else: :unknown
-    end
-  end
-
-  defp approval_subject_fields(tool, command, paths) do
-    %{}
-    |> put_present(:paths, presence(paths))
-    |> put_present(:command_sha256, command && Exec.digest(command))
-    |> Map.merge(mcp_subject(tool))
-  end
-
-  # `mcp__server__tool` carries two identities in one name, on every provider that speaks
-  # it. Splitting it here lets a reader ask what a session did through one MCP server
-  # without parsing tool names out of the ledger.
-  defp mcp_subject("mcp__" <> rest) do
-    case String.split(rest, "__", parts: 2) do
-      [server, tool] when server != "" and tool != "" -> %{mcp_server: server, mcp_tool: tool}
-      _unsplittable -> %{}
-    end
-  end
-
-  defp mcp_subject(_tool), do: %{}
-
-  defp presence(""), do: nil
-  defp presence([]), do: nil
-  defp presence(value), do: value
-
-  # Embeds `node()` for the same reason every other effect id here does: it is read across
-  # a fleet, where a VM-local number alone collides.
-  defp approval_effect_id(session_id, request_id) do
-    digest =
-      :sha256
-      |> :crypto.hash(:erlang.term_to_binary({node(), session_id, request_id}))
-      |> Base.encode16(case: :lower)
-
-    "approval-" <> binary_slice(digest, 0, 32)
-  end
-
-  # Exactly the two parameters `ledger.get` takes, so a client resolves the row it drew
-  # without a second vocabulary to translate.
-  defp ledger_ref(effect_id), do: %{"node" => Atom.to_string(node()), "id" => effect_id}
-
-  defp remember_approval_effect(runtime, request_id, effect_id) do
-    effects = Map.put(runtime.approval_effects, request_id, effect_id)
-
-    effects =
-      if map_size(effects) > @max_approval_effects,
-        do:
-          Map.drop(
-            effects,
-            Enum.take(Map.keys(effects), map_size(effects) - @max_approval_effects)
-          ),
-        else: effects
-
-    %{runtime | approval_effects: effects}
-  end
-
-  # Stamps the transport's own `approval_resolved` with the ledger entry the answer was
-  # written under, the same way `enrich_chat_input/2` stamps an input the runtime already
-  # had the words for. The provider does not know about the ledger and should not have to.
-  defp enrich_approval_resolved(
-         %Event{type: :approval_resolved, request_id: request_id} = event,
-         effects
-       )
-       when is_binary(request_id) do
-    case Map.get(effects, request_id) do
-      nil -> event
-      effect_id -> %{event | payload: Map.put(event.payload, "ledger_ref", ledger_ref(effect_id))}
-    end
-  end
-
-  defp enrich_approval_resolved(event, _effects), do: event
-
-  defp external_answer(request_id, decision, source, reason) do
-    %{request_id: request_id, decision: decision, source: source, reason: reason}
-  end
-
-  defp external_approval_timeout_ms(%State{} = session) do
-    case Map.get(session.options, :approval_timeout_ms) do
-      ms when is_integer(ms) and ms > 0 ->
-        ms |> max(@external_approval_min_timeout_ms) |> min(@external_approval_ceiling_ms)
-
-      _unset_or_infinity ->
-        @external_approval_default_timeout_ms
-    end
-  end
-
-  defp rule_reason(rule) when is_binary(rule), do: rule
-  defp rule_reason(nil), do: nil
-  defp rule_reason(rule), do: inspect(rule)
-
   defp put_present(map, _key, nil), do: map
   defp put_present(map, _key, ""), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
-  defp maybe_provider_session(session, nil), do: session
-  defp maybe_provider_session(session, id), do: %{session | provider_session_id: id}
+  def maybe_provider_session(session, nil), do: session
+  def maybe_provider_session(session, id), do: %{session | provider_session_id: id}
 
   defp normalize_session_status(status)
        when status in [
@@ -3732,10 +2531,10 @@ defmodule Ouroboros.Interactive.Task do
 
   defp ready?(%State{status: status}), do: status in [:idle, :running, :awaiting_approval]
 
-  defp with_harness_session(%{session: %State{harness_session_id: nil}}, _fun),
+  def with_harness_session(%{session: %State{harness_session_id: nil}}, _fun),
     do: {:error, :session_not_started}
 
-  defp with_harness_session(runtime, fun) do
+  def with_harness_session(runtime, fun) do
     safe_session_call(fn -> fun.(runtime.session.harness_session_id) end)
   end
 
@@ -3743,9 +2542,9 @@ defmodule Ouroboros.Interactive.Task do
   # secrets; it leaves runtime authority alone, and a harness call exit reason carries
   # the pid it was calling. The store refuses such a checkpoint on every attempt, so a
   # session that wrote one used to retry that refusal for the rest of its life.
-  defp durable(term), do: term |> Jido.Harness.Redaction.redact() |> State.durable_term()
+  def durable(term), do: term |> Jido.Harness.Redaction.redact() |> State.durable_term()
 
-  defp safe_session_call(fun) do
+  def safe_session_call(fun) do
     try do
       fun.()
     rescue
@@ -3844,7 +2643,7 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp reply_turn_waiters(runtime, turn_id) do
+  def reply_turn_waiters(runtime, turn_id) do
     case Map.fetch(runtime.session.turns, turn_id) do
       {:ok, turn} when turn.status in [:completed, :failed, :interrupted, :ambiguous] ->
         {matching, remaining} =
@@ -3862,16 +2661,16 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp reply_all_terminal_turn_waiters(runtime) do
+  def reply_all_terminal_turn_waiters(runtime) do
     Enum.reduce(Map.keys(runtime.session.turns), runtime, &reply_turn_waiters(&2, &1))
   end
 
-  defp reply_ready_waiters(%{ready_timer: timer} = runtime) when is_reference(timer) do
+  def reply_ready_waiters(%{ready_timer: timer} = runtime) when is_reference(timer) do
     Process.cancel_timer(timer)
     reply_ready_waiters(%{runtime | ready_timer: nil})
   end
 
-  defp reply_ready_waiters(runtime) do
+  def reply_ready_waiters(runtime) do
     reply =
       if ready?(runtime.session),
         do: {:ok, State.public(runtime.session)},
@@ -3911,51 +2710,15 @@ defmodule Ouroboros.Interactive.Task do
     %{runtime | ready_waiters: waiters}
   end
 
-  defp schedule_poll(runtime, delay) do
+  def schedule_poll(runtime, delay) do
     Process.send_after(self(), :poll, delay)
     runtime
   end
 
-  defp schedule_retire(runtime) do
+  def schedule_retire(runtime) do
     Process.send_after(self(), :retire, @terminal_retire_ms)
     runtime
   end
-
-  defp validate_turn_id(id) do
-    if String.trim(id) == "", do: {:error, :invalid_turn_id}, else: :ok
-  end
-
-  defp ensure_serializable(value) do
-    if serializable?(value), do: :ok, else: {:error, :non_serializable_turn_request}
-  end
-
-  defp ensure_secret_free_options(%TurnRequest{} = request) do
-    private_options =
-      request
-      |> Map.from_struct()
-      |> Map.take([:attachments, :output_schema, :metadata, :provider_options])
-
-    if Jido.Harness.Redaction.redact(private_options) == private_options,
-      do: :ok,
-      else: {:error, :secret_bearing_turn_options}
-  end
-
-  defp serializable?(value)
-       when is_pid(value) or is_port(value) or is_reference(value) or is_function(value),
-       do: false
-
-  defp serializable?(value) when is_struct(value),
-    do: value |> Map.from_struct() |> serializable?()
-
-  defp serializable?(value) when is_map(value),
-    do: Enum.all?(value, fn {key, nested} -> serializable?(key) and serializable?(nested) end)
-
-  defp serializable?(value) when is_list(value), do: Enum.all?(value, &serializable?/1)
-
-  defp serializable?(value) when is_tuple(value),
-    do: value |> Tuple.to_list() |> Enum.all?(&serializable?/1)
-
-  defp serializable?(_value), do: true
 
   # D7. A session that asked for a worktree gets one *before* the lease is acquired, and
   # the lease is then taken on the worktree's own path — so every containment check in
@@ -4056,7 +2819,7 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp release_workspace(runtime) do
+  def release_workspace(runtime) do
     runtime =
       case runtime.workspace_lease do
         nil ->

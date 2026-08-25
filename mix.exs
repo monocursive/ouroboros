@@ -9,6 +9,16 @@ defmodule Ouroboros.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      # Gradual success typing. PLTs live under `_build/plts` (already gitignored with
+      # `_build/`) so they are not dumped in the repo root. `:error_handling` only:
+      # `:underspecs` / `:overspecs` / `:unmatched_returns` wait until this baseline is
+      # honest rather than drowning the first run. Existing warnings live in
+      # `dialyzer.ignore-warnings`; new files and new warning types must still be clean.
+      dialyzer: [
+        plt_local_path: "_build/plts",
+        flags: [:error_handling],
+        ignore_warnings: "dialyzer.ignore-warnings"
+      ],
       releases: releases()
     ]
   end
@@ -64,7 +74,11 @@ defmodule Ouroboros.MixProject do
       # Jido.Harness 2.0 is not on Hex yet. Pin the reviewed upstream commit so
       # provider protocol changes cannot enter the runtime implicitly.
       {:jido_harness,
-       github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"}
+       github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"},
+      # Gradual success typing (`mix dialyzer` / `make dialyzer`, and a CI job). Runtime
+      # false so a packaged node never ships the checker; `:dev`/`:test` so the lock
+      # still pins it for CI.
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

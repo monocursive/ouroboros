@@ -83,8 +83,10 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Permissions
-  alias Ouroboros.Gateway.Config, as: GatewayConfig
-  alias Ouroboros.Gateway.Wire
+  alias Ouroboros.Gateway.Methods.Encode
+  alias Ouroboros.Gateway.Methods.Placement
+  alias Ouroboros.Gateway.Methods.Present
+  alias Ouroboros.Gateway.Methods.Safe
   alias Ouroboros.Interactive.State, as: InteractiveState
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Task, as: InteractiveTask
@@ -99,12 +101,23 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
 
+  import Ouroboros.Gateway.Methods.Safe,
+    only: [
+      safe: 1,
+      reply: 1,
+      invalid_params: 1,
+      not_found: 1,
+      unavailable: 1,
+      upstream_error: 1,
+      account_reply: 1,
+      forget_session_owner_reply: 1,
+      fork_reply: 1,
+      exit_result: 1
+    ]
+
   @default_timeout 15_000
 
-  # One provider probe shells out to check an installed executable, so the fan-out is
-  # bounded well inside the method ceiling: a provider that never answers costs the
-  # client a null status for that provider, not a timed-out method.
-  @provider_probe_timeout 5_000
+  # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
 
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
@@ -117,10 +130,6 @@ defmodule Ouroboros.Gateway.Methods do
   @code_intel_request_timeout_ms 8_000
   @code_intel_max_wait_ms 10_000
   @code_intel_erpc_timeout 14_000
-
-  # Where `ledger.export`'s hash chain starts. A fixed, published seed rather than a random
-  # one: the point of the chain is that a client can recompute it from the answer alone.
-  @chain_seed String.duplicate("0", 64)
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -1101,7 +1110,7 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
 
-  def invoke("runtime.providers", _params), do: safe(fn -> {:ok, providers()} end)
+  def invoke("runtime.providers", _params), do: safe(fn -> {:ok, Present.providers()} end)
 
   def invoke("runtime.models", _params), do: safe(fn -> {:ok, Ouroboros.Models.list()} end)
 
@@ -1181,7 +1190,7 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   def invoke("interactive.list", _params),
-    do: safe(fn -> fleet_sessions(InteractiveSession) end)
+    do: safe(fn -> Present.fleet_sessions(InteractiveSession) end)
 
   def invoke("interactive.info", params) do
     with_session(params, :interactive, ["id", "node"], fn session ->
@@ -1201,7 +1210,7 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("coding.list", _params), do: safe(fn -> fleet_sessions(CodingSession) end)
+  def invoke("coding.list", _params), do: safe(fn -> Present.fleet_sessions(CodingSession) end)
 
   def invoke("coding.info", params) do
     with_session(params, :coding, ["id", "node"], fn session ->
@@ -1219,7 +1228,7 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("teams.list", _params), do: safe(fn -> {:ok, teams()} end)
+  def invoke("teams.list", _params), do: safe(fn -> {:ok, Present.teams()} end)
 
   def invoke("teams.state", params) do
     with_id(params, fn id ->
@@ -1425,9 +1434,9 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, fleet?} <- ledger_fleet(params),
          {:ok, target} <- permissions_node(params) do
       if fleet? do
-        ledger_fleet_list(filters)
+        Present.ledger_fleet_list(filters)
       else
-        ledger_local_list(target, filters)
+        Present.ledger_local_list(target, filters)
       end
     else
       {:invalid, message} -> invalid_params(message)
@@ -1448,7 +1457,7 @@ defmodule Ouroboros.Gateway.Methods do
     with :ok <- only_keys(params, ["since", "node"]),
          {:ok, since} <- ledger_since(params),
          {:ok, target} <- permissions_node(params) do
-      ledger_export(target, since)
+      Present.ledger_export(target, since)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -1459,7 +1468,7 @@ defmodule Ouroboros.Gateway.Methods do
       case options(params, @start_options) do
         {:ok, opts} ->
           {owner, opts} = Keyword.pop(opts, :node, node())
-          start_interactive_on(owner, opts)
+          Placement.start_interactive(owner, opts)
 
         {:invalid, message} ->
           invalid_params(message)
@@ -1502,7 +1511,7 @@ defmodule Ouroboros.Gateway.Methods do
            {:ok, session} <- session_target(:interactive, params),
            {:ok, request} <- approval_request(params) do
         case InteractiveSession.request_approval(session, request) do
-          {:ok, answer} -> {:ok, approval_answer(answer)}
+          {:ok, answer} -> {:ok, Encode.approval_answer(answer)}
           other -> reply(other)
         end
       else
@@ -1740,7 +1749,7 @@ defmodule Ouroboros.Gateway.Methods do
       with {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, opts} <- options(params, @start_options, ["objective"]) do
         {owner, opts} = Keyword.pop(opts, :node, node())
-        start_coding_on(owner, objective, opts)
+        Placement.start_coding(owner, objective, opts)
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -1886,291 +1895,6 @@ defmodule Ouroboros.Gateway.Methods do
     {:error, code(:method_not_found), "this build does not serve #{method}"}
   end
 
-  defp start_interactive_on(owner, opts) do
-    case destination_workspace(owner, opts) do
-      :ok ->
-        case Cluster.ensure_placeable(owner) do
-          :ok ->
-            case fence_possible_owner(:interactive, owner) do
-              :ok ->
-                owner
-                |> InteractiveSession.start_for_gateway_on(opts)
-                |> remember_started_owner(:interactive, owner)
-                |> start_reply()
-
-              {:error, _reason} ->
-                unavailable_not_dispatched(
-                  "machine #{owner} start was not dispatched because durable fleet owner evidence could not be checkpointed; repair the Ouroboros data directory and retry"
-                )
-            end
-
-          {:error, reason} ->
-            unavailable_not_dispatched(
-              "machine #{owner} cannot run this interactive session: #{placement_reason(reason)}"
-            )
-        end
-
-      {:error, reason} ->
-        invalid_params(destination_workspace_message(owner, reason))
-    end
-  end
-
-  defp start_coding_on(owner, objective, opts) do
-    case destination_workspace(owner, opts) do
-      :ok ->
-        case Cluster.ensure_placeable(owner) do
-          :ok ->
-            case fence_possible_owner(:coding, owner) do
-              :ok ->
-                owner
-                |> CodingSession.start_for_gateway_on(objective, opts)
-                |> remember_started_owner(:coding, owner)
-                |> start_reply()
-
-              {:error, _reason} ->
-                unavailable_not_dispatched(
-                  "machine #{owner} start was not dispatched because durable fleet owner evidence could not be checkpointed; repair the Ouroboros data directory and retry"
-                )
-            end
-
-          {:error, reason} ->
-            unavailable_not_dispatched(
-              "machine #{owner} cannot run this coding task: #{placement_reason(reason)}"
-            )
-        end
-
-      {:error, reason} ->
-        invalid_params(destination_workspace_message(owner, reason))
-    end
-  end
-
-  # A relative path belongs to the process that expands it. On a selected remote owner
-  # that process is a packaged release whose cwd is an implementation detail, not the
-  # developer's project. Require the client to name the destination path explicitly;
-  # the remote plane remains responsible for checking that the directory exists.
-  defp destination_workspace(owner, _opts) when owner == node(), do: :ok
-
-  defp destination_workspace(owner, opts) do
-    case Keyword.fetch(opts, :workspace) do
-      {:ok, workspace} when is_binary(workspace) ->
-        if Path.type(workspace) == :absolute,
-          do: :ok,
-          else: {:error, {:remote_workspace_not_absolute, owner}}
-
-      :error ->
-        {:error, {:remote_workspace_missing, owner}}
-
-      {:ok, _invalid} ->
-        {:error, {:remote_workspace_missing, owner}}
-    end
-  end
-
-  defp destination_workspace_message(owner, {:remote_workspace_missing, owner}) do
-    "params.workspace is required when params.machine or params.node selects remote " <>
-      "machine #{owner}; provide a nonempty absolute path that exists on that machine"
-  end
-
-  defp destination_workspace_message(owner, {:remote_workspace_not_absolute, owner}) do
-    "params.workspace must be an absolute path on remote machine #{owner}; relative paths " <>
-      "would resolve inside the packaged release rather than the destination project"
-  end
-
-  defp placement_reason(:node_not_connected), do: "it is not connected"
-  defp placement_reason(:runtime_not_running), do: "its Ouroboros runtime is not running"
-
-  defp placement_reason({:runtime_incompatible, _actual, _expected}),
-    do:
-      "its Ouroboros version, OTP release, or fleet protocol revision differs from this gateway; " <>
-        "install the same Ouroboros build before placing sessions there"
-
-  defp placement_reason({:role, actual, :core}),
-    do: "its role is #{actual}; agent sessions require a machine that runs agents"
-
-  defp placement_reason(reason), do: inspect(reason, limit: 10, printable_limit: 200)
-
-  defp providers do
-    specs = Ouroboros.providers()
-
-    specs
-    |> Task.async_stream(&probe_provider/1,
-      timeout: @provider_probe_timeout,
-      on_timeout: :kill_task,
-      max_concurrency: max(length(specs), 1),
-      ordered: true
-    )
-    |> Enum.zip(specs)
-    |> Enum.map(fn
-      {{:ok, probed}, _spec} ->
-        probed
-
-      {{:exit, _reason}, spec} ->
-        %{provider: spec.provider, spec: spec, status: nil, error: :probe_timeout}
-    end)
-  end
-
-  # Session checkpoints are owner-local, so a client attached to one gateway has to ask
-  # every connected compatible core. A successful array is authoritative in existing
-  # clients; it must therefore include every queryable core and fail when an owner proven
-  # by an earlier complete list or successful start is no longer queryable. That positive
-  # observation matters for transitive peers which were never invitation seeds and for
-  # peers whose last-known runtime later became incompatible. Returning [] for either
-  # kind of disconnected owner made its sessions disappear even though this gateway had
-  # already proved that it owned checkpoints.
-  # Fail the read instead: the TUI retains its last-known rows and retries, which is both
-  # backward-compatible and honest. A seed with no positive evidence does not freeze an
-  # otherwise useful list during an ordinary outage. Sessions created exclusively through
-  # another gateway remain owner-local until journals themselves are replicated.
-  defp fleet_sessions(module) when module in [InteractiveSession, CodingSession] do
-    query_fleet_sessions(module, session_plane(module))
-  end
-
-  defp query_fleet_sessions(module, plane) do
-    fleet = Cluster.fleet_status()
-    targets = fleet_session_targets(fleet)
-
-    case unavailable_session_owner(plane, targets) do
-      {:unavailable, target} ->
-        incomplete_session_list(target)
-
-      {:error, reason} ->
-        incomplete_session_evidence(reason)
-
-      :none ->
-        results =
-          targets
-          |> Task.async_stream(
-            &fleet_session_query(&1, module),
-            max_concurrency: max(length(targets), 1),
-            ordered: true,
-            timeout: @fleet_query_timeout,
-            on_timeout: :kill_task
-          )
-
-        targets
-        |> Enum.zip(results)
-        |> Enum.reduce_while({:ok, []}, fn
-          {target, {:ok, {:ok, sessions}}}, {:ok, observations} ->
-            {:cont, {:ok, [{target, sessions} | observations]}}
-
-          {target, _unavailable_or_foreign}, _observations ->
-            {:halt, incomplete_session_list(target)}
-        end)
-        |> case do
-          {:ok, observations} ->
-            # This synchronous update happens before the successful list escapes. Every
-            # queried target participates, so an empty connected owner clears its old
-            # evidence while an unavailable required owner can never be cleared by accident.
-            case Cluster.record_session_snapshot(plane, observations) do
-              :ok ->
-                sessions = Enum.flat_map(observations, &elem(&1, 1))
-
-                {:ok,
-                 Enum.sort_by(sessions, fn session ->
-                   {session |> Map.get(:node, node()) |> Atom.to_string(),
-                    Map.get(session, :id, "")}
-                 end)}
-
-              {:error, reason} ->
-                incomplete_session_evidence(reason)
-            end
-
-          error ->
-            error
-        end
-    end
-  end
-
-  defp session_plane(InteractiveSession), do: :interactive
-  defp session_plane(CodingSession), do: :coding
-
-  # Builders and signers deliberately run no session stores. Asking every distributed
-  # node made a healthy mixed-role fleet look incomplete, so only connected, compatible
-  # cores participate. Positive evidence still wins: a previously listed owner that is
-  # now offline, incompatible, or no longer a core is required and fails closed below.
-  defp fleet_session_targets(fleet) do
-    fleet.machines
-    |> Enum.filter(fn machine ->
-      machine.state in [:local, :connected] and machine.role == :core and
-        machine.runtime_running? == true and machine.compatibility in [:local, :compatible]
-    end)
-    |> Enum.map(& &1.node)
-    |> Enum.uniq()
-  end
-
-  defp unavailable_session_owner(plane, targets) do
-    queried = targets |> Enum.map(&Atom.to_string/1) |> MapSet.new()
-
-    case Cluster.session_owners(plane) do
-      {:ok, owners} ->
-        unavailable =
-          owners
-          |> Enum.sort()
-          |> Enum.find(&(not MapSet.member?(queried, &1)))
-
-        if is_binary(unavailable), do: {:unavailable, unavailable}, else: :none
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp incomplete_session_evidence(_reason) do
-    {:error, code(:unavailable),
-     "session list is incomplete because durable fleet owner evidence is unavailable; keeping the previous fleet view is safer than hiding its sessions",
-     %{
-       "reason" => "owner_query_incomplete",
-       "node" => "unknown",
-       "evidence" => "unavailable"
-     }}
-  end
-
-  defp incomplete_session_list(target) do
-    owner = if(is_atom(target), do: Atom.to_string(target), else: target)
-
-    {:error, code(:unavailable),
-     "session list is incomplete because owner #{owner} did not answer; keeping the previous fleet view is safer than hiding its sessions",
-     %{"reason" => "owner_query_incomplete", "node" => owner}}
-  end
-
-  # `Task.async_stream/3` bounds slow owners. Convert exceptions/exits inside each task
-  # into ordinary data as well, so a dead remote Store cannot link-exit the gateway
-  # caller while we are trying to report the partial read honestly.
-  defp fleet_session_query(target, module) do
-    sessions =
-      if target == node() do
-        apply(module, :list, [])
-      else
-        :erpc.call(target, module, :list, [], @fleet_query_timeout)
-      end
-
-    if is_list(sessions), do: {:ok, sessions}, else: {:error, :invalid_reply}
-  rescue
-    error -> {:error, {:exception, error}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  defp probe_provider(spec) do
-    case Ouroboros.provider_status(spec.provider) do
-      {:ok, status} -> %{provider: spec.provider, spec: spec, status: status, error: nil}
-      {:error, reason} -> %{provider: spec.provider, spec: spec, status: nil, error: reason}
-    end
-  end
-
-  # Projected exactly as `Ouroboros.status/0` projects it, so a client reading both sees
-  # one shape for a team rather than two.
-  defp teams do
-    Team.Store.list()
-    |> Enum.map(fn team ->
-      %{
-        id: team.id,
-        status: team.status,
-        worker_count: map_size(team.workers),
-        delegation_count: map_size(team.delegations),
-        updated_at: team.updated_at
-      }
-    end)
-  end
 
   defp signing_decisions(signing_node) do
     if Node.alive?() do
@@ -2520,27 +2244,6 @@ defmodule Ouroboros.Gateway.Methods do
       ~s("tool_use_id": "...", "cwd": "..."} with a non-empty tool_name)
   end
 
-  # Atoms the coordinator chose, rendered as the literal strings this module contains. A
-  # decision is never `to_string`d out of whatever the plane happened to answer.
-  defp approval_answer(answer) do
-    %{
-      "decision" => if(answer.decision == :allow, do: "allow", else: "deny"),
-      "request_id" => answer.request_id,
-      "source" => approval_source(answer.source),
-      "reason" => answer.reason
-    }
-  end
-
-  defp approval_source(:engine), do: "engine"
-  defp approval_source(:human), do: "human"
-  defp approval_source(:timeout), do: "timeout"
-  defp approval_source(:capacity), do: "capacity"
-  defp approval_source(:session_terminal), do: "session_terminal"
-  defp approval_source(:checkpoint_failed), do: "checkpoint_failed"
-  defp approval_source(:caller_gone), do: "caller_gone"
-  defp approval_source(:coordinator_restart), do: "coordinator_restart"
-  defp approval_source(_other), do: "runtime"
-
   defp approval_message do
     ~s(params.response must be "approve", "deny", or an object ) <>
       ~s({"decision": "approve"|"deny", "scope": "once"|"session", "reason": "..."})
@@ -2612,9 +2315,9 @@ defmodule Ouroboros.Gateway.Methods do
   defp code_intel_call(target, function, arguments) do
     safe(fn ->
       if target == node() do
-        code_intel_reply(apply(CodeIntel, function, arguments))
+        Encode.code_intel_reply(apply(CodeIntel, function, arguments))
       else
-        code_intel_reply(
+        Encode.code_intel_reply(
           :erpc.call(target, CodeIntel, function, arguments, @code_intel_erpc_timeout)
         )
       end
@@ -2629,116 +2332,6 @@ defmodule Ouroboros.Gateway.Methods do
       wait_ready_ms: @code_intel_wait_ready_ms,
       request_timeout_ms: @code_intel_request_timeout_ms
     ] ++ Enum.reject(extra, fn {_key, value} -> is_nil(value) end)
-  end
-
-  defp code_intel_reply({:ok, %{items: items} = answer}) when is_list(items) do
-    {:ok, answer |> Map.put(:status, :ok) |> Map.put(:items, code_intel_items(items))}
-  end
-
-  defp code_intel_reply({:ok, value}), do: {:ok, value}
-
-  # Not an error: the server has not answered for this version of the document yet. A
-  # caller that treated "no data yet" as a failure of whatever produced the edit is
-  # exactly the regression R4 §2 records against stale diagnostics, so it arrives as an
-  # ordinary result carrying no items at all — there is nothing to mistake for "clean".
-  defp code_intel_reply({:pending, version}), do: {:ok, %{status: :pending, version: version}}
-
-  defp code_intel_reply({:error, {:server_unavailable, server_id, hint}}) do
-    {:error, code(:unavailable), "no language server is available for that file: #{hint}",
-     %{"reason" => "server_unavailable", "server" => server_id, "hint" => hint}}
-  end
-
-  defp code_intel_reply({:error, {:outside_workspace, path}}) do
-    {:error, code(:invalid_params), "that path is not inside a workspace root this node admits",
-     %{"reason" => "outside_workspace", "path" => to_string(path)}}
-  end
-
-  defp code_intel_reply({:error, {:no_project_root, language, markers}}) do
-    {:error, code(:unavailable),
-     "no project root for that #{language} file; expected one of #{Enum.join(markers, ", ")}",
-     %{"reason" => "no_project_root", "language" => to_string(language), "markers" => markers}}
-  end
-
-  # A path that cannot be canonicalised is a path, not an upstream failure: it is missing,
-  # it is a directory, it is a symlink that goes nowhere, or it was relative to a directory
-  # that means nothing here. Saying `-32006 the runtime failed the call` about any of those
-  # sends a caller looking for a fault in the runtime.
-  defp code_intel_reply({:error, {tag, path, reason}})
-       when tag in [:workspace_path_error, :path_unavailable, :symbolic_link_unreadable] do
-    unreadable_path(path, reason)
-  end
-
-  defp code_intel_reply({:error, {tag, path}})
-       when tag in [:not_a_directory, :symbolic_link_cycle] do
-    unreadable_path(path, tag)
-  end
-
-  defp code_intel_reply({:error, :too_many_symbolic_links}) do
-    unreadable_path("that path", :too_many_symbolic_links)
-  end
-
-  defp code_intel_reply({:error, {:not_a_regular_file, path}}) do
-    {:error, code(:invalid_params), "params.path is not a regular file",
-     %{"reason" => "not_a_regular_file", "path" => to_string(path)}}
-  end
-
-  defp code_intel_reply({:error, {:invalid_attachment_path, path}}) do
-    {:error, code(:invalid_params), "params.path must be a nonempty string",
-     %{"reason" => "invalid_path", "path" => inspect(path)}}
-  end
-
-  defp code_intel_reply({:error, {:unsupported_language, extension}}) do
-    {:error, code(:invalid_params), "no language server is registered for #{extension} files",
-     %{"reason" => "unsupported_language", "extension" => extension}}
-  end
-
-  defp code_intel_reply({:error, {:unknown_operation, operation, allowed}}) do
-    invalid_params(
-      "params.operation must be one of " <>
-        (allowed |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")) <>
-        ", got: #{inspect(operation)}"
-    )
-  end
-
-  defp code_intel_reply({:error, :disabled}) do
-    {:error, code(:unavailable), "code intelligence is disabled on this node",
-     %{"reason" => "disabled"}}
-  end
-
-  defp code_intel_reply({:error, :broken}) do
-    {:error, code(:unavailable),
-     "that language server failed too often and is not being respawned for now",
-     %{"reason" => "broken"}}
-  end
-
-  defp code_intel_reply({:error, :document_not_open}) do
-    {:error, code(:unavailable),
-     "no language server holds that document; announce the edit with code_intel.touch first",
-     %{"reason" => "document_not_open"}}
-  end
-
-  defp code_intel_reply({:error, reason}), do: upstream_error(reason)
-  defp code_intel_reply(other), do: {:ok, other}
-
-  defp unreadable_path(path, reason) do
-    {:error, code(:invalid_params),
-     "params.path could not be read as a file (#{inspect(reason)}); name it absolutely, " <>
-       "because a relative path here is expanded against the runtime's own working " <>
-       "directory rather than against the workspace",
-     %{"reason" => "unreadable_path", "path" => to_string(path)}}
-  end
-
-  # Every diagnostic that crosses the wire carries the identity its caller needs to tell a
-  # new finding from one that was already there. Navigation items have no severity and are
-  # left exactly as the pool returned them.
-  defp code_intel_items(items) do
-    Enum.map(items, fn
-      %{severity: _severity, message: _message, range: _range} = item ->
-        Map.put(item, :signature, CodeIntel.Diagnostics.signature(item))
-
-      item ->
-        item
-    end)
   end
 
   # Carried as the caller typed it and canonicalised on the *target* node, because a path
@@ -2807,88 +2400,6 @@ defmodule Ouroboros.Gateway.Methods do
         reply(:erpc.call(target, EffectLedger, function, arguments, @fleet_query_timeout))
       end
     end)
-  end
-
-  defp ledger_local_list(target, filters) do
-    case ledger_query(target, filters) do
-      {:ok, entries} ->
-        {:ok, %{entries: entries, nodes: [%{node: target, status: :ok}]}}
-
-      {:error, reason} ->
-        {:ok,
-         %{
-           entries: [],
-           nodes: [%{node: target, status: :unavailable, reason: Wire.to_json(reason)}]
-         }}
-    end
-  end
-
-  # I3. "Survives machine moves" is only true if every owner is asked, so this asks every
-  # connected core node and says which ones did not answer instead of returning a shorter
-  # list that looks complete. Sequences are minted per node, so there is no cross-node
-  # total order to merge into: entries are ordered by `{node, sequence}` and the node is
-  # part of every row.
-  defp ledger_fleet_list(filters) do
-    targets = Cluster.fleet_status() |> fleet_session_targets() |> ensure_local_target()
-
-    results =
-      targets
-      |> Task.async_stream(&{&1, ledger_query(&1, filters)},
-        max_concurrency: max(length(targets), 1),
-        ordered: true,
-        timeout: @fleet_query_timeout + 1_000,
-        on_timeout: :kill_task
-      )
-      |> Enum.zip(targets)
-      |> Enum.map(fn
-        {{:ok, {target, {:ok, entries}}}, _target} ->
-          {%{node: target, status: :ok}, entries}
-
-        {{:ok, {target, {:error, reason}}}, _target} ->
-          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
-
-        {{:exit, reason}, target} ->
-          {%{node: target, status: :unavailable, reason: Wire.to_json(reason)}, []}
-      end)
-
-    entries =
-      results
-      |> Enum.flat_map(fn {%{node: target}, entries} ->
-        Enum.map(entries, &{Atom.to_string(target), &1})
-      end)
-      |> Enum.sort_by(fn {name, entry} -> {name, -entry.sequence} end)
-      |> Enum.map(&elem(&1, 1))
-      |> Enum.take(filters[:limit])
-
-    {:ok, %{entries: entries, nodes: Enum.map(results, &elem(&1, 0))}}
-  end
-
-  defp ensure_local_target([]), do: [node()]
-
-  defp ensure_local_target(targets) do
-    if node() in targets, do: targets, else: [node() | targets]
-  end
-
-  # Exceptions and exits become data here for the same reason `fleet_session_query/2` does
-  # it: a dead remote ledger must not link-exit the gateway task that is trying to report
-  # honestly that it is dead.
-  defp ledger_query(target, filters) do
-    result =
-      if target == node() do
-        EffectLedger.list(filters)
-      else
-        :erpc.call(target, EffectLedger, :list, [filters], @fleet_query_timeout)
-      end
-
-    case result do
-      {:ok, entries} when is_list(entries) -> {:ok, entries}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:invalid_reply, other}}
-    end
-  rescue
-    error -> {:error, {:exception, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
   end
 
   defp ledger_filters(params) do
@@ -2980,75 +2491,6 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # I1's JSONL export. Each line is the exact text whose bytes the hash covers, so a client
-  # verifies the chain by hashing what it was given rather than by agreeing with this
-  # runtime about how to canonicalise a JSON object. The chain is computed for this answer
-  # and is not stored anywhere: it makes an export self-verifying, which is a different and
-  # much smaller claim than tamper-proof storage.
-  defp ledger_export(target, since) do
-    limits = EffectLedger.query_limits()
-    filters = [since_sequence: since, order: :asc, limit: limits.max]
-
-    case ledger_query(target, filters) do
-      {:ok, entries} ->
-        {:ok,
-         entries
-         |> chain()
-         |> Map.merge(%{node: target, format: "jsonl", limit: limits.max, since: since})}
-
-      {:error, reason} ->
-        unavailable("the effect ledger on #{target} did not answer: #{inspect(reason)}")
-    end
-  end
-
-  @doc """
-  The hash chain over an ordered run of ledger entries, as `ledger.export` answers it.
-
-  Each line is the exact text whose bytes its hash covers:
-  `hash(n) = sha256(hash(n-1) || line(n))`, with `hash(-1)` the published seed and every
-  hash the lowercase hex of 32 bytes. A client verifies an export by hashing the strings
-  it was handed, in order — no agreement about how to re-encode an entry is needed, which
-  is the only reason the claim is checkable at all.
-
-  Public because the golden fixture is derived through it: a change to the chain has to
-  show up as a fixture diff a reviewer signs off on, not as a silent change to what a
-  client is verifying.
-  """
-  @spec chain([EffectLedger.Entry.t()]) :: map()
-  def chain(entries) when is_list(entries) do
-    {lines, head} =
-      Enum.map_reduce(entries, @chain_seed, fn entry, previous ->
-        line = entry |> Wire.to_json() |> canonical_json()
-        hash = :sha256 |> :crypto.hash([previous, line]) |> Base.encode16(case: :lower)
-
-        {%{sequence: entry.sequence, id: entry.id, line: line, previous: previous, hash: hash},
-         hash}
-      end)
-
-    %{algorithm: "sha256", count: length(lines), seed: @chain_seed, head: head, lines: lines}
-  end
-
-  # Object keys sorted, no whitespace. `JSON.encode!/1` iterates a map in whatever order
-  # the term happens to have, which is stable enough in practice and not a property worth
-  # betting a hash chain on: two exports of the same entry have to produce the same bytes,
-  # on any machine, or the chain a client verifies is a chain over an accident.
-  defp canonical_json(value), do: value |> canonical() |> IO.iodata_to_binary()
-
-  defp canonical(map) when is_map(map) do
-    inner =
-      map
-      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
-      |> Enum.map(fn {key, value} -> [JSON.encode!(to_string(key)), ?:, canonical(value)] end)
-      |> Enum.intersperse(?,)
-
-    [?{, inner, ?}]
-  end
-
-  defp canonical(list) when is_list(list),
-    do: [?[, list |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
-
-  defp canonical(other), do: JSON.encode!(other)
-
   defp with_replay(params, plane, replay) do
     with :ok <- only_keys(params, ["id", "cursor", "limit", "node"]),
          {:ok, session} <- session_target(plane, params),
@@ -3076,7 +2518,7 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, sequence} <- fetch_sequence(params) do
       safe(fn ->
         case replay.(session, cursor: sequence - 1, limit: 1) do
-          {:ok, [%{sequence: ^sequence} = event]} -> {:ok, detail(event)}
+          {:ok, [%{sequence: ^sequence} = event]} -> {:ok, Encode.detail(event)}
           {:ok, _window} -> not_found("that session retains no event at sequence #{sequence}")
           other -> reply(other)
         end
@@ -3084,19 +2526,6 @@ defmodule Ouroboros.Gateway.Methods do
     else
       {:invalid, message} -> invalid_params(message)
     end
-  end
-
-  # Encoded here rather than by the `Conn`, because this is the one answer that gets the
-  # larger per-leaf cap: the whole point of the method is to hand back the leaf a
-  # streamed event could only excerpt. What it returns is already a JSON tree, so the
-  # connection's own `Wire.to_json/1` walks plain strings and maps and leaves it alone.
-  defp detail(event) do
-    limits = GatewayConfig.event_limits()
-
-    Wire.to_json(event,
-      event_leaf_bytes: limits.detail_leaf_bytes,
-      event_payload_bytes: limits.detail_leaf_bytes
-    )
   end
 
   defp fetch_sequence(params) do
@@ -3313,353 +2742,22 @@ defmodule Ouroboros.Gateway.Methods do
       end
   end
 
-  defp safe(fun) do
-    fun.()
-  rescue
-    error -> upstream_error(error)
-  catch
-    :exit, reason -> exit_result(reason)
-    kind, reason -> upstream_error({kind, reason})
-  end
-
-  defp reply({:ok, value}), do: {:ok, value}
-
-  defp reply(:not_found), do: not_found("no such record on this node")
-  defp reply({:error, :not_found}), do: not_found("no such record on this node")
-
-  defp reply({:error, {:agent_not_found, id}}),
-    do: not_found("no agent #{inspect(id)} is visible from this node")
-
-  defp reply({:error, {:team_not_found, id}}),
-    do: not_found("no team #{inspect(id)} is visible from this node")
-
-  defp reply({:error, {:session_not_terminal, status}}) do
-    {:error, code(:upstream_error),
-     "the session is still #{status}; close or kill it before removing the durable record",
-     %{"reason" => "session_not_terminal", "status" => to_string(status)}}
-  end
-
-  defp reply({:error, {:task_not_terminal, status}}) do
-    {:error, code(:upstream_error),
-     "the coding task is still #{status}; cancel it before removing the durable record",
-     %{"reason" => "task_not_terminal", "status" => to_string(status)}}
-  end
-
-  defp reply({:error, :control_disabled_or_unavailable}),
-    do: unavailable("the control plane is disabled or not running on this node")
-
-  defp reply({:error, {:permissions_unavailable, _detail}}),
-    do: unavailable("the permission engine is not running on this node")
-
-  defp reply({:error, :node_scope_is_operator_configuration}) do
-    {:error, code(:upstream_error),
-     "node-scope permission rules come from config :ouroboros, :permissions and are not written over the wire",
-     %{"reason" => "node_scope_is_operator_configuration"}}
-  end
-
-  defp reply({:error, {:unknown_permission_rule, id}}),
-    do: not_found("no permission rule #{id} on this node")
-
-  defp reply({:error, {:signing_service_unavailable, _detail} = reason}),
-    do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}
-
-  # A rejected title is the caller's mistake, not the runtime's, and the reason names
-  # which rule it broke so a client can say so next to the field rather than in a toast.
-  defp reply({:error, {:invalid_title, %{reason: :too_long, limit: limit}}}) do
-    invalid_params("params.title must be at most #{limit} characters after trimming")
-  end
-
-  defp reply({:error, {:invalid_title, %{reason: :control_characters}}}) do
-    invalid_params(
-      "params.title must not contain control characters; it is drawn into one line of a list"
-    )
-  end
-
-  defp reply({:error, {:invalid_title, %{reason: reason}}})
-       when reason in [:blank, :not_a_string] do
-    invalid_params("params.title must be a nonempty string")
-  end
-
-  # A pruned cursor is the one upstream detail a client acts on rather than displays: it
-  # restarts from the floor and marks the transcript as truncated below it. So the floor
-  # travels as data under a named reason instead of inside a sentence.
-  defp reply({:error, {:cursor_pruned, floor}}) do
-    {:error, code(:upstream_error),
-     "the session no longer retains events at or below that cursor; replay from #{floor}",
-     %{"reason" => "cursor_pruned", "floor" => floor}}
-  end
-
-  # Several planes bound themselves and answer `:timeout` rather than exiting. The request
-  # may still have been accepted durably — `Ouroboros.Team` says so explicitly — so the
-  # answer is the same "the gateway stopped waiting, the runtime did not" that a ceiling
-  # breach gets, and it carries the same admission of not knowing.
-  defp reply({:error, :timeout}) do
-    {:error, code(:upstream_timeout), "the runtime did not answer in time",
-     %{"outcome" => "unknown"}}
-  end
-
-  defp reply({:error, {:unavailable, message}}) when is_binary(message), do: unavailable(message)
-
-  defp reply({:error, {:owner_unavailable, owner}}) when is_atom(owner) do
-    {:error, code(:unavailable), "session owner #{owner} is offline; Ouroboros is reconnecting",
-     %{"reason" => "owner_unavailable", "node" => owner, "outcome" => "unknown"}}
-  end
-
-  defp reply({:error, {:owner_unavailable, owner, detail}}) when is_atom(owner) do
-    {:error, code(:unavailable),
-     "session owner #{owner} did not answer; Ouroboros is reconnecting",
-     %{
-       "reason" => "owner_unavailable",
-       "node" => owner,
-       "detail" => Wire.to_json(detail),
-       "outcome" => "unknown"
-     }}
-  end
-
-  defp reply({:error, reason}), do: turn_error_reply(reason)
-  defp reply(value), do: {:ok, value}
-
-  # Start has a durable boundary the generic `reply/1` cannot infer. Once the exact
-  # caller-owned request is checkpointed, readiness failure is still a successful
-  # creation outcome: clients must open that stable failed session, not mint another or
-  # remain trapped reconciling it. Conflicts are the inverse — this request definitely
-  # created nothing, because the id already belongs to different immutable intent.
-  # Owner-evidence failure cannot rewrite a created session into `not_dispatched`; the
-  # monitor marks its evidence unreliable so subsequent lists fail closed instead.
-  defp fence_possible_owner(_plane, owner) when owner == node(), do: :ok
-
-  defp fence_possible_owner(plane, owner) do
-    Cluster.record_session_snapshot(plane, [{owner, [%{possible_start: true}]}])
-  end
-
-  defp remember_started_owner({:ok, %{node: owner}} = result, plane, owner) do
-    _ = Cluster.record_session_snapshot(plane, [{owner, [%{created: true}]}])
-    result
-  end
-
-  defp remember_started_owner({:created, %{node: owner}, _reason} = result, plane, owner) do
-    _ = Cluster.record_session_snapshot(plane, [{owner, [%{created: true}]}])
-    result
-  end
-
-  defp remember_started_owner(result, _plane, _owner), do: result
-
-  defp start_reply({:created, %{id: id, node: owner}, reason}) do
-    {:ok,
-     %{
-       "id" => id,
-       "node" => owner,
-       "outcome" => "created",
-       "ready" => false,
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  defp start_reply({:error, {:session_id_conflict, id} = reason}) do
-    {:error, code(:upstream_error),
-     "session id #{inspect(id)} already belongs to different immutable start options",
-     %{
-       "reason" => "session_id_conflict",
-       "id" => id,
-       "outcome" => "not_dispatched",
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  defp start_reply({:error, {:task_id_conflict, id} = reason}) do
-    {:error, code(:upstream_error),
-     "coding task id #{inspect(id)} already belongs to a different immutable request",
-     %{
-       "reason" => "task_id_conflict",
-       "id" => id,
-       "outcome" => "not_dispatched",
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  defp start_reply(result), do: reply(result)
-
-  # Answered in `interactive.start`'s shape, because a fork *is* a start and a client that
-  # already knows how to open a created-but-not-ready session should not need a second
-  # branch to open this one.
-  defp fork_reply({:ok, %{id: id, node: owner, ready: ready?, error: error}}) do
-    {:ok,
-     %{
-       "id" => id,
-       "node" => owner,
-       "outcome" => "created",
-       "ready" => ready?,
-       "error" => Wire.to_json(error)
-     }}
-  end
-
-  defp fork_reply(result), do: reply(result)
-
   @doc false
-  # These are not refusals. Harness may already have returned a turn id, its call may
-  # have exited before a trustworthy acknowledgement, or a synchronous refusal may have
-  # failed to replace the durable `:dispatching` intent that recovery can still send.
-  # In every case the caller-owned id is the reconciliation boundary and retrying under
-  # a new id could duplicate live work.
-  def turn_error_reply(
-        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id} = reason
-      )
-      when is_binary(turn_id) do
-    unknown_turn_dispatch(turn_id, reason)
-  end
+  defdelegate turn_error_reply(reason), to: Safe
 
-  def turn_error_reply(
-        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
-         {:harness_refused, _refusal}} = reason
-      )
-      when is_binary(turn_id) do
-    unknown_turn_dispatch(turn_id, reason)
-  end
+  @doc """
+  The hash chain over an ordered run of ledger entries, as `ledger.export` answers it.
 
-  def turn_error_reply(
-        {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn_id,
-         {:request_exposure_failed, _failure}} = reason
-      )
-      when is_binary(turn_id) do
-    unknown_turn_dispatch(turn_id, reason)
-  end
+  Each line is the exact text whose bytes its hash covers:
+  `hash(n) = sha256(hash(n-1) || line(n))`, with `hash(-1)` the published seed and every
+  hash the lowercase hex of 32 bytes. A client verifies an export by hashing the strings
+  it was handed, in order — no agreement about how to re-encode an entry is needed, which
+  is the only reason the claim is checkable at all.
 
-  def turn_error_reply({:turn_dispatch_ambiguous, turn_id} = reason)
-      when is_binary(turn_id) do
-    unknown_turn_dispatch(turn_id, reason)
-  end
-
-  def turn_error_reply({:turn_dispatch_ambiguous, turn_id, :checkpoint_failed} = reason)
-      when is_binary(turn_id) do
-    unknown_turn_dispatch(turn_id, reason)
-  end
-
-  # Harness accepts `follow_up` while a session is running and queues it, but refuses a
-  # second immediate `send_message` as `:busy`. Name that distinction so an interactive
-  # client can preserve the draft and switch to the queueing verb instead of showing an
-  # opaque upstream failure. Harness answered synchronously, so this input did not cross
-  # the dispatch boundary and a retry under a fresh logical id is safe.
-  def turn_error_reply({:turn_dispatch_failed, :busy} = reason) do
-    {:error, code(:upstream_error),
-     "the session is already running a turn; queue this input with interactive.follow_up",
-     %{
-       "reason" => "busy",
-       "outcome" => "not_dispatched",
-       "retry_with" => "interactive.follow_up",
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  def turn_error_reply(reason),
-    do: {:error, code(:upstream_error), "the runtime refused the call", Wire.to_json(reason)}
-
-  defp unknown_turn_dispatch(turn_id, reason) do
-    {:error, code(:upstream_timeout),
-     "the runtime could not confirm the turn dispatch; the turn may already be running",
-     %{
-       "outcome" => "unknown",
-       "turn_id" => turn_id,
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  # Account failures are attributed here rather than in the shared reply mapper: these
-  # shapes are also used by unrelated planes, and only these methods call OpenAI OAuth.
-  defp account_reply({:error, {:timeout, operation}}),
-    do: {:error, code(:upstream_timeout), "OpenAI authentication timed out during #{operation}"}
-
-  defp account_reply({:error, {:upstream, message}}) when is_binary(message),
-    do: upstream_error({:openai_auth, message})
-
-  defp account_reply(result), do: reply(result)
-
-  defp forget_session_owner_reply({:ok, result}), do: {:ok, result}
-
-  defp forget_session_owner_reply({:error, {:invalid_session_owner_machine, machine}}) do
-    invalid_params(
-      "params.machine must be the exact fleet machine name, got: #{inspect(machine)}"
-    )
-  end
-
-  defp forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
-    not_found(
-      "fleet profile has no signed roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
-    )
-  end
-
-  defp forget_session_owner_reply({:error, {:session_owner_connected, machine, owner}}) do
-    {:error, code(:unavailable),
-     "machine #{machine} is connected as #{owner}; inspect or copy its sessions instead of forgetting live state",
-     %{
-       "reason" => "session_owner_connected",
-       "machine" => machine,
-       "node" => owner
-     }}
-  end
-
-  defp forget_session_owner_reply({:error, :fleet_profile_unavailable}) do
-    unavailable(
-      "no active fleet profile is available; this command only retires a member already tombstoned by a signed fleet roster"
-    )
-  end
-
-  defp forget_session_owner_reply({:error, {:fleet_profile_unavailable, reason}}) do
-    {:error, code(:unavailable),
-     "the local fleet profile could not be validated; repair or re-import it before forgetting session state",
-     %{"reason" => "fleet_profile_unavailable", "error" => Wire.to_json(reason)}}
-  end
-
-  defp forget_session_owner_reply({:error, {:session_owner_evidence_unavailable, reason}}) do
-    {:error, code(:unavailable),
-     "durable session-owner evidence is unavailable; repair it before accepting state loss",
-     %{"reason" => "session_owner_evidence_unavailable", "error" => Wire.to_json(reason)}}
-  end
-
-  defp forget_session_owner_reply({:error, {:session_owner_forget_checkpoint_failed, reason}}) do
-    {:error, code(:upstream_error),
-     "session-owner evidence could not be checkpointed, so no state was forgotten",
-     %{
-       "reason" => "session_owner_forget_checkpoint_failed",
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  defp forget_session_owner_reply({:error, reason}), do: upstream_error(reason)
-
-  defp exit_result(reason) do
-    case exit_class(reason) do
-      :gone ->
-        {:error, code(:unavailable), "that plane is not running on this node",
-         Wire.to_json(reason)}
-
-      :timeout ->
-        {:error, code(:upstream_timeout), "the runtime did not answer in time",
-         Wire.to_json(reason)}
-
-      :other ->
-        {:error, code(:upstream_error), "the runtime failed the call", Wire.to_json(reason)}
-    end
-  end
-
-  defp exit_class(:noproc), do: :gone
-  defp exit_class({:noproc, _detail}), do: :gone
-  defp exit_class(:normal), do: :gone
-  defp exit_class({:normal, _detail}), do: :gone
-  defp exit_class(:shutdown), do: :gone
-  defp exit_class({:shutdown, _detail}), do: :gone
-  defp exit_class(:timeout), do: :timeout
-  defp exit_class({:timeout, _detail}), do: :timeout
-  defp exit_class(_reason), do: :other
-
-  defp upstream_error(reason) do
-    {:error, code(:upstream_error), "the runtime failed the call", Wire.to_json(reason)}
-  end
-
-  defp unavailable(message), do: {:error, code(:unavailable), message}
-
-  defp unavailable_not_dispatched(message),
-    do: {:error, code(:unavailable), message, %{"outcome" => "not_dispatched"}}
-
-  defp not_found(message), do: {:error, code(:not_found), message}
-  defp invalid_params(message), do: {:error, code(:invalid_params), message}
+  Public because the golden fixture is derived through it: a change to the chain has to
+  show up as a fixture diff a reviewer signs off on, not as a silent change to what a
+  client is verifying.
+  """
+  @spec chain([EffectLedger.Entry.t()]) :: map()
+  defdelegate chain(entries), to: Encode
 end

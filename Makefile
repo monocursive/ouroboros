@@ -12,7 +12,7 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -29,6 +29,7 @@ help:
 	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
 	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
 	@echo "make test             mix test, cargo test, cargo fmt --check, cargo clippy"
+	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
@@ -97,6 +98,12 @@ test:
 	cd tui && $(CARGO) fmt --check
 	cd tui && $(CARGO) clippy --all-targets -- -D warnings
 	cd tui && $(CARGO) clippy --all-targets --features embed -- -D warnings
+
+# Deliberately not part of `make test`: the first run builds a PLT and even incremental
+# runs are minutes, not the seconds `mix test` is supposed to stay. CI has its own job.
+dialyzer:
+	@echo "==> dialyzer: gradual success typing against the local PLT"
+	$(MIX) dialyzer
 
 # Deliberately not part of `make test`. The corpus spawns a real daemon and drives it
 # through the real client, so it is minutes of wall clock and it needs both halves built;

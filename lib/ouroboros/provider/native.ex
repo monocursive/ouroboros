@@ -52,8 +52,12 @@ defmodule Ouroboros.Provider.Native do
       workspace through a program this runtime does not inspect, and approvals, rules
       and the ledger are the containment. There is no seccomp filter and no domain
       allowlist on any backend.
-    * **No LSP, MCP, hooks, or compaction yet.** Those are D3–D5 and E2; this slice is
-      the loop, its tools, its approvals, and its checkpoint.
+    * **LSP, MCP, hooks, compaction, and checkpoints live in this adapter.** They are
+      the reason this provider exists in-process rather than as another CLI: the loop
+      can ask before a tool runs, append a diagnostic to an edit, fold a conversation it
+      actually holds, and refuse a compaction whose archive cannot be written. Vendor
+      transports still own whatever of those they implement themselves; this module does
+      not invent a second copy for a transcript it never had.
   """
 
   @behaviour Jido.Harness.Adapter

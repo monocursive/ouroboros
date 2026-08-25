@@ -393,6 +393,32 @@ mod tests {
         encoder.finish().expect("flushing the archive")
     }
 
+    /// A tarball whose only member would write outside the unpack destination.
+    /// `set_path` refuses that name, so the header is filled the way a hostile
+    /// archive would be.
+    fn escaping_tarball() -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+
+        const PAYLOAD: &[u8] = b"pwned\n";
+        let mut header = tar::Header::new_gnu();
+        {
+            let gnu = header.as_gnu_mut().expect("a GNU header");
+            for (slot, byte) in gnu.name.iter_mut().zip(b"../pwned") {
+                *slot = *byte;
+            }
+        }
+        header.set_size(PAYLOAD.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append(&header, PAYLOAD)
+            .expect("appending an escaping member");
+
+        let encoder = builder.into_inner().expect("finishing the archive");
+        encoder.finish().expect("flushing the archive")
+    }
+
     #[test]
     fn extracts_verifies_and_marks_the_launcher_executable() {
         let dir = scratch("extract");
@@ -558,6 +584,38 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "a refused extraction must leave nothing behind, found {leftovers:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `unpack` is what keeps a cache extraction inside its destination. A member
+    /// named `../pwned` must not appear beside the releases directory. The crate
+    /// skips such entries rather than returning an error, so extraction may
+    /// succeed with an empty directory; the parent must stay clean either way.
+    #[test]
+    fn an_escaping_archive_member_cannot_write_outside_the_destination() {
+        let dir = scratch("escape");
+        let releases = dir.join("releases");
+        let bytes = escaping_tarball();
+        let digest = sha256_hex(&bytes);
+
+        let result = extract(&bytes, &digest, "9.9.9", &releases);
+        let planted = dir.join("pwned");
+        let sibling = releases.join("pwned");
+
+        assert!(
+            result.is_err() || (!planted.exists() && !sibling.exists()),
+            "the extractor must refuse an escaping member, or at least not write it \
+             outside the destination: {result:?}"
+        );
+        assert!(
+            !planted.exists(),
+            "the parent of the releases directory must stay clean"
+        );
+        assert!(
+            !sibling.exists(),
+            "an escaping member must not land beside the unpack directory"
         );
 
         fs::remove_dir_all(&dir).ok();

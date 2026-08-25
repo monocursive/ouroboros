@@ -74,9 +74,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   external network is on or off, never "these hosts". A network-denied macOS command
   retains loopback for build-tool IPC; bubblewrap keeps its isolated network namespace.
   `sandbox-exec` is deprecated by Apple — it still works on macOS 26 and it is what
-  Codex ships, but it carries that warning. The bubblewrap path is unit-tested only:
-  `bwrap` is not installed on the machine this slice was written on, so its argv is
-  pinned byte for byte and its behaviour is not claimed.
+  Codex ships, but it carries that warning. Live bubblewrap behaviour is claimed only
+  where the live suite runs: Linux CI on ubuntu-24.04, which installs `bwrap` and
+  exercises the filesystem denials. That suite still has no seccomp, and the original
+  authoring Mac never ran it.
   """
 
   require Logger

@@ -27,6 +27,21 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                            ]
                        end)
 
+  # Same honesty for bubblewrap: a Darwin `mix test` prints why the live suite did not
+  # run. Linux CI installs `bwrap` before `mix test`, so that run is the one that
+  # claims observed behaviour.
+  @needs_bwrap (case @backend do
+                  :bwrap ->
+                    []
+
+                  other ->
+                    [
+                      skip:
+                        "no bwrap on this node (detected backend: #{inspect(other)}); " <>
+                          "the live bubblewrap tests need Linux"
+                    ]
+                end)
+
   @none %{
     backend: :none,
     executable: nil,
@@ -904,6 +919,81 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       scratch = result.output |> String.trim() |> String.split("\n") |> List.last()
       assert scratch =~ "ouroboros-sandbox-"
       refute File.exists?(scratch)
+    end
+  end
+
+  describe "the bwrap backend, live on this node" do
+    @describetag :bwrap
+    @describetag @needs_bwrap
+
+    test "runs a read_only command that used to be refused outright", %{
+      read_only_context: context
+    } do
+      result = run(Bash, %{"command" => "echo hi && pwd"}, context)
+
+      refute result.is_error
+      assert result.output =~ "hi"
+      assert result.output =~ context.scope.root
+    end
+
+    test "denies a write into the workspace under read_only and names the constraint", %{
+      read_only_context: context,
+      workspace: workspace
+    } do
+      result = run(Bash, %{"command" => "echo nope > denied.txt"}, context)
+
+      assert result.is_error
+      assert result.output =~ "Read-only file system"
+      assert result.output =~ "bwrap, sandbox_mode: read_only"
+      assert result.output =~ "no writes at all outside $TMPDIR"
+      assert result.output =~ "sandbox_mode: workspace_write"
+      refute File.exists?(Path.join(workspace, "denied.txt"))
+    end
+
+    test "writes inside the workspace under workspace_write", %{
+      context: context,
+      workspace: workspace
+    } do
+      result = run(Bash, %{"command" => "echo inside > inside.txt"}, context)
+
+      refute result.is_error
+      assert File.read!(Path.join(workspace, "inside.txt")) == "inside\n"
+    end
+
+    test "denies a write to the home directory under workspace_write" do
+      escape =
+        Path.join(System.user_home!(), "ouroboros-escape-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm(escape) end)
+
+      root = Path.join(System.tmp_dir!(), "native-escape-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf(root) end)
+      {:ok, scope} = Paths.scope(root, [], :workspace_write)
+
+      result =
+        run(
+          Bash,
+          %{"command" => "echo escaped > #{escape}"},
+          %{scope: scope, session_dir: root, reads: %{}}
+        )
+
+      assert result.is_error
+      assert result.output =~ "Read-only file system"
+      assert result.output =~ "add the directory this needs to the session's `add_dirs`"
+      refute File.exists?(escape)
+    end
+
+    test "denies a write into .git, which is why a commit needs a human", %{
+      context: context,
+      workspace: workspace
+    } do
+      result = run(Bash, %{"command" => "echo tampered > .git/HEAD"}, context)
+
+      assert result.is_error
+      assert result.output =~ "Read-only file system"
+      assert result.output =~ "never into a `.git` or `.ouroboros` directory"
+      refute File.exists?(Path.join(workspace, ".git/HEAD"))
     end
   end
 end

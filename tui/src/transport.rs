@@ -26,8 +26,10 @@
 //! A dropped connection is retried with capped exponential backoff and jitter, and the
 //! handshake is repeated. A *refused* handshake is not retried: a rejected token and an
 //! unsupported protocol are decisions, and retrying a decision is a spin, not a repair.
-//! [`ReconnectHook`] is where Slice 3b re-subscribes every watched session; Slice 3a
-//! leaves it a no-op and only counts the reconnects.
+//! [`ReconnectHook`] is where the interactive UI re-subscribes every watched session
+//! after a successful re-handshake. Headless commands (`ouro run`, `ouro stop`,
+//! `mcp-serve`) pass [`NoReconnectHook`]: a lost socket is the answer, not a fault to
+//! repair.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -189,8 +191,9 @@ fn unit_random() -> f64 {
 
 pub type HookFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Run after every successful re-handshake. Slice 3b re-subscribes each watched session
-/// here with its last seen `sequence` as cursor; Slice 3a runs [`NoReconnectHook`].
+/// Run after every successful re-handshake. The interactive UI re-subscribes each
+/// watched session here with its last seen `sequence` as cursor. Headless commands
+/// install [`NoReconnectHook`].
 pub trait ReconnectHook: Send + Sync + 'static {
     fn after_reconnect(&self, client: Client, hello: Hello) -> HookFuture;
 }
@@ -441,8 +444,9 @@ impl Client {
         self.shared.lost_forgets.load(Ordering::Relaxed)
     }
 
-    /// Notifications discarded because the consumer did not keep up. Slice 3a drains
-    /// nothing into a UI, so this is the honest count of what a 3b tab would have shown.
+    /// Notifications discarded because the consumer did not keep up. Headless
+    /// commands drain nothing into a UI, so this is the honest count of frames a
+    /// subscribed client would have shown.
     pub fn dropped_notifications(&self) -> u64 {
         self.shared.dropped_notifications.load(Ordering::Relaxed)
     }
