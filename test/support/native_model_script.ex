@@ -33,6 +33,25 @@ defmodule Ouroboros.Test.NativeModelScript do
     {model_spec(agent), agent}
   end
 
+  @doc """
+  Starts a scripted model **on the node this runs on**, unlinked, for a session elsewhere.
+
+  Two things make this different from `start/1`, and both are about another node. The spec
+  encodes the agent's pid with `:erlang.pid_to_list/1`, whose text is only meaningful in
+  the VM that produced it — so a session running on a peer must be pointed at a script
+  agent *on that peer*, started there. And the natural way to start one there is
+  `:erpc.call/4`, whose caller is a transient process that exits the moment it returns,
+  which would take a linked agent with it.
+
+  The agent therefore outlives its starter and is reclaimed with the node. Only a test that
+  owns the node it starts one on should use this.
+  """
+  @spec start_unlinked([[tuple()]]) :: {String.t(), pid()}
+  def start_unlinked(script) do
+    {:ok, agent} = Agent.start(fn -> %{script: script, requests: []} end)
+    {model_spec(agent), agent}
+  end
+
   @doc "The model spec that routes a session to one script agent."
   @spec model_spec(pid()) :: String.t()
   def model_spec(agent), do: "scripted:" <> (agent |> :erlang.pid_to_list() |> List.to_string())

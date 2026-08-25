@@ -84,9 +84,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   What that buys, and what it costs, stated plainly:
 
-    * the child is fenced by the **target's** `workspace_allowed_roots`, judged by the
-      **target's** permission engine, hooks and sandbox, and writes its transcript, its
-      checkpoints and its effect-ledger entries on the **target**;
+    * the child is fenced by its own workspace root **on the target**, judged by the
+      **target's** permission rules, engine, hooks and sandbox, and writes its transcript,
+      its checkpoints and its effect-ledger entries **there**. A worktree, if one was asked
+      for, is leased against the target's `workspace_allowed_roots`;
     * MCP tool names inherited through the parent's tool intersection resolve against the
       **target's** MCP configuration. A name the target does not serve is refused in-band
       there, as an ordinary failed tool result of the child, rather than at spawn;

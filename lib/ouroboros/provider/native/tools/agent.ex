@@ -50,11 +50,13 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   What travels is the parent's **posture**: the approval mode, the resolved sandbox mode,
   the plan flag, the tool intersection, the model, the turn and deadline bounds. What does
   not travel, and cannot, is the parent machine's *filesystem authority*: the child is
-  fenced by the target node's own `workspace_allowed_roots`, judged by the target node's
-  permission engine and hooks, and its transcript and ledger entries are written there.
-  `add_dirs` is empty for a remote child for the same reason a worktree child gets none —
-  a root of this machine is not a root of that one. Approvals still reach **this**
-  session's human, relayed back by `Ouroboros.Provider.Native.Subagent`.
+  fenced by the workspace root it was given **there**, judged by the target node's own
+  permission rules, engine and hooks, sandboxed by the target's sandbox, and its transcript
+  and ledger entries are written on the target. A worktree asked for with `worktree: true`
+  is leased against the target's `workspace_allowed_roots`, not this node's. `add_dirs` is
+  empty for a remote child for the same reason a worktree child gets none — a root of this
+  machine is not a root of that one. Approvals still reach **this** session's human,
+  relayed back by `Ouroboros.Provider.Native.Subagent`.
 
   Depth is unchanged by distance: a remote child is one level deeper than its parent, and
   its own `machine:` resolves against the nodes *it* can see.
