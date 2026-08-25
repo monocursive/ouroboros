@@ -809,6 +809,150 @@ impl DelegationEvent {
     }
 }
 
+/// How many of a settled child's changed paths the parent's transcript names.
+///
+/// The count beside them is the whole number, so a child that touched three hundred files
+/// still reports three hundred — this only bounds how many of them get spelled out in a
+/// conversation that is about the parent's work, not the child's.
+const SUBAGENT_FILES: usize = 16;
+
+/// Which moment of a child agent's life a `subagent` provider event reports.
+///
+/// `Other` exists because the runtime may name a phase this build has not heard of, and a
+/// client that dropped it would show a child that spawned and then stopped existing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentPhase {
+    Spawned,
+    Progress,
+    Settled,
+    /// A phase word this build does not model, kept verbatim. Empty where the payload
+    /// named no phase at all.
+    Other(String),
+}
+
+impl SubagentPhase {
+    fn decode(word: Option<&str>) -> Self {
+        match word {
+            Some("spawned") => Self::Spawned,
+            Some("progress") => Self::Progress,
+            Some("settled") => Self::Settled,
+            Some(other) => Self::Other(bounded(other, LABEL_BYTES)),
+            None => Self::Other(String::new()),
+        }
+    }
+
+    pub fn settled(&self) -> bool {
+        matches!(self, Self::Settled)
+    }
+}
+
+/// One `provider_event` whose `kind` is `subagent`: a child agent spawning, reporting, or
+/// settling in the parent's own transcript.
+///
+/// Every field is optional and every default is the honest one. A child may be placed on
+/// another fleet machine, in which case the payload names the `node` it ran on and sets
+/// `remote`; an older event that predates fleet placement carries neither, and an absent
+/// pair means the child ran here — which is why `remote` defaults to `false` rather than
+/// to "unknown". Nothing below invents a number the runtime did not send: a zero this
+/// client made up would be indistinguishable from a zero the child measured.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentEvent {
+    pub phase: Option<SubagentPhase>,
+    pub task_id: Option<String>,
+    pub description: Option<String>,
+    pub provider_session_id: Option<String>,
+    /// Where the child was placed. Absent means this machine.
+    pub node: Option<String>,
+    /// True only where the runtime said so. An absent flag is local, not unknown.
+    pub remote: bool,
+    pub workspace: Option<String>,
+    /// Whether the child was given a worktree of its own — the `spawned` payload's bool,
+    /// or the presence of the `settled` payload's map.
+    pub worktree: bool,
+    /// The settled payload's worktree map, which is the only one that says how it retired.
+    pub worktree_detail: Option<Worktree>,
+    pub tools: Vec<String>,
+    pub background: bool,
+    pub depth: Option<u64>,
+    pub max_turns: Option<u64>,
+    pub deadline_ms: Option<u64>,
+    pub turns: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub files_changed: Option<u64>,
+    /// Named paths, bounded by [`SUBAGENT_FILES`]; `files_changed` stays the whole count.
+    pub files: Vec<String>,
+    /// `"completed"`, `"failed"`, `"stopped"` or `"timed_out"`, as the runtime spelled it.
+    pub status: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub approvals_denied: Option<u64>,
+    pub summary_bytes: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl SubagentEvent {
+    pub fn decode(payload: &Value) -> Self {
+        let Some(map) = payload.as_object() else {
+            return Self::default();
+        };
+
+        let worktree_detail = Worktree::decode(map.get("worktree"));
+
+        Self {
+            phase: Some(SubagentPhase::decode(
+                map.get("phase").and_then(Value::as_str),
+            )),
+            task_id: at(map, "task_id"),
+            description: at(map, "description"),
+            provider_session_id: at(map, "provider_session_id"),
+            node: at(map, "node"),
+            remote: flag(map, "remote").unwrap_or(false),
+            workspace: at(map, "workspace"),
+            // Two shapes for one key: `spawned` sends a bool, `settled` sends the worktree
+            // itself. Either one means the child had one.
+            worktree: flag(map, "worktree").unwrap_or(false) || worktree_detail.is_some(),
+            worktree_detail,
+            tools: names(map.get("tools"), usize::MAX),
+            background: flag(map, "background").unwrap_or(false),
+            depth: count(map, "depth"),
+            max_turns: count(map, "max_turns"),
+            deadline_ms: count(map, "deadline_ms"),
+            turns: count(map, "turns"),
+            tool_calls: count(map, "tool_calls"),
+            files_changed: count(map, "files_changed"),
+            files: names(map.get("files"), SUBAGENT_FILES),
+            status: at(map, "status"),
+            input_tokens: count(map, "input_tokens"),
+            output_tokens: count(map, "output_tokens"),
+            approvals_denied: count(map, "approvals_denied"),
+            summary_bytes: count(map, "summary_bytes"),
+            cost_usd: map.get("cost_usd").and_then(Value::as_f64),
+            error: sentence(map, "error", 512),
+        }
+    }
+
+    pub fn phase(&self) -> SubagentPhase {
+        self.phase
+            .clone()
+            .unwrap_or_else(|| SubagentPhase::Other(String::new()))
+    }
+}
+
+/// A JSON array of strings, trimmed, bounded, and with the empties dropped.
+fn names(value: Option<&Value>, limit: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| string(Some(value)))
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The `operator_shell` half of a `provider_event` payload (B7).
 ///
 /// The runtime writes one of these after every command it ran, so a command survives a
@@ -1050,5 +1194,96 @@ mod tests {
             DelegationRow::decode_list(&json!([{"delegation_id": "d1"}, 7])).len(),
             1
         );
+    }
+
+    /// One key, two shapes: `spawned` says whether the child got a worktree, and `settled`
+    /// sends the worktree itself. Both mean it had one, and only the second says how it
+    /// was retired.
+    #[test]
+    fn a_child_agent_reads_a_worktree_from_either_shape_the_runtime_sends() {
+        let spawned = SubagentEvent::decode(&json!({"phase": "spawned", "worktree": true}));
+        assert!(spawned.worktree);
+        assert!(spawned.worktree_detail.is_none());
+
+        let settled = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "worktree": {"path": "/tmp/w", "retired": "kept"}
+        }));
+        assert!(settled.worktree);
+        assert_eq!(
+            settled.worktree_detail.expect("the map").retired.as_deref(),
+            Some("kept")
+        );
+
+        let none = SubagentEvent::decode(&json!({"phase": "spawned", "worktree": false}));
+        assert!(!none.worktree);
+    }
+
+    /// A child that carries no placement ran here. `remote` defaults to false rather than
+    /// to unknown, because every event this runtime wrote before fleet placement existed
+    /// is a local child and must keep reading as one.
+    #[test]
+    fn a_child_agent_without_a_placement_is_local_not_unknown() {
+        let old = SubagentEvent::decode(&json!({"phase": "spawned", "task_id": "t"}));
+
+        assert!(!old.remote);
+        assert!(old.node.is_none());
+
+        // A node without the flag is still local: the runtime naming where a local child
+        // ran is not the runtime saying it left.
+        let named = SubagentEvent::decode(&json!({"phase": "spawned", "node": "ouro-1@fleet"}));
+        assert!(!named.remote);
+        assert_eq!(named.node.as_deref(), Some("ouro-1@fleet"));
+
+        let placed = SubagentEvent::decode(
+            &json!({"phase": "spawned", "node": "ouro-2@fleet", "remote": true}),
+        );
+        assert!(placed.remote);
+    }
+
+    /// Payloads this build cannot read at all. None of them may panic, and none of them
+    /// may invent a number the runtime did not send.
+    #[test]
+    fn a_child_agent_payload_this_build_cannot_read_decodes_to_nothing_rather_than_a_guess() {
+        let scalar = SubagentEvent::decode(&json!("not an object"));
+        assert_eq!(scalar, SubagentEvent::default());
+        assert!(scalar.turns.is_none(), "an absent counter is not a zero");
+
+        let unknown = SubagentEvent::decode(&json!({"phase": "paused", "task_id": "t"}));
+        assert_eq!(unknown.phase(), SubagentPhase::Other("paused".to_string()));
+        assert!(!unknown.phase().settled());
+
+        let unnamed = SubagentEvent::decode(&json!({"task_id": "t"}));
+        assert_eq!(unnamed.phase(), SubagentPhase::Other(String::new()));
+
+        // Wrong types where numbers and lists belong: dropped, never coerced.
+        let wrong = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "turns": "nine",
+            "tools": "read",
+            "files": {"a": 1},
+            "cost_usd": "free"
+        }));
+        assert!(wrong.turns.is_none());
+        assert!(wrong.tools.is_empty());
+        assert!(wrong.files.is_empty());
+        assert!(wrong.cost_usd.is_none());
+    }
+
+    /// The named paths are bounded; the count beside them is not, so a child that touched
+    /// three hundred files still reports three hundred.
+    #[test]
+    fn a_settled_childs_named_paths_are_bounded_and_its_count_is_not() {
+        let files: Vec<_> = (0..(SUBAGENT_FILES + 20))
+            .map(|index| json!(format!("src/f{index}.rs")))
+            .collect();
+        let event = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "files": Value::Array(files),
+            "files_changed": SUBAGENT_FILES + 20
+        }));
+
+        assert_eq!(event.files.len(), SUBAGENT_FILES);
+        assert_eq!(event.files_changed, Some((SUBAGENT_FILES + 20) as u64));
     }
 }

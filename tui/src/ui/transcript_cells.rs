@@ -251,6 +251,290 @@ impl Block {
     }
 }
 
+/// The glyph a child agent's row is marked with, so a reader scanning a parent transcript
+/// can tell work this session delegated from work it did itself, by shape alone.
+pub const SUBAGENT_MARKER: &str = "↳";
+
+/// One child agent's whole life, as a single row that is rewritten in place.
+///
+/// A child sends up to sixty-four progress reports, so this is folded by `task_id` rather
+/// than appended to: a parent transcript that grew a line every time a child counted its
+/// turns would be a transcript about the counting. Latest wins, and only for the fields an
+/// event actually carried — a progress report that omits its tool-call count leaves the
+/// last one it did send standing rather than resetting the row to zero.
+///
+/// Every counter is optional for the same reason [`UsageReport`]'s are: a zero this client
+/// invented is indistinguishable from a zero the child measured.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentCell {
+    /// What the row is folded on. `None` where the runtime named no task, in which case
+    /// each event gets its own row — one honest row per event beats folding two children
+    /// into one.
+    pub task_id: Option<String>,
+    pub description: Option<String>,
+    /// The child's own session, so an operator can go and read its transcript.
+    pub provider_session_id: Option<String>,
+    /// The fleet machine the child was placed on, drawn only when it is not this one.
+    pub node: Option<String>,
+    pub remote: bool,
+    pub worktree: bool,
+    pub background: bool,
+    pub depth: Option<u64>,
+    pub turns: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub files: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    /// Set once the child settles: `completed`, `failed`, `stopped`, `timed_out`.
+    pub status: Option<String>,
+    pub settled: bool,
+    pub error: Option<String>,
+    /// The path of a worktree the runtime kept because it still held uncommitted work.
+    pub worktree_kept: Option<String>,
+    /// Phase words this build does not model, in arrival order. Named rather than dropped.
+    pub unknown_phases: Vec<String>,
+}
+
+impl SubagentCell {
+    /// Folds one event onto the row. Idempotent: re-applying the same event — which every
+    /// resync and every replay does — writes the same values over themselves.
+    pub fn absorb(&mut self, event: &crate::model::native::SubagentEvent) {
+        use crate::model::native::SubagentPhase;
+
+        let phase = event.phase();
+
+        if self.task_id.is_none() {
+            self.task_id.clone_from(&event.task_id);
+        }
+
+        overwrite(&mut self.description, &event.description);
+        overwrite(&mut self.provider_session_id, &event.provider_session_id);
+        overwrite(&mut self.node, &event.node);
+
+        // Facts that only ever arrive set. A progress report carries none of them, and
+        // clearing them on its arrival would make a backgrounded child stop being one.
+        self.remote |= event.remote;
+        self.worktree |= event.worktree;
+        self.background |= event.background;
+        self.depth = event.depth.or(self.depth);
+
+        self.turns = event.turns.or(self.turns);
+        self.tool_calls = event.tool_calls.or(self.tool_calls);
+        self.files = event.files_changed.or(self.files);
+
+        if phase.settled() {
+            self.settled = true;
+            overwrite(&mut self.status, &event.status);
+            self.input_tokens = event.input_tokens.or(self.input_tokens);
+            self.output_tokens = event.output_tokens.or(self.output_tokens);
+            self.cost_usd = event.cost_usd.or(self.cost_usd);
+            overwrite(&mut self.error, &event.error);
+
+            // Only "kept" is worth a line. A worktree the runtime removed is not somewhere
+            // anyone needs to go, and saying so would put a line in every transcript.
+            if let Some(worktree) = &event.worktree_detail {
+                if worktree.retired.as_deref() == Some("kept") {
+                    self.worktree_kept =
+                        Some(worktree.path.clone().unwrap_or_else(|| worktree.label()));
+                }
+            }
+        }
+
+        if let SubagentPhase::Other(word) = &phase {
+            let word = match word.is_empty() {
+                true => "unnamed".to_string(),
+                false => word.clone(),
+            };
+
+            // Deduped so a replayed event does not lengthen the list it already appears in.
+            if !self.unknown_phases.contains(&word) {
+                self.unknown_phases.push(word);
+            }
+        }
+    }
+
+    /// The bold first row: `Subagent <description>` and the badges that qualify it.
+    ///
+    /// The node badge is drawn only for a child that actually ran elsewhere. Every session
+    /// runs *somewhere*, so a node on every row would be noise that hides the one case a
+    /// reader needs to see.
+    pub fn headline(&self) -> String {
+        self.headline_in(false)
+    }
+
+    /// The same headline with the badge glyphs spelled out as words.
+    ///
+    /// [`super::access::speakable`] respells this client's *punctuation*, which is where
+    /// the separators are handled. A badge glyph is not punctuation — it is a word this
+    /// client chose to draw as a picture — so the words come back here rather than by
+    /// teaching the shared transform two more symbols it would then apply everywhere.
+    pub fn spoken_headline(&self) -> String {
+        self.headline_in(true)
+    }
+
+    fn headline_in(&self, spoken: bool) -> String {
+        let mut headline = match self.description.as_deref().map(str::trim) {
+            Some(description) if !description.is_empty() => format!("Subagent {description}"),
+            _unnamed => "Subagent".to_string(),
+        };
+
+        for badge in self.badges_in(spoken) {
+            headline.push_str(" · ");
+            headline.push_str(&badge);
+        }
+
+        headline
+    }
+
+    /// `⇄ <node>`, `⎇ worktree`, `background`, `depth n` — each only where it is true.
+    pub fn badges(&self) -> Vec<String> {
+        self.badges_in(false)
+    }
+
+    fn badges_in(&self, spoken: bool) -> Vec<String> {
+        let mut badges = Vec::new();
+
+        if self.remote {
+            badges.push(match (&self.node, spoken) {
+                (Some(node), true) => format!("on {node}"),
+                (Some(node), false) => format!("⇄ {node}"),
+                // Remote, but the runtime did not say where. Still worth the badge: that
+                // it left this machine is the fact that changes how a reader reads the row.
+                (None, true) => "on another machine".to_string(),
+                (None, false) => "⇄ remote".to_string(),
+            });
+        }
+
+        if self.worktree {
+            badges.push(match spoken {
+                true => "worktree".to_string(),
+                false => "⎇ worktree".to_string(),
+            });
+        }
+
+        if self.background {
+            badges.push("background".to_string());
+        }
+
+        // Depth 1 is every child of this session, which is not news. Deeper than that is.
+        if let Some(depth) = self.depth.filter(|depth| *depth > 1) {
+            badges.push(format!("depth {depth}"));
+        }
+
+        badges
+    }
+
+    /// The counters, in the order they answer "how much did this child do": work, then
+    /// what it cost. Empty before the child has reported anything, which draws nothing.
+    pub fn digest(&self) -> String {
+        let mut facts = Vec::new();
+
+        if let Some(turns) = self.turns {
+            facts.push(format!("{turns} turns"));
+        }
+
+        if let Some(calls) = self.tool_calls {
+            facts.push(format!("{calls} tool calls"));
+        }
+
+        if let Some(files) = self.files {
+            facts.push(format!("{files} files"));
+        }
+
+        match (self.input_tokens, self.output_tokens) {
+            (Some(input), Some(output)) => facts.push(format!("{input} in / {output} out tokens")),
+            (Some(input), None) => facts.push(format!("{input} in tokens")),
+            (None, Some(output)) => facts.push(format!("{output} out tokens")),
+            (None, None) => {}
+        }
+
+        if let Some(cost) = self.cost_usd {
+            facts.push(format!("${cost:.4}"));
+        }
+
+        facts.join(" · ")
+    }
+
+    /// The rows under the digest: what went wrong, what was left behind, and where the
+    /// child's own transcript is.
+    pub fn rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+
+        for phase in &self.unknown_phases {
+            rows.push(format!("phase {phase}, which this client does not model"));
+        }
+
+        if let Some(error) = &self.error {
+            rows.push(format!("Error: {error}"));
+        }
+
+        if let Some(path) = &self.worktree_kept {
+            rows.push(format!("Worktree kept (it holds uncommitted work): {path}"));
+        }
+
+        if let Some(session) = &self.provider_session_id {
+            rows.push(format!("session {session}"));
+        }
+
+        rows
+    }
+
+    /// The status word, once the child has settled. Never guessed before then: a row that
+    /// said "completed" while a child was still running would be the worst thing here.
+    pub fn status_word(&self) -> Option<&str> {
+        match self.settled {
+            true => Some(self.status.as_deref().unwrap_or("settled")),
+            false => None,
+        }
+    }
+
+    pub fn tone(&self) -> Tone {
+        match (self.settled, self.status.as_deref()) {
+            (true, Some("completed")) => Tone::Success,
+            (true, Some("failed" | "timed_out")) => Tone::Error,
+            // `stopped` and any word this build does not know: something happened that was
+            // not success, and claiming it was a failure would be inventing a verdict.
+            (true, _other) => Tone::Muted,
+            (false, _running) => Tone::Muted,
+        }
+    }
+
+    /// The digest with its status word in front, as one line.
+    pub fn detail(&self) -> String {
+        match (self.status_word(), self.digest()) {
+            (Some(status), digest) if digest.is_empty() => status.to_string(),
+            (Some(status), digest) => format!("{status} · {digest}"),
+            (None, digest) => digest,
+        }
+    }
+
+    /// The whole row as plain text, for `/details`, the export, and a voice.
+    pub fn text(&self) -> String {
+        let mut text = self.headline();
+
+        if !self.detail().is_empty() {
+            text.push_str(" — ");
+            text.push_str(&self.detail());
+        }
+
+        for row in self.rows() {
+            text.push('\n');
+            text.push_str(&row);
+        }
+
+        text
+    }
+}
+
+/// Writes a value through only where the new one is there, so a payload that omits a field
+/// leaves what the last one said standing instead of blanking it.
+fn overwrite(slot: &mut Option<String>, value: &Option<String>) {
+    if value.is_some() {
+        slot.clone_from(value);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCell {
     pub call_id: Option<String>,
@@ -471,6 +755,10 @@ pub enum Cell {
     /// transcript should be able to tell those apart from the model's work by their shape
     /// alone.
     Runtime(Block),
+    /// One child agent this session spawned, folded across its whole life. Its own cell
+    /// rather than a [`Cell::Runtime`] block because it is the one row here that is
+    /// *rewritten* — a block is a thing that happened, and a child is a thing happening.
+    Subagent(SubagentCell),
     Divider {
         text: String,
         tone: Tone,
@@ -497,6 +785,10 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
     let mut pending = None;
     let mut thinking: Option<PendingThinking> = None;
     let mut tools: BTreeMap<String, ToolSlot> = BTreeMap::new();
+    // Which row each child agent owns, so its sixty-four progress reports rewrite one cell
+    // instead of appending sixty-four. Indices stay valid because this projection only
+    // ever pushes cells — nothing below removes or reorders them.
+    let mut subagents: BTreeMap<String, usize> = BTreeMap::new();
     let mut approvals: BTreeMap<String, usize> = BTreeMap::new();
     // Diff cells an outstanding approval is about, so its resolution can collapse them.
     let mut approval_diffs: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -698,6 +990,10 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     PresentationEvent::Delegation(delegation) => {
                         flush_agent(&mut cells, &mut pending, false);
                         cells.push(Cell::Runtime(delegation_block(&delegation)));
+                    }
+                    PresentationEvent::Subagent(event) => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        project_subagent(&mut cells, &mut subagents, &event);
                     }
                     PresentationEvent::ToolCall(call) => {
                         flush_agent(&mut cells, &mut pending, false);
@@ -1134,6 +1430,7 @@ pub fn render_cells_at(
             } => render_status(&mut lines, label, detail, colour(*tone), width, verbosity),
             Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
             Cell::Runtime(block) => render_runtime_block(&mut lines, block, width, verbosity),
+            Cell::Subagent(subagent) => render_subagent(&mut lines, subagent, width),
             Cell::Divider { text, tone, .. } => lines.push(divider(text, width, colour(*tone))),
         }
     }
@@ -1398,6 +1695,36 @@ fn render_plain(lines: &mut Vec<Line<'static>>, cell: &Cell, vocabulary: Vocabul
 
             if !block.body.is_empty() {
                 body(lines, &block.body.join("\n"), theme::quiet());
+            }
+        }
+        // Headline and digest as one sentence, for the same reason a runtime block is:
+        // "subagent audit the parser: completed" is what a voice should say, rather than a
+        // heading followed by a verdict that has lost the thing it is a verdict about. The
+        // marker is dropped by both plain renderings, which drop every glyph column — a
+        // selection should not carry an arrow, and an arrow read aloud is noise — and the
+        // tone becomes the attention word screen-reader mode uses everywhere else.
+        Cell::Subagent(subagent) => {
+            let headline = match vocabulary.screen_reader() {
+                true => subagent.spoken_headline(),
+                false => subagent.headline(),
+            };
+            let headline = match subagent.detail().is_empty() {
+                true => headline,
+                false => format!("{headline}: {}", subagent.detail()),
+            };
+
+            label(
+                lines,
+                match vocabulary.screen_reader() {
+                    true => attention(subagent.tone(), &headline),
+                    false => headline,
+                },
+            );
+
+            let rows = subagent.rows();
+
+            if !rows.is_empty() {
+                body(lines, &rows.join("\n"), theme::quiet());
             }
         }
         // ASCII, not a box rule: a boundary is still content, and a copied line should not
@@ -2924,6 +3251,41 @@ pub fn delegation_block(delegation: &crate::model::native::DelegationEvent) -> B
     Block::new(label, facts.join(" · "), tone)
 }
 
+/// Folds one child-agent event onto the row that child already owns, or opens one.
+///
+/// A `settled` for a `task_id` this window never saw its `spawned` for — the ordinary
+/// shape after a resync, a reconnect, or a session reopened from the ledger — opens the
+/// row rather than being dropped: the digest is the part worth having, and a parent
+/// transcript that showed nothing for a child that ran and finished would be lying by
+/// omission about work this session caused.
+fn project_subagent(
+    cells: &mut Vec<Cell>,
+    tracked: &mut BTreeMap<String, usize>,
+    event: &crate::model::native::SubagentEvent,
+) {
+    let index = match event
+        .task_id
+        .as_ref()
+        .and_then(|task| tracked.get(task).copied())
+    {
+        Some(index) => index,
+        None => {
+            let index = cells.len();
+            cells.push(Cell::Subagent(SubagentCell::default()));
+
+            if let Some(task) = &event.task_id {
+                tracked.insert(task.clone(), index);
+            }
+
+            index
+        }
+    };
+
+    if let Some(Cell::Subagent(cell)) = cells.get_mut(index) {
+        cell.absorb(event);
+    }
+}
+
 /// `Nms`, `Ns`, or `Nm Ns` — the same three shapes a tool row's elapsed time takes.
 fn elapsed_label(milliseconds: u64) -> String {
     if milliseconds < 1_000 {
@@ -2945,6 +3307,55 @@ pub fn body_rows(text: &str) -> Vec<String> {
         .map(str::to_string)
         .take(BLOCK_HEAD + BLOCK_TAIL + 1)
         .collect()
+}
+
+/// One child agent's row: the headline it keeps for its whole life, the counters that are
+/// rewritten under it, and the child's own session id so an operator can go and read it.
+///
+/// The status word carries the tone and the counters stay muted, so a settled child's
+/// verdict is the thing the eye lands on rather than its arithmetic.
+fn render_subagent(lines: &mut Vec<Line<'static>>, subagent: &SubagentCell, width: usize) {
+    separate(lines);
+
+    lines.push(Line::from(Span::styled(
+        format!("{SUBAGENT_MARKER} {}", subagent.headline()),
+        Style::default()
+            .fg(colour(subagent.tone()))
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let digest = subagent.digest();
+
+    match subagent.status_word() {
+        Some(status) => {
+            let mut spans = vec![Span::styled(
+                format!("  {status}"),
+                Style::default().fg(colour(subagent.tone())),
+            )];
+
+            if !digest.is_empty() {
+                spans.push(Span::styled(format!(" · {digest}"), theme::muted()));
+            }
+
+            lines.push(Line::from(spans));
+        }
+        None if !digest.is_empty() => {
+            lines.push(Line::from(Span::styled(
+                format!("  {digest}"),
+                theme::muted(),
+            )));
+        }
+        None => {}
+    }
+
+    for row in subagent.rows() {
+        for wrapped in wrap_limited(&row, width.max(8).saturating_sub(2), 4) {
+            lines.push(Line::from(Span::styled(
+                format!("  {wrapped}"),
+                theme::quiet(),
+            )));
+        }
+    }
 }
 
 fn render_runtime_block(
@@ -6070,5 +6481,386 @@ diff --git a/src/lex.rs b/src/lex.rs
 
         assert_eq!(overlay.scopes(), 3, "this session, turn 1, turn 2");
         assert_eq!(overlay.turns[1].label(), "turn 2");
+    }
+
+    // ------------------------------------------------------------------ subagents
+
+    /// A `provider_event` carrying a child agent's payload, as the runtime emits it.
+    fn subagent(sequence: u64, payload: Value) -> Event {
+        let mut payload = payload;
+
+        payload
+            .as_object_mut()
+            .expect("a subagent payload is an object")
+            .insert("kind".into(), json!("subagent"));
+
+        event(sequence, "provider_event", payload)
+    }
+
+    fn spawned(sequence: u64) -> Event {
+        subagent(
+            sequence,
+            json!({
+                "phase": "spawned",
+                "task_id": "task-a",
+                "description": "audit the parser",
+                "provider_session_id": "sess-child",
+                "workspace": "/repo",
+                "worktree": true,
+                "tools": ["read", "edit"],
+                "background": true,
+                "depth": 2,
+                "max_turns": 40,
+                "deadline_ms": 600_000
+            }),
+        )
+    }
+
+    fn progress(sequence: u64, turns: u64, calls: u64, files: u64) -> Event {
+        subagent(
+            sequence,
+            json!({
+                "phase": "progress",
+                "task_id": "task-a",
+                "description": "audit the parser",
+                "provider_session_id": "sess-child",
+                "turns": turns,
+                "tool_calls": calls,
+                "files_changed": files
+            }),
+        )
+    }
+
+    fn settled(sequence: u64) -> Event {
+        subagent(
+            sequence,
+            json!({
+                "phase": "settled",
+                "task_id": "task-a",
+                "description": "audit the parser",
+                "provider_session_id": "sess-child",
+                "status": "completed",
+                "turns": 9,
+                "tool_calls": 31,
+                "files_changed": 4,
+                "files": ["src/lex.rs", "src/parse.rs"],
+                "input_tokens": 18_400,
+                "output_tokens": 2_100,
+                "approvals_denied": 0,
+                "summary_bytes": 812,
+                "cost_usd": 0.0731
+            }),
+        )
+    }
+
+    fn subagent_cells(events: &[Event]) -> Vec<Cell> {
+        project(events.iter().map(Entry::Event).collect())
+    }
+
+    fn subagent_rows(cells: &[Cell]) -> usize {
+        cells
+            .iter()
+            .filter(|cell| matches!(cell, Cell::Subagent(_)))
+            .count()
+    }
+
+    fn only_subagent(cells: &[Cell]) -> &SubagentCell {
+        cells
+            .iter()
+            .find_map(|cell| match cell {
+                Cell::Subagent(subagent) => Some(subagent),
+                _other => None,
+            })
+            .expect("a child agent row")
+    }
+
+    /// A child sends up to sixty-four progress reports. Each one rewrites the row it
+    /// already has; none of them appends a second.
+    #[test]
+    fn a_child_agent_is_one_row_that_its_progress_rewrites() {
+        let events = [
+            spawned(1),
+            progress(2, 1, 2, 0),
+            progress(3, 4, 11, 2),
+            progress(4, 7, 22, 3),
+            settled(5),
+        ];
+        let cells = subagent_cells(&events);
+
+        assert_eq!(subagent_rows(&cells), 1, "five events, one row: {cells:#?}");
+
+        let rendered = plain(&render_cells(&cells, 100));
+
+        assert!(
+            rendered.contains("\u{21b3} Subagent audit the parser"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("9 turns \u{b7} 31 tool calls \u{b7} 4 files"),
+            "the settled digest wins: {rendered}"
+        );
+        assert!(
+            !rendered.contains("7 turns"),
+            "a superseded progress report must not survive: {rendered}"
+        );
+    }
+
+    /// The spawn badges are the qualifiers, and every one of them is drawn only where it
+    /// is true.
+    #[test]
+    fn a_spawned_child_wears_only_the_badges_it_earned() {
+        let rendered = plain(&render_cells(&subagent_cells(&[spawned(1)]), 100));
+
+        assert!(rendered.contains("\u{2387} worktree"), "{rendered}");
+        assert!(rendered.contains("background"), "{rendered}");
+        assert!(rendered.contains("depth 2"), "{rendered}");
+        assert!(
+            rendered.contains("session sess-child"),
+            "the child's own transcript is findable: {rendered}"
+        );
+        assert!(
+            !rendered.contains('\u{21c4}'),
+            "a child with no node ran here, and says nothing about where: {rendered}"
+        );
+    }
+
+    /// The whole point of the settled row: what it did, what it cost, how it ended.
+    #[test]
+    fn a_settled_child_states_its_verdict_its_work_and_its_cost() {
+        let rendered = plain(&render_cells(
+            &subagent_cells(&[spawned(1), settled(2)]),
+            100,
+        ));
+
+        assert!(rendered.contains("completed"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "9 turns \u{b7} 31 tool calls \u{b7} 4 files \u{b7} 18400 in / 2100 out tokens \
+                 \u{b7} $0.0731"
+            ),
+            "{rendered}"
+        );
+    }
+
+    /// A resync, a reconnect, or a session reopened from the ledger all deliver a `settled`
+    /// for a child whose `spawned` this window never held. The digest is the part worth
+    /// having, so the row is opened rather than dropped.
+    #[test]
+    fn a_settled_child_this_window_never_saw_spawn_still_gets_its_row() {
+        let cells = subagent_cells(&[settled(9)]);
+
+        assert_eq!(subagent_rows(&cells), 1, "{cells:#?}");
+
+        let rendered = plain(&render_cells(&cells, 100));
+
+        assert!(rendered.contains("Subagent audit the parser"), "{rendered}");
+        assert!(rendered.contains("completed"), "{rendered}");
+    }
+
+    /// Replay is the ordinary case, not the exotic one: every resync overlaps. Re-applying
+    /// a child's whole life must land on the row it already had.
+    #[test]
+    fn replaying_a_childs_whole_life_does_not_duplicate_its_row() {
+        let events = [spawned(1), progress(2, 4, 11, 2), settled(3)];
+        let once = subagent_cells(&events);
+
+        // Both halves of the idempotence: the same ordered ledger folded twice, and the
+        // same events delivered twice over — which is what a resync actually delivers.
+        let twice = subagent_cells(&events);
+        let doubled = project(
+            events
+                .iter()
+                .chain(events.iter())
+                .map(Entry::Event)
+                .collect(),
+        );
+
+        assert_eq!(once, twice, "the same ledger must fold to the same cells");
+        assert_eq!(
+            once, doubled,
+            "a redelivered child must not grow a second row"
+        );
+    }
+
+    /// A child placed on another fleet machine says so; a local one does not, because
+    /// every session runs somewhere and a node on every row hides the one that matters.
+    #[test]
+    fn only_a_remote_child_carries_a_node_badge() {
+        let local = plain(&render_cells(&subagent_cells(&[spawned(1)]), 100));
+        assert!(!local.contains('\u{21c4}'), "{local}");
+
+        let placed = subagent(
+            1,
+            json!({
+                "phase": "spawned",
+                "task_id": "task-b",
+                "description": "build the release",
+                "node": "ouro-2@fleet",
+                "remote": true
+            }),
+        );
+        let remote = plain(&render_cells(&subagent_cells(&[placed]), 100));
+
+        assert!(remote.contains("\u{21c4} ouro-2@fleet"), "{remote}");
+
+        // `node` without `remote` is the runtime naming where a local child ran. Still
+        // local, and still no badge.
+        let named = subagent(
+            1,
+            json!({
+                "phase": "spawned",
+                "task_id": "task-c",
+                "description": "read the lexer",
+                "node": "ouro-1@fleet"
+            }),
+        );
+        let here = plain(&render_cells(&subagent_cells(&[named]), 100));
+
+        assert!(!here.contains('\u{21c4}'), "{here}");
+    }
+
+    /// A payload from a runtime newer than this build. It is named on the row rather than
+    /// dropped, and nothing about it is allowed to panic.
+    #[test]
+    fn a_phase_this_build_does_not_model_is_named_rather_than_dropped() {
+        let events = [
+            spawned(1),
+            subagent(2, json!({"phase": "paused", "task_id": "task-a"})),
+            subagent(3, json!({"task_id": "task-a"})),
+        ];
+        let cells = subagent_cells(&events);
+        let rendered = plain(&render_cells(&cells, 100));
+
+        assert_eq!(
+            subagent_rows(&cells),
+            1,
+            "an unknown phase folds onto the row it names: {cells:#?}"
+        );
+        assert!(rendered.contains("phase paused"), "{rendered}");
+        assert!(rendered.contains("phase unnamed"), "{rendered}");
+        assert!(
+            rendered.contains("Subagent audit the parser"),
+            "the description the spawn established survives: {rendered}"
+        );
+    }
+
+    /// An empty payload is still a payload. It must draw a row, not a panic.
+    #[test]
+    fn a_subagent_payload_with_nothing_in_it_still_draws_a_row() {
+        let bare = event(1, "provider_event", json!({"kind": "subagent"}));
+        let cells = subagent_cells(&[bare]);
+        let rendered = plain(&render_cells(&cells, 100));
+
+        assert_eq!(subagent_rows(&cells), 1, "{cells:#?}");
+        assert!(rendered.contains("Subagent"), "{rendered}");
+        assert!(
+            !rendered.contains("0 turns"),
+            "a counter nobody reported is not a zero: {rendered}"
+        );
+    }
+
+    /// A failed child says why. A stopped one is neither a success nor a failure, and
+    /// claiming either would be inventing a verdict the runtime did not reach.
+    #[test]
+    fn a_failed_child_reports_its_error_and_a_stopped_one_claims_no_verdict() {
+        let failed = subagent(
+            1,
+            json!({
+                "phase": "settled",
+                "task_id": "task-d",
+                "description": "run the suite",
+                "status": "failed",
+                "turns": 3,
+                "tool_calls": 4,
+                "files_changed": 0,
+                "error": "the deadline passed before the suite finished"
+            }),
+        );
+        let cells = subagent_cells(&[failed]);
+
+        assert_eq!(only_subagent(&cells).tone(), Tone::Error);
+
+        let rendered = plain(&render_cells(&cells, 100));
+        assert!(
+            rendered.contains("Error: the deadline passed before the suite finished"),
+            "{rendered}"
+        );
+
+        let stopped = subagent_cells(&[subagent(
+            1,
+            json!({"phase": "settled", "task_id": "task-e", "status": "stopped"}),
+        )]);
+
+        assert_eq!(
+            only_subagent(&stopped).tone(),
+            Tone::Muted,
+            "stopped is not a failure"
+        );
+    }
+
+    /// A worktree the runtime kept is somewhere an operator has to go. A removed one is
+    /// not, and saying so would put a line in every transcript that ever used one.
+    #[test]
+    fn only_a_kept_worktree_earns_a_line() {
+        let kept = subagent(
+            1,
+            json!({
+                "phase": "settled",
+                "task_id": "task-f",
+                "description": "refactor the lexer",
+                "status": "completed",
+                "worktree": {"path": "/tmp/ouro-w1", "branch": "child/lexer", "retired": "kept"}
+            }),
+        );
+        let rendered = plain(&render_cells(&subagent_cells(&[kept]), 120));
+
+        assert!(
+            rendered.contains("Worktree kept (it holds uncommitted work): /tmp/ouro-w1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\u{2387} worktree"),
+            "the settled worktree map earns the badge the spawn bool would have: {rendered}"
+        );
+
+        let removed = subagent(
+            1,
+            json!({
+                "phase": "settled",
+                "task_id": "task-g",
+                "status": "completed",
+                "worktree": {"path": "/tmp/ouro-w2", "retired": "removed"}
+            }),
+        );
+        let gone = plain(&render_cells(&subagent_cells(&[removed]), 120));
+
+        assert!(!gone.contains("Worktree kept"), "{gone}");
+    }
+
+    /// Screen-reader mode says the verdict together with the thing it is a verdict about,
+    /// and drops the glyph column a voice would otherwise have to read out.
+    #[test]
+    fn a_voice_reads_the_child_row_as_one_sentence() {
+        let cells = subagent_cells(&[spawned(1), settled(2)]);
+        let mut lines = Vec::new();
+
+        for cell in &cells {
+            render_plain(&mut lines, cell, Vocabulary::ScreenReader);
+        }
+
+        let spoken = plain(&lines);
+
+        assert!(
+            spoken.contains("Subagent audit the parser, worktree, background, depth 2: completed"),
+            "{spoken}"
+        );
+        assert!(
+            !spoken.contains(['\u{21b3}', '\u{2387}', '\u{21c4}', '\u{b7}']),
+            "no glyph a voice would have to spell out: {spoken}"
+        );
+        assert!(
+            spoken.contains("session sess-child"),
+            "the row a voice reads still leads to the child: {spoken}"
+        );
     }
 }
