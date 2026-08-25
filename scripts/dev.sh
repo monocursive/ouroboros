@@ -62,7 +62,7 @@ proc_age() {
 # stale, never to restart one behind the operator's back.
 source_age() {
     now="$(date +%s)"
-    committed="$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || say "$now")"
+    committed="$(git -C "$REPO" log -1 --format=%ct -- lib config mix.exs 2>/dev/null || say "$now")"
     newest_file="$( (find "$REPO/lib" "$REPO/config" "$REPO/mix.exs" -type f -name '*.ex*' \
         -exec stat -f %m {} + 2>/dev/null || \
         find "$REPO/lib" "$REPO/config" "$REPO/mix.exs" -type f -name '*.ex*' \
@@ -210,6 +210,38 @@ status() {
     if [ -z "$found" ]; then say "strays     none"; fi
 }
 
+# A fresh runtime: the daemon stopped, then the data directory emptied — except
+# oauth.json, because "start over" should not also mean "sign in to ChatGPT again";
+# delete it yourself when that is what you mean. The desktop app is left alone: it only
+# shows disconnected once its daemon is gone, and `make gui` is the verb that brings it
+# back. The directory itself survives, so its 0700 permissions do. The guard on the name
+# is for a mis-set OUROBOROS_DATA_DIR: this verb must never be able to empty a directory
+# that is not an ouroboros data dir.
+reset() {
+    case "$(basename "$DATA_DIR")" in
+    *ouro*) ;;
+    *)
+        say "refusing to reset $DATA_DIR: its name does not look like an ouroboros data dir" >&2
+        exit 64
+        ;;
+    esac
+    if [ "$DATA_DIR" = "/" ] || [ "$DATA_DIR" = "$HOME" ] || [ "$DATA_DIR" = "$REPO" ]; then
+        say "refusing to reset $DATA_DIR" >&2
+        exit 64
+    fi
+
+    daemon_stop
+
+    if [ ! -d "$DATA_DIR" ]; then
+        say "nothing to reset: $DATA_DIR does not exist"
+        return 0
+    fi
+
+    say "==> emptying $DATA_DIR (oauth.json kept)"
+    find "$DATA_DIR" -mindepth 1 -maxdepth 1 ! -name oauth.json -exec rm -rf {} +
+    say "reset. make daemon or make gui starts a fresh runtime"
+}
+
 # Everything down: the window, the published daemon, and any stray this checkout leaks.
 stop_all() {
     gui_stop
@@ -231,9 +263,10 @@ daemon-restart) daemon_restart ;;
 gui) gui_start ;;
 gui-stop) gui_stop ;;
 stop-all) stop_all ;;
+reset) reset ;;
 logs) logs ;;
 *)
-    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|gui|gui-stop|stop-all|logs" >&2
+    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|gui|gui-stop|stop-all|reset|logs" >&2
     exit 64
     ;;
 esac

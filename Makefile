@@ -12,7 +12,7 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop logs desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app test bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -24,6 +24,7 @@ help:
 	@echo "make gui-stop         quit the desktop app"
 	@echo "make status           what is running, on which port, and whether it is stale"
 	@echo "make stop             everything down: app, daemon, and any stray daemons"
+	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
 	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
 	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
@@ -67,6 +68,9 @@ status:
 
 stop:
 	@sh scripts/dev.sh stop-all
+
+reset:
+	@sh scripts/dev.sh reset
 
 logs:
 	@sh scripts/dev.sh logs

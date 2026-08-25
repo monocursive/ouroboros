@@ -78,6 +78,7 @@ make daemon-restart  # recompile, then swap the runtime onto the new code
 make tui             # the terminal client, attached to the checkout runtime
 make gui             # the macOS desktop app, (re)launched against the checkout
 make stop            # everything down, stray daemons included
+make reset           # stop the daemon, then empty the dev data dir (oauth.json kept)
 make logs            # follow the dev runtime's log
 ```
 
