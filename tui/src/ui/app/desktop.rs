@@ -98,6 +98,10 @@ pub struct DesktopApproval {
     pub diff: Option<DesktopApprovalDiff>,
     pub edits: Vec<String>,
     pub choices: Vec<DesktopApprovalChoice>,
+    /// `asked by subagent <description> (<task_id>)`, plus ` on <node>` where the child
+    /// runs on a machine that is not the session's own — absent for every approval the
+    /// session asked for itself.
+    pub subagent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +319,13 @@ impl App {
         let (plane, id) = self.sessions.open.as_ref()?;
         let request = self.sessions.open_watch()?.next_approval()?;
         let detail = request.detail();
+        let subagent = detail.subagent.as_ref().map(|subagent| {
+            subagent.line(
+                self.sessions
+                    .session(*plane, id)
+                    .and_then(|session| session.node.as_deref()),
+            )
+        });
 
         let choices = if let Some(plan) = detail.plan.as_ref() {
             plan.choices
@@ -406,6 +417,7 @@ impl App {
                 })
                 .collect(),
             choices,
+            subagent,
         })
     }
 

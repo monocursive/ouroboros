@@ -926,6 +926,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             *choice,
         ),
         Overlay::Approval {
+            plane,
             id,
             request_id,
             subject,
@@ -949,6 +950,10 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
                 choice: *choice,
                 expanded: *expanded,
                 follow_up: follow_up.as_deref(),
+                session_node: app
+                    .sessions
+                    .session(*plane, id)
+                    .and_then(|session| session.node.as_deref()),
             },
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
@@ -2657,6 +2662,9 @@ struct ApprovalModal<'a> {
     expanded: bool,
     /// B2, plan exits only: the prompt to run once the session has left plan mode.
     follow_up: Option<&'a str>,
+    /// The node this session runs on, so a subagent-relayed request can say when the
+    /// asker is on a different machine.
+    session_node: Option<&'a str>,
 }
 
 /// How many plan steps the modal draws before it says how many it left out. `ctrl+o`
@@ -2730,6 +2738,10 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         super::tree::truncate(modal.id, inner),
         theme::quiet(),
     )));
+
+    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+        body.push(asker);
+    }
 
     if let Some(title) = &detail.title {
         body.push(Line::from(Span::raw(super::tree::truncate(title, inner))));
@@ -2898,6 +2910,10 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         super::tree::truncate(modal.id, inner),
         theme::quiet(),
     )));
+
+    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+        body.push(asker);
+    }
 
     // The runtime's own question, verbatim and wrapped. Its `·` lines describe what each
     // answer does; the rows below carry the same options' names.
@@ -3134,6 +3150,38 @@ fn approval_answers(modal: &ApprovalModal<'_>) -> Vec<String> {
     }
 
     answers
+}
+
+/// The line naming which child agent relayed this request, absent for every approval the
+/// session asked for itself.
+///
+/// The attribution is chrome, but the machine is not: an answer here authorizes work on
+/// the node the *child* runs on, so where that is not the session's own machine the node
+/// carries the modal's warning color rather than the quiet one.
+fn approval_asker(
+    detail: &ApprovalDetail,
+    session_node: Option<&str>,
+    inner: usize,
+) -> Option<Line<'static>> {
+    let subagent = detail.subagent.as_ref()?;
+    let attribution = subagent.attribution();
+
+    Some(match subagent.remote_node(session_node) {
+        Some(node) => {
+            let on = format!(" on {node}");
+            Line::from(vec![
+                Span::styled(
+                    super::tree::truncate(&attribution, inner.saturating_sub(on.chars().count())),
+                    theme::quiet(),
+                ),
+                Span::styled(on, Style::default().fg(theme::warn())),
+            ])
+        }
+        None => Line::from(Span::styled(
+            super::tree::truncate(&attribution, inner),
+            theme::quiet(),
+        )),
+    })
 }
 
 /// The lines under the diff: what a "don't ask again" would write, or why it is not

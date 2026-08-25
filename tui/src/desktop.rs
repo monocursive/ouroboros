@@ -2614,6 +2614,14 @@ impl DesktopView {
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child(approval.subject),
                 )
+                .when_some(approval.subagent, |view, subagent| {
+                    view.child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.tone(cx, Tone::Warning).foreground)
+                            .child(subagent),
+                    )
+                })
                 .when_some(approval.title, |view, title| {
                     view.child(
                         div()

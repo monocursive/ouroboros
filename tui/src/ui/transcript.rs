@@ -330,6 +330,82 @@ pub struct ApprovalDetail {
     /// B2. Present only for a `plan_exit` question, and the thing the dedicated modal
     /// branches on. `None` is every other approval this runtime raises.
     pub plan: Option<PlanExit>,
+    /// Present only where a child agent relayed this request through its parent.
+    pub subagent: Option<ApprovalSubagent>,
+}
+
+/// Which child agent relayed this request, where the runtime said so.
+///
+/// `Native.Loop.subagent_approval/2` forwards the child's own payload whole and adds one
+/// `subagent` object naming the asker: its description, its task id, and the node it runs
+/// on. Every field is optional — an older runtime, or the fallback for a child whose
+/// payload was unreadable, may carry any subset — and the object's presence alone is worth
+/// the line: this permission was asked for by a child, not by the session itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalSubagent {
+    pub description: Option<String>,
+    pub task_id: Option<String>,
+    /// The fleet machine the child runs on.
+    pub node: Option<String>,
+    /// A runtime that says outright the child ran elsewhere. Today's `subagent_approval/2`
+    /// sends only the node, but a payload that does say so is believed without a node
+    /// comparison — the same deference `SubagentCell` gives the flag.
+    pub remote: Option<bool>,
+}
+
+impl ApprovalSubagent {
+    /// `None` for every approval the session asked for itself.
+    fn decode(payload: &Value) -> Option<Self> {
+        let subagent = payload.get("subagent")?;
+        subagent.as_object()?;
+
+        Some(Self {
+            description: json_nonempty_str(subagent, "description"),
+            task_id: json_nonempty_str(subagent, "task_id"),
+            node: json_nonempty_str(subagent, "node"),
+            remote: subagent.get("remote").and_then(Value::as_bool),
+        })
+    }
+
+    /// `asked by subagent <description> (<task_id>)`, from whatever subset arrived.
+    pub fn attribution(&self) -> String {
+        match (self.description.as_deref(), self.task_id.as_deref()) {
+            (Some(description), Some(task_id)) => {
+                format!("asked by subagent {description} ({task_id})")
+            }
+            (Some(description), None) => format!("asked by subagent {description}"),
+            (None, Some(task_id)) => format!("asked by subagent ({task_id})"),
+            (None, None) => "asked by a subagent".to_string(),
+        }
+    }
+
+    /// The machine the child runs on, only where that is news: the payload marked the
+    /// child remote, or named a node that is not the session's own. Every child runs
+    /// *somewhere*, so a node on every line would hide the one case that changes the
+    /// question — an answer here authorizing a write to a machine the approver is not
+    /// looking at.
+    pub fn remote_node(&self, session_node: Option<&str>) -> Option<&str> {
+        let elsewhere = match (self.node.as_deref(), session_node) {
+            (Some(node), Some(local)) => node != local,
+            // A node with no local to compare against says nothing about remoteness,
+            // exactly as a `node` without `remote` does on the transcript's child row.
+            _unknown => false,
+        };
+
+        if self.remote == Some(true) || elsewhere {
+            Some(self.node.as_deref().unwrap_or("another machine"))
+        } else {
+            None
+        }
+    }
+
+    /// The whole line, for a surface that draws it unstyled.
+    pub fn line(&self, session_node: Option<&str>) -> String {
+        match self.remote_node(session_node) {
+            Some(node) => format!("{} on {}", self.attribution(), node),
+            None => self.attribution(),
+        }
+    }
 }
 
 /// One ACP diff content block, described rather than rendered as a patch.
@@ -422,6 +498,7 @@ impl ApprovalRequest {
             diff_excerpted,
             edits: call.map(approval_edits).unwrap_or_default(),
             plan: PlanExit::decode(payload),
+            subagent: ApprovalSubagent::decode(payload),
         }
     }
 }

@@ -304,6 +304,96 @@ fn an_acp_diff_content_block_is_named_rather_than_diffed_by_this_client() {
     );
 }
 
+/// `Native.Loop.subagent_approval/2` for a child placed on another fleet node: the
+/// child's own payload, whole, plus the `subagent` object naming the asker.
+#[test]
+fn a_subagent_relayed_approval_names_the_asker_and_the_machine_it_runs_on() {
+    let mut app = opened(full_hello());
+    approve(
+        &mut app,
+        json!({
+            "tool_call": {
+                "name": "exec_command",
+                "command": "cargo build",
+                "cwd": "/tmp/child-worktree"
+            },
+            "kind": "tool",
+            "subagent": {
+                "task_id": "task-a",
+                "description": "audit the parser",
+                "provider_session_id": "sess-child",
+                "node": "ouro-2@fleet"
+            }
+        }),
+    );
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.contains("asked by subagent audit the parser (task-a)"),
+        "a relayed request names which child is asking:\n{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("on ouro-2@fleet"),
+        "approving this authorizes a machine the approver is not looking at, and the \
+         modal must say which:\n{}",
+        screen.text()
+    );
+}
+
+/// A child on the session's own node still names itself, but its node is not news — every
+/// child runs somewhere, and a machine on every relayed request would hide the one case
+/// where the answer crosses to another one.
+#[test]
+fn a_local_subagents_node_is_not_drawn_because_it_is_the_sessions_own() {
+    let mut app = opened(full_hello());
+    approve(
+        &mut app,
+        json!({
+            "tool_call": { "name": "exec_command", "command": "cargo build", "cwd": "/tmp/w" },
+            "kind": "tool",
+            "subagent": {
+                "task_id": "task-b",
+                "description": "tidy the docs",
+                "node": "ouroboros@golden"
+            }
+        }),
+    );
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.contains("asked by subagent tidy the docs (task-b)"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        !screen.text().contains("on ouroboros@golden"),
+        "the session's own node is not drawn as if it were elsewhere:\n{}",
+        screen.text()
+    );
+}
+
+/// `subagent_approval/2`'s fallback for a child whose payload was unreadable carries only
+/// the task id. Every field is optional, and the line is built from whatever arrived.
+#[test]
+fn a_subagent_attribution_with_only_a_task_id_still_names_the_asker() {
+    let mut app = opened(full_hello());
+    approve(
+        &mut app,
+        json!({ "kind": "tool", "subagent": { "task_id": "task-c" } }),
+    );
+
+    let screen = render(&mut app, 120, 30);
+
+    assert!(
+        screen.contains("asked by subagent (task-c)"),
+        "{}",
+        screen.text()
+    );
+}
+
 #[test]
 fn the_fifth_answer_names_the_exact_pattern_and_scope_it_would_write() {
     let mut app = opened(full_hello());

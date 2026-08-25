@@ -654,6 +654,10 @@ fn desktop_approval_is_complete_and_rejects_a_stale_button() {
     assert!(diff.label.contains("+1 −1"));
     assert!(diff.text.contains("+new"));
     assert_eq!(approval.choices.len(), 4);
+    assert!(
+        approval.subagent.is_none(),
+        "an approval the session asked for itself is attributed to nobody else"
+    );
 
     let error = app
         .desktop_respond_approval("req-stale", ApprovalDecision::Approve, ApprovalScope::Once)
@@ -674,6 +678,86 @@ fn desktop_approval_is_complete_and_rejects_a_stale_button() {
         .expect("the approval response is routed through the reducer");
     assert_eq!(response.params["id"], SESSION);
     assert_eq!(response.params["request_id"], "req-desktop-9");
+}
+
+/// `Native.Loop.subagent_approval/2` forwards the child's payload whole and adds one
+/// `subagent` object. The card must say which child is asking, and — because this session
+/// runs on `ouroboros@golden` — that the answer authorizes work on `ouro-2@fleet`.
+#[test]
+fn a_subagent_relayed_approval_reaches_the_desktop_with_its_asker_and_machine() {
+    let mut app = opened();
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-child-1",
+            "kind": "tool",
+            "tool_call": { "name": "exec_command", "command": "cargo build", "cwd": "/tmp/wt" },
+            "subagent": {
+                "task_id": "task-a",
+                "description": "audit the parser",
+                "provider_session_id": "sess-child",
+                "node": "ouro-2@fleet"
+            }
+        }),
+    );
+
+    let approval = app.desktop_approval().expect("a pending desktop approval");
+    assert_eq!(
+        approval.subagent.as_deref(),
+        Some("asked by subagent audit the parser (task-a) on ouro-2@fleet")
+    );
+}
+
+/// A child on the session's own node is named without a machine — its node is not news —
+/// and a payload that says `remote` outright is believed even with no node to compare.
+#[test]
+fn a_subagent_attribution_draws_the_machine_only_where_it_is_elsewhere() {
+    let mut app = opened();
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-child-2",
+            "kind": "tool",
+            "tool_call": { "name": "exec_command", "command": "cargo build" },
+            "subagent": {
+                "task_id": "task-b",
+                "description": "tidy the docs",
+                "node": "ouroboros@golden"
+            }
+        }),
+    );
+
+    let local = app.desktop_approval().expect("a pending desktop approval");
+    assert_eq!(
+        local.subagent.as_deref(),
+        Some("asked by subagent tidy the docs (task-b)")
+    );
+
+    app.desktop_respond_approval("req-child-2", ApprovalDecision::Deny, ApprovalScope::Once)
+        .expect("the local child's request is answerable");
+    app.drain();
+
+    notify(
+        &mut app,
+        2,
+        "approval_requested",
+        json!({
+            "request_id": "req-child-3",
+            "kind": "tool",
+            "tool_call": { "name": "exec_command", "command": "cargo build" },
+            "subagent": { "task_id": "task-c", "remote": true }
+        }),
+    );
+
+    let marked = app.desktop_approval().expect("a pending desktop approval");
+    assert_eq!(
+        marked.subagent.as_deref(),
+        Some("asked by subagent (task-c) on another machine")
+    );
 }
 
 #[test]
