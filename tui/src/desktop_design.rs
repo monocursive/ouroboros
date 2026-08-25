@@ -39,9 +39,9 @@ const DARK: PaletteSpec = PaletteSpec {
     line: 0x2e3033,
     ink: 0xf2f3f4,
     ink_2: 0xa5a8ad,
-    accent: 0x3d9aff,
-    accent_hover: 0x268cf4,
-    accent_tint: 0x20364d,
+    accent: 0x4fcb7d,
+    accent_hover: 0x3fb96c,
+    accent_tint: 0x203c2a,
     success: 0x62d295,
     warning: 0xf5b94c,
     danger: 0xf47777,
@@ -56,9 +56,9 @@ const LIGHT: PaletteSpec = PaletteSpec {
     line: 0xe2e4e7,
     ink: 0x1f2124,
     ink_2: 0x62656b,
-    accent: 0x0285ff,
-    accent_hover: 0x0078e7,
-    accent_tint: 0xe8f3ff,
+    accent: 0x147a46,
+    accent_hover: 0x0f693b,
+    accent_tint: 0xe8f5ec,
     success: 0x168557,
     warning: 0x9a6400,
     danger: 0xce3f4a,
@@ -416,6 +416,17 @@ mod tests {
             assert_ne!(palette.warning, palette.accent);
             assert_ne!(palette.danger, palette.accent);
             assert_ne!(palette.success, palette.accent);
+        }
+    }
+
+    #[test]
+    fn action_accent_is_green_in_every_mode() {
+        for palette in [DARK, LIGHT] {
+            let red = (palette.accent >> 16) & 0xff;
+            let green = (palette.accent >> 8) & 0xff;
+            let blue = palette.accent & 0xff;
+            assert!(green > red);
+            assert!(green > blue);
         }
     }
 }
