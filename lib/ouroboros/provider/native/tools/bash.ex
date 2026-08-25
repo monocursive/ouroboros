@@ -23,12 +23,24 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       runs unsandboxed where none does. The second case is what this provider did
       before C5; it is reported rather than hidden, through `sandbox: "none"` on the
       tool call and through the provider's status.
+    * **`unrestricted`** — runs with no OS sandbox on any node, because that is what the
+      session asked for by name. `Sandbox.decide/2` logs it every time.
 
   When the sandbox stops a command, the result says which constraint was hit and what
   to ask a human for, so the model escalates instead of retrying (Cursor's rule, R3
   §11). When the *backend* fails — a profile that will not compile — the command is
   refused rather than re-run under a weaker posture, because a sandbox that silently
   is not there is worse than one that is absent and says so.
+
+  ## The escalation offer
+
+  A denial `Sandbox.escalatable?/3` says an operator could lift comes back as an
+  `escalation:` key on the result, beside the output rather than inside it. This tool
+  cannot ask anybody anything — only `Ouroboros.Provider.Native.Loop` owns an approval
+  channel — so it describes the denial and says whether it is liftable, and the loop
+  decides whether a human sees it and re-runs the command. That split is why a `bash`
+  call made outside a loop reads exactly as honestly as one made inside: the guidance
+  text never claims somebody is being asked.
 
   ## Everything else is unchanged
 
@@ -114,6 +126,7 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       {:ok,
        %{
          label: label,
+         command: command,
          executable: executable,
          args: args,
          env: Sandbox.env(policy),
@@ -139,6 +152,7 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   defp plain(command) do
     %{
       label: "none",
+      command: command,
       executable: "/bin/sh",
       args: ["-c", command],
       env: [],
@@ -153,13 +167,13 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     case Sandbox.backend_failure(plan.label, output, status) do
       nil ->
         {inline, note} = present(output, context)
+        {annotation, offer} = annotate(plan, output, status, timed_out?)
 
         {:ok,
          %{
-           output:
-             header(status, timed_out?, timeout) <>
-               inline <> note <> annotate(plan, output, status, timed_out?),
-           is_error: timed_out? or status != 0
+           output: header(status, timed_out?, timeout) <> inline <> note <> annotation,
+           is_error: timed_out? or status != 0,
+           escalation: offer
          }}
 
       message ->
@@ -176,14 +190,35 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
   # A command killed by its own deadline was not stopped by the sandbox, whatever its
   # partial output happens to contain.
-  defp annotate(_plan, _output, _status, true), do: ""
-  defp annotate(%{policy: nil}, _output, _status, _live), do: ""
+  defp annotate(_plan, _output, _status, true), do: {"", nil}
+  defp annotate(%{policy: nil}, _output, _status, _live), do: {"", nil}
 
+  # Returns the text appended to the tool result and, separately, the escalation *offer*
+  # the loop acts on. They are two things and are kept apart on purpose: this tool cannot
+  # ask anybody anything — only the loop process owns an approval channel — so all it does
+  # is describe the denial accurately and say whether it is one an operator could lift.
+  # A `bash` call made outside a loop therefore reads exactly as honestly as one inside.
   defp annotate(plan, output, status, _live) do
     case Sandbox.violation(plan.policy, output, status) do
-      nil -> ""
-      violation -> Sandbox.escalation(violation, plan.policy, plan.label)
+      nil ->
+        {"", nil}
+
+      violation ->
+        offered? = Sandbox.escalatable?(violation, plan.policy, plan.command)
+
+        {Sandbox.escalation(violation, plan.policy, plan.label, offered: offered?),
+         if(offered?, do: offer(violation, plan))}
     end
+  end
+
+  defp offer(violation, plan) do
+    %{
+      constraint: violation.constraint,
+      evidence: violation.evidence,
+      label: plan.label,
+      mode: plan.policy.mode,
+      reason: Sandbox.escalation_reason(violation, plan.policy, plan.label)
+    }
   end
 
   # ------------------------------------------------------------------ execution

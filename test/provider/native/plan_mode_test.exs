@@ -746,6 +746,45 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       assert {:ok, %{plan: false, sandbox_mode: :workspace_write}} = Session.plan_state(handle)
     end
 
+    # The mode the provider now offers by name is displaced and restored like any other.
+    # Plan mode outranks full access — it has to, or a session an operator put into
+    # planning would still hold an unsandboxed shell — and leaving must give it back
+    # rather than quietly downgrading the session to `workspace_write`.
+    test "plan mode displaces :unrestricted and hands it back on the way out", context do
+      script = [[{:text, "hello"}, {:finish, :stop}]]
+
+      %{handle: handle} =
+        open(context, script, %{provider_options: %{}, sandbox_mode: :unrestricted})
+
+      await_event(:provider_event)
+
+      assert {:ok, %{plan: false, sandbox_mode: :unrestricted}} = Session.plan_state(handle)
+      assert :ok = Session.plan_mode(handle, true)
+
+      assert {:ok, %{plan: true, sandbox_mode: :read_only, sandbox_after_plan: :unrestricted}} =
+               Session.plan_state(handle)
+
+      assert :ok = Session.plan_mode(handle, false)
+      assert {:ok, %{plan: false, sandbox_mode: :unrestricted}} = Session.plan_state(handle)
+    end
+
+    test "a session started in plan mode still restores :unrestricted when it leaves",
+         context do
+      script = [[{:text, "hello"}, {:finish, :stop}]]
+
+      %{handle: handle} =
+        open(context, script, %{
+          provider_options: %{plan: true},
+          sandbox_mode: :unrestricted
+        })
+
+      await_event(:provider_event)
+
+      assert {:ok, %{plan: true, sandbox_mode: :read_only}} = Session.plan_state(handle)
+      assert :ok = Session.plan_mode(handle, false)
+      assert {:ok, %{plan: false, sandbox_mode: :unrestricted}} = Session.plan_state(handle)
+    end
+
     test "plan mode is reachable and durable through the harness worker", context do
       # The end-to-end check the unit tests above cannot make: driven through
       # `Jido.Harness.Session` rather than by calling the transport's callbacks, because

@@ -64,6 +64,20 @@ defmodule Ouroboros.Provider.Native.PromptTest do
     assert prompt =~ "`.git`, `.ouroboros`"
     assert prompt =~ "External network access is denied; loopback is available for local IPC"
     refute prompt =~ "no OS sandbox"
+
+    # The escalation is named where the model will read it, because a model told only
+    # "do not retry" spends the next call asking for something it is already being given.
+    assert prompt =~ "put to the operator for you, once, as an approval"
+    assert prompt =~ "do not ask for one with `ask_user`"
+  end
+
+  test "the unrestricted posture says what is off and what is still on" do
+    prompt = Prompt.base(Keyword.put(@opts, :sandbox_mode, :unrestricted))
+
+    assert prompt =~ "explicitly **unrestricted**"
+    assert prompt =~ "`bash` has no OS sandbox"
+    assert prompt =~ "Permission rules and approvals"
+    refute prompt =~ "runs inside the sandbox-exec OS sandbox"
   end
 
   test "describes read-only shell behavior with and without a backend" do

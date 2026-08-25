@@ -578,18 +578,29 @@ defmodule Ouroboros.Provider.Native.Tools do
       is_error: Map.get(result, :is_error, false) == true,
       changes: Map.get(result, :changes, []),
       reads: Map.get(result, :reads, %{}),
-      plan: Map.get(result, :plan)
+      plan: Map.get(result, :plan),
+      # C5+. `bash` is the one tool that can come back saying "the OS sandbox stopped
+      # this, and it is a denial an operator could lift". It is carried here rather than
+      # buried in the output text because the loop has to *act* on it — it owns the only
+      # approval channel — and parsing a decision back out of prose is how that kind of
+      # seam rots. Every other tool leaves it `nil`.
+      escalation: Map.get(result, :escalation)
     }
   end
 
-  def normalize_result({:ok, result}) when is_map(result),
-    do: %{output: bound(inspect(result)), is_error: false, changes: [], reads: %{}, plan: nil}
+  def normalize_result({:ok, result}) when is_map(result), do: empty(inspect(result), false)
+  def normalize_result({:error, reason}), do: empty(describe(reason), true)
+  def normalize_result(other), do: empty(inspect(other), true)
 
-  def normalize_result({:error, reason}),
-    do: %{output: bound(describe(reason)), is_error: true, changes: [], reads: %{}, plan: nil}
-
-  def normalize_result(other),
-    do: %{output: bound(inspect(other)), is_error: true, changes: [], reads: %{}, plan: nil}
+  defp empty(output, error?),
+    do: %{
+      output: bound(output),
+      is_error: error?,
+      changes: [],
+      reads: %{},
+      plan: nil,
+      escalation: nil
+    }
 
   defp describe({:tool_raised, message}), do: "tool raised: #{message}"
   defp describe({:tool_exited, reason}), do: "tool exited: #{reason}"

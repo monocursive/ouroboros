@@ -45,8 +45,27 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   **The `.git` consequence is real and is not a bug.** A sandboxed `git commit` fails,
   because committing writes into `.git`. That is Codex's rule and it is kept for
   Codex's reason: the repository's history is the one thing a session must not be able
-  to rewrite behind the operator's back. Commits go through a human or through a
-  session the operator moved off the sandbox.
+  to rewrite behind the operator's back. What has changed is what happens next: a
+  filesystem denial under `workspace_write` is now escalatable — `escalatable?/3` says
+  whether this particular denial is one an operator may lift, and
+  `Ouroboros.Provider.Native.Loop` asks them, once, per command. A commit therefore
+  still goes through a human; it no longer goes through a human *and* a restarted
+  session.
+
+  `escalatable?/3` is deliberately narrow, and never says yes for:
+
+    * a **network** denial — external network is a node-level setting
+      (`config :ouroboros, native_sandbox_network: true`), not something one command's
+      approval can lift for one command;
+    * a **`read_only`** session — the honest advice there is still `workspace_write`,
+      because a read-only label the shell can step out of is the lie this module was
+      written to stop telling;
+    * a denial whose evidence, or whose command line, names one of `protected_names/0`
+      or an `.ouroboros` directory. Those are the runtime's own state and the
+      operator's own configuration; the answer there stays "do it yourself". The check
+      is textual — a shell command cannot be decomposed into the paths it will touch —
+      so it is conservative by construction: it refuses to offer an escalation whenever
+      those names appear at all, in either the configured or the canonicalized spelling.
 
   ## What it does not do
 
@@ -406,15 +425,86 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Cursor's rule (R3 §11): surface the *violated constraint* and recommend the
   escalation, so the model asks a human for a different posture rather than retrying
   the same command until the loop detector stops it.
+
+  `offered: true` is passed by a caller that has an escalation channel — the loop, which
+  puts the denial to the operator itself. The text then says so, and says that reading
+  it means no escalation was granted, because on a granted one the re-run's result
+  replaces this text entirely. Everywhere else the advice stays what it was: ask a human
+  with `ask_user`.
   """
-  @spec escalation(map(), policy(), String.t()) :: String.t()
-  def escalation(%{constraint: constraint, evidence: evidence}, policy, label) do
+  @spec escalation(map(), policy(), String.t(), keyword()) :: String.t()
+  def escalation(violation, policy, label, opts \\ [])
+
+  def escalation(%{constraint: constraint, evidence: evidence}, policy, label, opts) do
     "\nThe sandbox (#{label}, sandbox_mode: #{policy.mode}) appears to have stopped this " <>
       "command: #{evidence}\n" <>
       constraint_text(constraint, policy) <>
-      "\nDo not retry the same command. Ask the human — with `ask_user` — whether to " <>
-      escalation_text(constraint, policy) <>
-      " If they say no, find a way to do this that stays inside the sandbox."
+      "\n" <> advice(constraint, policy, Keyword.get(opts, :offered, false) == true)
+  end
+
+  defp advice(constraint, policy, false),
+    do:
+      "Do not retry the same command. Ask the human — with `ask_user` — whether to " <>
+        escalation_text(constraint, policy) <>
+        " If they say no, find a way to do this that stays inside the sandbox."
+
+  defp advice(constraint, policy, true),
+    do:
+      "Do not retry the same command. This runtime offers the operator a one-command " <>
+        "escalation for a denial like this one: approving it re-runs the command once " <>
+        "with no OS sandbox, and that re-run's result is what you would be reading " <>
+        "instead of this. Reading this means no escalation was granted — so do not ask " <>
+        "for one again with `ask_user`. Either " <>
+        escalation_text(constraint, policy) <>
+        " Or find a way to do this that stays inside the sandbox."
+
+  @doc """
+  The `reason` an escalation approval carries: what was stopped, and which constraint.
+
+  One paragraph, no advice — the advice in an approval modal is the operator's to give,
+  not this runtime's to write into the question it is asking them.
+  """
+  @spec escalation_reason(map(), policy(), String.t()) :: String.t()
+  def escalation_reason(%{constraint: constraint, evidence: evidence}, policy, label) do
+    "The #{label} sandbox (sandbox_mode: #{policy.mode}) stopped this command: " <>
+      "#{evidence}. " <> constraint_text(constraint, policy)
+  end
+
+  @doc """
+  Whether this denial is one an operator may lift by approving a single unsandboxed re-run.
+
+  Filesystem only, `workspace_write` only, and never when the evidence or the command
+  line names a protected root or an `.ouroboros` directory. See the moduledoc for why
+  each of those three is a hard no. `command` may be `nil`; then only the evidence is
+  read, which is the weaker check and is why the caller should pass the command it ran.
+  """
+  @spec escalatable?(map() | nil, policy() | nil, String.t() | nil) :: boolean()
+  def escalatable?(%{constraint: :filesystem} = violation, %{mode: :workspace_write}, command),
+    do: not protected_text?(Map.get(violation, :evidence)) and not protected_text?(command)
+
+  def escalatable?(_violation, _policy, _command), do: false
+
+  # Textual, conservative, and stated as such in the moduledoc. A protected root that
+  # appears anywhere in the command line or in the denial the kernel produced is enough
+  # to withhold the offer, because this cannot know which of a shell line's several paths
+  # the kernel actually refused.
+  #
+  # `protected_names/0` rather than `protected_roots/0`: a root is matched in *both* the
+  # form an operator configured and the form it canonicalizes to, because a shell command
+  # and a kernel error message do not agree on which one they use. On macOS the data
+  # directory an operator writes as `/var/folders/…` canonicalizes to `/private/var/…`,
+  # and matching only the canonical form would have offered an escalation into the
+  # runtime's own store.
+  defp protected_text?(text) when is_binary(text) do
+    Enum.any?(protected_names(), &String.contains?(text, &1)) or ouroboros_dir?(text)
+  end
+
+  defp protected_text?(_absent), do: false
+
+  defp ouroboros_dir?(text) do
+    String.contains?(text, "/.ouroboros/") or String.ends_with?(text, "/.ouroboros") or
+      String.contains?(text, " .ouroboros/") or text == ".ouroboros" or
+      String.starts_with?(text, ".ouroboros/")
   end
 
   @doc "The refusal text for a `read_only` session on a node with no backend."
@@ -510,13 +600,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     |> Enum.sort()
   end
 
-  defp protected_roots do
-    [
-      Application.get_env(:ouroboros, :data_dir),
-      Application.get_env(:ouroboros, :native_data_dir)
-    ]
-    |> Enum.concat([config_dir()])
-    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+  @doc """
+  The roots the sandbox keeps read-only under every mode, canonicalized.
+
+  The node's data directory, the native provider's own data directory, and the user's
+  `ouroboros` config. Public because `escalatable?/3` is defined in terms of it and a
+  test that checks the two agree should not have to re-derive the list.
+  """
+  @spec protected_roots() :: [String.t()]
+  def protected_roots do
+    configured_roots()
     |> Enum.flat_map(fn root ->
       case Ouroboros.Workspace.Path.canonicalize(root) do
         {:ok, canonical} -> [canonical]
@@ -525,6 +618,37 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     end)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  @doc """
+  Every spelling of a protected root this node might see written down.
+
+  `protected_roots/0` canonicalizes, which is right for a sandbox profile — the kernel
+  is given real directories — and wrong for reading a shell command, which says whatever
+  the operator or the model typed. This returns both forms, and includes a configured
+  root that does not exist yet rather than dropping it: a name nothing is under is a
+  name a command should still not be escalated toward.
+  """
+  @spec protected_names() :: [String.t()]
+  def protected_names do
+    configured_roots()
+    |> Enum.flat_map(fn root ->
+      case Ouroboros.Workspace.Path.canonicalize(root) do
+        {:ok, canonical} -> [root, canonical]
+        {:error, _absent} -> [root]
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp configured_roots do
+    [
+      Application.get_env(:ouroboros, :data_dir),
+      Application.get_env(:ouroboros, :native_data_dir),
+      config_dir()
+    ]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
   end
 
   defp config_dir do
@@ -584,7 +708,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     do:
       "allow this session's shell to reach the network. This node turns that on with " <>
         "`config :ouroboros, native_sandbox_network: true`, which lifts it for every " <>
-        "native session on the node — there is no per-domain allowlist yet."
+        "native session on the node — there is no per-domain allowlist yet. Moving the " <>
+        "session to `sandbox_mode: unrestricted` also lifts it, by removing the sandbox " <>
+        "altogether rather than by opening one axis of it."
 
   defp escalation_text(:filesystem, %{mode: :read_only}),
     do:
@@ -593,8 +719,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   defp escalation_text(:filesystem, %{mode: :workspace_write}),
     do:
-      "add the directory this needs to the session's `add_dirs`, or — if the write was " <>
-        "into `.git` — do it themselves. A commit is deliberately outside what this " <>
-        "sandbox permits, and this provider does not offer a full-access mode to escape " <>
-        "into."
+      "add the directory this needs to the session's `add_dirs`, or move this session " <>
+        "to `sandbox_mode: unrestricted` — which turns the OS sandbox off for the shell " <>
+        "and leaves the file tools' path containment, the permission rules, and the " <>
+        "approvals exactly where they are. A write into `.git` is the case that mode " <>
+        "exists for: a commit is deliberately outside what this sandbox permits."
 end
