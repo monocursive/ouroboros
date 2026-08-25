@@ -12,7 +12,7 @@ use ouro::transport::ClientError;
 use ouro::ui::app::{App, DesktopCellKind, DesktopTone, Mode, Msg, Tag};
 use serde_json::{json, Value};
 
-use support::full_hello;
+use support::{full_hello, hello};
 
 const SESSION: &str = "session-desktop-1";
 
@@ -898,4 +898,122 @@ fn desktop_auto_approve_leaves_ask_user_questions_for_the_person() {
         .expect("the question still renders as a card");
     assert_eq!(approval.request_id, "req-desktop-11");
     assert!(approval.question, "and the card knows it is a question");
+}
+
+/// One `runtime.models` answer, shaped as `Ouroboros.Models.list/0` encodes it.
+fn models_catalogue() -> Value {
+    json!({
+        "source": "llm_db",
+        "epoch": 41,
+        "limit": 40,
+        "providers": [
+            {
+                "provider": "native",
+                "catalog": "openai",
+                "default": "openai_codex:gpt-5.6-sol",
+                "model_option": true,
+                "total": 1,
+                "models": [{
+                    "id": "openai_codex:gpt-5.6-sol",
+                    "name": "GPT-5.6 Sol",
+                    "context_window": 400000,
+                    "max_output_tokens": 128000,
+                    "release_date": "2026-05-14",
+                    "pricing": {"currency": "USD", "input_per_mtok": 1.25, "output_per_mtok": 10.0}
+                }]
+            }
+        ]
+    })
+}
+
+fn methods(app: &mut App) -> Vec<String> {
+    app.drain()
+        .into_iter()
+        .map(|call| call.method.to_string())
+        .collect()
+}
+
+/// The new-session form's two lists are one seam, and it is safe to call every time the
+/// form opens: a question already outstanding is not asked twice.
+#[test]
+fn desktop_pickers_ask_for_providers_and_models_once() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    app.drain();
+
+    app.desktop_fetch_pickers();
+    let asked = methods(&mut app);
+    assert!(
+        asked.contains(&"runtime.providers".to_string())
+            && asked.contains(&"runtime.models".to_string()),
+        "opening the form asks for both lists: {asked:?}"
+    );
+
+    app.desktop_fetch_pickers();
+    assert!(
+        methods(&mut app).is_empty(),
+        "reopening the form while both answers are outstanding asks nothing again"
+    );
+
+    answer(&mut app, Tag::Models, models_catalogue());
+    answer(&mut app, Tag::Providers, json!([]));
+    app.drain();
+
+    app.desktop_fetch_pickers();
+    assert!(
+        methods(&mut app).is_empty(),
+        "and an answer already held is not re-fetched either"
+    );
+}
+
+#[test]
+fn a_models_answer_lands_in_the_catalogue_the_picker_reads() {
+    let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
+    app.drain();
+    app.desktop_fetch_pickers();
+    app.drain();
+
+    answer(&mut app, Tag::Models, models_catalogue());
+
+    let catalogue = app.models.value.as_ref().expect("a decoded catalogue");
+    assert!(!app.models.pending);
+    assert!(app.models.error.is_none());
+
+    let native = catalogue.provider("native").expect("the native row");
+    assert!(native.model_option);
+    assert_eq!(native.default.as_deref(), Some("openai_codex:gpt-5.6-sol"));
+    assert_eq!(
+        native.models[0].id, "openai_codex:gpt-5.6-sol",
+        "ids arrive already prefixed for the model option a native session takes"
+    );
+    assert_eq!(
+        native.models[0].detail().as_deref(),
+        Some("GPT-5.6 Sol · 400K context")
+    );
+}
+
+/// A gateway that predates `runtime.models` is not a broken one. Nothing is asked, nothing
+/// is recorded as failed, and the form's model field stays the text input it always was.
+#[test]
+fn a_gateway_without_runtime_models_is_not_asked_and_reports_no_failure() {
+    let mut app = App::new(
+        Mode::Attached,
+        "127.0.0.1:4560".into(),
+        hello(&["runtime.providers", "interactive.start", "interactive.list"]),
+        None,
+    );
+    app.drain();
+
+    app.desktop_fetch_pickers();
+
+    assert_eq!(
+        methods(&mut app),
+        ["runtime.providers"],
+        "the verb this gateway does not serve is never sent"
+    );
+    assert!(app.models.value.is_none());
+    assert!(
+        app.models.error.is_none(),
+        "an unserved verb is a gap in the gateway, not an error to show where models go"
+    );
+    assert!(!app.models.pending);
 }

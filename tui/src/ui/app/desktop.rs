@@ -424,6 +424,18 @@ impl App {
         Ok(())
     }
 
+    /// Fills the two lists the native new-session form picks from.
+    ///
+    /// One seam rather than two calls at the window, because the form needs both at once
+    /// and neither is a session action. Each fetch is a no-op while its answer is
+    /// outstanding or already held, so calling this every time the form opens costs
+    /// nothing; a gateway that serves neither verb leaves both lists empty and the form
+    /// degrades to the text fields it had before.
+    pub fn desktop_fetch_pickers(&mut self) {
+        self.fetch_providers();
+        self.fetch_models();
+    }
+
     /// Starts an interactive session with choices visible in the native form.
     ///
     /// `sandbox_mode` is the form's own answer, and `None` means the operator did not

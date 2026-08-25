@@ -1261,6 +1261,135 @@ impl ProviderEntry {
     }
 }
 
+/// `runtime.models`: the model catalogue this node can vouch for, one row per configured
+/// provider.
+///
+/// Not a promise that a listed model will work — the vendor CLI and the account behind it
+/// decide that, and only they can. This is what the runtime's packaged snapshot knows
+/// about the models each provider *it serves* draws from, which is enough to fill a picker
+/// without inventing entries.
+///
+/// Every field is `#[serde(default)]` for the same reason [`ProviderEntry`]'s are: a
+/// gateway one version ahead may add keys and one version behind may omit them, and
+/// neither should cost a client the whole answer.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelsCatalog {
+    /// Which snapshot the rows came from — `"llm_db"` today.
+    #[serde(default)]
+    pub source: String,
+    /// The snapshot's own counter, so two answers can be told apart without diffing them.
+    #[serde(default)]
+    pub epoch: u64,
+    /// The per-provider bound the runtime applied before answering.
+    #[serde(default)]
+    pub limit: u64,
+    #[serde(default)]
+    pub providers: Vec<ProviderModels>,
+}
+
+/// One provider's row of the catalogue.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProviderModels {
+    #[serde(default)]
+    pub provider: String,
+    /// The vendor catalogue this provider's CLI draws from. `None` when the runtime
+    /// resolved none — a different fact from "the catalogue is empty", and the reason a
+    /// picker says nothing here rather than guessing a vendor.
+    #[serde(default)]
+    pub catalog: Option<String>,
+    /// The model this node configured for the provider. Not a value to send: it is what
+    /// the runtime applies when a start request names no model at all.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Whether the adapter normalizes a `model` option at all. `false` means a request
+    /// naming one is naming something nothing downstream will read.
+    #[serde(default)]
+    pub model_option: bool,
+    /// How many models the catalogue holds, before [`ModelsCatalog::limit`] truncated
+    /// [`Self::models`]. Above that bound this is the count that did not fit, not a page a
+    /// client may ask for.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+}
+
+/// One model, as the runtime's snapshot describes it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelEntry {
+    /// Already carries whatever prefix this provider's model option needs
+    /// (`openai_codex:` on `native`), so a start request sends this string verbatim.
+    #[serde(default)]
+    pub id: String,
+    /// The vendor's own name for the model, when the snapshot has one.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
+}
+
+/// The vendor's public list price as the snapshot recorded it, normalised to one million
+/// tokens. Not a rate this runtime charges or verifies.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelPricing {
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub input_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub output_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_read_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl ModelsCatalog {
+    pub fn decode(value: &Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value.clone())
+    }
+
+    /// The catalogue row for one provider, or `None` when this runtime did not report it.
+    pub fn provider(&self, provider: &str) -> Option<&ProviderModels> {
+        let provider = provider.trim();
+
+        self.providers
+            .iter()
+            .find(|entry| entry.provider == provider)
+    }
+}
+
+impl ModelEntry {
+    /// One line of secondary text: the vendor's name and the context window, whichever the
+    /// snapshot actually stated. `None` when it stated neither — a row showing only the id
+    /// is honest, and an empty second line is not.
+    pub fn detail(&self) -> Option<String> {
+        let name = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let window = self.context_window.and_then(|tokens| match tokens {
+            0..=999 => None,
+            1_000..=999_999 => Some(format!("{}K context", tokens / 1_000)),
+            _ => Some(format!("{:.1}M context", tokens as f64 / 1_000_000.0)),
+        });
+
+        match (name, window) {
+            (Some(name), Some(window)) => Some(format!("{name} · {window}")),
+            (Some(name), None) => Some(name.to_string()),
+            (None, Some(window)) => Some(window),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Non-secret account metadata exposed by the runtime's direct OAuth boundary.
 ///
 /// Tokens stay in the runtime's private credential file. This shape is only enough for
@@ -3531,6 +3660,147 @@ mod tests {
             "a failed probe is not a false negative"
         );
         assert_eq!(providers[1].error, "probe_timeout");
+    }
+
+    /// One `runtime.models` answer, shaped exactly as `Ouroboros.Models.list/0` encodes it:
+    /// atoms become strings, `nil` becomes `null`, and `native`'s ids arrive already
+    /// prefixed for the model option a session on that provider takes.
+    fn models_answer() -> Value {
+        serde_json::json!({
+            "source": "llm_db",
+            "epoch": 41,
+            "limit": 40,
+            "providers": [
+                {
+                    "provider": "native",
+                    "catalog": "openai",
+                    "default": "openai_codex:gpt-5.6-sol",
+                    "model_option": true,
+                    "total": 57,
+                    "models": [
+                        {
+                            "id": "openai_codex:gpt-5.6-sol",
+                            "name": "GPT-5.6 Sol",
+                            "context_window": 400000,
+                            "max_output_tokens": 128000,
+                            "release_date": "2026-05-14",
+                            "pricing": {
+                                "currency": "USD",
+                                "input_per_mtok": 1.25,
+                                "output_per_mtok": 10.0,
+                                "cache_read_per_mtok": 0.125,
+                                "cache_write_per_mtok": 1.5625
+                            }
+                        },
+                        {
+                            "id": "openai_codex:gpt-5.2-codex",
+                            "name": null,
+                            "context_window": null,
+                            "max_output_tokens": null,
+                            "release_date": null,
+                            "pricing": null
+                        }
+                    ]
+                },
+                {
+                    "provider": "amp",
+                    "catalog": null,
+                    "default": null,
+                    "model_option": false,
+                    "total": 0,
+                    "models": []
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn the_model_catalogue_decodes_the_shape_the_gateway_sends() {
+        let catalogue = ModelsCatalog::decode(&models_answer()).expect("a catalogue");
+
+        assert_eq!(catalogue.source, "llm_db");
+        assert_eq!(catalogue.epoch, 41);
+        assert_eq!(catalogue.limit, 40);
+
+        let native = catalogue.provider("native").expect("the native row");
+        assert_eq!(native.catalog.as_deref(), Some("openai"));
+        assert_eq!(native.default.as_deref(), Some("openai_codex:gpt-5.6-sol"));
+        assert!(native.model_option);
+        assert_eq!(
+            native.total, 57,
+            "the count that did not fit is reported, not hidden behind the truncated list"
+        );
+        assert_eq!(native.models.len(), 2);
+        assert_eq!(native.models[0].id, "openai_codex:gpt-5.6-sol");
+        assert_eq!(native.models[0].context_window, Some(400_000));
+        assert_eq!(
+            native.models[0]
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.output_per_mtok),
+            Some(10.0)
+        );
+    }
+
+    #[test]
+    fn a_provider_that_normalizes_no_model_says_so_rather_than_offering_an_empty_list() {
+        let catalogue = ModelsCatalog::decode(&models_answer()).expect("a catalogue");
+
+        let amp = catalogue.provider("amp").expect("the amp row");
+        assert!(!amp.model_option);
+        assert!(amp.catalog.is_none(), "no catalogue is not an empty one");
+        assert!(amp.models.is_empty());
+
+        assert!(
+            catalogue.provider("kimi").is_none(),
+            "a provider this runtime did not report has no row to read"
+        );
+    }
+
+    #[test]
+    fn a_catalogue_survives_keys_it_does_not_recognise_and_keys_it_expected() {
+        // A gateway one version ahead adds keys; one version behind omits them. Neither
+        // may cost the client the rows it can still read.
+        let catalogue = ModelsCatalog::decode(&serde_json::json!({
+            "epoch": 7,
+            "reasoning_effort": ["low", "high"],
+            "providers": [{ "provider": "claude", "models": [{ "id": "claude-opus-5" }] }]
+        }))
+        .expect("a catalogue");
+
+        assert_eq!(catalogue.epoch, 7);
+        assert_eq!(catalogue.source, "");
+        let claude = catalogue.provider("claude").expect("the claude row");
+        assert!(
+            !claude.model_option,
+            "an unstated model option is not an assumed one"
+        );
+        assert_eq!(claude.models[0].id, "claude-opus-5");
+        assert!(claude.models[0].detail().is_none());
+    }
+
+    #[test]
+    fn a_model_row_states_only_what_the_snapshot_gave_it() {
+        let catalogue = ModelsCatalog::decode(&models_answer()).expect("a catalogue");
+        let native = catalogue.provider("native").expect("the native row");
+
+        assert_eq!(
+            native.models[0].detail().as_deref(),
+            Some("GPT-5.6 Sol · 400K context")
+        );
+        assert_eq!(
+            native.models[1].detail(),
+            None,
+            "a model with neither a name nor a window gets no second line"
+        );
+
+        // A million-token window reads as a million, not as 1050K.
+        let wide = ModelEntry {
+            name: Some("Wide".into()),
+            context_window: Some(1_050_000),
+            ..ModelEntry::default()
+        };
+        assert_eq!(wide.detail().as_deref(), Some("Wide · 1.1M context"));
     }
 
     #[test]

@@ -16,16 +16,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use gpui::{
-    actions, div, prelude::*, px, size, uniform_list, App as GpuiApp, Application, Bounds, Context,
-    Entity, FocusHandle, Focusable as _, KeyBinding, KeyDownEvent, Menu, MenuItem, ScrollHandle,
-    Subscription, SystemMenuType, Task, Timer, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, uniform_list, AnyElement, App as GpuiApp, Application,
+    Bounds, Context, Entity, FocusHandle, Focusable as _, KeyBinding, KeyDownEvent, Menu, MenuItem,
+    PathPromptOptions, ScrollHandle, SharedString, Subscription, SystemMenuType, Task, Timer,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::alert::Alert;
 use gpui_component::button::{ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Enter as InputEnter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
@@ -35,12 +36,14 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::config;
 use crate::desktop_design::{self as design, DesktopTokens, Tone};
-use crate::model::{ApprovalDecision, ApprovalScope, Plane, SandboxMode, Triage};
+use crate::model::{
+    ApprovalDecision, ApprovalScope, ModelsCatalog, Plane, ProviderEntry, SandboxMode, Triage,
+};
 use crate::runtime::{self, Paths};
 use crate::transport::{self, Secret, TransportConfig};
 use crate::ui::app::{
-    App, Call, Connection, DesktopApprovalChoice, DesktopCell, DesktopCellKind, DesktopTone, Mode,
-    Msg, NoticeKind,
+    provider_choices, App, Call, Connection, DesktopApprovalChoice, DesktopCell, DesktopCellKind,
+    DesktopTone, Loadable, Mode, Msg, NoticeKind, ProviderChoice,
 };
 use crate::ui::{self, TICK};
 
@@ -451,10 +454,26 @@ struct DesktopView {
     status: String,
     fatal: Option<String>,
     composer: Entity<InputState>,
+    /// The provider and model fields the form falls back to whenever the runtime cannot
+    /// answer with a list — an unserved verb, a fetch still in flight, one that failed,
+    /// or a "Custom…" pick. Seeded from the stored configuration, never from a literal.
     provider: Entity<InputState>,
     model: Entity<InputState>,
     workspace: Entity<InputState>,
     rename: Entity<InputState>,
+    provider_select: Entity<SelectState<Vec<ProviderRow>>>,
+    model_select: Entity<SelectState<SearchableVec<ModelRow>>>,
+    /// The rows currently installed in the two pickers. Held so a frame that would install
+    /// the same rows installs nothing: `set_items` cannot compare them itself, and
+    /// re-seeding a selection every frame would fight the operator's own pick.
+    provider_rows: Vec<ProviderRow>,
+    model_field: ModelField,
+    /// Whether the stored configuration has been placed in the fields yet. One shot each:
+    /// the config says where a control *starts*, so an answer landing later must not move
+    /// a choice the operator has already made. The model has its own flag because its
+    /// rows cannot exist until the catalogue arrives, which may be several frames later.
+    seeded: bool,
+    model_seeded: bool,
     /// The new-session form's file-access answer. `None` until the operator picks one, so
     /// an untouched form still starts the session the stored configuration describes —
     /// including the case where it describes nothing and the plane decides.
@@ -479,16 +498,12 @@ impl DesktopView {
                 .auto_grow(2, 8)
                 .placeholder("Message the open session…")
         });
-        let provider = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Provider")
-                .default_value("native")
-        });
-        let model = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Model (optional)")
-                .default_value("openai_codex:gpt-5.6-sol")
-        });
+        // No literal defaults here. Both fields are seeded from the stored configuration
+        // the first time the reducer exists to read it — see `sync_pickers` — because a
+        // provider and model baked into the window would be this client deciding for an
+        // operator who already wrote the answer down.
+        let provider = cx.new(|cx| InputState::new(window, cx).placeholder("Provider"));
+        let model = cx.new(|cx| InputState::new(window, cx).placeholder("Model (optional)"));
         let workspace_value = std::env::current_dir()
             .ok()
             .filter(|path| path != Path::new("/"))
@@ -501,6 +516,12 @@ impl DesktopView {
                 .default_value(workspace_value)
         });
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
+        let provider_select =
+            cx.new(|cx| SelectState::new(Vec::<ProviderRow>::new(), None, window, cx));
+        let model_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(Vec::<ModelRow>::new()), None, window, cx)
+                .searchable(true)
+        });
         let mut subscriptions = Vec::new();
         for input in [
             composer.clone(),
@@ -519,6 +540,27 @@ impl DesktopView {
                 },
             ));
         }
+
+        subscriptions.push(cx.subscribe_in(
+            &provider_select,
+            window,
+            |this, _select, _event: &SelectEvent<Vec<ProviderRow>>, window, cx| {
+                // The catalogue is per provider, so a model chosen under the old one may
+                // not exist under the new one — and carrying it over silently would send
+                // an id this runtime never offered for this provider.
+                this.reset_model_choice(window, cx);
+                this.action_error = None;
+                cx.notify();
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &model_select,
+            window,
+            |this, _select, _event: &SelectEvent<SearchableVec<ModelRow>>, _window, cx| {
+                this.action_error = None;
+                cx.notify();
+            },
+        ));
 
         let poll = cx.spawn(async move |view, cx| loop {
             Timer::after(TICK).await;
@@ -546,6 +588,12 @@ impl DesktopView {
             model,
             workspace,
             rename,
+            provider_select,
+            model_select,
+            provider_rows: Vec::new(),
+            model_field: ModelField::Text { hint: None },
+            seeded: false,
+            model_seeded: false,
             new_sandbox: None,
             show_new: false,
             action_error: None,
@@ -584,8 +632,14 @@ impl DesktopView {
                         app.inform(problem, crate::ui::app::NoticeKind::Warn);
                     }
                     app.apply(Msg::Tick);
+                    // Asked once here so the new-session form has its lists the first time
+                    // it opens rather than a frame or two after. A reconnect builds a new
+                    // `App`, so this is genuinely once per connection.
+                    app.desktop_fetch_pickers();
                     self.status = format!("Connected · {} · {}", app.hello.node, app.hello.scope);
                     self.app = Some(app);
+                    self.seeded = false;
+                    self.model_seeded = false;
                 }
                 DriverEvent::Message(message) => {
                     if let Some(app) = self.app.as_mut() {
@@ -894,23 +948,260 @@ impl DesktopView {
         }
     }
 
+    /// Keeps the two new-session pickers pointing at what the runtime currently reports.
+    ///
+    /// Driven from `render` because that is the only place holding a `Window`, and written
+    /// to be a no-op whenever the rows it would install are already installed — so a frame
+    /// that changes nothing costs two comparisons and touches no entity.
+    fn sync_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(app) = self.app.as_ref() else {
+            return;
+        };
+        let stored_provider = app.home_provider().to_string();
+        let stored_model = app.home_model().to_string();
+        let rows = provider_rows(&app.providers, Some(&stored_provider));
+
+        if rows != self.provider_rows {
+            self.provider_rows = rows.clone();
+            self.provider_select.update(cx, |state, cx| {
+                // A refresh that reordered or re-probed the list must not move a choice
+                // the operator made, so the pick is carried by name; `set_selected_value`
+                // clears it by itself if this runtime stopped reporting that provider.
+                let chosen = state.selected_value().cloned();
+                state.set_items(rows, window, cx);
+                match chosen {
+                    Some(name) => state.set_selected_value(&name, window, cx),
+                    None => state.set_selected_index(None, window, cx),
+                }
+            });
+        }
+
+        if !self.seeded {
+            self.seeded = true;
+            self.provider.update(cx, |input, cx| {
+                input.set_value(&stored_provider, window, cx)
+            });
+            self.model
+                .update(cx, |input, cx| input.set_value(&stored_model, window, cx));
+
+            let seed = SharedString::from(stored_provider);
+            self.provider_select
+                .update(cx, |state, cx| state.set_selected_value(&seed, window, cx));
+        }
+
+        self.sync_model_field(window, cx);
+
+        if matches!(self.model_field, ModelField::Rows { .. }) {
+            if !self.model_seeded {
+                self.model_seeded = true;
+                self.place_model_choice(&stored_model, window, cx);
+            } else if self.model_select.read(cx).selected_value().is_none() {
+                // The rows were rebuilt under a provider the operator changed, and the
+                // pick from the old one did not survive it. Land on the row that means
+                // what an unset model option means, rather than leaving the picker
+                // showing nothing while the request would still carry the default.
+                self.model_select.update(cx, |state, cx| {
+                    state.set_selected_value(&ModelChoice::RuntimeDefault, window, cx)
+                });
+            }
+        }
+    }
+
+    /// Rebuilds the model rows for whichever provider is selected now.
+    fn sync_model_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = self.new_provider(cx);
+        let Some(field) = self
+            .app
+            .as_ref()
+            .map(|app| model_field(&app.models, &provider))
+        else {
+            return;
+        };
+
+        if field == self.model_field {
+            return;
+        }
+        self.model_field = field;
+
+        // Installed even when there is nothing to install: a field that has stopped
+        // offering rows must stop showing the row it last had selected, or its closed
+        // label keeps naming a model from the provider the operator just left.
+        let rows = match &self.model_field {
+            ModelField::Rows { rows, .. } => rows.clone(),
+            ModelField::Text { .. } | ModelField::Unsupported => Vec::new(),
+        };
+        self.model_select.update(cx, |state, cx| {
+            state.set_items(SearchableVec::new(rows), window, cx);
+            state.set_selected_index(None, window, cx);
+        });
+    }
+
+    /// Puts `model` on the row that would actually send it.
+    ///
+    /// A catalogue that lists the id selects that row. One that does not is no evidence
+    /// the id is wrong — the catalogue is a bounded snapshot of what a vendor published,
+    /// not of what an account can reach — so the choice becomes "Custom…" over the text
+    /// field that still holds the id, and the form sends exactly what it would have sent.
+    fn place_model_choice(&mut self, model: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = ModelChoice::Catalog(SharedString::from(model.trim().to_string()));
+        let listed = matches!(
+            &self.model_field,
+            ModelField::Rows { rows, .. } if rows.iter().any(|row| row.choice == wanted)
+        );
+
+        let choice = match (model.trim().is_empty(), listed) {
+            (true, _) => ModelChoice::RuntimeDefault,
+            (false, true) => wanted,
+            (false, false) => ModelChoice::Custom,
+        };
+
+        self.model_select.update(cx, |state, cx| {
+            state.set_selected_value(&choice, window, cx)
+        });
+    }
+
+    /// Reacts to a provider the operator chose themselves.
+    ///
+    /// Latching alone is the whole job: the stored model default belongs to the provider
+    /// they just left, so it is no longer theirs to place, and `sync_pickers` rebuilds the
+    /// rows and lands on "Runtime default" from there. Re-picking the same provider leaves
+    /// the rows identical and so leaves their model choice alone.
+    fn reset_model_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_seeded = true;
+        self.sync_pickers(window, cx);
+    }
+
+    /// Whether the provider picker can stand in for the text field.
+    ///
+    /// Only once `runtime.providers` has answered. Before that the only row this client
+    /// could build is the stored default annotated "not reported here", which is a claim
+    /// about a probe that has not run.
+    fn provider_picker_ready(&self) -> bool {
+        !self.provider_rows.is_empty()
+            && self
+                .app
+                .as_ref()
+                .is_some_and(|app| app.providers.value.is_some())
+    }
+
+    /// The provider this form will send: the picker's choice while the picker is what is
+    /// on screen, the text field otherwise. A form must not send what nobody can see.
+    fn new_provider(&self, cx: &GpuiApp) -> String {
+        if self.provider_picker_ready() {
+            if let Some(name) = self.provider_select.read(cx).selected_value() {
+                return name.to_string();
+            }
+        }
+
+        self.provider.read(cx).value().trim().to_string()
+    }
+
+    /// The model option this form will send. `None` sends none at all, which is what
+    /// leaves the choice to the runtime.
+    fn new_model(&self, cx: &GpuiApp) -> Option<String> {
+        let typed = || {
+            let value = self.model.read(cx).value().trim().to_string();
+            (!value.is_empty()).then_some(value)
+        };
+
+        match &self.model_field {
+            ModelField::Text { .. } => typed(),
+            // The adapter normalizes no model option, so naming one here would name
+            // something nothing downstream reads.
+            ModelField::Unsupported => None,
+            ModelField::Rows { .. } => match self.model_select.read(cx).selected_value() {
+                Some(ModelChoice::Catalog(id)) => Some(id.to_string()),
+                Some(ModelChoice::Custom) => typed(),
+                Some(ModelChoice::RuntimeDefault) | None => None,
+            },
+        }
+    }
+
+    /// Whether the model field is on its "Custom…" row, which is what reveals the text
+    /// input beneath the picker.
+    fn model_is_custom(&self, cx: &GpuiApp) -> bool {
+        matches!(self.model_field, ModelField::Rows { .. })
+            && self.model_select.read(cx).selected_value() == Some(&ModelChoice::Custom)
+    }
+
+    /// The model this session would actually run under, as far as this client can tell.
+    ///
+    /// The operator's pick when there is one, and otherwise the default the *runtime*
+    /// reported for the provider — a statement from the runtime rather than a guess made
+    /// here. Only the sign-in notice reads this; the request still carries no model option
+    /// when "Runtime default" is chosen.
+    fn new_effective_model(&self, cx: &GpuiApp) -> Option<String> {
+        if let Some(model) = self.new_model(cx) {
+            return Some(model);
+        }
+
+        let provider = self.new_provider(cx);
+        self.app
+            .as_ref()?
+            .models
+            .value
+            .as_ref()?
+            .provider(&provider)?
+            .default
+            .clone()
+    }
+
+    /// Whether the session this form describes would run on a ChatGPT-subscription model.
+    fn new_requires_chatgpt(&self, cx: &GpuiApp) -> bool {
+        self.new_provider(cx) == "native"
+            && self
+                .new_effective_model(cx)
+                .is_some_and(|model| model.starts_with("openai_codex:"))
+    }
+
+    /// Opens the platform's own directory chooser and writes the pick into the workspace
+    /// field. Cancelling changes nothing — the field keeps whatever was typed.
+    fn browse_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose workspace".into()),
+        });
+        let view = cx.entity().downgrade();
+
+        window
+            .spawn(cx, async move |cx| {
+                let picked = picked.await;
+                _ = view.update_in(cx, |this, window, cx| {
+                    match picked {
+                        Ok(Ok(Some(paths))) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                this.workspace.update(cx, |input, cx| {
+                                    input.set_value(path.display().to_string(), window, cx)
+                                });
+                                this.action_error = None;
+                            }
+                        }
+                        // The platform could not open a chooser at all, which is a
+                        // different fact from a person deciding not to pick one.
+                        Ok(Err(error)) => {
+                            this.action_error =
+                                Some(format!("the directory chooser did not open: {error}"));
+                        }
+                        Ok(Ok(None)) | Err(_) => {}
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+    }
+
     fn start_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let provider = self.provider.read(cx).value().to_string();
-        let model = self.model.read(cx).value().to_string();
+        let provider = self.new_provider(cx);
+        let model = self.new_model(cx);
         let workspace = self.workspace.read(cx).value().to_string();
         let sandbox = self.new_sandbox;
         let result = self
             .app
             .as_mut()
             .ok_or_else(|| "the runtime is not connected yet".to_string())
-            .and_then(|app| {
-                app.desktop_start_session(
-                    provider,
-                    (!model.trim().is_empty()).then_some(model),
-                    workspace,
-                    sandbox,
-                )
-            });
+            .and_then(|app| app.desktop_start_session(provider, model, workspace, sandbox));
 
         match result {
             Ok(id) => {
@@ -1028,8 +1319,23 @@ impl DesktopView {
         if self.app.is_some() {
             self.show_new = !self.show_new;
             self.action_error = None;
+            if self.show_new {
+                self.open_new_session(cx);
+            }
             cx.notify();
         }
+    }
+
+    /// Asks the runtime to fill the form's pickers. Both fetches are no-ops while an
+    /// answer is held or outstanding, so opening the form repeatedly asks nothing extra —
+    /// but a fetch that failed earlier gets its retry here rather than on a poll cadence.
+    fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = self.app.as_mut() {
+            app.desktop_fetch_pickers();
+            self.flush_calls();
+        }
+        self.action_error = None;
+        cx.notify();
     }
 
     fn handle_key_down(
@@ -1132,6 +1438,9 @@ impl DesktopView {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_new = !this.show_new;
                                 this.action_error = None;
+                                if this.show_new {
+                                    this.open_new_session(cx);
+                                }
                                 cx.notify();
                             })),
                     ),
@@ -1410,15 +1719,145 @@ impl DesktopView {
             )
     }
 
+    /// The provider control: the probe list once it has answered, and the text field the
+    /// form always had until then.
+    fn render_provider_field(&self, tokens: DesktopTokens) -> gpui::Div {
+        if self.provider_picker_ready() {
+            // Only the probed rows: an "unserved" row carries a different annotation, and
+            // this sentence would be describing a probe that never ran on it.
+            let undetected = self
+                .provider_rows
+                .iter()
+                .filter(|row| !row.unserved && !row.detected)
+                .count();
+
+            return design::field(
+                tokens,
+                "Provider",
+                Some("Required".into()),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Select::new(&self.provider_select)
+                            .small()
+                            .w_full()
+                            .placeholder("Choose a provider"),
+                    )
+                    // Said once here rather than beside each row, and said as what it is:
+                    // a report about a probe, not a verdict on whether a session can start.
+                    .when(undetected > 0, |field| {
+                        field.child(div().text_xs().text_color(tokens.ink_3).child(
+                            "Dimmed entries are ones whose probe found no executable. The runtime decides whether a session starts.",
+                        ))
+                    }),
+            );
+        }
+
+        let hint = self.app.as_ref().and_then(|app| {
+            match (app.providers.error.as_deref(), app.providers.pending) {
+                (Some(error), _) => Some(format!("the provider list could not be read: {error}")),
+                (None, true) => Some("reading the provider list…".to_string()),
+                (None, false) => None,
+            }
+        });
+
+        design::field(
+            tokens,
+            "Provider",
+            Some("Required".into()),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(Input::new(&self.provider).prefix(Icon::new(IconName::Bot).small()))
+                .when_some(hint, |field, hint| {
+                    field.child(div().text_xs().text_color(tokens.ink_3).child(hint))
+                }),
+        )
+    }
+
+    /// The model control, which is whatever this runtime can honestly offer for the
+    /// provider now selected — a filtered list, a disabled picker, or the text field.
+    fn render_model_field(&self, tokens: DesktopTokens, cx: &mut Context<Self>) -> gpui::Div {
+        let (hint, control) = match &self.model_field {
+            ModelField::Unsupported => (
+                Some(SharedString::from("Not accepted")),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Select::new(&self.model_select)
+                            .small()
+                            .w_full()
+                            .disabled(true)
+                            .placeholder("No model option"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.ink_3)
+                            .child("This provider does not accept a model option."),
+                    ),
+            ),
+            ModelField::Text { hint } => (
+                Some(SharedString::from("Optional")),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Input::new(&self.model)
+                            .cleanable(true)
+                            .prefix(Icon::new(IconName::Settings2).small()),
+                    )
+                    .when_some(hint.clone(), |field, hint| {
+                        field.child(div().text_xs().text_color(tokens.ink_3).child(hint))
+                    }),
+            ),
+            ModelField::Rows { rows, total } => {
+                // The two framing rows are this window's, not the catalogue's, so they are
+                // not counted against the bound the runtime reported.
+                let listed = rows.len().saturating_sub(2) as u64;
+                let hint = if *total > listed {
+                    SharedString::from(format!("{listed} of {total}"))
+                } else {
+                    SharedString::from("Optional")
+                };
+
+                (
+                    Some(hint),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            Select::new(&self.model_select)
+                                .small()
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("Runtime default")
+                                .search_placeholder("Search models…"),
+                        )
+                        .when(self.model_is_custom(cx), |field| {
+                            field.child(
+                                Input::new(&self.model)
+                                    .cleanable(true)
+                                    .prefix(Icon::new(IconName::Settings2).small()),
+                            )
+                        }),
+                )
+            }
+        };
+
+        design::field(tokens, "Model", hint, control)
+    }
+
     fn render_new_session(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = design::tokens(cx);
-        let requires_chatgpt = self.provider.read(cx).value().trim() == "native"
-            && self
-                .model
-                .read(cx)
-                .value()
-                .trim()
-                .starts_with("openai_codex:");
+        let requires_chatgpt = self.new_requires_chatgpt(cx);
         let account_usable = self
             .app
             .as_ref()
@@ -1497,36 +1936,34 @@ impl DesktopView {
                     .child(
                         div()
                             .flex()
+                            .items_start()
                             .gap_3()
-                            .child(
-                                design::field(
-                                    tokens,
-                                    "Provider",
-                                    Some("Required".into()),
-                                    Input::new(&self.provider)
-                                        .prefix(Icon::new(IconName::Bot).small()),
-                                )
-                                .flex_1(),
-                            )
-                            .child(
-                                design::field(
-                                    tokens,
-                                    "Model",
-                                    Some("Optional".into()),
-                                    Input::new(&self.model)
-                                        .cleanable(true)
-                                        .prefix(Icon::new(IconName::Settings2).small()),
-                                )
-                                .flex_1(),
-                            ),
+                            .child(self.render_provider_field(tokens).flex_1())
+                            .child(self.render_model_field(tokens, cx).flex_1()),
                     )
                     .child(design::field(
                         tokens,
                         "Workspace",
                         Some("Absolute path".into()),
-                        Input::new(&self.workspace)
-                            .cleanable(true)
-                            .prefix(Icon::new(IconName::Folder).small()),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div().flex_1().child(
+                                    Input::new(&self.workspace)
+                                        .cleanable(true)
+                                        .prefix(Icon::new(IconName::Folder).small()),
+                                ),
+                            )
+                            .child(
+                                design::secondary_button("browse-workspace", "Browse…")
+                                    .flex_none()
+                                    .icon(IconName::Folder)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse_workspace(window, cx);
+                                    })),
+                            ),
                     ))
                     .child(design::field(
                         tokens,
@@ -1657,13 +2094,7 @@ impl DesktopView {
     fn render_account(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let tokens = design::tokens(cx);
         let requires_chatgpt = if self.show_new {
-            self.provider.read(cx).value().trim() == "native"
-                && self
-                    .model
-                    .read(cx)
-                    .value()
-                    .trim()
-                    .starts_with("openai_codex:")
+            self.new_requires_chatgpt(cx)
         } else {
             self.app
                 .as_ref()
@@ -1881,8 +2312,7 @@ impl DesktopView {
                                 .icon(IconName::Plus)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_new = true;
-                                    this.action_error = None;
-                                    cx.notify();
+                                    this.open_new_session(cx);
                                 })),
                         )
                     }),
@@ -2335,6 +2765,13 @@ impl DesktopView {
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The pickers are reconciled here because this is the only place holding a
+        // `Window`, and only while the form is on screen: it is the sole reader, and a
+        // reconcile that changes nothing is what every later frame does anyway.
+        if self.show_new {
+            self.sync_pickers(window, cx);
+        }
+
         let tokens = design::tokens(cx);
         let open_title = self
             .app
@@ -3040,6 +3477,233 @@ fn display_session_title(title: Option<&str>, id: &str) -> String {
         .unwrap_or_else(|| display_session_id(id))
 }
 
+/// One row of the new-session provider picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderRow {
+    name: SharedString,
+    /// Whether `runtime.providers` reported a probe that found a usable executable.
+    /// `false` is drawn dim and annotated but stays selectable: the probe found no
+    /// executable, which is all it knows, and the runtime — not this window — is the
+    /// authority on whether a session can start.
+    detected: bool,
+    /// The stored default, which this runtime's provider list does not name. Kept for the
+    /// same reason the settings picker keeps it: a config written elsewhere would
+    /// otherwise vanish from the form that is about to send it.
+    unserved: bool,
+}
+
+impl ProviderRow {
+    /// What the row says beside the name, or `None` when there is nothing to add.
+    fn note(&self) -> Option<SharedString> {
+        match (self.unserved, self.detected) {
+            (true, _) => Some("not reported here".into()),
+            (false, false) => Some("no executable found".into()),
+            (false, true) => None,
+        }
+    }
+}
+
+impl SelectItem for ProviderRow {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.name.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.name
+    }
+
+    fn render(&self, _: &mut Window, cx: &mut GpuiApp) -> impl IntoElement {
+        let tokens = design::tokens(cx);
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(self.note().is_some(), |row| row.text_color(tokens.ink_2))
+            .child(self.name.clone())
+            .when_some(self.note(), |row, note| {
+                row.child(div().text_xs().text_color(tokens.ink_3).child(note))
+            })
+    }
+}
+
+/// Which choice a model row stands for. This — not the row's label — is what the form
+/// reads back when it builds the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelChoice {
+    /// Send no model option at all and let the runtime apply whatever it configured.
+    RuntimeDefault,
+    /// A catalogue id, already carrying whatever prefix this provider's option needs.
+    Catalog(SharedString),
+    /// Whatever the operator types into the text field this row reveals.
+    Custom,
+}
+
+/// One row of the new-session model picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelRow {
+    choice: ModelChoice,
+    /// The closed picker's label. For a catalogue row this is the id itself, so what is
+    /// on screen is exactly what the request will carry.
+    label: SharedString,
+    /// The vendor's name for the model and the window it was given — secondary text only,
+    /// and absent when the snapshot stated neither.
+    detail: Option<SharedString>,
+}
+
+impl SelectItem for ModelRow {
+    type Value = ModelChoice;
+
+    /// Also the text the searchable list filters on, which is why the detail is folded in
+    /// here: a person hunting "opus" is typing the vendor's name, not the id.
+    fn title(&self) -> SharedString {
+        match &self.detail {
+            Some(detail) => format!("{} {detail}", self.label).into(),
+            None => self.label.clone(),
+        }
+    }
+
+    /// The closed picker shows the label alone; the search text above would read as a
+    /// claim about what is being sent.
+    fn display_title(&self) -> Option<AnyElement> {
+        Some(div().child(self.label.clone()).into_any_element())
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.choice
+    }
+
+    fn render(&self, _: &mut Window, cx: &mut GpuiApp) -> impl IntoElement {
+        let tokens = design::tokens(cx);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(self.label.clone())
+            .when_some(self.detail.clone(), |row, detail| {
+                row.child(div().text_xs().text_color(tokens.ink_3).child(detail))
+            })
+    }
+}
+
+/// What the new-session model field can honestly offer for one provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelField {
+    /// There is no catalogue to filter, so the field stays the free-text input it always
+    /// was. `hint` says why when there is a reason worth stating; `None` is the ordinary
+    /// case of a gateway that does not serve `runtime.models` at all.
+    Text { hint: Option<SharedString> },
+    /// The adapter normalizes no `model` option, so there is nothing a picker could send.
+    Unsupported,
+    /// The catalogue's rows: "Runtime default" first, "Custom…" last. `total` is the
+    /// catalogue's own count, above `rows` whenever the runtime truncated the list.
+    Rows { rows: Vec<ModelRow>, total: u64 },
+}
+
+/// The rows the new-session provider picker offers.
+///
+/// [`provider_choices`] already owns the rule that matters — the stored default gets a row
+/// even when this runtime's probe list has none — so this reuses it and drops only the
+/// "unset" row, which the settings picker needs and this form cannot use: a start request
+/// names a provider, and this form is where that name is stated.
+fn provider_rows(
+    providers: &Loadable<Vec<ProviderEntry>>,
+    stored: Option<&str>,
+) -> Vec<ProviderRow> {
+    let entries = providers.value.as_deref().unwrap_or_default();
+
+    provider_choices(entries, stored)
+        .into_iter()
+        .filter_map(|choice| match choice {
+            ProviderChoice::Unset => None,
+            ProviderChoice::Probed { name, ready } => Some(ProviderRow {
+                name: name.into(),
+                detected: ready,
+                unserved: false,
+            }),
+            ProviderChoice::Unserved { name } => Some(ProviderRow {
+                name: name.into(),
+                detected: false,
+                unserved: true,
+            }),
+        })
+        .collect()
+}
+
+/// What the model field becomes for `provider`, given whatever the catalogue fetch has
+/// produced so far.
+///
+/// Every path that cannot offer a list falls back to the text input rather than to an
+/// empty picker, because an empty picker claims the runtime knows of no models and none of
+/// these paths know that.
+fn model_field(models: &Loadable<ModelsCatalog>, provider: &str) -> ModelField {
+    let provider = provider.trim();
+
+    let Some(catalogue) = models.value.as_ref() else {
+        return ModelField::Text {
+            hint: match (models.error.as_deref(), models.pending) {
+                (Some(error), _) => {
+                    Some(format!("the model list could not be read: {error}").into())
+                }
+                (None, true) => Some("reading the model list…".into()),
+                // Never asked, or this gateway does not serve the verb. Either way the
+                // field is what it was before the verb existed, and says nothing extra.
+                (None, false) => None,
+            },
+        };
+    };
+
+    if provider.is_empty() {
+        return ModelField::Text {
+            hint: Some("choose a provider to see its models".into()),
+        };
+    }
+
+    let Some(row) = catalogue.provider(provider) else {
+        return ModelField::Text {
+            hint: Some(format!("this runtime's model list does not mention {provider}").into()),
+        };
+    };
+
+    if !row.model_option {
+        return ModelField::Unsupported;
+    }
+
+    let default = ModelRow {
+        choice: ModelChoice::RuntimeDefault,
+        label: match row
+            .default
+            .as_deref()
+            .map(str::trim)
+            .filter(|default| !default.is_empty())
+        {
+            Some(default) => format!("Runtime default · {default}").into(),
+            None => "Runtime default".into(),
+        },
+        detail: Some("Send no model and let the runtime choose".into()),
+    };
+
+    let mut rows = vec![default];
+    rows.extend(row.models.iter().map(|model| ModelRow {
+        choice: ModelChoice::Catalog(model.id.clone().into()),
+        label: model.id.clone().into(),
+        detail: model.detail().map(SharedString::from),
+    }));
+    rows.push(ModelRow {
+        choice: ModelChoice::Custom,
+        label: "Custom…".into(),
+        detail: Some("Type a model id this list does not carry".into()),
+    });
+
+    ModelField::Rows {
+        rows,
+        total: row.total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3135,5 +3799,204 @@ mod tests {
         assert!(preview.body.chars().count() < COLLAPSED_TOOL_CHARS);
         assert!(preview.body.starts_with('🌀'));
         assert!(preview.body.ends_with('🌀'));
+    }
+
+    /// GPUI widgets need a window server, so the two pickers are tested through the pure
+    /// functions that decide what goes in them. What is left untested here is only the
+    /// drawing.
+    fn loaded<T>(value: T) -> Loadable<T> {
+        Loadable {
+            value: Some(value),
+            error: None,
+            pending: false,
+            next_tick: 0,
+        }
+    }
+
+    fn probes() -> Loadable<Vec<ProviderEntry>> {
+        loaded(ProviderEntry::decode_list(&serde_json::json!([
+            {
+                "provider": "native",
+                "spec": {},
+                "status": { "installed": true, "compatible": true },
+                "error": null
+            },
+            {
+                "provider": "claude",
+                "spec": {},
+                "status": { "installed": false, "compatible": false },
+                "error": null
+            },
+            { "provider": "kimi", "spec": {}, "status": null, "error": "probe_timeout" }
+        ])))
+    }
+
+    fn catalogue() -> Loadable<ModelsCatalog> {
+        loaded(
+            ModelsCatalog::decode(&serde_json::json!({
+                "source": "llm_db",
+                "epoch": 41,
+                "limit": 2,
+                "providers": [
+                    {
+                        "provider": "native",
+                        "catalog": "openai",
+                        "default": "openai_codex:gpt-5.6-sol",
+                        "model_option": true,
+                        "total": 9,
+                        "models": [
+                            {
+                                "id": "openai_codex:gpt-5.6-sol",
+                                "name": "GPT-5.6 Sol",
+                                "context_window": 400000
+                            },
+                            { "id": "openai_codex:gpt-5.2-codex" }
+                        ]
+                    },
+                    {
+                        "provider": "amp",
+                        "catalog": null,
+                        "default": null,
+                        "model_option": false,
+                        "total": 0,
+                        "models": []
+                    }
+                ]
+            }))
+            .expect("a catalogue"),
+        )
+    }
+
+    #[test]
+    fn a_provider_whose_probe_found_nothing_is_annotated_and_still_offered() {
+        let rows = provider_rows(&probes(), Some("native"));
+
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_ref()).collect::<Vec<_>>(),
+            ["native", "claude", "kimi"],
+            "every provider the runtime reports is a row the operator can pick"
+        );
+        assert_eq!(rows[0].note(), None);
+        // "no executable found" is what a probe can say. "unavailable" would be this
+        // window overruling the runtime, which is the only thing that can actually refuse.
+        assert_eq!(rows[1].note(), Some("no executable found".into()));
+        assert_eq!(
+            rows[2].note(),
+            Some("no executable found".into()),
+            "a probe that timed out is not a probe that succeeded"
+        );
+    }
+
+    #[test]
+    fn a_stored_default_this_runtime_does_not_report_keeps_its_row() {
+        let rows = provider_rows(&probes(), Some("opencode"));
+
+        let stored = rows.last().expect("a row for the stored default");
+        assert_eq!(stored.name.as_ref(), "opencode");
+        assert!(stored.unserved);
+        assert_eq!(stored.note(), Some("not reported here".into()));
+        assert_eq!(
+            rows.len(),
+            4,
+            "the settings picker's \"unset\" row has no meaning in a form that must name \
+             a provider: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_provider_list_offers_only_what_the_configuration_named() {
+        let rows = provider_rows(&Loadable::default(), Some("native"));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name.as_ref(), "native");
+        assert!(
+            rows[0].unserved,
+            "before the probe answers, the only row is the stored one — which is why the \
+             form still shows its text field"
+        );
+        assert!(provider_rows(&Loadable::default(), None).is_empty());
+    }
+
+    #[test]
+    fn the_model_rows_frame_the_catalogue_with_a_default_and_an_escape_hatch() {
+        let ModelField::Rows { rows, total } = model_field(&catalogue(), "native") else {
+            panic!("the native row carries a model option");
+        };
+
+        assert_eq!(total, 9, "the count that did not fit is still reported");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.choice.clone())
+                .collect::<Vec<_>>(),
+            [
+                ModelChoice::RuntimeDefault,
+                ModelChoice::Catalog("openai_codex:gpt-5.6-sol".into()),
+                ModelChoice::Catalog("openai_codex:gpt-5.2-codex".into()),
+                ModelChoice::Custom,
+            ]
+        );
+        assert_eq!(
+            rows[0].label.as_ref(),
+            "Runtime default · openai_codex:gpt-5.6-sol",
+            "the default is named when the runtime named it"
+        );
+        assert_eq!(
+            rows[1].label.as_ref(),
+            "openai_codex:gpt-5.6-sol",
+            "the label is the id the request will carry, prefix and all"
+        );
+        assert_eq!(rows[1].detail, Some("GPT-5.6 Sol · 400K context".into()));
+        assert!(
+            rows[1].title().contains("GPT-5.6 Sol"),
+            "the searchable text folds in the vendor's name: {:?}",
+            rows[1].title()
+        );
+        assert_eq!(rows[2].detail, None);
+    }
+
+    #[test]
+    fn a_provider_that_takes_no_model_option_gets_no_picker_to_send_from() {
+        assert_eq!(model_field(&catalogue(), "amp"), ModelField::Unsupported);
+    }
+
+    #[test]
+    fn a_catalogue_that_cannot_answer_leaves_the_text_field_in_place() {
+        // Never asked, or a gateway that does not serve `runtime.models`. The field is
+        // what it always was and says nothing it cannot support.
+        assert_eq!(
+            model_field(&Loadable::default(), "native"),
+            ModelField::Text { hint: None }
+        );
+
+        let pending = Loadable::<ModelsCatalog> {
+            pending: true,
+            ..Loadable::default()
+        };
+        assert_eq!(
+            model_field(&pending, "native"),
+            ModelField::Text {
+                hint: Some("reading the model list…".into())
+            }
+        );
+
+        let failed = Loadable::<ModelsCatalog> {
+            error: Some("upstream timeout".to_string()),
+            ..Loadable::default()
+        };
+        assert_eq!(
+            model_field(&failed, "native"),
+            ModelField::Text {
+                hint: Some("the model list could not be read: upstream timeout".into())
+            }
+        );
+
+        assert_eq!(
+            model_field(&catalogue(), "opencode"),
+            ModelField::Text {
+                hint: Some("this runtime's model list does not mention opencode".into())
+            },
+            "a provider the catalogue omits gets a text field, not an empty list that \
+             would claim the runtime knows of no models"
+        );
     }
 }
