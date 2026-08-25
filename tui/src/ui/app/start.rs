@@ -438,6 +438,26 @@ impl App {
         self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
     }
 
+    /// Asks for the model catalogue if this connection has not got one yet.
+    ///
+    /// Gated on `hello.methods` rather than asked-and-refused: an older gateway would
+    /// answer `-32601`, and a picker reading that error would report a broken runtime
+    /// where the truth is a runtime that predates the verb. Left unasked, the catalogue
+    /// stays empty and the surfaces that would have used it stay free-text — which is
+    /// exactly what they were before this existed.
+    pub(super) fn fetch_models(&mut self) {
+        if !self.hello.serves("runtime.models") {
+            return;
+        }
+
+        if self.models.value.is_some() || self.models.pending {
+            return;
+        }
+
+        self.models.started();
+        self.issue(Call::new(Tag::Models, "runtime.models", json!({})));
+    }
+
     pub(super) fn new_session_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 

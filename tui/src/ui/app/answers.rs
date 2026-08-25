@@ -117,6 +117,19 @@ impl App {
                     .providers
                     .failed(error.to_string(), ticks, PROVIDER_TICKS),
             },
+            Tag::Models => match result {
+                Ok(value) => match ModelsCatalog::decode(&value) {
+                    Ok(catalogue) => self.models.ok(catalogue, ticks, MODEL_TICKS),
+                    Err(error) => self.models.failed(
+                        format!("runtime.models did not decode: {error}"),
+                        ticks,
+                        MODEL_TICKS,
+                    ),
+                },
+                // Including the `-32601` a gateway that does not serve the verb answers
+                // with. A picker reading this shows the refusal rather than an empty list.
+                Err(error) => self.models.failed(error.to_string(), ticks, MODEL_TICKS),
+            },
             Tag::Sessions(plane) => match result {
                 Ok(value) => {
                     let sessions = self.retain_offline_session_rows(

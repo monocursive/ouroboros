@@ -37,8 +37,9 @@ use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
-    Capabilities, CursorPruned, Effort, Event, EventType, PlanChoice, Plane, ProviderEntry,
-    RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
+    Capabilities, CursorPruned, Effort, Event, EventType, ModelsCatalog, PlanChoice, Plane,
+    ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage,
+    TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -103,6 +104,9 @@ const LIST_TICKS: u64 = 38; // ~3s
 const UPGRADE_TICKS: u64 = 63; // ~5s
 const DETAIL_TICKS: u64 = 125; // ~10s: `Mesh.state/1` is a whole agent's state tree
 const PROVIDER_TICKS: u64 = 750; // ~60s: each entry probes an executable
+/// ~4min. The catalogue is a snapshot packaged with the runtime, so it cannot change
+/// under a live connection; this cadence exists to recover a failed fetch, not to poll.
+const MODEL_TICKS: u64 = 3_000;
 const ACCOUNT_TICKS: u64 = 375; // ~30s; ~1s while a managed login is pending
 const ACCOUNT_LOGIN_TICKS: u64 = 13;
 const NOTICE_TICKS: u64 = 63;
@@ -242,6 +246,8 @@ pub enum Tag {
     AccountLogout,
     Status,
     Providers,
+    /// `runtime.models`. Asked for only where a picker will read it, never on a cadence.
+    Models,
     Sessions(Plane),
     Agents,
     AgentState(String),
@@ -833,6 +839,10 @@ pub struct App {
     pub account: Loadable<AccountState>,
     pub status: Loadable<RuntimeStatus>,
     pub providers: Loadable<Vec<ProviderEntry>>,
+    /// What the runtime can vouch for about each provider's models. Fetched on demand by
+    /// the surfaces that offer a model picker; a gateway that does not serve
+    /// `runtime.models` leaves this empty and those surfaces stay free-text.
+    pub models: Loadable<ModelsCatalog>,
     pub sessions: SessionsTab,
     pub agents: Explorer,
     pub teams: Explorer,
@@ -1083,6 +1093,7 @@ impl App {
             account: Loadable::default(),
             status: Loadable::default(),
             providers: Loadable::default(),
+            models: Loadable::default(),
             sessions: SessionsTab::default(),
             agents: Explorer::default(),
             teams: Explorer::default(),
@@ -2447,6 +2458,7 @@ impl App {
             Tag::Account => self.account.due(self.ticks),
             Tag::Status => self.status.due(self.ticks),
             Tag::Providers => self.providers.due(self.ticks),
+            Tag::Models => self.models.due(self.ticks),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.due(self.ticks),
             Tag::Sessions(Plane::Coding) => self.sessions.coding.due(self.ticks),
             Tag::Agents => self.agents.rows.due(self.ticks),
@@ -2466,6 +2478,7 @@ impl App {
             Tag::Account => self.account.started(),
             Tag::Status => self.status.started(),
             Tag::Providers => self.providers.started(),
+            Tag::Models => self.models.started(),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.started(),
             Tag::Sessions(Plane::Coding) => self.sessions.coding.started(),
             Tag::Agents => self.agents.rows.started(),
