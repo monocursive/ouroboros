@@ -439,6 +439,22 @@ fn block(out: &mut String, cell: &Cell, stamps: &[String], said: &mut usize, wid
                 out.push('\n');
             }
         }
+        // The digest and nothing more. A child's own transcript is the record of what it
+        // did; what belongs in the parent's export is that it ran, how it ended, and the
+        // session id that leads to the rest.
+        Cell::Subagent(subagent) => {
+            label(out, &subagent.headline());
+
+            if !subagent.detail().is_empty() {
+                paragraph(out, &subagent.detail(), width);
+            }
+
+            for row in subagent.rows() {
+                line(out, &row);
+            }
+
+            out.push('\n');
+        }
         Cell::Divider { text, .. } => {
             paragraph(out, &format!("── {text} ──"), width);
         }

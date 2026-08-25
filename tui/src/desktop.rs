@@ -3487,6 +3487,9 @@ fn render_meta_cell(
         DesktopCellKind::File => IconName::File,
         DesktopCellKind::Diff => IconName::Replace,
         DesktopCellKind::Runtime => IconName::Settings2,
+        // The same icon an agent message carries, because that is what this row is: work
+        // another agent did, reported here.
+        DesktopCellKind::Subagent => IconName::Bot,
         DesktopCellKind::Status => IconName::Info,
         DesktopCellKind::Divider => IconName::Dash,
     };

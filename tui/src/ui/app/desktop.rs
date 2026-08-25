@@ -29,6 +29,10 @@ pub enum DesktopCellKind {
     File,
     Diff,
     Runtime,
+    /// A child agent this session spawned. Its own kind rather than [`Self::Runtime`] so
+    /// the desktop can give it the agent icon: a reader should be able to see that a row
+    /// is another agent's work without reading it.
+    Subagent,
     Status,
     Divider,
 }
@@ -1062,6 +1066,27 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
                 .join("\n"),
             tone: desktop_tone(block.tone),
             streaming: false,
+            metadata: Vec::new(),
+        },
+        // Keyed by task so the desktop's list keeps one child's row identified across the
+        // rewrites its progress reports cause, rather than treating each render as a new
+        // row and losing whatever the reader had expanded.
+        Cell::Subagent(subagent) => DesktopCell {
+            key: subagent
+                .task_id
+                .as_ref()
+                .map(|task| format!("subagent:{task}")),
+            kind: DesktopCellKind::Subagent,
+            label: subagent.headline(),
+            body: [subagent.detail(), subagent.rows().join("\n")]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tone: desktop_tone(subagent.tone()),
+            // A child that has not settled is still working, and the desktop's live
+            // treatment is the only thing on that row that says so.
+            streaming: !subagent.settled,
             metadata: Vec::new(),
         },
         Cell::Divider { text, tone, .. } => DesktopCell {

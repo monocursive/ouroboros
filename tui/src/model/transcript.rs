@@ -108,6 +108,11 @@ pub enum PresentationEvent {
     /// and no more; the terminal one carries a digest of the result, never the result,
     /// because that is the child's own record.
     Delegation(Box<crate::model::native::DelegationEvent>),
+    /// A child agent this session spawned, at one moment of its life: spawned, reporting
+    /// progress, or settled. Unlike a delegation there may be many of these per child —
+    /// the runtime sends up to sixty-four progress reports — so the cell layer folds them
+    /// onto one row per `task_id` rather than drawing each one.
+    Subagent(Box<crate::model::native::SubagentEvent>),
     /// Something the provider said that this client does not model. Named by its own kind
     /// so it is one dim line rather than an invisible event.
     ProviderNote {
@@ -507,6 +512,14 @@ fn provider_note(payload: &Value) -> PresentationEvent {
             if let Some(report) = crate::model::native::Compaction::decode(payload) {
                 return PresentationEvent::Compaction(Box::new(report));
             }
+        }
+        // A child agent's own lifecycle. Drawn in full for the same reason the two above
+        // are: it is this runtime's record of work it started, and a parent transcript
+        // that showed nothing while a child ran would be a transcript missing the work.
+        Some("subagent") => {
+            return PresentationEvent::Subagent(Box::new(
+                crate::model::native::SubagentEvent::decode(payload),
+            ));
         }
         _other => {}
     }

@@ -809,6 +809,150 @@ impl DelegationEvent {
     }
 }
 
+/// How many of a settled child's changed paths the parent's transcript names.
+///
+/// The count beside them is the whole number, so a child that touched three hundred files
+/// still reports three hundred — this only bounds how many of them get spelled out in a
+/// conversation that is about the parent's work, not the child's.
+const SUBAGENT_FILES: usize = 16;
+
+/// Which moment of a child agent's life a `subagent` provider event reports.
+///
+/// `Other` exists because the runtime may name a phase this build has not heard of, and a
+/// client that dropped it would show a child that spawned and then stopped existing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentPhase {
+    Spawned,
+    Progress,
+    Settled,
+    /// A phase word this build does not model, kept verbatim. Empty where the payload
+    /// named no phase at all.
+    Other(String),
+}
+
+impl SubagentPhase {
+    fn decode(word: Option<&str>) -> Self {
+        match word {
+            Some("spawned") => Self::Spawned,
+            Some("progress") => Self::Progress,
+            Some("settled") => Self::Settled,
+            Some(other) => Self::Other(bounded(other, LABEL_BYTES)),
+            None => Self::Other(String::new()),
+        }
+    }
+
+    pub fn settled(&self) -> bool {
+        matches!(self, Self::Settled)
+    }
+}
+
+/// One `provider_event` whose `kind` is `subagent`: a child agent spawning, reporting, or
+/// settling in the parent's own transcript.
+///
+/// Every field is optional and every default is the honest one. A child may be placed on
+/// another fleet machine, in which case the payload names the `node` it ran on and sets
+/// `remote`; an older event that predates fleet placement carries neither, and an absent
+/// pair means the child ran here — which is why `remote` defaults to `false` rather than
+/// to "unknown". Nothing below invents a number the runtime did not send: a zero this
+/// client made up would be indistinguishable from a zero the child measured.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentEvent {
+    pub phase: Option<SubagentPhase>,
+    pub task_id: Option<String>,
+    pub description: Option<String>,
+    pub provider_session_id: Option<String>,
+    /// Where the child was placed. Absent means this machine.
+    pub node: Option<String>,
+    /// True only where the runtime said so. An absent flag is local, not unknown.
+    pub remote: bool,
+    pub workspace: Option<String>,
+    /// Whether the child was given a worktree of its own — the `spawned` payload's bool,
+    /// or the presence of the `settled` payload's map.
+    pub worktree: bool,
+    /// The settled payload's worktree map, which is the only one that says how it retired.
+    pub worktree_detail: Option<Worktree>,
+    pub tools: Vec<String>,
+    pub background: bool,
+    pub depth: Option<u64>,
+    pub max_turns: Option<u64>,
+    pub deadline_ms: Option<u64>,
+    pub turns: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub files_changed: Option<u64>,
+    /// Named paths, bounded by [`SUBAGENT_FILES`]; `files_changed` stays the whole count.
+    pub files: Vec<String>,
+    /// `"completed"`, `"failed"`, `"stopped"` or `"timed_out"`, as the runtime spelled it.
+    pub status: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub approvals_denied: Option<u64>,
+    pub summary_bytes: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl SubagentEvent {
+    pub fn decode(payload: &Value) -> Self {
+        let Some(map) = payload.as_object() else {
+            return Self::default();
+        };
+
+        let worktree_detail = Worktree::decode(map.get("worktree"));
+
+        Self {
+            phase: Some(SubagentPhase::decode(
+                map.get("phase").and_then(Value::as_str),
+            )),
+            task_id: at(map, "task_id"),
+            description: at(map, "description"),
+            provider_session_id: at(map, "provider_session_id"),
+            node: at(map, "node"),
+            remote: flag(map, "remote").unwrap_or(false),
+            workspace: at(map, "workspace"),
+            // Two shapes for one key: `spawned` sends a bool, `settled` sends the worktree
+            // itself. Either one means the child had one.
+            worktree: flag(map, "worktree").unwrap_or(false) || worktree_detail.is_some(),
+            worktree_detail,
+            tools: names(map.get("tools"), usize::MAX),
+            background: flag(map, "background").unwrap_or(false),
+            depth: count(map, "depth"),
+            max_turns: count(map, "max_turns"),
+            deadline_ms: count(map, "deadline_ms"),
+            turns: count(map, "turns"),
+            tool_calls: count(map, "tool_calls"),
+            files_changed: count(map, "files_changed"),
+            files: names(map.get("files"), SUBAGENT_FILES),
+            status: at(map, "status"),
+            input_tokens: count(map, "input_tokens"),
+            output_tokens: count(map, "output_tokens"),
+            approvals_denied: count(map, "approvals_denied"),
+            summary_bytes: count(map, "summary_bytes"),
+            cost_usd: map.get("cost_usd").and_then(Value::as_f64),
+            error: sentence(map, "error", 512),
+        }
+    }
+
+    pub fn phase(&self) -> SubagentPhase {
+        self.phase
+            .clone()
+            .unwrap_or_else(|| SubagentPhase::Other(String::new()))
+    }
+}
+
+/// A JSON array of strings, trimmed, bounded, and with the empties dropped.
+fn names(value: Option<&Value>, limit: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| string(Some(value)))
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The `operator_shell` half of a `provider_event` payload (B7).
 ///
 /// The runtime writes one of these after every command it ran, so a command survives a
