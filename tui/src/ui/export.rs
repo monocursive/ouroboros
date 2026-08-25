@@ -891,6 +891,105 @@ mod tests {
         );
     }
 
+    /// The export is what a session looks like outside this client. A child agent's row
+    /// has to survive that trip: an export that dropped it would be an export claiming
+    /// this session did nothing during the minutes a child was working for it.
+    #[test]
+    fn an_export_carries_a_child_agents_digest_at_every_width() {
+        let mut watch = Watch::new(Plane::Interactive, "sess-parent".into());
+
+        watch.absorb(vec![
+            event(
+                1,
+                "provider_event",
+                json!({
+                    "kind": "subagent",
+                    "phase": "spawned",
+                    "task_id": "task-a",
+                    "description": "audit the parser",
+                    "provider_session_id": "sess-child",
+                    "worktree": true,
+                    "background": true,
+                    "depth": 2,
+                    "node": "ouro-2@fleet",
+                    "remote": true
+                }),
+            ),
+            event(
+                2,
+                "provider_event",
+                json!({
+                    "kind": "subagent",
+                    "phase": "progress",
+                    "task_id": "task-a",
+                    "turns": 4,
+                    "tool_calls": 11,
+                    "files_changed": 2
+                }),
+            ),
+            event(
+                3,
+                "provider_event",
+                json!({
+                    "kind": "subagent",
+                    "phase": "settled",
+                    "task_id": "task-a",
+                    "description": "audit the parser",
+                    "provider_session_id": "sess-child",
+                    "status": "completed",
+                    "turns": 9,
+                    "tool_calls": 31,
+                    "files_changed": 4,
+                    "input_tokens": 18_400,
+                    "output_tokens": 2_100,
+                    "cost_usd": 0.0731,
+                    "node": "ouro-2@fleet",
+                    "remote": true
+                }),
+            ),
+        ]);
+
+        for width in [60usize, 100, 160] {
+            let text = transcript(&watch, width);
+
+            for expected in [
+                "Subagent audit the parser",
+                "⇄ ouro-2@fleet",
+                "⎇ worktree",
+                // The digest is a paragraph, so a narrow measure folds it. Every fact in
+                // it survives the fold; only the line it sits on changes.
+                "completed · 9 turns · 31 tool calls · 4 files",
+                "$0.0731",
+                "session sess-child",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "width {width} lost {expected:?}:\n{text}"
+                );
+            }
+
+            assert_eq!(
+                text.matches("Subagent audit the parser").count(),
+                1,
+                "three events, one row: {text}"
+            );
+            assert!(
+                !text.contains("4 turns"),
+                "the superseded progress report is not exported: {text}"
+            );
+        }
+
+        // Unfolded, at a measure that holds it, the digest is one line.
+        assert!(
+            transcript(&watch, 160).contains(
+                "completed · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · \
+                 $0.0731"
+            ),
+            "{}",
+            transcript(&watch, 160)
+        );
+    }
+
     #[test]
     fn a_double_width_word_is_cut_on_a_cell_boundary_not_a_character_one() {
         let lines = wrap(&"漢".repeat(40), 20);

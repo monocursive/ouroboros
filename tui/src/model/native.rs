@@ -1195,4 +1195,95 @@ mod tests {
             1
         );
     }
+
+    /// One key, two shapes: `spawned` says whether the child got a worktree, and `settled`
+    /// sends the worktree itself. Both mean it had one, and only the second says how it
+    /// was retired.
+    #[test]
+    fn a_child_agent_reads_a_worktree_from_either_shape_the_runtime_sends() {
+        let spawned = SubagentEvent::decode(&json!({"phase": "spawned", "worktree": true}));
+        assert!(spawned.worktree);
+        assert!(spawned.worktree_detail.is_none());
+
+        let settled = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "worktree": {"path": "/tmp/w", "retired": "kept"}
+        }));
+        assert!(settled.worktree);
+        assert_eq!(
+            settled.worktree_detail.expect("the map").retired.as_deref(),
+            Some("kept")
+        );
+
+        let none = SubagentEvent::decode(&json!({"phase": "spawned", "worktree": false}));
+        assert!(!none.worktree);
+    }
+
+    /// A child that carries no placement ran here. `remote` defaults to false rather than
+    /// to unknown, because every event this runtime wrote before fleet placement existed
+    /// is a local child and must keep reading as one.
+    #[test]
+    fn a_child_agent_without_a_placement_is_local_not_unknown() {
+        let old = SubagentEvent::decode(&json!({"phase": "spawned", "task_id": "t"}));
+
+        assert!(!old.remote);
+        assert!(old.node.is_none());
+
+        // A node without the flag is still local: the runtime naming where a local child
+        // ran is not the runtime saying it left.
+        let named = SubagentEvent::decode(&json!({"phase": "spawned", "node": "ouro-1@fleet"}));
+        assert!(!named.remote);
+        assert_eq!(named.node.as_deref(), Some("ouro-1@fleet"));
+
+        let placed = SubagentEvent::decode(
+            &json!({"phase": "spawned", "node": "ouro-2@fleet", "remote": true}),
+        );
+        assert!(placed.remote);
+    }
+
+    /// Payloads this build cannot read at all. None of them may panic, and none of them
+    /// may invent a number the runtime did not send.
+    #[test]
+    fn a_child_agent_payload_this_build_cannot_read_decodes_to_nothing_rather_than_a_guess() {
+        let scalar = SubagentEvent::decode(&json!("not an object"));
+        assert_eq!(scalar, SubagentEvent::default());
+        assert!(scalar.turns.is_none(), "an absent counter is not a zero");
+
+        let unknown = SubagentEvent::decode(&json!({"phase": "paused", "task_id": "t"}));
+        assert_eq!(unknown.phase(), SubagentPhase::Other("paused".to_string()));
+        assert!(!unknown.phase().settled());
+
+        let unnamed = SubagentEvent::decode(&json!({"task_id": "t"}));
+        assert_eq!(unnamed.phase(), SubagentPhase::Other(String::new()));
+
+        // Wrong types where numbers and lists belong: dropped, never coerced.
+        let wrong = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "turns": "nine",
+            "tools": "read",
+            "files": {"a": 1},
+            "cost_usd": "free"
+        }));
+        assert!(wrong.turns.is_none());
+        assert!(wrong.tools.is_empty());
+        assert!(wrong.files.is_empty());
+        assert!(wrong.cost_usd.is_none());
+    }
+
+    /// The named paths are bounded; the count beside them is not, so a child that touched
+    /// three hundred files still reports three hundred.
+    #[test]
+    fn a_settled_childs_named_paths_are_bounded_and_its_count_is_not() {
+        let files: Vec<_> = (0..(SUBAGENT_FILES + 20))
+            .map(|index| json!(format!("src/f{index}.rs")))
+            .collect();
+        let event = SubagentEvent::decode(&json!({
+            "phase": "settled",
+            "files": Value::Array(files),
+            "files_changed": SUBAGENT_FILES + 20
+        }));
+
+        assert_eq!(event.files.len(), SUBAGENT_FILES);
+        assert_eq!(event.files_changed, Some((SUBAGENT_FILES + 20) as u64));
+    }
 }

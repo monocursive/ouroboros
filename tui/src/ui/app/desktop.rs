@@ -1164,7 +1164,7 @@ fn desktop_tone(tone: Tone) -> DesktopTone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::transcript_cells::ToolCell;
+    use crate::ui::transcript_cells::{SubagentCell, ToolCell};
     use serde_json::json;
 
     #[test]
@@ -1182,5 +1182,81 @@ mod tests {
 
         assert_eq!(cell.key.as_deref(), Some("tool:call-42"));
         assert_eq!(cell.kind, DesktopCellKind::Tool);
+    }
+
+    /// Parity is not two renderers that happen to agree. It is one projection with two
+    /// renderers over it, and this is the seam where the desktop reads it — so what the
+    /// desktop shows for a child agent is asserted against the same [`Cell`] the pane draws.
+    #[test]
+    fn a_running_child_agent_reaches_the_desktop_keyed_and_live() {
+        let cell = desktop_cell(Cell::Subagent(SubagentCell {
+            task_id: Some("task-a".to_string()),
+            description: Some("audit the parser".to_string()),
+            provider_session_id: Some("sess-child".to_string()),
+            node: Some("ouro-2@fleet".to_string()),
+            remote: true,
+            worktree: true,
+            background: true,
+            depth: Some(2),
+            turns: Some(4),
+            tool_calls: Some(11),
+            files: Some(2),
+            ..SubagentCell::default()
+        }));
+
+        assert_eq!(cell.kind, DesktopCellKind::Subagent);
+        assert_eq!(
+            cell.key.as_deref(),
+            Some("subagent:task-a"),
+            "the row keeps its identity across the rewrites progress causes"
+        );
+        assert_eq!(
+            cell.label,
+            "Subagent audit the parser · ⇄ ouro-2@fleet · ⎇ worktree · background · depth 2"
+        );
+        assert!(
+            cell.body.contains("4 turns · 11 tool calls · 2 files"),
+            "{cell:#?}"
+        );
+        assert!(
+            cell.body.contains("session sess-child"),
+            "the desktop leads to the child's own transcript too: {cell:#?}"
+        );
+        assert!(cell.streaming, "a child that has not settled is working");
+        assert_eq!(cell.tone, DesktopTone::Muted);
+    }
+
+    /// A settled child stops being live, and its verdict becomes the row's tone.
+    #[test]
+    fn a_settled_child_agent_stops_streaming_and_takes_its_verdicts_tone() {
+        let settled = |status: &str| {
+            desktop_cell(Cell::Subagent(SubagentCell {
+                task_id: Some("task-a".to_string()),
+                description: Some("audit the parser".to_string()),
+                status: Some(status.to_string()),
+                settled: true,
+                turns: Some(9),
+                tool_calls: Some(31),
+                files: Some(4),
+                input_tokens: Some(18_400),
+                output_tokens: Some(2_100),
+                ..SubagentCell::default()
+            }))
+        };
+
+        let completed = settled("completed");
+        assert!(!completed.streaming);
+        assert_eq!(completed.tone, DesktopTone::Success);
+        assert!(
+            completed.body.contains(
+                "completed · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens"
+            ),
+            "{completed:#?}"
+        );
+
+        assert_eq!(settled("failed").tone, DesktopTone::Error);
+        assert_eq!(settled("timed_out").tone, DesktopTone::Error);
+        // Neither a success nor a failure, and the desktop does not pick one.
+        assert_eq!(settled("stopped").tone, DesktopTone::Muted);
     }
 }
