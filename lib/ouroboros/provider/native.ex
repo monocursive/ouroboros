@@ -24,12 +24,27 @@ defmodule Ouroboros.Provider.Native do
       since C5 — by running `bash` inside the node's OS sandbox. Where the node has no
       sandbox backend `bash` is still refused outright, because a shell that cannot be
       made read-only under a read-only label is a lie about the label.
-    * **`:unrestricted` is not offered.** `normalized_values.sandbox_mode` lists only
-      `:default`, `:read_only`, and `:workspace_write`. C5 gave this provider a sandbox
-      to relax, not a reason to offer a mode that turns everything off;
-      `Ouroboros.Provider.Native.Sandbox` understands `:unrestricted` so nothing breaks
-      if the vocabulary widens, but until someone decides that on purpose the answer to
-      "let it out" is a human, not a flag.
+    * **`:unrestricted` is offered, deliberately.** `normalized_values.sandbox_mode`
+      lists `:default`, `:read_only`, `:workspace_write`, and `:unrestricted`, valid at
+      start and through `interactive.configure`. C5 said the answer to "let it out" was
+      a human rather than a flag; the human has since decided, so the flag exists and
+      says what it does. What it means is narrow and worth stating exactly:
+
+        * It is about **the shell**. `bash` runs with no OS sandbox — the
+          `{:unsandboxed, :unrestricted}` branch of `Ouroboros.Provider.Native.Sandbox`,
+          which logs a warning naming the session every time a command takes it. The
+          `sandbox` marker on the `bash` tool call reads `none`, so a client footer says
+          "no OS sandbox" from a fact rather than a guess.
+        * It is **not** about the structured file tools. `write`, `edit`, `apply_patch`
+          and every path-taking tool keep their `Ouroboros.Workspace.Path` containment
+          inside the workspace and its declared `add_dirs`. Widening those is a separate
+          decision nobody has made, and quietly folding it into this one would mean the
+          mode did two things under one name.
+        * It is **not** about who is asked. `approval_mode`, the C1 permission engine,
+          the hooks and the effect ledger are untouched: full access answers "what can
+          be written", never "who is asked".
+        * Plan mode still outranks it. Entering plan mode forces `:read_only` and
+          remembers what it displaced, `:unrestricted` included, and leaving restores it.
     * **The OS sandbox is what the node has.** `Ouroboros.Provider.Native.Sandbox`
       detects macOS `sandbox-exec` or Linux `bwrap`; `ProviderStatus.details["sandbox"]`
       names which, or `none`. On `none`, `workspace_write` is still only the tools' own
@@ -96,8 +111,9 @@ defmodule Ouroboros.Provider.Native do
       ],
       normalized_values: %{
         approval_mode: [:default, :prompt, :auto_edit, :auto_approve],
-        # No `:unrestricted`. See the moduledoc: there is no OS sandbox to relax.
-        sandbox_mode: [:default, :read_only, :workspace_write]
+        # `:unrestricted` is the shell's OS sandbox turned off, and nothing else. See the
+        # moduledoc for what it does not relax.
+        sandbox_mode: [:default, :read_only, :workspace_write, :unrestricted]
       },
       # `plan` (B2) is here rather than in `normalized_options` because
       # `Jido.Harness.SessionRequest` has no field for it and its `approval_mode` enum has
@@ -222,7 +238,8 @@ defmodule Ouroboros.Provider.Native do
   defp enforced(%{backend: :none}),
     do:
       "workspace path containment; read_only refuses write/edit/bash; no OS sandbox on " <>
-        "this node, so a bash command is bounded by approvals and rules alone"
+        "this node, so a bash command is bounded by approvals and rules alone; " <>
+        "unrestricted is the same posture, asked for by name"
 
   defp enforced(sandbox),
     do:
@@ -231,7 +248,8 @@ defmodule Ouroboros.Provider.Native do
         "; workspace_write runs bash under " <>
         Sandbox.label(sandbox) <>
         " with the workspace and declared roots writable, .git/.ouroboros/data dir/user " <>
-        "config read-only, and the network denied"
+        "config read-only, and the network denied; unrestricted runs bash with no OS " <>
+        "sandbox at all, and leaves the file tools' path containment in place"
 
   defp version do
     case Application.spec(:ouroboros, :vsn) do

@@ -74,7 +74,7 @@ defmodule Ouroboros.Provider.NativeTest do
                ])
     end
 
-    test "offers every approval mode and no sandbox mode it cannot enforce" do
+    test "offers every approval mode and every sandbox mode, `:unrestricted` included" do
       spec = Native.spec()
 
       assert spec.normalized_values.approval_mode == [
@@ -84,8 +84,15 @@ defmodule Ouroboros.Provider.NativeTest do
                :auto_approve
              ]
 
-      assert spec.normalized_values.sandbox_mode == [:default, :read_only, :workspace_write]
-      refute :unrestricted in spec.normalized_values.sandbox_mode
+      # `:unrestricted` is offered on purpose: it turns the OS sandbox off for the shell
+      # and does nothing else — the file tools keep their path containment, the permission
+      # engine and `approval_mode` are untouched. See the adapter's moduledoc.
+      assert spec.normalized_values.sandbox_mode == [
+               :default,
+               :read_only,
+               :workspace_write,
+               :unrestricted
+             ]
     end
 
     test "declares one transport, and it is the one the session adapter implements" do
@@ -166,10 +173,10 @@ defmodule Ouroboros.Provider.NativeTest do
 
     test "refuses a sandbox mode it cannot enforce, by name" do
       assert {:error, {:unsupported_safety_options, detail}} =
-               Provider.safety_options(:native, [sandbox_mode: :unrestricted], :coding)
+               Provider.safety_options(:native, [sandbox_mode: :nonsense], :coding)
 
       assert detail.provider == :native
-      assert detail.message =~ "cannot enforce sandbox_mode: :unrestricted"
+      assert detail.message =~ "cannot enforce sandbox_mode: :nonsense"
       assert detail.message =~ ":workspace_write"
     end
 
@@ -178,6 +185,22 @@ defmodule Ouroboros.Provider.NativeTest do
                Provider.safety_options(:native, [sandbox_mode: :read_only], :coding)
 
       assert Keyword.get(options, :sandbox_mode) == :read_only
+    end
+
+    test "accepts unrestricted on both planes, because it is now a mode this provider has" do
+      assert {:ok, coding} =
+               Provider.safety_options(:native, [sandbox_mode: :unrestricted], :coding)
+
+      assert Keyword.get(coding, :sandbox_mode) == :unrestricted
+
+      assert {:ok, interactive} =
+               Provider.safety_options(
+                 :native,
+                 [sandbox_mode: :unrestricted],
+                 {:interactive, nil}
+               )
+
+      assert Keyword.get(interactive, :sandbox_mode) == :unrestricted
     end
   end
 
