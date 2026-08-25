@@ -153,7 +153,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | F5 | landed | `/export`; compaction archives |
 | G1 | landed | `interactive.delegate/delegations`; client `/delegate` with a caller-owned id, `delegation` events as transcript cells, child rows nested under the parent in the rail, `Ctrl+T` lists delegations beside the plan (Enter/Esc navigation lives in `/delegations`, a cursor surface) |
 | G2 | landed | fleet triage: needs-input / working / done from declared state across every node, counts in the footer, node labels on rail cards and picker rows, offline owners keep their group with a `last_known` mark; `Space` peek and `r` reply on the session picker (the rail has no row cursor); `ouro agents [--json]` starts no runtime — **live-verified** against a scratch daemon |
-| G3 | landed (runtime) | the native `agent` tool spawns a child native session inside the same interactive session — isolated context, the parent's tools intersected with an allowlist, never more permissive than the parent (plan, sandbox, approval mode), optional worktree (refused with the reason when the node cannot lease one), `background: true` with a companion `agent_result` to collect — with bounds: depth 2, at most 4 running children (a fifth is refused, not queued), 12 turns by default, a 300 s deadline, a 16 KiB summary; `provider_event kind: "subagent"` at spawn/progress/settled; a child's approvals reach the parent's channel; its usage folds into the parent's totals under the child's own turn id; its calls are ledgered with the parent named; stopped when the parent session closes. Live round trip through the interactive plane. It also found the D7 defect (no session could write inside a worktree on a node with a data directory), fixed the same day. Client rendering of the `subagent` events is pending; one turn per child, no steering into one |
+| G3 | landed | the native `agent` tool spawns a child native session inside the same interactive session — isolated context, the parent's tools intersected with an allowlist, never more permissive than the parent (plan, sandbox, approval mode), optional worktree (refused with the reason when the node cannot lease one), `background: true` with a companion `agent_result` to collect — with bounds: depth 2, at most 4 running children (a fifth is refused, not queued), 12 turns by default, a 300 s deadline, a 16 KiB summary; `provider_event kind: "subagent"` at spawn/progress/settled; a child's approvals reach the parent's channel; its usage folds into the parent's totals under the child's own turn id; its calls are ledgered with the parent named; stopped when the parent session closes. Live round trip through the interactive plane. It also found the D7 defect (no session could write inside a worktree on a node with a data directory), fixed the same day. A child can now be **placed on another machine of the fleet**: `machine:` names a connected `:core` node, `workspace:` (required with it) an absolute path there; the session request and worktree materialize on the target so its filesystem is the one validated, and approvals relay back to the parent's human. Both clients draw the `subagent` events as one folded row per child with a `⇄ node` badge when remote. Still: one turn per child, no steering into one |
 | G4 | pending | visible agent-to-agent messaging |
 | G5 | pending | orchestration UI |
 | H1 | landed | `ouro run --json|--stream-json`, result object, exit codes; **live-verified**. `files_changed` counts every `file_change` plus the target of a well-known write tool once its result was not an error — Claude's harness adapter emits no `file_change`, so a Claude edit used to finish as `[]` |
@@ -189,7 +189,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway; `ouro --continue` finds this directory's newest session on any machine) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
 | 17 | Memory & instructions | 0 | 2 (AGENTS.md hierarchy, skills; no cross-machine sync) |
-| 18 | In-session parallelism | 1 | 3 (native subagents with bounds, summaries, and background collection; delegation on the wire and in the rail; the client does not draw `subagent` events yet) |
+| 18 | In-session parallelism | 1 | 4 (native subagents with bounds, summaries, and background collection, placeable on other fleet machines; delegation on the wire and in the rail; both clients draw `subagent` rows) |
 | 19 | Background handoff + remote attach | 2 | 2 |
 | 20 | Cross-machine / fleet coordination | 2 | 3 (fleet ledger queries; triage across nodes in the rail, the picker, and `ouro agents`) |
 | 21 | Programmability | 1 | 3 (hooks, skills, `ouro run --json`, MCP server, generated protocol reference, and `ouro acp` so editors drive it as an agent) |
@@ -197,7 +197,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 23 | Provider freedom & pricing transparency | 2 | 3 (ten providers incl. native on thirty model vendors; cost shown) |
 | 24 | Audit & governance | 2 | 3 (permission and operator-shell effects ledgered; fleet-wide queries and a verifiable export chain; native tool calls as ledger entries still pending) |
 | 25 | Vendor honesty & stability | 1 | 1 |
-| | **Total / 75** | **23** | **55** |
+| | **Total / 75** | **23** | **56** |
 
 ### Honest limits added this wave
 
@@ -248,8 +248,8 @@ what a user of `ouro` on `review-fixes` gets today.
 - C4's Codex halves (`thread/compact/start` behind `interactive.compact`, a
   per-provider models seam) were interrupted by the account's weekly usage limit; the
   ACP services and the `mode` key landed, the Codex work sits uncommitted in the agent's
-  worktree and is not on the branch. The client draws neither `subagent` events nor the
-  `ledger_ref` on tool rows yet.
+  worktree and is not on the branch. The client now draws `subagent` events as one folded
+  row per child; the `ledger_ref` on tool rows is still not drawn.
 - The MCP client speaks stdio only and validates no arguments (the server owns its
   schema); a `url` server is refused by name, never silently dropped. MCP tool names are
   absent from the cached system-prompt tool list (the loop rebuilds the specs before every

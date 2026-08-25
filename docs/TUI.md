@@ -508,12 +508,14 @@ than as a second entry anywhere. Three phases, all on the parent's stream:
              "provider_session_id": "native-9f3c-…", "workspace": "/repo",
              "worktree": false, "tools": ["read", "grep", "glob"],
              "background": false, "depth": 1,
-             "max_turns": 8, "deadline_ms": 300000}}
+             "max_turns": 8, "deadline_ms": 300000,
+             "node": "ouroboros@mac-1", "remote": false}}
 
 {"type": "provider_event",
  "payload": {"kind": "subagent", "phase": "progress", "task_id": "sub-9f3c…",
              "description": "ledger writers", "provider_session_id": "native-9f3c-…",
-             "turns": 2, "tool_calls": 5, "files_changed": 0}}
+             "turns": 2, "tool_calls": 5, "files_changed": 0,
+             "node": "ouroboros@mac-1"}}
 
 {"type": "provider_event",
  "payload": {"kind": "subagent", "phase": "settled", "task_id": "sub-9f3c…",
@@ -521,8 +523,19 @@ than as a second entry anywhere. Three phases, all on the parent's stream:
              "status": "completed", "turns": 3, "tool_calls": 5,
              "files_changed": 2, "files": ["lib/a.ex", "lib/b.ex"],
              "input_tokens": 12043, "output_tokens": 388, "cost_usd": 0.0041,
-             "approvals_denied": 0, "summary_bytes": 812}}
+             "approvals_denied": 0, "summary_bytes": 812,
+             "node": "ouroboros@mac-1", "remote": false}}
 ```
+
+`node` names the machine the child ran on and `remote` says whether that is a different
+node of the fleet: the `agent` tool takes `machine:` (a connected `:core` node, named in
+full or by an unambiguous fragment) and `workspace:` (an absolute path on that machine,
+required with `machine:` and refused without it). The child's session request, worktree,
+sandbox, hooks, permission rules, and MCP config are all the **target** node's; the
+parent's posture travels in the request, and the child's approvals still relay to the
+parent's human. The client folds all three phases onto one transcript row per `task_id`
+(TUI and desktop), with a `⇄ node` badge only when `remote` is true — a `node` without
+the flag is the runtime naming where a local child ran, not saying it left.
 
 `status` is one of `completed`, `failed`, `stopped`, `timed_out`. `error` is present only
 when there is one; `cost_usd` is **absent rather than zero** when the child's model could
@@ -546,11 +559,15 @@ session**, with the parent's own `request_id`, the child's original `kind`
 {"type": "approval_requested", "request_id": "napp_…",
  "payload": {"kind": "file_change", "paths": ["/repo/lib/b.ex"], "reason": "…",
              "subagent": {"task_id": "sub-9f3c…", "description": "ledger writers",
-                          "provider_session_id": "native-9f3c-…"}}}
+                          "provider_session_id": "native-9f3c-…",
+                          "node": "ouroboros@mac-1"}}}
 ```
 
 Answering it is `interactive.respond_approval` as always. A client that has never heard of
-subagents renders the modal it already has; one that has can label it with the child.
+subagents renders the modal it already has; one that has can label it with the child —
+and with the `node`, because a person approving a relayed file change is authorizing a
+write to a filesystem that may not be in front of them. (The shipped modal does not draw
+the `subagent` object yet.)
 
 **A child's spend arrives as an ordinary `usage` event with `subagent_task_id` on it**, and
 deliberately **without** `context_used`/`context_window`: a running cost should include the
