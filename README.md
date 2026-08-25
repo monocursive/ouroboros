@@ -348,11 +348,13 @@ row, no coordinator, no second workspace lease. It lives inside the parent's int
 session, its progress arrives as `provider_event`s of the parent with `kind: "subagent"`,
 and its `tool_result` is the summary.
 
-**A child can never be more permissive than its parent**, and the tool has no parameter
-that could make one. `approval_mode` and `sandbox_mode` are the parent's resolved values;
+**A child can never be more permissive than its parent**, and no parameter of the tool
+widens its posture. `approval_mode` and `sandbox_mode` are the parent's resolved values;
 a planning parent gets a planning child; the tool set is the *intersection* of what the
 call asked for with what the parent actually has, so naming a tool the parent was denied
-buys nothing; `add_dirs` are inherited only when there is no worktree.
+buys nothing; `add_dirs` are inherited only when there is no worktree. `machine:` and
+`workspace:` move where that posture is applied rather than softening it, and the node
+they move it to fences the child with its own rules on top — see *On another machine*.
 
 | Bound | Value |
 |---|---|
@@ -383,6 +385,28 @@ therefore **refused at spawn** unless it cannot ask: either the session runs in
 — a model that asked for isolation and silently got the parent's tree would make edits it
 believes are contained. A worktree holding uncommitted work when the child ends is **kept**
 and its path is in the summary.
+
+**On another machine.** `machine:` places the child on another connected node of the
+fleet, and `workspace:` is the absolute path it works in *there*. Each is refused without
+the other, and both refusals say why: a remote child cannot inherit this machine's paths,
+and a local child works in this session's own tree by construction. A name resolves in
+full or by a fragment that fits only one connected machine; an ambiguous one names the
+candidates rather than guessing, and only the chosen target is probed with
+`Cluster.ensure_placeable/1`.
+
+The **whole launch runs on the target** — the worktree, the request validation, the
+session — because `cwd` and a `git worktree` are facts about a filesystem, and deciding
+them here would be [F2](docs/FLEET.md) with a new caller. So the child is fenced by the
+workspace it was given there, judged by the target's own permission rules, engine, hooks
+and sandbox, and writes its transcript, checkpoints and ledger entries on the target;
+`worktree: true` is leased against the target's `workspace_allowed_roots`; `add_dirs` is
+empty, because a root of this machine is not a root of that one; and an MCP tool name that
+survived the intersection resolves against the target's MCP configuration, so one it does
+not serve is refused in-band there rather than at spawn. What travels is the parent's
+posture — approval mode, resolved sandbox mode, the plan flag, the tool set, the model and
+every bound — and approvals still reach **this** session's human, relayed back over the
+distribution link. `spawned`, `progress` and `settled` all carry `node`, spawn and settle
+also carry `remote`, and the summary a remote child returns says `… completed on <node>.`
 
 **Cost and accountability.** The child's tokens fold into the parent's `usage` events and
 its turn totals, so `/cost` stays true. The fold carries no context meter — the child's

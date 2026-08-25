@@ -559,7 +559,7 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call(:subagent_counts, _from, state) do
     running =
       Enum.count(state.subagents, fn {_task_id, entry} ->
-        entry.status == :running and Process.alive?(entry.pid)
+        entry.status == :running and subagent_alive?(entry.pid)
       end)
 
     {:reply, %{running: running, tracked: map_size(state.subagents)}, state}
@@ -778,6 +778,15 @@ defmodule Ouroboros.Provider.Native.Session do
         %{state | settled_subagents: tombstones}
     end
   end
+
+  # `Process.alive?/1` answers only about this node and **raises** for a pid of any other,
+  # so a child placed on another machine cannot be asked here. It does not need to be: every
+  # tracked child is monitored, a monitor fires across the distribution link — including on
+  # `:noconnection` — and `forget_by_monitor/2` drops the entry when it does. Membership in
+  # the table is therefore already the answer for a remote child, and the local check stays
+  # only because for a local child it is free and one step fresher.
+  defp subagent_alive?(pid) when node(pid) == node(), do: Process.alive?(pid)
+  defp subagent_alive?(_remote), do: true
 
   defp forget_by_monitor(state, monitor) do
     case Enum.find(state.subagents, fn {_task_id, entry} -> entry.monitor == monitor end) do

@@ -150,6 +150,28 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   defp agent_call(input, id \\ "c1"), do: {:tool_call, %{id: id, name: "agent", input: input}}
 
+  # The parent posture `Loop.subagent_parent/1` builds, in the least of it: enough for
+  # `AgentTool.plan/2` and nothing that opens a session.
+  defp bare_parent(tag) do
+    %{
+      depth: 0,
+      provider_session_id: "native-#{tag}",
+      session_id: "sess-#{tag}",
+      session_pid: self(),
+      request: SessionRequest.new!(%{provider: :native, cwd: File.cwd!()}),
+      context: %{owner: self(), session_id: "sess-#{tag}", provider: :native},
+      scope: %{root: File.cwd!(), roots: [File.cwd!()], sandbox_mode: :workspace_write},
+      model_spec: "scripted:parent",
+      approval_mode: :auto_approve,
+      tool_names: [],
+      options: %{},
+      subscriber: self(),
+      background_subscriber: self(),
+      running: 0,
+      tracked: 0
+    }
+  end
+
   defp finish(text \\ "done"),
     do: [{:text, text}, {:usage, %{input_tokens: 10, output_tokens: 3}}, {:finish, :stop}]
 
@@ -187,9 +209,17 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert spawned.payload["max_turns"] == 12
       assert String.starts_with?(spawned.payload["provider_session_id"], "native-")
 
-      assert [_at_least_one | _] = subagent_events(events, "progress")
+      # Every subagent payload says where the child is, and a child of this node says so
+      # with this node's name rather than by omission.
+      assert spawned.payload["node"] == Atom.to_string(node())
+      assert spawned.payload["remote"] == false
+
+      assert [progress | _] = subagent_events(events, "progress")
+      assert progress.payload["node"] == Atom.to_string(node())
 
       [settled] = subagent_events(events, "settled")
+      assert settled.payload["node"] == Atom.to_string(node())
+      assert settled.payload["remote"] == false
       assert settled.payload["status"] == "completed"
       assert settled.payload["tool_calls"] == 1
       assert settled.payload["input_tokens"] == 40
@@ -440,20 +470,29 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert {:ok, spec} = AgentTool.plan(%{"prompt" => "explore"}, parent)
 
       # A planning parent hands its child the plan posture, not a way out of it.
-      assert spec.request.sandbox_mode == :read_only
-      assert spec.request.approval_mode == :prompt
-      assert spec.request.provider_options["plan"] == true
-      assert spec.request.disallowed_tools == ["bash"]
-      assert spec.request.provider_options["subagent_depth"] == 1
-      assert spec.request.provider_options["subagent_parent"] == "native-parent"
+      assert spec.request_attrs.sandbox_mode == :read_only
+      assert spec.request_attrs.approval_mode == :prompt
+      assert spec.request_attrs.provider_options["plan"] == true
+      assert spec.request_attrs.disallowed_tools == ["bash"]
+      assert spec.request_attrs.provider_options["subagent_depth"] == 1
+      assert spec.request_attrs.provider_options["subagent_parent"] == "native-parent"
       assert spec.depth == 1
 
-      # And there is no parameter on the tool that could have widened any of it.
+      # A local child is placed on this node and asks for no worktree, and both are spec
+      # fields rather than something already done to a filesystem.
+      assert spec.node == node()
+      assert spec.remote == false
+      assert spec.worktree == false
+
+      # And there is no parameter on the tool that could have widened the posture. The two
+      # placement parameters move where the posture applies; they do not soften it.
       assert Keyword.keys(AgentTool.schema()) == [
                :prompt,
                :description,
                :tools,
                :worktree,
+               :machine,
+               :workspace,
                :background,
                :max_turns
              ]
@@ -465,9 +504,9 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       }
 
       assert {:ok, prompting_spec} = AgentTool.plan(%{"prompt" => "explore"}, prompting)
-      assert prompting_spec.request.approval_mode == :prompt
-      assert prompting_spec.request.sandbox_mode == :workspace_write
-      refute Map.has_key?(prompting_spec.request.provider_options, "plan")
+      assert prompting_spec.request_attrs.approval_mode == :prompt
+      assert prompting_spec.request_attrs.sandbox_mode == :workspace_write
+      refute Map.has_key?(prompting_spec.request_attrs.provider_options, "plan")
     end
 
     test "max_turns is capped and reaches the child as its own iteration bound" do
@@ -490,15 +529,193 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       }
 
       assert {:ok, spec} = AgentTool.plan(%{"prompt" => "x", "max_turns" => 9_000}, parent)
-      assert spec.request.provider_options["max_iterations"] == 30
+      assert spec.request_attrs.provider_options["max_iterations"] == 30
 
       assert {:ok, default} = AgentTool.plan(%{"prompt" => "x"}, parent)
-      assert default.request.provider_options["max_iterations"] == 12
+      assert default.request_attrs.provider_options["max_iterations"] == 12
       assert default.deadline_ms == 300_000
 
       bounded = %{parent | options: %{"subagent_deadline_ms" => 9_000_000}}
       assert {:ok, clamped} = AgentTool.plan(%{"prompt" => "x"}, bounded)
       assert clamped.deadline_ms == 900_000
+    end
+  end
+
+  # ---------------------------------------------------------------- placement
+
+  # Every refusal below is a *unit* claim about `plan/2`: the parent map is built by hand
+  # so the posture under test is exactly the one named, and no session is opened. The
+  # end-to-end proof that a child really runs on another machine is
+  # `test/provider/native/subagent_remote_test.exs`, which needs a second VM.
+  describe "placing a child on another machine" do
+    setup do
+      %{parent: bare_parent("place")}
+    end
+
+    test "a machine named on a node that is not in a fleet is refused by name", %{parent: parent} do
+      # This test asserts the undistributed posture, so it only means anything there. The
+      # peer suite is where a distributed node is exercised.
+      if Node.alive?() do
+        assert {:error, message} =
+                 AgentTool.plan(%{"prompt" => "x", "machine" => "nowhere-at-all"}, parent)
+
+        assert message =~ "Refused:"
+      else
+        assert {:error, message} =
+                 AgentTool.plan(%{"prompt" => "x", "machine" => "builder-2"}, parent)
+
+        assert message =~ "this node is not part of a fleet"
+        assert message =~ "OUROBOROS_CLUSTER_STRATEGY"
+        assert message =~ "docs/FLEET.md"
+        assert message =~ "Omit `machine:`"
+      end
+    end
+
+    test "a workspace without a machine is refused as the containment rule it is", %{
+      parent: parent
+    } do
+      assert {:error, message} =
+               AgentTool.plan(%{"prompt" => "x", "workspace" => "/srv/repo"}, parent)
+
+      assert message =~ "`workspace: \"/srv/repo\"` means something only together with `machine:`"
+      assert message =~ "this session's own tree"
+      assert message =~ "Drop `workspace:`"
+    end
+
+    test "naming this very machine is local, and then a workspace is refused too", %{
+      parent: parent
+    } do
+      me = Atom.to_string(node())
+
+      # Undistributed, `node()` is `:nonode@nohost` and the not-a-fleet refusal comes first;
+      # that clause is asserted above. Distributed, naming yourself is simply local.
+      if Node.alive?() do
+        assert {:ok, spec} = AgentTool.plan(%{"prompt" => "x", "machine" => me}, parent)
+        assert spec.node == node()
+        assert spec.remote == false
+        assert spec.request_attrs.cwd == parent.scope.root
+
+        assert {:error, message} =
+                 AgentTool.plan(
+                   %{"prompt" => "x", "machine" => me, "workspace" => "/srv/repo"},
+                   parent
+                 )
+
+        assert message =~ "means something only together with `machine:`"
+      end
+    end
+
+    test "a machine name resolves in full, resolves by fragment, or says why it did not", %{
+      parent: parent
+    } do
+      fleet = [:core@alpha, :core@beta, :builder@alpha]
+
+      # In full, even when the same string is also part of another machine's name.
+      assert {:ok, :core@alpha} = AgentTool.resolve_machine("core@alpha", fleet)
+
+      # By a fragment that fits only one — of the host half or of the name half.
+      assert {:ok, :builder@alpha} = AgentTool.resolve_machine("builder", fleet)
+      assert {:ok, :core@beta} = AgentTool.resolve_machine("beta", fleet)
+
+      # A fragment that fits two cannot choose between them, and says which two.
+      assert {:error, ambiguous} = AgentTool.resolve_machine("core@", fleet)
+      assert ambiguous =~ "matches 2 connected machines"
+      assert ambiguous =~ "core@alpha, core@beta"
+      assert ambiguous =~ "Name one of them in full"
+
+      # A name nothing matches lists what there was to choose from.
+      assert {:error, unknown} = AgentTool.resolve_machine("gamma", fleet)
+      assert unknown =~ "no machine matches `machine: \"gamma\"`"
+      assert unknown =~ "builder@alpha, core@alpha, core@beta"
+
+      # …and when this node is the only candidate, says that instead of listing itself.
+      assert {:error, alone} = AgentTool.resolve_machine("gamma", [node()])
+      assert alone =~ "no other machine is connected to it right now"
+      assert alone =~ "Omit `machine:` to run it here"
+
+      # A node that answers a probe but cannot take work names the reason and the action.
+      assert AgentTool.unplaceable_refusal(:builder@beta, {:role, :builder, :core}) =~
+               "its role is builder, and placement needs core"
+
+      assert AgentTool.unplaceable_refusal(:builder@beta, :runtime_not_running) =~
+               "its Ouroboros runtime is not running"
+
+      assert AgentTool.unplaceable_refusal(:builder@beta, :runtime_not_running) =~
+               "Name another machine, or omit `machine:`"
+
+      # And nothing above changed what a plain local spawn does.
+      assert {:ok, spec} = AgentTool.plan(%{"prompt" => "x"}, parent)
+      assert spec.node == node()
+      refute spec.remote
+    end
+
+    test "the spec a remote child would travel as survives the wire", %{parent: parent} do
+      # Distribution serialises the spec, so every field has to mean on the target what it
+      # means here. A closure, a port or a reference does not, and the harness context is
+      # where one would arrive: it is built by `Jido.Harness.Session.Worker` out of a
+      # provider config an operator wrote.
+      dirty = %{
+        parent
+        | context: %{
+            session_id: "sess-remote",
+            provider: :native,
+            owner: self(),
+            adapter: Ouroboros.Provider.Native,
+            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            telemetry_context: %{session_id: "sess-remote"},
+            config: %{
+              test_pid: self(),
+              table: :ets.new(:spec_portability, [:public]),
+              on_event: fn event -> event end,
+              retention: %{journal_dir: "/tmp/journal", cleanup: fn -> :ok end}
+            }
+          }
+      }
+
+      assert {:ok, local} = AgentTool.plan(%{"prompt" => "x"}, dirty)
+
+      # A local spec is handed on untouched: nothing crosses a node boundary, and scrubbing
+      # it would be a behaviour change bought for nothing.
+      assert is_function(local.context.config.on_event)
+
+      # The remote path cannot be planned without a peer, so the same scrub is applied
+      # directly — it is the function `plan/2` calls for a remote child.
+      remote_context = AgentTool.portable_context(dirty.context)
+
+      assert remote_context.session_id == "sess-remote"
+      assert remote_context.adapter == Ouroboros.Provider.Native
+      assert remote_context.owner == nil
+      refute Map.has_key?(remote_context.config, :on_event)
+      refute Map.has_key?(remote_context.config, :table)
+      refute Map.has_key?(remote_context.config.retention, :cleanup)
+
+      # Pids stay: the subscriber is one, and reaching back to it is the whole point.
+      assert remote_context.config.test_pid == self()
+      assert remote_context.config.retention.journal_dir == "/tmp/journal"
+
+      # Structurally identical after a round trip through the wire format, and free of
+      # anything that names only this VM.
+      spec = %{local | context: remote_context, node: :peer@example, remote: true}
+      assert AgentTool.portable?(spec)
+      assert spec |> :erlang.term_to_binary() |> :erlang.binary_to_term() == spec
+    end
+
+    test "a remote child's own machine: resolves against its node, not its parent's" do
+      # There is no code for this and there should not be: `plan/2` reads `node()` and
+      # `Node.list/0` of whatever VM it runs in, and for a child that is the target. Depth
+      # is what bounds nesting, and distance does not touch it — a child at depth 1 on
+      # another machine still spawns grandchildren at depth 2, and a depth-2 session has no
+      # `agent` tool at all. Asserted here so the property stays written down.
+      assert AgentTool.max_depth() == 2
+
+      remote_child = %{bare_parent("depth") | depth: 1}
+      assert {:ok, spec} = AgentTool.plan(%{"prompt" => "x"}, remote_child)
+      assert spec.depth == 2
+      assert spec.tools == []
+
+      too_deep = %{bare_parent("depth") | depth: 2}
+      assert {:error, message} = AgentTool.plan(%{"prompt" => "x"}, too_deep)
+      assert message =~ "subagent depth cap is 2"
     end
   end
 
@@ -1012,6 +1229,37 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
       # An unpriced child says nothing about cost rather than saying it was free.
       refute rendered =~ "$"
+    end
+
+    test "a remote child's header names the machine it ran on" do
+      summary = %{
+        task_id: "sub-abc",
+        description: "explore",
+        provider_session_id: "native-x-y",
+        session_dir: "/srv/x",
+        status: :completed,
+        error: nil,
+        turns: 1,
+        tool_calls: 2,
+        files_changed: [],
+        files_changed_count: 0,
+        approvals_denied: 0,
+        usage: %{input: 10, output: 2, cost: nil},
+        text: "found it on the other machine",
+        worktree: nil,
+        node: :core@beta,
+        remote: true,
+        background: false,
+        depth: 1,
+        tools: ["read"]
+      }
+
+      assert Subagent.render(summary) =~ "Subagent sub-abc (explore) completed on core@beta."
+
+      # …and a child of this node reads exactly as it always did, with no trailing clause
+      # about a machine the reader never chose.
+      assert Subagent.render(%{summary | remote: false, node: node()}) =~
+               "Subagent sub-abc (explore) completed."
     end
   end
 end

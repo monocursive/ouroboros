@@ -65,6 +65,46 @@ defmodule Ouroboros.Provider.Native.Subagent do
       **kept and reported when it holds uncommitted work**, which is
       `Ouroboros.Workspace.Worktree`'s rule and not this module's to soften.
 
+  ## A child on another node
+
+  `spec.node` names the node the child runs on, and `node()` is the ordinary value of it.
+  When it names another node, `spawn/1` sends `start_and_launch/1` there by `:erpc` and
+  everything after that is unchanged: the returned pid is a remote pid, and
+  `await/2`, `summary/1`, `stop/2`, `respond/3`, the `{:subagent, task_id, …}` messages
+  and the subscriber monitor all work across the distribution link exactly as they do
+  inside one VM. That is why this process, and not the loop, is what moves.
+
+  **The launch runs on the child's node, and that is the whole design.**
+  `Jido.Harness.SessionRequest.new/1` validates `File.dir?(cwd)`, and a git worktree is a
+  directory on a disk: building either on the parent's node would answer a question about
+  the target's filesystem by looking at the wrong one — the defect `docs/FLEET.md` records
+  as F2. So the spec carries `request_attrs` (a plain map) and `worktree` (a boolean
+  *request*), and this process turns them into a request, and possibly a worktree, where
+  they mean something.
+
+  What that buys, and what it costs, stated plainly:
+
+    * the child is fenced by its own workspace root **on the target**, judged by the
+      **target's** permission rules, engine, hooks and sandbox, and writes its transcript,
+      its checkpoints and its effect-ledger entries **there**. A worktree, if one was asked
+      for, is leased against the target's `workspace_allowed_roots`;
+    * MCP tool names inherited through the parent's tool intersection resolve against the
+      **target's** MCP configuration. A name the target does not serve is refused in-band
+      there, as an ordinary failed tool result of the child, rather than at spawn;
+    * `add_dirs` is empty for a remote child: a root of the parent's machine is not a root
+      of the target's;
+    * the parent's **posture** does travel, because it rides in `request_attrs` —
+      `approval_mode`, the resolved `sandbox_mode`, the `plan` flag, the tool intersection,
+      the model, `max_iterations`, the deadline;
+    * approvals still reach the **parent's** human. The child raises one on the target,
+      this process relays it to the subscriber pid on the parent node, the parent's loop
+      puts it to a person, and the answer comes back by `respond/3`.
+
+  The spec crosses the wire, so it must hold nothing that means only what this VM says it
+  means. `Ouroboros.Provider.Native.Tools.Agent` scrubs funs, ports and references out of
+  the harness context and the provider options before a remote spawn; pids are kept, since
+  the subscriber is one and reaching back to it is the point.
+
   ## Bounds
 
   Every number here is a ceiling, and each is named where it is enforced:
@@ -72,7 +112,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   final message inside it, `@max_files` on the changed-path list, `@max_progress` on how
   many progress events one child may produce, and the caller's deadline on the whole
   thing. The child's own events are bounded by exactly what bounds any native session's,
-  because it is one.
+  because it is one. A remote spawn adds one more: `@remote_spawn_timeout`, so a node that
+  accepted the connection and then went quiet fails the spawn instead of holding the turn.
   """
 
   use GenServer, restart: :temporary
@@ -85,6 +126,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
   alias Ouroboros.Workspace.Worktree
 
   @open_timeout 30_000
+  # The erpc bound on a remote spawn. It has to exceed the launch call it wraps
+  # (`@open_timeout + 5_000`) by a margin, or a target that is merely slow would be
+  # reported as unreachable while it is still opening a session.
+  @remote_spawn_timeout @open_timeout + 20_000
+  @remote_stop_timeout 15_000
   @max_summary_bytes 16 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
@@ -97,9 +143,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
           required(:prompt) => String.t(),
           required(:description) => String.t(),
           required(:subscriber) => pid(),
-          required(:request) => SessionRequest.t(),
+          required(:request_attrs) => map(),
           required(:context) => map(),
-          optional(:worktree) => map() | nil,
+          optional(:node) => node(),
+          optional(:worktree) => boolean(),
           optional(:deadline_ms) => pos_integer(),
           optional(:background) => boolean(),
           optional(:depth) => non_neg_integer(),
@@ -111,12 +158,32 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @doc """
   Starts a child session for `spec` and sends it its prompt.
 
-  Returns `{:ok, %{pid:, task_id:, provider_session_id:, session_dir:, worktree:}}`, or
-  `{:error, reason}` with nothing started. The open is synchronous and bounded: a caller
+  Returns
+  `{:ok, %{pid:, task_id:, provider_session_id:, session_dir:, worktree:, workspace:, node:, remote:}}`,
+  or `{:error, reason}` with nothing started. The open is synchronous and bounded: a caller
   that got `:ok` has a child that is running, not one that may yet fail to start.
+
+  `spec.node` places the child. When it names another node the whole start — this process,
+  the worktree, the request, the session — happens **there**, and the `pid` that comes back
+  is a remote one that every other function in this module accepts unchanged.
   """
   @spec spawn(spec()) :: {:ok, map()} | {:error, term()}
   def spawn(spec) do
+    case Map.get(spec, :node) || node() do
+      target when target == node() -> start_and_launch(spec)
+      target -> spawn_remote(target, spec)
+    end
+  end
+
+  @doc """
+  Starts and launches one child **on this node**, for `spawn/1` and for its own `:erpc`.
+
+  Public because `:erpc.call/5` needs a named function to call on the target, and private
+  because nothing else should call it: `spawn/1` is the entry point that knows where a
+  child belongs.
+  """
+  @spec start_and_launch(spec()) :: {:ok, map()} | {:error, term()}
+  def start_and_launch(spec) do
     case DynamicSupervisor.start_child(
            Jido.Harness.SessionTransportSupervisor,
            {__MODULE__, spec}
@@ -134,6 +201,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
       {:error, reason} ->
         {:error, {:subagent_unstartable, reason}}
     end
+  end
+
+  # Every way an erpc can fail becomes an ordinary `{:error, reason}` this module's callers
+  # already handle, because the alternative is an exception thrown through the loop process
+  # in the middle of a turn — a node that went away must cost a tool result, not a session.
+  defp spawn_remote(target, spec) do
+    case :erpc.call(target, __MODULE__, :start_and_launch, [spec], @remote_spawn_timeout) do
+      {:ok, started} -> {:ok, started}
+      {:error, _reason} = error -> error
+      other -> {:error, {:subagent_unstartable, {:remote_spawn_failed, target, other}}}
+    end
+  catch
+    :error, {:erpc, reason} ->
+      {:error, {:subagent_unstartable, {:node_unreachable, target, reason}}}
+
+    kind, reason ->
+      {:error, {:subagent_unstartable, {:remote_spawn_failed, target, {kind, reason}}}}
   end
 
   @doc "This child's summary now, whether or not it has settled."
@@ -176,7 +260,9 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @spec render(map()) :: String.t()
   def render(summary) do
     header =
-      "Subagent #{summary.task_id} (#{summary.description}) #{summary.status}." <>
+      "Subagent #{summary.task_id} (#{summary.description}) #{summary.status}" <>
+        where(summary) <>
+        "." <>
         if(summary.error, do: " #{summary.error}", else: "")
 
     digest =
@@ -206,19 +292,38 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   # ---------------------------------------------------------------- server
 
+  # A local child's summary reads exactly as it always did. A remote one says where it ran,
+  # because "completed" about a machine the reader did not pick is half a sentence.
+  defp where(summary) do
+    if Map.get(summary, :remote, false) and Map.get(summary, :node),
+      do: " on #{summary.node}",
+      else: ""
+  end
+
   @impl GenServer
   def init(spec) do
     subscriber = spec.subscriber
     monitor = Process.monitor(subscriber)
+    request_attrs = Map.get(spec, :request_attrs) || %{}
+
+    # Which node the *parent* is on, read off the subscriber rather than carried in the
+    # spec: the subscriber is the pid this child reports to, so it is the definition of
+    # "the other end" and cannot drift from one.
+    origin = if is_pid(subscriber), do: node(subscriber), else: node()
 
     {:ok,
      %{
        task_id: spec.task_id,
        description: clip(spec.description, @max_description_bytes),
        prompt: spec.prompt,
-       request: spec.request,
+       request_attrs: request_attrs,
+       request: nil,
+       workspace: Map.get(request_attrs, :cwd),
        context: spec.context,
-       worktree: Map.get(spec, :worktree),
+       origin: origin,
+       remote?: node() != origin,
+       worktree_requested?: Map.get(spec, :worktree) == true,
+       worktree: nil,
        background?: Map.get(spec, :background, false),
        depth: Map.get(spec, :depth, 1),
        tools: Map.get(spec, :tools, []),
@@ -259,7 +364,13 @@ defmodule Ouroboros.Provider.Native.Subagent do
             task_id: state.task_id,
             provider_session_id: state.provider_session_id,
             session_dir: state.session_dir,
-            worktree: state.worktree
+            worktree: state.worktree,
+            # The directory the child actually runs in, and the node it runs on, both
+            # settled here rather than guessed by the caller: for a remote child neither is
+            # knowable on the parent's side until this launch has run.
+            workspace: state.workspace,
+            node: node(),
+            remote: state.remote?
           }}, state}
 
       {:error, reason} ->
@@ -337,13 +448,67 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   # ---------------------------------------------------------------- launch
 
+  # Three steps, in this order, and every one of them a fact about **this** node's
+  # filesystem: lease the worktree if one was asked for, validate the request against the
+  # directory it names, open the session in it. On the parent's node for a local child; on
+  # the target for a remote one, which is the only place any of the three is true.
+  defp launch(state) do
+    with {:ok, state} <- provision_worktree(state),
+         {:ok, request} <- build_request(state) do
+      open_child(%{state | request: request, workspace: request.cwd})
+    end
+  end
+
+  # A refusal here is never a silent fall back to the parent's tree. A model that asked for
+  # isolation and got the parent's working copy would make edits it believes are contained,
+  # which is the worst of the three possible outcomes.
+  # `Ouroboros.Provider.Native.Tools.Agent.start_refusal/1` says each of these in words.
+  defp provision_worktree(%{worktree_requested?: false} = state), do: {:ok, state}
+
+  defp provision_worktree(state) do
+    root = Map.get(state.request_attrs, :cwd)
+
+    if Worktree.admissible?() do
+      case Worktree.create(root, worktree_id()) do
+        {:ok, worktree} ->
+          {:ok,
+           %{
+             state
+             | worktree: Worktree.public(worktree),
+               request_attrs: Map.put(state.request_attrs, :cwd, worktree.root)
+           }}
+
+        {:error, reason} ->
+          {:error, {:subagent_worktree_unprovisionable, node(), reason}}
+      end
+    else
+      {:error, {:subagent_worktree_root_not_admitted, node()}}
+    end
+  end
+
+  # `new/1` rather than `new!/1`, because the validation that matters most here —
+  # `File.dir?(cwd)` — is exactly the one a caller can get wrong, and a raise inside an
+  # erpc would reach the parent as an exception instead of a sentence. The reason is
+  # rendered to a binary before it travels: an exception struct from the target is a term
+  # the parent has no reason to reconstruct.
+  defp build_request(state) do
+    case SessionRequest.new(state.request_attrs) do
+      {:ok, request} ->
+        {:ok, request}
+
+      {:error, reason} ->
+        {:error,
+         {:subagent_request_invalid, node(), Map.get(state.request_attrs, :cwd), describe(reason)}}
+    end
+  end
+
   # The child's `owner` is **this** process and never the subscriber. A subscriber gets a
   # digest; the raw stream belongs here, where it is counted, bounded, and turned into one.
   # Pointing a child at the loop directly would also rename the parent's provider session,
   # because the harness worker adopts the `provider_session_id` of any adapter event it
   # receives.
-  defp launch(state) do
-    case Session.open(state.request, %{state.context | owner: self()}) do
+  defp open_child(state) do
+    case Session.open(state.request, Map.put(state.context, :owner, self())) do
       {:ok, handle} ->
         provider_session_id = state.request.provider_session_id
         turn_id = "sub_turn_" <> random(9)
@@ -497,7 +662,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
       "provider_session_id" => state.provider_session_id,
       "turns" => state.turns,
       "tool_calls" => state.tool_calls,
-      "files_changed" => state.files_count
+      "files_changed" => state.files_count,
+      "node" => Atom.to_string(node())
     }
   end
 
@@ -594,6 +760,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
       },
       text: clip(state.text, @max_text_bytes),
       worktree: state.worktree,
+      workspace: state.workspace,
+      # Where the work happened. `node` is this process's own node — the child's — and
+      # `remote` is whether that differs from the node the subscriber is on, which is the
+      # only definition of "remote" that stays true no matter who reads the summary.
+      node: node(),
+      remote: state.remote?,
       background: state.background?,
       depth: state.depth,
       tools: state.tools
@@ -616,7 +788,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
       "input_tokens" => summary.usage.input,
       "output_tokens" => summary.usage.output,
       "approvals_denied" => summary.approvals_denied,
-      "summary_bytes" => byte_size(summary.text)
+      "summary_bytes" => byte_size(summary.text),
+      # Defaulted rather than fetched: a summary minted by a parent that could not reach its
+      # child at all still has to answer "where", and `node()` is the honest answer for one
+      # this runtime never heard from.
+      "node" => Atom.to_string(Map.get(summary, :node) || node()),
+      "remote" => Map.get(summary, :remote, false)
     }
     |> maybe_put("cost_usd", summary.usage.cost)
     |> maybe_put("error", summary.error)
@@ -663,6 +840,14 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp random(bytes), do: Base.url_encode64(:crypto.strong_rand_bytes(bytes), padding: false)
 
+  # `Ouroboros.Workspace.Worktree` validates this as a directory name, so it is minted in
+  # the shape that validator accepts rather than borrowed from a caller.
+  defp worktree_id, do: "subagent-" <> random(9)
+
+  defp describe(%{__exception__: true} = error), do: clip(Exception.message(error), 500)
+  defp describe(reason) when is_binary(reason), do: clip(reason, 500)
+  defp describe(reason), do: reason |> inspect() |> clip(500)
+
   defp clip(text, limit) when is_binary(text) and byte_size(text) <= limit, do: text
   defp clip(text, limit) when is_binary(text), do: binary_part(text, 0, limit) <> "…"
   defp clip(_text, _limit), do: ""
@@ -673,9 +858,26 @@ defmodule Ouroboros.Provider.Native.Subagent do
     :exit, reason -> {:error, {:subagent_unreachable, reason}}
   end
 
+  # `Jido.Harness.SessionTransportSupervisor` is a locally registered name, so terminating a
+  # remote child has to happen **on its own node** — asking this node's supervisor about a
+  # pid that was never its child answers `{:error, :not_found}` and leaves the child running
+  # against a workspace nobody is watching, which is the one outcome this module exists to
+  # prevent.
   defp stop_process(pid) do
-    DynamicSupervisor.terminate_child(Jido.Harness.SessionTransportSupervisor, pid)
+    case node(pid) do
+      target when target == node() ->
+        DynamicSupervisor.terminate_child(Jido.Harness.SessionTransportSupervisor, pid)
+
+      target ->
+        :erpc.call(
+          target,
+          DynamicSupervisor,
+          :terminate_child,
+          [Jido.Harness.SessionTransportSupervisor, pid],
+          @remote_stop_timeout
+        )
+    end
   catch
-    :exit, _reason -> :ok
+    _kind, _reason -> :ok
   end
 end

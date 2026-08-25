@@ -1540,15 +1540,12 @@ defmodule Ouroboros.Provider.Native.Loop do
           )
         end
 
+      # Every way a launch can fail is now mostly a fact about the node the child was
+      # placed on — its worktree root, its filesystem, its reachability — so the tool's own
+      # module says each of them in a sentence rather than inspecting a tuple into the
+      # transcript.
       {:error, reason} ->
-        refuse_subagent(
-          state,
-          call,
-          hook_context,
-          effect_id,
-          "Refused: the subagent could not be started (#{inspect(reason)}). Nothing ran, " <>
-            "and there is no task to collect."
-        )
+        refuse_subagent(state, call, hook_context, effect_id, AgentTool.start_refusal(reason))
     end
   end
 
@@ -1712,8 +1709,11 @@ defmodule Ouroboros.Provider.Native.Loop do
         summary
 
       # A child whose own process is gone still owes the parent a terminal answer. This is
-      # the least this runtime knows to be true about it, said as such.
+      # the least this runtime knows to be true about it, said as such — including *where*
+      # it was, which `node/1` on the pid still answers for a node that has gone away.
       {:error, _unreachable} ->
+        child_node = Map.get(started, :node) || node(started.pid)
+
         %{
           task_id: started.task_id,
           description: "subagent",
@@ -1730,6 +1730,9 @@ defmodule Ouroboros.Provider.Native.Loop do
           text: "",
           turn_id: nil,
           worktree: Map.get(started, :worktree),
+          workspace: Map.get(started, :workspace),
+          node: child_node,
+          remote: child_node != node(),
           background: false,
           depth: 0,
           tools: []
@@ -1761,7 +1764,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         "input_tokens" => summary.usage.input,
         "output_tokens" => summary.usage.output,
         "total_tokens" => summary.usage.input + summary.usage.output,
-        "model" => spec.request.model,
+        "model" => spec.request_attrs.model,
         "subagent_task_id" => summary.task_id,
         "provider_session_id" => summary.provider_session_id
       }
@@ -1798,7 +1801,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     Map.put(payload, "subagent", %{
       "task_id" => spec.task_id,
       "description" => spec.description,
-      "provider_session_id" => spec.request.provider_session_id
+      "provider_session_id" => spec.request_attrs.provider_session_id,
+      # Which machine is asking. A person answering an approval relayed from another node
+      # is authorizing a change to a filesystem that is not the one in front of them, and a
+      # modal that did not say so would be asking the wrong question.
+      "node" => Atom.to_string(spec.node)
     })
   end
 
@@ -1827,7 +1834,8 @@ defmodule Ouroboros.Provider.Native.Loop do
          %{
            description: spec.description,
            background: spec.background,
-           provider_session_id: started.provider_session_id
+           provider_session_id: started.provider_session_id,
+           node: Map.get(started, :node) || spec.node
          }}
       )
 
