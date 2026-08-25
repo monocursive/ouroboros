@@ -40,9 +40,11 @@ TUI's `/auto-approve` and `ouro run --approve-all`, so it works identically on e
 transport and leaves a per-request ledger trail. Questions — the plan exit and
 `ask_user`'s `kind: "question"` — are never auto-answered and keep their card. The
 approval card offers "Auto-approve session" for the same switch on ordinary permissions,
-since the composer is hidden while a card is showing; it also does not override the OS
-sandbox — a native session's protected paths (`.git`, `.ouroboros`, the data dir) stay
-protected whatever the approval posture. The mode is per session, this client
+since the composer is hidden while a card is showing. The mode does not override the OS
+sandbox by itself: a denied command raises a `sandbox escalation` card, and because that
+is a permission rather than a question, auto-approve answers it — so a `.git` write like
+a commit goes through, one ledgered escalation per command. `.ouroboros`, the node's data
+directory, and the user's ouroboros config never escalate. The mode is per session, this client
 only, and not persisted; the trigger wears the warning tone while active because a
 standing yes is a risk posture, not an action highlight.
 
