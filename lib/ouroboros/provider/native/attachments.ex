@@ -47,37 +47,74 @@ defmodule Ouroboros.Provider.Native.Attachments do
   end
 
   defp stage(path, session_dir) when is_binary(path) do
-    with {:ok, stat} <- File.stat(path),
-         true <- stat.type == :regular or {:error, {:invalid_attachment, path, :not_regular}},
-         {:ok, bytes} <- File.read(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        case File.open(path, [:read, :binary], fn file ->
+               {:attachment, stage_open(file, path, session_dir)}
+             end) do
+          {:ok, {:attachment, result}} -> result
+          {:error, reason} -> {:error, {:invalid_attachment, path, reason}}
+        end
+
+      {:ok, %File.Stat{}} ->
+        {:error, {:invalid_attachment, path, :not_regular}}
+
+      {:error, reason} ->
+        {:error, {:invalid_attachment, path, reason}}
+    end
+  end
+
+  defp stage_open(file, path, session_dir) do
+    case IO.binread(file, 12) do
+      :eof ->
+        {:ok, :file, path}
+
+      {:error, reason} ->
+        {:error, {:invalid_attachment, path, reason}}
+
+      header when is_binary(header) ->
+        case media_type(header) do
+          nil -> {:ok, :file, path}
+          _image -> stage_image(file, path, session_dir)
+        end
+    end
+  end
+
+  defp stage_image(file, path, session_dir) do
+    with {:ok, 0} <- :file.position(file, :bof),
+         bytes when is_binary(bytes) <- IO.binread(file, @max_image_bytes + 1) do
       case media_type(bytes) do
         nil ->
-          {:ok, :file, path}
+          {:error, {:invalid_attachment, path, :changed_while_reading}}
 
-        media_type when byte_size(bytes) <= @max_image_bytes ->
-          digest = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
-          extension = extension(media_type)
-          directory = Path.join(session_dir, "attachments")
-          staged_path = Path.join(directory, digest <> extension)
-
-          with :ok <- mkdir_private(directory),
-               :ok <- write_once(staged_path, bytes) do
-            {:ok, :image,
-             %{
-               type: :image,
-               path: staged_path,
-               media_type: media_type,
-               sha256: digest,
-               size: byte_size(bytes)
-             }}
-          end
-
-        _media_type ->
+        _media_type when byte_size(bytes) > @max_image_bytes ->
           {:error, {:attachment_too_large, path, @max_image_bytes}}
+
+        media_type ->
+          persist_image(bytes, media_type, session_dir)
       end
     else
-      {:error, {:invalid_attachment, _path, _reason} = reason} -> {:error, reason}
+      :eof -> {:error, {:invalid_attachment, path, :changed_while_reading}}
       {:error, reason} -> {:error, {:invalid_attachment, path, reason}}
+    end
+  end
+
+  defp persist_image(bytes, media_type, session_dir) do
+    digest = :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+    extension = extension(media_type)
+    directory = Path.join(session_dir, "attachments")
+    staged_path = Path.join(directory, digest <> extension)
+
+    with :ok <- mkdir_private(directory),
+         :ok <- write_once(staged_path, bytes) do
+      {:ok, :image,
+       %{
+         type: :image,
+         path: staged_path,
+         media_type: media_type,
+         sha256: digest,
+         size: byte_size(bytes)
+       }}
     end
   end
 

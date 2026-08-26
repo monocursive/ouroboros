@@ -570,6 +570,9 @@ defmodule Ouroboros.ClusterTest do
 
     @tag timeout: 180_000
     test "connected core query failures are incomplete without freezing an idle offline seed" do
+      reset_session_owner_evidence!()
+      on_exit(fn -> reset_session_owner_evidence!() end)
+
       core = start_app_peer!()
 
       previous_strategy = System.get_env("OUROBOROS_CLUSTER_STRATEGY")

@@ -11,7 +11,7 @@ use std::ffi::CStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -4663,11 +4663,15 @@ fn start_owned_epmd(
     let (epmd_program, executable) = validate_epmd_program(epmd_program)?;
     let lock_path = epmd_owner_lock_path(data_dir);
     let marker_path = epmd_owner_path(data_dir);
-    let mut lock = Some(create_inheritable_epmd_lock(&lock_path)?);
+    let mut lock = Some(create_epmd_lock(&lock_path)?);
     let lock_metadata = lock
         .as_ref()
         .expect("the ownership lock was just created")
         .metadata()?;
+    let lock_fd = lock
+        .as_ref()
+        .expect("the ownership lock was just created")
+        .as_raw_fd();
 
     let mut command = Command::new(&epmd_program);
     command
@@ -4680,7 +4684,8 @@ fn start_owned_epmd(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: setsid is async-signal-safe and is the only operation between fork/exec.
+    inherit_epmd_lock_on_exec(&mut command, lock_fd);
+    // SAFETY: fcntl and setsid are async-signal-safe and are the only pre-exec operations.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -4799,7 +4804,7 @@ fn validate_epmd_program(path: &Path) -> Result<(PathBuf, fs::Metadata)> {
     Ok((canonical, metadata))
 }
 
-fn create_inheritable_epmd_lock(path: &Path) -> Result<File> {
+fn create_epmd_lock(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -4816,13 +4821,28 @@ fn create_inheritable_epmd_lock(path: &Path) -> Result<File> {
     }
     let fd = file.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
         return Err(io::Error::last_os_error())
-            .context("making the EPMD ownership lock inheritable across exec");
+            .context("making the launcher copy of the EPMD ownership lock close-on-exec");
     }
     file.sync_all()?;
     sync_parent(path)?;
     Ok(file)
+}
+
+fn inherit_epmd_lock_on_exec(command: &mut Command, fd: RawFd) {
+    // The parent keeps this descriptor close-on-exec. Clearing the flag only in this
+    // command's post-fork child prevents an unrelated concurrent spawn from retaining
+    // the ownership lease.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 fn try_lock_epmd_file(file: &File) -> Result<bool> {
@@ -6628,7 +6648,31 @@ mod tests {
         let data = scratch("epmd-inherited-lock");
         fs::create_dir_all(fleet_dir(&data)).unwrap();
         let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_inheritable_epmd_lock(&lock_path).unwrap();
+        let lock = create_epmd_lock(&lock_path).unwrap();
+        let metadata = lock.metadata().unwrap();
+        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
+            .into_iter()
+            .find(|path| path.is_file())
+            .expect("a Unix sleep executable");
+        let mut command = Command::new(sleep);
+        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
+        let mut child = command.arg("30").spawn().unwrap();
+        drop(lock);
+
+        assert!(epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
+        remove_epmd_owner_artifacts(&data).unwrap();
+        fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn unrelated_children_do_not_inherit_the_epmd_ownership_lock() {
+        let data = scratch("epmd-unrelated-lock");
+        fs::create_dir_all(fleet_dir(&data)).unwrap();
+        let lock_path = epmd_owner_lock_path(&data);
+        let lock = create_epmd_lock(&lock_path).unwrap();
         let metadata = lock.metadata().unwrap();
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
@@ -6637,10 +6681,9 @@ mod tests {
         let mut child = Command::new(sleep).arg("30").spawn().unwrap();
         drop(lock);
 
-        assert!(epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
+        assert!(!epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(!epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
         remove_epmd_owner_artifacts(&data).unwrap();
         fs::remove_dir_all(data).ok();
     }
@@ -6732,7 +6775,7 @@ mod tests {
         create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_inheritable_epmd_lock(&lock_path).unwrap();
+        let lock = create_epmd_lock(&lock_path).unwrap();
         let lock_metadata = lock.metadata().unwrap();
         drop(lock);
         let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
@@ -6776,14 +6819,16 @@ mod tests {
         create(&data, None, "leaf", "127.0.0.1", Ports::DEFAULT).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_inheritable_epmd_lock(&lock_path).unwrap();
+        let lock = create_epmd_lock(&lock_path).unwrap();
         let lock_metadata = lock.metadata().unwrap();
 
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
             .find(|path| path.is_file())
             .expect("a Unix sleep executable");
-        let mut child = Command::new(sleep).arg("30").spawn().unwrap();
+        let mut command = Command::new(sleep);
+        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
+        let mut child = command.arg("30").spawn().unwrap();
         let pid = child.id() as i32;
         let waiter = thread::spawn(move || child.wait().unwrap());
         drop(lock);
@@ -6868,14 +6913,16 @@ mod tests {
         create(&data, None, "leaf", "127.0.0.1", Ports::DEFAULT).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_inheritable_epmd_lock(&lock_path).unwrap();
+        let lock = create_epmd_lock(&lock_path).unwrap();
         let lock_metadata = lock.metadata().unwrap();
 
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
             .find(|path| path.is_file())
             .expect("a Unix sleep executable");
-        let mut child = Command::new(sleep).arg("30").spawn().unwrap();
+        let mut command = Command::new(sleep);
+        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
+        let mut child = command.arg("30").spawn().unwrap();
         let pid = child.id() as i32;
         let waiter = thread::spawn(move || child.wait().unwrap());
         drop(lock);

@@ -7,6 +7,7 @@ defmodule Ouroboros.Provider.Native.SessionTest do
   alias Jido.Harness.SessionRequest
   alias Jido.Harness.TurnRequest
   alias Ouroboros.Provider.Native.Checkpoint
+  alias Ouroboros.Provider.Native.Attachments
   alias Ouroboros.Provider.Native.Session
   alias Ouroboros.Test.NativeModelScript
 
@@ -558,6 +559,20 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       assert image.media_type == "image/png"
       assert image.path != png
       assert File.read!(image.path) == File.read!(png)
+    end
+
+    test "rejects an oversized sparse image without staging it", context do
+      image = Path.join(context.workspace, "oversized.png")
+      {:ok, file} = :file.open(String.to_charlist(image), [:write, :binary])
+      :ok = :file.write(file, <<137, 80, 78, 71, 13, 10, 26, 10>>)
+      {:ok, _position} = :file.position(file, 32 * 1024 * 1024)
+      :ok = :file.write(file, <<0>>)
+      :ok = :file.close(file)
+
+      assert {:error, {:attachment_too_large, ^image, 20_971_520}} =
+               Attachments.message("inspect this", [image], context.data_dir)
+
+      refute File.exists?(Path.join(context.data_dir, "attachments"))
     end
 
     test "fork copies the parent checkpoint to a fresh provider session", context do

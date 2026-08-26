@@ -109,9 +109,16 @@ defmodule Ouroboros.Control.Permissions.Paths do
   # Walk up to the nearest ancestor the resolver accepts, then re-attach what was missing.
   defp resolve(absolute) do
     case walk(absolute, [], @max_ancestor_walk) do
-      {:ok, canonical, []} -> canonical
-      {:ok, canonical, suffix} -> Path.join([canonical | suffix])
-      :error -> Path.expand(absolute)
+      {:ok, canonical, []} ->
+        canonical
+
+      {:ok, canonical, suffix} ->
+        [canonical | suffix]
+        |> Path.join()
+        |> Path.expand()
+
+      :error ->
+        Path.expand(absolute)
     end
   end
 

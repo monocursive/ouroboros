@@ -294,6 +294,14 @@ fn run_with_timeout(
             }
         }
 
+        if reader.sink == Sink::File
+            && std::fs::metadata(scratch).is_ok_and(|metadata| metadata.len() > IMAGE_LIMIT as u64)
+        {
+            terminate_process_group(&mut child);
+            let _ = std::fs::remove_file(scratch);
+            bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
+        }
+
         if status.is_none() {
             match child.try_wait() {
                 Ok(Some(result)) => status = Some(result),
@@ -337,6 +345,15 @@ fn run_with_timeout(
             .expect("the completion condition requires captured output")
             .with_context(|| format!("reading stdout from {}", reader.program)),
         Sink::File => {
+            let length = std::fs::metadata(scratch)
+                .with_context(|| format!("inspecting what {} wrote", reader.program))?
+                .len();
+
+            if length > IMAGE_LIMIT as u64 {
+                let _ = std::fs::remove_file(scratch);
+                bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
+            }
+
             let result = std::fs::read(scratch).with_context(|| {
                 format!(
                     "reading what {} wrote to {}",
@@ -345,13 +362,7 @@ fn run_with_timeout(
                 )
             });
             let _ = std::fs::remove_file(scratch);
-            let bytes = result?;
-
-            if bytes.len() > IMAGE_LIMIT {
-                bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
-            }
-
-            Ok(bytes)
+            result
         }
     }
 }
@@ -649,6 +660,24 @@ mod tests {
 
         // Nothing usable came back, and nothing was buffered past the bound.
         assert_eq!(read(&[reader], &[], &scratch_path("test-e")), Clip::Empty);
+    }
+
+    #[test]
+    fn a_file_reader_is_stopped_before_an_oversized_file_is_read() {
+        let scratch = scratch_path("test-file-limit");
+        let _ = std::fs::remove_file(&scratch);
+        let reader = Reader::file(
+            "sh",
+            &[
+                "-c",
+                &format!("head -c {} /dev/zero > '{{}}'", IMAGE_LIMIT + 4_096),
+            ],
+        );
+
+        let error = run_with_timeout(&reader, &scratch, TIMEOUT).expect_err("the size limit");
+
+        assert!(error.to_string().contains("more than"), "{error:#}");
+        assert!(!scratch.exists(), "the oversized scratch file is removed");
     }
 
     #[test]

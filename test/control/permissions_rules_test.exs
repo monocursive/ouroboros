@@ -170,6 +170,24 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
       assert {:deny, %{id: "protected-path"}} = Rules.decide(data, [])
     end
 
+    test "a redirect cannot hide a protected path behind a missing parent", %{
+      root: root,
+      data_dir: data_dir
+    } do
+      relative_data_dir = "../" <> Path.basename(data_dir)
+
+      request =
+        Request.new(%{
+          tool: "bash",
+          command: "mkdir gap && echo pwned > gap/../#{relative_data_dir}/permissions/rules.json",
+          mode: :execute,
+          context: %{workspace: root}
+        })
+
+      assert request.write_paths == [Path.join(data_dir, "permissions/rules.json")]
+      assert {:deny, %{id: "protected-path"}} = Rules.decide(request, [])
+    end
+
     test "reading a protected path is not protected", %{root: root} do
       request =
         Request.new(%{
