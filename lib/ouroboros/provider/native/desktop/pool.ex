@@ -152,6 +152,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
 
     state = %{
       helper_path: Keyword.get(opts, :helper_path) || Desktop.helper_path(),
+      denied_app_ids: Keyword.get(opts, :denied_app_ids) || Desktop.denied_app_ids(),
       settings: settings(opts),
       port: nil,
       os_pid: nil,
@@ -379,7 +380,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
           :exit_status,
           :use_stdio,
           :hide,
-          {:args, [~c"serve"]},
+          {:args, serve_args(state)},
           {:env, filtered_env()}
         ]
       )
@@ -393,6 +394,14 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     {:ok, %{state | port: port, os_pid: os_pid}}
   rescue
     error -> {:error, Exception.message(error)}
+  end
+
+  # The helper's own deny belt (§7.3, §12): even if this node's Elixir denylist were
+  # incomplete, the helper refuses to observe or act on a bundle id it was launched to deny.
+  # Repeated `--deny-app <id>` argv, charlists for the port.
+  defp serve_args(state) do
+    [~c"serve"] ++
+      Enum.flat_map(state.denied_app_ids, fn id -> [~c"--deny-app", String.to_charlist(id)] end)
   end
 
   # Erlang's `env` option modifies the inherited environment rather than replacing it, so
