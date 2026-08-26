@@ -169,15 +169,20 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   end
 
   describe "status/0" do
-    test "is clearly marked not-yet-wired in Phase 0" do
+    test "reports the config posture and, with no pool, running: false (starts nothing)" do
       status = Desktop.status()
 
-      assert status.phase == 0
-      assert status.wired == false
-      assert status.note =~ "Phase 0 stub"
+      # Config posture is always present.
       assert status.enabled == false
+      assert status.flag == false
       assert is_list(status.denied_app_ids)
       assert is_binary(status.helper_path)
+      assert is_boolean(status.helper_present)
+
+      # No pool is running under a bare test, so the live block is absent and the honest
+      # `running: false` stands in — status must never spawn the pool to answer.
+      assert status.running == false
+      refute Map.has_key?(status, :doctor)
     end
   end
 

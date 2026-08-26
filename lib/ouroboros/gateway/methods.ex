@@ -94,6 +94,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
   alias Ouroboros.Provider.OpenAIAuth
+  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
@@ -278,6 +279,8 @@ defmodule Ouroboros.Gateway.Methods do
     # operator wrote, never authored over a socket.
     # ---------------------------------------------------------------------------------
     "mcp.list" => %{scope: :read, timeout: @default_timeout},
+    "computer_use.status" => %{scope: :read, timeout: @default_timeout},
+    "computer_use.artifact" => %{scope: :read, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
@@ -743,6 +746,18 @@ defmodule Ouroboros.Gateway.Methods do
        [
          {"workspace", :optional, :string,
           "narrow the answer to the servers claimed by sessions in this workspace; every workspace by default"},
+         @authority_node
+       ]},
+    "computer_use.status" =>
+      {:closed,
+       [
+         @authority_node
+       ]},
+    "computer_use.artifact" =>
+      {:closed,
+       [
+         {"sha256", :required, :string,
+          "the content hash of a staged screenshot from a tool_result artifact; served as base64 from this node only"},
          @authority_node
        ]},
     "code_intel.diagnostics" =>
@@ -1347,6 +1362,41 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, workspace} <- fetch_optional_string(params, "workspace"),
          {:ok, target} <- permissions_node(params) do
       mcp_call(target, workspaces: List.wrap(workspace))
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Computer Use — node-routed status and artifact fetch (docs/COMPUTER_USE.md §8.5)
+  # ---------------------------------------------------------------------------
+
+  def invoke("computer_use.status", params) do
+    with :ok <- only_keys(params, ["node"]),
+         {:ok, target} <- permissions_node(params) do
+      safe(fn ->
+        if target == node() do
+          {:ok, Desktop.status()}
+        else
+          {:ok, :erpc.call(target, Desktop, :status, [], @fleet_query_timeout)}
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("computer_use.artifact", params) do
+    with :ok <- only_keys(params, ["sha256", "node"]),
+         {:ok, sha} <- fetch_string(params, "sha256"),
+         {:ok, target} <- permissions_node(params) do
+      safe(fn ->
+        if target == node() do
+          reply(Desktop.artifact(sha))
+        else
+          reply(:erpc.call(target, Desktop, :artifact, [sha], @fleet_query_timeout))
+        end
+      end)
     else
       {:invalid, message} -> invalid_params(message)
     end

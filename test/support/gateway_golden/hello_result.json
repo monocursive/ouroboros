@@ -27,6 +27,8 @@
       "coding.start",
       "coding.subscribe",
       "coding.unsubscribe",
+      "computer_use.artifact",
+      "computer_use.status",
       "control.cancel",
       "control.get",
       "control.list",

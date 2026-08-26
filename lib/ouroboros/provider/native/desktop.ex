@@ -218,18 +218,68 @@ defmodule Ouroboros.Provider.Native.Desktop do
   """
   @spec status() :: map()
   def status do
-    %{
+    base = %{
       enabled: enabled?(),
       flag: config(:enabled) == true,
       helper_path: helper_path(),
       helper_present: helper_present?(),
-      denied_app_ids: denied_app_ids(),
-      phase: 0,
-      wired: false,
-      note:
-        "Phase 0 stub: no helper process, no screen capture, and no input injection are " <>
-          "wired. computer use is not enabled on this node."
+      denied_app_ids: denied_app_ids()
     }
+
+    case Process.whereis(Pool) do
+      nil ->
+        Map.put(base, :running, false)
+
+      pid ->
+        ps = Pool.status(pid)
+
+        Map.merge(base, %{
+          running: true,
+          phase: ps.phase,
+          doctor: ps.doctor,
+          sessions: ps.sessions
+        })
+    end
+  end
+
+  @doc """
+  Serves one staged screenshot by content hash for `computer_use.artifact` (§8.5).
+
+  Searches only the `<session_dir>/desktop/` directories the live pool has staged into, so
+  an evicted or unknown sha — or a stopped pool — is an honest `{:error, :not_found}` rather
+  than a path traversal. Returns the bytes base64-encoded with the media type and size; the
+  pool is never started to answer a fetch.
+  """
+  @spec artifact(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def artifact(sha) when is_binary(sha) do
+    with true <- sha =~ ~r/\A[a-f0-9]{64}\z/,
+         pid when is_pid(pid) <- Process.whereis(Pool),
+         staged when is_tuple(staged) <- find_staged(sha, Pool.session_dirs(pid)) do
+      read_artifact(staged)
+    else
+      _miss -> {:error, :not_found}
+    end
+  end
+
+  def artifact(_sha), do: {:error, :not_found}
+
+  defp find_staged(sha, session_dirs) do
+    Enum.find_value(session_dirs, fn dir ->
+      Enum.find_value([{"jpg", "image/jpeg"}, {"png", "image/png"}], fn {ext, media} ->
+        path = Path.join([dir, "desktop", "#{sha}.#{ext}"])
+        if File.regular?(path), do: {path, media}
+      end)
+    end)
+  end
+
+  defp read_artifact({path, media}) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        {:ok, %{bytes: Base.encode64(bytes), media_type: media, size: byte_size(bytes)}}
+
+      _unreadable ->
+        {:error, :not_found}
+    end
   end
 
   @doc """

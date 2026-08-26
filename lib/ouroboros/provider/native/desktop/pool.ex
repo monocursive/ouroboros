@@ -114,6 +114,10 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   def state(server, params, timeout_ms) when is_map(params),
     do: request(server, "state", params, timeout_ms)
 
+  @doc "The session dirs this pool has staged a snapshot for — the artifact search set (§8.5)."
+  @spec session_dirs(GenServer.server()) :: [String.t()]
+  def session_dirs(server), do: GenServer.call(server, :session_dirs)
+
   @doc "Records the last state for `session_dir` (D11)."
   @spec remember_state(GenServer.server(), String.t(), map()) :: :ok
   def remember_state(server, session_dir, state) when is_binary(session_dir) and is_map(state) do
@@ -210,6 +214,10 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
        sessions: map_size(state.snapshots),
        broken_reason: state.broken_reason
      }, state}
+  end
+
+  def handle_call(:session_dirs, _from, state) do
+    {:reply, Map.keys(state.snapshots), state}
   end
 
   @impl true
