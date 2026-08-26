@@ -220,7 +220,7 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
     not_found(
-      "fleet profile has no signed roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
+      "fleet profile has no roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
     )
   end
 

@@ -131,7 +131,9 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     # Protecting only the loader leaves the enforcement path open: one patch against the
     # journal writer makes every durable write a silent no-op, one against the release
     # authorizer unlocks the durable lane, and the control plane decides what is patched
-    # at all.
+    # at all. The forge and deploy entry points are protected for the symmetric reason —
+    # a signed replacement of the surfaces that *trigger* the lane is as good as forging
+    # it, so they are held to the same refusal as the surfaces that gate it.
     for module <- [
           NodeExecutor,
           Verifier,
@@ -139,6 +141,17 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
           Ouroboros.Release.Authorizer.Deny,
           Ouroboros.Release.Journal,
           Ouroboros.Control.Store,
+          Ouroboros.Agent.Effects,
+          Ouroboros.Agent.Effects.Runner,
+          Ouroboros.Orchestration.ForgeExecutor,
+          Ouroboros.Runtime.Capabilities,
+          Ouroboros.Mesh,
+          Ouroboros.Mesh.Directory,
+          Ouroboros.Provider.Native,
+          Ouroboros.Provider.Native.Paths,
+          Ouroboros.Provider.Native.Tools.SafeWrite,
+          Ouroboros.Workspace,
+          Ouroboros.Workspace.Path,
           Ouroboros.Application,
           Ouroboros.Application.RegistryOwner
         ] do
@@ -172,6 +185,28 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     # And once such a module is loaded, the replacement path refuses it on the same check,
     # before anything about the binary is inspected.
     assert {:module, ^module} = :code.load_binary(module, ~c"gateway_sneak.beam", binary)
+
+    assert {:ok, replacement} =
+             Artifact.build(
+               [{module, binary, old_binary: binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(replacement, allow_unsigned: true)
+  end
+
+  test "refuses to patch native containment and workspace admission, loaded or not" do
+    module = Ouroboros.Provider.Native.Sneak
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:ok, introduction} = introduce_artifact!(module, binary)
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(introduction, allow_unsigned: true)
+
+    assert {:module, ^module} = :code.load_binary(module, ~c"native_sneak.beam", binary)
 
     assert {:ok, replacement} =
              Artifact.build(

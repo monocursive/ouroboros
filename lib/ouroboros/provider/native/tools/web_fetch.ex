@@ -15,6 +15,12 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
       model can call the tool again with that URL and be gated on it properly. This is
       Claude Code's own stated reason for preferring `WebFetch(domain:)` over
       argument-constrained `Bash` rules (R3 §8d).
+    * **Public destinations only.** The host is resolved and refused when any address
+      is loopback, link-local, RFC1918, CGNAT, multicast, documentation space, or
+      IPv6 unique-local; `localhost`, `*.local`, and cloud metadata names are refused
+      before lookup. Domain rules still match the hostname; this is the address gate
+      those rules cannot see. Residual DNS-rebinding between this lookup and
+      `:httpc`'s own connect is documented on `WebFetch.Target`.
     * **One mebibyte, fifteen seconds.** The body is read with a cap and the request
       with a deadline; both are stated in the result when they bite.
 
@@ -36,7 +42,7 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     description:
       "Fetch an http(s) URL with GET and return its text. HTML is converted to text. " <>
         "Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not " <>
-        "followed.",
+        "followed. Loopback, private, link-local, and metadata destinations are refused.",
     schema: [
       url: [type: :string, required: true, doc: "The absolute http:// or https:// URL to fetch."],
       max_bytes: [
@@ -51,10 +57,13 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   @max_redirects 3
   @max_text_bytes 100 * 1024
 
+  alias Ouroboros.Provider.Native.Tools.WebFetch.Target
+
   @impl true
-  def run(params, _context) do
+  def run(params, context) do
     with {:ok, uri} <- parse(params.url),
-         {:ok, response} <- fetch(uri, min(params.max_bytes, @max_bytes), @max_redirects) do
+         {:ok, response} <-
+           fetch(uri, min(params.max_bytes, @max_bytes), @max_redirects, context) do
       {:ok, present(response)}
     else
       {:error, {:http_status, _url, _status, _phrase, _body} = reason} ->
@@ -103,9 +112,15 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
 
   defp parse(url), do: {:error, {:not_absolute, inspect(url)}}
 
-  defp fetch(_uri, _max_bytes, 0), do: {:error, :too_many_redirects}
+  defp fetch(_uri, _max_bytes, 0, _context), do: {:error, :too_many_redirects}
 
-  defp fetch(%URI{} = uri, max_bytes, remaining) do
+  defp fetch(%URI{} = uri, max_bytes, remaining, context) do
+    with :ok <- Target.admit(uri, context) do
+      request_uri(uri, max_bytes, remaining, context)
+    end
+  end
+
+  defp request_uri(%URI{} = uri, max_bytes, remaining, context) do
     request = {String.to_charlist(URI.to_string(uri)), [{~c"user-agent", ~c"ouroboros-native"}]}
 
     http_options = [
@@ -127,7 +142,7 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
          }}
 
       {:ok, {{_version, status, _phrase}, headers, _body}} when status in 300..399 ->
-        redirect(uri, header(headers, "location"), max_bytes, remaining)
+        redirect(uri, header(headers, "location"), max_bytes, remaining, context)
 
       {:ok, {{_version, status, phrase}, _headers, body}} ->
         {:error,
@@ -142,9 +157,10 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     :exit, reason -> {:error, {:request_failed, reason}}
   end
 
-  defp redirect(_uri, nil, _max_bytes, _remaining), do: {:error, :redirect_without_location}
+  defp redirect(_uri, nil, _max_bytes, _remaining, _context),
+    do: {:error, :redirect_without_location}
 
-  defp redirect(uri, location, max_bytes, remaining) do
+  defp redirect(uri, location, max_bytes, remaining, context) do
     target = URI.merge(uri, location)
 
     cond do
@@ -155,7 +171,7 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
         {:error, {:redirect_off_host, uri.host, URI.to_string(target)}}
 
       true ->
-        fetch(target, max_bytes, remaining - 1)
+        fetch(target, max_bytes, remaining - 1, context)
     end
   rescue
     _error -> {:error, :redirect_without_location}
@@ -312,6 +328,20 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   end
 
   defp describe({:request_failed, reason}), do: "the request failed: #{inspect(reason)}"
+
+  defp describe({:blocked_host, host}),
+    do:
+      "#{host} is a loopback, link-local, or metadata name. web_fetch does not open " <>
+        "sockets to those destinations."
+
+  defp describe({:blocked_address, host, address}),
+    do:
+      "#{host} resolved to #{address}, which is not a public address. web_fetch does " <>
+        "not open sockets to loopback, link-local, private, or metadata destinations."
+
+  defp describe({:unresolvable, host}),
+    do: "#{host} did not resolve to an address this tool will connect to."
+
   defp describe(reason), do: inspect(reason)
 
   defp phrase_note(phrase) do

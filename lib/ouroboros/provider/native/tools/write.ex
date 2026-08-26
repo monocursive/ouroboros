@@ -5,7 +5,9 @@ defmodule Ouroboros.Provider.Native.Tools.Write do
   Refused under `sandbox_mode: :read_only`. Missing parent directories are created,
   because the path has already been proven to be inside the workspace before this tool
   runs — `Ouroboros.Provider.Native.Paths.resolve/2` canonicalizes through every symlink
-  on the way, so a parent that resolves inside the boundary really is inside it.
+  on the way, so a parent that resolves inside the boundary really is inside it. The
+  write itself is `SafeWrite`: the proof is re-checked around the rename, because
+  resolve and the write are two moments and the filesystem can move between them.
 
   The previous content is read first so the emitted `file_change` carries a real
   unified diff rather than "a file changed", and so a later checkpoint slice has
@@ -28,15 +30,14 @@ defmodule Ouroboros.Provider.Native.Tools.Write do
 
   alias Ouroboros.Provider.Native.Diff
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Tools.Read
+  alias Ouroboros.Provider.Native.Tools.{Read, SafeWrite}
 
   @impl true
   def run(params, context) do
     with :ok <- writable(context.scope),
          {:ok, path} <- Paths.resolve(params.path, context.scope),
          {:ok, previous} <- previous(path),
-         :ok <- ensure_parent(path),
-         :ok <- write(path, params.content),
+         :ok <- SafeWrite.write(path, params.content, context.scope),
          {:ok, fingerprint} <- Read.fingerprint(path) do
       relative = Path.relative_to(path, context.scope.root)
       kind = if is_nil(previous), do: :add, else: :modify
@@ -64,24 +65,10 @@ defmodule Ouroboros.Provider.Native.Tools.Write do
     end
   end
 
-  defp ensure_parent(path) do
-    case File.mkdir_p(Path.dirname(path)) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:unwritable, Path.dirname(path), reason}}
-    end
-  end
-
-  defp write(path, content) do
-    case File.write(path, content) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:unwritable, path, reason}}
-    end
-  end
-
   defp describe(:read_only_sandbox),
     do: "this session runs with sandbox_mode: read_only, which refuses every write"
 
   defp describe({:unreadable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
-  defp describe({:unwritable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
+  defp describe({:unwritable, _path, _reason} = error), do: SafeWrite.format_reason(error)
   defp describe(reason), do: Paths.describe_error(reason)
 end

@@ -30,6 +30,10 @@ defmodule Ouroboros.Mesh do
   @agent_module_prefixes ["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]
 
   @type agent_id :: String.t()
+  # A wedged peer must be able to lose a placement or a stop without losing the caller
+  # forever; every cross-node call here carries this bound, and `:timeout` is reported
+  # as an error tuple like any other transport fault.
+  @remote_call_timeout_ms 30_000
 
   @doc """
   Starts a logical agent on the local node.
@@ -77,7 +81,7 @@ defmodule Ouroboros.Mesh do
     if target_node == node() do
       start_agent(id, opts)
     else
-      :erpc.call(target_node, __MODULE__, :start_agent, [id, opts])
+      :erpc.call(target_node, __MODULE__, :start_agent, [id, opts], @remote_call_timeout_ms)
     end
   catch
     # `:erpc` reports transport faults as `:error`, but a remote exit arrives as
@@ -210,9 +214,14 @@ defmodule Ouroboros.Mesh do
   @spec stop_agent(agent_id()) :: :ok | {:error, term()}
   def stop_agent(id) when is_binary(id) do
     case whereis(id) do
-      nil -> {:error, {:agent_not_found, id}}
-      pid when node(pid) == node() -> Ouroboros.Jido.stop_agent(pid)
-      pid -> :erpc.call(node(pid), Ouroboros.Jido, :stop_agent, [pid])
+      nil ->
+        {:error, {:agent_not_found, id}}
+
+      pid when node(pid) == node() ->
+        Ouroboros.Jido.stop_agent(pid)
+
+      pid ->
+        :erpc.call(node(pid), Ouroboros.Jido, :stop_agent, [pid], @remote_call_timeout_ms)
     end
   catch
     kind, reason -> {:error, {:remote_stop_failed, {kind, reason}}}

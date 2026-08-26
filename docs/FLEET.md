@@ -72,7 +72,8 @@ erase positive session-owner evidence. An offline former owner therefore continu
 make session lists fail closed after restart. If the machine is permanently lost, first
 inspect or export any recoverable owner-local state, then run `ouro fleet sessions forget
 --machine NAME --accept-state-loss` locally on every gateway/data directory that may have
-observed it. The authenticated operate call requires the matching signed-roster tombstone,
+observed it. The authenticated operate call requires the matching roster tombstone in the
+validated local profile (rebuilt only from a signature-verified roster import),
 refuses while that node is connected, and syncs both evidence planes before success. It is
 an irreversible local discoverability boundary only: it neither deletes files on the lost
 machine nor revokes its credential.

@@ -220,16 +220,34 @@ defmodule Ouroboros.Interactive.Task.Turns do
   def authorize_turn_attachments(%TurnRequest{attachments: []} = request, _workspace),
     do: {:ok, request}
 
-  def authorize_turn_attachments(%TurnRequest{} = request, workspace) do
+  def authorize_turn_attachments(%TurnRequest{attachments: attachments} = request, workspace) do
+    case authorize_attachment_paths(attachments, workspace) do
+      {:ok, authorized} -> {:ok, %{request | attachments: authorized}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The workspace containment every attachment list must pass, whatever carries it.
+
+  `dispatch_turn` applies it to turn requests; `Ouroboros.Interactive.Task` applies the
+  same check to steer inputs, because a steer's attachments reach the same transports
+  and the Harness validates them for existence only, never containment.
+  """
+  def authorize_attachment_paths([], _workspace), do: {:ok, []}
+
+  def authorize_attachment_paths(paths, workspace) when is_list(paths) do
     with {:ok, root} <- WorkspacePath.canonicalize(workspace),
-         {:ok, attachments} <- canonical_attachments(request.attachments, root) do
-      {:ok, %{request | attachments: attachments}}
+         {:ok, attachments} <- canonical_attachments(paths, root) do
+      {:ok, attachments}
     else
       {:error, {:attachment_outside_workspace, _path} = reason} -> {:error, reason}
       {:error, {:invalid_attachment, _path, _reason} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:invalid_attachment_workspace, reason}}
     end
   end
+
+  def authorize_attachment_paths(_paths, _workspace), do: {:error, :invalid_attachments}
 
   defp canonical_attachments(attachments, root) do
     Enum.reduce_while(attachments, {:ok, []}, fn path, {:ok, authorized} ->

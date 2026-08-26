@@ -71,12 +71,6 @@ defmodule Ouroboros.Upgrade.Artifact do
   end
 
   @doc false
-  @spec signing_payload(t()) :: binary()
-  def signing_payload(%__MODULE__{} = artifact) do
-    :erlang.term_to_binary({:ouroboros_upgrade_v1, manifest(artifact)}, [:deterministic])
-  end
-
-  @doc false
   @spec signing_payload(t(), String.t()) :: binary()
   def signing_payload(%__MODULE__{} = artifact, signer) when is_binary(signer) do
     :erlang.term_to_binary({:ouroboros_upgrade_v1, signer, manifest(artifact)}, [:deterministic])

@@ -190,6 +190,50 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
     end
   end
 
+  # ── Truncated commands ─────────────────────────────────────────────────────────────
+
+  describe "truncated commands" do
+    test "an allow rule cannot win over parts the parser never read" do
+      # 64 readable `safe` parts plus a 65th the bound drops. The allow rule covers
+      # everything matching ever saw; the line it is asked to permit is longer than that.
+      command = [List.duplicate("safe", 64), "rm -rf /"] |> List.flatten() |> Enum.join(" && ")
+
+      request = Request.new(%{tool: "bash", command: command, mode: :execute})
+
+      assert {:ask, :truncated_request} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(safe *)")])
+    end
+
+    test "a command longer than the byte bound asks even under a covering allow" do
+      command =
+        "safe " <> String.duplicate("x", Ouroboros.Control.Permissions.Shell.max_command_bytes())
+
+      request = Request.new(%{tool: "bash", command: command, mode: :execute})
+
+      assert {:ask, :truncated_request} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(safe *)")])
+    end
+
+    test "a deny rule still matches the readable prefix of a truncated line" do
+      # The refused part is inside the bound this time: deny matches fail-closed over the
+      # prefix, so truncation does not weaken them the way it withdraws an allow win.
+      command = ["rm -rf /" | List.duplicate("safe", 64)] |> Enum.join(" && ")
+
+      request = Request.new(%{tool: "bash", command: command, mode: :execute})
+
+      assert {:deny, _ref} =
+               Rules.decide(request, [rule(:node, :deny, "Bash(rm *)")])
+    end
+
+    test "exactly the bound of parts is judged whole, not truncated" do
+      command = Enum.join(List.duplicate("safe", 64), " && ")
+      request = Request.new(%{tool: "bash", command: command, mode: :execute})
+
+      assert {:allow, _ref} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(safe *)")])
+    end
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────────────
 
   defp pushing do

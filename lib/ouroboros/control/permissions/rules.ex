@@ -42,7 +42,7 @@ defmodule Ouroboros.Control.Permissions.Rules do
   governs it, not a session looking at it.
   """
 
-  alias Ouroboros.Control.Permissions.{Matcher, Paths, Request, Rule}
+  alias Ouroboros.Control.Permissions.{Matcher, Paths, Request, Rule, Shell}
 
   @protected_segments [".git", ".ouroboros"]
 
@@ -143,15 +143,27 @@ defmodule Ouroboros.Control.Permissions.Rules do
 
   defp best([], _request), do: {:ask, :no_rule}
 
-  defp best(matches, _request) do
+  defp best(matches, request) do
     winner =
       Enum.min_by(matches, fn rule ->
         {Map.fetch!(@rank, rule.decision), Map.fetch!(@scope_rank, rule.scope), rule.id}
       end)
 
     case winner.decision do
-      :ask -> {:ask, :rule}
-      decision -> {decision, Rule.ref(winner)}
+      :ask ->
+        {:ask, :rule}
+
+      # Allow quantifies over what the parser could read; a command truncated at the
+      # bound carries a tail no rule ever saw, and covering the readable prefix is not
+      # covering the line. Deny and ask already match fail-closed over the same prefix,
+      # so only an allow win is downgraded.
+      :allow ->
+        if Shell.truncated?(request.command),
+          do: {:ask, :truncated_request},
+          else: {:allow, Rule.ref(winner)}
+
+      decision ->
+        {decision, Rule.ref(winner)}
     end
   end
 

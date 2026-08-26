@@ -23,8 +23,8 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
   convenience; a half-applied patch is a tree in a state no one described and the model
   cannot reason about, and the format's own envelope says the sections belong together.
 
-  Writing itself is not transactional — three `File.write/2` calls are three syscalls —
-  so a disk that fails between them is reported by naming which files were written and
+  Writing itself is not transactional — three `SafeWrite.write/3` calls are three
+  syscalls — so a disk that fails between them is reported by naming which files were written and
   which were not. Every file written before that point is in the session's checkpoint
   and can be rewound.
 
@@ -56,8 +56,7 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
 
   alias Ouroboros.Provider.Native.Diff
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Tools.Patch
-  alias Ouroboros.Provider.Native.Tools.Read
+  alias Ouroboros.Provider.Native.Tools.{Patch, Read, SafeWrite}
 
   @similar_lines 3
 
@@ -217,7 +216,7 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
   defp commit(plans, context) do
     {written, failure} =
       Enum.reduce_while(plans, {[], nil}, fn plan, {done, nil} ->
-        case perform(plan) do
+        case perform(plan, context.scope) do
           :ok -> {:cont, {[plan | done], nil}}
           {:error, reason} -> {:halt, {done, {plan, reason}}}
         end
@@ -236,19 +235,17 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
     {:ok, result}
   end
 
-  defp perform(%{action: :write, path: path, after: content}) do
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(path, content) do
-      :ok
-    else
-      {:error, reason} -> {:error, {:unwritable, path, reason}}
+  defp perform(%{action: :write, path: path, after: content}, scope) do
+    case SafeWrite.write(path, content, scope) do
+      :ok -> :ok
+      {:error, {:unwritable, _path, _reason} = error} -> {:error, error}
     end
   end
 
-  defp perform(%{action: :delete, path: path}) do
-    case File.rm(path) do
+  defp perform(%{action: :delete, path: path}, scope) do
+    case SafeWrite.delete(path, scope) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:undeletable, path, reason}}
+      {:error, {:undeletable, _path, _reason} = error} -> {:error, error}
     end
   end
 
@@ -334,8 +331,8 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
 
   defp describe({:hunk_not_found, path, hunk, needle}), do: hunk_message(path, hunk, needle)
   defp describe({:unreadable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
-  defp describe({:unwritable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
-  defp describe({:undeletable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
+  defp describe({:unwritable, _path, _reason} = error), do: SafeWrite.format_reason(error)
+  defp describe({:undeletable, _path, _reason} = error), do: SafeWrite.format_reason(error)
   defp describe(reason), do: patch_or_path(reason)
 
   defp patch_or_path(reason) do

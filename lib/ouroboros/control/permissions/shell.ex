@@ -49,13 +49,47 @@ defmodule Ouroboros.Control.Permissions.Shell do
   @max_command_bytes 8_192
   @max_parts 64
 
+  @doc "The most bytes one command line contributes to matching."
+  @spec max_command_bytes() :: pos_integer()
+  def max_command_bytes, do: @max_command_bytes
+
+  @doc "The most sub-commands one command line is judged by."
+  @spec max_parts() :: pos_integer()
+  def max_parts, do: @max_parts
+
+  @doc """
+  Whether a command line exceeds the bounds matching honours.
+
+  A truncated line is judged only by what fit inside the bound, and what did not fit is
+  invisible to every rule. `Ouroboros.Control.Permissions.Rules` therefore never lets an
+  allow rule win over a truncated request: an unchecked 65th sub-command must not ride a
+  rule that only ever saw 64.
+  """
+  @spec truncated?(String.t() | nil) :: boolean()
+  def truncated?(command) when is_binary(command) do
+    if byte_size(command) > @max_command_bytes do
+      true
+    else
+      # The part count `split/1` reports is already capped, so count without the cap:
+      # exactly #{@max_parts} parts are judged whole and are not a truncation.
+      command
+      |> do_split("", [], nil)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> length() > @max_parts
+    end
+  end
+
+  def truncated?(_command), do: false
+
   @doc """
   Splits a command line into the sub-commands a rule must each match.
 
   Quoting is respected: `echo "a && b"` is one sub-command. A line longer than
   #{@max_command_bytes} bytes, or one that splits into more than #{@max_parts} parts, is
-  truncated to that bound — the engine treats an over-long line as unmatchable rather
-  than spending unbounded time on it, and the caller sees a shorter list than the input.
+  truncated to that bound — the caller sees a shorter list than the input, and
+  `truncated?/1` says so; `Ouroboros.Control.Permissions.Rules` refuses to let an allow
+  rule win over a truncated request rather than judging the tail nobody could read.
   """
   @spec split(String.t()) :: [String.t()]
   def split(command) when is_binary(command) do

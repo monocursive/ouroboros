@@ -699,13 +699,16 @@ escalation below.
 **A filesystem denial is put to you once, and re-run if you say yes.** When
 `workspace_write` stops a *filesystem* write, the session raises an approval with
 `kind: "sandbox_escalation"` carrying the command, the working directory, and the
-constraint the kernel enforced. Approve it and the identical command is re-run once with
-no OS sandbox, in the same turn; the model is shown the re-run's result and told the
-first attempt happened, because a command that partly succeeded before the denial has now
-run twice. Deny it, or leave it unanswered past `approval_timeout_ms`, and the sandboxed
-failure stands. `approval_mode` deliberately does not answer this — `auto_approve` means
-"do not ask me about tool calls", never "leave the OS sandbox" — so only a permission
-rule or a person grants it, and `scope: session` remembers it for that command alone.
+constraint the kernel enforced. Approve it and the identical command is re-run once in
+the fenced `:workspace_write_escalated` profile — still inside the OS sandbox, with
+only the `.git` segment fence lifted so a `git commit` can land — in the same turn;
+the model is shown the re-run's result and told the first attempt happened, because a
+command that partly succeeded before the denial has now run twice. Runtime data,
+config, `.ouroboros`, and the network policy stay enforced. Deny it, or leave it
+unanswered past `approval_timeout_ms`, and the sandboxed failure stands. `approval_mode`
+deliberately does not answer this — `auto_approve` means "do not ask me about tool
+calls", never "leave the OS sandbox" — so only a permission rule or a person grants it,
+and `scope: session` remembers it for that command alone.
 
 Three denials are never offered: a **network** denial, because external network is the
 node-level `native_sandbox_network` setting rather than one command's answer; anything
@@ -834,10 +837,11 @@ transcript it never had would be a claim with nothing behind it.
   overrides it. A session running under it says `sandbox: "none"` on every `bash` call and
   writes a warning line to the log each time a command takes it.
 - **An escalation is one command, not a session.** Approving a sandbox denial re-runs that
-  command with no OS sandbox and changes nothing about the session; the next `bash` call
-  is sandboxed again. A `scope: session` answer remembers that one command line, under a
-  key of its own — approving a `bash` call for the session never also approves escaping
-  the sandbox for it.
+  command in the fenced workspace-write profile with the `.git` fence lifted, and changes
+  nothing about the session; the next `bash` call is sandboxed again under the ordinary
+  profile. A `scope: session` answer remembers that one command line, under a key of its
+  own — approving a `bash` call for the session never also approves escaping the sandbox
+  for it. The re-run is never unsandboxed: that is what `:unrestricted` is for.
 - **A permission rule that allows a command also allows escalating it.** The engine is
   asked about the same `Bash(…)` subject the command already has, which is the simplest
   honest mapping onto the rule vocabulary that exists — and means an `allow` rule covering

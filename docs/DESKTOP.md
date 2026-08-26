@@ -43,8 +43,9 @@ approval card offers "Auto-approve session" for the same switch on ordinary perm
 since the composer is hidden while a card is showing. The mode does not override the OS
 sandbox by itself: a denied command raises a `sandbox escalation` card, and because that
 is a permission rather than a question, auto-approve answers it — so a `.git` write like
-a commit goes through, one ledgered escalation per command. `.ouroboros`, the node's data
-directory, and the user's ouroboros config never escalate. The mode is per session, this client
+a commit goes through, one ledgered escalation per command. The re-run stays inside the
+OS sandbox with only the `.git` fence lifted; it is not an unsandboxed shell.
+`.ouroboros`, the node's data directory, and the user's ouroboros config never escalate. The mode is per session, this client
 only, and not persisted; the trigger wears the warning tone while active because a
 standing yes is a risk posture, not an action highlight.
 

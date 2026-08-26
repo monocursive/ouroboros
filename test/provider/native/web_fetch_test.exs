@@ -75,6 +75,7 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
   end
 
   defp fetch(port, path, context, extra \\ %{}) do
+    context = Map.put(context, :web_fetch_allow_loopback, true)
     input = Map.merge(%{"url" => "http://127.0.0.1:#{port}#{path}"}, extra)
     Tools.execute(WebFetch, input, context, 30_000)
   end
@@ -220,6 +221,27 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       for url <- ["/just/a/path", "example.com/no-scheme", ""] do
         result = Tools.execute(WebFetch, %{"url" => url}, context, 5_000)
         assert result.is_error
+      end
+    end
+
+    test "loopback, private, metadata, and link-local destinations are refused", %{
+      context: context
+    } do
+      refusals = [
+        {"http://127.0.0.1/", "127.0.0.1"},
+        {"http://localhost/", "localhost"},
+        {"http://10.0.0.1/", "10.0.0.1"},
+        {"http://192.168.1.1/", "192.168.1.1"},
+        {"http://169.254.169.254/latest/meta-data/", "169.254.169.254"},
+        {"http://metadata.google.internal/", "metadata.google.internal"},
+        {"http://[::1]/", "::1"}
+      ]
+
+      for {url, needle} <- refusals do
+        result = Tools.execute(WebFetch, %{"url" => url}, context, 5_000)
+        assert result.is_error, url
+        assert result.output =~ needle
+        assert result.output =~ "does not open sockets"
       end
     end
   end

@@ -49,7 +49,7 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
 
   alias Ouroboros.Provider.Native.Diff
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Tools.Read
+  alias Ouroboros.Provider.Native.Tools.{Read, SafeWrite}
 
   @similar_lines 3
 
@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
          :ok <- unchanged_since_read(path, content, context),
          :ok <- distinct(params),
          {:ok, updated, tier, count} <- apply_edit(content, params, path) do
-      case File.write(path, updated) do
+      case SafeWrite.write(path, updated, context.scope) do
         :ok ->
           relative = Path.relative_to(path, context.scope.root)
           {:ok, fingerprint} = Read.fingerprint(path)
@@ -76,7 +76,7 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
            }}
 
         {:error, reason} ->
-          {:ok, %{output: "edit failed: #{path}: #{:file.format_error(reason)}", is_error: true}}
+          {:ok, %{output: "edit failed: #{SafeWrite.format_reason(reason)}", is_error: true}}
       end
     else
       {:error, reason} -> {:ok, %{output: "edit failed: #{describe(reason)}", is_error: true}}
@@ -299,6 +299,7 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
 
   defp describe({:no_match, path, old_string}), do: no_match_message(path, old_string)
   defp describe({:unreadable, path, reason}), do: "#{path}: #{:file.format_error(reason)}"
+  defp describe({:unwritable, _path, _reason} = error), do: SafeWrite.format_reason(error)
   defp describe(reason), do: Paths.describe_error(reason)
 
   @doc """

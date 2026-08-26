@@ -281,7 +281,9 @@ defmodule Ouroboros.Gateway.Methods do
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
-    # only after a signed roster tombstone is present and the machine is offline.
+    # only after a roster tombstone is present and the machine is offline. The tombstone
+    # lives in the local fleet profile, which the client rebuilds only from a roster whose
+    # signature it verified at import; this node trusts that profile and does not verify.
     "fleet.forget_session_owner" => %{scope: :operate, timeout: @default_timeout},
     # Session ids are caller-owned and both planes reconcile the same immutable intent.
     # A ceiling can fire after durable creation, so never imply that minting a second id
@@ -642,7 +644,7 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed,
        [
          {"machine", :required, :string,
-          "must appear in the validated local profile's signed-roster tombstones, and must be offline"},
+          "must appear in the validated local profile's roster tombstones, and must be offline"},
          {"accept_state_loss", :required, {:const, true},
           "anything else is refused: this retires durable session-owner evidence"}
        ]},

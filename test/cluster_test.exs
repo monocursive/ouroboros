@@ -869,7 +869,7 @@ defmodule Ouroboros.ClusterTest do
                    "accept_state_loss" => true
                  })
 
-        assert missing_message =~ "no signed roster tombstone"
+        assert missing_message =~ "no roster tombstone"
 
         write_test_fleet_profile!(fleet_dir, fleet_id,
           tombstones: [removed_member],

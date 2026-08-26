@@ -339,10 +339,13 @@ roots writable while keeping `.git`, `.ouroboros`, runtime data and user configu
 read-only; `:read_only` permits a shell with writes confined to per-call scratch. The
 network is denied by default in both modes. Without a backend, `:read_only` refuses
 `bash` and `:workspace_write` reports that the command is unsandboxed;
-`:unrestricted` is explicitly unsandboxed. `web_fetch` reaches the network and is
-bounded by the permission engine's `WebFetch(domain:)` rules rather than by a proxy; it
-refuses to follow a redirect off the host that was evaluated. The README states the same
-limits where an operator will read them.
+`:unrestricted` is explicitly unsandboxed. An approved filesystem escalation re-runs
+that one command under `:workspace_write_escalated`: the same writable roots, protected
+data/config, `.ouroboros` fence, and network policy, with only the `.git` segment
+fence lifted. `web_fetch` reaches the network and is bounded by the permission engine's
+`WebFetch(domain:)` rules *and* by an address gate that refuses loopback, link-local,
+private, and metadata destinations; it also refuses to follow a redirect off the host
+that was evaluated. The README states the same limits where an operator will read them.
 
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.
@@ -398,9 +401,15 @@ a new module from silently occupying an existing name.
 
 Policy protects the modules that make these guarantees enforceable, not just the loader:
 `Ouroboros.Upgrade.*`, `Ouroboros.Storage.*` (a patched journal writer makes every
-write a silent no-op), `Ouroboros.Release.*` (the durable lane's authorizer), and
-`Ouroboros.Control.*` (which decides what gets patched), plus the application root and
-its registry owner. On-load functions are detected by preparing the batch, because
+write a silent no-op), `Ouroboros.Release.*` (the durable lane's authorizer),
+`Ouroboros.Control.*` (which decides what gets patched), `Ouroboros.Gateway.*` (an
+auth check that can be hot-patched is no auth at all), `Ouroboros.Agent.Effects*` and
+`Ouroboros.Orchestration.*` (the forge and deploy entry points), `Ouroboros.Mesh` and
+`Ouroboros.Mesh.*` (where deployed capabilities start), `Ouroboros.Runtime.Capabilities`,
+`Ouroboros.Provider.Native` and `Ouroboros.Provider.Native.*` (path containment,
+SafeWrite, and the OS sandbox), `Ouroboros.Workspace` and `Ouroboros.Workspace.*`
+(the admission lease the file tools sit on), plus the application root and its
+registry owner. On-load functions are detected by preparing the batch, because
 `-on_load` lives in the Code chunk and never appears among a module's attributes; the
 preimage is probed too, since rollback loads it with `:code.load_binary/3`.
 
@@ -786,10 +795,11 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - Development/test permits unsigned local patch tests. Production never does. Trusted
   keys arrive through `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; boot fails on a malformed
   entry and an unset variable trusts nobody.
-- Upgrade policy rejects the upgrade, storage, release, and control namespaces, the
-  application root and its registry owner, on-load code, consolidated protocols, and
-  sticky modules. It rejects statically imported `:erlang.load_nif/2`, which a
-  runtime-resolved call evades. Loaded code remains VM-privileged.
+- Upgrade policy rejects the upgrade, storage, release, control, gateway, effect,
+  orchestration, mesh, native-provider, and workspace namespaces, the application root
+  and its registry owner, on-load code, consolidated protocols, and sticky modules. It
+  rejects statically imported `:erlang.load_nif/2`, which a runtime-resolved call
+  evades. Loaded code remains VM-privileged.
 - Newly introduced modules must be absent and named under `Ouroboros.Capability.`. Both
   rules are policy about names, not a sandbox: an introduced module is exactly as
   privileged as a replacement, and the gate only stops a new module from taking a name

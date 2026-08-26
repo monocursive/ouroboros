@@ -574,6 +574,44 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = InteractiveSession.close(ref)
   end
 
+  test "steer attachments pass the same workspace gate as turn attachments", %{id: id} do
+    base =
+      Path.join(
+        File.cwd!(),
+        ".ouro-steer-attachment-test-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace = Path.join(base, "workspace")
+    outside = Path.join(base, "outside.txt")
+    inside = Path.join(workspace, "inside.txt")
+    escape = Path.join(workspace, "escape.txt")
+    File.mkdir_p!(workspace)
+    File.write!(inside, "inside")
+    File.write!(outside, "outside")
+    File.ln_s!(outside, escape)
+    on_exit(fn -> File.rm_rf!(base) end)
+
+    assert {:ok, ref} =
+             InteractiveSession.start(id: id, provider: @provider, workspace: workspace)
+
+    # The gate is the coordinator's, ahead of the Harness, which checks steer
+    # attachments for existence only: traversal and symlink escapes are refused by name
+    # without a steer ever reaching the transport.
+    assert {:error, {:attachment_outside_workspace, "../outside.txt"}} =
+             InteractiveSession.steer(ref, %{prompt: "look", attachments: ["../outside.txt"]})
+
+    assert {:error, {:attachment_outside_workspace, "escape.txt"}} =
+             InteractiveSession.steer(ref, %{prompt: "look", attachments: ["escape.txt"]})
+
+    # A contained file passes the gate; whatever answers next is the Harness's (no
+    # active turn here), but it is not a containment refusal.
+    assert {:error, reason} =
+             InteractiveSession.steer(ref, %{prompt: "look", attachments: ["inside.txt"]})
+
+    refute match?({:attachment_outside_workspace, _}, reason)
+    assert :ok = InteractiveSession.close(ref)
+  end
+
   test "public snapshots hide turn requests and secret-bearing turn options are rejected", %{
     id: id
   } do

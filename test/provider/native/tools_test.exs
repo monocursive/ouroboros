@@ -325,6 +325,91 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
     end
   end
 
+  test "refuses a leaf that became a symlink between resolution and the write", %{
+    context: context,
+    workspace: workspace,
+    root: root
+  } do
+    # The race SafeWrite exists for: resolve proved the path, then the leaf was swapped
+    # for a link pointing outside. The write is refused, and the link's target is never
+    # touched — the planted secret keeps its bytes.
+    File.ln_s!(Path.join(root, "outside/secret.txt"), Path.join(workspace, "swapped"))
+
+    result =
+      run(
+        Ouroboros.Provider.Native.Tools.Write,
+        %{"path" => Path.join(workspace, "swapped"), "content" => "exfiltrated"},
+        context
+      )
+
+    # Paths.resolve canonicalizes the leaf to the outside target and refuses there; the
+    # containment gate is the one named either way.
+    assert result.is_error
+    assert File.read!(Path.join(root, "outside/secret.txt")) == "keep out\n"
+
+    # The same refusal holds when the tool receives an already-resolved path carrying a
+    # symlink leaf — the shape the race would produce mid-flight.
+    assert {:error, {:unwritable, _path, :symlinked_leaf}} =
+             Ouroboros.Provider.Native.Tools.SafeWrite.write(
+               Path.join(workspace, "swapped"),
+               "exfiltrated",
+               context.scope
+             )
+
+    assert File.read!(Path.join(root, "outside/secret.txt")) == "keep out\n"
+  end
+
+  test "refuses a write whose parent directory became a symlink", %{
+    context: context,
+    workspace: workspace,
+    root: root
+  } do
+    File.ln_s!(Path.join(root, "outside"), Path.join(workspace, "parent"))
+
+    assert {:error, {:unwritable, _path, :symlinked_parent}} =
+             Ouroboros.Provider.Native.Tools.SafeWrite.write(
+               Path.join([workspace, "parent", "planted.txt"]),
+               "x",
+               context.scope
+             )
+
+    refute File.exists?(Path.join(root, "outside/planted.txt"))
+  end
+
+  test "refuses a nested write through a symlinked ancestor without mkdir outside", %{
+    context: context,
+    workspace: workspace,
+    root: root
+  } do
+    File.ln_s!(Path.join(root, "outside"), Path.join(workspace, "link"))
+
+    assert {:error, {:unwritable, _path, :symlinked_parent}} =
+             Ouroboros.Provider.Native.Tools.SafeWrite.write(
+               Path.join([workspace, "link", "nested", "planted.txt"]),
+               "x",
+               context.scope
+             )
+
+    refute File.exists?(Path.join(root, "outside/nested"))
+    refute File.exists?(Path.join(root, "outside/nested/planted.txt"))
+  end
+
+  test "refuses to delete a leaf that became a symlink", %{
+    context: context,
+    workspace: workspace,
+    root: root
+  } do
+    File.ln_s!(Path.join(root, "outside/secret.txt"), Path.join(workspace, "swapped-del"))
+
+    assert {:error, {:undeletable, _path, :symlinked_leaf}} =
+             Ouroboros.Provider.Native.Tools.SafeWrite.delete(
+               Path.join(workspace, "swapped-del"),
+               context.scope
+             )
+
+    assert File.read!(Path.join(root, "outside/secret.txt")) == "keep out\n"
+  end
+
   describe "edit" do
     setup %{context: context, workspace: workspace} do
       path = write_file(workspace, "lib/a.ex", "defmodule A do\n  def x, do: 1\nend\n")

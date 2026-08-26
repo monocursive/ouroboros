@@ -3,14 +3,21 @@ defmodule Ouroboros.Upgrade.Verifier do
   Fail-closed policy checks for fast-lane BEAM artifacts.
 
   The fast lane can replace agent behavior, but not the modules that enforce this
-  lane's own guarantees, on-load code, or consolidated protocols. The protected set
-  is every `Ouroboros.Upgrade.*` module (verifier, executor, coordinator), every
-  `Ouroboros.Storage.*` module (the synced journal writer a patch could turn into a
-  silent no-op), every `Ouroboros.Release.*` module (the durable lane's authorizer
-  and journal), every `Ouroboros.Control.*` module (which decides what is patched at
-  all), every `Ouroboros.Gateway.*` module (the operator surface, where an auth check
-  that can be hot-patched is no auth at all), and the application root and its registry
-  owner.
+  lane's own guarantees, the surfaces that trigger it, on-load code, or consolidated
+  protocols. The protected set is every `Ouroboros.Upgrade.*` module (verifier,
+  executor, coordinator), every `Ouroboros.Storage.*` module (the synced journal
+  writer a patch could turn into a silent no-op), every `Ouroboros.Release.*` module
+  (the durable lane's authorizer and journal), every `Ouroboros.Control.*` module
+  (which decides what is patched at all), every `Ouroboros.Gateway.*` module (the
+  operator surface, where an auth check that can be hot-patched is no auth at all),
+  every `Ouroboros.Agent.Effects.*` module and every `Ouroboros.Orchestration.*`
+  module (the forge and deploy entry points a patch could call on an agent's behalf),
+  `Ouroboros.Runtime.Capabilities` (the operator admission surface for forged
+  capabilities), every `Ouroboros.Mesh.*` module (where deployed capabilities start),
+  every `Ouroboros.Provider.Native.*` module and `Ouroboros.Provider.Native` itself
+  (path containment, SafeWrite, and the sandbox the native loop consults), every
+  `Ouroboros.Workspace.*` module and `Ouroboros.Workspace` itself (the admission
+  lease the file tools sit on), and the application root and its registry owner.
 
   Detection is a policy gate, not a security sandbox. On-load functions are detected
   soundly by asking the code server to prepare the batch. NIF loading is detected only
@@ -30,13 +37,30 @@ defmodule Ouroboros.Upgrade.Verifier do
 
   alias Ouroboros.Upgrade.{Artifact, Beam}
 
-  @protected_modules [Ouroboros.Application, Ouroboros.Application.RegistryOwner]
+  @protected_modules [
+    Ouroboros.Application,
+    Ouroboros.Application.RegistryOwner,
+    # The effect API itself, not only its `Runner`: the forge/deploy actions live here.
+    Ouroboros.Agent.Effects,
+    # The public mesh surface carries the startable-module allowlist.
+    Ouroboros.Mesh,
+    Ouroboros.Runtime.Capabilities,
+    # Containment the native loop and workspace leases enforce: a signed replacement
+    # of Paths or SafeWrite is a signed replacement of the write fence.
+    Ouroboros.Provider.Native,
+    Ouroboros.Workspace
+  ]
   @protected_prefixes [
     "Elixir.Ouroboros.Upgrade.",
     "Elixir.Ouroboros.Release.",
     "Elixir.Ouroboros.Storage.",
     "Elixir.Ouroboros.Control.",
-    "Elixir.Ouroboros.Gateway."
+    "Elixir.Ouroboros.Gateway.",
+    "Elixir.Ouroboros.Agent.Effects.",
+    "Elixir.Ouroboros.Orchestration.",
+    "Elixir.Ouroboros.Mesh.",
+    "Elixir.Ouroboros.Provider.Native.",
+    "Elixir.Ouroboros.Workspace."
   ]
   @introduce_prefix "Elixir.Ouroboros.Capability."
 

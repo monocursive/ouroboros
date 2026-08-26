@@ -75,6 +75,7 @@ defmodule Ouroboros.Provider.Native.Tools.CodeIntel do
   alias Ouroboros.Provider.Native.CodeIntel, as: Native
   alias Ouroboros.Provider.Native.Diff
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Tools.SafeWrite
 
   @navigation ~w(definition references hover document_symbols workspace_symbols
                  implementation prepare_call_hierarchy incoming_calls outgoing_calls)
@@ -231,9 +232,9 @@ defmodule Ouroboros.Provider.Native.Tools.CodeIntel do
   defp write_all(plans, context) do
     {written, failure} =
       Enum.reduce_while(plans, {[], nil}, fn plan, {done, nil} ->
-        case File.write(plan.path, plan.after) do
+        case SafeWrite.write(plan.path, plan.after, context.scope) do
           :ok -> {:cont, {[plan | done], nil}}
-          {:error, reason} -> {:halt, {done, {plan.path, reason}}}
+          {:error, reason} -> {:halt, {done, reason}}
         end
       end)
 
@@ -246,10 +247,9 @@ defmodule Ouroboros.Provider.Native.Tools.CodeIntel do
           "Renamed across #{length(done)} #{plural(length(done), "file")}:\n" <>
             Enum.map_join(done, "\n", &("  " <> Path.relative_to(&1.path, root)))
 
-        {path, reason} ->
-          "code_intel failed partway: #{Path.relative_to(path, root)}: " <>
-            "#{:file.format_error(reason)}. #{length(done)} files were already written " <>
-            "and are in the session checkpoint."
+        reason ->
+          "code_intel failed partway: #{SafeWrite.format_reason(reason)}. " <>
+            "#{length(done)} files were already written and are in the session checkpoint."
       end
 
     {:ok,
