@@ -196,7 +196,54 @@ config :ouroboros,
   # workspace's `.ouroboros/mcp.json`):
   #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
   #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
-  mcp_servers: %{}
+  mcp_servers: %{},
+  # Computer Use (docs/COMPUTER_USE.md §4). Host-privileged GUI I/O for the native
+  # provider, default **off**: when it is off the tools are absent from the tool list
+  # entirely, not merely denied (D9). Same hardening posture as `:mcp` and `:code_intel`
+  # above — `Ouroboros.Provider.Native.Desktop` reads every value here and a non-positive
+  # timeout or a *raised* cap falls back to the shipped default, so an operator typo can
+  # never widen a bound. Only node config or the `OUROBOROS_COMPUTER_USE*` env can enable
+  # it; no workspace file can (§4), and `runtime.exs` may override these from env.
+  computer_use: [
+    enabled: false,
+    # `:bundled` resolves to the helper shipped next to `ouro`; a string is an absolute
+    # path. `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides it. No helper ships in
+    # Phase 0, so `enabled?/0` is honestly false until a built binary exists on disk.
+    helper_path: :bundled,
+    handshake_timeout_ms: 5_000,
+    state_timeout_ms: 5_000,
+    act_timeout_ms: 10_000,
+    shutdown_grace_ms: 2_000,
+    max_frame_bytes: 8 * 1024 * 1024,
+    max_image_bytes: 2 * 1024 * 1024,
+    max_image_width: 1920,
+    max_image_height: 1920,
+    max_nodes: 1_000,
+    max_depth: 32,
+    max_snapshots_per_session: 8,
+    jpeg_quality: 80,
+    # Node deny, not remember-able (D12). The bundle ids Computer Use never drives: this
+    # runtime's own surfaces, every terminal it could shell out of, the panes that draw
+    # OS auth and secrets. `Native.Desktop.denied_app_ids/0` unions this with a baked
+    # floor, so an operator may add to it but a typo can never remove ouro or a terminal.
+    denied_app_ids: [
+      "com.ouroboros.desktop",
+      "com.apple.Terminal",
+      "com.googlecode.iterm2",
+      "com.mitchellh.ghostty",
+      "net.kovidgoyal.kitty",
+      "com.apple.systempreferences",
+      "com.apple.loginwindow",
+      "dev.warp.Warp-Stable",
+      "org.alacritty",
+      "com.github.wez.wezterm",
+      "co.zeit.hyper",
+      "org.tabby",
+      "com.1password.1password",
+      "com.apple.keychainaccess",
+      "com.apple.SecurityAgent"
+    ]
+  ]
 
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its

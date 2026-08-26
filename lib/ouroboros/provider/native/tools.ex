@@ -38,6 +38,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   """
 
   alias Jido.AI.ToolAdapter
+  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
@@ -47,6 +48,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Bash
   alias Ouroboros.Provider.Native.Tools.CodeIntel
+  alias Ouroboros.Provider.Native.Tools.DesktopAct
+  alias Ouroboros.Provider.Native.Tools.DesktopState
   alias Ouroboros.Provider.Native.Tools.Edit
   alias Ouroboros.Provider.Native.Tools.Glob
   alias Ouroboros.Provider.Native.Tools.Grep
@@ -131,7 +134,7 @@ defmodule Ouroboros.Provider.Native.Tools do
       end)
       |> Enum.map(&spec(&1, opts))
 
-    static ++ mcp_specs(allowed, disallowed, opts)
+    static ++ desktop_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
   end
 
   @doc """
@@ -149,6 +152,25 @@ defmodule Ouroboros.Provider.Native.Tools do
 
       _absent ->
         []
+    end
+  end
+
+  # Computer Use's two tools sit after the static prefix and before MCP (D1, §5.1), and
+  # only when the feature is genuinely usable on this node *and* a workspace was given —
+  # the same host-local gate MCP uses. When it is off `Native.Desktop.enabled?/0` is false
+  # and the names never appear, so the model is not taught a name it cannot use (D9). The
+  # `allowed`/`disallowed` filters apply by tool name exactly as they do to a static tool.
+  defp desktop_specs(allowed, disallowed, opts) do
+    with root when is_binary(root) and root != "" <- Keyword.get(opts, :workspace),
+         true <- Desktop.enabled?() do
+      [DesktopState, DesktopAct]
+      |> Enum.filter(fn module ->
+        name = module.name()
+        name not in disallowed and (allowed == [] or name in allowed)
+      end)
+      |> Enum.map(&spec(&1, opts))
+    else
+      _off_or_no_workspace -> []
     end
   end
 
@@ -236,9 +258,19 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp resolve_module(name) do
     cond do
       module = Enum.find(modules(), &(&1.name() == name)) -> module
+      module = desktop_module(name) -> module
       Mcp.advertised?(name) -> {McpTool, name}
       true -> nil
     end
+  end
+
+  # The desktop tools are not in `modules/0`: they are conditional on the node feature flag,
+  # so they resolve here only while `Native.Desktop.enabled?/0`. Off, both names are
+  # `:unknown_tool` — the same answer `specs/3` gives by omitting them (D9). `specs/3` also
+  # gates on a workspace, which this name-only lookup cannot see; that gate is what keeps
+  # the model from being taught the name, so it is enough that a disabled node refuses here.
+  defp desktop_module(name) do
+    if Desktop.enabled?(), do: Enum.find([DesktopState, DesktopAct], &(&1.name() == name))
   end
 
   @doc "The name a tool name resolves to after aliases."
@@ -416,7 +448,8 @@ defmodule Ouroboros.Provider.Native.Tools do
           paths: [String.t()],
           write_paths: [String.t()],
           domains: [String.t()],
-          command: String.t() | nil
+          command: String.t() | nil,
+          context: map()
         }
   def classify(name, input, scope) do
     canonical = canonical(name)
@@ -429,12 +462,19 @@ defmodule Ouroboros.Provider.Native.Tools do
       paths: Enum.uniq(paths(canonical, input, scope) ++ write_paths),
       write_paths: write_paths,
       domains: domains(canonical, input),
-      command: command(canonical, input)
+      command: command(canonical, input),
+      context: context(canonical, input)
     }
   end
 
   defp mode("bash", _input), do: :execute
   defp mode("mcp__" <> _rest, _input), do: :execute
+
+  # Computer Use (D3): observing the screen is a read, operating it is an execute. Plan mode
+  # allows the first and refuses the second, which is the correct split — a plan may look
+  # and must not click.
+  defp mode("desktop_state", _input), do: :read
+  defp mode("desktop_act", _input), do: :execute
 
   # G3. Spawning a child that will run tools of its own is an effect, and the honest
   # classification of "a program whose actions this call authorises but does not name" is
@@ -494,6 +534,33 @@ defmodule Ouroboros.Provider.Native.Tools do
   end
 
   defp command(_name, _input), do: nil
+
+  # D4/§6.3: Computer Use puts app identity and the desktop action into the permission
+  # `context`, under atom keys the matcher reads via `context_value/2`, so a
+  # `ComputerUse(app:…)` rule can allow on the app this node measured. In Phase 0 `app` is
+  # the caller's *claimed* string (or nil); the resolved-app second evaluate is Phase 1 and
+  # is deliberately not implemented here. Every other tool carries an empty context.
+  defp context("desktop_state", input),
+    do: %{app: claimed_app(input), desktop_action: "state"}
+
+  defp context("desktop_act", input),
+    do: %{app: claimed_app(input), desktop_action: claimed_action(input)}
+
+  defp context(_name, _input), do: %{}
+
+  defp claimed_app(input) do
+    case Map.get(input, "app") do
+      app when is_binary(app) and app != "" -> app
+      _absent -> nil
+    end
+  end
+
+  defp claimed_action(input) do
+    case Map.get(input, "action") do
+      action when is_binary(action) and action != "" -> action
+      _absent -> nil
+    end
+  end
 
   @doc """
   Runs one tool and normalizes whatever it returned into the loop's result shape.

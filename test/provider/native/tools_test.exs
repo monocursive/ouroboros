@@ -161,6 +161,17 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert {:error, :unknown_tool} = Tools.lookup("todo", nil, ["todo"])
       assert {:ok, Ouroboros.Provider.Native.Tools.Plan} = Tools.lookup("todo", ["plan"], nil)
     end
+
+    test "the desktop tools are unknown and unlisted while Computer Use is off (D9)" do
+      # Default config ships Computer Use off, so the names are never taught to the model —
+      # absent from the tool list and `:unknown_tool` at lookup, workspace or not.
+      assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
+      assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
+
+      names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
+      refute "desktop_state" in names
+      refute "desktop_act" in names
+    end
   end
 
   describe "classify/3" do
@@ -184,6 +195,28 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "reports an unresolvable path as given rather than dropping it", %{scope: scope} do
       assert %{paths: ["../escape"]} = Tools.classify("read", %{"path" => "../escape"}, scope)
+    end
+
+    test "classifies the desktop tools by mode and puts app identity in context", %{scope: scope} do
+      # desktop_state observes: :read, no workspace paths, action tag "state".
+      assert %{tool: "desktop_state", mode: :read, paths: [], context: state_context} =
+               Tools.classify("desktop_state", %{"app" => "Safari"}, scope)
+
+      assert state_context == %{app: "Safari", desktop_action: "state"}
+
+      # desktop_act operates: :execute, the claimed action carried through.
+      assert %{tool: "desktop_act", mode: :execute, context: act_context} =
+               Tools.classify(
+                 "desktop_act",
+                 %{"app" => "com.apple.Calculator", "action" => "click"},
+                 scope
+               )
+
+      assert act_context == %{app: "com.apple.Calculator", desktop_action: "click"}
+
+      # No claimed app or action is nil, not an invented value (Phase 0: the claim only).
+      assert %{context: %{app: nil, desktop_action: nil}} =
+               Tools.classify("desktop_act", %{}, scope)
     end
   end
 
