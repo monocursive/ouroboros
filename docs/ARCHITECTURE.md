@@ -238,7 +238,7 @@ attach natively — all of which have landed.
   used only for `ToolAdapter`, which turns a `Jido.Action` schema into the model's JSON
   Schema. The tool schemas are built once per turn and held in the loop's state: a tool
   list that could change between two calls of one turn is a changed cached prefix.
-- `Ouroboros.Provider.Native.Tools` is the thirteen-tool set and the classification the
+- `Ouroboros.Provider.Native.Tools` is the fifteen-tool set and the classification the
   permission engine is asked about — the tool, its mode (`:read`/`:write`/`:execute`/
   `:network`), the paths it touches, the subset it would *change*, the domains it would
   reach, and the command when there is one. Every path goes through

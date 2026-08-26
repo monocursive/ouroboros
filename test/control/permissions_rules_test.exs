@@ -214,6 +214,17 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
                Rules.decide(request, [rule(:node, :allow, "Bash(safe *)")])
     end
 
+    test "the byte bound can cut a UTF-8 codepoint without crashing the engine" do
+      # 8,191 ASCII bytes followed by a multi-byte grapheme straddles the 8,192-byte
+      # boundary. Matching sees the valid prefix and the uninspected tail withdraws the
+      # allow instead of raising in the shell parser.
+      command = String.duplicate("s", 8_191) <> "é"
+      request = Request.new(%{tool: "bash", command: command, mode: :execute})
+
+      assert {:ask, :truncated_request} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(s*)")])
+    end
+
     test "a deny rule still matches the readable prefix of a truncated line" do
       # The refused part is inside the bound this time: deny matches fail-closed over the
       # prefix, so truncation does not weaken them the way it withdraws an allow win.

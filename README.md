@@ -318,7 +318,7 @@ Fifteen, in the order the model sees them:
 | `grep` | ripgrep where the host has it, a bounded built-in walker where it does not; the result says which answered. 200 matches, 300 bytes per line. |
 | `glob` | 2,000 results, newest-modified first. |
 | `ls` | One level by default, three at most, 1,000 entries; `.git`, `_build`, `node_modules` and friends are listed but not descended into. |
-| `web_fetch` | GET, `http`/`https` only, 1 MiB, 15 seconds, HTML converted to text. **A redirect to another host is reported and not followed** — the new host was never put to the permission engine. |
+| `web_fetch` | GET, `http`/`https` only, 1 MiB, 15 seconds, HTML converted to text. Loopback, private, link-local, metadata, and other non-public destinations are refused after resolution. **A redirect to another host is reported and not followed** — the new host was never put to the permission engine. |
 | `code_intel` | The nine LSP navigation operations plus `diagnostics` and a preview-then-apply `rename`. See below. |
 | `ask_user` | Asks the operator a question mid-turn and blocks for the answer, on the same channel as an approval, so any client that renders an approval modal can carry it. |
 | `agent` | Spawns a child session with its own context window and returns a bounded summary. See below. |
@@ -507,7 +507,7 @@ with an open `{"type": "object"}` schema and a sentence saying the schema was wi
 and that the server validates arguments. The budget was measured rather than assumed:
 the `everything`, `git` and `filesystem` reference servers cost 2.9 / 4.6 / 5.1 kB for
 their whole tool set, so two or three ordinary servers cost about what one of the
-thirteen tools above costs. Note that MCP has no per-tool schema request — `tools/list`
+fifteen tools above costs. Note that MCP has no per-tool schema request — `tools/list`
 returns them all — so what is deferred is what reaches the *model's context*, not a
 fetch.
 
@@ -862,9 +862,12 @@ transcript it never had would be a claim with nothing behind it.
   has already happened. A missing, starting, broken, or slow language server produces
   `(no LSP data for this file)` and nothing else; a language with no registered server
   produces silence. Nothing here installs a language server.
-- **`web_fetch` does not follow a redirect to another host.** It reports the new URL
+- **`web_fetch` opens sockets only to public destinations and does not follow a redirect
+  to another host.** It resolves every destination and refuses loopback, private,
+  link-local, metadata, and other special-use addresses. It reports an off-host redirect
   instead, so the new host is put to the permission engine on the next call rather than
-  being reached on the strength of the first one's rule.
+  being reached on the strength of the first one's rule. There remains a DNS-rebinding
+  window between the explicit lookup and `:httpc`'s own connection.
 - **A `bash` command's effects are not checkpointed and cannot be rewound.** Rewind says
   so, by turn, before it acts.
 - **MCP is stdio only, and has no OAuth.** A `url` server is refused by name with

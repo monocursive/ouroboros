@@ -286,7 +286,8 @@ defmodule Ouroboros.CodeIntel.Registry do
   admitted workspace root containing the file is used), and `root:` forces the project
   root, skipping the marker walk but not the containment check.
   """
-  @spec resolve(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec resolve(String.t(), keyword()) ::
+          {:ok, Ouroboros.CodeIntel.LspPool.spec()} | {:error, term()}
   def resolve(path, opts \\ []) when is_binary(path) do
     with {:ok, file} <- WorkspacePath.canonicalize_file(path),
          {:ok, workspace_root} <- workspace_root(file, opts),

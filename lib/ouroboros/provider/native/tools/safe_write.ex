@@ -17,19 +17,23 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
       rather than following it, so a leaf swapped in after the check cannot steer the
       write;
     * after the rename the final path is canonicalized again and must still be inside
-      the workspace; an escape removes the written file and fails.
+      one of the session's allowed roots;
+    * replacing an existing file preserves its ordinary permission bits, so editing an
+      executable does not silently turn it into a non-executable file.
 
-  The residual window — a parent swapped between its lstat and the temporary open — is
-  microseconds, and the post-write containment re-check is what catches it.
+  OTP has no public `openat(O_NOFOLLOW)` primitive, so a parent can still be swapped
+  between its `lstat` and the temporary open. The post-write containment re-check detects
+  and reports that escape, but cannot safely undo an external mutation: deleting by the
+  now-escaped path would create a second race and could remove somebody else's file.
   """
 
   alias Ouroboros.Workspace.Path, as: WorkspacePath
 
   @doc """
-  Writes `content` to the already-resolved `path` inside `scope.root`.
+  Writes `content` to the already-resolved `path` inside one of `scope.roots`.
 
-  `path` must be canonical, as `Paths.resolve/2` returns it; `scope.root` is the leased
-  workspace root the containment re-check is measured against.
+  `path` must be canonical, as `Paths.resolve/2` returns it; `scope.roots` is the leased
+  workspace plus its admitted `add_dirs`, which the containment re-check uses unchanged.
   """
   @spec write(String.t(), String.t(), map()) :: :ok | {:error, term()}
   def write(path, content, scope) do
@@ -38,8 +42,9 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
 
     result =
       with :ok <- ensure_parent(parent, scope),
-           :ok <- verify_leaf(path),
+           {:ok, permissions} <- verify_leaf(path),
            :ok <- write_temporary(temporary, content),
+           :ok <- preserve_permissions(temporary, permissions),
            :ok <- rename_over(temporary, path),
            :ok <- contained(path, scope) do
         :ok
@@ -52,7 +57,7 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   end
 
   @doc """
-  Removes the already-resolved `path` if it is still a regular file inside `scope.root`.
+  Removes the already-resolved `path` if it is still a regular file inside `scope.roots`.
 
   `unlink` does not follow the last component, so a swapped symlink leaf would only
   remove the link. This still refuses that leaf: a name that became a link after
@@ -60,24 +65,65 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   """
   @spec delete(String.t(), map()) :: :ok | {:error, term()}
   def delete(path, scope) do
-    with :ok <- verify_deletable(path),
+    with :ok <- ensure_deletable_parent(Path.dirname(path), scope),
+         :ok <- verify_deletable(path),
          :ok <- unlink(path),
          :ok <- still_inside_or_gone(path, scope) do
       :ok
     end
   end
 
-  # Parents are created from the workspace root down, never via `File.mkdir_p/1`.
+  # Parents are created from the matching allowed root down, never via `File.mkdir_p/1`.
   # mkdir_p follows intermediate symlinks, so a swapped ancestor would mkdir outside
   # the workspace before `verify_parent` had a chance to refuse.
   defp ensure_parent(parent, scope) do
-    with {:ok, root} <- WorkspacePath.canonicalize(scope.root),
-         parent = Path.expand(parent),
-         true <- WorkspacePath.within?(parent, root) do
+    parent = Path.expand(parent)
+
+    with {:ok, root} <- allowed_root(parent, scope) do
       ensure_chain(root, relative_segments(parent, root))
     else
-      false -> {:error, {:unwritable, parent, :escaped_workspace}}
       {:error, reason} -> {:error, {:unwritable, parent, {:containment_recheck_failed, reason}}}
+    end
+  end
+
+  defp ensure_deletable_parent(parent, scope) do
+    parent = Path.expand(parent)
+
+    result =
+      with {:ok, root} <- allowed_root(parent, scope) do
+        verify_existing_chain(root, relative_segments(parent, root))
+      else
+        {:error, reason} ->
+          {:error, {:unwritable, parent, {:containment_recheck_failed, reason}}}
+      end
+
+    case result do
+      :ok -> :ok
+      {:error, {:unwritable, path, reason}} -> {:error, {:undeletable, path, reason}}
+    end
+  end
+
+  # `Paths.resolve/2` admits the workspace plus every declared `add_dirs` root. Keep
+  # that exact set here: checking only `scope.root` would turn every admitted extra
+  # directory into a path that resolves successfully and then inexplicably cannot be
+  # written. A root must also still canonicalize to the identity captured at admission;
+  # a root path replaced by a symlink is not a newly authorized location.
+  defp allowed_root(path, scope) do
+    candidates =
+      scope
+      |> Map.get(:roots, [Map.fetch!(scope, :root)])
+      |> Enum.filter(&(is_binary(&1) and WorkspacePath.within?(path, &1)))
+      |> Enum.sort_by(&byte_size/1, :desc)
+
+    case Enum.find_value(candidates, fn root ->
+           case WorkspacePath.canonicalize(root) do
+             {:ok, ^root} -> {:ok, root}
+             _moved_or_unavailable -> nil
+           end
+         end) do
+      nil when candidates == [] -> {:error, :escaped_workspace}
+      nil -> {:error, :allowed_root_moved}
+      result -> result
     end
   end
 
@@ -96,6 +142,30 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
           next = Path.join(acc, segment)
 
           case ensure_component(next) do
+            :ok -> {:cont, {:ok, next}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          {:ok, _final} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Deletion never creates a directory. The target existed when it was resolved, so a
+  # missing component now is a changed filesystem to refuse, not a parent to recreate as
+  # the write path would.
+  defp verify_existing_chain(root, segments) do
+    case verify_directory(root) do
+      :ok ->
+        Enum.reduce_while(segments, {:ok, root}, fn segment, {:ok, current} ->
+          next = Path.join(current, segment)
+
+          case verify_directory(next) do
             :ok -> {:cont, {:ok, next}}
             {:error, reason} -> {:halt, {:error, reason}}
           end
@@ -148,8 +218,8 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   # exists for, and the honest answer is to refuse and let the model look at what moved.
   defp verify_leaf(path) do
     case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :regular}} -> :ok
-      {:error, :enoent} -> :ok
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> {:ok, Bitwise.band(mode, 0o777)}
+      {:error, :enoent} -> {:ok, nil}
       {:ok, %File.Stat{type: :symlink}} -> {:error, {:unwritable, path, :symlinked_leaf}}
       {:ok, _stat} -> {:error, {:unwritable, path, :not_a_regular_file}}
       {:error, reason} -> {:error, {:unwritable, path, reason}}
@@ -175,7 +245,7 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   defp still_inside_or_gone(path, scope) do
     case File.lstat(path, time: :posix) do
       {:error, :enoent} ->
-        :ok
+        ensure_deletable_parent(Path.dirname(path), scope)
 
       {:ok, _stat} ->
         contained(path, scope)
@@ -191,16 +261,37 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   end
 
   defp write_temporary(temporary, content) do
-    with {:ok, device} <-
-           :file.open(String.to_charlist(temporary), [:write, :binary, :raw, :exclusive]),
-         :ok <- :file.write(device, content),
-         :ok <- :file.close(device) do
-      :ok
-    else
+    case :file.open(String.to_charlist(temporary), [:write, :binary, :raw, :exclusive]) do
+      {:ok, device} ->
+        write_result = device_write(device, content)
+        close_result = :file.close(device)
+
+        case {write_result, close_result} do
+          {:ok, :ok} -> :ok
+          {{:error, reason}, _close} -> {:error, {:unwritable, temporary, reason}}
+          {:ok, {:error, reason}} -> {:error, {:unwritable, temporary, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:unwritable, temporary, reason}}
+    end
+  end
+
+  defp device_write(device, content) do
+    :file.write(device, content)
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp preserve_permissions(_temporary, nil), do: :ok
+
+  defp preserve_permissions(temporary, permissions) do
+    case File.chmod(temporary, permissions) do
+      :ok -> :ok
       {:error, reason} -> {:error, {:unwritable, temporary, reason}}
     end
-  rescue
-    error -> {:error, {:unwritable, temporary, error}}
   end
 
   defp rename_over(temporary, path) do
@@ -211,21 +302,15 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
   end
 
   # The proof is repeated after the write because everything before it is check-then-use.
-  # A path that no longer canonicalizes inside the workspace is removed best-effort and
-  # reported as a refusal, because its bytes may already be somewhere they were never
-  # admitted.
+  # A path that no longer canonicalizes inside an admitted root is reported as a refusal.
+  # Do not delete by that escaped name: an attacker could swap the external leaf again
+  # between this check and `File.rm/1`, turning cleanup into an arbitrary-file deletion.
   defp contained(path, scope) do
-    with {:ok, root} <- WorkspacePath.canonicalize(scope.root),
-         {:ok, canonical} <- WorkspacePath.canonicalize_file(path) do
-      if WorkspacePath.within?(canonical, root) do
-        :ok
-      else
-        _ = File.rm(path)
-        {:error, {:unwritable, path, :escaped_workspace}}
-      end
+    with {:ok, canonical} <- WorkspacePath.canonicalize_file(path),
+         {:ok, _root} <- allowed_root(canonical, scope) do
+      :ok
     else
       {:error, reason} ->
-        _ = File.rm(path)
         {:error, {:unwritable, path, {:containment_recheck_failed, reason}}}
     end
   end
@@ -248,8 +333,11 @@ defmodule Ouroboros.Provider.Native.Tools.SafeWrite do
 
   def format_reason(:escaped_workspace),
     do:
-      "the target moved outside the workspace between resolution and the write; the write " <>
-        "was removed"
+      "the target moved outside the workspace between resolution and the write; the escape " <>
+        "was detected after the write"
+
+  def format_reason(:allowed_root_moved),
+    do: "an allowed root moved or became a symlink after path resolution; write refused"
 
   def format_reason({:containment_recheck_failed, reason}),
     do: "containment re-check failed: #{inspect(reason)}"

@@ -183,8 +183,8 @@ defmodule Ouroboros.Interactive.Task do
     do: {:reply, {:error, :not_found}, runtime}
 
   def handle_call({:steer, input, opts}, _from, runtime) do
-    case authorize_steer_attachments(input, runtime) do
-      {:ok, input} ->
+    case authorize_steer_attachments(input, opts, runtime) do
+      {:ok, input, opts} ->
         case with_harness_session(runtime, &Session.steer(&1, input, opts)) do
           {:ok, request_id} when is_binary(request_id) ->
             {:reply, {:ok, request_id},
@@ -443,20 +443,61 @@ defmodule Ouroboros.Interactive.Task do
   # applies the same workspace gate `Turns.dispatch_turn` enforces on messages. Without
   # it, a steer names any file the daemon user can read, and the native transport reads
   # it into the model context.
-  defp authorize_steer_attachments(input, runtime) when is_map(input) do
-    case Map.fetch(input, :attachments) do
+  defp authorize_steer_attachments(input, opts, runtime) do
+    workspace = runtime.session.workspace
+
+    with {:ok, input} <- authorize_steer_input(input, workspace),
+         {:ok, opts} <- authorize_steer_options(opts, workspace) do
+      {:ok, input, opts}
+    end
+  end
+
+  # `Jido.Harness.TurnRequest` accepts atom-keyed maps, string-keyed maps, and lists of
+  # key/value pairs. Check every representation before handing it to the Harness rather
+  # than accidentally making containment depend on which public API spelling a caller
+  # chose.
+  defp authorize_steer_input(input, workspace) when is_map(input) do
+    Enum.reduce_while([:attachments, "attachments"], {:ok, input}, fn key, {:ok, input} ->
+      case Map.fetch(input, key) do
+        :error ->
+          {:cont, {:ok, input}}
+
+        {:ok, paths} ->
+          case Turns.authorize_attachment_paths(paths, workspace) do
+            {:ok, authorized} -> {:cont, {:ok, Map.put(input, key, authorized)}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+      end
+    end)
+  end
+
+  defp authorize_steer_input(input, workspace) when is_list(input) do
+    if Enum.all?(input, &match?({_, _}, &1)) do
+      input |> Map.new() |> authorize_steer_input(workspace)
+    else
+      # Let the Harness produce its ordinary validation error for a non key/value list.
+      {:ok, input}
+    end
+  end
+
+  defp authorize_steer_input(input, _workspace), do: {:ok, input}
+
+  # Options are merged over the input by the Harness, so an `attachments:` option is the
+  # final attachment list and needs the same gate even when the input itself is a string.
+  defp authorize_steer_options(opts, workspace) when is_list(opts) do
+    case Keyword.fetch(opts, :attachments) do
       :error ->
-        {:ok, input}
+        {:ok, opts}
 
       {:ok, paths} ->
-        case Turns.authorize_attachment_paths(paths, runtime.session.workspace) do
-          {:ok, authorized} -> {:ok, Map.put(input, :attachments, authorized)}
+        case Turns.authorize_attachment_paths(paths, workspace) do
+          {:ok, authorized} -> {:ok, Keyword.put(opts, :attachments, authorized)}
           {:error, reason} -> {:error, reason}
         end
     end
   end
 
-  defp authorize_steer_attachments(input, _runtime), do: {:ok, input}
+  defp authorize_steer_options(opts, _workspace), do: {:ok, opts}
 
   # G1's other direction: the team learned a delegated task reached a terminal status and
   # is telling the conversation that asked for it. A cast rather than a call on purpose —

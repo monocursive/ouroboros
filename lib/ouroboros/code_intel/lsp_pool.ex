@@ -46,7 +46,11 @@ defmodule Ouroboros.CodeIntel.LspPool do
           required(:executable) => String.t(),
           optional(:args) => [String.t()],
           optional(:env) => [{String.t(), String.t()}],
-          optional(:initialization_options) => map() | nil
+          optional(:initialization_options) => map() | nil,
+          optional(:language) => atom(),
+          optional(:language_id) => String.t(),
+          optional(:path) => String.t(),
+          optional(:workspace_root) => String.t()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()

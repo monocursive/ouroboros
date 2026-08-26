@@ -12,6 +12,7 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Tools
   alias Ouroboros.Provider.Native.Tools.WebFetch
+  alias Ouroboros.Provider.Native.Tools.WebFetch.Target
 
   setup do
     root = Path.join(System.tmp_dir!(), "native-fetch-#{System.unique_integer([:positive])}")
@@ -242,6 +243,37 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
         assert result.is_error, url
         assert result.output =~ needle
         assert result.output =~ "does not open sockets"
+      end
+    end
+
+    test "special-use literals cannot bypass the public-address gate" do
+      urls = [
+        "http://192.0.0.1/",
+        "http://192.88.99.1/",
+        "http://198.18.0.1/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::127.0.0.1]/",
+        "http://[64:ff9b::7f00:1]/",
+        "http://[fec0::1]/",
+        "http://[2001:2::1]/",
+        "http://[2002:7f00:1::1]/",
+        "http://[3fff::1]/"
+      ]
+
+      for url <- urls do
+        assert {:error, {:blocked_address, _host, _address}} =
+                 url |> URI.parse() |> Target.admit(),
+               url
+      end
+    end
+
+    test "ordinary public IPv4 and IPv6 literals remain admissible" do
+      for url <- [
+            "http://8.8.8.8/",
+            "http://192.0.0.9/",
+            "http://[2606:4700:4700::1111]/"
+          ] do
+        assert :ok = url |> URI.parse() |> Target.admit(), url
       end
     end
   end

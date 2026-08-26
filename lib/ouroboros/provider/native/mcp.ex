@@ -23,7 +23,7 @@ defmodule Ouroboros.Provider.Native.Mcp do
   rather than assumed. Encoded `inputSchema` sizes for the servers this was built
   against: `everything` (14 tools) 2.9 kB total, `git` (13 tools) 4.6 kB, `filesystem`
   (12 tools) 5.1 kB; the largest single schema seen was 1.4 kB. Two or three ordinary
-  servers therefore cost about as much as one of this runtime's own thirteen tools, and
+  servers therefore cost about as much as one of this runtime's own fifteen tools, and
   hiding them would buy nothing while costing a round trip on first use.
 
   So the decision is: **schemas are exposed directly while they fit, and deferred past a

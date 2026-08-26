@@ -410,6 +410,61 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
     assert File.read!(Path.join(root, "outside/secret.txt")) == "keep out\n"
   end
 
+  test "a delete never recreates a parent that vanished after resolution", %{
+    context: context,
+    workspace: workspace
+  } do
+    parent = Path.join(workspace, "vanished")
+    path = Path.join(parent, "old.txt")
+    File.mkdir_p!(parent)
+    File.write!(path, "old")
+    File.rm_rf!(parent)
+
+    assert {:error, {:undeletable, _path, _reason}} =
+             Ouroboros.Provider.Native.Tools.SafeWrite.delete(path, context.scope)
+
+    refute File.exists?(parent)
+  end
+
+  test "writes to an admitted add_dirs root", %{context: context, root: root} do
+    extra = Path.join(root, "extra")
+    File.mkdir_p!(extra)
+
+    {:ok, scope} =
+      Ouroboros.Provider.Native.Paths.scope(context.scope.root, [extra], :workspace_write)
+
+    context = %{context | scope: scope}
+
+    result =
+      run(
+        Ouroboros.Provider.Native.Tools.Write,
+        %{"path" => Path.join(extra, "nested/added.txt"), "content" => "admitted"},
+        context
+      )
+
+    refute result.is_error
+    assert File.read!(Path.join(extra, "nested/added.txt")) == "admitted"
+  end
+
+  test "editing an executable preserves its execute bits", %{
+    context: context,
+    workspace: workspace
+  } do
+    path = Path.join(workspace, "run.sh")
+    File.write!(path, "#!/bin/sh\necho before\n")
+    File.chmod!(path, 0o751)
+
+    result =
+      run(
+        Ouroboros.Provider.Native.Tools.Write,
+        %{"path" => path, "content" => "#!/bin/sh\necho after\n"},
+        context
+      )
+
+    refute result.is_error
+    assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o751
+  end
+
   describe "edit" do
     setup %{context: context, workspace: workspace} do
       path = write_file(workspace, "lib/a.ex", "defmodule A do\n  def x, do: 1\nend\n")

@@ -423,7 +423,6 @@ defmodule Ouroboros.Control.Permissions do
         case node_outcome do
           {:allow, _ref} -> {:ask, :authority_unavailable}
           {:ask, _reason} -> {:ask, :authority_unavailable}
-          other -> other
         end
 
       stored ->

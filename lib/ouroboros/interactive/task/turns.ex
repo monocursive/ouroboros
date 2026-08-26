@@ -250,31 +250,35 @@ defmodule Ouroboros.Interactive.Task.Turns do
   def authorize_attachment_paths(_paths, _workspace), do: {:error, :invalid_attachments}
 
   defp canonical_attachments(attachments, root) do
-    Enum.reduce_while(attachments, {:ok, []}, fn path, {:ok, authorized} ->
-      candidate =
-        if Path.type(path) == :absolute,
-          do: path,
-          else: Path.join(root, path)
+    Enum.reduce_while(attachments, {:ok, []}, fn
+      path, {:ok, authorized} when is_binary(path) and path != "" ->
+        candidate =
+          if Path.type(path) == :absolute,
+            do: path,
+            else: Path.join(root, path)
 
-      lexical = Path.expand(candidate)
+        lexical = Path.expand(candidate)
 
-      cond do
-        not WorkspacePath.within?(lexical, root) ->
-          {:halt, {:error, {:attachment_outside_workspace, path}}}
+        cond do
+          not WorkspacePath.within?(lexical, root) ->
+            {:halt, {:error, {:attachment_outside_workspace, path}}}
 
-        true ->
-          case WorkspacePath.canonicalize_file(candidate) do
-            {:ok, canonical} ->
-              if WorkspacePath.within?(canonical, root) do
-                {:cont, {:ok, [canonical | authorized]}}
-              else
-                {:halt, {:error, {:attachment_outside_workspace, path}}}
-              end
+          true ->
+            case WorkspacePath.canonicalize_file(candidate) do
+              {:ok, canonical} ->
+                if WorkspacePath.within?(canonical, root) do
+                  {:cont, {:ok, [canonical | authorized]}}
+                else
+                  {:halt, {:error, {:attachment_outside_workspace, path}}}
+                end
 
-            {:error, reason} ->
-              {:halt, {:error, {:invalid_attachment, path, reason}}}
-          end
-      end
+              {:error, reason} ->
+                {:halt, {:error, {:invalid_attachment, path, reason}}}
+            end
+        end
+
+      path, {:ok, _authorized} ->
+        {:halt, {:error, {:invalid_attachment, path, :invalid_path}}}
     end)
     |> case do
       {:ok, authorized} -> {:ok, Enum.reverse(authorized)}

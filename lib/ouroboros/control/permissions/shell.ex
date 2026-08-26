@@ -67,7 +67,7 @@ defmodule Ouroboros.Control.Permissions.Shell do
   """
   @spec truncated?(String.t() | nil) :: boolean()
   def truncated?(command) when is_binary(command) do
-    if byte_size(command) > @max_command_bytes do
+    if byte_size(command) > @max_command_bytes or not String.valid?(command) do
       true
     else
       # The part count `split/1` reports is already capped, so count without the cap:
@@ -94,7 +94,7 @@ defmodule Ouroboros.Control.Permissions.Shell do
   @spec split(String.t()) :: [String.t()]
   def split(command) when is_binary(command) do
     command
-    |> binary_part(0, min(byte_size(command), @max_command_bytes))
+    |> bounded_prefix()
     |> do_split("", [], nil)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
@@ -102,6 +102,21 @@ defmodule Ouroboros.Control.Permissions.Shell do
   end
 
   def split(_command), do: []
+
+  # A byte cap can land in the middle of a multi-byte UTF-8 codepoint. Feeding that
+  # invalid suffix into the `::utf8` parser below would raise inside the permission
+  # engine instead of returning a bounded match. Back up to the longest valid prefix;
+  # valid input loses at most three bytes, while malformed direct-Elixir input is still
+  # handled totally as the module promises.
+  defp bounded_prefix(command) do
+    prefix = binary_part(command, 0, min(byte_size(command), @max_command_bytes))
+
+    case :unicode.characters_to_binary(prefix) do
+      valid when is_binary(valid) -> valid
+      {:incomplete, valid, _tail} -> valid
+      {:error, valid, _tail} -> valid
+    end
+  end
 
   @doc """
   Removes leading wrapper commands and their options.

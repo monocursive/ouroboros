@@ -597,11 +597,23 @@ defmodule Ouroboros.InteractiveSessionTest do
     # The gate is the coordinator's, ahead of the Harness, which checks steer
     # attachments for existence only: traversal and symlink escapes are refused by name
     # without a steer ever reaching the transport.
+    for input <- [
+          %{prompt: "look", attachments: ["../outside.txt"]},
+          %{"prompt" => "look", "attachments" => ["../outside.txt"]},
+          [prompt: "look", attachments: ["../outside.txt"]]
+        ] do
+      assert {:error, {:attachment_outside_workspace, "../outside.txt"}} =
+               InteractiveSession.steer(ref, input)
+    end
+
     assert {:error, {:attachment_outside_workspace, "../outside.txt"}} =
-             InteractiveSession.steer(ref, %{prompt: "look", attachments: ["../outside.txt"]})
+             InteractiveSession.steer(ref, "look", attachments: ["../outside.txt"])
 
     assert {:error, {:attachment_outside_workspace, "escape.txt"}} =
              InteractiveSession.steer(ref, %{prompt: "look", attachments: ["escape.txt"]})
+
+    assert {:error, {:invalid_attachment, 123, :invalid_path}} =
+             InteractiveSession.steer(ref, %{prompt: "look", attachments: [123]})
 
     # A contained file passes the gate; whatever answers next is the Harness's (no
     # active turn here), but it is not a containment refusal.

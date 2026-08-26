@@ -29,7 +29,7 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   D4 adds tools this module cannot enumerate at compile time: every `mcp__<server>__<tool>`
   an MCP server advertises. They enter through exactly one seam and nothing outside this
-  file changed to admit them. `specs/3` appends them after the static thirteen, `lookup/3`
+  file changed to admit them. `specs/3` appends them after the static fifteen, `lookup/3`
   resolves such a name to `{Tools.Mcp, name}` instead of a bare module, and `execute/4`
   and `interactive?/1` accept that pair. The loop treats what `lookup/3` returns as
   opaque — it only ever hands it back to these two functions — so carrying the resolved
