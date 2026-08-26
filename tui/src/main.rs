@@ -411,6 +411,7 @@ async fn new_session(
                 anyhow!("{}", StartError::UnknownSandboxMode(name.clone()).message())
             })?),
         },
+        reasoning_effort: None,
         objective: String::new(),
         worktree: start.worktree,
         plan: start.plan,
@@ -3396,6 +3397,7 @@ mod tests {
             workspace: "/tmp/workspace".into(),
             approval_mode: None,
             sandbox_mode: None,
+            reasoning_effort: None,
             objective: String::new(),
             worktree: false,
             plan: false,

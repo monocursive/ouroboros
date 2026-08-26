@@ -138,6 +138,15 @@ pub struct DesktopQuickStart {
     pub pending: bool,
 }
 
+/// The model- and provider-specific reasoning control for one open desktop session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopReasoning {
+    /// The session value last confirmed by the runtime. `None` is drawn as `Default`, not
+    /// guessed as `High`; the high default belongs to the new-session form.
+    pub current: Option<Effort>,
+    pub choices: Vec<Effort>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopAccount {
     pub resolved: bool,
@@ -570,6 +579,64 @@ impl App {
         self.fetch_models();
     }
 
+    /// Reasoning levels both the selected model and provider transport declare usable.
+    /// A missing catalogue/provider row returns none rather than a generic three-row list:
+    /// the caller asked for what is available for this model, and silence is not proof.
+    pub fn desktop_reasoning_choices_for(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+    ) -> Vec<Effort> {
+        let provider = provider.trim();
+        let Some(catalogue) = self.models.value.as_ref() else {
+            return Vec::new();
+        };
+        let Some(catalogue_row) = catalogue.provider(provider) else {
+            return Vec::new();
+        };
+        let Some(model) = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .or(catalogue_row.default.as_deref())
+        else {
+            return Vec::new();
+        };
+        let Some(model) = catalogue_row.models.iter().find(|entry| entry.id == model) else {
+            return Vec::new();
+        };
+        let Some(provider_row) = self
+            .providers
+            .value
+            .as_ref()
+            .and_then(|rows| rows.iter().find(|entry| entry.provider == provider))
+        else {
+            return Vec::new();
+        };
+
+        desktop_reasoning_choices(model, provider_row)
+    }
+
+    /// The reasoning select shown in the active session's composer bar.
+    pub fn desktop_reasoning(&self) -> Option<DesktopReasoning> {
+        let session = self.sessions.open_info()?;
+        if session.plane != Plane::Interactive
+            || session.capabilities.dynamic_configuration == Capability::No
+        {
+            return None;
+        }
+
+        let provider = session.provider.as_deref()?;
+        let model = session
+            .model
+            .as_deref()
+            .or_else(|| self.sessions.open_watch().and_then(Watch::model));
+        let choices = self.desktop_reasoning_choices_for(provider, model);
+        (!choices.is_empty()).then_some(DesktopReasoning {
+            current: session.reasoning_effort,
+            choices,
+        })
+    }
+
     /// Starts an interactive session with choices visible in the native form.
     ///
     /// `sandbox_mode` is the form's own answer, and `None` means the operator did not
@@ -582,6 +649,7 @@ impl App {
         model: Option<String>,
         workspace: String,
         sandbox_mode: Option<SandboxMode>,
+        reasoning_effort: Option<Effort>,
     ) -> Result<String, String> {
         if !self.hello.serves("interactive.start") {
             return Err("this gateway does not serve interactive.start".to_string());
@@ -615,6 +683,7 @@ impl App {
             workspace: workspace.trim().to_string(),
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: sandbox_mode.or_else(|| self.config.defaults.sandbox_mode()),
+            reasoning_effort,
             objective: String::new(),
             worktree: false,
             plan: false,
@@ -848,6 +917,25 @@ impl App {
         self.configure_sandbox(mode)
             .map_err(|(_kind, refusal)| refusal)
     }
+
+    /// Changes the open session's default effort for future turns. As with file access,
+    /// the label stays on the runtime-confirmed value until the configure answer re-lists
+    /// the session.
+    pub fn desktop_set_reasoning_effort(&mut self, effort: Effort) -> Result<(), String> {
+        self.configure_reasoning_effort(effort)
+            .map_err(|(_kind, refusal)| refusal)
+    }
+}
+
+fn desktop_reasoning_choices(
+    model: &crate::model::ModelEntry,
+    provider: &ProviderEntry,
+) -> Vec<Effort> {
+    model
+        .efforts()
+        .into_iter()
+        .filter(|effort| provider.reasoning_effort_refusal(*effort).is_none())
+        .collect()
 }
 
 fn desktop_excerpt(text: &str, max_bytes: usize) -> String {
@@ -1178,6 +1266,45 @@ mod tests {
     use super::*;
     use crate::ui::transcript_cells::{SubagentCell, ToolCell};
     use serde_json::json;
+
+    #[test]
+    fn desktop_reasoning_rows_intersect_model_and_transport_capabilities() {
+        let catalogue = ModelsCatalog::decode(&json!({
+            "providers": [{
+                "provider": "native",
+                "models": [{
+                    "id": "openai_codex:gpt-test",
+                    "reasoning_efforts": ["low", "medium", "high", "future"]
+                }]
+            }]
+        }))
+        .expect("a model catalogue");
+        let providers = ProviderEntry::decode_list(&json!([{
+            "provider": "native",
+            "spec": {
+                "provider": "native",
+                "default_session_transport": "managed",
+                "normalized_options": ["model", "reasoning_effort"],
+                "normalized_values": {"reasoning_effort": ["low", "high"]}
+            }
+        }]));
+        let model = &catalogue.provider("native").unwrap().models[0];
+
+        assert_eq!(
+            desktop_reasoning_choices(model, &providers[0]),
+            vec![Effort::Low, Effort::High]
+        );
+
+        let no_effort = ProviderEntry::decode_list(&json!([{
+            "provider": "native",
+            "spec": {
+                "provider": "native",
+                "default_session_transport": "managed",
+                "normalized_options": ["model"]
+            }
+        }]));
+        assert!(desktop_reasoning_choices(model, &no_effort[0]).is_empty());
+    }
 
     #[test]
     fn desktop_tool_rows_keep_their_call_identity_for_local_expansion_state() {

@@ -197,6 +197,7 @@ impl App {
                 workspace: self.default_workspace(),
                 approval_mode: self.config.defaults.approval_mode(),
                 sandbox_mode: self.config.defaults.sandbox_mode(),
+                reasoning_effort: None,
                 objective: String::new(),
                 // The quick start is the shortest path there is; a worktree and plan mode
                 // are choices, and they are made in the `n` dialog or on the command line.
@@ -353,6 +354,7 @@ impl App {
             workspace,
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            reasoning_effort: None,
             objective: String::new(),
             worktree: false,
             // `/write` is the verb for "let it edit"; starting it planning would be the

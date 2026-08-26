@@ -6,7 +6,7 @@
 
 mod support;
 
-use ouro::model::{ApprovalDecision, ApprovalScope, Plane};
+use ouro::model::{ApprovalDecision, ApprovalScope, Effort, Plane};
 use ouro::proto::{ErrorCode, Notification, RpcError};
 use ouro::transport::ClientError;
 use ouro::ui::app::{App, DesktopCellKind, DesktopTone, Mode, Msg, Tag};
@@ -780,6 +780,7 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
             Some("openai_codex:gpt-5.6-sol".into()),
             "/tmp/desktop-workspace".into(),
             None,
+            Some(Effort::High),
         )
         .expect("the operate-capable gateway can start a session");
     let start = app
@@ -791,6 +792,7 @@ fn desktop_new_session_keeps_operator_choices_explicit() {
     assert_eq!(start.params["provider"], "native");
     assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/tmp/desktop-workspace");
+    assert_eq!(start.params["reasoning_effort"], "high");
     assert!(
         start.params.get("sandbox_mode").is_none(),
         "an untouched form with no stored default states no posture: {}",
@@ -818,8 +820,14 @@ fn desktop_new_session_omits_the_model_key_when_no_model_was_chosen() {
     );
     app.drain();
 
-    app.desktop_start_session("claude".into(), None, "/tmp/desktop-workspace".into(), None)
-        .expect("the operate-capable gateway can start a session");
+    app.desktop_start_session(
+        "claude".into(),
+        None,
+        "/tmp/desktop-workspace".into(),
+        None,
+        None,
+    )
+    .expect("the operate-capable gateway can start a session");
     let start = app
         .drain()
         .into_iter()
@@ -838,6 +846,7 @@ fn desktop_new_session_omits_the_model_key_when_no_model_was_chosen() {
         "claude".into(),
         Some("   ".into()),
         "/tmp/desktop-workspace".into(),
+        None,
         None,
     )
     .expect("a session still starts");
@@ -874,8 +883,14 @@ fn desktop_new_session_sends_the_chosen_sandbox_over_the_stored_default() {
     app.drain();
 
     // Untouched, the stored default is what the form sends.
-    app.desktop_start_session("native".into(), None, "/tmp/desktop-workspace".into(), None)
-        .expect("the operate-capable gateway can start a session");
+    app.desktop_start_session(
+        "native".into(),
+        None,
+        "/tmp/desktop-workspace".into(),
+        None,
+        None,
+    )
+    .expect("the operate-capable gateway can start a session");
     let start = app
         .drain()
         .into_iter()
@@ -889,6 +904,7 @@ fn desktop_new_session_sends_the_chosen_sandbox_over_the_stored_default() {
             None,
             "/tmp/desktop-workspace".into(),
             Some(mode),
+            None,
         )
         .expect("the operate-capable gateway can start a session");
         let start = app
@@ -924,6 +940,7 @@ fn desktop_gates_codex_work_and_uses_the_runtime_owned_login_flow() {
             "native".into(),
             Some("openai_codex:gpt-5.6-sol".into()),
             "/tmp/desktop-workspace".into(),
+            None,
             None,
         )
         .expect_err("an OAuth-backed model cannot start before sign-in");

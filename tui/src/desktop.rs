@@ -38,7 +38,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::config;
 use crate::desktop_design::{self as design, DesktopTokens, Tone};
 use crate::model::{
-    ApprovalDecision, ApprovalScope, ModelsCatalog, Plane, ProviderEntry, SandboxMode, Triage,
+    ApprovalDecision, ApprovalScope, Effort, ModelsCatalog, Plane, ProviderEntry, SandboxMode,
+    Triage,
 };
 use crate::runtime::{self, Paths};
 use crate::transport::{self, Secret, TransportConfig};
@@ -515,6 +516,10 @@ struct DesktopView {
     /// an untouched form still starts the session the stored configuration describes —
     /// including the case where it describes nothing and the plane decides.
     new_sandbox: Option<SandboxMode>,
+    /// The new-session form starts on High. If the selected model/provider does not offer
+    /// it, the effective choice falls back to the first declared row without mutating this
+    /// record; selecting another model starts at High again.
+    new_reasoning_effort: Effort,
     show_new: bool,
     action_error: Option<String>,
     transcript_scroll: ScrollHandle,
@@ -562,6 +567,7 @@ impl DesktopView {
                 // resolved against rows that are not the whole list.
                 let SelectEvent::Confirm(choice) = event;
                 this.model_choice = choice.clone().unwrap_or(ModelChoice::RuntimeDefault);
+                this.new_reasoning_effort = Effort::High;
                 // A confirmed search leaves the delegate filtered and the list index
                 // pointing into it. Reinstalling unfiltered rows and re-asserting the
                 // choice puts the closed label back in agreement with what will be sent.
@@ -640,6 +646,7 @@ impl DesktopView {
                 // choice the new provider does not offer.
                 this.model_seeded = true;
                 this.sync_pickers(window, cx);
+                this.new_reasoning_effort = Effort::High;
                 this.action_error = None;
                 cx.notify();
             },
@@ -681,6 +688,7 @@ impl DesktopView {
             seeded: false,
             model_seeded: false,
             new_sandbox: None,
+            new_reasoning_effort: Effort::High,
             show_new: false,
             action_error: None,
             transcript_scroll: ScrollHandle::new(),
@@ -1276,6 +1284,23 @@ impl DesktopView {
             .clone()
     }
 
+    fn new_reasoning_choices(&self, cx: &GpuiApp) -> Vec<Effort> {
+        let provider = self.new_provider(cx);
+        let model = self.new_effective_model(cx);
+        self.app
+            .as_ref()
+            .map(|app| app.desktop_reasoning_choices_for(&provider, model.as_deref()))
+            .unwrap_or_default()
+    }
+
+    /// The value the new-session request will send. High wins whenever the model offers
+    /// it; a narrower model falls back to its first declared value, and an unknown model
+    /// sends no effort rather than guessing.
+    fn new_reasoning_effort(&self, cx: &GpuiApp) -> Option<Effort> {
+        let choices = self.new_reasoning_choices(cx);
+        resolved_reasoning_effort(self.new_reasoning_effort, &choices)
+    }
+
     /// Whether the session this form describes would run on a ChatGPT-subscription model.
     fn new_requires_chatgpt(&self, cx: &GpuiApp) -> bool {
         self.new_provider(cx) == "native"
@@ -1327,11 +1352,14 @@ impl DesktopView {
         let model = self.new_model(cx);
         let workspace = self.workspace.read(cx).value().to_string();
         let sandbox = self.new_sandbox;
+        let reasoning_effort = self.new_reasoning_effort(cx);
         let result = self
             .app
             .as_mut()
             .ok_or_else(|| "the runtime is not connected yet".to_string())
-            .and_then(|app| app.desktop_start_session(provider, model, workspace, sandbox));
+            .and_then(|app| {
+                app.desktop_start_session(provider, model, workspace, sandbox, reasoning_effort)
+            });
 
         match result {
             Ok(id) => {
@@ -1436,6 +1464,21 @@ impl DesktopView {
         cx.notify();
     }
 
+    fn set_reasoning_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
+        let result = match self.app.as_mut() {
+            None => Err("the runtime is not connected".to_string()),
+            Some(app) => app.desktop_set_reasoning_effort(effort),
+        };
+        match result {
+            Ok(()) => {
+                self.action_error = None;
+                self.flush_calls();
+            }
+            Err(error) => self.action_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         if let Some(app) = self.app.as_mut() {
             app.desktop_interrupt();
@@ -1483,6 +1526,7 @@ impl DesktopView {
 
         self.model_picker = Self::new_model_picker(window, cx);
         self.reinstall_model_rows(window, cx);
+        self.new_reasoning_effort = Effort::High;
 
         self.action_error = None;
         cx.notify();
@@ -2038,6 +2082,10 @@ impl DesktopView {
             .as_ref()
             .and_then(|app| app.config.defaults.sandbox_mode());
         let sandbox = self.new_sandbox.or(configured_sandbox);
+        let reasoning_choices = self.new_reasoning_choices(cx);
+        let reasoning_effort = self.new_reasoning_effort(cx);
+        let reasoning_model = self.new_effective_model(cx);
+        let picker_view = cx.entity().downgrade();
 
         design::panel(tokens)
             .flex()
@@ -2131,6 +2179,60 @@ impl DesktopView {
                                         this.browse_workspace(window, cx);
                                     })),
                             ),
+                    ))
+                    .child(design::field(
+                        tokens,
+                        "Thinking",
+                        Some(
+                            reasoning_model
+                                .map(|model| format!("For {model}").into())
+                                .unwrap_or_else(|| "Not reported for this model".into()),
+                        ),
+                        match reasoning_effort {
+                            Some(current) => {
+                                let choices = reasoning_choices.clone();
+                                design::secondary_button("new-reasoning-effort", current.label())
+                                    .w_full()
+                                    .icon(IconName::Settings2)
+                                    .tooltip("Default thinking level for this session")
+                                    .dropdown_menu(move |menu, _window, _cx| {
+                                        choices
+                                            .iter()
+                                            .copied()
+                                            .enumerate()
+                                            .fold(
+                                                menu.min_w(px(220.0)),
+                                                |menu, (_index, effort)| {
+                                                    let view = picker_view.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new(effort.label())
+                                                            .checked(effort == current)
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ =
+                                                                    view.update(cx, |this, cx| {
+                                                                        this.new_reasoning_effort =
+                                                                            effort;
+                                                                        this.action_error = None;
+                                                                        cx.notify();
+                                                                    });
+                                                            }),
+                                                    )
+                                                },
+                                            )
+                                            .separator()
+                                            .label("High is the default when the model supports it")
+                                    })
+                                    .into_any_element()
+                            }
+                            None => design::secondary_button(
+                                "new-reasoning-unavailable",
+                                "Not available",
+                            )
+                            .w_full()
+                            .icon(IconName::Settings2)
+                            .disabled(true)
+                            .into_any_element(),
+                        },
                     ))
                     .child(design::field(
                         tokens,
@@ -2816,6 +2918,7 @@ impl DesktopView {
         // omitted rather than guessed at: a picker with a checked row is a claim about
         // what the agent may touch, and this client does not have one to make.
         let sandbox = self.app.as_ref().and_then(|app| app.desktop_sandbox_mode());
+        let reasoning = self.app.as_ref().and_then(App::desktop_reasoning);
         let picker_view = cx.entity().downgrade();
         div()
             .px_6()
@@ -2985,6 +3088,43 @@ impl DesktopView {
                                                     .separator()
                                                     .label("The runtime's own posture, for this session")
                                             })
+                                    }))
+                                    .children(reasoning.map(|reasoning| {
+                                        let current = reasoning.current;
+                                        let choices = reasoning.choices;
+                                        let picker_view = picker_view.clone();
+                                        design::secondary_button(
+                                            "reasoning-effort",
+                                            format!(
+                                                "Thinking · {}",
+                                                current.map(Effort::label).unwrap_or("Default")
+                                            ),
+                                        )
+                                        .tooltip("Default thinking level for future turns")
+                                        .dropdown_menu(move |menu, _window, _cx| {
+                                            choices.iter().copied().fold(
+                                                menu.min_w(px(240.0)),
+                                                |menu, effort| {
+                                                    let view = picker_view.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new(effort.label())
+                                                            .checked(current == Some(effort))
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ = view.update(
+                                                                    cx,
+                                                                    |this, cx| {
+                                                                        this.set_reasoning_effort(
+                                                                            effort, cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }),
+                                                    )
+                                                },
+                                            )
+                                            .separator()
+                                            .label("Applies to future turns in this session")
+                                        })
                                     }))
                                     .child({
                                         let context = div()
@@ -3971,6 +4111,16 @@ fn model_intent(field: &ModelField, choice: &ModelChoice, typed: &str) -> ModelI
     ModelIntent { send, hint }
 }
 
+fn resolved_reasoning_effort(selected: Effort, choices: &[Effort]) -> Option<Effort> {
+    if choices.contains(&selected) {
+        Some(selected)
+    } else if choices.contains(&Effort::High) {
+        Some(Effort::High)
+    } else {
+        choices.first().copied()
+    }
+}
+
 /// The rows the new-session provider picker offers.
 ///
 /// [`provider_choices`] already owns the rule that matters — the stored default gets a row
@@ -4235,9 +4385,13 @@ mod tests {
                             {
                                 "id": "openai_codex:gpt-5.6-sol",
                                 "name": "GPT-5.6 Sol",
-                                "context_window": 400000
+                                "context_window": 400000,
+                                "reasoning_efforts": ["low", "medium", "high"]
                             },
-                            { "id": "openai_codex:gpt-5.2-codex" }
+                            {
+                                "id": "openai_codex:gpt-5.2-codex",
+                                "reasoning_efforts": []
+                            }
                         ]
                     },
                     {
@@ -4423,6 +4577,22 @@ mod tests {
             blank.hint, "Sends no model option (runtime default)",
             "an empty Custom field sends nothing, and says so rather than implying a model"
         );
+    }
+
+    #[test]
+    fn high_is_the_reasoning_default_without_inventing_an_unsupported_level() {
+        let all = [Effort::Low, Effort::Medium, Effort::High];
+        assert_eq!(
+            resolved_reasoning_effort(Effort::High, &all),
+            Some(Effort::High)
+        );
+
+        let narrow = [Effort::Low, Effort::Medium];
+        assert_eq!(
+            resolved_reasoning_effort(Effort::High, &narrow),
+            Some(Effort::Low)
+        );
+        assert_eq!(resolved_reasoning_effort(Effort::High, &[]), None);
     }
 
     #[test]

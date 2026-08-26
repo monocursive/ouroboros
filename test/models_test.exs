@@ -48,6 +48,19 @@ defmodule Ouroboros.ModelsTest do
       end
     end
 
+    test "reasoning levels are model-specific and limited to what the runtime accepts" do
+      model =
+        provider_row(:native).models
+        |> Enum.find(&(&1.id == "openai_codex:gpt-5.6-sol"))
+
+      assert model, "the packaged OpenAI catalogue no longer carries gpt-5.6-sol"
+      assert model.reasoning_efforts == ["low", "medium", "high"]
+
+      for row <- Models.list().providers, model <- row.models do
+        assert Enum.all?(model.reasoning_efforts, &(&1 in ~w(low medium high)))
+      end
+    end
+
     test "pricing is normalised to one million tokens, in the currency it was stated in" do
       row = provider_row(:claude)
       model = Enum.find(row.models, &(&1.pricing != nil))

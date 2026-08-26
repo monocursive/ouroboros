@@ -811,9 +811,11 @@ pub struct SessionInfo {
     pub model: Option<String>,
     /// `options.approval_mode` / `options.sandbox_mode`, verbatim. `None` means the start
     /// omitted them and the plane's own default applies, which is a fact this client does
-    /// not have.
+    /// not have. Reasoning effort is parsed into the gateway's finite vocabulary so the
+    /// desktop can put the confirmed value back on a select row.
     pub approval_mode: Option<String>,
     pub sandbox_mode: Option<String>,
+    pub reasoning_effort: Option<Effort>,
     /// B2. `options.plan` — whether this session is planning: read-only, holding its
     /// terminal event at the end of a planning turn to ask whether to build the plan.
     ///
@@ -921,6 +923,7 @@ impl SessionInfo {
             model: option("model"),
             approval_mode: option("approval_mode"),
             sandbox_mode: option("sandbox_mode"),
+            reasoning_effort: option("reasoning_effort").and_then(|value| Effort::parse(&value)),
             plan: options
                 .and_then(|options| options.get("plan"))
                 .and_then(Value::as_bool)
@@ -1193,6 +1196,13 @@ impl ProviderEntry {
         self.normalized_refusal("sandbox_mode", mode.as_str())
     }
 
+    /// Whether this provider's selected session transport can carry an effort value.
+    /// Model capability and transport normalization are independent; a picker must satisfy
+    /// both or it offers a value the selected model understands but the adapter drops.
+    pub fn reasoning_effort_refusal(&self, effort: Effort) -> Option<String> {
+        self.normalized_refusal("reasoning_effort", effort.as_str())
+    }
+
     fn normalized_refusal(&self, field: &str, value: &str) -> Option<String> {
         let declared = self.declared_session_options()?;
 
@@ -1351,6 +1361,11 @@ pub struct ModelEntry {
     pub max_output_tokens: Option<u64>,
     #[serde(default)]
     pub release_date: Option<String>,
+    /// The model's effort vocabulary, already intersected server-side with the values the
+    /// runtime can normalize. Kept as strings so a gateway one version ahead can add a
+    /// word without making this client reject the entire catalogue.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
     #[serde(default)]
     pub pricing: Option<ModelPricing>,
 }
@@ -1387,6 +1402,20 @@ impl ModelsCatalog {
 }
 
 impl ModelEntry {
+    /// The reasoning levels this client knows how to send, in the order the runtime
+    /// reported them. Unknown future words are ignored rather than costing the model row.
+    pub fn efforts(&self) -> Vec<Effort> {
+        let mut efforts = Vec::new();
+        for name in &self.reasoning_efforts {
+            if let Some(effort) = Effort::parse(name) {
+                if !efforts.contains(&effort) {
+                    efforts.push(effort);
+                }
+            }
+        }
+        efforts
+    }
+
     /// One line of secondary text: the vendor's name and the context window, whichever the
     /// snapshot actually stated. `None` when it stated neither — a row showing only the id
     /// is honest, and an empty second line is not.
@@ -2188,6 +2217,7 @@ pub struct StartRequest {
     pub workspace: String,
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
+    pub reasoning_effort: Option<Effort>,
     /// Required on the coding plane, refused on the interactive one.
     pub objective: String,
     /// D7. Run in a `git worktree` under the runtime's data directory instead of the
@@ -2218,6 +2248,7 @@ impl StartRequest {
             workspace: String::new(),
             approval_mode: None,
             sandbox_mode: None,
+            reasoning_effort: None,
             objective: String::new(),
             worktree: false,
             plan: false,
@@ -2301,6 +2332,13 @@ impl StartRequest {
             params.insert(
                 "sandbox_mode".into(),
                 Value::String(mode.as_str().to_string()),
+            );
+        }
+
+        if let Some(effort) = self.reasoning_effort {
+            params.insert(
+                "reasoning_effort".into(),
+                Value::String(effort.as_str().to_string()),
             );
         }
 
@@ -2622,8 +2660,9 @@ impl Attachment {
     }
 }
 
-/// Per-turn reasoning effort, exactly the three values `@reasoning_efforts` declares in
-/// `gateway/methods.ex`. A fourth would be a `-32602` naming the parameter.
+/// Reasoning effort, exactly the three values `@reasoning_efforts` declares in
+/// `gateway/methods.ex`. It can be a session default or a per-turn override; a fourth
+/// would be a `-32602` naming the parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effort {
     Low,
@@ -2645,6 +2684,14 @@ impl Effort {
     pub fn parse(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
         Self::ALL.into_iter().find(|effort| effort.as_str() == name)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
     }
 }
 
@@ -3102,6 +3149,32 @@ mod tests {
         assert_eq!(tasks[0].status, SessionStatus::Running);
         assert!(tasks[0].status.busy());
         assert!(!tasks[0].status.terminal());
+    }
+
+    #[test]
+    fn a_session_row_keeps_its_confirmed_reasoning_effort() {
+        let session = SessionInfo::decode(
+            Plane::Interactive,
+            &serde_json::json!({
+                "id": "session-thinking",
+                "status": "idle",
+                "options": {"reasoning_effort": "high"}
+            }),
+        )
+        .expect("a session row");
+
+        assert_eq!(session.reasoning_effort, Some(Effort::High));
+
+        let future = SessionInfo::decode(
+            Plane::Interactive,
+            &serde_json::json!({
+                "id": "session-future",
+                "status": "idle",
+                "options": {"reasoning_effort": "future"}
+            }),
+        )
+        .expect("a forward-compatible session row");
+        assert_eq!(future.reasoning_effort, None);
     }
 
     #[test]
@@ -3705,6 +3778,7 @@ mod tests {
                             "context_window": 400000,
                             "max_output_tokens": 128000,
                             "release_date": "2026-05-14",
+                            "reasoning_efforts": ["low", "medium", "high"],
                             "pricing": {
                                 "currency": "USD",
                                 "input_per_mtok": 1.25,
@@ -3719,6 +3793,7 @@ mod tests {
                             "context_window": null,
                             "max_output_tokens": null,
                             "release_date": null,
+                            "reasoning_efforts": [],
                             "pricing": null
                         }
                     ]
@@ -3754,6 +3829,10 @@ mod tests {
         assert_eq!(native.models.len(), 2);
         assert_eq!(native.models[0].id, "openai_codex:gpt-5.6-sol");
         assert_eq!(native.models[0].context_window, Some(400_000));
+        assert_eq!(
+            native.models[0].efforts(),
+            vec![Effort::Low, Effort::Medium, Effort::High]
+        );
         assert_eq!(
             native.models[0]
                 .pricing
@@ -3846,6 +3925,7 @@ mod tests {
         );
 
         request.sandbox_mode = Some(SandboxMode::ReadOnly);
+        request.reasoning_effort = Some(Effort::High);
         let fields = request
             .params()
             .expect("still valid")
@@ -3853,7 +3933,8 @@ mod tests {
             .expect("an object")
             .clone();
         assert_eq!(fields["sandbox_mode"], "read_only");
-        assert_eq!(fields.len(), 5);
+        assert_eq!(fields["reasoning_effort"], "high");
+        assert_eq!(fields.len(), 6);
     }
 
     #[test]
@@ -3869,6 +3950,7 @@ mod tests {
         assert!(!fields.contains_key("workspace"));
         assert!(!fields.contains_key("approval_mode"));
         assert!(!fields.contains_key("sandbox_mode"));
+        assert!(!fields.contains_key("reasoning_effort"));
         assert!(!fields.contains_key("objective"));
         assert_eq!(fields["id"], request.id);
         assert_eq!(fields.len(), 2);

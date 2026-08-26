@@ -37,9 +37,9 @@ use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
-    Capabilities, CursorPruned, Effort, Event, EventType, ModelsCatalog, PlanChoice, Plane,
-    ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage,
-    TurnInput,
+    Capabilities, Capability, CursorPruned, Effort, Event, EventType, ModelsCatalog, PlanChoice,
+    Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef,
+    Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -75,7 +75,7 @@ use session::{
 
 pub use desktop::{
     DesktopAccount, DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell,
-    DesktopCellKind, DesktopQuickStart, DesktopSession, DesktopTone,
+    DesktopCellKind, DesktopQuickStart, DesktopReasoning, DesktopSession, DesktopTone,
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{

@@ -59,6 +59,12 @@ defmodule Ouroboros.Models do
     "token.cache_write" => :cache_write_per_mtok
   }
 
+  # The gateway and the pinned Harness request schemas currently normalize these three
+  # values. A vendor catalogue may publish a wider vocabulary (for example `none`,
+  # `xhigh`, or `max`); advertising one here would let a client select a value the very
+  # next start/configure call refuses, so model metadata is intersected with this list.
+  @reasoning_efforts ~w(low medium high)
+
   @doc """
   Returns the catalogue for every provider this node serves.
 
@@ -165,9 +171,50 @@ defmodule Ouroboros.Models do
       context_window: number(Map.get(limits, :context)),
       max_output_tokens: number(Map.get(limits, :output)),
       release_date: Map.get(model, :release_date),
+      reasoning_efforts: reasoning_efforts(model),
       pricing: pricing(Map.get(model, :pricing))
     }
   end
+
+  defp reasoning_efforts(model) do
+    model
+    |> declared_reasoning_efforts()
+    |> Enum.map(&reasoning_effort_name/1)
+    |> Enum.filter(&(&1 in @reasoning_efforts))
+    |> Enum.uniq()
+    |> Enum.sort_by(&Enum.find_index(@reasoning_efforts, fn known -> known == &1 end))
+  end
+
+  # Prefer llm_db's canonical capability shape. The packaged snapshot predates that
+  # enrichment for some models, so retain the opaque `extra.reasoning_options` fallback
+  # that holds the same vendor declaration in those rows.
+  defp declared_reasoning_efforts(%{capabilities: capabilities, extra: extra}) do
+    case get_in(capabilities || %{}, [:reasoning, :effort]) do
+      %{supported: true, values: values} when is_list(values) and values != [] -> values
+      _absent -> extra_reasoning_efforts(extra)
+    end
+  end
+
+  defp declared_reasoning_efforts(_model), do: []
+
+  defp extra_reasoning_efforts(extra) when is_map(extra) do
+    options = Map.get(extra, "reasoning_options") || Map.get(extra, :reasoning_options) || []
+
+    Enum.flat_map(options, fn
+      option when is_map(option) ->
+        type = Map.get(option, "type") || Map.get(option, :type)
+        values = Map.get(option, "values") || Map.get(option, :values)
+        if reasoning_effort_name(type) == "effort" and is_list(values), do: values, else: []
+
+      _other ->
+        []
+    end)
+  end
+
+  defp extra_reasoning_efforts(_extra), do: []
+  defp reasoning_effort_name(value) when is_atom(value), do: Atom.to_string(value)
+  defp reasoning_effort_name(value) when is_binary(value), do: value
+  defp reasoning_effort_name(_value), do: ""
 
   defp pricing(%{components: components} = pricing) when is_list(components) do
     rates =
