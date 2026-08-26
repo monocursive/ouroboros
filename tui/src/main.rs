@@ -32,8 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, FleetCommand, HookCommand, InviteCommand, LedgerArgs, McpCommand,
-    RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
+    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, HookCommand, InviteCommand, LedgerArgs,
+    McpCommand, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -207,6 +207,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Mcp { command }) => mcp_command(&paths, command).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
+        Some(Command::Desktop { command }) => desktop(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
@@ -2489,6 +2490,21 @@ async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::ledger_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+/// `ouro desktop` — the Computer Use operator surface. Reporting only; the model tools and
+/// enabling the feature live elsewhere.
+async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
+    match command {
+        DesktopCommand::Doctor(args) => {
+            let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+            let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+            let connected = attach_with(address, token, false, hook).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::desktop_cli::doctor(&connected.client, args.json, &mut out).await
+        }
+    }
 }
 
 /// Where a runtime this client did not start listens, and the token to present to it.

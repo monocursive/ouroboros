@@ -14,6 +14,7 @@ pub mod config;
 pub mod continuation;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod desktop_cli;
 #[cfg(feature = "desktop")]
 mod desktop_design;
 pub mod fleet;

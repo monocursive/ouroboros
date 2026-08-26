@@ -195,6 +195,12 @@ pub enum Command {
     /// a clean stream for a pipe.
     Ledger(LedgerArgs),
 
+    /// Computer Use operator surface. `ouro desktop doctor` reports node readiness.
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommand,
+    },
+
     /// Create, join, and diagnose a secure group of Ouroboros machines.
     Fleet {
         #[command(subcommand)]
@@ -333,6 +339,30 @@ pub struct LedgerArgs {
     /// How many entries at most. The runtime bounds this as well, and its bound wins.
     #[arg(long, value_name = "N")]
     pub limit: Option<u64>,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro desktop`'s subcommands. One so far.
+#[derive(Debug, Subcommand)]
+pub enum DesktopCommand {
+    /// Report Computer Use readiness on the node — helper presence, permissions, and
+    /// capabilities. Asks `computer_use.status`, which starts nothing.
+    Doctor(DesktopArgs),
+}
+
+/// `ouro desktop doctor`'s flags.
+#[derive(Debug, Args)]
+pub struct DesktopArgs {
+    /// Emit the raw status JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
 
     /// Where the gateway listens. Omitted, the local gateway.json is read instead.
     #[arg(long, value_name = "HOST:PORT")]
