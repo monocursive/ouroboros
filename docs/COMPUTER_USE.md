@@ -1,7 +1,10 @@
 # Computer Use
 
-Status: design. Not implemented. This document is the contract a first PR is
-held to. It is not generated; edit it when the contract changes.
+Status: Phase 0 + Phase 1 (observe) built and live-proven on a feature branch;
+`desktop_act` (Phase 2), the `ouro desktop` CLI, and the full §6.3 gate are
+deferred. See **§18** for what is actually built vs still designed. This document
+is the contract a PR is held to; it is not generated — edit it when the contract
+changes.
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md) (native loop, permissions, MCP),
 [DESKTOP.md](DESKTOP.md) (GPUI is presentation), [PROTOCOL.md](PROTOCOL.md)
@@ -918,8 +921,14 @@ client (TUI/GPUI) decodes into memory, never writes the workspace.
 - TUI: `images.rs` gains `session_desktop(session_dir, sha)` — a second
   containment rule, **not** a weakening of `inside_workspace/2`. Fetch
   via `computer_use.artifact` (preferred, works remotely) or local
-  session_dir when attached to localhost. Draw with existing kitty/iTerm
-  encoders. Max rows still 40.
+  session_dir when attached to localhost. Max rows still 40.
+  **As built (2026-08-26): the TUI shows a labelled placeholder, not inline
+  pixels.** `ratatui-core`'s `Buffer::set_stringn` strips control characters,
+  so a kitty/iTerm2 escape placed in a `Line`/`Paragraph` never reaches the
+  terminal (verified against `buffer.rs:333/353`). The encoders exist and are
+  unit-tested (`images::render`), but inline TUI pixels need a cursor-positioned
+  raw-byte draw-loop pass over the backend — deferred, an operator-surface
+  concern. GPUI is the surface that renders real pixels today.
 - GPUI: add `DesktopCellKind::Image { sha, width, height, media_type }`.
   `desktop_cell/1` maps a tool_result with artifacts to a Tool cell plus
   an Image cell. Do not put pixels in `DesktopCell.body`.
@@ -1173,3 +1182,63 @@ Windows, PiP overlay, `@App` composer sugar.
 12. Plan mode can look and cannot click.
 13. A Linux port implements `doctor|state|act|windows`, not 18 MCP
     tools.
+
+## 18. Phase 0 + Phase 1 (observe) — as built and proven (2026-08-26)
+
+Phase 0 and Phase 1 (observe) are implemented and merged to a feature branch
+(`computer-use-p1`, not `main`). What follows is what the code actually does,
+where it diverges from the design above, and what stays deferred — the honesty
+invariant applied to this document itself.
+
+**Proven live on macOS (real capture, this host):**
+
+- The helper (`ouro-computer-use`) captures a real screenshot through
+  `SCScreenshotManager` over a desktop-independent `SCWindow` filter that never
+  raises the window (D8/§7.3), plus a real `AXUIElement` tree whose node bounds
+  are transformed into the screenshot's coordinate space. `doctor` reports every
+  capability green; `windows` returns real windows over the `serve` JSON-RPC.
+- `DesktopState.run` → `Native.Desktop.Pool` → helper → `state` → content-address
+  staging (`0600`, `<session_dir>/desktop/<sha>.jpg`) → a result carrying
+  `images: [%{path, media_type, sha256, size}]` was driven end-to-end (a
+  ~200 KB JPEG whose staged sha matched).
+- `computer_use.status` reports `running: true` with the pool's cached doctor;
+  `computer_use.artifact` returns the staged bytes base64 by sha, and refuses an
+  unknown sha or a non-64-hex sha (a path-traversal attempt) with `not_found`.
+- The ollama native path streams a full turn — the first live exercise of
+  `Model.ReqLLM` normalization.
+
+**Honest divergences and deferrals (do not "fix" without reading):**
+
+- **TUI inline pixels are deferred.** See §8.6 — ratatui strips the escape codes.
+  GPUI renders; the TUI shows a placeholder.
+- **§6.3 two-phase is Phase-1-partial.** For `desktop_state` the protections that
+  are live are: the claimed-app node-denylist check before capture, the helper's
+  `--deny-app` belt (the pool now launches `serve --deny-app <id>` for every
+  denied id, §7.3), and a helper that errors rather than substituting a different
+  app when the target does not resolve. The full **engine re-evaluate on the
+  resolved app** (an allow for app X must not cover a capture that resolved to Y)
+  lands with **`desktop_act` in Phase 2**, where the focus-only preflight makes it
+  load-bearing (clicking the wrong app is the real risk).
+- **`desktop_act` is a stub** (Phase 2): validation + key grammar are real and
+  tested, but no input is injected.
+- **The helper pool is an unlinked, lazily-started singleton** (no supervisor in
+  this slice; D11's "next state rebuilds" covers a crash). Wiring it under a
+  `Desktop.Supervisor` is a deferred refinement; `start_link/1` + `child_spec`
+  already ship.
+- **Last state is keyed by `session_dir`**, not `session_id` (the tool context
+  carries the former); rekeying is a one-line change if `session_id` is threaded.
+- **`computer_use.artifact` is pool-incarnation-scoped**: it searches only the
+  session dirs the live pool has staged into, so a sha from before a pool crash
+  is an honest miss. A durable sha→path index is a later refinement.
+- **`--approve-all` must not auto-answer `desktop_act`** (Δ1, D10): the headless
+  `ouro run` driver approves everything except `plan_exit`; the Phase-2
+  `desktop_act` work must add `desktop_act` (and a first-app `desktop_state`) to
+  that carve-out so an unattended run cannot click.
+- **Vision leg is unit-tested, not live-proven end-to-end.** A non-vision model
+  (e.g. `qwen2.5-coder`) receives the accessibility tree by design; the
+  pixels-to-vision-model path is covered by `Model.ReqLLM` unit tests. A vision
+  model that reliably tool-calls would close it.
+
+**Deferred operator surface:** the `ouro desktop doctor` CLI (D2) is not yet
+built; `computer_use.status` is reachable over the gateway. Its TUI/GPUI
+catalogue rows (`docs/TUI.md` §2.4) land with that CLI.
