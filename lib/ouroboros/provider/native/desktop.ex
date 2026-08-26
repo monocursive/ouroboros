@@ -211,10 +211,12 @@ defmodule Ouroboros.Provider.Native.Desktop do
   def app_aliases, do: @app_aliases
 
   @doc """
-  A readiness map for operator surfaces, clearly marked not-yet-wired in Phase 0.
+  Node-facing Computer Use readiness for `computer_use.status` (§8.5). Starts nothing.
 
-  There is no helper process, no capture, and no input in this phase, so `wired` is false
-  and `note` says so. Later phases replace this with the helper's own `doctor` output.
+  The config posture — `enabled`, `flag`, `helper_path`, `helper_present`,
+  `denied_app_ids` — is always reported. When the helper pool is already running, the
+  live block (`running: true`, the pool's cached handshake `doctor`, `phase`, `sessions`)
+  is folded in; with no pool it is an honest `running: false`. This never spawns the pool.
   """
   @spec status() :: map()
   def status do
