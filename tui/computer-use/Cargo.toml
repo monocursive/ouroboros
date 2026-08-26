@@ -22,3 +22,34 @@ serde_json = "1"
 # The line loop, and the cancellation-safe input model Phase 1 needs (`tokio::sync::Mutex`,
 # detached tasks). Phase 0 uses only the runtime, stdio, and the byte utilities.
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }
+# Pure-Rust, cross-platform, and used only by the platform-independent image pipeline
+# (`src/image.rs`): downscale to the size budget, then encode JPEG (quality) / PNG. Keeping
+# encode/resize out of the objc2 FFI is deliberate — it makes the whole pixel path (budget
+# clamping, scale arithmetic, format choice) unit-testable with no Screen-Recording grant.
+# `default-features = false` drops every decoder/encoder except the two formats §7.3 names.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# The `state` screenshot's content hash (§7.3, §8.1). Pure Rust, already in this repo's lock
+# behind `ouro`'s own `sha2`; no C, no OpenSSL.
+sha2 = "0.10"
+
+# The macOS observe stack lives ONLY here, behind `cfg(target_os = "macos")`, so a non-macOS
+# build compiles the honest "unsupported platform" path and pulls none of it. `ouro` /
+# `ouro-desktop` never depend on this member, so none of this reaches their graph either.
+[target.'cfg(target_os = "macos")'.dependencies]
+# Objective-C runtime + typed framework bindings (objc2 0.6 family). Chosen over raw
+# msg_send FFI because ScreenCaptureKit's async, block-based capture and the AXUIElement walk
+# are far easier to get memory-correct through typed, retain/release-aware bindings. The
+# framework crates take their default feature set: the alternative — hand-picking a dozen
+# per-symbol features across five crates — is brittle and offers nothing to this isolated
+# member. `objc2-app-kit` is the exception: only `NSRunningApplication` is needed (to map a
+# window's pid to its bundle id in `windows`, with no TCC grant), so all of AppKit stays out.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-application-services = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSRunningApplication", "libc"] }
+# The completion-handler blocks `SCShareableContent` / `SCScreenshotManager` deliver their
+# results through (§7.5: one request in flight, driven to completion synchronously).
+block2 = "0.6"

@@ -5,16 +5,22 @@
 //! there is always exactly **one in-flight request**; Phase 1's long-running `act` will move
 //! to a `tokio::sync::Mutex` plus a detached task (doc §7.5) but Phase 0 needs neither.
 //!
-//! Phase 0 answers `doctor` for real and returns a structured "not implemented in phase 0"
-//! error for `windows` / `state` / `act`. Per the honesty invariant, a stub returns that
-//! error — never plausible-looking window lists, trees, or screenshots.
+//! Phase 1 answers `doctor`, `windows`, and `state` for real; `act` remains a structured
+//! "not implemented in phase 2" stub. Per the honesty invariant, a stub returns that error —
+//! never plausible-looking window lists, trees, or screenshots — and a real method returns
+//! real host state or an honest error, never filler.
 //!
-//! ## Phase-1 input invariants to honor later (NOT implemented here)
+//! ## Phase-2 input invariants to honor later (NOT implemented here)
 //!
-//! When `act` becomes real, two rules from doc §7.4/§7.5 must hold and are easy to lose:
+//! When `act` becomes real, three rules from doc §7.4/§7.5/§7.6 must hold and are easy to lose:
 //!   * **Never replay input across backends after a partial failure.** If one injection path
 //!     (AXPress, then CGEvent) partially lands and fails, do not re-run the sequence on the
 //!     other backend — a half-applied chord replayed is double input, not a retry.
+//!   * **An `AXPress`→`CGEvent` fallback must not double-fire.** When a node lists `AXPress`,
+//!     that is the click; only fall back to a synthetic `CGEvent` click when `AXPress` was
+//!     *not attempted or is unavailable*, never after an `AXPress` that returned success (or
+//!     whose result is unknown) — a press that landed followed by a coordinate click is two
+//!     activations of the same control.
 //!   * **Run stateful input in a detached, cancellation-safe task.** Key-down/up and
 //!     button-hold must live in a task that releases what it is holding even when the call is
 //!     cancelled mid-way (the "cancellation-safe guard" shape), so a `Command-.` interrupt
@@ -27,8 +33,18 @@ use crate::codec::{self, Frame, Incoming};
 use crate::doctor;
 
 /// The error code for a method whose real implementation lands in a later phase. -32000 sits
-/// inside JSON-RPC 2.0's reserved server-error band (-32000..=-32099).
+/// inside JSON-RPC 2.0's reserved server-error band (-32000..=-32099); the codes below share
+/// that band, each distinct so Elixir can map a helper failure to the right in-band tool error.
 const NOT_IMPLEMENTED: i64 = -32000;
+/// An observe method (`windows`/`state`) failed at runtime: no display session, capture or AX
+/// failure, target not found, staging failure (doc §5.2 hard errors).
+pub const OBSERVE_ERROR: i64 = -32001;
+/// The resolved target app is on the helper's `--deny-app` belt (doc §7.3).
+pub const DENIED_APP: i64 = -32002;
+/// The method is real but this platform is not macOS, so it cannot run here. Referenced only
+/// from the non-macOS `handle` stubs, hence unused on a macOS build.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub const UNSUPPORTED_PLATFORM: i64 = -32003;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INTERNAL_ERROR: i64 = -32603;
@@ -48,8 +64,8 @@ impl Server {
         Self { deny_apps }
     }
 
-    /// The `--deny-app` list this helper was started with (doc §7.3). Retained now, enforced
-    /// in Phase 1 when `state`/`act` stop being stubs.
+    /// The `--deny-app` list this helper was started with (doc §7.3). Enforced by `state`
+    /// before any capture; `act` will honor it too in Phase 2.
     pub fn deny_apps(&self) -> &[String] {
         &self.deny_apps
     }
@@ -76,14 +92,18 @@ impl Server {
         }))
     }
 
-    fn dispatch(&self, method: &str, _params: Value) -> Result<Value, (i64, String)> {
+    fn dispatch(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
         match method {
             "doctor" => Ok(doctor::report()),
 
-            // Structured stubs. Never fabricated data (honesty invariant).
-            "windows" | "state" | "act" => Err(not_implemented(method)),
+            // Phase 1 observe: real host state or an honest error, never fabricated data.
+            "windows" => crate::windows::handle(),
+            "state" => crate::state::handle(self.deny_apps(), params),
 
-            // A cancel targets an in-flight `act`, of which Phase 0 has none. As a
+            // Input injection is Phase 2. Still a structured stub, never a faked result.
+            "act" => Err(not_implemented("act")),
+
+            // A cancel targets an in-flight `act`, of which Phase 1 has none. As a
             // notification it is dropped; as a request it gets an explicit null.
             "cancel" => Ok(Value::Null),
 
@@ -92,12 +112,12 @@ impl Server {
     }
 }
 
-/// The message every Phase-0 stub returns: the phrase the contract names, prefixed with the
-/// method so a caller reading the error knows which one it hit.
+/// The message a not-yet-implemented method returns: the phrase the contract names, prefixed
+/// with the method so a caller reading the error knows which one it hit.
 fn not_implemented(method: &str) -> (i64, String) {
     (
         NOT_IMPLEMENTED,
-        format!("{method} is not implemented in phase 0"),
+        format!("{method} is not implemented in phase 2"),
     )
 }
 
@@ -209,16 +229,36 @@ mod tests {
     }
 
     #[test]
-    fn stub_methods_return_not_implemented() {
-        for method in ["windows", "state", "act"] {
-            let frame = server().handle_message(request(7, method)).unwrap();
+    fn act_is_still_a_phase_two_stub() {
+        let frame = server().handle_message(request(7, "act")).unwrap();
+        let value: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(value["error"]["code"], NOT_IMPLEMENTED);
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("not implemented in phase 2"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// `windows` and `state` are wired to real host backends now. On a non-macOS test host they
+    /// return the honest unsupported-platform error; on macOS without TCC grants they return a
+    /// runtime observe error. Either way the helper must answer with a structured JSON-RPC error
+    /// and never a fabricated result — that is what this asserts, TCC-free.
+    #[test]
+    fn observe_methods_are_answered_never_faked() {
+        for method in ["windows", "state"] {
+            let frame = server().handle_message(request(8, method)).unwrap();
             let value: Value = serde_json::from_str(&frame).unwrap();
-            assert_eq!(value["error"]["code"], NOT_IMPLEMENTED);
-            let message = value["error"]["message"].as_str().unwrap();
-            assert!(
-                message.contains("not implemented in phase 0"),
-                "unexpected message: {message}"
-            );
+            // No `result` masquerading as data; if it errored, the code is in the server band.
+            if value.get("result").is_some() {
+                assert!(value["error"].is_null());
+            } else {
+                let code = value["error"]["code"].as_i64().unwrap();
+                assert!(
+                    (-32099..=-32000).contains(&code),
+                    "unexpected error code for {method}: {code}"
+                );
+            }
         }
     }
 
