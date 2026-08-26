@@ -579,6 +579,64 @@ fn within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+/// Whether a name is exactly a sha256 digest and nothing else.
+///
+/// The gate [`session_desktop`] leans on: a value that is 64 lowercase hex characters has no
+/// path separator, no `.`, and no `..` in it, so it cannot name anything but a file directly
+/// inside the desktop directory. Rejecting everything else here is what lets the containment
+/// rule below be a statement about one directory rather than a path-traversal audit.
+fn is_sha256(sha: &str) -> bool {
+    sha.len() == 64
+        && sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Where a desktop screenshot with this sha lives, if this node staged it (A11, §8.6).
+///
+/// A **second** containment rule, not a weakening of [`inside_workspace`]: desktop artifacts
+/// are staged in `<session_dir>/desktop/` (§8.5), which is *not* the workspace — it is a
+/// per-session scratch directory this client never lets an agent name a path into. So the
+/// rule here is stricter than the workspace rule by construction: the only key is a sha256,
+/// which cannot spell a traversal, and the resolved file is re-checked against the desktop
+/// directory after every link is followed, exactly as [`inside_workspace`] re-checks against
+/// the workspace. A sha that is not a clean digest never touches the filesystem.
+///
+/// The extension is not on the sha, so each format this client draws is tried in turn; the
+/// first that both exists and canonicalises back inside the directory is the answer. This is
+/// the localhost-attached path — a session running on this machine — and is preferred to a
+/// `computer_use.artifact` round trip only when the bytes are already here. Absent (`None`)
+/// where nothing was staged, which is the ordinary remote case and not an error.
+pub fn session_desktop(session_dir: &Path, sha: &str) -> Option<PathBuf> {
+    let sha = sha.trim();
+
+    if !is_sha256(sha) {
+        return None;
+    }
+
+    // The directory as it actually resolves. A session dir that does not exist, or whose
+    // `desktop/` was never created, has nothing to serve and says so by being absent.
+    let root = std::fs::canonicalize(session_dir.join("desktop")).ok()?;
+
+    // Both jpeg spellings, because the stager names the file from a media type and this
+    // client cannot assume which one `Attachments.media_type/1` chose.
+    for extension in ["png", "jpg", "jpeg", "gif", "webp"] {
+        let candidate = root.join(format!("{sha}.{extension}"));
+
+        let Ok(canonical) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+
+        // The gate that holds even if a link was planted in the directory: after every link
+        // is followed, is the file still inside the desktop directory this node owns?
+        if within(&canonical, &root) {
+            return Some(canonical);
+        }
+    }
+
+    None
+}
+
 /// Whether a name ends in an extension one of these formats uses.
 ///
 /// A name, not a file: this is what lets a path an event mentioned be recognised as an
@@ -768,6 +826,53 @@ pub fn iterm2(payload: &[u8], name: &str, cols: u16, rows: u16) -> String {
         base64(name.as_bytes()),
         base64(payload)
     )
+}
+
+/// The one escape a capable terminal is asked to draw, composed from decoded bytes.
+///
+/// This is the real render path the two encoders exist for: [`fit`] decides the cell box
+/// from the header's pixels, and the protocol decides the escape. It is deliberately the
+/// *only* place that turns "we may draw here" into bytes for the terminal, so the honesty
+/// rules the encoders keep are enforced once:
+///
+/// - `None` for a protocol this build cannot encode — [`Protocol::renders`] is the gate, and
+///   a sixel terminal falls through it to the placeholder rather than to a wrong picture.
+/// - `None` for kitty asked to draw anything but a PNG. kitty's `f=100` is PNG-only and this
+///   build does not decode to raw pixels, so a JPEG under kitty is honestly a placeholder
+///   (it renders under iTerm2, which takes all four formats whole). See [`Format::kitty_native`].
+///
+/// The bytes travel to the terminal exactly as they were decoded from the artifact — the
+/// same guarantee the module doc makes for a file on disk: nothing here re-encodes a picture.
+///
+/// The escape it returns is a stream of terminal control bytes, which a cell-buffer renderer
+/// (ratatui's `Buffer`, and therefore the TUI transcript's `Paragraph`) strips as zero-width
+/// control characters. Its consumer is a surface that writes raw bytes to the terminal: a
+/// real image renderer such as the GPUI desktop, or a cursor-positioned placement pass over
+/// the backend. It is not something a [`ratatui::text::Line`] can carry.
+pub fn render(
+    protocol: Protocol,
+    header: Header,
+    bytes: &[u8],
+    name: &str,
+    cell: CellPixels,
+    max_cols: u16,
+) -> Option<String> {
+    if !protocol.renders() {
+        return None;
+    }
+
+    let (cols, rows) = fit((header.width, header.height), cell, max_cols, MAX_ROWS);
+
+    match protocol {
+        Protocol::Kitty => header
+            .format
+            .kitty_native()
+            .then(|| kitty(bytes, cols, rows)),
+        Protocol::Iterm2 => Some(iterm2(bytes, name, cols, rows)),
+        // `renders()` already excluded this; kept explicit so a future protocol that renders
+        // must decide its own escape here rather than silently returning a kitty one.
+        Protocol::Sixel => None,
+    }
 }
 
 /// Standard base64 with padding. Written here rather than taken as a dependency: it is
@@ -1428,5 +1533,113 @@ mod tests {
         assert!(escape.contains("width=40;height=12"), "{escape:?}");
         assert!(escape.contains("preserveAspectRatio=1"), "{escape:?}");
         assert!(escape.ends_with("Zm9vYmFy\x07"), "{escape:?}");
+    }
+
+    #[test]
+    fn the_render_path_encodes_only_what_the_protocol_can_honestly_draw() {
+        let png = Header {
+            format: Format::Png,
+            width: 320,
+            height: 240,
+        };
+        let jpeg = Header {
+            format: Format::Jpeg,
+            width: 320,
+            height: 240,
+        };
+        let cell = CellPixels {
+            width: 10,
+            height: 20,
+        };
+
+        // kitty draws a PNG whole (`f=100`) …
+        let kitty = render(Protocol::Kitty, png, b"payload", "shot", cell, 80)
+            .expect("kitty renders a PNG");
+        assert!(kitty.starts_with("\x1b_G"), "{kitty:?}");
+        assert!(kitty.contains("f=100"), "{kitty:?}");
+
+        // … but not a JPEG, which it cannot take without a decoder this build does not ship.
+        assert_eq!(
+            render(Protocol::Kitty, jpeg, b"payload", "shot", cell, 80),
+            None,
+            "kitty asked for a JPEG is honestly a placeholder"
+        );
+
+        // iTerm2 takes all four formats whole, so a JPEG renders there.
+        let iterm = render(Protocol::Iterm2, jpeg, b"payload", "shot", cell, 80)
+            .expect("iterm2 renders a JPEG");
+        assert!(iterm.starts_with("\x1b]1337;File=inline=1;"), "{iterm:?}");
+
+        // A protocol this build cannot encode falls through to the placeholder.
+        assert_eq!(
+            render(Protocol::Sixel, png, b"payload", "shot", cell, 80),
+            None
+        );
+
+        // The cell box is [`fit`]'s, so the bound the caller set is honoured.
+        let (cols, rows) = fit((320, 240), cell, 8, MAX_ROWS);
+        assert!(iterm.contains(&format!("width={cols}")) || cols <= 8);
+        assert!(rows <= MAX_ROWS);
+    }
+
+    #[test]
+    fn a_desktop_artifact_is_served_only_from_inside_the_sessions_desktop_directory() {
+        let sha = "a".repeat(64);
+        let session = std::env::temp_dir().join(format!("ouro-desktop-{}", std::process::id()));
+        let desktop = session.join("desktop");
+        std::fs::create_dir_all(&desktop).expect("a scratch desktop dir");
+        std::fs::write(desktop.join(format!("{sha}.png")), png_bytes(4, 4)).expect("a staged png");
+
+        // The staged sha resolves to its file …
+        assert_eq!(
+            session_desktop(&session, &sha),
+            Some(std::fs::canonicalize(desktop.join(format!("{sha}.png"))).expect("canonical")),
+        );
+
+        // … and every non-digest key is refused before it touches the filesystem, so no sha
+        // can spell a traversal out of the directory.
+        let bad_keys = [
+            "../../../etc/passwd".to_string(),
+            "..".to_string(),
+            "a/b".to_string(),
+            "/etc/passwd".to_string(),
+            String::new(),
+            "   ".to_string(),
+            "A".repeat(64), // uppercase is not the digest this stager writes
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64), // not hex
+        ];
+        for bad in &bad_keys {
+            assert_eq!(
+                session_desktop(&session, bad),
+                None,
+                "{bad:?} must not resolve"
+            );
+        }
+
+        // A sha with no staged file is absent, not an error — the ordinary remote case.
+        assert_eq!(session_desktop(&session, &"b".repeat(64)), None);
+
+        // A link inside the directory that points out of it is refused after resolution, the
+        // same gate [`inside_workspace`] keeps.
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir()
+                .join(format!("ouro-desktop-outside-{}.png", std::process::id()));
+            std::fs::write(&outside, png_bytes(4, 4)).expect("a scratch file outside");
+            let escaping = "c".repeat(64);
+            let _ = std::os::unix::fs::symlink(&outside, desktop.join(format!("{escaping}.png")));
+
+            assert_eq!(
+                session_desktop(&session, &escaping),
+                None,
+                "a link out of the desktop directory is out of the desktop directory"
+            );
+
+            let _ = std::fs::remove_file(&outside);
+        }
+
+        let _ = std::fs::remove_dir_all(&session);
     }
 }

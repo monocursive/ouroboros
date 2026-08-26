@@ -19,7 +19,10 @@ pub enum DesktopTone {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// No longer `Copy`: the [`Self::Image`] variant carries the artifact's identity, so the kind
+// is matched by reference rather than copied out. Every existing use is an `==` or a
+// non-binding `matches!`/`match`, so the borrow is all any of them needed anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopCellKind {
     Message,
     Activity,
@@ -35,6 +38,19 @@ pub enum DesktopCellKind {
     Subagent,
     Status,
     Divider,
+    /// A11. A desktop screenshot artifact (§8.6). Its own kind so the GPUI desktop draws the
+    /// picture with `gpui::img` rather than a file row, and so the pixels stay off
+    /// [`DesktopCell::body`]: the identity and the drawable travel here, on the kind, never as
+    /// text in a body. `bytes` is the decoded drawable once a surface fetched it by sha,
+    /// `None` until then — a placeholder-with-real-dimensions in the meantime. `Arc` so a
+    /// cloned cell is a refcount, not a copy of a screenshot.
+    Image {
+        sha: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+        media_type: Option<String>,
+        bytes: Option<std::sync::Arc<Vec<u8>>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1084,6 +1100,26 @@ fn desktop_cell(cell: Cell) -> DesktopCell {
             streaming: false,
             metadata: Vec::new(),
         },
+        // A11. A desktop screenshot artifact becomes an Image cell the GPUI desktop draws
+        // with `gpui::img`; a composer attachment, which carries no sha and no fetched bytes,
+        // stays a File placeholder because there is nothing here to hand a real renderer.
+        // Either way the label — never the pixels — is the body, so a text surface still has
+        // a sentence and the picture surface has the drawable off to the side (§8.6).
+        Cell::Image(image) if image.sha.is_some() => DesktopCell {
+            key: image.sha.as_ref().map(|sha| format!("image:{sha}")),
+            kind: DesktopCellKind::Image {
+                sha: image.sha.clone(),
+                width: image.pixels.map(|(width, _height)| width),
+                height: image.pixels.map(|(_width, height)| height),
+                media_type: image.media_type.clone(),
+                bytes: image.bytes.clone(),
+            },
+            label: "Screenshot".to_string(),
+            body: image.label(),
+            tone: DesktopTone::Muted,
+            streaming: false,
+            metadata: Vec::new(),
+        },
         Cell::Image(image) => DesktopCell {
             key: None,
             kind: DesktopCellKind::File,
@@ -1264,7 +1300,7 @@ fn desktop_tone(tone: Tone) -> DesktopTone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::transcript_cells::{SubagentCell, ToolCell};
+    use crate::ui::transcript_cells::{ImageCell, SubagentCell, ToolCell};
     use serde_json::json;
 
     #[test]
@@ -1363,6 +1399,56 @@ mod tests {
         );
         assert!(cell.streaming, "a child that has not settled is working");
         assert_eq!(cell.tone, DesktopTone::Muted);
+    }
+
+    /// A11. The seam the GPUI desktop reads for a screenshot: a desktop artifact is an Image
+    /// cell carrying the identity and (once fetched) the drawable, and its label — never the
+    /// pixels — is the body. A composer attachment, which has neither sha nor bytes, stays a
+    /// File placeholder.
+    #[test]
+    fn a_desktop_artifact_reaches_the_desktop_as_an_image_cell_with_its_bytes_off_the_body() {
+        let sha = "a".repeat(64);
+        let bytes = std::sync::Arc::new(vec![1u8, 2, 3, 4]);
+
+        let cell = desktop_cell(Cell::Image(ImageCell {
+            named: format!("desktop capture · {}", &sha[..12]),
+            pixels: Some((480, 640)),
+            format: Some("jpeg".to_string()),
+            note: None,
+            sha: Some(sha.clone()),
+            media_type: Some("image/jpeg".to_string()),
+            bytes: Some(bytes.clone()),
+        }));
+
+        assert_eq!(
+            cell.kind,
+            DesktopCellKind::Image {
+                sha: Some(sha.clone()),
+                width: Some(480),
+                height: Some(640),
+                media_type: Some("image/jpeg".to_string()),
+                bytes: Some(bytes),
+            }
+        );
+        assert_eq!(cell.key.as_deref(), Some(format!("image:{sha}").as_str()));
+        // The body is the label, a sentence — the pixels are on the kind, not in the text.
+        assert!(cell.body.contains("480×640 jpeg"), "{cell:#?}");
+        assert!(
+            !cell.body.contains('\u{1b}'),
+            "no escapes leak into the body"
+        );
+
+        // A composer attachment (no sha, no fetched bytes) has nothing to hand a renderer.
+        let attachment = desktop_cell(Cell::Image(ImageCell {
+            named: ".ouroboros/images/shot.png".to_string(),
+            pixels: Some((32, 32)),
+            format: Some("png".to_string()),
+            note: None,
+            sha: None,
+            media_type: None,
+            bytes: None,
+        }));
+        assert_eq!(attachment.kind, DesktopCellKind::File);
     }
 
     /// A settled child stops being live, and its verdict becomes the row's tone.

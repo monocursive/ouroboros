@@ -2297,6 +2297,12 @@ impl App {
                         .header
                         .map(|header| header.format.as_str().to_string()),
                     note: described.note,
+                    // A composer attachment is named by its path, not a digest, and its
+                    // bytes are drawn from the workspace rather than fetched by sha — the
+                    // desktop-artifact fields (A11) are simply not its shape.
+                    sha: None,
+                    media_type: None,
+                    bytes: None,
                 }
             })
             .collect();

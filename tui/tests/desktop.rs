@@ -434,8 +434,8 @@ fn desktop_keeps_agent_metadata_visible_without_promoting_it_over_the_answer() {
     assert!(tool.body.contains("9 passed; 0 failed"));
 
     assert_eq!(
-        cells.last().map(|cell| cell.kind),
-        Some(DesktopCellKind::Activity),
+        cells.last().map(|cell| &cell.kind),
+        Some(&DesktopCellKind::Activity),
         "the loader stays in the conversation after metadata until visible agent text arrives"
     );
 }

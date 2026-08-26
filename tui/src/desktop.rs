@@ -16,10 +16,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use gpui::{
-    actions, div, prelude::*, px, size, uniform_list, AnyElement, App as GpuiApp, Application,
-    Bounds, Context, Entity, FocusHandle, Focusable as _, KeyBinding, KeyDownEvent, Menu, MenuItem,
-    PathPromptOptions, ScrollHandle, SharedString, Subscription, SystemMenuType, Task, Timer,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, size, uniform_list, AnyElement, App as GpuiApp, Application,
+    Bounds, Context, Entity, FocusHandle, Focusable as _, Image, ImageFormat, KeyBinding,
+    KeyDownEvent, Menu, MenuItem, PathPromptOptions, ScrollHandle, SharedString, Subscription,
+    SystemMenuType, Task, Timer, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_component::alert::Alert;
 use gpui_component::button::{ButtonVariant, ButtonVariants as _};
@@ -3422,7 +3423,105 @@ fn render_cell(
         DesktopCellKind::Message => render_agent_message(index, cell, tokens, window, cx),
         DesktopCellKind::Activity => render_agent_activity(cell, tokens, cx),
         DesktopCellKind::Divider => render_transcript_divider(cell, tokens, cx),
+        DesktopCellKind::Image { .. } => render_image_cell(index, cell, tokens, cx),
         _ => render_meta_cell(index, cell, expanded, expansion_key, tokens, window, cx),
+    }
+}
+
+/// A11. A desktop screenshot artifact, drawn as the picture it is (§8.6).
+///
+/// This is the surface the two encoders never could be: GPUI decodes and rasterises the bytes
+/// itself, so the drawable the artifact carried is handed to `gpui::img` and shown, rather
+/// than described. Until a surface has fetched the bytes by sha the cell is a
+/// placeholder-with-real-dimensions — the same honest fallback the transcript keeps — and the
+/// caption ([`DesktopCell::body`]) states the size and digest either way. The pixels are read
+/// from the kind, never from the body, so nothing here turns text into an image.
+fn render_image_cell(
+    index: usize,
+    cell: DesktopCell,
+    tokens: DesktopTokens,
+    cx: &mut Context<DesktopView>,
+) -> gpui::AnyElement {
+    let (bytes, media_type) = match &cell.kind {
+        DesktopCellKind::Image {
+            bytes, media_type, ..
+        } => (bytes.clone(), media_type.clone()),
+        // render_cell only routes Image cells here; a different shape is shown as its caption
+        // rather than a panic, because crashing on an unexpected cell is the worse failure.
+        _other => (None, None),
+    };
+
+    let caption = cell.body;
+
+    let picture = bytes.map(|bytes| {
+        img(Arc::new(Image::from_bytes(
+            image_format(media_type.as_deref()),
+            bytes.as_ref().clone(),
+        )))
+        .id(("desktop-screenshot", index))
+        .max_w(px(480.0))
+        .max_h(px(360.0))
+        .rounded(tokens.radius)
+        .into_any_element()
+    });
+
+    let content = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_w_0()
+        .child(div().text_xs().text_color(tokens.ink_3).child(caption));
+
+    let content = match picture {
+        Some(picture) => content.child(picture),
+        None => content,
+    };
+
+    div()
+        .flex()
+        .justify_start()
+        .w_full()
+        .max_w(px(880.0))
+        .mx_auto()
+        .py_2()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .w_full()
+                .max_w(px(760.0))
+                .child(design::icon_tile(
+                    tokens,
+                    cx,
+                    Tone::Neutral,
+                    IconName::Frame,
+                ))
+                .child(
+                    design::card(tokens, cx, Tone::Neutral)
+                        .px_4()
+                        .py_3()
+                        .child(content),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The `gpui::ImageFormat` for a media type, defaulting to PNG.
+///
+/// GPUI reads the format from the bytes regardless, so this is the hint, not the authority;
+/// PNG is the safe default because it is what a screenshot most often is and what the decoder
+/// tries first anyway.
+fn image_format(media_type: Option<&str>) -> ImageFormat {
+    match media_type
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("image/jpeg" | "image/jpg") => ImageFormat::Jpeg,
+        Some("image/gif") => ImageFormat::Gif,
+        Some("image/webp") => ImageFormat::Webp,
+        _png => ImageFormat::Png,
     }
 }
 
@@ -3670,6 +3769,9 @@ fn render_meta_cell(
         DesktopCellKind::Subagent => IconName::Bot,
         DesktopCellKind::Status => IconName::Info,
         DesktopCellKind::Divider => IconName::Dash,
+        // Routed to `render_image_cell` before reaching here; kept so the match stays
+        // exhaustive rather than needing a catch-all that would hide a future variant.
+        DesktopCellKind::Image { .. } => IconName::Frame,
     };
     let label = cell.label;
     let tooltip_label = label.clone();

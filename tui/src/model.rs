@@ -2493,6 +2493,123 @@ pub fn respond_approval_params_with_reason(
     })
 }
 
+/// The read-scope gateway method that returns one staged desktop screenshot by sha (§8.5).
+///
+/// Node-routed, like `mcp.list`: the bytes are a fact about the node whose
+/// `session_dir/desktop/` staged them, so the fetch is answered there or `404`s. A single
+/// image, already size-capped upstream at `max_image_bytes`; the client decodes it into
+/// memory and never writes the workspace.
+pub const ARTIFACT_METHOD: &str = "computer_use.artifact";
+
+/// The params for [`ARTIFACT_METHOD`]: the sha, and nothing else.
+///
+/// No path — "the path is a fact about this node" — and the sha is the whole request because
+/// it is the only key the node's containment ([`crate::images::session_desktop`]) will honour.
+pub fn artifact_params(sha256: &str) -> Value {
+    serde_json::json!({ "sha256": sha256 })
+}
+
+/// Why an artifact the gateway returned could not honestly be put on the screen.
+///
+/// Each variant is a sentence a surface can show in place of the picture, because a
+/// placeholder that did not say *why* it was a placeholder is the exact fault the images
+/// module exists to avoid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactError {
+    /// The result carried no base64 field this client recognises.
+    Missing,
+    /// The base64 did not decode.
+    NotBase64,
+    /// Decoded, but larger than [`crate::images::MAX_BYTES`] — the same ceiling a paste and a
+    /// transcript file are held to.
+    TooLarge { bytes: usize },
+    /// The bytes are not a raster format this client reads, so drawing them would be putting
+    /// something unknown on the operator's screen.
+    NotAnImage,
+    /// The bytes did not hash to the sha that was asked for. A node answering the wrong file
+    /// is a fetch this client refuses rather than one it draws.
+    ShaMismatch,
+}
+
+impl fmt::Display for ArtifactError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => write!(formatter, "no artifact bytes in the reply"),
+            Self::NotBase64 => write!(formatter, "artifact bytes were not valid base64"),
+            Self::TooLarge { bytes } => write!(
+                formatter,
+                "{bytes} bytes, over this client's {} MiB ceiling",
+                crate::images::MAX_BYTES / (1024 * 1024)
+            ),
+            Self::NotAnImage => write!(formatter, "not a format this client reads"),
+            Self::ShaMismatch => write!(formatter, "artifact did not match the sha requested"),
+        }
+    }
+}
+
+/// Decodes a `computer_use.artifact` reply into image bytes, or says why it could not.
+///
+/// This is the whole client half of the artifact transfer (§8.5): base64 in the JSON result,
+/// one image, decoded into memory. Everything it checks is a thing it refuses to draw rather
+/// than a thing it trusts —
+///
+/// 1. the bytes decode from base64,
+/// 2. they are within [`crate::images::MAX_BYTES`] (`max_image_bytes` is the upstream cap;
+///    this is the client's own, so a gateway that forgot to cap cannot make this client
+///    allocate a gigabyte),
+/// 3. they are a raster format [`crate::images::header`] recognises, and
+/// 4. they hash to the sha that was requested.
+///
+/// (4) is the one that makes the fetch trustworthy: the sha is the request, so a node that
+/// answered a different file — by bug or by substitution — is caught here rather than put on
+/// the screen. It never writes the file anywhere; the workspace is not touched.
+pub fn decode_artifact(result: &Value, expected_sha: &str) -> Result<Vec<u8>, ArtifactError> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+
+    // The reply is either `{sha256, bytes: "<base64>"}` or a bare base64 string; both are the
+    // "base64 in the JSON result" the decision settled on. The field name is read tolerantly
+    // because the golden fixture is the integrator's to write and this client should decode
+    // the obvious spellings rather than pin one before the server half exists.
+    let encoded = result
+        .get("bytes")
+        .or_else(|| result.get("base64"))
+        .or_else(|| result.get("data"))
+        .or(Some(result))
+        .and_then(Value::as_str)
+        .ok_or(ArtifactError::Missing)?;
+
+    let bytes = BASE64
+        .decode(encoded.trim())
+        .map_err(|_error| ArtifactError::NotBase64)?;
+
+    if bytes.len() as u64 > crate::images::MAX_BYTES {
+        return Err(ArtifactError::TooLarge { bytes: bytes.len() });
+    }
+
+    if crate::images::header(&bytes).is_none() {
+        return Err(ArtifactError::NotAnImage);
+    }
+
+    if !sha256_hex(&bytes).eq_ignore_ascii_case(expected_sha.trim()) {
+        return Err(ArtifactError::ShaMismatch);
+    }
+
+    Ok(bytes)
+}
+
+/// The lowercase hex sha256 of some bytes, through `ring` — already in the tree for Ed25519,
+/// so no new dependency to hash the one thing this client verifies.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let mut hex = String::with_capacity(digest.as_ref().len() * 2);
+    for byte in digest.as_ref() {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// B2. The three answers a `plan_exit` approval admits, in the order the modal lists them.
 ///
 /// These are `optionId`s, not labels: `Provider.Native.Session`'s `@plan_exit_options`
@@ -4454,5 +4571,85 @@ mod tests {
 
         assert_eq!(Plane::parse("teams"), None);
         assert_eq!(Plane::Coding.method("replay"), "coding.replay");
+    }
+
+    /// A minimal but valid PNG header — signature plus IHDR — which is all
+    /// [`crate::images::header`] reads. Not a real picture, and not claimed to be: this test
+    /// is about the *transfer*, not a capture.
+    fn png_header_bytes() -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn the_artifact_request_carries_the_sha_and_nothing_else() {
+        assert_eq!(
+            artifact_params("abc123"),
+            serde_json::json!({ "sha256": "abc123" })
+        );
+    }
+
+    #[test]
+    fn an_artifact_is_decoded_only_when_it_is_an_image_that_matches_its_sha() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let bytes = png_header_bytes();
+        let sha = super::sha256_hex(&bytes);
+        let encoded = BASE64.encode(&bytes);
+
+        // The reply the decision settled on: base64 in the JSON result.
+        assert_eq!(
+            decode_artifact(
+                &serde_json::json!({ "sha256": sha, "bytes": encoded }),
+                &sha
+            ),
+            Ok(bytes.clone()),
+        );
+
+        // A bare base64 string is accepted too, so a binary-frame reply that lands as a
+        // string still decodes.
+        assert_eq!(
+            decode_artifact(&Value::String(BASE64.encode(&bytes)), &sha),
+            Ok(bytes.clone()),
+        );
+
+        // Every refusal is a sentence, not a silence.
+        assert_eq!(
+            decode_artifact(&serde_json::json!({ "note": "no bytes" }), &sha),
+            Err(ArtifactError::Missing),
+        );
+        assert_eq!(
+            decode_artifact(&serde_json::json!({ "bytes": "not base64 !!!" }), &sha),
+            Err(ArtifactError::NotBase64),
+        );
+        assert_eq!(
+            decode_artifact(
+                &serde_json::json!({ "bytes": BASE64.encode(b"plain text, not an image") }),
+                &sha,
+            ),
+            Err(ArtifactError::NotAnImage),
+        );
+        // The bytes are a real image, but not the one that was asked for.
+        assert_eq!(
+            decode_artifact(&serde_json::json!({ "bytes": encoded }), &"f".repeat(64),),
+            Err(ArtifactError::ShaMismatch),
+        );
+
+        // Every error renders to something a placeholder can show.
+        for error in [
+            ArtifactError::Missing,
+            ArtifactError::NotBase64,
+            ArtifactError::TooLarge { bytes: 1 },
+            ArtifactError::NotAnImage,
+            ArtifactError::ShaMismatch,
+        ] {
+            assert!(!error.to_string().is_empty());
+        }
     }
 }
