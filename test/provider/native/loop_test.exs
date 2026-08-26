@@ -75,6 +75,22 @@ defmodule Ouroboros.Provider.Native.LoopTest do
   defp find(events, type), do: Enum.find(events, &(&1.type == type))
   defp all(events, type), do: Enum.filter(events, &(&1.type == type))
 
+  defp paired_tool_calls?(messages) do
+    pending =
+      Enum.reduce(messages, MapSet.new(), fn
+        %{role: :assistant, tool_calls: calls}, pending when is_list(calls) ->
+          Enum.reduce(calls, pending, fn call, pending -> MapSet.put(pending, call.id) end)
+
+        %{role: :tool, tool_call_id: id}, pending ->
+          MapSet.delete(pending, id)
+
+        _other, pending ->
+          pending
+      end)
+
+    MapSet.size(pending) == 0
+  end
+
   describe "a scripted turn that reads, edits, runs bash, and finishes" do
     test "emits the full sequence in order", context do
       script = [
@@ -295,6 +311,35 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       failed = find(events, :turn_failed)
       assert failed.payload["reason"] == "max_iterations"
       assert failed.payload["error"] =~ "max_iterations (2)"
+      assert failed.payload["error"] =~ "reserved tool-free final response"
+      assert length(all(events, :tool_result)) == 1
+
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+    end
+
+    test "strips reserved-round tool calls so a resume is well-formed", context do
+      script = [
+        [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+        [
+          {:text, "almost done"},
+          {:tool_call, %{id: "c2", name: "bash", input: %{"command" => "echo two"}}}
+        ]
+      ]
+
+      {loop, _agent} = start_loop(context, script, max_iterations: 2)
+      run(loop)
+      events = collect()
+
+      assert find(events, :turn_failed).payload["reason"] == "max_iterations"
+      assert Enum.map(all(events, :tool_call), & &1.payload["call_id"]) == ["c1"]
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+
+      assistant =
+        Enum.find(state.messages, &(&1.role == :assistant and &1.content =~ "almost done"))
+
+      assert assistant.tool_calls == []
     end
 
     test "warns the model to validate and finish as the iteration budget expires", context do
@@ -313,8 +358,12 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert first.system =~ "3 model round-trip(s) remain"
       assert second.system =~ "2 model round-trip(s) remain"
       assert third.system =~ "1 model round-trip(s) remain"
-      assert third.system =~ "Do not begin optional work"
+      assert third.system =~ "reserved final response round"
+      assert third.system =~ "No tools are available"
       assert third.system =~ "state anything unverified explicitly"
+      assert first.tools != []
+      assert second.tools != []
+      assert third.tools == []
     end
 
     test "allows substantial interactive turns by default while retaining the hard cap" do

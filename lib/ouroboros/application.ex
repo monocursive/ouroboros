@@ -133,6 +133,11 @@ defmodule Ouroboros.Application do
           # servers too; unfinished acknowledged attempts then recover as ambiguous
           # instead of continuing beside a replacement empty ledger.
           Ouroboros.Agent.EffectLedger,
+          # Native model admission is in-memory scheduling, not durable authority. It
+          # sits after the ledger and before Jido so a lease-server crash restarts the
+          # sessions that consume its leases — otherwise Finch connections outlive the
+          # bound — without taking the ledger down with it.
+          native_model_admission(),
           Ouroboros.Jido,
           %{
             id: Ouroboros.Mesh.Scope,
@@ -251,6 +256,13 @@ defmodule Ouroboros.Application do
         # durable state of their own and still belong in an in-memory tree.
         after_owner
     end
+  end
+
+  defp native_model_admission do
+    {Ouroboros.Provider.Native.Model.Admission,
+     limit: Application.get_env(:ouroboros, :native_model_max_concurrency, 8),
+     queue_limit: Application.get_env(:ouroboros, :native_model_queue_limit, 32),
+     queue_timeout_ms: Application.get_env(:ouroboros, :native_model_queue_timeout_ms, 120_000)}
   end
 
   # Absent configuration means no gateway at all — not a disabled one — so a test run, a

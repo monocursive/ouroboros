@@ -1,5 +1,16 @@
 import Config
 
+# Native streams are admitted globally by `Provider.Native.Model.Admission`, eight at a
+# time. Keep Finch as one pool with more connections than admitted streams: this removes
+# random one-connection shard collisions and leaves two cleanup/headroom connections for a
+# cancelled stream whose transport is still unwinding. HTTP/1 remains deliberate because
+# ReqLLM supports providers whose HTTP/2 behavior is not uniform and large mixed-protocol
+# request bodies hit Finch's ALPN flow-control limitation.
+config :req_llm,
+  stream_pool_protocols: [:http1],
+  stream_pool_size: 10,
+  stream_pool_count: 1
+
 # Erlexec's port manager refuses to start without SHELL even when every command is an
 # argv list. Service managers and coding harnesses legitimately omit it, so establish the
 # Unix release's portable shell before dependency applications start.
@@ -138,12 +149,17 @@ config :ouroboros,
   # `openai_codex` starts on SSE; a stable session id and the Ouroboros originator are
   # injected for each request by `Provider.Native.Model.ReqLLM`.
   native_model_options: [
-    receive_timeout: 60_000,
-    stream_idle_timeout: 60_000,
+    receive_timeout: 120_000,
+    stream_idle_timeout: 180_000,
     total_timeout: 300_000,
     max_retries: 0,
     provider_options: [openai_stream_transport: :sse, codex_originator: "ouroboros"]
   ],
+  # One node-wide boundary for root sessions, children, and grandchildren. Waiters are
+  # monitored and bounded rather than falling into Finch's per-connection checkout queue.
+  native_model_max_concurrency: 8,
+  native_model_queue_limit: 32,
+  native_model_queue_timeout_ms: 120_000,
   # The packaged direct default uses ChatGPT subscription OAuth. API-key deployments may
   # set `OUROBOROS_NATIVE_MODEL=openai:<model>` or override this node setting.
   native_model: "openai_codex:gpt-5.6-sol",

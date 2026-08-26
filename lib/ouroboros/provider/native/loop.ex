@@ -31,11 +31,16 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   ## Bounds
 
-  `max_iterations` (default 100) caps model round-trips per turn. During the final ten
-  calls the system prompt exposes the remaining budget, becoming urgent for the final
-  three, so a productive long turn has a chance to validate and report instead of
-  discovering the ceiling after another tool call. `tool_timeout_ms` caps one tool. The
-  doom-loop guard stops a turn on the third identical `(name, input)` call — OpenCode's
+  `max_iterations` (default 100) caps model round-trips per turn. The last round is
+  reserved: tools are omitted so the model must answer rather than start more work.
+  `max_iterations: 1` is therefore a single tool-free response. Dropping tools on that
+  last call is a deliberate prefix-cache miss on the full-history request; the
+  alternative is discovering the ceiling after a tool call that cannot be answered. If
+  the model still emits tool calls, the turn fails by name and those unpaired calls are
+  stripped from the checkpointed transcript so a resume remains well-formed. During the
+  final ten calls the system prompt exposes the remaining budget, becoming urgent for
+  the final three and naming the last round as tool-free. `tool_timeout_ms` caps one tool.
+  The doom-loop guard stops a turn on the third identical `(name, input)` call — OpenCode's
   rule, and the cheapest defence against a model that has found a loop it likes. Each
   bound fails the turn by name rather than running out quietly.
 
@@ -285,14 +290,24 @@ defmodule Ouroboros.Provider.Native.Loop do
               state =
                 append_assistant(state, text, calls, reasoning_details, provider_metadata)
 
-              if calls == [] do
-                complete(state, iteration)
-              else
-                case run_tools(state, calls) do
-                  {:continue, state} -> iterate(apply_steer(state), iteration + 1)
-                  {:interrupted, state} -> interrupted(state)
-                  {:failed, state, message, reason} -> fail(state, message, reason)
-                end
+              cond do
+                calls == [] ->
+                  complete(state, iteration)
+
+                iteration >= state.max_iterations ->
+                  fail(
+                    drop_unpaired_tool_calls(state),
+                    "reached max_iterations (#{state.max_iterations}); the model attempted " <>
+                      "another tool call during the reserved tool-free final response",
+                    "max_iterations"
+                  )
+
+                true ->
+                  case run_tools(state, calls) do
+                    {:continue, state} -> iterate(apply_steer(state), iteration + 1)
+                    {:interrupted, state} -> interrupted(state)
+                    {:failed, state, message, reason} -> fail(state, message, reason)
+                  end
               end
             end
 
@@ -309,7 +324,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       model: state.model_spec,
       system: iteration_system(state.system, iteration, state.max_iterations),
       messages: state.messages,
-      tools: tool_specs(state),
+      tools: iteration_tools(state, iteration),
       provider_session_id: state.provider_session_id,
       turn_id: state.turn_id,
       reasoning_effort: state.reasoning_effort,
@@ -327,11 +342,17 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     if remaining <= @iteration_warning_at do
       urgency =
-        if remaining <= @iteration_urgent_at do
-          " Do not begin optional work. Complete required validation now and return an " <>
-            "honest final answer before the limit; state anything unverified explicitly."
-        else
-          " Prioritize the work required to validate the result and finish the turn."
+        cond do
+          remaining == 1 ->
+            " This is the reserved final response round. No tools are available. Return " <>
+              "the best honest final answer now and state anything unverified explicitly."
+
+          remaining <= @iteration_urgent_at ->
+            " Do not begin optional work. Complete required validation now and return an " <>
+              "honest final answer before the limit; state anything unverified explicitly."
+
+          true ->
+            " Prioritize the work required to validate the result and finish the turn."
         end
 
       system <>
@@ -344,6 +365,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp iteration_system(system, _iteration, _max_iterations), do: system
+
+  defp iteration_tools(_state, iteration) when iteration < 1, do: []
+
+  defp iteration_tools(state, iteration) do
+    if iteration >= state.max_iterations, do: [], else: tool_specs(state)
+  end
 
   defp consume(state, stream) do
     {text, calls, usages, reasoning_details, provider_metadata} =
@@ -422,6 +449,33 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     %{state | messages: state.messages ++ [message]}
   end
+
+  # The reserved final round already appended the assistant message, including any tool
+  # calls the model emitted despite an empty tool list. Those calls will not run, and a
+  # checkpoint that kept them would resume as an assistant `tool_calls` turn with no
+  # matching tool results. Strip the unpaired calls; drop the message if nothing else
+  # remains to persist.
+  defp drop_unpaired_tool_calls(%{messages: messages} = state) do
+    case Enum.split(messages, -1) do
+      {prefix, [%{role: :assistant, tool_calls: [_ | _]} = message]} ->
+        stripped = %{message | tool_calls: []}
+
+        %{
+          state
+          | messages: if(keep_assistant?(stripped), do: prefix ++ [stripped], else: prefix)
+        }
+
+      _other ->
+        state
+    end
+  end
+
+  defp keep_assistant?(%{content: content} = message) do
+    content not in [nil, ""] or (message[:reasoning_details] || []) != [] or
+      map_size(message[:provider_metadata] || %{}) > 0
+  end
+
+  defp keep_assistant?(_message), do: false
 
   # ---------------------------------------------------------------- tools
 

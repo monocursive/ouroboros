@@ -12,6 +12,37 @@ defmodule Ouroboros.ApplicationRecoveryTest do
 
   @provider :ouroboros_test
 
+  test "the model admission boundary owns every session that consumes its leases" do
+    admission = Process.whereis(Ouroboros.Provider.Native.Model.Admission)
+    ledger = Process.whereis(Ouroboros.Agent.EffectLedger)
+    jido = Process.whereis(Ouroboros.Jido)
+
+    assert is_pid(admission)
+    assert is_pid(ledger)
+    assert is_pid(jido)
+
+    admission_monitor = Process.monitor(admission)
+    ledger_monitor = Process.monitor(ledger)
+    jido_monitor = Process.monitor(jido)
+    Process.exit(admission, :kill)
+
+    assert_receive {:DOWN, ^admission_monitor, :process, ^admission, :killed}, 1_000
+    assert_receive {:DOWN, ^jido_monitor, :process, ^jido, _reason}, 2_000
+    refute_receive {:DOWN, ^ledger_monitor, :process, ^ledger, _reason}, 300
+    assert Process.alive?(ledger)
+    assert Process.whereis(Ouroboros.Agent.EffectLedger) == ledger
+
+    replacement_admission =
+      assert_eventually(fn ->
+        replacement(Ouroboros.Provider.Native.Model.Admission, admission)
+      end)
+
+    replacement_jido = assert_eventually(fn -> replacement(Ouroboros.Jido, jido) end)
+
+    assert Process.alive?(replacement_admission)
+    assert Process.alive?(replacement_jido)
+  end
+
   test "the effect ledger owns the execution subtree beneath its durable boundary" do
     ledger = Process.whereis(Ouroboros.Agent.EffectLedger)
     jido = Process.whereis(Ouroboros.Jido)
@@ -130,9 +161,11 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert Application.get_env(:ouroboros, :data_dir) in [nil, ""]
 
     # The runtime boundary drops the owner of a directory this node does not have, and
-    # nothing else: the provider cache behind it holds no durable state.
+    # nothing else: the provider cache behind it holds no durable state. Model admission
+    # starts after the ledger, still without needing a data directory.
     assert Process.whereis(Ouroboros.RuntimeOwner) == nil
     assert is_pid(Process.whereis(Ouroboros.Provider.RuntimeCache))
+    assert is_pid(Process.whereis(Ouroboros.Provider.Native.Model.Admission))
   end
 
   test "a killed coding registry preserves workspace exclusion while tasks recover", %{

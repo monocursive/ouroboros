@@ -18,12 +18,12 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   """
 
   @behaviour Ouroboros.Provider.Native.Model
-  alias Ouroboros.Provider.Native.Model.ToolSchema
+  alias Ouroboros.Provider.Native.Model.{Admission, ToolSchema}
   alias ReqLLM.Provider.ChunkAccumulator
 
   @generation_defaults [
-    receive_timeout: 60_000,
-    stream_idle_timeout: 60_000,
+    receive_timeout: 120_000,
+    stream_idle_timeout: 180_000,
     total_timeout: 300_000,
     max_retries: 0
   ]
@@ -61,10 +61,12 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         |> put_unless_nil(:max_tokens, request[:max_tokens])
         |> put_transport_options(request)
 
-      case ReqLLM.stream_text(request.model, context, generation_opts) do
-        {:ok, response} -> {:ok, normalize(response, request.tools)}
-        {:error, reason} -> {:error, reason}
-      end
+      Admission.with_stream(fn ->
+        case ReqLLM.stream_text(request.model, context, generation_opts) do
+          {:ok, response} -> {:ok, normalize(response, request.tools)}
+          {:error, reason} -> {:error, reason}
+        end
+      end)
     end
   rescue
     error -> {:error, {:model_client_error, Exception.message(error)}}
