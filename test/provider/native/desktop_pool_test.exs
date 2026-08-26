@@ -1,0 +1,202 @@
+defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
+  # Not async: each test spawns a real OS child and one of them lowers a timeout.
+  use ExUnit.Case, async: false
+
+  alias Ouroboros.Provider.Native.Desktop.Codec
+  alias Ouroboros.Provider.Native.Desktop.Pool
+
+  describe "Codec — newline-delimited JSON-RPC, bounded" do
+    test "encodes one newline-terminated request line that decodes back" do
+      frame = Codec.request(1, "doctor", %{}) |> IO.iodata_to_binary()
+      assert String.ends_with?(frame, "\n")
+      assert {:ok, [%{"id" => 1, "method" => "doctor"}], 0, ""} = Codec.decode(frame, 1_000_000)
+    end
+
+    test "splits several frames and carries the unterminated remainder" do
+      assert {:ok, frames, 0, rest} =
+               Codec.decode(~s({"a":1}\n{"b":2}\n{"c), 1_000_000)
+
+      assert frames == [%{"a" => 1}, %{"b" => 2}]
+      assert rest == ~s({"c)
+    end
+
+    test "counts a non-JSON line as noise and skips it" do
+      assert {:ok, [%{"ok" => 1}], 1, ""} = Codec.decode("a banner line\n{\"ok\":1}\n", 1_000_000)
+    end
+
+    test "refuses a frame past max_frame_bytes rather than allocating it" do
+      assert {:error, {:frame_too_large, _size, 4}} = Codec.decode("abcdef\n", 4)
+    end
+  end
+
+  describe "one helper per node — handshake and requests" do
+    test "handshakes to ready and answers doctor, windows, and state" do
+      pid = start_pool(responding_helper())
+      assert %{phase: :ready} = wait_status(pid, &(&1.phase == :ready))
+
+      assert {:ok, %{"readiness" => %{"screenshot" => "ok"}}} = Pool.doctor(pid, 2_000)
+      assert {:ok, %{"windows" => []}} = Pool.windows(pid, 2_000)
+      assert {:ok, %{"app" => %{"id" => "com.apple.calculator"}}} = Pool.state(pid, %{}, 2_000)
+    end
+
+    test "a busy pool refuses a second in-flight request rather than queueing it" do
+      pid = start_pool(slow_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      task = Task.async(fn -> Pool.state(pid, %{}, 3_000) end)
+      Process.sleep(80)
+      assert {:error, :busy} = Pool.state(pid, %{}, 3_000)
+      assert {:ok, %{"app" => _}} = Task.await(task, 5_000)
+    end
+  end
+
+  describe "broken is a state, not a crash (like MCP)" do
+    test "a helper that exits at once leaves the pool broken and answering errors" do
+      pid = start_pool(exiting_helper(), handshake_timeout_ms: 1_000)
+      assert %{phase: :broken} = wait_status(pid, &(&1.phase == :broken))
+
+      # The pool process is still alive and still answers — it holds the snapshot map.
+      assert Process.alive?(pid)
+      assert {:error, _reason} = Pool.state(pid, %{}, 500)
+    end
+
+    test "a helper that never answers its handshake is broken, not waited on" do
+      pid = start_pool(silent_helper(), handshake_timeout_ms: 150)
+      status = wait_status(pid, &(&1.phase == :broken), 2_000)
+
+      assert status.phase == :broken
+      assert status.broken_reason == :handshake_timeout
+    end
+  end
+
+  describe "env is filtered (§7)" do
+    test "the helper is spawned without the gateway token but keeps a benign variable" do
+      System.put_env("OUROBOROS_GATEWAY_TOKEN", "supersecret")
+      System.put_env("OURO_CU_MARKER", "keepme")
+
+      on_exit(fn ->
+        System.delete_env("OUROBOROS_GATEWAY_TOKEN")
+        System.delete_env("OURO_CU_MARKER")
+      end)
+
+      pid = start_pool(env_echo_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      assert {:ok, %{"token" => token, "marker" => marker}} = Pool.doctor(pid, 2_000)
+      assert token == "", "the gateway token must not reach the helper's environment"
+      assert marker == "keepme", "a non-secret variable is inherited so the helper can run"
+    end
+  end
+
+  describe "the last state lives here, in the BEAM (D11)" do
+    test "remember, read back, and forget a session's last state" do
+      pid = start_pool(responding_helper())
+
+      assert Pool.last_state(pid, "/session/a") == nil
+      Pool.remember_state(pid, "/session/a", %{"app" => %{"id" => "com.apple.calculator"}})
+      # A cast then a call from this process are ordered, so no polling is needed.
+      assert Pool.last_state(pid, "/session/a") == %{"app" => %{"id" => "com.apple.calculator"}}
+
+      Pool.forget_state(pid, "/session/a")
+      assert Pool.last_state(pid, "/session/a") == nil
+    end
+  end
+
+  ## Helpers
+
+  defp start_pool(helper_path, opts \\ []) do
+    name = :"desktop_pool_#{System.unique_integer([:positive])}"
+
+    # Started detached (not `start_link`) so the pool is independent of the test process:
+    # its child's exit does not travel through us, and we stop it explicitly at teardown,
+    # which reaps the helper via `terminate/2`.
+    {:ok, pid} =
+      Pool.start(
+        Keyword.merge([name: name, helper_path: helper_path, handshake_timeout_ms: 2_000], opts)
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal, 1_000)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    pid
+  end
+
+  defp wait_status(pid, pred, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(pid, pred, deadline)
+  end
+
+  defp do_wait(pid, pred, deadline) do
+    status = Pool.status(pid)
+
+    cond do
+      pred.(status) -> status
+      System.monotonic_time(:millisecond) >= deadline -> status
+      true -> Process.sleep(20) && do_wait(pid, pred, deadline)
+    end
+  end
+
+  # A helper that answers each request line, echoing back the id. `awk` reads a line at a
+  # time and `fflush()` guarantees each response reaches the port immediately — the one
+  # portable way to avoid a shell's stdout buffering stalling the handshake.
+  defp responding_helper, do: write_helper(awk_body(""))
+  defp slow_helper, do: write_helper(awk_body(~s|system("sleep 0.3"); |))
+
+  defp awk_body(prelude) do
+    """
+    #!/bin/sh
+    exec awk '
+    {
+      #{prelude}id = $0
+      sub(/.*"id":/, "", id)
+      sub(/[^0-9].*/, "", id)
+      if ($0 ~ /"method":"doctor"/) {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"readiness\\":{\\"screenshot\\":\\"ok\\",\\"ax\\":\\"ok\\",\\"input\\":\\"ok\\"}}}\\n", id)
+      } else if ($0 ~ /"method":"windows"/) {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"windows\\":[]}}\\n", id)
+      } else if ($0 ~ /"method":"state"/) {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"app\\":{\\"id\\":\\"com.apple.calculator\\",\\"name\\":\\"Calculator\\"}}}\\n", id)
+      } else {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"error\\":{\\"code\\":-32601,\\"message\\":\\"nope\\"}}\\n", id)
+      }
+      fflush()
+    }
+    '
+    """
+  end
+
+  # Echoes two environment variables back in every response, so a test can prove the
+  # gateway token was stripped while a benign variable survived.
+  defp env_echo_helper do
+    write_helper("""
+    #!/bin/sh
+    exec awk '
+    {
+      id = $0
+      sub(/.*"id":/, "", id)
+      sub(/[^0-9].*/, "", id)
+      printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"token\\":\\"%s\\",\\"marker\\":\\"%s\\"}}\\n", id, ENVIRON["OUROBOROS_GATEWAY_TOKEN"], ENVIRON["OURO_CU_MARKER"])
+      fflush()
+    }
+    '
+    """)
+  end
+
+  defp exiting_helper, do: write_helper("#!/bin/sh\nexit 0\n")
+  defp silent_helper, do: write_helper("#!/bin/sh\nexec cat >/dev/null\n")
+
+  defp write_helper(body) do
+    path = Path.join(System.tmp_dir!(), "ouro-cu-helper-#{System.unique_integer([:positive])}.sh")
+    File.write!(path, body)
+    File.chmod!(path, 0o755)
+    on_exit(fn -> File.rm_rf(path) end)
+    path
+  end
+end

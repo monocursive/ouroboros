@@ -646,6 +646,11 @@ defmodule Ouroboros.Provider.Native.Tools do
       changes: Map.get(result, :changes, []),
       reads: Map.get(result, :reads, %{}),
       plan: Map.get(result, :plan),
+      # C-U (§8.1). Tool results may carry staged images: `[%{path, media_type, sha256,
+      # size}]`. Absent or `[]` for every existing tool; only `desktop_state` fills it. This
+      # is the loop's vision seam — `bound/1` caps `output` and never touches an image,
+      # because a screenshot is bytes on disk fetched by sha, not text to truncate.
+      images: images(Map.get(result, :images, [])),
       # C5+. `bash` is the one tool that can come back saying "the OS sandbox stopped
       # this, and it is a denial an operator could lift". It is carried here rather than
       # buried in the output text because the loop has to *act* on it — it owns the only
@@ -666,8 +671,20 @@ defmodule Ouroboros.Provider.Native.Tools do
       changes: [],
       reads: %{},
       plan: nil,
-      escalation: nil
+      escalation: nil,
+      images: []
     }
+
+  # Keep only well-formed image parts (§8.1). A tool that returns junk here gets `[]` rather
+  # than a malformed part the model encoder would then have to defend against.
+  defp images(list) when is_list(list), do: Enum.filter(list, &image_part?/1)
+  defp images(_other), do: []
+
+  defp image_part?(%{path: path, media_type: media_type, sha256: sha256, size: size})
+       when is_binary(path) and is_binary(media_type) and is_binary(sha256) and is_integer(size),
+       do: true
+
+  defp image_part?(_part), do: false
 
   defp describe({:tool_raised, message}), do: "tool raised: #{message}"
   defp describe({:tool_exited, reason}), do: "tool exited: #{reason}"

@@ -6,16 +6,20 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopState do
   — a plan may look at the screen, it just may not click (D3) — and it is the observe step
   every `desktop_act` is checked against.
 
-  ## Phase 0
+  ## Phase 1 — observe
 
-  This is the contract, not the capability. The helper that owns pixels and accessibility
-  trees does not exist yet, so `run/2` returns an in-band error saying Computer Use is not
-  enabled on this node rather than pretending to have looked at anything. That is the
-  honesty invariant: a stub says it is a stub. The tool is absent from the tool list
-  altogether unless `Ouroboros.Provider.Native.Desktop.enabled?/0` and a workspace are both
-  present (§5.1), so a model only ever sees this name on a node that could, in a later
-  phase, answer it.
+  `run/2` delegates to `Ouroboros.Provider.Native.Desktop.observe/2`, which resolves the
+  target, refuses a denied app before any capture, drives the node's helper for a `state`,
+  stages the screenshot under `session_dir/desktop/`, records the session's last state
+  (D11), and renders the §5.2 text. The result carries `images: [%{path, media_type,
+  sha256, size}]` — the seam the loop turns into a multimodal tool message (§8.1). Every
+  failure is in-band (`is_error: true`, no image): the tool never raises a turn, and it
+  never returns a screenshot it did not actually stage. The tool is absent from the tool
+  list altogether unless `Ouroboros.Provider.Native.Desktop.enabled?/0` and a workspace are
+  both present (§5.1), so a model only ever sees this name on a node that can answer it.
   """
+
+  alias Ouroboros.Provider.Native.Desktop
 
   use Jido.Action,
     name: "desktop_state",
@@ -51,9 +55,15 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopState do
   @not_enabled "computer use is not enabled on this node"
 
   @impl true
-  def run(_params, _context) do
-    # Phase 0: no helper IO. Every well-formed call reports honestly that the capability is
-    # not wired on this node rather than returning a screenshot it did not take.
-    {:ok, %{output: @not_enabled, is_error: true}}
+  def run(params, context) do
+    params = if is_map(params), do: params, else: %{}
+    context = if is_map(context), do: context, else: %{}
+
+    # The tool is only listed when `enabled?/0`, but a direct caller (a test, a replay) may
+    # reach `run/2` on an off node; answer honestly rather than spawning a helper that the
+    # config says must not run.
+    if Desktop.enabled?() or Map.has_key?(context, :desktop_runner),
+      do: Desktop.observe(params, context),
+      else: {:ok, %{output: @not_enabled, is_error: true, images: []}}
   end
 end

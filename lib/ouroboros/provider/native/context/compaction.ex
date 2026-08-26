@@ -310,20 +310,43 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
   end
 
   defp elidable?(%{role: :tool} = message) do
-    content = to_string(Map.get(message, :content) || "")
-    content != "" and not elided?(message)
+    content_bytes(Map.get(message, :content)) > 0 and not elided?(message)
   end
 
   defp elidable?(_message), do: false
 
+  # §8.3. Eliding a tool result replaces its whole content — text *and* image parts — with
+  # the marker, and the byte count includes the image bytes so a folded screenshot's cost is
+  # visible on the marker. The staged file under `session_dir/desktop/` is untouched; the
+  # image is dropped from the *conversation*, not from disk.
   defp elide(message) do
-    content = to_string(Map.get(message, :content) || "")
-
-    %{
-      message
-      | content: "#{@elision_marker} #{byte_size(content)} bytes]"
-    }
+    %{message | content: "#{@elision_marker} #{content_bytes(Map.get(message, :content))} bytes]"}
   end
+
+  defp content_bytes(content) when is_binary(content), do: byte_size(content)
+
+  defp content_bytes(parts) when is_list(parts),
+    do: Enum.reduce(parts, 0, &(part_bytes(&1) + &2))
+
+  defp content_bytes(_other), do: 0
+
+  defp part_bytes(part) when is_map(part) do
+    case part_field(part, :type) do
+      type when type in [:image, "image"] -> non_negative(part_field(part, :size))
+      _text_or_other -> byte_size(binary_or_empty(part_field(part, :text)))
+    end
+  end
+
+  defp part_bytes(part) when is_binary(part), do: byte_size(part)
+  defp part_bytes(_part), do: 0
+
+  defp part_field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
+
+  defp non_negative(value) when is_integer(value) and value >= 0, do: value
+  defp non_negative(_value), do: 0
+
+  defp binary_or_empty(value) when is_binary(value), do: value
+  defp binary_or_empty(_value), do: ""
 
   # Move the split point back over any tool results that would be orphaned by it, and
   # over the assistant message that made their calls, so the tail always begins on a

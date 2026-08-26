@@ -341,4 +341,253 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       refute DesktopAct.valid_key?(123)
     end
   end
+
+  describe "stage_image/2 (§8.1)" do
+    test "stages a jpeg: verified, written once at 0600 under session_dir/desktop, temp unlinked" do
+      dir = session_dir()
+      bytes = jpeg("a")
+      temp = temp_image(bytes)
+
+      assert {:ok, staged} =
+               Desktop.stage_image(%{"path" => temp, "sha256" => sha(bytes)}, dir)
+
+      assert staged.media_type == "image/jpeg"
+      assert staged.sha256 == sha(bytes)
+      assert staged.size == byte_size(bytes)
+      assert staged.path == Path.join([dir, "desktop", sha(bytes) <> ".jpg"])
+      assert File.read!(staged.path) == bytes
+      assert {:ok, %File.Stat{mode: mode}} = File.stat(staged.path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+      refute File.exists?(temp), "the helper temp is unlinked after staging"
+    end
+
+    test "stages a png" do
+      dir = session_dir()
+      bytes = png("p")
+      temp = temp_image(bytes)
+
+      assert {:ok, staged} = Desktop.stage_image(%{"path" => temp}, dir)
+      assert staged.media_type == "image/png"
+      assert staged.path == Path.join([dir, "desktop", sha(bytes) <> ".png"])
+    end
+
+    test "refuses bytes whose magic is not a jpeg or png" do
+      dir = session_dir()
+      temp = temp_image(<<"not an image at all">>)
+      assert {:error, {:not_an_image, _}} = Desktop.stage_image(%{"path" => temp}, dir)
+    end
+
+    test "refuses a webp even though Attachments would accept it — desktop is jpeg/png only" do
+      dir = session_dir()
+      bytes = <<"RIFF", 0, 0, 0, 0, "WEBP", 0, 0>>
+      temp = temp_image(bytes)
+      assert {:error, {:not_an_image, "image/webp"}} = Desktop.stage_image(%{"path" => temp}, dir)
+    end
+
+    test "refuses an image over max_image_bytes" do
+      Application.put_env(:ouroboros, :computer_use, max_image_bytes: 16)
+      dir = session_dir()
+      bytes = jpeg("big") <> :binary.copy(<<0>>, 64)
+      temp = temp_image(bytes)
+      assert {:error, :too_large} = Desktop.stage_image(%{"path" => temp}, dir)
+    end
+
+    test "refuses when the sha256 the helper claimed does not match the bytes" do
+      dir = session_dir()
+      temp = temp_image(jpeg("x"))
+
+      assert {:error, :sha_mismatch} =
+               Desktop.stage_image(%{"path" => temp, "sha256" => sha(jpeg("y"))}, dir)
+    end
+
+    test "refuses a missing path" do
+      assert {:error, :missing_path} = Desktop.stage_image(%{}, session_dir())
+    end
+
+    test "evicts oldest files past max_snapshots_per_session" do
+      Application.put_env(:ouroboros, :computer_use, max_snapshots_per_session: 2)
+      dir = session_dir()
+
+      for tag <- ["1", "2", "3", "4"] do
+        bytes = jpeg(tag)
+        assert {:ok, _} = Desktop.stage_image(%{"path" => temp_image(bytes)}, dir)
+      end
+
+      {:ok, names} = File.ls(Path.join(dir, "desktop"))
+      assert length(names) == 2
+    end
+  end
+
+  describe "DesktopState.run/2 observe (§5.2), injected helper runner" do
+    test "renders the §5.2 text and returns one staged image" do
+      dir = session_dir()
+      bytes = jpeg("cap")
+      temp = temp_image(bytes)
+      raw = calculator_state(temp, sha(bytes))
+
+      assert {:ok, result} =
+               DesktopState.run(%{include_image: true}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      refute result.is_error
+      assert result.output =~ "app: com.apple.calculator (Calculator)"
+      assert result.output =~ "nodes (2):"
+      assert result.output =~ "image: 480x640 jpeg"
+      assert result.output =~ "sha=#{sha(bytes)}"
+      assert result.output =~ "focused_element: button \"2\""
+
+      assert [image] = result.images
+      assert image.media_type == "image/jpeg"
+      assert image.sha256 == sha(bytes)
+      assert File.exists?(image.path)
+      assert Path.dirname(image.path) == Path.join(dir, "desktop")
+    end
+
+    test "include_image=false returns the tree only, no image line, no images" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("z")), sha(jpeg("z")))
+
+      assert {:ok, result} =
+               DesktopState.run(%{include_image: false}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      assert result.images == []
+      refute result.output =~ "image:"
+      assert result.output =~ "nodes (2):"
+    end
+
+    test "a denied app is refused before any capture, naming the denylist" do
+      runner = fn _method, _params, _timeout ->
+        flunk("the helper must not be called for a denied app")
+      end
+
+      assert {:ok, result} =
+               DesktopState.run(%{app: "Terminal"}, %{
+                 session_dir: session_dir(),
+                 desktop_runner: runner
+               })
+
+      assert result.is_error
+      assert result.output =~ "denylist"
+      assert result.images == []
+    end
+
+    test "a helper that is down is an honest in-band error, no image" do
+      runner = fn "state", _params, _timeout -> {:error, :broken} end
+
+      assert {:ok, result} =
+               DesktopState.run(%{}, %{session_dir: session_dir(), desktop_runner: runner})
+
+      assert result.is_error
+      assert result.output =~ "not responding"
+      assert result.images == []
+    end
+
+    test "a screenshot that cannot be staged still returns the tree, with a warning" do
+      dir = session_dir()
+      raw = calculator_state("/no/such/screenshot.jpg", "deadbeef")
+
+      assert {:ok, result} =
+               DesktopState.run(%{include_image: true}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      refute result.is_error
+      assert result.images == []
+      assert result.output =~ "nodes (2):"
+      assert result.output =~ "could not be staged"
+    end
+
+    test "no session directory is an honest error, no capture" do
+      assert {:ok, result} =
+               DesktopState.run(%{}, %{desktop_runner: ok(%{"app" => %{"id" => "x"}})})
+
+      assert result.is_error
+      assert result.output =~ "working directory"
+    end
+
+    test "off node with no injected runner reports not enabled" do
+      assert {:ok,
+              %{output: "computer use is not enabled on this node", is_error: true, images: []}} =
+               DesktopState.run(%{include_image: true}, %{session_dir: session_dir()})
+    end
+  end
+
+  describe "Tools.normalize_result/1 images seam (§8.1)" do
+    test "carries a well-formed images list through unchanged" do
+      part = %{path: "/p", media_type: "image/jpeg", sha256: "abc", size: 10}
+      result = Tools.normalize_result({:ok, %{output: "x", is_error: false, images: [part]}})
+      assert result.images == [part]
+    end
+
+    test "every other tool result shape has images: []" do
+      assert Tools.normalize_result({:ok, %{output: "x"}}).images == []
+      assert Tools.normalize_result({:error, :boom}).images == []
+      assert Tools.normalize_result({:ok, %{not_output: 1}}).images == []
+    end
+
+    test "drops malformed image parts rather than passing them to the encoder" do
+      result = Tools.normalize_result({:ok, %{output: "x", images: [%{path: "/p"}, "junk"]}})
+      assert result.images == []
+    end
+  end
+
+  # A jpeg/png distinguished only by its magic bytes; the body is derived from `tag` so two
+  # captures differ and hash apart, which is all staging and eviction need.
+  defp jpeg(tag), do: <<0xFF, 0xD8, 0xFF, 0xE0>> <> :crypto.hash(:sha256, tag) <> <<0xFF, 0xD9>>
+  defp png(tag), do: <<137, 80, 78, 71, 13, 10, 26, 10>> <> :crypto.hash(:sha256, tag)
+
+  defp sha(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  defp temp_image(bytes) do
+    path = Path.join(System.tmp_dir!(), "ouro-cu-temp-#{System.unique_integer([:positive])}")
+    File.write!(path, bytes)
+    on_exit(fn -> File.rm_rf(path) end)
+    path
+  end
+
+  defp session_dir do
+    dir = Path.join(System.tmp_dir!(), "ouro-cu-session-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  # A runner that answers `state` with a fixed raw payload and refuses anything else.
+  defp ok(raw), do: fn "state", _params, _timeout -> {:ok, raw} end
+
+  defp calculator_state(image_path, sha) do
+    %{
+      "app" => %{"id" => "com.apple.calculator", "name" => "Calculator"},
+      "window" => %{
+        "id" => "w_1",
+        "title" => "Calculator",
+        "focused" => true,
+        "bounds" => %{"x" => 0, "y" => 0, "w" => 240, "h" => 320}
+      },
+      "image" => %{
+        "path" => image_path,
+        "mime" => "image/jpeg",
+        "sha256" => sha,
+        "width" => 480,
+        "height" => 640,
+        "coordinate_width" => 960,
+        "coordinate_height" => 1280,
+        "scale" => 2.0,
+        "quality" => 80
+      },
+      "nodes" => [
+        %{"index" => 0, "role" => "window", "name" => "Calculator", "actions" => []},
+        %{"index" => 1, "role" => "button", "name" => "2", "actions" => ["click"]}
+      ],
+      "focused_element" => %{"index" => 1, "role" => "button", "name" => "2", "editable" => false},
+      "readiness" => %{"screenshot" => "ok", "ax" => "ok", "input" => "ok"},
+      "warnings" => []
+    }
+  end
 end

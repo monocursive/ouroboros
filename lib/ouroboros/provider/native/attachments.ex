@@ -125,12 +125,19 @@ defmodule Ouroboros.Provider.Native.Attachments do
     [%{type: :text, text: "Files available through the read tool:\n" <> text}]
   end
 
-  defp media_type(<<137, 80, 78, 71, 13, 10, 26, 10, _rest::binary>>), do: "image/png"
-  defp media_type(<<255, 216, 255, _rest::binary>>), do: "image/jpeg"
-  defp media_type(<<"GIF87a", _rest::binary>>), do: "image/gif"
-  defp media_type(<<"GIF89a", _rest::binary>>), do: "image/gif"
-  defp media_type(<<"RIFF", _size::binary-size(4), "WEBP", _rest::binary>>), do: "image/webp"
-  defp media_type(_bytes), do: nil
+  @doc """
+  The image media type for a byte prefix, or `nil` when the magic bytes are not an image.
+
+  Public because `Ouroboros.Provider.Native.Desktop` stages helper screenshots against the
+  same one magic-byte table rather than keeping a second, driftable copy of it.
+  """
+  @spec media_type(binary()) :: String.t() | nil
+  def media_type(<<137, 80, 78, 71, 13, 10, 26, 10, _rest::binary>>), do: "image/png"
+  def media_type(<<255, 216, 255, _rest::binary>>), do: "image/jpeg"
+  def media_type(<<"GIF87a", _rest::binary>>), do: "image/gif"
+  def media_type(<<"GIF89a", _rest::binary>>), do: "image/gif"
+  def media_type(<<"RIFF", _size::binary-size(4), "WEBP", _rest::binary>>), do: "image/webp"
+  def media_type(_bytes), do: nil
 
   defp extension("image/png"), do: ".png"
   defp extension("image/jpeg"), do: ".jpg"
