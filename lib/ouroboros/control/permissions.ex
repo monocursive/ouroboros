@@ -283,7 +283,12 @@ defmodule Ouroboros.Control.Permissions do
   """
   @spec suggest(map() | keyword() | Request.t()) :: String.t() | nil
   def suggest(%Request{} = request) do
+    computer_use = computer_use_app(request)
+
     cond do
+      is_binary(computer_use) ->
+        "ComputerUse(app:#{computer_use})"
+
       is_binary(request.command) ->
         suggest_command(request.command)
 
@@ -741,4 +746,17 @@ defmodule Ouroboros.Control.Permissions do
   defp suggest_glob(path), do: Path.dirname(path) <> "/**"
 
   defp base_name(token), do: token |> String.split("/") |> List.last()
+
+  # A desktop tool whose app the node resolved: the rule an operator would write keys on
+  # the app id, never on the tool name or a path — a bundle id is not a filesystem path,
+  # so it must not be routed through `suggest_glob`. nil for anything that is not one.
+  defp computer_use_app(%Request{tool: tool, context: context})
+       when tool in ["desktop_state", "desktop_act"] and is_map(context) do
+    case Map.get(context, :app) || Map.get(context, "app") do
+      app when is_binary(app) and app != "" -> app
+      _other -> nil
+    end
+  end
+
+  defp computer_use_app(_request), do: nil
 end

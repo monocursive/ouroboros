@@ -23,6 +23,7 @@ defmodule Ouroboros.Control.PermissionsTest do
 
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Permissions
+  alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request}
   alias Ouroboros.Control.PermissionsTest.RefusingStorage
   alias Ouroboros.Upgrade.{Artifact, Verifier}
 
@@ -438,6 +439,174 @@ defmodule Ouroboros.Control.PermissionsTest do
 
       assert Permissions.suggest(%{tool: "websearch", mode: :network}) == "Tool(websearch)"
       assert Permissions.suggest(%{}) == nil
+    end
+  end
+
+  describe "Computer Use" do
+    test "parses the four forms and refuses a bare or malformed one" do
+      assert %Pattern{kind: :computer_use, spec: %{form: :observe}} =
+               Pattern.parse!("ComputerUse(observe)")
+
+      assert %Pattern{kind: :computer_use, spec: %{form: :act}} =
+               Pattern.parse!("ComputerUse(act)")
+
+      assert %Pattern{kind: :computer_use, spec: %{app: "com.apple.Calculator"}} =
+               Pattern.parse!("ComputerUse(app:com.apple.Calculator)")
+
+      assert %Pattern{kind: :computer_use, spec: %{app: :any}} =
+               Pattern.parse!("ComputerUse(app:*)")
+
+      # A bare ComputerUse has no permissive arm; neither does an empty or unknown inner.
+      assert {:error, {:unrecognized_pattern, _}} = Pattern.parse("ComputerUse")
+      assert {:error, {:invalid_computer_use_pattern, _}} = Pattern.parse("ComputerUse()")
+
+      assert {:error, {:invalid_computer_use_pattern, _}} =
+               Pattern.parse("ComputerUse(everything)")
+
+      assert {:error, {:invalid_computer_use_app, _}} =
+               Pattern.parse("ComputerUse(app:has space)")
+
+      assert {:error, {:invalid_computer_use_app, _}} =
+               Pattern.parse("ComputerUse(app:#{String.duplicate("a", 129)})")
+    end
+
+    test "an app allow is admissible, unlike a reported-parameter allow" do
+      assert Pattern.decisions(Pattern.parse!("ComputerUse(app:com.apple.Safari)")) == :any
+      assert Pattern.decisions(Pattern.parse!("ComputerUse(observe)")) == :any
+      refute Pattern.fragile?(Pattern.parse!("ComputerUse(app:*)"))
+
+      # The whole point of D4: the engine admits an allow keyed on the resolved app, where
+      # `Tool(name:param=value)` — a parameter the provider merely reported — cannot allow.
+      assert {:ok, %{decision: :allow}} =
+               Permissions.add(
+                 %{scope: :user, decision: :allow, pattern: "ComputerUse(app:com.apple.Safari)"},
+                 start_engine!()
+               )
+    end
+
+    test "the matcher reads the tool for observe/act and the resolved app for app:X" do
+      observe = Pattern.parse!("ComputerUse(observe)")
+      act = Pattern.parse!("ComputerUse(act)")
+      calc = Pattern.parse!("ComputerUse(app:com.apple.Calculator)")
+
+      state =
+        Request.new(%{
+          tool: "desktop_state",
+          mode: :read,
+          context: %{app: "com.apple.Calculator"}
+        })
+
+      action =
+        Request.new(%{
+          tool: "desktop_act",
+          mode: :execute,
+          context: %{app: "com.apple.Calculator"}
+        })
+
+      assert Matcher.matches?(observe, state, :all)
+      refute Matcher.matches?(observe, action, :all)
+      assert Matcher.matches?(act, action, :all)
+      refute Matcher.matches?(act, state, :all)
+
+      assert Matcher.matches?(calc, state, :all)
+      assert Matcher.matches?(calc, action, :all)
+
+      # The tool layer keys context with the atom :app; a string "app" is tolerated too.
+      string_keyed =
+        Request.new(%{
+          tool: "desktop_state",
+          mode: :read,
+          context: %{"app" => "com.apple.Calculator"}
+        })
+
+      assert Matcher.matches?(calc, string_keyed, :all)
+    end
+
+    test "app:* needs a resolved app, and app:X never covers app:Y" do
+      any = Pattern.parse!("ComputerUse(app:*)")
+      safari = Pattern.parse!("ComputerUse(app:com.apple.Safari)")
+
+      resolved =
+        Request.new(%{tool: "desktop_act", mode: :execute, context: %{app: "com.apple.Mail"}})
+
+      missing = Request.new(%{tool: "desktop_act", mode: :execute})
+
+      assert Matcher.matches?(any, resolved, :all)
+      # An allow on `*` must not cover "we did not resolve an app".
+      refute Matcher.matches?(any, missing, :all)
+      # An allow on Safari does not authorise a call that actually focused Mail.
+      refute Matcher.matches?(safari, resolved, :all)
+    end
+
+    test "Tool(desktop_act) matches by tool name, and is not the app-scoped Always-allow form" do
+      plain = Pattern.parse!("Tool(desktop_act)")
+      assert plain.kind == :tool
+
+      calculator =
+        Request.new(%{
+          tool: "desktop_act",
+          mode: :execute,
+          context: %{app: "com.apple.Calculator"}
+        })
+
+      mail =
+        Request.new(%{tool: "desktop_act", mode: :execute, context: %{app: "com.apple.Mail"}})
+
+      # It matches the tool regardless of which app was resolved — it names no app, so it
+      # is the blunt feature-hiding rule, not the granular ComputerUse(app:…) allow.
+      assert Matcher.matches?(plain, calculator, :all)
+      assert Matcher.matches?(plain, mail, :all)
+      refute Matcher.matches?(Pattern.parse!("ComputerUse(app:com.apple.Calculator)"), mail, :all)
+    end
+
+    test "a node deny of an app beats a user allow of it" do
+      Application.put_env(:ouroboros, :permissions, [
+        {"ComputerUse(app:com.apple.Terminal)", :deny}
+      ])
+
+      engine = start_engine!()
+
+      {:ok, _rule} =
+        Permissions.remember(
+          %{},
+          "ComputerUse(app:com.apple.Terminal)",
+          :allow,
+          :user,
+          engine
+        )
+
+      assert {:deny, %{scope: :node, pattern: "ComputerUse(app:com.apple.Terminal)"}} =
+               Permissions.evaluate(
+                 %{
+                   principal: %{session_id: unique("cu-deny")},
+                   tool: "desktop_act",
+                   mode: :execute,
+                   context: %{app: "com.apple.Terminal"}
+                 },
+                 engine
+               )
+    end
+
+    test "remember refuses to write an app rule at node scope" do
+      assert {:error, :node_scope_is_operator_configuration} =
+               Permissions.remember(%{}, "ComputerUse(app:com.apple.Safari)", :allow, :node)
+    end
+
+    test "suggest keys the rule on the resolved app, not the tool name or a path" do
+      assert Permissions.suggest(%{
+               tool: "desktop_state",
+               mode: :read,
+               context: %{app: "com.apple.Calculator"}
+             }) == "ComputerUse(app:com.apple.Calculator)"
+
+      assert Permissions.suggest(%{
+               tool: "desktop_act",
+               mode: :execute,
+               context: %{app: "com.apple.Safari"}
+             }) == "ComputerUse(app:com.apple.Safari)"
+
+      # No resolved app: nothing to key an app rule on, so fall back rather than invent one.
+      assert Permissions.suggest(%{tool: "desktop_state", mode: :read}) == "Tool(desktop_state)"
     end
   end
 

@@ -31,6 +31,10 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   | `mcp__server__tool` | a tool named `mcp:server:tool` or `mcp__server__tool` |
   | `Tool(name)` | a tool with that name |
   | `Tool(name:param=value)` | that tool when `context[param]` equals `value` |
+  | `ComputerUse(observe)` | the `desktop_state` tool |
+  | `ComputerUse(act)` | the `desktop_act` tool |
+  | `ComputerUse(app:<id>)` | either desktop tool when `context.app` equals `<id>` |
+  | `ComputerUse(app:*)` | either desktop tool when `context.app` is a nonempty binary |
 
   `Edit` and `Write` overlap on purpose. A provider that reports a tool this runtime does
   not recognise is judged by both, because the alternative — judging it by neither —
@@ -114,6 +118,27 @@ defmodule Ouroboros.Control.Permissions.Matcher do
     same_tool?(spec.name, request.tool) and
       context_value(request.context, spec.param) == spec.value
   end
+
+  # ── Computer Use ─────────────────────────────────────────────────────────────────────
+
+  defp do_matches?(%Pattern{kind: :computer_use, spec: %{form: :observe}}, request, _quantifier),
+    do: request.tool == "desktop_state"
+
+  defp do_matches?(%Pattern{kind: :computer_use, spec: %{form: :act}}, request, _quantifier),
+    do: request.tool == "desktop_act"
+
+  # An allow on `*` must not cover "we did not resolve an app": a missing key reads as nil,
+  # never as a nonempty binary. The `:any` clause precedes the exact one so `%{app: :any}`
+  # is the wildcard, not an app literally named ":any".
+  defp do_matches?(%Pattern{kind: :computer_use, spec: %{app: :any}}, request, _quantifier) do
+    case context_value(request.context, "app") do
+      app when is_binary(app) -> app != ""
+      _other -> false
+    end
+  end
+
+  defp do_matches?(%Pattern{kind: :computer_use, spec: %{app: app}}, request, _quantifier),
+    do: context_value(request.context, "app") == app
 
   # ── helpers ────────────────────────────────────────────────────────────────────────
 

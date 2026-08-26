@@ -16,6 +16,10 @@ defmodule Ouroboros.Control.Permissions.Pattern do
       mcp__<server>__*          every tool on one MCP server
       Tool(<name>)              one tool by the name the provider calls it
       Tool(<name>:<param>=<v>)  that tool with that parameter — deny and ask only
+      ComputerUse(observe)      the desktop_state tool
+      ComputerUse(act)          the desktop_act tool
+      ComputerUse(app:<id>)     either desktop tool, when the node resolved that app
+      ComputerUse(app:*)        either desktop tool, when the node resolved any app
 
   ## The two refusals
 
@@ -40,16 +44,21 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   with the flag set so every surface that shows a rule can say what it is.
   """
 
-  @kinds [:bash, :read, :edit, :write, :web_fetch, :mcp, :tool, :tool_param]
+  @kinds [:bash, :read, :edit, :write, :web_fetch, :mcp, :tool, :tool_param, :computer_use]
 
   @wrapped %{"Bash" => :bash, "Read" => :read, "Edit" => :edit, "Write" => :write}
 
   @max_pattern_bytes 512
 
+  # A resolved app id: `com.apple.Calculator`, `org.mozilla.firefox`. Bounded so a rule
+  # cannot smuggle a pattern-length attack past `@max_pattern_bytes` through the app slot.
+  @computer_use_app ~r/\A[A-Za-z0-9._-]{1,128}\z/
+
   @enforce_keys [:raw, :kind, :spec, :fragile?]
   defstruct @enforce_keys
 
-  @type kind :: :bash | :read | :edit | :write | :web_fetch | :mcp | :tool | :tool_param
+  @type kind ::
+          :bash | :read | :edit | :write | :web_fetch | :mcp | :tool | :tool_param | :computer_use
   @type t :: %__MODULE__{
           raw: String.t(),
           kind: kind(),
@@ -98,7 +107,9 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   Which decisions this pattern may carry.
 
   `:any` for everything except `Tool(<name>:<param>=<value>)`, which is
-  `:deny_or_ask_only`.
+  `:deny_or_ask_only`. `ComputerUse(app:…)` is `:any` — an app allow is honest —
+  because the app is a fact the node resolved from the live window before `evaluate/1`,
+  not a parameter the provider merely reported (the `Tool(…:param=)` distinction).
   """
   @spec decisions(t()) :: :any | :deny_or_ask_only
   def decisions(%__MODULE__{kind: :tool_param}), do: :deny_or_ask_only
@@ -176,6 +187,32 @@ defmodule Ouroboros.Control.Permissions.Pattern do
 
       [name, constraint] ->
         parse_tool_param(raw, String.trim(name), String.trim(constraint))
+    end
+  end
+
+  # `app:*` is the explicit any-app form; `app:<id>` an exact resolved id. A bare
+  # `ComputerUse` never reaches here — the wrapping regex requires `Name(inner)` — and an
+  # empty or unrecognised inner is a parse error, so there is no permissive arm.
+  defp parse_named("ComputerUse", inner, raw) do
+    case String.trim(inner) do
+      "observe" ->
+        {:ok,
+         %__MODULE__{raw: raw, kind: :computer_use, spec: %{form: :observe}, fragile?: false}}
+
+      "act" ->
+        {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{form: :act}, fragile?: false}}
+
+      "app:*" ->
+        {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{app: :any}, fragile?: false}}
+
+      "app:" <> id ->
+        if Regex.match?(@computer_use_app, id),
+          do:
+            {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{app: id}, fragile?: false}},
+          else: {:error, {:invalid_computer_use_app, id}}
+
+      other ->
+        {:error, {:invalid_computer_use_pattern, other}}
     end
   end
 
