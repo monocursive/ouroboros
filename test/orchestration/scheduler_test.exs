@@ -18,6 +18,67 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
     end
   end
 
+  # An owner that outlives the scheduler that spawned it, and reports only when told to.
+  defmodule BlockingExecutor do
+    @behaviour Ouroboros.Orchestration.Executor
+
+    alias Ouroboros.Orchestration.Scheduler
+
+    @impl true
+    def start(execution, scheduler, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+
+      owner =
+        spawn(fn ->
+          send(test_pid, {:owner_started, execution, self()})
+
+          receive do
+            {:report, result} ->
+              reply =
+                Scheduler.complete(
+                  scheduler,
+                  execution.plan_id,
+                  execution.step_id,
+                  execution.token,
+                  result
+                )
+
+              send(test_pid, {:owner_reported, execution.token, reply})
+          end
+        end)
+
+      {:ok, owner}
+    end
+  end
+
+  # A forge-shaped executor: it refuses while a previous attempt of the same step is
+  # unsettled, and deploys once that attempt has settled.
+  defmodule InFlightExecutor do
+    @behaviour Ouroboros.Orchestration.Executor
+
+    alias Ouroboros.Orchestration.Scheduler
+
+    @impl true
+    def start(execution, scheduler, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:in_flight_attempt, execution})
+
+      if execution.attempt < Keyword.fetch!(opts, :settles_on_attempt) do
+        {:error, {:forge_deploy_in_flight, "Ouroboros.Capability.Stub", "artifact-1"}}
+      else
+        {:ok,
+         spawn(fn ->
+           Scheduler.complete(
+             scheduler,
+             execution.plan_id,
+             execution.step_id,
+             execution.token,
+             :deployed
+           )
+         end)}
+      end
+    end
+  end
+
   setup do
     {:ok, _applications} = Application.ensure_all_started(:jido)
 
@@ -153,7 +214,7 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
     end)
   end
 
-  test "scheduler restart recovers running work with the same token", context do
+  test "scheduler restart re-offers running work as a new attempt", context do
     start_scheduler(context, executor: true)
     assert {:ok, _} = Scheduler.submit(context.scheduler, plan!("restart", [%{id: "step"}]))
     assert_receive {:execution_started, first}
@@ -167,14 +228,93 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
 
     assert_receive {:execution_started, recovered}
     assert recovered.step_id == "step"
-    assert recovered.token == first.token
-    assert recovered.attempt == first.attempt
-    assert recovered.recovered?
+    refute recovered.token == first.token
+    assert recovered.attempt == first.attempt + 1
+    refute recovered.recovered?
+
+    # The owner the dead scheduler spawned may still be running. Whatever it reports is
+    # not this attempt's outcome.
+    assert {:error, :stale_execution_token} =
+             Scheduler.complete(context.scheduler, "restart", "step", first.token, :ok)
 
     assert {:ok, completed} =
              Scheduler.complete(context.scheduler, "restart", "step", recovered.token, :ok)
 
     assert completed.status == :completed
+  end
+
+  test "a surviving owner cannot settle the step the restarted scheduler re-offered",
+       context do
+    start_scheduler(context, executor: {BlockingExecutor, test_pid: self()})
+    assert {:ok, _} = Scheduler.submit(context.scheduler, plan!("orphan", [%{id: "step"}]))
+    assert_receive {:owner_started, first_execution, first_owner}
+
+    first_scheduler = Process.whereis(context.scheduler)
+    Process.unlink(first_scheduler)
+    Process.exit(first_scheduler, :kill)
+    assert_eventually(fn -> Process.whereis(context.scheduler) == nil end)
+
+    assert Process.alive?(first_owner)
+    start_scheduler(context, executor: {BlockingExecutor, test_pid: self()})
+
+    assert_receive {:owner_started, second_execution, second_owner}
+    refute second_execution.token == first_execution.token
+
+    send(first_owner, {:report, :from_the_orphan})
+    assert_receive {:owner_reported, _stale_token, {:error, :stale_execution_token}}
+
+    send(second_owner, {:report, :from_the_current_owner})
+    assert_receive {:owner_reported, _current_token, {:ok, _plan}}
+
+    assert {:ok, completed} = Scheduler.get(context.scheduler, "orphan")
+    assert completed.status == :completed
+    assert completed.steps["step"].result == :from_the_current_owner
+  end
+
+  test "a step refused because a previous attempt is unsettled is retried, not failed",
+       context do
+    start_scheduler(context,
+      step_retry_delay: 10,
+      executor: {InFlightExecutor, test_pid: self(), settles_on_attempt: 2}
+    )
+
+    assert {:ok, _} = Scheduler.submit(context.scheduler, plan!("in-flight", [%{id: "deploy"}]))
+
+    assert_receive {:in_flight_attempt, %{attempt: 1}}
+    assert_receive {:in_flight_attempt, %{attempt: 2}}
+
+    assert_eventually(fn ->
+      {:ok, plan} = Scheduler.get(context.scheduler, "in-flight")
+      plan.status == :completed
+    end)
+
+    assert {:ok, completed} = Scheduler.get(context.scheduler, "in-flight")
+    assert completed.steps["deploy"].result == :deployed
+  end
+
+  test "the retry channel is bounded and the last refusal still fails the plan", context do
+    start_scheduler(context,
+      step_retry_delay: 10,
+      step_retry_attempts: 2,
+      executor: {InFlightExecutor, test_pid: self(), settles_on_attempt: 99}
+    )
+
+    assert {:ok, _} = Scheduler.submit(context.scheduler, plan!("bounded", [%{id: "deploy"}]))
+
+    assert_receive {:in_flight_attempt, %{attempt: 1}}
+    assert_receive {:in_flight_attempt, %{attempt: 2}}
+    refute_receive {:in_flight_attempt, %{attempt: 3}}, 100
+
+    assert_eventually(fn ->
+      {:ok, plan} = Scheduler.get(context.scheduler, "bounded")
+      plan.status == :failed
+    end)
+
+    assert {:ok, failed} = Scheduler.get(context.scheduler, "bounded")
+
+    assert failed.steps["deploy"].error ==
+             {:executor_start_failed,
+              {:forge_deploy_in_flight, "Ouroboros.Capability.Stub", "artifact-1"}}
   end
 
   test "owner death requeues and redispatches the same execution identity", context do

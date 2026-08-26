@@ -150,6 +150,22 @@ defmodule Ouroboros.Control.PermissionsPatternTest do
       assert Shell.redirect_targets("ls 2>&1") == []
     end
 
+    test "a redirect on any descriptor is a write, not just 0, 1, and 2" do
+      assert Shell.redirect_targets("echo hi 3>/tmp/out") == ["/tmp/out"]
+      assert Shell.redirect_targets("echo hi 4>> /tmp/out") == ["/tmp/out"]
+      assert Shell.redirect_targets("echo hi 10>/tmp/out") == ["/tmp/out"]
+      # The shape that motivated this: the write is on fd 3, and fd 1 is then pointed at
+      # it, so nothing about the line looks like a redirect to a file.
+      assert Shell.redirect_targets("echo pwned 3>.git/config 1>&3") == [".git/config"]
+    end
+
+    test "a clobbering >| is a redirect, not a pipe" do
+      assert Shell.split("echo pwned >| f") == ["echo pwned >| f"]
+      assert Shell.split("echo pwned >| f | cat") == ["echo pwned >| f", "cat"]
+      assert Shell.redirect_targets("echo pwned >| .git/config") == [".git/config"]
+      assert Shell.redirect_targets("echo pwned 3>| .git/config") == [".git/config"]
+    end
+
     test "a Bash pattern never matches a request with no command" do
       refute Matcher.matches?(Pattern.parse!("Bash(ls *)"), Request.new(%{tool: "read"}), :any)
     end

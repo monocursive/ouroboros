@@ -141,6 +141,87 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     end
   end
 
+  # ------------------------------------------------------- structured content
+
+  # `Ouroboros.Provider.Native.Attachments.message/3` builds a user message whose content
+  # is a list of parts. Everything on the compaction path used to call `to_string/1` on
+  # that list, which raises — and the session that was compacting is `restart: :temporary`,
+  # so `/compact` after an image was attached killed it.
+  describe "a message whose content is a list of parts" do
+    defp attachment_parts do
+      [
+        %{type: :text, text: "look at this diagram"},
+        %{type: :image, path: "/tmp/d.png", media_type: "image/png", sha256: "ab", size: 12}
+      ]
+    end
+
+    # What a checkpoint round-trip leaves: JSON has no atoms.
+    defp round_tripped_parts do
+      [
+        %{"type" => "text", "text" => "look at this diagram"},
+        %{"type" => "image", "path" => "/tmp/d.png", "media_type" => "image/png"}
+      ]
+    end
+
+    test "is estimated rather than raised on" do
+      message = %{role: :user, content: attachment_parts()}
+
+      tokens = Window.estimate_tokens([message])
+
+      assert is_integer(tokens)
+      assert tokens > 0
+    end
+
+    test "counts its text and charges its image" do
+      text_only = Window.estimate_tokens([%{role: :user, content: "look at this diagram"}])
+      with_image = Window.estimate_tokens([%{role: :user, content: attachment_parts()}])
+
+      assert with_image > text_only
+      assert Window.message_text(%{role: :user, content: attachment_parts()}) =~ "diagram"
+    end
+
+    test "reads the string keys a checkpoint round-trip leaves" do
+      atoms = Window.estimate_tokens([%{role: :user, content: attachment_parts()}])
+      strings = Window.estimate_tokens([%{role: :user, content: round_tripped_parts()}])
+
+      assert strings == atoms
+      assert Window.message_text(%{role: :user, content: round_tripped_parts()}) =~ "diagram"
+    end
+
+    test "an assistant message with structured content is estimated too" do
+      message = %{
+        role: :assistant,
+        content: [%{type: :text, text: "I see it"}],
+        tool_calls: [%{id: "c1", name: "read", input: %{"path" => "a.ex"}}]
+      }
+
+      assert Window.estimate_tokens([message]) > 0
+      assert Window.message_text(message) =~ "I see it"
+      assert Window.message_text(message) =~ "read"
+    end
+
+    test "compaction folds a conversation that contains one" do
+      long = for index <- 1..400, do: user("a fairly wordy operator message number #{index}")
+      messages = [%{role: :user, content: attachment_parts()} | long]
+
+      assert {:ok, outcome} =
+               Compaction.compact(messages,
+                 keep_recent_tokens: 50,
+                 summarize: fn _payload -> {:ok, "## Goal\n\nx"} end
+               )
+
+      assert outcome.summarised
+      assert is_integer(outcome.before_tokens)
+    end
+
+    test "the structural summary reads the text of one rather than raising" do
+      summary =
+        Compaction.structural_summary([%{role: :user, content: attachment_parts()}], nil)
+
+      assert summary =~ "look at this diagram"
+    end
+  end
+
   # ---------------------------------------------------------------- ordering
 
   describe "tool results go first" do

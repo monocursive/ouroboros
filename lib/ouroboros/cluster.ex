@@ -77,49 +77,20 @@ defmodule Ouroboros.Cluster.Monitor do
     {:reply, reply, state}
   end
 
+  # An observation is evidence about one plane, never a repair of the journal that makes
+  # every plane's list complete. While that journal is unreadable the in-memory baseline is
+  # empty, so recording here would persist the whole map derived from it — erasing the other
+  # plane's durable owners — and then declare the result reliable. `forget_session_owner/2`
+  # and `migrate_local_session_owners/2` already refuse for the same reason, and the same
+  # refusal shape lets a start fail closed instead of recovering evidence as a side effect.
   def handle_call({:record_session_snapshot, plane, observations}, _from, state)
       when plane in [:interactive, :coding] and is_list(observations) do
-    observed =
-      observations
-      |> Enum.map(fn {target, _sessions} -> Atom.to_string(target) end)
-      |> MapSet.new()
+    case Map.get(state, :session_owner_evidence, :reliable) do
+      :reliable ->
+        record_session_snapshot(state, plane, observations)
 
-    present =
-      observations
-      |> Enum.filter(fn {_target, sessions} -> sessions != [] end)
-      |> Enum.map(fn {target, _sessions} -> Atom.to_string(target) end)
-      |> MapSet.new()
-
-    owners =
-      state
-      |> session_owners()
-      |> Map.fetch!(plane)
-      |> MapSet.difference(observed)
-      |> MapSet.union(present)
-
-    current = session_owners(state)
-    updated = Map.put(current, plane, owners)
-
-    commit =
-      if updated == current and Map.get(state, :session_owner_evidence, :reliable) == :reliable,
-        do: :ok,
-        else: persist_session_owners(updated)
-
-    case commit do
-      :ok ->
-        state = %{state | session_owners: updated, session_owner_evidence: :reliable}
-        {:reply, :ok, state}
-
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
-
-      {:error, reason} ->
-        Logger.error(
-          "cluster session-owner checkpoint failed; fleet lists will fail closed: " <>
-            inspect(reason, limit: 10, printable_limit: 200)
-        )
-
-        {:reply, {:error, reason}, Map.put(state, :session_owner_evidence, {:unreliable, reason})}
+      {:unreliable, reason} ->
+        {:reply, {:error, {:session_owner_evidence_unavailable, reason}}, state}
     end
   end
 
@@ -546,6 +517,46 @@ defmodule Ouroboros.Cluster.Monitor do
         {:ok, fleet_id, _profile, opts} ->
           write_session_owner_checkpoint(owners, fleet_id, opts)
       end
+    end
+  end
+
+  defp record_session_snapshot(state, plane, observations) do
+    observed =
+      observations
+      |> Enum.map(fn {target, _sessions} -> Atom.to_string(target) end)
+      |> MapSet.new()
+
+    present =
+      observations
+      |> Enum.filter(fn {_target, sessions} -> sessions != [] end)
+      |> Enum.map(fn {target, _sessions} -> Atom.to_string(target) end)
+      |> MapSet.new()
+
+    current = session_owners(state)
+
+    owners =
+      current
+      |> Map.fetch!(plane)
+      |> MapSet.difference(observed)
+      |> MapSet.union(present)
+
+    updated = Map.put(current, plane, owners)
+    commit = if updated == current, do: :ok, else: persist_session_owners(updated)
+
+    case commit do
+      :ok ->
+        {:reply, :ok, %{state | session_owners: updated}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, ambiguity}, state}
+
+      {:error, reason} ->
+        Logger.error(
+          "cluster session-owner checkpoint failed; fleet lists will fail closed: " <>
+            inspect(reason, limit: 10, printable_limit: 200)
+        )
+
+        {:reply, {:error, reason}, Map.put(state, :session_owner_evidence, {:unreliable, reason})}
     end
   end
 

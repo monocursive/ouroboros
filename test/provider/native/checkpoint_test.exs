@@ -70,6 +70,89 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
     refute match?([%{role: :tool} | _], restored)
   end
 
+  # The turn manifest counts messages from the start of the session. The list on disk may
+  # not start there, and how far in it does start is the number a rewind needs.
+  test "records what the trim dropped, cumulatively", %{path: path} do
+    assert {:ok, whole} = write_and_load(path, @conversation, [])
+    assert whole.offset == 0
+    assert whole.rewind_floor == 0
+
+    long = List.duplicate(%{role: :user, content: "x"}, 10) ++ @conversation
+
+    assert {:ok, trimmed} = write_and_load(path, long, event_limit: 4)
+    assert trimmed.offset == length(long) - length(trimmed.messages)
+
+    # A session resuming onto that tail and trimming again is a further offset, not the
+    # same one: the offset it was opened with is what the next write counts from.
+    assert {:ok, again} =
+             write_and_load(path, trimmed.messages, event_limit: 2, offset: trimmed.offset)
+
+    assert again.offset == trimmed.offset + (length(trimmed.messages) - length(again.messages))
+  end
+
+  test "the floor a rewind cannot cut below never moves backwards", %{path: path} do
+    long = List.duplicate(%{role: :user, content: "x"}, 10)
+
+    assert {:ok, conversation} =
+             write_and_load(path, long, event_limit: 4, offset: 2, rewind_floor: 9)
+
+    assert conversation.offset == 8
+    assert conversation.rewind_floor == 9
+
+    assert {:ok, higher} = write_and_load(path, long, event_limit: 4, offset: 20)
+    assert higher.rewind_floor == higher.offset
+  end
+
+  test "a checkpoint written before the offset existed reads as a whole conversation",
+       %{path: path} do
+    assert :ok = Checkpoint.write(path, @conversation)
+
+    payload = path |> File.read!() |> JSON.decode!()
+    File.write!(path, JSON.encode!(Map.drop(payload, ["offset", "rewind_floor"])))
+
+    assert {:ok, conversation} = Checkpoint.load(path)
+    assert conversation.offset == 0
+    assert conversation.rewind_floor == 0
+    assert conversation.messages == @conversation
+  end
+
+  test "a trimmed checkpoint without offset infers it from the sibling manifest", %{path: path} do
+    kept = Enum.take(@conversation, -2)
+    assert :ok = Checkpoint.write(path, kept)
+
+    payload = path |> File.read!() |> JSON.decode!() |> Map.drop(["offset", "rewind_floor"])
+    File.write!(path, JSON.encode!(payload))
+
+    last_count = 10
+
+    File.write!(
+      Path.join(Path.dirname(path), "manifest.json"),
+      JSON.encode!(%{
+        "version" => 1,
+        "turns" => [
+          %{
+            "turn_id" => "t1",
+            "at" => "2026-01-01T00:00:00Z",
+            "message_count" => last_count,
+            "commands" => [],
+            "dropped" => false,
+            "files" => []
+          }
+        ]
+      })
+    )
+
+    assert {:ok, conversation} = Checkpoint.load(path)
+    assert conversation.offset == last_count - length(kept)
+    assert conversation.rewind_floor == conversation.offset
+    assert conversation.messages == kept
+  end
+
+  defp write_and_load(path, messages, opts) do
+    :ok = Checkpoint.write(path, messages, opts)
+    Checkpoint.load(path)
+  end
+
   test "limit/1 honours a session's event_limit and clamps it" do
     assert Checkpoint.limit(%{}) == 400
     assert Checkpoint.limit(%{event_limit: 10}) == 10

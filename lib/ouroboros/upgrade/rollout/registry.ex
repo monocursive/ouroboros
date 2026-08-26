@@ -30,6 +30,13 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   ETS means the record dies with the VM, and the durability level is reported rather
   than assumed.
 
+  A rollout names a module the forge compiled at runtime, so the checkpoint carries that
+  name as a binary and `Ouroboros.Upgrade.ModuleName` resolves it back on read. A
+  registry that journaled the atom could not be read back at all by the rebooted VM
+  that has to read it; an entry whose name no longer resolves keeps the binary, because
+  "this node has not loaded that module" is a true thing to record about a rollout that
+  happened before the reboot.
+
   ## `eval_report`, and the checkpoint version that carries it
 
   An entry also holds whatever `Ouroboros.Upgrade.Rollout.Evaluation` proved on the way
@@ -46,7 +53,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
 
   use GenServer
 
-  alias Ouroboros.Upgrade.Beam
+  alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
   @store_key {:ouroboros, :capability_rollouts, 1}
   @checkpoint_version 2
@@ -74,7 +81,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     @type state :: :deploying | :live | :superseded | :rolled_back | :quarantined
     @type t :: %__MODULE__{
             artifact_id: String.t(),
-            module: module(),
+            # A name read back from a checkpoint stays a binary when this VM has never
+            # interned it, which is what a rollout of code this node no longer holds
+            # looks like from here.
+            module: module() | String.t(),
             epoch: pos_integer(),
             nodes: [node()],
             state: state(),
@@ -131,7 +141,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @doc "Returns every rollout for one capability module, oldest first."
   @spec history(module(), GenServer.server()) :: [Entry.t()]
   def history(module, server \\ __MODULE__) when is_atom(module) do
-    server |> list() |> Enum.filter(&(&1.module == module))
+    server |> list() |> Enum.filter(&same_module?(&1.module, module))
   end
 
   @doc "Returns the rollouts currently believed to be live."
@@ -302,7 +312,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
         {id, live}
 
       {id, %Entry{} = entry} ->
-        if entry.state == :live and entry.module == live.module and
+        if entry.state == :live and same_module?(entry.module, live.module) and
              Enum.any?(entry.nodes, &(&1 in live.nodes)) do
           {id,
            %{
@@ -343,23 +353,39 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end)
   end
 
-  defp checkpoint(rollouts), do: %{version: @checkpoint_version, rollouts: rollouts}
+  defp checkpoint(rollouts),
+    do: Wire.dump(%{version: @checkpoint_version, rollouts: to_wire(rollouts)})
+
+  # Two names for one module compare equal whichever side of the checkpoint boundary
+  # each of them came from.
+  defp same_module?(left, right), do: ModuleName.to_wire(left) == ModuleName.to_wire(right)
+
+  defp to_wire(rollouts), do: map_modules(rollouts, &ModuleName.to_wire/1)
+  defp from_wire(rollouts), do: map_modules(rollouts, &ModuleName.from_wire/1)
+
+  defp map_modules(rollouts, fun) do
+    Map.new(rollouts, fn
+      {id, %Entry{} = entry} -> {id, %{entry | module: fun.(entry.module)}}
+      other -> other
+    end)
+  end
 
   defp load(adapter, adapter_opts) do
     case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
       :not_found ->
         {:ok, %{}}
 
-      {:ok, %{version: version, rollouts: rollouts}} when is_map(rollouts) ->
-        upgrade(version, rollouts)
+      {:ok, wire} ->
+        case Wire.load(wire) do
+          %{version: version, rollouts: rollouts} when is_map(rollouts) ->
+            upgrade(version, from_wire(rollouts))
 
-      # A checkpoint this build cannot interpret is preserved, not overwritten. The same
-      # rule the node executor's journal follows: refuse rather than coerce.
-      {:ok, %{version: version}} ->
-        {:error, {:unsupported_rollout_checkpoint, version}}
+          %{"version" => version, "rollouts" => rollouts} when is_map(rollouts) ->
+            upgrade(version, from_wire(rollouts))
 
-      {:ok, _invalid} ->
-        {:error, :invalid_rollout_checkpoint}
+          _invalid ->
+            {:error, :invalid_rollout_checkpoint}
+        end
 
       {:error, reason} ->
         {:error, {:rollout_checkpoint_unreadable, reason}}

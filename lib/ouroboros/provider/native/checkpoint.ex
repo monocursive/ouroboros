@@ -15,7 +15,10 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
   Bounded by `event_limit` (default 400 messages, newest kept). The trim never splits an
   assistant message from the tool results that answer it: a tool result whose call is
-  gone is a message most providers reject outright.
+  gone is a message most providers reject outright. What the trim dropped is written down
+  beside the conversation as an `offset`, because a session that resumes onto a tail and a
+  manifest that counts messages from the beginning are two different coordinate systems,
+  and `rewind` has to convert between them rather than assume they agree.
 
   ## The file checkpoint, beside the conversation
 
@@ -63,6 +66,13 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   # able to spend the whole budget on one turn.
   @max_blob_bytes 32 * 1024 * 1024
 
+  @typedoc "A conversation read back, and where it sits in the session that wrote it."
+  @type conversation :: %{
+          messages: [map()],
+          offset: non_neg_integer(),
+          rewind_floor: non_neg_integer()
+        }
+
   @doc "Where one session's checkpoint lives, and whether that location survives a reboot."
   @spec locate(String.t()) :: {:ok, String.t(), boolean()} | {:error, term()}
   def locate(provider_session_id) do
@@ -85,9 +95,17 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     encoded = trimmed |> Enum.map(&encode/1) |> canonical()
     digest = digest(encoded)
 
+    # What the trim costs the *next* session, written down. `messages` starts at absolute
+    # message `offset` in this session's conversation, so the list on disk starts at
+    # `offset` plus whatever the trim just dropped — and that is the number a rewind needs
+    # to turn the manifest's absolute counts into positions in the list it will hold.
+    offset = count(opts, :offset) + (length(messages) - length(trimmed))
+
     payload = %{
       "version" => @version,
       "digest" => digest,
+      "offset" => offset,
+      "rewind_floor" => max(count(opts, :rewind_floor), offset),
       "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "messages" => encoded
     }
@@ -112,12 +130,32 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   """
   @spec read(String.t()) :: {:ok, [map()]} | {:error, term()}
   def read(path) do
+    with {:ok, conversation} <- load(path), do: {:ok, conversation.messages}
+  end
+
+  @doc """
+  The conversation, and where it sits in the session that wrote it.
+
+  `offset` is how many messages that session had before the first one still on disk: the
+  trim keeps the newest `event_limit` and drops the rest, so a resumed long session holds
+  a tail rather than the whole conversation. `rewind_floor` is the oldest message count a
+  rewind can still cut that tail at.
+
+  Both exist because the turn manifest counts messages from the start of the session while
+  the list here may not: a rewind that compared the two directly would take a slice out of
+  the middle of the conversation and call it a turn boundary.
+  """
+  @spec load(String.t()) :: {:ok, conversation()} | {:error, term()}
+  def load(path) do
     with {:ok, json} <- read_file(path),
          {:ok, payload} <- decode_json(json),
          :ok <- verify_version(payload),
          {:ok, encoded} <- fetch_messages(payload),
          :ok <- verify_digest(payload, encoded) do
-      {:ok, Enum.map(encoded, &decode/1)}
+      messages = Enum.map(encoded, &decode/1)
+      {offset, floor} = position(payload, path, length(messages))
+
+      {:ok, %{messages: messages, offset: offset, rewind_floor: floor}}
     end
   end
 
@@ -175,6 +213,47 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
   defp fetch_messages(%{"messages" => messages}) when is_list(messages), do: {:ok, messages}
   defp fetch_messages(_payload), do: {:error, :checkpoint_corrupt}
+
+  # `"offset"` present — even as 0 — is a file this runtime wrote. Absent is a file
+  # written before the field existed: the sibling manifest still counted messages from
+  # the start of the session, and treating that count as an index into a trimmed tail
+  # is the mis-slice. Infer the dropped prefix from the last turn when we can; a file
+  # with no usable manifest still reads as a whole conversation.
+  defp position(payload, path, kept) when is_map(payload) do
+    if Map.has_key?(payload, "offset") do
+      offset = count(payload, "offset")
+      {offset, max(count(payload, "rewind_floor"), offset)}
+    else
+      offset = inferred_offset(Path.dirname(path), kept)
+      {offset, offset}
+    end
+  end
+
+  defp inferred_offset(session_dir, kept) do
+    case last_manifest_count(session_dir) do
+      last when is_integer(last) and last > kept -> last - kept
+      _unknown -> 0
+    end
+  end
+
+  defp last_manifest_count(session_dir) do
+    case read_manifest(session_dir) do
+      {:ok, %{"turns" => turns}} when is_list(turns) and turns != [] ->
+        case List.last(turns) do
+          %{"message_count" => count} when is_integer(count) and count >= 0 -> count
+          _other -> nil
+        end
+
+      _unusable ->
+        nil
+    end
+  end
+
+  defp count(opts, key) when is_list(opts), do: non_negative(Keyword.get(opts, key))
+  defp count(payload, key) when is_map(payload), do: non_negative(Map.get(payload, key))
+
+  defp non_negative(value) when is_integer(value) and value >= 0, do: value
+  defp non_negative(_other), do: 0
 
   defp verify_digest(%{"digest" => digest}, encoded) do
     if digest == digest(encoded), do: :ok, else: {:error, :checkpoint_digest_mismatch}
@@ -492,11 +571,17 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   entry names the path — or the turn — and why. The two lists together account for every
   file the manifest says was touched, which is the property that makes the answer usable
   as a warning *before* the operator commits.
+
+  The undone turns are then **dropped from the manifest**, because they are no longer part
+  of this session's history. A manifest that kept them would let a later rewind restore a
+  file to a state the live timeline never had, and would offer the operator a turn
+  boundary the transcript no longer has.
   """
   @spec restore_files(String.t(), String.t() | non_neg_integer() | :start) ::
           {:ok, map()} | {:error, term()}
   def restore_files(session_dir, to_turn) do
-    with {:ok, all} <- turns(session_dir),
+    with {:ok, manifest} <- read_manifest(session_dir),
+         all = manifest["turns"],
          {:ok, index} <- locate_turn(all, to_turn) do
       after_turn = Enum.drop(all, index + 1)
 
@@ -528,6 +613,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
         end)
 
       {restored, failed} = write_back(session_dir, targets)
+      prune_manifest(session_dir, manifest, index)
 
       {:ok,
        %{
@@ -598,6 +684,26 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   end
 
   defp command_warnings(_turn), do: []
+
+  # The blobs the dropped turns referenced are left to the next `record_turn/4`'s garbage
+  # collection: they are unreachable now, and deleting them here would put a file sweep in
+  # front of the answer a rewind already earned.
+  defp prune_manifest(session_dir, manifest, index) do
+    kept = Enum.take(manifest["turns"], index + 1)
+
+    case write_manifest(session_dir, %{manifest | "turns" => kept}) do
+      :ok ->
+        :ok
+
+      # The files are already back. Failing the rewind over the bookkeeping would be a
+      # worse answer than a warning, so this is the warning.
+      {:error, reason} ->
+        Logger.warning(
+          "native rewind restored files but could not prune the turn manifest: " <>
+            "#{inspect(reason)}"
+        )
+    end
+  end
 
   defp write_back(session_dir, targets) do
     Enum.reduce(targets, {[], []}, fn {path, before}, {restored, failed} ->

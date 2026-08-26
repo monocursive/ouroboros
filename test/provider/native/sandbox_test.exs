@@ -86,6 +86,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
 
+  defp env_value(["--setenv", key, value | _rest], key), do: value
+  defp env_value([_head | rest], key), do: env_value(rest, key)
+  defp env_value([], _key), do: nil
+
   describe "the macOS Seatbelt profile" do
     test "denies everything, opens reads, and makes only the scratch directory writable under read_only" do
       assert SandboxExec.profile(fixed_policy(:read_only)) == """
@@ -264,6 +268,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       workspace: workspace
     } do
       scratch = Path.join(root, "scratch")
+      # A vendored dependency's `.git` is as much a repository as the workspace's own, and
+      # bubblewrap has no path regex to cover both: it needs a bind per directory.
+      nested = Path.join(workspace, "deps/foo/.git")
+      File.mkdir_p!(nested)
 
       policy = %{
         fixed_policy(:workspace_write)
@@ -290,6 +298,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                "--ro-bind",
                scratch,
                Path.join(workspace, ".ouroboros"),
+               "--ro-bind",
+               nested,
+               nested,
                "--tmpfs",
                scratch,
                "--unshare-net",
@@ -313,6 +324,27 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                )
 
       assert Enum.take(args, -4) == ["--", "/bin/sh", "-c", "echo hi"]
+    end
+
+    test "injects the name-based create filter when the library is on disk" do
+      path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
+
+      assert {:ok, {"/usr/bin/bwrap", args}} =
+               Bwrap.wrap(
+                 {:shell, "echo hi"},
+                 %{root: "/ws"},
+                 fixed_policy(:workspace_write),
+                 "/usr/bin/bwrap"
+               )
+
+      assert Enum.take(args, -4) == ["--", "/bin/sh", "-c", "echo hi"]
+
+      if File.regular?(path) do
+        assert env_value(args, "LD_PRELOAD") == path
+        assert env_value(args, "OUROBOROS_FS_DENY") == ".git:.ouroboros"
+      else
+        refute "LD_PRELOAD" in args
+      end
     end
   end
 
@@ -1016,6 +1048,37 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert result.output =~ "Read-only file system"
       assert result.output =~ "never into a `.git` or `.ouroboros` directory"
       refute File.exists?(Path.join(workspace, ".git/HEAD"))
+    end
+
+    test "denies a write into a nested .git, not only the workspace's own", %{
+      context: context,
+      workspace: workspace
+    } do
+      nested = Path.join(workspace, "deps/foo/.git")
+      File.mkdir_p!(nested)
+
+      result = run(Bash, %{"command" => "echo tampered > deps/foo/.git/HEAD"}, context)
+
+      assert result.is_error
+      assert result.output =~ "Read-only file system"
+      refute File.exists?(Path.join(nested, "HEAD"))
+    end
+
+    test "denies creating a .git that did not exist when the command started", %{
+      context: context,
+      workspace: workspace
+    } do
+      result =
+        run(
+          Bash,
+          %{"command" => "mkdir -p deps/bar/.git && echo x > deps/bar/.git/HEAD"},
+          context
+        )
+
+      assert result.is_error
+      assert result.output =~ "Read-only file system"
+      refute File.dir?(Path.join(workspace, "deps/bar/.git"))
+      refute File.exists?(Path.join(workspace, "deps/bar/.git/HEAD"))
     end
   end
 end

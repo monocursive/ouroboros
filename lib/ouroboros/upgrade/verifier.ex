@@ -35,7 +35,7 @@ defmodule Ouroboros.Upgrade.Verifier do
   that a new module cannot silently take the name of an existing one.
   """
 
-  alias Ouroboros.Upgrade.{Artifact, Beam}
+  alias Ouroboros.Upgrade.{Artifact, Beam, ModuleName}
 
   @protected_modules [
     Ouroboros.Application,
@@ -257,7 +257,19 @@ defmodule Ouroboros.Upgrade.Verifier do
     cond do
       :code.which(module) != :non_existing -> {:error, {:module_already_present, module}}
       :code.get_object_code(module) != :error -> {:error, {:module_already_present, module}}
-      true -> expected_absent(module, Map.get(expected_modules, module))
+      true -> expected_absent(module, expected_identity(expected_modules, module))
+    end
+  end
+
+  # A journal read back from a checkpoint may key an expectation by the binary name it
+  # stored, because the VM that read it had never interned the atom (see
+  # `Ouroboros.Upgrade.ModuleName`). A lookup that only tried the atom would read "no
+  # expectation" out of a journal that holds one, which is the one direction this check
+  # must never fail in.
+  defp expected_identity(expected_modules, module) do
+    case Map.fetch(expected_modules, module) do
+      {:ok, identity} -> identity
+      :error -> Map.get(expected_modules, ModuleName.to_wire(module))
     end
   end
 
@@ -276,7 +288,7 @@ defmodule Ouroboros.Upgrade.Verifier do
   end
 
   defp verify_current_object_code(%Beam{} = beam, expected_modules) do
-    case Map.get(expected_modules, beam.module) do
+    case expected_identity(expected_modules, beam.module) do
       %{sha256: sha256, md5: md5}
       when is_binary(sha256) and is_binary(md5) ->
         if sha256 == beam.old_sha256 and md5 == beam.old_md5,

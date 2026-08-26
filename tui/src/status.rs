@@ -9,6 +9,7 @@ use std::fmt::Write;
 
 use serde_json::Value;
 
+use crate::model::plain;
 use crate::proto::Hello;
 
 /// The header: who answered, at what scope, speaking what.
@@ -116,15 +117,6 @@ fn blank_as_unknown(value: &str) -> &str {
     } else {
         value
     }
-}
-
-/// Blanks control characters, escape sequences included, before a gateway-supplied
-/// string reaches a terminal this module does not own. The ratatui renderer is immune by
-/// construction; the printed page is not, and the peer is authenticated but not trusted.
-fn plain(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
 }
 
 fn scalar(status: &Value, key: &str) -> String {

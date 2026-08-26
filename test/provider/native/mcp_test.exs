@@ -398,6 +398,33 @@ defmodule Ouroboros.Provider.Native.McpTest do
       assert eventually(fn -> Pool.status(pool).servers == [] end)
     end
 
+    # `Map.update/4` evaluates its initial value whether or not the key is there, so every
+    # claim after the first created a monitor the pool then threw away — one leaked
+    # reference per tool call, for the life of the node.
+    test "one monitor per owner, however many tool calls it makes", context do
+      pool = start_pool(context, idle_ms: 600_000)
+      configure(context, args: [])
+      Mcp.specs(context.workspace, pool: pool)
+
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(owner, :kill) end)
+
+      pool_pid = Process.whereis(pool)
+      before = length(monitors(pool_pid))
+
+      for _call <- 1..3 do
+        assert %{is_error: false} =
+                 Mcp.call("mcp__fake__echo", %{"text" => "x"},
+                   pool: pool,
+                   workspace: context.workspace,
+                   owner: owner
+                 )
+      end
+
+      assert length(monitors(pool_pid)) == before + 1
+      assert Enum.count(monitors(pool_pid), &(&1 == {:process, owner})) == 1
+    end
+
     test "an idle server with no claim is stopped by the sweep", context do
       pool = start_pool(context, idle_ms: 300, sweep_ms: 100)
       configure(context, args: [])
@@ -583,6 +610,11 @@ defmodule Ouroboros.Provider.Native.McpTest do
 
   defp server_status(pool, name) do
     Enum.find(Pool.status(pool).servers, &(&1.name == name))
+  end
+
+  defp monitors(pool_pid) do
+    {:monitors, monitors} = Process.info(pool_pid, :monitors)
+    monitors
   end
 
   defp recorded(path) do

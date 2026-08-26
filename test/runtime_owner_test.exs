@@ -126,6 +126,25 @@ defmodule Ouroboros.RuntimeOwnerTest do
     GenServer.stop(owner)
   end
 
+  test "a stray port message leaves the first child of the durable tree standing", %{
+    tmp_dir: data_dir
+  } do
+    {:ok, owner} = start_owner(data_dir, os_pid: 424, identity: "stray-message-vm")
+    port = Port.open({:spawn_executable, "/usr/bin/true"}, [:exit_status])
+
+    # A recovery-lock helper's exit status can arrive after the claim already returned. This
+    # process leads a rest_for_one tree, so an unmatched message must not bounce every store
+    # and session beneath it.
+    send(owner, {port, {:exit_status, 0}})
+    send(owner, {:EXIT, port, :normal})
+    send(owner, :something_nobody_sends)
+
+    assert %{pid: 424, owner: "stray-message-vm"} = RuntimeOwner.claim(owner)
+    assert Process.alive?(owner)
+
+    GenServer.stop(owner)
+  end
+
   test "an owner crash leaves the claim and the same VM identity can resume it", %{
     tmp_dir: data_dir
   } do

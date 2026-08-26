@@ -181,12 +181,14 @@ defmodule Ouroboros.Coding.Task do
   end
 
   @impl true
-  def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
+  def handle_info(:poll, runtime), do: {:noreply, runtime |> clear_timer(:poll_timer) |> poll()}
 
   # A waiter that arrives in the window between the terminal checkpoint and this
   # message used to strand the coordinator: nothing rescheduled retirement once it
   # had been declined.
   def handle_info(:retire, %{task: task} = runtime) do
+    runtime = clear_timer(runtime, :retire_timer)
+
     cond do
       not TaskState.terminal?(task) -> {:noreply, runtime}
       map_size(runtime.waiters) == 0 -> {:stop, :normal, runtime}
@@ -227,7 +229,9 @@ defmodule Ouroboros.Coding.Task do
       waiters: %{},
       workspace_lease: lease,
       workspace_capability: capability,
-      retry: no_retry()
+      retry: no_retry(),
+      poll_timer: nil,
+      retire_timer: nil
     }
   end
 
@@ -379,11 +383,16 @@ defmodule Ouroboros.Coding.Task do
 
   # Best effort by construction: the run has already reached its terminal status and been
   # checkpointed, so a store that refuses this addendum loses the note, not the result.
+  # It still goes through `persist/3`: `:worktree_retained` is the last thing a subscriber
+  # will ever hear about this task, and a note only a later reader can find is not one.
   defp checkpoint_worktree(runtime, task, type, payload) do
-    {task, _event} = append_internal(task, type, payload)
+    {task, event} = append_internal(task, type, payload)
     task = touch(task)
-    _ = Store.put(task)
-    %{runtime | task: task}
+
+    case persist(runtime, task, [event]) do
+      {:ok, runtime} -> runtime
+      {:error, runtime} -> %{runtime | task: task}
+    end
   end
 
   defp safe_workspace_release(lease_id, capability) do
@@ -774,20 +783,44 @@ defmodule Ouroboros.Coding.Task do
     %{runtime | waiters: %{}}
   end
 
-  defp schedule_poll(runtime, delay) do
-    Process.send_after(self(), :poll, delay)
-    runtime
+  defp schedule_poll(runtime, delay), do: schedule_timer(runtime, :poll_timer, :poll, delay)
+
+  defp schedule_attach(runtime), do: schedule_poll(runtime, @poll_interval)
+
+  defp schedule_retire(runtime),
+    do: schedule_timer(runtime, :retire_timer, :retire, @terminal_retire_ms)
+
+  # One pending timer per message, not one per call. Several paths ask for a poll or a
+  # retirement for the same reason at the same time, and every extra timer became another
+  # self-perpetuating chain: each delivery scheduled its own successor.
+  defp schedule_timer(runtime, key, message, delay) do
+    due = System.monotonic_time(:millisecond) + delay
+
+    case Map.fetch!(runtime, key) do
+      %{due: pending_due} when pending_due <= due ->
+        runtime
+
+      pending ->
+        cancel_timer(pending, message)
+        Map.put(runtime, key, %{ref: Process.send_after(self(), message, delay), due: due})
+    end
   end
 
-  defp schedule_attach(runtime) do
-    Process.send_after(self(), :poll, @poll_interval)
-    runtime
+  defp cancel_timer(nil, _message), do: :ok
+
+  defp cancel_timer(%{ref: ref}, message) do
+    if Process.cancel_timer(ref) == false do
+      receive do
+        ^message -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    :ok
   end
 
-  defp schedule_retire(runtime) do
-    Process.send_after(self(), :retire, @terminal_retire_ms)
-    runtime
-  end
+  defp clear_timer(runtime, key), do: Map.put(runtime, key, nil)
 
   defp touch(task), do: %{task | updated_at: DateTime.utc_now() |> DateTime.to_iso8601()}
 

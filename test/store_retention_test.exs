@@ -168,6 +168,61 @@ defmodule Ouroboros.StoreRetentionTest do
     end
   end
 
+  describe "interactive store boot" do
+    @tag :capture_log
+    test "a session checkpoint nobody can read is quarantined, not fatal" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "ouroboros-interactive-store-#{System.unique_integer([:positive, :monotonic])}"
+        )
+
+      on_exit(fn -> File.rm_rf(path) end)
+
+      key = {:ouroboros, :interactive_sessions_test, :quarantine}
+      storage = {Ouroboros.Storage.DurableFile, path: path}
+      survivor = unique_id("interactive-survivor")
+      corrupt = unique_id("interactive-corrupt")
+
+      store = start_interactive_store!(:quarantine_first, key, storage)
+      assert :ok = InteractiveStore.create(session(survivor), store)
+      assert :ok = InteractiveStore.create(session(corrupt), store)
+      stop_supervised!(:quarantine_first)
+
+      truncate_session_checkpoint!(path, corrupt)
+
+      # Booting is not all-or-nothing: one session nobody can read must not refuse the
+      # interactive plane, and everything `rest_for_one` starts after it, to the operator.
+      store = start_interactive_store!(:quarantine_second, key, storage)
+
+      assert {:ok, %State{id: ^survivor}} = InteractiveStore.get(survivor, store)
+      assert :not_found = InteractiveStore.get(corrupt, store)
+      assert [%State{id: ^survivor}] = InteractiveStore.list(store)
+
+      # The rebuilt index no longer claims the quarantined session, so the next boot
+      # does not have to rediscover it.
+      assert {:ok, %{version: 2, ids: [^survivor]}} =
+               Ouroboros.Storage.DurableFile.get_checkpoint(key, path: path)
+    end
+  end
+
+  defp start_interactive_store!(id, key, storage) do
+    start_supervised!({InteractiveStore, name: nil, key: key, storage: storage}, id: id)
+  end
+
+  defp truncate_session_checkpoint!(path, id) do
+    file =
+      [path, "checkpoints", "*.term"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.find(fn file ->
+        match?(%{^id => _session}, :erlang.binary_to_term(File.read!(file), [:safe]))
+      end)
+
+    assert is_binary(file)
+    File.write!(file, "half a checkpoint")
+  end
+
   describe "recovery retention sweep" do
     test "prunes expired terminal coding tasks on the recovery tick" do
       id = unique_id("coding-swept")

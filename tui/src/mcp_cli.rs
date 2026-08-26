@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
 
-use crate::model::{McpList, McpServer};
+use crate::model::{plain, McpList, McpServer};
 
 /// The file both scopes are spelled in, and the one key it holds.
 const DOCUMENT_KEY: &str = "mcpServers";
@@ -516,6 +516,11 @@ pub fn list_params(node: Option<&str>, workspace: Option<&Path>) -> Value {
 }
 
 /// The plain page: one block per server, then the refusals.
+///
+/// Every string below came off the wire, and this page is written to stdout rather than
+/// painted into cells, so each one is blanked of control characters on the way out: an
+/// MCP server's name is authored in a file on somebody's machine, and a `broken_reason`
+/// is whatever the process it names wrote to stderr.
 pub fn render(list: &McpList) -> String {
     let mut page = String::new();
 
@@ -524,15 +529,18 @@ pub fn render(list: &McpList) -> String {
     }
 
     if let Some(node) = &list.node {
-        page.push_str(&format!("node {node}\n"));
+        page.push_str(&format!("node {}\n", plain(node)));
     }
 
     if let Some(version) = &list.protocol_version {
-        page.push_str(&format!("protocol {version}\n"));
+        page.push_str(&format!("protocol {}\n", plain(version)));
     }
 
     if !list.transports.is_empty() {
-        page.push_str(&format!("transports {}\n", list.transports.join(", ")));
+        page.push_str(&format!(
+            "transports {}\n",
+            plain(&list.transports.join(", "))
+        ));
     }
 
     page.push('\n');
@@ -551,12 +559,12 @@ pub fn render(list: &McpList) -> String {
         for refusal in &list.refusals {
             page.push_str(&format!(
                 "  {}  {}\n",
-                refusal.name.as_deref().unwrap_or("(unnamed entry)"),
-                refusal.reason.as_deref().unwrap_or("refused")
+                plain(refusal.name.as_deref().unwrap_or("(unnamed entry)")),
+                plain(refusal.reason.as_deref().unwrap_or("refused"))
             ));
 
             if let Some(detail) = &refusal.detail {
-                page.push_str(&format!("    {detail}\n"));
+                page.push_str(&format!("    {}\n", plain(detail)));
             }
         }
     }
@@ -565,11 +573,11 @@ pub fn render(list: &McpList) -> String {
 }
 
 fn server_block(server: &McpServer) -> String {
-    let state = server.state.as_deref().unwrap_or("unknown");
-    let mut facts = vec![state.to_string()];
+    let state = plain(server.state.as_deref().unwrap_or("unknown"));
+    let mut facts = vec![state.clone()];
 
     if let Some(scope) = &server.scope {
-        facts.push(scope.clone());
+        facts.push(plain(scope));
     }
 
     // A tool count means something only once a server has started. `configured` has not,
@@ -586,7 +594,7 @@ fn server_block(server: &McpServer) -> String {
         facts.push(format!("{} restart(s)", server.restarts));
     }
 
-    let mut block = format!("{}  {}\n", server.name, facts.join(" · "));
+    let mut block = format!("{}  {}\n", plain(&server.name), facts.join(" · "));
 
     if let Some(command) = &server.command {
         let argv = if server.args.is_empty() {
@@ -595,19 +603,22 @@ fn server_block(server: &McpServer) -> String {
             format!("{command} {}", server.args.join(" "))
         };
 
-        block.push_str(&format!("  {argv}\n"));
+        block.push_str(&format!("  {}\n", plain(&argv)));
     }
 
     if let Some(source) = &server.source {
-        block.push_str(&format!("  from {source}\n"));
+        block.push_str(&format!("  from {}\n", plain(source)));
     }
 
     if let Some(reason) = &server.broken_reason {
-        block.push_str(&format!("  broken: {reason}\n"));
+        block.push_str(&format!("  broken: {}\n", plain(reason)));
     }
 
     if !server.tool_names.is_empty() {
-        block.push_str(&format!("  tools: {}\n", server.tool_names.join(" ")));
+        block.push_str(&format!(
+            "  tools: {}\n",
+            plain(&server.tool_names.join(" "))
+        ));
     }
 
     block

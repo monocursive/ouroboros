@@ -126,6 +126,15 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     {:ok, workspace: workspace}
   end
 
+  test "a node with no durable directory still starts the children behind its owner" do
+    assert Application.get_env(:ouroboros, :data_dir) in [nil, ""]
+
+    # The runtime boundary drops the owner of a directory this node does not have, and
+    # nothing else: the provider cache behind it holds no durable state.
+    assert Process.whereis(Ouroboros.RuntimeOwner) == nil
+    assert is_pid(Process.whereis(Ouroboros.Provider.RuntimeCache))
+  end
+
   test "a killed coding registry preserves workspace exclusion while tasks recover", %{
     workspace: workspace
   } do

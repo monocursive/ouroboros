@@ -502,7 +502,9 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   # ## Journal storage
 
   defp checkpoint(journal, state) do
-    case adapter_call(state.adapter, :put_checkpoint, [@store_key, journal, state.opts]) do
+    wire = Journal.to_wire(journal)
+
+    case adapter_call(state.adapter, :put_checkpoint, [@store_key, wire, state.opts]) do
       :ok -> :ok
       {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
       {:error, reason} -> {:error, reason}
@@ -518,13 +520,12 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       :not_found ->
         {:ok, Journal.new()}
 
-      {:ok, %Journal{} = journal} ->
+      {:ok, wire} ->
+        journal = Journal.from_wire(wire)
+
         if Journal.valid?(journal),
           do: {:ok, journal},
           else: {:error, :invalid_signing_journal}
-
-      {:ok, _other} ->
-        {:error, :invalid_signing_journal}
 
       {:error, reason} ->
         {:error, {:signing_journal_unreadable, reason}}

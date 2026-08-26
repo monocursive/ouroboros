@@ -45,20 +45,8 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
        key: {:team_executor_test, suffix}}
     )
 
-    start_supervised!(
-      {Scheduler,
-       name: scheduler,
-       store: store,
-       max_concurrency: 1,
-       executor:
-         {TeamExecutor,
-          team_id: team_id,
-          worker_id: worker_id,
-          team_cancel_timeout_ms: 300,
-          team_retry_backoff_ms: 10,
-          team_retry_max_backoff_ms: 50}},
-      restart: :temporary
-    )
+    context = %{scheduler: scheduler, store: store, team_id: team_id, worker_id: worker_id}
+    start_scheduler(context)
 
     on_exit(fn ->
       case Team.whereis(team_id) do
@@ -72,8 +60,28 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
       File.rm_rf(journal_dir)
     end)
 
-    {:ok, team: team, team_id: team_id, worker_id: worker_id, scheduler: scheduler}
+    {:ok, team: team, team_id: team_id, worker_id: worker_id, scheduler: scheduler, store: store}
   end
+
+  defp start_scheduler(context) do
+    start_supervised!(
+      {Scheduler,
+       name: context.scheduler,
+       store: context.store,
+       max_concurrency: 1,
+       executor:
+         {TeamExecutor,
+          team_id: context.team_id,
+          worker_id: context.worker_id,
+          team_cancel_timeout_ms: 300,
+          team_retry_backoff_ms: 10,
+          team_retry_max_backoff_ms: 50}},
+      restart: :temporary
+    )
+  end
+
+  # The delegation a step owns, whichever attempt is offering it.
+  defp delegation_id(plan_id, step_id), do: "orchestration:" <> plan_id <> ":" <> step_id
 
   test "runs a dependency chain through one team worker without duplicate delegations", context do
     assert {:ok, plan} =
@@ -184,8 +192,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "cancel after the coordinator restarts")
 
-    {:ok, running} = Scheduler.get(context.scheduler, plan.id)
-    token = running.steps["long"].execution_token
+    delegation_id = delegation_id(plan.id, "long")
 
     with_suspended_team_recovery(fn ->
       old_team = stop_team(context.team_id)
@@ -212,7 +219,9 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
         end)
 
       assert cancellation.outcome == :ok
-      assert Team.state(restarted_team).delegations[token].cancellation_requested_at != nil
+
+      assert Team.state(restarted_team).delegations[delegation_id].cancellation_requested_at !=
+               nil
     end)
   end
 
@@ -287,9 +296,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "survive the coordinator restart")
 
-    {:ok, running} = Scheduler.get(context.scheduler, plan.id)
-    token = running.steps["survive"].execution_token
-    assert is_binary(token)
+    delegation_id = delegation_id(plan.id, "survive")
 
     old_team = Team.whereis(context.team_id)
     monitor = Process.monitor(old_team)
@@ -308,13 +315,13 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
       assert_eventually(fn ->
         state = Team.state(restarted_team)
 
-        case state.delegations[token] do
+        case state.delegations[delegation_id] do
           %{status: :running} = delegation -> delegation
           _other -> false
         end
       end)
 
-    assert recovered.id == token
+    assert recovered.id == delegation_id
 
     assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "survived"})
     assert :ok = HarnessAdapter.finish(adapter)
@@ -327,12 +334,74 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
         end
       end)
 
-    assert completed.steps["survive"].result.delegation.id == token
+    assert completed.steps["survive"].result.delegation.id == delegation_id
     assert completed.steps["survive"].result.delegation.result.text == "survived"
     assert completed.steps["survive"].attempt == 1
     assert map_size(Team.state(restarted_team).delegations) == 1
 
     refute_receive {:ouroboros_test_adapter_started, _duplicate_run, _request, _adapter}, 250
+  end
+
+  test "a scheduler restart reattaches to the delegation rather than starting a second run",
+       context do
+    assert {:ok, plan} =
+             Plan.new(unique_id("scheduler-restart-plan"), [
+               %{
+                 id: "survive",
+                 input: %{
+                   objective: "survive the scheduler restart",
+                   options: [provider: @provider, workspace: File.cwd!()]
+                 }
+               }
+             ])
+
+    assert {:ok, _running} = Scheduler.submit(context.scheduler, plan)
+
+    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: prompt},
+                    adapter},
+                   1_000
+
+    assert Ouroboros.Test.Prompt.wrapped?(prompt, "survive the scheduler restart")
+
+    {:ok, running} = Scheduler.get(context.scheduler, plan.id)
+    first_token = running.steps["survive"].execution_token
+
+    old_scheduler = Process.whereis(context.scheduler)
+    Process.unlink(old_scheduler)
+    Process.exit(old_scheduler, :kill)
+    assert_eventually(fn -> Process.whereis(context.scheduler) == nil end)
+    start_scheduler(context)
+
+    # A new attempt with a new token, delegated under the step's own identity — so the
+    # team answers with the delegation that is already running, not a second one.
+    assert_eventually(fn ->
+      case Scheduler.get(context.scheduler, plan.id) do
+        {:ok, %{steps: %{"survive" => %{state: :running, execution_token: token}}}} ->
+          is_binary(token) and token != first_token
+
+        _other ->
+          false
+      end
+    end)
+
+    refute_receive {:ouroboros_test_adapter_started, _duplicate_run, _request, _adapter}, 250
+
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "survived"})
+    assert :ok = HarnessAdapter.finish(adapter)
+
+    completed =
+      assert_eventually(fn ->
+        case Scheduler.get(context.scheduler, plan.id) do
+          {:ok, %{status: :completed} = completed} -> completed
+          _other -> false
+        end
+      end)
+
+    assert completed.steps["survive"].result.delegation.id ==
+             delegation_id(plan.id, "survive")
+
+    assert completed.steps["survive"].attempt == 2
+    assert map_size(Team.state(context.team).delegations) == 1
   end
 
   test "distinguishes missing, closed, and permanent delegation failures", context do

@@ -65,11 +65,18 @@ defmodule Ouroboros.Control.Permissions.Rules do
   """
   @spec protected_write?(String.t()) :: boolean()
   def protected_write?(path) when is_binary(path) do
-    Enum.any?(@protected_segments, &Paths.has_segment?(path, &1)) or
+    Enum.any?(@protected_segments, &protected_segment?(path, &1)) or
       (Enum.any?(protected_roots(), &Paths.within?(path, &1)) and not worktree_write?(path))
   end
 
   def protected_write?(_path), do: false
+
+  # Case-folded, because APFS and NTFS are case-insensitive by default: there `.GIT/HEAD`
+  # *is* `.git/HEAD`, and a byte-exact comparison would answer "not protected" about the
+  # very file it exists to protect. Write, edit, and apply_patch never cross an OS
+  # sandbox, so on those paths this list is the only guard there is.
+  defp protected_segment?(path, segment),
+    do: Paths.has_segment?(path, segment, case: :insensitive)
 
   # D7 keeps the workspaces it provisions under `<data_dir>/worktrees`: a workspace a
   # session was given to write in, not runtime state, and the one place beneath the data
@@ -169,8 +176,8 @@ defmodule Ouroboros.Control.Permissions.Rules do
 
   defp protected_pattern(target) do
     cond do
-      Paths.has_segment?(target, ".git") -> "**/.git/**"
-      Paths.has_segment?(target, ".ouroboros") -> "**/.ouroboros/**"
+      protected_segment?(target, ".git") -> "**/.git/**"
+      protected_segment?(target, ".ouroboros") -> "**/.ouroboros/**"
       true -> (Enum.find(protected_roots(), &Paths.within?(target, &1)) || "") <> "/**"
     end
   end

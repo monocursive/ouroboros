@@ -184,6 +184,14 @@ defmodule Ouroboros.Provider.Native.Session do
   `provider_event` naming the rewind. A rewind that left no trace in the transcript would
   be a change to the workspace that the transcript denies.
 
+  A conversation half that cannot be honoured is
+  `{:error, {:rewind_checkpoint_failed, reason, outcome}}`, not a quiet `{:ok, …}` with
+  the transcript left where it was. That happens when the turn's boundary is older than
+  what this session still holds of its own conversation — a resume keeps the newest
+  `event_limit` messages and a compaction folded the head — and the honest answer is that
+  the files came back and the transcript could not, rather than a `:both` that delivered
+  one half and reported two.
+
   Refused while a turn is running: rewinding underneath a loop that is mid-edit would
   race its own writes.
   """
@@ -278,7 +286,7 @@ defmodule Ouroboros.Provider.Native.Session do
          {:ok, model_spec} <- Loop.resolve_model(request.model),
          {:ok, session_dir, durable?} <- Paths.session_dir(provider_session_id),
          {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(provider_session_id),
-         {:ok, messages} <- restore(checkpoint_path) do
+         {:ok, conversation} <- restore(checkpoint_path) do
       posture = restore_posture(session_dir, request, options)
       scope = if posture.plan?, do: %{scope | sandbox_mode: :read_only}, else: scope
 
@@ -297,7 +305,14 @@ defmodule Ouroboros.Provider.Native.Session do
         approval_mode: posture.approval_mode || Loop.approval_mode(request.approval_mode),
         max_iterations: Loop.max_iterations(options, nil),
         tool_timeout_ms: Loop.tool_timeout(options),
-        messages: messages,
+        messages: conversation.messages,
+        # Where `messages` sits in the conversation this session has had in total, and the
+        # oldest point a rewind can still cut it at. A resumed session holds the tail its
+        # checkpoint kept and a compacted one holds a summary where its head used to be;
+        # the turn manifest counts from the beginning either way, so these two are what
+        # make its numbers mean something here. See `rewind_conversation/3`.
+        message_offset: conversation.offset,
+        rewind_floor: conversation.rewind_floor,
         reads: %{},
         session_grants: MapSet.new(),
         loop: nil,
@@ -895,6 +910,7 @@ defmodule Ouroboros.Provider.Native.Session do
         allowed_tools: state.request.allowed_tools,
         disallowed_tools: state.request.disallowed_tools,
         messages: state.messages,
+        message_offset: state.message_offset,
         reads: state.reads,
         session_grants: state.session_grants,
         max_iterations: state.max_iterations,
@@ -1100,9 +1116,9 @@ defmodule Ouroboros.Provider.Native.Session do
   # A corrupt checkpoint fails the open rather than silently starting an empty session
   # under an id whose transcript the operator believes still exists.
   defp restore(path) do
-    case Checkpoint.read(path) do
-      {:ok, messages} -> {:ok, messages}
-      {:error, :no_checkpoint} -> {:ok, []}
+    case Checkpoint.load(path) do
+      {:ok, conversation} -> {:ok, conversation}
+      {:error, :no_checkpoint} -> {:ok, %{messages: [], offset: 0, rewind_floor: 0}}
       {:error, reason} -> {:error, {:checkpoint_unusable, reason}}
     end
   end
@@ -1119,8 +1135,8 @@ defmodule Ouroboros.Provider.Native.Session do
     do: {:ok, state, length(state.messages)}
 
   defp rewind_conversation(state, to_turn, _conversation_or_both) do
-    case Checkpoint.message_count_at(state.session_dir, to_turn) do
-      {:ok, count} when count <= length(state.messages) ->
+    case boundary(state, to_turn) do
+      {:ok, count} ->
         state = %{state | messages: Enum.take(state.messages, count)}
 
         case checkpoint(state) do
@@ -1128,12 +1144,37 @@ defmodule Ouroboros.Provider.Native.Session do
           {:error, reason} -> {:error, state, reason}
         end
 
-      # A count this session cannot honour — a turn id it never recorded, or a
-      # conversation already shorter than the mark — leaves the transcript alone. A
-      # rewind that truncated to a number it could not justify would lose messages the
-      # manifest never claimed to cover.
-      _unusable ->
-        {:ok, state, length(state.messages)}
+      # A boundary this session cannot honour leaves the transcript alone and *says so*.
+      # Reporting success here is how a `:both` rewind silently becomes a files-only one;
+      # truncating anyway is how it keeps a window from the middle of the conversation and
+      # calls it a turn. Both are the same lie in different directions.
+      {:error, reason} ->
+        {:error, state, reason}
+    end
+  end
+
+  # The manifest counts messages from the start of the session. `state.messages` may not:
+  # a resume holds the tail `event_limit` kept, and a compaction put a summary where the
+  # head used to be. Rebasing by `message_offset` is what makes the two comparable, and
+  # `rewind_floor` is where the answer stops existing — no slice of the list this session
+  # holds is the conversation as it stood at a turn older than that.
+  defp boundary(state, to_turn) do
+    case Checkpoint.message_count_at(state.session_dir, to_turn) do
+      # Before the first turn is the empty conversation, whatever is left of the rest.
+      {:ok, 0} ->
+        {:ok, 0}
+
+      {:ok, absolute} when absolute < state.rewind_floor ->
+        {:error, {:turn_boundary_dropped, to_turn}}
+
+      {:ok, absolute} when absolute - state.message_offset > length(state.messages) ->
+        {:error, {:turn_boundary_beyond_conversation, to_turn}}
+
+      {:ok, absolute} ->
+        {:ok, absolute - state.message_offset}
+
+      :error ->
+        {:error, {:unknown_turn, to_turn}}
     end
   end
 
@@ -1161,19 +1202,28 @@ defmodule Ouroboros.Provider.Native.Session do
 
     emit(state, %{
       type: :provider_event,
-      payload: %{
-        "kind" => "status",
-        "event" => "rewind",
-        "to_turn" => to_string(to_turn),
-        "what" => Atom.to_string(what),
-        "restored" => length(outcome.restored),
-        "unrestorable" => Enum.map(outcome.unrestorable, &describe_unrestorable/1),
-        "messages" => outcome.messages
-      },
+      payload:
+        %{
+          "kind" => "status",
+          "event" => "rewind",
+          "to_turn" => to_string(to_turn),
+          "what" => Atom.to_string(what),
+          "restored" => length(outcome.restored),
+          "unrestorable" => Enum.map(outcome.unrestorable, &describe_unrestorable/1),
+          "messages" => outcome.messages
+        }
+        |> conversation_note(outcome),
       turn_id: nil,
       request_id: nil
     })
   end
+
+  # A client that only reads the event has to be able to see that the conversation half
+  # did not happen; the return value is not the only place this is said.
+  defp conversation_note(payload, %{checkpoint_error: reason}),
+    do: Map.put(payload, "conversation_error", inspect(reason, limit: 6))
+
+  defp conversation_note(payload, _outcome), do: payload
 
   defp describe_unrestorable(%{path: nil, turn_id: turn_id, reason: reason}),
     do: %{"turn_id" => turn_id, "reason" => reason}
@@ -1183,7 +1233,9 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp checkpoint(state) do
     case Checkpoint.write(state.checkpoint_path, state.messages,
-           event_limit: state.checkpoint_limit
+           event_limit: state.checkpoint_limit,
+           offset: state.message_offset,
+           rewind_floor: state.rewind_floor
          ) do
       :ok ->
         :ok
@@ -1417,17 +1469,33 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp do_compaction(state, focus, trigger) do
-    {:ok, outcome} =
-      Compaction.compact(state.messages,
-        keep_recent_tokens: state.keep_recent_tokens,
-        focus: focus,
-        summarize: summariser(state)
-      )
+    case fold(state, focus) do
+      {:ok, outcome} ->
+        case archive(state, outcome.archived) do
+          {:ok, entry} -> apply_compaction(state, outcome, entry, trigger)
+          {:error, reason} -> refuse_compaction(state, reason)
+        end
 
-    case archive(state, outcome.archived) do
-      {:ok, entry} -> apply_compaction(state, outcome, entry, trigger)
-      {:error, reason} -> refuse_compaction(state, reason)
+      {:error, reason} ->
+        refuse_broken_compaction(state, reason)
     end
+  end
+
+  # `Compaction.compact/2` is documented not to fail, and this is the belt on top of that
+  # contract rather than a substitute for it. This process is `restart: :temporary`, so a
+  # raise anywhere on the compaction path is the whole session gone — and both `/compact`
+  # and the automatic threshold reach it. A conversation shape compaction cannot fold
+  # becomes the refusal that already exists: nothing dropped, the operator told.
+  defp fold(state, focus) do
+    Compaction.compact(state.messages,
+      keep_recent_tokens: state.keep_recent_tokens,
+      focus: focus,
+      summarize: summariser(state)
+    )
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   # "Compaction always leaves the archive" is an invariant, so it decides the outcome
@@ -1449,10 +1517,24 @@ defmodule Ouroboros.Provider.Native.Session do
     {:error, {:archive_unwritable, reason}, state}
   end
 
+  defp refuse_broken_compaction(state, reason) do
+    Logger.warning("native compaction refused: it failed (#{inspect(reason)})")
+
+    announce_refusal(
+      state,
+      "compaction_failed",
+      inspect(reason),
+      "the conversation was not compacted because compaction itself failed. " <>
+        "Nothing was dropped."
+    )
+
+    {:error, {:compaction_failed, reason}, state}
+  end
+
   # One event shape for every refused compaction, whatever refused it. The `status` stays
-  # `compaction_refused` — a client keys on that — and `cause` names which of the two it
-  # was, because "a hook said no" and "this node could not write the archive" are
-  # different problems with different fixes.
+  # `compaction_refused` — a client keys on that — and `cause` names which one it was,
+  # because "a hook said no", "this node could not write the archive" and "compaction
+  # itself failed" are different problems with different fixes.
   defp announce_refusal(state, cause, reason, message) do
     emit(state, %{
       type: :provider_event,
@@ -1481,6 +1563,8 @@ defmodule Ouroboros.Provider.Native.Session do
       summarised: outcome.summarised
     }
 
+    state = rebase(state, outcome)
+
     state = %{
       state
       | messages: outcome.messages,
@@ -1503,6 +1587,21 @@ defmodule Ouroboros.Provider.Native.Session do
     })
 
     {:ok, state, report}
+  end
+
+  # Eliding tool results rewrites messages in place, so the conversation still lines up
+  # with the manifest's counts.
+  defp rebase(state, %{summarised: false}), do: state
+
+  # Summarising does not: the new list is `[summary | recent]`, and the summary is not a
+  # message this conversation ever had. A rewind's count therefore lands one slot further
+  # along — which keeps the summary, as it must, since without it the tail has no
+  # beginning — and no count inside the folded range can be honoured at all.
+  defp rebase(state, outcome) do
+    kept = length(outcome.messages) - 1
+    floor = state.message_offset + length(state.messages) - kept
+
+    %{state | message_offset: floor - 1, rewind_floor: floor}
   end
 
   defp thrash_guard(%{compactions: [%{turn: turn} | _rest]} = state), do: state.turns - turn <= 3

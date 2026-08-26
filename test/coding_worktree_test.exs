@@ -188,7 +188,13 @@ defmodule Ouroboros.CodingWorktreeTest do
 
       File.write!(Path.join(path, "scratch.txt"), "work in progress\n")
 
+      assert {:ok, _backlog} = CodingSession.subscribe(task_ref)
+
       finish(task_ref, adapter)
+
+      # The retention note is the last thing anyone learns about this task, so it reaches
+      # the subscribers watching it rather than only the checkpoint.
+      assert_receive {:ouroboros_coding_event, ^id, %{type: :worktree_retained}}, 2_000
 
       # Read the durable record rather than the coordinator: it retires itself shortly
       # after the terminal transition, and the checkpoint is what outlives it.

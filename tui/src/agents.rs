@@ -15,7 +15,7 @@ use std::fmt::Write;
 
 use serde_json::{json, Value};
 
-use crate::model::{Plane, SessionInfo, Triage};
+use crate::model::{plain, Plane, SessionInfo, Triage};
 
 /// How wide the id column is before it is cut. Wide enough for a generated id, narrow
 /// enough that the columns after it survive an eighty-column terminal.
@@ -56,9 +56,16 @@ fn row(session: &SessionInfo) -> String {
     line.trim_end().to_string()
 }
 
+/// Every gateway string this page prints goes through here, which is also where it is
+/// blanked of control characters. The page is written straight to stdout, so an objective
+/// carrying an escape sequence would otherwise be a session on another node repainting
+/// this terminal. Blanked before the width is counted, so the column arithmetic measures
+/// what will actually be shown.
 fn cut(text: &str, width: usize) -> String {
+    let text = plain(text);
+
     if text.chars().count() <= width {
-        return text.to_string();
+        return text;
     }
 
     let head: String = text.chars().take(width.saturating_sub(1)).collect();
@@ -236,6 +243,29 @@ mod tests {
 
         assert_eq!(rows[0].0, Triage::NeedsInput);
         assert_eq!(rows[0].1.id, "waiting");
+    }
+
+    /// The page goes to stdout as it stands. A session on another node must not be able
+    /// to move this terminal's cursor by naming its objective after an escape sequence.
+    #[test]
+    fn gateway_strings_reach_the_page_without_control_characters() {
+        let (interactive, coding) = decode(
+            &json!([{
+                "id": "s\u{1b}[2Kevil",
+                "status": "running",
+                "node": "core@\u{9b}4m",
+                "objective": "ship it\u{7}\u{1b}]0;pwned\u{7}",
+                "updated_at": "2026-01-01T00:00:00.000000Z",
+            }]),
+            &json!([]),
+        );
+        let page = render(&group(&interactive, &coding));
+
+        assert!(!page.contains('\u{1b}'), "{page:?}");
+        assert!(!page.contains('\u{9b}'), "{page:?}");
+        assert!(!page.contains('\u{7}'), "{page:?}");
+        assert!(page.contains("s [2Kevil"), "{page:?}");
+        assert!(page.contains("ship it  ]0;pwned"), "{page:?}");
     }
 
     #[test]

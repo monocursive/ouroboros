@@ -123,6 +123,12 @@ defmodule Ouroboros.RuntimeOwner do
   @impl true
   def handle_info({:EXIT, port, :normal}, state) when is_port(port), do: {:noreply, state}
 
+  # Defining any clause above replaces GenServer's default handler, so a recovery-lock
+  # helper's `{port, {:exit_status, _}}` arriving after the claim returned would raise here
+  # instead of being ignored. This process is the first child of a `rest_for_one` durable
+  # tree: a stray message is not a reason to take every store and session beneath it down.
+  def handle_info(_message, state), do: {:noreply, state}
+
   defp claim(
          data_dir,
          path,

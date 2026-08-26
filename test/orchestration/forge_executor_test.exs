@@ -2,6 +2,7 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Orchestration.{Execution, ForgeExecutor, Plan, Scheduler, Store, TestExecutor}
+  alias Ouroboros.Upgrade.Beam
   alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Registry
@@ -236,6 +237,64 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
     assert :code.which(@pending) == :non_existing
   end
 
+  test "a deploy in flight is retried until it settles rather than failing the plan", context do
+    source_sha256 =
+      Beam.sha256(File.read!(Path.join(context.workspace, "capabilities/pending.ex")))
+
+    assert {:ok, _entry} =
+             Registry.deploying(
+               %{
+                 artifact_id: "settling-rollout",
+                 module: @pending,
+                 epoch: 41,
+                 nodes: [node()],
+                 source_sha256: source_sha256
+               },
+               context.registry
+             )
+
+    start_scheduler(context, [nodes: [node()]],
+      step_retry_attempts: 40,
+      step_retry_delay: 50
+    )
+
+    plan =
+      plan!("settling", [
+        %{
+          id: "build",
+          kind: :forge,
+          input: %{module: inspect(@pending), source_path: "capabilities/pending.ex"}
+        }
+      ])
+
+    assert {:ok, _submitted} = Scheduler.submit(context.scheduler, plan)
+
+    # The first attempt refuses, and the step is offered again instead of failing the plan.
+    retrying = await_plan(context.scheduler, "settling", &(&1.steps["build"].attempt >= 2))
+    refute retrying.status == :failed
+
+    assert retrying.steps["build"].error ==
+             {:forge_deploy_in_flight, inspect(@pending), "settling-rollout"}
+
+    # The interrupted rollout settles, exactly as an operator or the rollout itself would.
+    assert {:ok, _live} =
+             Registry.mark(
+               "settling-rollout",
+               :live,
+               [detail: :settled_by_test],
+               context.registry
+             )
+
+    completed = await_plan(context.scheduler, "settling", &(&1.status in terminal_statuses()))
+    assert completed.status == :completed, inspect(completed.steps["build"].error)
+
+    result = completed.steps["build"].result
+    assert result.reattached?
+    assert result.artifact_id == "settling-rollout"
+    assert result.registry_state == :live
+    assert :code.which(@pending) == :non_existing
+  end
+
   test "a forge step whose source is missing fails without recording a rollout", context do
     start_scheduler(context, nodes: [node()])
 
@@ -256,16 +315,18 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
     assert Registry.history(@pending, context.registry) == []
   end
 
-  defp start_scheduler(context, forge_opts) do
+  defp start_scheduler(context, forge_opts, scheduler_opts \\ []) do
     start_supervised!(
       {Scheduler,
-       name: context.scheduler,
-       store: context.store,
-       max_concurrency: 2,
-       executors: %{
-         coding: {TestExecutor, test_pid: self()},
-         forge: {ForgeExecutor, forge_options(context, forge_opts)}
-       }},
+       [
+         name: context.scheduler,
+         store: context.store,
+         max_concurrency: 2,
+         executors: %{
+           coding: {TestExecutor, test_pid: self()},
+           forge: {ForgeExecutor, forge_options(context, forge_opts)}
+         }
+       ] ++ scheduler_opts},
       restart: :temporary
     )
   end

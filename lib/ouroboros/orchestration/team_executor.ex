@@ -2,12 +2,15 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
   @moduledoc """
   Executes durable orchestration steps through an Ouroboros coding team.
 
-  The graph execution token becomes the delegation ID, so scheduler or adapter
-  restarts reattach to the same detached coding task instead of launching a
-  duplicate provider run. Team processes are resolved from their logical ID at
-  every retry boundary: a transient `Team.Server` restart therefore drops only
-  the current waiter, not the durable delegation. A short-lived owner process is
-  monitored by the scheduler; no PID enters the durable graph or team snapshot.
+  The step's durable identity — `{plan_id, step_id}` — becomes the delegation ID, so
+  scheduler or adapter restarts reattach to the same detached coding task instead of
+  launching a duplicate provider run. The execution token deliberately does not appear
+  in it: a scheduler that restarts mints a fresh token for the same step, and a
+  delegation named after the token would make that second offer a second provider run.
+  Team processes are resolved from their logical ID at every retry boundary: a
+  transient `Team.Server` restart therefore drops only the current waiter, not the
+  durable delegation. A short-lived owner process is monitored by the scheduler; no PID
+  enters the durable graph or team snapshot.
 
   Cancellation has a separate deadline capped at four seconds, leaving margin
   beneath the scheduler's default five-second callback timeout. `:ok` means the
@@ -40,7 +43,7 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
              team_id,
              worker_id,
              objective,
-             Keyword.put(delegation_opts, :id, execution.token),
+             Keyword.put(delegation_opts, :id, delegation_id(execution)),
              opts,
              retry_policy
            ) do
@@ -64,9 +67,14 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
     with {:ok, team_id} <- required_binary(opts, :team_id),
          {:ok, retry_policy} <- retry_policy(opts),
          {:ok, cancel_timeout} <- cancel_timeout(opts) do
-      cancel_with_retry(team_id, execution.token, retry_policy, cancel_timeout)
+      cancel_with_retry(team_id, delegation_id(execution), retry_policy, cancel_timeout)
     end
   end
+
+  # Durable, and stable across every attempt of the same step. Two offers of one step
+  # name one delegation, whichever token either of them carries.
+  defp delegation_id(%Execution{plan_id: plan_id, step_id: step_id}),
+    do: "orchestration:" <> plan_id <> ":" <> step_id
 
   defp delegate_with_retry(team_id, worker_id, objective, delegation_opts, opts, policy) do
     retry_team_operation(
@@ -120,14 +128,15 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
 
   defp await_and_report(team_id, execution, scheduler, timeout, retry_policy) do
     deadline = deadline(timeout)
+    delegation_id = delegation_id(execution)
 
     result =
       retry_team_operation(
         team_id,
         :await,
-        execution.token,
+        delegation_id,
         retry_policy,
-        fn team -> Team.await(team, execution.token, remaining_timeout(deadline)) end,
+        fn team -> Team.await(team, delegation_id, remaining_timeout(deadline)) end,
         fn -> classify_missing_team(team_id, deadline, :await) end,
         deadline
       )

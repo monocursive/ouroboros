@@ -75,6 +75,51 @@ defmodule Ouroboros.Storage.DurableFileTest do
     assert {:ok, %{sequence: 2}} = DurableFile.get_checkpoint(:journal, path: root)
   end
 
+  test "a temporary file orphaned by a crash is swept by the next adapter start", %{root: root} do
+    hook = fn
+      :before_rename -> raise "died before rename"
+      _event -> :ok
+    end
+
+    assert {:error, %RuntimeError{}} =
+             DurableFile.put_checkpoint(:journal, %{sequence: 1},
+               path: root,
+               durability_hook: hook
+             )
+
+    assert [orphan] = Path.wildcard(Path.join([root, "checkpoints", "*.tmp-*"]))
+
+    # Old enough to be from a run that is over rather than a commit in flight.
+    File.touch!(orphan, System.os_time(:second) - 3_600)
+
+    # A fresh process is a fresh user of the adapter, and sweeps on its first write.
+    task = Task.async(fn -> DurableFile.put_checkpoint(:journal, %{sequence: 2}, path: root) end)
+    assert :ok = Task.await(task)
+
+    assert Path.wildcard(Path.join([root, "checkpoints", "*.tmp-*"])) == []
+    assert {:ok, %{sequence: 2}} = DurableFile.get_checkpoint(:journal, path: root)
+  end
+
+  test "a temporary file a live commit may still hold is left alone", %{root: root} do
+    hook = fn
+      :before_rename -> raise "died before rename"
+      _event -> :ok
+    end
+
+    assert {:error, %RuntimeError{}} =
+             DurableFile.put_checkpoint(:journal, %{sequence: 1},
+               path: root,
+               durability_hook: hook
+             )
+
+    assert [recent] = Path.wildcard(Path.join([root, "checkpoints", "*.tmp-*"]))
+
+    task = Task.async(fn -> DurableFile.put_checkpoint(:journal, %{sequence: 2}, path: root) end)
+    assert :ok = Task.await(task)
+
+    assert Path.wildcard(Path.join([root, "checkpoints", "*.tmp-*"])) == [recent]
+  end
+
   test "unsupported thread operations fail closed", %{root: root} do
     assert {:error, :thread_operations_not_supported} =
              DurableFile.load_thread("thread", path: root)

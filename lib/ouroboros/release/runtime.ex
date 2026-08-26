@@ -123,6 +123,13 @@ defmodule Ouroboros.Release.Runtime do
   end
 
   def handle_call({:authorize, %Artifact{} = artifact, actions, approval}, _from, state) do
+    # Authorizing is the only path that adds a capability, so it is the path that drops
+    # the ones that have run out. Expiry is already refused on use; this keeps the map
+    # from retaining every capability this node has ever issued. `:mutate` deliberately
+    # does not sweep: a caller presenting an expired capability is told that it expired
+    # rather than that it never existed.
+    state = drop_expired_capabilities(state)
+
     with :ok <- ensure_ready(state),
          :ok <- validate_actions(actions),
          :ok <- ensure_recorded(state.journal, artifact),
@@ -391,6 +398,16 @@ defmodule Ouroboros.Release.Runtime do
   defp completed?(stage, :install), do: stage in [:installed, :permanent]
   defp completed?(:permanent, :make_permanent), do: true
   defp completed?(_stage, _action), do: false
+
+  defp drop_expired_capabilities(state) do
+    now = System.monotonic_time(:millisecond)
+
+    %{
+      state
+      | capabilities:
+          Map.reject(state.capabilities, fn {_digest, entry} -> entry.expires_at < now end)
+    }
+  end
 
   defp authorize_action(state, artifact, action, capability) do
     digest = capability_digest(capability)

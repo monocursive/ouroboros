@@ -216,6 +216,25 @@ defmodule Ouroboros.Release.RuntimeTest do
     assert TestHandler.calls() == []
   end
 
+  test "authorizing drops the capabilities that have run out", %{path: path} do
+    runtime = start_runtime(capability_ttl_ms: 1)
+    assert {:ok, artifact} = Runtime.inspect_package(runtime, path)
+
+    assert {:ok, expiring} =
+             Runtime.authorize(runtime, artifact, [:unpack], {:approved, "change-123"})
+
+    assert Runtime.status(runtime).ephemeral_capability_count == 1
+    Process.sleep(20)
+
+    assert {:ok, _fresh} =
+             Runtime.authorize(runtime, artifact, [:unpack], {:approved, "change-123"})
+
+    # One live capability, not two: the expired grant is gone rather than retained for
+    # the lifetime of the node.
+    assert Runtime.status(runtime).ephemeral_capability_count == 1
+    assert {:error, :invalid_release_capability} = Runtime.unpack(runtime, artifact, expiring)
+  end
+
   test "executes the gated release lifecycle and journals idempotent state", %{path: path} do
     runtime = start_runtime()
     assert {:ok, artifact} = Runtime.inspect_package(runtime, path)

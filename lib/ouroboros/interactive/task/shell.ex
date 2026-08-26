@@ -20,7 +20,7 @@ defmodule Ouroboros.Interactive.Task.Shell do
   # given a second transcript to read.
   @max_exposed_operator_commands 3
 
-  def plan(runtime, command) do
+  def plan(runtime, command, caller) do
     session = runtime.session
 
     cond do
@@ -36,7 +36,7 @@ defmodule Ouroboros.Interactive.Task.Shell do
 
       true ->
         case shell_authority(runtime, command) do
-          {:ok, authority} -> open_operator_shell(runtime, command, authority)
+          {:ok, authority} -> open_operator_shell(runtime, command, authority, caller)
           {:error, reason} -> {:error, reason, runtime}
         end
     end
@@ -162,7 +162,7 @@ defmodule Ouroboros.Interactive.Task.Shell do
         "suggested rule with permissions.add, or move the session with " <>
         "interactive.configure."
 
-  defp open_operator_shell(runtime, command, authority) do
+  defp open_operator_shell(runtime, command, authority, caller) do
     session = runtime.session
     effect_id = operator_shell_id(session.id, command)
 
@@ -187,6 +187,8 @@ defmodule Ouroboros.Interactive.Task.Shell do
 
     case Task.safe_ledger(fn -> EffectLedger.record_started(attrs) end) do
       {:ok, _entry, _created} ->
+        watch_caller(session, effect_id, caller)
+
         {:ok,
          %{
            effect_id: effect_id,
@@ -210,6 +212,25 @@ defmodule Ouroboros.Interactive.Task.Shell do
           }}, runtime}
     end
   end
+
+  # The command runs in the caller's own process, so the caller is this effect's runner:
+  # if it dies between the plan and the settlement, nobody else is going to say so. The
+  # ledger learns that here rather than at the next boot's reconciliation.
+  defp watch_caller(session, effect_id, caller) when is_pid(caller) do
+    case Task.safe_ledger(fn -> EffectLedger.watch_runner(effect_id, caller) end) do
+      :ok ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "interactive session #{session.id} could not watch the runner of operator " <>
+            "command #{effect_id}: #{inspect(other, limit: 4)}; an abandoned entry will " <>
+            "stay :started until the next boot reconciles it"
+        )
+    end
+  end
+
+  defp watch_caller(_session, _effect_id, _caller), do: :ok
 
   defp shell_spill_dir(session_id) do
     case Exec.spill_dir(session_id) do

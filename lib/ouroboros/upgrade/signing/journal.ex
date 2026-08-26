@@ -23,9 +23,13 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   and small, because a durable log an attacker can grow by choosing its inputs is not a
   log. History is trimmed oldest-first like `Ouroboros.Release.Journal`; an operator who
   needs unbounded retention ships these entries somewhere that has it.
+
+  Module names, struct modules, policy reasons, and node names all cross the checkpoint
+  boundary through `Ouroboros.Upgrade.Wire`: `[:safe]` decode must not need this module
+  (or any other) already loaded in the reading VM.
   """
 
-  alias Ouroboros.Upgrade.Beam
+  alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
   @version 1
   @decisions [:issued, :refused]
@@ -95,6 +99,36 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
         decisions: trim(journal.decisions ++ [entry], limit)
     }
   end
+
+  @doc "The journal as it is written to storage: no atoms a rebooted VM would have to intern."
+  @spec to_wire(t()) :: term()
+  def to_wire(%__MODULE__{} = journal),
+    do: journal |> map_module_names(&ModuleName.to_wire/1) |> Wire.dump()
+
+  @doc "The journal as it is read from storage, resolving names this VM still knows."
+  @spec from_wire(term()) :: t() | term()
+  def from_wire(term) do
+    case Wire.load(term) do
+      %__MODULE__{} = journal -> map_module_names(journal, &ModuleName.from_wire/1)
+      other -> other
+    end
+  end
+
+  defp map_module_names(journal, fun) do
+    decisions =
+      Enum.map(journal.decisions, fn
+        %{modules: modules} = entry when is_list(modules) ->
+          %{entry | modules: Enum.map(modules, &map_entry_module(&1, fun))}
+
+        entry ->
+          entry
+      end)
+
+    %{journal | decisions: decisions}
+  end
+
+  defp map_entry_module(%{module: module} = entry, fun), do: %{entry | module: fun.(module)}
+  defp map_entry_module(entry, _fun), do: entry
 
   @doc "Whether a term read back from storage is a journal this build may use."
   @spec valid?(term()) :: boolean()

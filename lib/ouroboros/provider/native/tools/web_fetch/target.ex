@@ -6,12 +6,13 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch.Target do
   that name resolves to, so a permitted `example.com` that rebinds to `169.254.169.254`
   — or a literal `http://127.0.0.1/` — would otherwise reach loopback, RFC1918, and
   cloud metadata. This module refuses those destinations after a DNS lookup and
-  before `:httpc` runs.
+  before Mint connects.
 
   The residual window is DNS rebinding between this lookup and the connect
-  `:httpc` does itself. Pinning the connect to the admitted address is not available
-  on `:httpc` without dropping TLS hostname verification; the lookup is still the
-  difference between "we never checked" and "we checked once".
+  Mint does itself. Pinning the connect to the admitted address is not done
+  here: it would require a custom transport that still presents the original
+  hostname for TLS verification. The lookup is still the difference between
+  "we never checked" and "we checked once".
   """
 
   @blocked_hosts MapSet.new([

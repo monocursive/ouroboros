@@ -133,7 +133,7 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
       messages
       |> Enum.reverse()
       |> Enum.reduce_while({0, 0}, fn message, {taken, tokens} ->
-        next = tokens + Window.estimate_tokens(Window.message_text(message))
+        next = tokens + Window.message_tokens(message)
 
         if taken > 0 and next > keep_recent_tokens,
           do: {:halt, {taken, tokens}},
@@ -194,7 +194,7 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
     user_messages =
       messages
       |> Enum.filter(&(Map.get(&1, :role) == :user))
-      |> Enum.map(&String.trim(to_string(Map.get(&1, :content) || "")))
+      |> Enum.map(&String.trim(Window.message_text(&1)))
       |> Enum.reject(&(&1 == ""))
 
     tools =

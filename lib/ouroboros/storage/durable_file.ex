@@ -12,11 +12,22 @@ defmodule Ouroboros.Storage.DurableFile do
   Thread operations fail closed because this adapter is intentionally limited to
   Ouroboros mutation journals, which use checkpoint operations only.
 
+  A commit that dies between opening its temporary file and renaming it — the process is
+  killed, the node goes down — leaves that file behind. Randomized names mean an orphan
+  wedges nothing, so this is hygiene rather than correctness: the first write a process
+  makes into a checkpoint directory sweeps the orphans it finds there. Only files older
+  than #{div(60_000, 1_000)} seconds are swept, so a temporary file another process has
+  open right now is never one of them.
+
   `:durability_hook` is a deterministic fault-observation seam for tests. A hook
   returning `{:error, reason}` aborts before the named operation.
   """
 
   @behaviour Jido.Storage
+
+  # Old enough that no live commit could still be writing it, short enough that an
+  # orphan does not outlive the boot that follows the crash which made it.
+  @stale_temporary_ms 60_000
 
   @impl true
   def get_checkpoint(key, opts) do
@@ -33,6 +44,7 @@ defmodule Ouroboros.Storage.DurableFile do
   def put_checkpoint(key, data, opts) do
     with {:ok, path} <- checkpoint_path(key, opts),
          :ok <- ensure_directory(Path.dirname(path)),
+         :ok <- sweep_once(Path.dirname(path)),
          temporary = temporary_path(path),
          :ok <- hook(opts, :before_open_temp),
          {:ok, device} <-
@@ -121,6 +133,39 @@ defmodule Ouroboros.Storage.DurableFile do
     end
 
     result
+  end
+
+  # Once per process per directory: the store that owns a checkpoint directory is a
+  # single serialized process, so this runs on its first write and never again. A sweep
+  # that cannot read the directory or remove a file changes nothing about the commit
+  # that is about to happen.
+  defp sweep_once(directory) do
+    if Process.get({__MODULE__, :swept, directory}) do
+      :ok
+    else
+      Process.put({__MODULE__, :swept, directory}, true)
+      sweep_stale_temporaries(directory)
+      :ok
+    end
+  end
+
+  defp sweep_stale_temporaries(directory) do
+    horizon = System.os_time(:second) - div(@stale_temporary_ms, 1_000)
+
+    directory
+    |> Path.join("*.tmp-*")
+    |> Path.wildcard()
+    |> Enum.each(fn temporary ->
+      case File.stat(temporary, time: :posix) do
+        {:ok, %File.Stat{type: :regular, mtime: mtime}} when mtime <= horizon ->
+          _ = File.rm(temporary)
+
+        _newer_or_unreadable ->
+          :ok
+      end
+    end)
+  rescue
+    _error -> :ok
   end
 
   defp ensure_directory(directory) do

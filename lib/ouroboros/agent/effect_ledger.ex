@@ -49,6 +49,8 @@ defmodule Ouroboros.Agent.EffectLedger do
 
   use GenServer
 
+  require Logger
+
   alias Ouroboros.Control.Grants
 
   @store_key {:ouroboros, :agent_effect_ledger, 1}
@@ -453,9 +455,22 @@ defmodule Ouroboros.Agent.EffectLedger do
             entries = replace(state.entries, ambiguous) |> trim(state.retention_limit)
             updated = %{state | entries: entries, next_sequence: state.next_sequence + 1}
 
+            # Same discipline as `record/3` and `settle_entry/3`: a transition nobody
+            # durably recorded did not happen. Keeping it in memory only would have this
+            # process answer `:ambiguous` for an entry that is still `:started` on disk,
+            # and hand out sequence numbers no checkpoint ever claimed.
             case checkpoint_state(updated) do
-              :ok -> {:noreply, updated}
-              {:error, _checkpoint_reason} -> {:noreply, updated}
+              :ok ->
+                {:noreply, updated}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "effect ledger could not checkpoint the ambiguity of #{effect_id}: " <>
+                    "#{inspect(reason, limit: 4)}; the entry stays :started until it is " <>
+                    "settled or the next boot reconciles it"
+                )
+
+                {:noreply, state}
             end
 
           _terminal_or_missing ->

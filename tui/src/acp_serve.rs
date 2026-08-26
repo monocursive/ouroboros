@@ -1310,6 +1310,15 @@ impl Agent {
     fn drain(&mut self, session_id: &str) -> Vec<Frame> {
         let mut frames = Vec::new();
 
+        // A prune moves the cursor forward over events this agent is still holding. They
+        // can never sit on it again, and leaving them behind would keep `pending`
+        // non-empty for the rest of the session: every later event would look like a gap
+        // and spend a resync round on a hole that is already closed.
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            let cursor = session.cursor;
+            session.pending.retain(|sequence, _| *sequence > cursor);
+        }
+
         loop {
             let Some(session) = self.sessions.get_mut(session_id) else {
                 return frames;

@@ -81,11 +81,13 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   ## What it does not do
 
   No seccomp filter on Linux, so a bubblewrap session constrains the filesystem and the
-  network namespace but not the syscall surface. No domain allowlist and no proxy:
-  external network is on or off, never "these hosts". A network-denied macOS command
-  retains loopback for build-tool IPC; bubblewrap keeps its isolated network namespace.
-  `sandbox-exec` is deprecated by Apple — it still works on macOS 26 and it is what
-  Codex ships, but it carries that warning. Live bubblewrap behaviour is claimed only
+  network namespace but not the syscall surface. A name-based create filter (`LD_PRELOAD`)
+  denies `.git` / `.ouroboros` path components that appear after the command starts;
+  static binaries that never call libc are outside that net. No domain allowlist and no
+  proxy: external network is on or off, never "these hosts". A network-denied macOS
+  command retains loopback for build-tool IPC; bubblewrap keeps its isolated network
+  namespace. `sandbox-exec` is deprecated by Apple — it still works on macOS 26 and it is
+  what Codex ships, but it carries that warning. Live bubblewrap behaviour is claimed only
   where the live suite runs: Linux CI on ubuntu-24.04, which installs `bwrap` and
   exercises the filesystem denials. That suite still has no seccomp, and the original
   authoring Mac never ran it.

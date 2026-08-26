@@ -196,7 +196,7 @@ printf 'home=%s\n' "$HOME"
 printf 'hostname=%s\n' "$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
 if command -v ouro >/dev/null 2>&1; then
   printf 'ouro=%s\n' "$(command -v ouro)"
-  ouro version 2>/dev/null | awk '{print "version_" $0}'
+  ouro version 2>/dev/null | awk 'NR == 1 {print "version=" $0}'
 else
   printf 'ouro=\n'
 fi
@@ -348,11 +348,10 @@ pub fn parse_probe(text: &str) -> Result<Probe> {
             "ouro" if !value.is_empty() => probe.ouro = Some(value),
             "tailscale_ip" if !value.is_empty() => probe.tailscale_ip = Some(value),
             "tailscale_dns" if !value.is_empty() => probe.tailscale_dns = Some(value),
-            key if key.starts_with("version_") && probe.ouro_version.is_none() => {
-                let line = raw.trim().trim_start_matches("version_").trim();
-                if line.starts_with("ouro ") || line.starts_with("release") {
-                    probe.ouro_version = Some(line.to_string());
-                }
+            // `ouro version`'s first line, which the probe prefixes with `version=` so it
+            // arrives in the same `key=value` shape as everything else here.
+            "version" if !value.is_empty() && probe.ouro_version.is_none() => {
+                probe.ouro_version = Some(value)
             }
             _ => {}
         }
@@ -1300,6 +1299,35 @@ mod tests {
             Some("vps.tailnet.ts.net")
         );
         assert_eq!(probe.suggested_machine().as_deref(), Some("vps"));
+    }
+
+    /// The probe and the parse have to agree on the spelling, and for a while they did
+    /// not: the script printed `version_ouro 0.1.0`, which carries no `=` and so never
+    /// reached the match at all. Pinned from the script rather than from a retyped copy
+    /// of it, because a divergence there is exactly what went unnoticed.
+    #[test]
+    fn the_probe_reports_the_ouro_version_the_remote_prints() {
+        assert!(
+            PROBE_SCRIPT.contains(r#"{print "version=" $0}"#),
+            "the probe must emit the version as key=value: {PROBE_SCRIPT}"
+        );
+
+        let probe = parse_probe(
+            "os=Linux\narch=x86_64\nhome=/home/op\nouro=/home/op/.local/bin/ouro\nversion=ouro 0.1.0\ntailscale=no\n",
+        )
+        .unwrap();
+
+        assert_eq!(probe.ouro.as_deref(), Some("/home/op/.local/bin/ouro"));
+        assert_eq!(probe.ouro_version.as_deref(), Some("ouro 0.1.0"));
+    }
+
+    #[test]
+    fn a_remote_without_ouro_reports_no_version() {
+        let probe =
+            parse_probe("os=Linux\narch=x86_64\nhome=/home/op\nouro=\ntailscale=no\n").unwrap();
+
+        assert!(probe.ouro.is_none());
+        assert!(probe.ouro_version.is_none());
     }
 
     #[test]

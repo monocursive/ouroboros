@@ -20,7 +20,8 @@ defmodule Ouroboros.Team.Server.State do
                 cleanup_agents?: true,
                 durability: :ephemeral_checkpoint,
                 backoff: %{},
-                start_deadlines: %{}
+                start_deadlines: %{},
+                timers: %{}
               ]
 end
 
@@ -261,7 +262,11 @@ defmodule Ouroboros.Team.Server do
       delegation_id ->
         case consume_event(state, delegation_id, event) do
           {:ok, state} ->
-            if Event.terminal?(event), do: schedule_completion_check(delegation_id, 0)
+            state =
+              if Event.terminal?(event),
+                do: schedule_completion_check(state, delegation_id, 0),
+                else: state
+
             {:noreply, state}
 
           {:error, reason} ->
@@ -270,7 +275,8 @@ defmodule Ouroboros.Team.Server do
     end
   end
 
-  def handle_info({:check_completion, delegation_id}, state) do
+  def handle_info({:check_completion, delegation_id} = message, state) do
+    state = clear_timer(state, message)
     transition_info(check_completion(state, delegation_id), state)
   end
 
@@ -278,7 +284,8 @@ defmodule Ouroboros.Team.Server do
     transition_info(deliver_terminal(state, delegation_id), state)
   end
 
-  def handle_info({:retry_cancel, delegation_id}, state) do
+  def handle_info({:retry_cancel, delegation_id} = message, state) do
+    state = clear_timer(state, message)
     transition_info(propagate_cancellation(state, delegation_id), state)
   end
 
@@ -539,7 +546,7 @@ defmodule Ouroboros.Team.Server do
             end
 
           {:ok, %TaskState{}} ->
-            schedule_completion_check(delegation_id, @completion_check_ms)
+            state = schedule_completion_check(state, delegation_id, @completion_check_ms)
             {:ok, reset_backoff(state, {:completion, delegation_id})}
 
           {:error, reason} ->
@@ -595,7 +602,7 @@ defmodule Ouroboros.Team.Server do
   defp checkpoint_completion_error(state, delegation, delegation_id, reason) do
     error = {:completion_check_failed, durable_error(reason)}
     {delay, state} = next_backoff(state, {:completion, delegation_id}, @delivery_retry_ms)
-    schedule_completion_check(delegation_id, delay)
+    state = schedule_completion_check(state, delegation_id, delay)
 
     if delegation.delivery_error == error do
       {:ok, state}
@@ -655,8 +662,7 @@ defmodule Ouroboros.Team.Server do
 
         case result do
           :ok ->
-            schedule_completion_check(delegation_id, 0)
-            {:ok, state}
+            {:ok, schedule_completion_check(state, delegation_id, 0)}
 
           {:error, reason} ->
             redacted = durable_error(reason)
@@ -667,8 +673,10 @@ defmodule Ouroboros.Team.Server do
                 updated_at: timestamp()
             }
 
-            Process.send_after(self(), {:retry_cancel, delegation_id}, @delivery_retry_ms)
-            checkpoint(put_delegation(state, delegation))
+            state
+            |> schedule_cancel_retry(delegation_id, @delivery_retry_ms)
+            |> put_delegation(delegation)
+            |> checkpoint()
         end
 
       :error ->
@@ -1118,9 +1126,10 @@ defmodule Ouroboros.Team.Server do
   defp reconcile_delegation(state, %Delegation{status: :starting} = delegation) do
     case start_assigned_coding(state, delegation, :recovery) do
       {:ok, delegation, state} ->
-        if delegation.cancellation_requested_at != nil do
-          send(self(), {:retry_cancel, delegation.id})
-        end
+        state =
+          if delegation.cancellation_requested_at != nil,
+            do: schedule_cancel_retry(state, delegation.id, 0),
+            else: state
 
         {:ok, state}
 
@@ -1167,16 +1176,18 @@ defmodule Ouroboros.Team.Server do
     with {:ok, state} <- state_result do
       delegation = Map.fetch!(state.delegations, delegation.id)
 
-      cond do
-        delegation.cancellation_requested_at != nil ->
-          send(self(), {:retry_cancel, delegation.id})
+      state =
+        cond do
+          delegation.cancellation_requested_at != nil ->
+            schedule_cancel_retry(state, delegation.id, 0)
 
-        delegation.delivery == :delivering ->
-          send(self(), {:deliver_terminal, delegation.id})
+          delegation.delivery == :delivering ->
+            send(self(), {:deliver_terminal, delegation.id})
+            state
 
-        true ->
-          schedule_completion_check(delegation.id, 0)
-      end
+          true ->
+            schedule_completion_check(state, delegation.id, 0)
+        end
 
       {:ok, state}
     end
@@ -1543,9 +1554,10 @@ defmodule Ouroboros.Team.Server do
       when delivery != :delivered ->
         case start_assigned_coding(state, delegation, :recovery) do
           {:ok, delegation, state} ->
-            if delegation.cancellation_requested_at != nil do
-              send(self(), {:retry_cancel, delegation.id})
-            end
+            state =
+              if delegation.cancellation_requested_at != nil,
+                do: schedule_cancel_retry(state, delegation.id, 0),
+                else: state
 
             {:ok, state}
 
@@ -1676,7 +1688,7 @@ defmodule Ouroboros.Team.Server do
 
     case checkpoint(put_delegation(state, delegation)) do
       {:ok, state} ->
-        schedule_completion_check(delegation.id, 0)
+        state = schedule_completion_check(state, delegation.id, 0)
         {:ok, delegation, forget_start(state, delegation.id)}
 
       {:error, reason} ->
@@ -1695,7 +1707,7 @@ defmodule Ouroboros.Team.Server do
       {:ok, next_state} ->
         next_state = forget_start(next_state, delegation.id)
         delegation = Map.fetch!(next_state.delegations, delegation.id)
-        schedule_completion_check(delegation.id, 0)
+        next_state = schedule_completion_check(next_state, delegation.id, 0)
 
         case publish_delegated_projection(next_state, delegation) do
           :ok ->
@@ -2067,9 +2079,12 @@ defmodule Ouroboros.Team.Server do
 
     case checkpoint(%{state | status: :closing, delegations: delegations}) do
       {:ok, state} ->
-        Enum.each(state.delegations, fn {delegation_id, delegation} ->
-          if delegation.delivery != :delivered, do: send(self(), {:retry_cancel, delegation_id})
-        end)
+        state =
+          Enum.reduce(state.delegations, state, fn {delegation_id, delegation}, acc ->
+            if delegation.delivery != :delivered,
+              do: schedule_cancel_retry(acc, delegation_id, 0),
+              else: acc
+          end)
 
         case finish_close_if_ready(state) do
           {:ok, state} -> {:ok, state}
@@ -2194,9 +2209,46 @@ defmodule Ouroboros.Team.Server do
     %{state | delegations: Map.put(state.delegations, delegation.id, delegation)}
   end
 
-  defp schedule_completion_check(delegation_id, delay) do
-    Process.send_after(self(), {:check_completion, delegation_id}, delay)
+  defp schedule_completion_check(state, delegation_id, delay),
+    do: schedule_timer(state, {:check_completion, delegation_id}, delay)
+
+  defp schedule_cancel_retry(state, delegation_id, delay),
+    do: schedule_timer(state, {:retry_cancel, delegation_id}, delay)
+
+  # One pending timer per message. A delegation whose completion check or cancellation
+  # retry is asked for from several paths at once used to get one timer per ask, and
+  # because every delivery schedules its own successor, each of those became an
+  # independent chain that never stopped. Cancel and replace only when the new deadline
+  # is the earlier one; otherwise the timer already pending is the answer.
+  defp schedule_timer(state, message, delay) do
+    due = System.monotonic_time(:millisecond) + delay
+
+    case Map.get(state.timers, message) do
+      %{due: pending_due} when pending_due <= due ->
+        state
+
+      pending ->
+        cancel_timer(pending, message)
+        timer = %{ref: Process.send_after(self(), message, delay), due: due}
+        %{state | timers: Map.put(state.timers, message, timer)}
+    end
   end
+
+  defp cancel_timer(nil, _message), do: :ok
+
+  defp cancel_timer(%{ref: ref}, message) do
+    if Process.cancel_timer(ref) == false do
+      receive do
+        ^message -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp clear_timer(state, message), do: %{state | timers: Map.delete(state.timers, message)}
 
   # Retry pacing is runtime scheduling, not durable domain state, so it is held in
   # memory only. A restart honestly restarts the bound.

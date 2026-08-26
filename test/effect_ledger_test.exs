@@ -196,6 +196,47 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end)
   end
 
+  @tag :capture_log
+  test "an ambiguity nobody could checkpoint is not believed in memory either" do
+    path = temporary_path("ambiguity-refused")
+    on_exit(fn -> File.rm_rf(path) end)
+
+    {:ok, gate} = Agent.start_link(fn -> :allow end)
+    on_exit(fn -> if Process.alive?(gate), do: Agent.stop(gate) end)
+
+    hook = fn
+      :before_write ->
+        if Agent.get(gate, & &1) == :refuse, do: {:error, :injected_write_failure}, else: :ok
+
+      _event ->
+        :ok
+    end
+
+    storage = {Ouroboros.Storage.DurableFile, path: path, durability_hook: hook}
+    ledger = start_ledger!(storage: storage)
+    attrs = attrs("effect-unwritable-ambiguity", :stop_agent, %{agent: "peer"})
+    runner = spawn(fn -> Process.sleep(:infinity) end)
+
+    assert {:ok, _entry, :created} = EffectLedger.record_started(attrs, ledger)
+    assert :ok = EffectLedger.watch_runner(attrs.id, runner, ledger)
+
+    Agent.update(gate, fn _state -> :refuse end)
+    Process.exit(runner, :kill)
+
+    assert_eventually(fn -> :sys.get_state(ledger).runner_monitors == %{} end)
+
+    # The checkpoint was refused, so the transition did not happen — in memory any more
+    # than on disk. A reader who trusts this process and a reader who reloads the
+    # checkpoint are told the same thing.
+    assert {:ok, %Entry{status: :started, sequence: 1}} = EffectLedger.get(attrs.id, ledger)
+    assert EffectLedger.status(ledger).next_sequence == 2
+
+    assert {:ok, %{entries: [%Entry{status: :started, sequence: 1}], next_sequence: 2}} =
+             Ouroboros.Storage.DurableFile.get_checkpoint(EffectLedger.checkpoint_key(),
+               path: path
+             )
+  end
+
   test "a failed initial checkpoint prevents an effect from becoming admissible" do
     table = unique_name("refusing_table")
     ledger = start_ledger!(storage: {RefusingStorage, table: table})

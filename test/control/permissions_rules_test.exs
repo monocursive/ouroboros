@@ -146,6 +146,54 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
                Rules.decide(request, [rule(:node, :allow, "Bash(echo *)")])
     end
 
+    test "a redirect on a high descriptor is denied too", %{root: root} do
+      # `3>` writes the file and `1>&3` points stdout at it: an allowlist that only knew
+      # `>`, `1>`, and `2>` read this line as a bare `echo`.
+      request =
+        Request.new(%{
+          tool: "bash",
+          command: "echo pwned 3>.git/config 1>&3",
+          mode: :execute,
+          context: %{workspace: root}
+        })
+
+      assert {:deny, %{id: "protected-path"}} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(echo *)")])
+    end
+
+    test "a clobbering >| redirect into .git is denied", %{root: root} do
+      request =
+        Request.new(%{
+          tool: "bash",
+          command: "echo pwned >| .git/config",
+          mode: :execute,
+          context: %{workspace: root}
+        })
+
+      assert {:deny, %{id: "protected-path"}} =
+               Rules.decide(request, [rule(:node, :allow, "Bash(echo *)")])
+    end
+
+    test "a protected segment is recognised whatever its case", %{root: root} do
+      # APFS and NTFS are case-insensitive by default, so `.GIT/HEAD` is `.git/HEAD`
+      # there — and write/edit/apply_patch never cross an OS sandbox.
+      assert Rules.protected_write?(Path.join(root, ".GIT/HEAD"))
+      assert Rules.protected_write?(Path.join(root, ".Git/hooks/pre-commit"))
+      assert Rules.protected_write?(Path.join(root, ".Ouroboros/state.json"))
+      refute Rules.protected_write?(Path.join(root, "gitignore"))
+
+      request =
+        Request.new(%{
+          tool: "write",
+          mode: :write,
+          paths: [".GIT/config"],
+          context: %{workspace: root}
+        })
+
+      assert {:deny, %{id: "protected-path", pattern: "**/.git/**"}} =
+               Rules.decide(request, [rule(:node, :allow, "Write(**)")])
+    end
+
     test "a write into .ouroboros or the data directory is denied", %{
       root: root,
       data_dir: data_dir

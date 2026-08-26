@@ -7,6 +7,7 @@ defmodule Ouroboros.MixProject do
       version: "0.1.0",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
+      compilers: Mix.compilers() ++ [:ouroboros_fs_filter],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       # Gradual success typing. PLTs live under `_build/plts` (already gitignored with
@@ -47,9 +48,8 @@ defmodule Ouroboros.MixProject do
   def application do
     [
       mod: {Ouroboros.Application, []},
-      # `:inets`/`:ssl` are the native agent's `web_fetch`: `:httpc` is OTP's own client,
-      # it takes `autoredirect: false`, and it adds no dependency to a runtime that
-      # otherwise makes no outbound HTTP request of its own.
+      # `:ssl` is the native agent's `web_fetch` (Mint). `:inets` stays for any
+      # remaining OTP HTTP callers.
       extra_applications: [:logger, :crypto, :sasl, :inets, :ssl]
     ]
   end
@@ -67,6 +67,10 @@ defmodule Ouroboros.MixProject do
       # as `llm_db`'s dependency; it is declared here so the runtime reads a dependency
       # it named rather than one it inherited.
       {:toml, "~> 0.7"},
+      # `web_fetch` streams every status through Mint so a 302/404 body is cancelled at
+      # the cap the way a 200 already was. Declared here rather than inherited from Req
+      # so the runtime names the client it opens sockets with.
+      {:mint, "~> 1.8"},
       # Cluster formation. The runtime's distribution semantics never depended on how
       # nodes found each other; this is the discovery half, and it stays off unless
       # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.

@@ -29,6 +29,12 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @default_compact_at 0.85
   @default_keep_recent_tokens 20_000
 
+  # What one image or file part of a user message is charged when the estimate cannot see
+  # it. Every vendor prices an image somewhere near a thousand tokens, and a part counted
+  # as free is a part that lets a conversation sail past the threshold it was measured
+  # against.
+  @nominal_part_tokens 1_000
+
   @typedoc "The window, or the fact that this node does not know it."
   @type window :: pos_integer() | nil
 
@@ -95,7 +101,7 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @doc "The fraction of the window at which a session compacts itself."
   @spec compact_at(map() | keyword()) :: float()
   def compact_at(options) when is_map(options) do
-    case option(options, :compact_at) do
+    case field(options, :compact_at) do
       value when is_number(value) and value > 0 and value <= 1 -> value / 1
       _unset -> @default_compact_at
     end
@@ -107,7 +113,7 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @doc "How many tokens of the newest conversation compaction keeps verbatim."
   @spec keep_recent_tokens(map() | keyword()) :: pos_integer()
   def keep_recent_tokens(options) when is_map(options) do
-    case option(options, :keep_recent_tokens) do
+    case field(options, :keep_recent_tokens) do
       value when is_integer(value) and value > 0 -> min(value, 500_000)
       _unset -> @default_keep_recent_tokens
     end
@@ -135,7 +141,20 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   def estimate_tokens(text) when is_binary(text), do: div(byte_size(text), 4) + 1
 
   def estimate_tokens(messages) when is_list(messages),
-    do: Enum.reduce(messages, 0, &(estimate_tokens(message_text(&1)) + &2))
+    do: Enum.reduce(messages, 0, &(message_tokens(&1) + &2))
+
+  @doc """
+  A rough token count for one message, its non-text parts included.
+
+  Use this rather than `estimate_tokens(message_text(message))`: an attachment turn's
+  content is a list of parts, and the image in it costs the window something no character
+  count can see.
+  """
+  @spec message_tokens(map()) :: non_neg_integer()
+  def message_tokens(message) when is_map(message),
+    do: estimate_tokens(message_text(message)) + opaque_tokens(message)
+
+  def message_tokens(_message), do: 0
 
   @doc false
   @spec message_text(map()) :: String.t()
@@ -147,15 +166,53 @@ defmodule Ouroboros.Provider.Native.Context.Window do
         "#{Map.get(call, :name, "")} #{inspect(Map.get(call, :input, %{}))}"
       end)
 
-    to_string(Map.get(message, :content) || "") <> " " <> calls
+    content_text(Map.get(message, :content)) <> " " <> calls
   end
 
   def message_text(message) when is_map(message),
-    do: to_string(Map.get(message, :content) || "")
+    do: content_text(Map.get(message, :content))
 
   def message_text(_message), do: ""
 
   # ---------------------------------------------------------------- private
+
+  # Total, deliberately. An attachment turn's content is a list of parts
+  # (`Ouroboros.Provider.Native.Attachments.message/3`), and `to_string/1` on that list
+  # raises — which, on the compaction path of a `restart: :temporary` session, is the
+  # session gone. A checkpoint round-trip turns the parts' atom keys into string ones, so
+  # both spellings are read.
+  defp content_text(content) when is_binary(content), do: content
+
+  defp content_text(parts) when is_list(parts),
+    do: parts |> Enum.map(&part_text/1) |> Enum.reject(&(&1 == "")) |> Enum.join(" ")
+
+  defp content_text(part) when is_map(part), do: part_text(part)
+
+  defp content_text(other) when is_atom(other) or is_number(other), do: to_string(other)
+  defp content_text(_other), do: ""
+
+  defp part_text(part) when is_binary(part), do: part
+
+  defp part_text(part) when is_map(part) do
+    case field(part, :text) do
+      text when is_binary(text) -> text
+      _absent -> ""
+    end
+  end
+
+  defp part_text(_part), do: ""
+
+  defp opaque_tokens(%{content: parts}) when is_list(parts),
+    do: @nominal_part_tokens * Enum.count(parts, &(not text_part?(&1)))
+
+  defp opaque_tokens(_message), do: 0
+
+  # A part with no `type`, or one typed `text`, is counted by its characters. Anything
+  # else — an image, a file — is counted at the nominal charge.
+  defp text_part?(part) when is_map(part), do: field(part, :type) in [nil, :text, "text"]
+  defp text_part?(part), do: is_binary(part)
+
+  defp field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
   defp from_db(model_spec) when is_binary(model_spec) and model_spec != "" do
     with true <- Code.ensure_loaded?(LLMDB),
@@ -179,10 +236,6 @@ defmodule Ouroboros.Provider.Native.Context.Window do
       value when is_integer(value) and value > 0 -> value
       _unset -> nil
     end
-  end
-
-  defp option(options, key) do
-    Map.get(options, key) || Map.get(options, Atom.to_string(key))
   end
 
   defp number(payload, key) do

@@ -831,6 +831,73 @@ defmodule Ouroboros.ClusterTest do
       end)
     end
 
+    test "an unreadable owner checkpoint refuses a recording start instead of overwriting it" do
+      fleet_id = "1357bdf01357bdf01357bdf0"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+
+      with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+
+        on_exit(fn ->
+          reset_session_owner_evidence!()
+
+          if previous_data_dir,
+            do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+            else: Application.delete_env(:ouroboros, :data_dir)
+        end)
+
+        write_test_fleet_profile!(fleet_dir, fleet_id)
+        checkpoint_dir = Path.join(fleet_dir, "cluster-directory")
+
+        # A checkpoint this build cannot decode, rather than an absent one: absent evidence
+        # is legitimately empty, undecodable evidence is unknown.
+        assert :ok =
+                 Ouroboros.Storage.DurableFile.put_checkpoint(
+                   {:ouroboros, :cluster_session_owners, 1},
+                   %{
+                     version: 1,
+                     fleet_id: fleet_id,
+                     interactive: "not-an-owner-list",
+                     coding: []
+                   },
+                   path: checkpoint_dir
+                 )
+
+        assert [checkpoint] =
+                 Path.wildcard(Path.join([checkpoint_dir, "checkpoints", "*.term"]))
+
+        undecodable = File.read!(checkpoint)
+        restart_cluster_monitor!()
+
+        assert {:error, {:invalid_session_owners, :interactive}} =
+                 Cluster.session_owners(:interactive)
+
+        # Every remote start reaches this call through `Placement.fence_possible_owner/2`.
+        # It must fail closed the way retirement already does rather than persist a map
+        # derived from the empty in-memory baseline.
+        assert {:error,
+                {:session_owner_evidence_unavailable, {:invalid_session_owners, :interactive}}} =
+                 Cluster.record_session_snapshot(:interactive, [
+                   {:"ouro-lost@127.0.0.2", [%{possible_start: true}]}
+                 ])
+
+        # An observation that changes nothing takes the same refusal: the skip-write branch
+        # was the one that used to call unreadable evidence reliable without writing at all.
+        assert {:error, {:session_owner_evidence_unavailable, _reason}} =
+                 Cluster.record_session_snapshot(:interactive, [])
+
+        assert File.read!(checkpoint) == undecodable
+
+        # The journal names both planes, so a recorded interactive observation must never
+        # be able to answer for coding either.
+        assert {:error, {:invalid_session_owners, :interactive}} =
+                 Cluster.session_owners(:coding)
+      end)
+    end
+
     @tag timeout: 180_000
     test "a roster tombstone preserves evidence until an explicit offline state-loss acknowledgement" do
       fleet_id = "9876543210abcdef98765432"

@@ -65,4 +65,33 @@ defmodule Ouroboros.Release.HandlerAdapterTest do
     assert File.read!(alias_path) == "pre-existing package"
     assert File.exists?(staged.path)
   end
+
+  test "a directory sync that fails after linking still removes the OTP alias", %{
+    releases_dir: releases_dir,
+    staged: staged
+  } do
+    alias_path = Path.join(releases_dir, "ouroboros.tar.gz")
+
+    assert {:error, {:release_directory_sync_failed, :simulated}} =
+             HandlerAdapter.OTP.unpack_release_with(
+               String.to_charlist(staged.basename),
+               fn _otp_name -> flunk("unpacker must not run for a non-durable alias") end,
+               fn _directory -> {:error, {:release_directory_sync_failed, :simulated}} end
+             )
+
+    refute File.exists?(alias_path)
+
+    # A leaked alias would make every later unpack of the same release `:eexist`.
+    assert {:ok, ~c"0.2.0"} =
+             HandlerAdapter.OTP.unpack_release_with(
+               String.to_charlist(staged.basename),
+               fn otp_name ->
+                 assert otp_name == ~c"ouroboros"
+                 {:ok, ~c"0.2.0"}
+               end
+             )
+
+    refute File.exists?(alias_path)
+    assert File.exists?(staged.path)
+  end
 end

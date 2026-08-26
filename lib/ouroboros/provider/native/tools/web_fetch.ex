@@ -7,8 +7,8 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
 
     * **GET only, `http` or `https` only.** No other method and no other scheme, so the
       tool cannot be turned into a `POST` of the workspace to somewhere.
-    * **No redirect off the host that was permitted.** `:httpc` is called with
-      `autoredirect: false` and this module follows a `3xx` only while the host is
+    * **No redirect off the host that was permitted.** Mint is called with no
+      automatic follow, and this module follows a `3xx` only while the host is
       unchanged, at most #{3} times. A redirect that crosses hosts is reported with the
       new URL and *not* followed: the new host was never evaluated by the permission
       engine, and following it would turn one allowed domain into an open proxy. The
@@ -20,9 +20,11 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
       IPv6 unique-local; `localhost`, `*.local`, and cloud metadata names are refused
       before lookup. Domain rules still match the hostname; this is the address gate
       those rules cannot see. Residual DNS-rebinding between this lookup and
-      `:httpc`'s own connect is documented on `WebFetch.Target`.
-    * **One mebibyte, fifteen seconds.** The body is read with a cap and the request
-      with a deadline; both are stated in the result when they bite.
+      Mint's own connect is documented on `WebFetch.Target`.
+    * **One mebibyte, fifteen seconds.** The body is *streamed* — including redirects
+      and error responses — and the transfer is cancelled at the cap, so the bound is
+      on this node's memory and not only on what the model is shown; the request
+      carries a deadline as well. Both are stated in the result when they bite.
 
   The permission evaluation happens in `Ouroboros.Provider.Native.Loop`'s gate, before
   this module runs at all, because `Ouroboros.Provider.Native.Tools.classify/3` reports
@@ -120,33 +122,22 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     end
   end
 
+  # The cap bounds memory, not just the answer. A synchronous request hands back a body
+  # that is already resident, so a multi-gigabyte response from a permitted host is a
+  # node the operator loses — fifteen seconds is a bound on time and says nothing about
+  # volume. Mint streams every status the same way: 2xx up to `max_bytes`, 4xx/5xx up to
+  # two kilobytes, 3xx stop at the headers so a redirect is not a vehicle for a body.
   defp request_uri(%URI{} = uri, max_bytes, remaining, context) do
-    request = {String.to_charlist(URI.to_string(uri)), [{~c"user-agent", ~c"ouroboros-native"}]}
+    case connect(uri) do
+      {:ok, conn} ->
+        case Mint.HTTP.request(conn, "GET", request_path(uri), request_headers(), nil) do
+          {:ok, conn, ref} ->
+            await(conn, ref, uri, max_bytes, remaining, context)
 
-    http_options = [
-      timeout: @timeout_ms,
-      connect_timeout: @timeout_ms,
-      autoredirect: false,
-      ssl: ssl_options(uri.host)
-    ]
-
-    case :httpc.request(:get, request, http_options, body_format: :binary) do
-      {:ok, {{_version, status, _phrase}, headers, body}} when status in 200..299 ->
-        {:ok,
-         %{
-           url: URI.to_string(uri),
-           status: status,
-           content_type: header(headers, "content-type"),
-           body: clamp(body, max_bytes),
-           truncated?: byte_size(body) > max_bytes
-         }}
-
-      {:ok, {{_version, status, _phrase}, headers, _body}} when status in 300..399 ->
-        redirect(uri, header(headers, "location"), max_bytes, remaining, context)
-
-      {:ok, {{_version, status, phrase}, _headers, body}} ->
-        {:error,
-         {:http_status, URI.to_string(uri), status, to_string(phrase), clamp(body, 2_000)}}
+          {:error, conn, reason} ->
+            close(conn)
+            {:error, {:request_failed, reason}}
+        end
 
       {:error, reason} ->
         {:error, {:request_failed, reason}}
@@ -155,6 +146,208 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     error -> {:error, {:request_failed, Exception.message(error)}}
   catch
     :exit, reason -> {:error, {:request_failed, reason}}
+  end
+
+  defp connect(%URI{} = uri) do
+    {scheme, port} = scheme_port(uri)
+    Mint.HTTP.connect(scheme, uri.host, port, connect_opts(scheme, uri.host))
+  end
+
+  defp scheme_port(%URI{scheme: "https", port: port}), do: {:https, port || 443}
+  defp scheme_port(%URI{scheme: "http", port: port}), do: {:http, port || 80}
+
+  defp connect_opts(:https, host), do: [timeout: @timeout_ms, transport_opts: ssl_options(host)]
+  defp connect_opts(:http, _host), do: [timeout: @timeout_ms]
+
+  defp request_headers, do: [{"user-agent", "ouroboros-native"}]
+
+  defp request_path(%URI{path: path, query: query}) do
+    path = if path in [nil, ""], do: "/", else: path
+    if is_binary(query) and query != "", do: path <> "?" <> query, else: path
+  end
+
+  defp await(conn, ref, uri, max_bytes, remaining, context) do
+    deadline = System.monotonic_time(:millisecond) + @timeout_ms
+
+    collect(conn, ref, uri, max_bytes, remaining, context, deadline, %{
+      status: nil,
+      headers: [],
+      chunks: [],
+      size: 0
+    })
+  end
+
+  defp collect(conn, ref, uri, max_bytes, remaining, context, deadline, acc) do
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      message ->
+        case Mint.HTTP.stream(conn, message) do
+          :unknown ->
+            collect(conn, ref, uri, max_bytes, remaining, context, deadline, acc)
+
+          {:ok, conn, responses} ->
+            handle_responses(
+              responses,
+              conn,
+              ref,
+              uri,
+              max_bytes,
+              remaining,
+              context,
+              deadline,
+              acc
+            )
+
+          {:error, conn, reason, _responses} ->
+            close(conn)
+            {:error, {:request_failed, reason}}
+        end
+    after
+      timeout ->
+        close(conn)
+        {:error, {:request_failed, :timeout}}
+    end
+  end
+
+  defp handle_responses([], conn, ref, uri, max_bytes, remaining, context, deadline, acc) do
+    collect(conn, ref, uri, max_bytes, remaining, context, deadline, acc)
+  end
+
+  defp handle_responses(
+         [response | rest],
+         conn,
+         ref,
+         uri,
+         max_bytes,
+         remaining,
+         context,
+         deadline,
+         acc
+       ) do
+    case step(response, ref, acc, max_bytes) do
+      {:continue, acc} ->
+        handle_responses(rest, conn, ref, uri, max_bytes, remaining, context, deadline, acc)
+
+      {:redirect, headers} ->
+        close(conn)
+        redirect(uri, header(headers, "location"), max_bytes, remaining, context)
+
+      {:done, acc} ->
+        close(conn)
+        finish(uri, acc, max_bytes, true)
+
+      {:capped, acc} ->
+        close(conn)
+        finish(uri, acc, max_bytes, false)
+
+      {:error, reason} ->
+        close(conn)
+        {:error, reason}
+    end
+  end
+
+  defp step({:status, ref, status}, ref, acc, _max_bytes),
+    do: {:continue, %{acc | status: status}}
+
+  defp step({:headers, ref, headers}, ref, acc, _max_bytes) do
+    acc = %{acc | headers: acc.headers ++ headers}
+
+    if acc.status in 300..399 do
+      {:redirect, acc.headers}
+    else
+      {:continue, acc}
+    end
+  end
+
+  defp step({:data, ref, chunk}, ref, acc, max_bytes) when is_binary(chunk) do
+    cap = body_cap(acc.status, max_bytes)
+    remaining = max(cap - acc.size, 0)
+    take = min(byte_size(chunk), remaining)
+
+    acc =
+      if take > 0 do
+        kept = if take == byte_size(chunk), do: chunk, else: binary_part(chunk, 0, take)
+        %{acc | chunks: [kept | acc.chunks], size: acc.size + take}
+      else
+        acc
+      end
+
+    if acc.size >= cap or take < byte_size(chunk) do
+      {:capped, acc}
+    else
+      {:continue, acc}
+    end
+  end
+
+  defp step({:done, ref}, ref, acc, _max_bytes), do: {:done, acc}
+
+  defp step({:error, ref, reason}, ref, _acc, _max_bytes), do: {:error, {:request_failed, reason}}
+
+  defp step(_other, _ref, acc, _max_bytes), do: {:continue, acc}
+
+  defp body_cap(status, max_bytes) when is_integer(status) and status in 200..299, do: max_bytes
+  defp body_cap(status, _max_bytes) when is_integer(status) and status in 300..399, do: 0
+  defp body_cap(_status, _max_bytes), do: 2_000
+
+  defp finish(uri, acc, max_bytes, ended?) do
+    body = acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
+    status = acc.status || 0
+
+    cond do
+      status in 200..299 ->
+        {:ok,
+         streamed(
+           uri,
+           status,
+           acc.headers,
+           clamp(body, max_bytes),
+           truncated?(acc.headers, acc.size, max_bytes, ended?)
+         )}
+
+      status in 300..399 ->
+        {:error, :redirect_without_location}
+
+      true ->
+        {:error, {:http_status, URI.to_string(uri), status, "", clamp(body, 2_000)}}
+    end
+  end
+
+  defp streamed(uri, status, headers, body, truncated?) do
+    %{
+      url: URI.to_string(uri),
+      status: status,
+      content_type: header(headers, "content-type"),
+      body: body,
+      truncated?: truncated?
+    }
+  end
+
+  # `content-length` is the server's word and is optional, so it never bounds the read —
+  # the streaming cap does that. It is used only to make the note precise: a body cut at
+  # the cap with no declared length is reported as truncated, which errs towards telling
+  # the model that something was left behind.
+  defp truncated?(_headers, size, max_bytes, true), do: size > max_bytes
+
+  defp truncated?(headers, size, max_bytes, false) do
+    case declared_length(headers) do
+      length when is_integer(length) -> length > max_bytes
+      nil -> size >= max_bytes
+    end
+  end
+
+  defp declared_length(headers) do
+    with value when is_binary(value) <- header(headers, "content-length"),
+         {length, _rest} when length >= 0 <- Integer.parse(String.trim(value)) do
+      length
+    else
+      _unstated -> nil
+    end
+  end
+
+  defp close(conn) do
+    _ = Mint.HTTP.close(conn)
+    :ok
   end
 
   defp redirect(_uri, nil, _max_bytes, _remaining, _context),
@@ -177,8 +370,9 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     _error -> {:error, :redirect_without_location}
   end
 
-  # Certificate verification is on and the CA bundle is the host's own. `:httpc`'s
-  # default is `verify_none`, which would make `https` decorative.
+  # Certificate verification is on and the CA bundle is the host's own. Mint's
+  # default is `verify_peer` when `cacerts` is set; omitting them would make
+  # `https` decorative.
   defp ssl_options(host) do
     [
       verify: :verify_peer,

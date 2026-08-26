@@ -3,13 +3,32 @@ defmodule Ouroboros.Orchestration.Scheduler do
   Durable dependency scheduler with explicit execution leases.
 
   The scheduler persists every state transition before invoking an executor.
-  Runtime owner PIDs and monitors remain private. If a scheduler or owner dies,
-  `:running` steps become `:ready` and are offered again with the same durable
-  token, allowing an adapter to reconnect instead of starting duplicate work.
+  Runtime owner PIDs and monitors remain private. A `:running` step whose owner is
+  gone becomes `:ready` and is offered again, and how it is offered depends on what
+  the scheduler actually knows:
+
+    * The owner's monitor fired, so the owner is *proven dead*. The step keeps its
+      durable token and attempt, and the executor may reconnect to the work that
+      token names.
+    * The scheduler itself restarted, so every owner's liveness is *unknown*: they
+      were spawned unlinked and may still be running. The token is cleared, and the
+      next claim mints a new one and bumps the attempt. The old owner's eventual
+      report is then refused as `:stale_execution_token` rather than accepted as the
+      new attempt's outcome, and executors that must not duplicate work key their
+      idempotency off `{plan_id, step_id}` rather than off token identity.
 
   Failure is fail-fast: descendants become `:blocked`; other unfinished work is
   cancelled, and running sibling executions receive the optional asynchronous
   executor cancellation callback.
+
+  ## The one retryable failure
+
+  Fail-fast has a single, named exception. An executor that refuses because a
+  *previous* attempt of the same step has not settled yet — `:forge_deploy_in_flight`
+  is the one reason that says so — is describing ambiguity that time can resolve, not
+  a plan that cannot finish. Such a step goes back to `:ready` with a fresh token
+  after `:step_retry_delay`, up to `:step_retry_attempts` claims in total; the last
+  refusal fails the plan exactly as before. Nothing else is retried.
 
   ## Heterogeneous plans
 
@@ -35,6 +54,8 @@ defmodule Ouroboros.Orchestration.Scheduler do
   alias Ouroboros.Orchestration.{Execution, Plan, Serializable, Step, Store}
 
   @default_cancel_timeout 5_000
+  @default_step_retry_attempts 3
+  @default_step_retry_delay 250
   @terminal_states [:completed, :failed, :cancelled, :blocked]
 
   @type server :: GenServer.server()
@@ -116,6 +137,10 @@ defmodule Ouroboros.Orchestration.Scheduler do
          {:ok, max_concurrency} <- positive_integer(Keyword.get(opts, :max_concurrency, 4)),
          {:ok, cancel_timeout} <-
            positive_integer(Keyword.get(opts, :cancel_timeout, @default_cancel_timeout)),
+         {:ok, retry_attempts} <-
+           positive_integer(Keyword.get(opts, :step_retry_attempts, @default_step_retry_attempts)),
+         {:ok, retry_delay} <-
+           non_negative_integer(Keyword.get(opts, :step_retry_delay, @default_step_retry_delay)),
          {:ok, executors} <-
            normalize_executors(Keyword.get(opts, :executors), Keyword.get(opts, :executor)),
          store <- Keyword.get(opts, :store, Store),
@@ -127,9 +152,12 @@ defmodule Ouroboros.Orchestration.Scheduler do
         callback_server: callback_server,
         max_concurrency: max_concurrency,
         cancel_timeout: cancel_timeout,
+        retry_attempts: retry_attempts,
+        retry_delay: retry_delay,
         executors: executors,
         owner_refs: %{},
         owners: %{},
+        deferred: MapSet.new(),
         cancellation_ops: %{},
         cancellation_refs: %{}
       }
@@ -223,9 +251,15 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
     with {:ok, plan} <- fetch_plan(state.store, plan_id),
          {:ok, step} <- fetch_step(plan, step_id),
-         {:ok, updated_plan, transition, cancellations} <- fail_step(plan, step, token, reason),
+         {:ok, updated_plan, transition, cancellations} <-
+           fail_step(plan, step, token, reason, state.retry_attempts),
          :ok <- persist_if_changed(state.store, plan, updated_plan) do
-      state = if transition == :changed, do: clear_owner(state, plan_id, step_id), else: state
+      state =
+        if transition in [:changed, :retry],
+          do: clear_owner(state, plan_id, step_id),
+          else: state
+
+      state = if transition == :retry, do: defer_retry(state, plan_id, step_id), else: state
       state = clear_cancelled_owners(state, cancellations)
       state = launch_cancellations(state, cancellations)
       state = dispatch_available(state)
@@ -273,6 +307,11 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
+  def handle_info({:retry_step, plan_id, step_id}, state) do
+    state = %{state | deferred: MapSet.delete(state.deferred, {plan_id, step_id})}
+    {:noreply, dispatch_available(state)}
+  end
+
   def handle_info({:cancel_result, operation_id, result}, state) do
     case Map.get(state.cancellation_ops, operation_id) do
       nil ->
@@ -316,7 +355,9 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
   defp dispatch_available(state) do
     if running_count(state.store) < state.max_concurrency do
-      case Enum.find(ready_steps(state.store), fn {_plan, step} -> executable?(state, step) end) do
+      case Enum.find(ready_steps(state.store), fn {plan, step} ->
+             executable?(state, step) and not deferred?(state, plan.id, step.id)
+           end) do
         nil -> state
         {plan, step} -> dispatch_step(state, plan, step)
       end
@@ -326,6 +367,17 @@ defmodule Ouroboros.Orchestration.Scheduler do
   end
 
   defp executable?(state, step), do: Map.has_key?(state.executors, step.kind)
+
+  defp deferred?(state, plan_id, step_id),
+    do: MapSet.member?(state.deferred, {plan_id, step_id})
+
+  # A step waiting out the previous attempt it collided with is `:ready` durably —
+  # a manual claim or a restarted scheduler may take it — but this scheduler leaves
+  # it alone until its timer says the collision has had time to clear.
+  defp defer_retry(state, plan_id, step_id) do
+    Process.send_after(self(), {:retry_step, plan_id, step_id}, state.retry_delay)
+    %{state | deferred: MapSet.put(state.deferred, {plan_id, step_id})}
+  end
 
   defp dispatch_step(state, plan, step) do
     executor = Map.fetch!(state.executors, step.kind)
@@ -361,10 +413,15 @@ defmodule Ouroboros.Orchestration.Scheduler do
     step = Map.fetch!(plan.steps, execution.step_id)
     reason = {:executor_start_failed, Serializable.safe(reason)}
 
-    case fail_step(plan, step, execution.token, reason) do
-      {:ok, failed_plan, :changed, cancellations} ->
+    case fail_step(plan, step, execution.token, reason, state.retry_attempts) do
+      {:ok, failed_plan, transition, cancellations} when transition in [:changed, :retry] ->
         case Store.put(state.store, failed_plan) do
           :ok ->
+            state =
+              if transition == :retry,
+                do: defer_retry(state, execution.plan_id, execution.step_id),
+                else: state
+
             state
             |> clear_cancelled_owners(cancellations)
             |> launch_cancellations(cancellations)
@@ -446,7 +503,7 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
-  defp fail_step(plan, step, token, reason) do
+  defp fail_step(plan, step, token, reason, retry_attempts) do
     cond do
       step.state == :failed and step.execution_token == token and step.error == reason ->
         {:ok, plan, :idempotent, []}
@@ -459,6 +516,17 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
       is_nil(step.execution_token) or step.execution_token != token ->
         {:error, :stale_execution_token}
+
+      retryable?(reason) and step.attempt < retry_attempts ->
+        retried = %{
+          step
+          | state: :ready,
+            execution_token: nil,
+            error: reason,
+            started_at: nil
+        }
+
+        {:ok, update_step(plan, retried), :retry, []}
 
       true ->
         now = System.system_time(:millisecond)
@@ -506,6 +574,13 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
+  # An attempt that collided with a previous, unsettled attempt of the same step is the
+  # one failure that time can resolve. It is named exactly, wrapper included, so that
+  # nothing else acquires a retry by resembling one.
+  defp retryable?({:forge_deploy_in_flight, _module, _artifact_id}), do: true
+  defp retryable?({:executor_start_failed, reason}), do: retryable?(reason)
+  defp retryable?(_reason), do: false
+
   defp cancel_plan(%Plan{status: :cancelled} = plan, _reason), do: {:ok, plan, []}
 
   defp cancel_plan(%Plan{status: status}, _reason) when status in [:completed, :failed, :blocked],
@@ -538,8 +613,13 @@ defmodule Ouroboros.Orchestration.Scheduler do
     {:ok, plan, Enum.reverse(cancellations)}
   end
 
+  # A `:ready` step that has been claimed before may still have an owner somewhere:
+  # either the token it kept names it, or a scheduler restart cleared that token and
+  # only the attempt count remembers. Both are asked to cancel; a step nobody has
+  # claimed yet has nothing to cancel.
   defp cancel_step(plan, step, reason, now) do
-    execution_active? = step.state == :running or is_binary(step.execution_token)
+    execution_active? =
+      step.state == :running or is_binary(step.execution_token) or step.attempt > 0
 
     cancellation = %{
       status: if(execution_active?, do: :pending, else: :not_required),
@@ -796,7 +876,6 @@ defmodule Ouroboros.Orchestration.Scheduler do
               step = Map.fetch!(plan.steps, id),
               step.state == :cancelled,
               match?(%{status: :pending}, step.cancellation),
-              is_binary(step.execution_token),
               do: execution_from(plan, step, true)
 
         launch_cancellations(state, executions)
@@ -806,6 +885,11 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
+  # A scheduler that just started knows nothing about the owners the previous one
+  # spawned: they were unlinked and may still be running. Clearing the token is what
+  # makes that honest — the next claim is a new attempt with a new token, and anything
+  # the old owner eventually reports is refused as stale rather than mistaken for this
+  # attempt's outcome.
   defp recover_running(plans, store) do
     Enum.reduce_while(plans, :ok, fn plan, :ok ->
       running? = Enum.any?(plan.steps, fn {_id, step} -> step.state == :running end)
@@ -814,7 +898,14 @@ defmodule Ouroboros.Orchestration.Scheduler do
         steps =
           Map.new(plan.steps, fn {id, step} ->
             if step.state == :running do
-              {id, %{step | state: :ready, started_at: nil, error: :scheduler_recovered}}
+              {id,
+               %{
+                 step
+                 | state: :ready,
+                   execution_token: nil,
+                   started_at: nil,
+                   error: :scheduler_recovered
+               }}
             else
               {id, step}
             end
@@ -966,6 +1057,9 @@ defmodule Ouroboros.Orchestration.Scheduler do
 
   defp positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp positive_integer(_value), do: {:error, :expected_positive_integer}
+
+  defp non_negative_integer(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp non_negative_integer(_value), do: {:error, :expected_non_negative_integer}
 
   defp validate_options(opts) do
     if Keyword.keyword?(opts), do: :ok, else: {:error, :invalid_options}

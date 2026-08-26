@@ -501,6 +501,48 @@ fn the_plain_page_states_every_server_and_every_refusal() {
     assert!(!page.to_lowercase().contains("token="), "{page}");
 }
 
+/// An MCP server is a command line somebody wrote into a file, and its `broken_reason` is
+/// whatever that process printed. The page is written to stdout as it stands, so none of
+/// it may reach the terminal as an escape sequence.
+#[test]
+fn the_plain_page_carries_no_control_characters_out_of_the_runtime() {
+    let list = McpList::decode(&json!({
+        "enabled": true,
+        "node": "core@\u{1b}[2K",
+        "protocol_version": "2025-06-18\u{7}",
+        "transports": ["stdio\u{1b}]0;pwned\u{7}"],
+        "servers": [{
+            "name": "fake\u{1b}[31m",
+            "state": "broken\u{9b}4m",
+            "scope": "user",
+            "command": "./bin/\u{1b}[Afake",
+            "args": ["--stdio\u{7}"],
+            "source": "/w/.ouroboros/mcp.json\u{1b}[K",
+            "broken_reason": "exited 1\u{1b}]0;pwned\u{7}",
+            "tool_names": ["mcp__fake__read\u{1b}[m"],
+        }],
+        "refusals": [{
+            "name": "remote\u{1b}[7m",
+            "reason": "unsupported_transport\u{7}",
+            "detail": "HTTP/SSE is not served\u{1b}[2J",
+        }],
+    }));
+
+    let page = mcp_cli::render(&list);
+
+    for forbidden in ['\u{1b}', '\u{7}', '\u{9b}'] {
+        assert!(
+            !page.contains(forbidden),
+            "{forbidden:?} survived into the page: {page:?}"
+        );
+    }
+
+    // Blanked, not dropped: the operator still sees which entry the runtime meant.
+    assert!(page.contains("fake [31m"), "{page:?}");
+    assert!(page.contains("broken: exited 1 ]0;pwned"), "{page:?}");
+    assert!(page.contains("remote [7m"), "{page:?}");
+}
+
 /// `--json` is the runtime's own answer, not a projection this client would have to keep
 /// in step by hand.
 #[test]

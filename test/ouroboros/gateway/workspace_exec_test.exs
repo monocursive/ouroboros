@@ -271,6 +271,38 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
       retire_session(id)
     end
 
+    test "a runner that dies mid-command turns its entry ambiguous",
+         %{id: id, workspace: workspace} do
+      start_session(id, workspace, approval_mode: :auto_approve)
+
+      runner = spawn(fn -> InteractiveSession.exec(id, "sleep 30") end)
+
+      started =
+        wait_until(fn ->
+          case shell_entries(id) do
+            [%{status: :started} = entry] -> entry
+            _other -> false
+          end
+        end)
+
+      # The command runs in the caller's process, so the caller is the entry's runner.
+      # Nobody else can settle it, and the ledger says so without waiting for a reboot.
+      Process.exit(runner, :kill)
+
+      ambiguous =
+        wait_until(fn ->
+          case EffectLedger.get(started.id) do
+            {:ok, %{status: :ambiguous} = entry} -> entry
+            _other -> false
+          end
+        end)
+
+      assert ambiguous.error.classification ==
+               {:effect_runner_exited_before_settlement, :killed}
+
+      retire_session(id)
+    end
+
     test "a failing command settles as failed rather than being lost",
          %{id: id, workspace: workspace} do
       start_session(id, workspace, approval_mode: :auto_approve)

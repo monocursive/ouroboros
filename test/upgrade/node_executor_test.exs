@@ -2,7 +2,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Test.UpgradeCounter
-  alias Ouroboros.Upgrade.{Artifact, Beam, NodeExecutor, Verifier}
+  alias Ouroboros.Upgrade.{Artifact, Beam, NodeExecutor, Verifier, Wire}
 
   defmodule UnrelatedServer do
     @moduledoc false
@@ -729,6 +729,9 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     assert %{mode: :quarantined, quarantine_reason: {:corrupt_checkpoint, :invalid_checkpoint}} =
              NodeExecutor.status(server: server)
 
+    assert {:error, {:journal_unloaded, {:corrupt_checkpoint, :invalid_checkpoint}}} =
+             NodeExecutor.reconcile_quarantine(server: server)
+
     stop_isolated_executor(executor)
 
     Agent.update(controller, fn state ->
@@ -739,6 +742,83 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
 
     assert %{mode: :quarantined, quarantine_reason: {:journal_read_failed, _reason}} =
              NodeExecutor.status(server: server)
+
+    assert {:error, {:journal_unloaded, {:journal_read_failed, _reason}}} =
+             NodeExecutor.reconcile_quarantine(server: server)
+
+    stop_isolated_executor(executor)
+  end
+
+  test "an unreadable checkpoint is never reconciled away nor overwritten" do
+    old_binary = object_code!(UpgradeCounter)
+    new_binary = compile_v2!(old_binary)
+    controller = start_storage_controller!()
+    storage = {ControlledStorage, controller: controller}
+    {server, executor} = start_isolated_executor!(storage)
+    epoch = System.unique_integer([:positive, :monotonic])
+
+    assert {:ok, artifact} =
+             Artifact.build([{UpgradeCounter, new_binary, old_binary: old_binary}], epoch: epoch)
+
+    assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
+    assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
+
+    committed = stored_checkpoint(controller)
+    assert committed.last_epoch == epoch
+    assert Map.has_key?(committed.receipts, receipt.id)
+
+    stop_isolated_executor(executor)
+    Agent.update(controller, &%{&1 | get_result: {:error, :permission_denied}})
+    {^server, executor} = start_isolated_executor!(storage, server)
+
+    # The placeholder journal this executor came up on satisfies every reconciliation
+    # check vacuously, so reconciliation has to refuse on the read failure itself.
+    assert %{mode: :quarantined, last_epoch: 0, rollback_receipts: []} =
+             NodeExecutor.status(server: server)
+
+    assert {:error, {:journal_unloaded, {:journal_read_failed, _reason}}} =
+             NodeExecutor.reconcile_quarantine(server: server)
+
+    preserved = stored_checkpoint(controller)
+    assert preserved.last_epoch == epoch
+    assert Map.has_key?(preserved.receipts, receipt.id)
+
+    stop_isolated_executor(executor)
+    Agent.update(controller, &%{&1 | get_result: :checkpoint})
+    {^server, executor} = start_isolated_executor!(storage, server)
+
+    # The replay defence survived, because the record it reads did.
+    assert %{mode: :ready, last_epoch: ^epoch} = NodeExecutor.status(server: server)
+
+    assert {:error, {:stale_epoch, ^epoch, ^epoch}} =
+             NodeExecutor.prepare(artifact, server: server)
+
+    stop_isolated_executor(executor)
+  end
+
+  test "the journal keeps one expectation per module however often it is patched" do
+    old_binary = object_code!(UpgradeCounter)
+    storage = unique_ets_storage()
+    {server, executor} = start_isolated_executor!(storage)
+
+    for _round <- 1..3 do
+      new_binary = compile_v2!(old_binary)
+
+      assert {:ok, artifact} =
+               Artifact.build([{UpgradeCounter, new_binary, old_binary: old_binary}],
+                 epoch: System.unique_integer([:positive, :monotonic])
+               )
+
+      assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
+      assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
+      assert :ok = NodeExecutor.rollback(receipt, server: server)
+    end
+
+    # Expectations are keyed by module and replaced, not appended: the map is bounded by
+    # how many distinct modules this node has patched, not by how often.
+    journal = :sys.get_state(executor).journal
+    assert Map.keys(journal.expected_modules) == [UpgradeCounter]
+    assert journal.receipts == %{}
 
     stop_isolated_executor(executor)
   end
@@ -1085,7 +1165,7 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
 
     assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
     assert is_binary(token)
-    assert Agent.get(controller, & &1.checkpoint).reservations != %{}
+    assert stored_checkpoint(controller).reservations != %{}
     assert :ok = NodeExecutor.abort(token, server: server)
     stop_isolated_executor(executor)
   end
@@ -1212,8 +1292,13 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
 
     # The write-ahead record was the only durable copy of the preimages. A failure that
     # left code mutated must not be the thing that deletes them.
+    # Module names cross the checkpoint boundary as binaries, so the VM that reads this
+    # record back does not have to have interned the name to decode it.
     retained = retained_commit_operation!(storage)
-    assert [%{module: UpgradeCounter, old_binary: ^old_binary}] = retained.artifact.modules
+
+    assert [%{module: "Elixir.Ouroboros.Test.UpgradeCounter", old_binary: ^old_binary}] =
+             retained.artifact.modules
+
     assert Enum.map(retained.migrations, & &1.pid) == [first, second]
 
     executor = restart_isolated_executor!(server, executor, storage)
@@ -1377,7 +1462,8 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
 
   defp retained_commit_operation!({adapter, adapter_opts}) do
     key = {:ouroboros, :upgrade_node_executor, node()}
-    assert {:ok, journal} = adapter.get_checkpoint(key, adapter_opts)
+    assert {:ok, wire} = adapter.get_checkpoint(key, adapter_opts)
+    journal = Wire.load(wire)
 
     assert operation =
              Enum.find(
@@ -1647,6 +1733,12 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
   end
 
   defp assert_persisted_quarantine(controller) do
-    assert Agent.get(controller, & &1.checkpoint).mode == :quarantined
+    assert stored_checkpoint(controller).mode == :quarantined
+  end
+
+  defp stored_checkpoint(controller) do
+    controller
+    |> Agent.get(& &1.checkpoint)
+    |> Wire.load()
   end
 end

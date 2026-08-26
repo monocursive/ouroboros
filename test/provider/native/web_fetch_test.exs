@@ -14,6 +14,11 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
   alias Ouroboros.Provider.Native.Tools.WebFetch
   alias Ouroboros.Provider.Native.Tools.WebFetch.Target
 
+  # How far the endless listener below will go before it gives up on its own. A tool that
+  # reads the whole body reaches this; one that cancels at its cap stops the server long
+  # before it.
+  @endless_bytes 4_000_000
+
   setup do
     root = Path.join(System.tmp_dir!(), "native-fetch-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
@@ -66,6 +71,35 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
     end
   end
 
+  # A listener whose handler writes to the socket itself, so a test can keep sending after
+  # the cap and observe whether the tool stopped the transfer or read all of it.
+  defp listen_raw(handler) do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(socket)
+
+    pid = spawn_link(fn -> serve_raw(socket, handler) end)
+
+    on_exit(fn ->
+      Process.exit(pid, :kill)
+      :gen_tcp.close(socket)
+    end)
+
+    port
+  end
+
+  defp serve_raw(socket, handler) do
+    case :gen_tcp.accept(socket) do
+      {:ok, client} ->
+        _request = read_request(client, "")
+        handler.(client)
+        :gen_tcp.close(client)
+        serve_raw(socket, handler)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
   defp response(status, headers, body) do
     head =
       "HTTP/1.1 #{status} X\r\n" <>
@@ -74,6 +108,17 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
 
     head <> body
   end
+
+  # No `Content-Length` and no end: bytes until the peer goes away, which is the shape the
+  # cap exists to bound.
+  defp push(client, chunk, sent) when sent < @endless_bytes do
+    case :gen_tcp.send(client, chunk) do
+      :ok -> push(client, chunk, sent + byte_size(chunk))
+      {:error, _gone} -> sent
+    end
+  end
+
+  defp push(_client, _chunk, sent), do: sent
 
   defp fetch(port, path, context, extra \\ %{}) do
     context = Map.put(context, :web_fetch_allow_loopback, true)
@@ -126,7 +171,8 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       result = fetch(port, "/missing", context)
 
       assert result.is_error
-      assert result.output =~ "HTTP 404 X from http://127.0.0.1:#{port}/missing"
+      assert result.output =~ "HTTP 404"
+      assert result.output =~ "from http://127.0.0.1:#{port}/missing"
       assert result.output =~ "The server was reached"
       assert result.output =~ "Verify the exact path and version/ref"
       assert result.output =~ "do not retry the unchanged URL"
@@ -140,9 +186,9 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       result = fetch(port, "/unavailable", context)
 
       assert result.is_error
-
-      assert result.output ==
-               "HTTP 503 X from http://127.0.0.1:#{port}/unavailable. try later"
+      assert result.output =~ "HTTP 503"
+      assert result.output =~ "from http://127.0.0.1:#{port}/unavailable"
+      assert result.output =~ "try later"
 
       refute result.output =~ "web_fetch failed"
     end
@@ -156,6 +202,62 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       refute result.is_error
       assert result.output =~ "body truncated at the byte cap"
       assert byte_size(result.output) < 5_000
+    end
+
+    # The cap has to bound this node's memory, not only what the model is shown. A
+    # synchronous request hands back a body that is already resident, and a body with no
+    # declared length has nothing but the fifteen-second deadline standing between it and
+    # the whole heap.
+    test "a body with no declared length is stopped at the cap, not buffered", %{
+      context: context
+    } do
+      caller = self()
+      chunk = String.duplicate("a", 8_000)
+
+      port =
+        listen_raw(fn client ->
+          :gen_tcp.send(
+            client,
+            "HTTP/1.1 200 X\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+          )
+
+          send(caller, {:sent, push(client, chunk, 0)})
+        end)
+
+      result = fetch(port, "/endless", context, %{"max_bytes" => 20_000})
+
+      refute result.is_error
+      assert result.output =~ "body truncated at the byte cap"
+      assert byte_size(result.output) < 40_000
+
+      # The transfer was cancelled: the server could not keep pushing into a request the
+      # tool had stopped reading.
+      assert_receive {:sent, sent}, 10_000
+      assert sent < @endless_bytes, "the whole body arrived (#{sent} bytes) before the cap bit"
+    end
+
+    test "a 404 body with no declared length is stopped at the error cap, not buffered", %{
+      context: context
+    } do
+      caller = self()
+      chunk = String.duplicate("a", 8_000)
+
+      port =
+        listen_raw(fn client ->
+          :gen_tcp.send(client, "HTTP/1.1 404 X\r\nConnection: close\r\n\r\n")
+          send(caller, {:sent, push(client, chunk, 0)})
+        end)
+
+      result = fetch(port, "/missing-endless", context)
+
+      assert result.is_error
+      assert result.output =~ "HTTP 404"
+      refute result.output =~ String.duplicate("a", 3_000)
+
+      assert_receive {:sent, sent}, 10_000
+
+      assert sent < @endless_bytes,
+             "the whole 404 body arrived (#{sent} bytes) before the cap bit"
     end
   end
 
@@ -196,6 +298,31 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
 
       assert result.is_error
       assert result.output =~ "redirects on one host"
+    end
+
+    test "a redirect body is not materialised before the Location is followed", %{
+      context: context
+    } do
+      caller = self()
+      chunk = String.duplicate("a", 8_000)
+
+      port =
+        listen_raw(fn client ->
+          :gen_tcp.send(
+            client,
+            "HTTP/1.1 302 X\r\nLocation: /finish\r\nConnection: close\r\n\r\n"
+          )
+
+          send(caller, {:sent, push(client, chunk, 0)})
+        end)
+
+      result = fetch(port, "/start", context)
+
+      # The follow of `/finish` fails because this listener never answers a second request;
+      # what matters is that the 302 body did not arrive whole first.
+      assert result.is_error
+      assert_receive {:sent, sent}, 10_000
+      assert sent < @endless_bytes, "the whole 302 body arrived (#{sent} bytes) before the close"
     end
 
     test "a redirect with no Location is refused", %{context: context} do

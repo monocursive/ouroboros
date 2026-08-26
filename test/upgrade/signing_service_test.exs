@@ -4,7 +4,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
   alias Ouroboros.Storage.DurableFile
   alias Ouroboros.Upgrade.Forge
   alias Ouroboros.Upgrade.Forge.{Signer, Source}
-  alias Ouroboros.Upgrade.Signing.{Policy, Service}
+  alias Ouroboros.Upgrade.Signing.{Journal, Policy, Service}
   alias Ouroboros.Upgrade.{Artifact, Beam, Verifier}
 
   @capability Ouroboros.Capability.SignedByService
@@ -327,10 +327,10 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert_received {:journal_write, :before_rename}
 
       # And the entry is on disk, readable by anything that can read the adapter.
-      assert {:ok, journal} =
+      assert {:ok, wire} =
                DurableFile.get_checkpoint(Service.checkpoint_key(), path: directory)
 
-      assert [%{decision: :issued}] = journal.decisions
+      assert [%{decision: :issued}] = Journal.from_wire(wire).decisions
     end
 
     test "a journal that will not accept the entry is a refusal to sign" do

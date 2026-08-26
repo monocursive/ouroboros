@@ -70,6 +70,18 @@ fn text_event(sequence: u64, kind: &str, text: &str) -> Value {
     event(sequence, kind, Some(TURN), json!({ "text": text }))
 }
 
+fn approval_event(sequence: u64, kind: &str, turn: Option<&str>, request_id: &str) -> Value {
+    let mut approval = event(
+        sequence,
+        kind,
+        turn,
+        json!({ "tool_call": { "name": "exec_command", "command": "ls" } }),
+    );
+
+    approval["request_id"] = Value::String(request_id.to_string());
+    approval
+}
+
 fn start_plan(prompt: &str) -> Plan {
     let request = StartRequest {
         id: SESSION.to_string(),
@@ -1342,7 +1354,173 @@ async fn a_hole_no_lagged_frame_explained_is_replayed_too() {
     assert_eq!(sequences, vec![1, 2, 3, 4], "{:#?}", ran.lines());
 }
 
+/// A replay that answers above the hole proves the events under it are gone, and the
+/// cursor jumps past them. Anything this run was already holding below the new cursor is
+/// then history too — and it has to be let go of. Held, it would sit at the head of the
+/// pending window forever: every later event would look like a gap, spend a resync round
+/// on a hole that is already closed, and say so on stderr until the budget ran out.
+#[tokio::test]
+async fn a_pruned_replay_lets_go_of_the_events_the_cursor_jumped_over() {
+    let mut options = options(Output::StreamJson);
+    // Short: a regression here stalls the stream, and it should say so quickly.
+    options.timeout = Duration::from_secs(4);
+
+    let ran = run_against(start_plan("do the thing"), options, |mut peer| {
+        tokio::spawn(async move {
+            accept_start(&mut peer, json!([])).await;
+
+            // Nine events above the cursor: a hole with nothing to announce it.
+            peer.notify(
+                "interactive.event",
+                json!({ "id": SESSION, "event": text_event(10, "output_text_delta", "ten") }),
+            )
+            .await;
+
+            let replay = peer.request_for("interactive.replay").await;
+            assert_eq!(replay["params"]["cursor"], 0);
+            // The retained window starts at 20. Everything below it is gone, event 10
+            // included — it was buffered here, never printed, and never will be.
+            peer.result(
+                &replay["id"],
+                json!([text_event(20, "output_text_final", "twenty")]),
+            )
+            .await;
+
+            peer.notify(
+                "interactive.event",
+                json!({
+                    "id": SESSION,
+                    "event": event(21, "turn_completed", Some(TURN), json!({})),
+                }),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let report = ran.report();
+    assert_eq!(report.status, Status::Completed);
+    assert_eq!(report.text, "twenty");
+
+    let sequences: Vec<u64> = ran
+        .objects()
+        .iter()
+        .filter_map(|object| object["sequence"].as_u64())
+        .collect();
+
+    assert_eq!(sequences, vec![20, 21], "{:#?}", ran.lines());
+
+    assert!(ran.err.contains("no longer retained"), "{}", ran.err);
+    assert!(
+        !ran.err.contains("still has a gap"),
+        "an event below the new cursor is history, not a gap: {}",
+        ran.err
+    );
+}
+
 // ----- resume ------------------------------------------------------------------------------
+
+/// `--resume` streams a session's retained history, and that history holds approvals.
+///
+/// A question another turn raised, or one the runtime has already retired, is not this
+/// run's to answer — under `--approve-all` least of all, because the answer is written
+/// into the runtime's ledger as a headless approval that nobody asked for. The count
+/// follows the same rule: `approvals.requested` is what this run was asked.
+#[tokio::test]
+async fn a_resumed_run_does_not_re_answer_the_approvals_in_its_history() {
+    let plan = Plan::Resume {
+        session_id: SESSION.to_string(),
+        prompt: "and again".to_string(),
+    };
+
+    let mut options = options(Output::Json);
+    options.approve_all = true;
+    options.timeout = Duration::from_secs(4);
+
+    let ran = run_against(plan, options, |mut peer| {
+        tokio::spawn(async move {
+            peer.hello(SERVES).await;
+
+            let info = peer.request_for("interactive.info").await;
+            peer.result(
+                &info["id"],
+                json!({
+                    "_struct": "Ouroboros.Interactive.State",
+                    "id": SESSION,
+                    "status": "idle",
+                    "provider": "native",
+                    "cursor": 40,
+                }),
+            )
+            .await;
+
+            let subscribe = peer.request_for("interactive.subscribe").await;
+            peer.result(&subscribe["id"], json!([])).await;
+
+            let send = peer.request_for("interactive.send_message").await;
+            let turn = send["params"]["turn_id"]
+                .as_str()
+                .expect("a turn id")
+                .to_string();
+            peer.result(
+                &send["id"],
+                json!({ "id": turn, "status": "running", "harness_turn_id": "turn-C" }),
+            )
+            .await;
+
+            // The gateway drops frames, and the window that repairs the gap reaches back
+            // into turns this run did not send.
+            peer.notify(
+                "stream.lagged",
+                json!({
+                    "id": SESSION,
+                    "plane": "interactive",
+                    "dropped": 7,
+                    "last_sequence": 47,
+                }),
+            )
+            .await;
+
+            let replay = peer.request_for("interactive.replay").await;
+            assert_eq!(replay["params"]["cursor"], 40);
+            peer.result(
+                &replay["id"],
+                json!([
+                    // Another turn's approval, already decided by whoever was there.
+                    approval_event(41, "approval_requested", Some("turn-A"), "req-1"),
+                    approval_event(42, "approval_resolved", Some("turn-A"), "req-1"),
+                    // Another turn's approval, still outstanding. Still not this run's.
+                    approval_event(43, "approval_requested", Some("turn-B"), "req-2"),
+                    // A session-level approval with no turn on it, retired later in this
+                    // same window: read in order it would be answered before its own
+                    // resolution was ever seen.
+                    approval_event(44, "approval_requested", None, "req-3"),
+                    approval_event(45, "approval_resolved", None, "req-3"),
+                    event(
+                        46,
+                        "output_text_final",
+                        Some("turn-C"),
+                        json!({ "text": "done" })
+                    ),
+                    event(47, "turn_completed", Some("turn-C"), json!({})),
+                ]),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let report = ran.report();
+    assert_eq!(report.status, Status::Completed);
+    assert_eq!(report.text, "done");
+    assert_eq!(report.approvals_requested, 0, "{}", ran.err);
+    assert_eq!(report.approvals_answered, 0, "{}", ran.err);
+    assert!(
+        !ran.err.contains("(headless)"),
+        "nothing on this stream was this run's to answer: {}",
+        ran.err
+    );
+}
 
 #[tokio::test]
 async fn resume_subscribes_from_the_sessions_own_cursor_and_prints_only_the_new_turn() {

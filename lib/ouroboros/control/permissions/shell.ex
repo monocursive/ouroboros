@@ -44,8 +44,6 @@ defmodule Ouroboros.Control.Permissions.Shell do
     "stdbuf" => ~w(-i -o -e --input --output --error)
   }
 
-  @redirect_operators ~w(> >> >| 2> 2>> &> &>> 1> 1>>)
-
   @max_command_bytes 8_192
   @max_parts 64
 
@@ -208,6 +206,14 @@ defmodule Ouroboros.Control.Permissions.Shell do
     end
   end
 
+  # `>|` is a clobbering redirect, not a pipe. `@separators` contains `|`, so without
+  # this clause `echo x >| .git/config` splits into `echo x >` and `.git/config` and the
+  # redirect target is never collected at all — the operator was documented and
+  # unreachable.
+  defp do_split(<<">|", rest::binary>>, current, acc, nil) do
+    do_split(rest, current <> ">|", acc, nil)
+  end
+
   defp do_split(binary, current, acc, nil) do
     case Enum.find(@separators, &String.starts_with?(binary, &1)) do
       nil ->
@@ -295,15 +301,23 @@ defmodule Ouroboros.Control.Permissions.Shell do
   end
 
   # `ls>out` and `ls 2>out` are the same redirect as `ls > out`; give the tokeniser a
-  # boundary to see it at.
+  # boundary to see it at. The descriptor group is `\d*`, not `\d?`, so `10>out` is one
+  # operator rather than a `1` glued to a `0>`.
   defp spaced_redirects(sub_command) do
-    Regex.replace(~r/(\d?)(>>|>\||>)/, sub_command, " \\1\\2 ")
+    Regex.replace(~r/(\d*)(>>|>\||>)/, sub_command, " \\1\\2 ")
   end
+
+  # `>`, `>>`, `>|`, and any of them prefixed by the descriptor they apply to: `2>`,
+  # `3>`, `10>>`. A fixed list of operators stopped at descriptor 2, and
+  # `echo pwned 3>.git/config 1>&3` writes a protected file through a rule that only
+  # ever saw `echo`. `>&2` and `1>&3` name a descriptor rather than a file, and are
+  # excluded by their target below rather than here.
+  defp redirect_operator?(token), do: Regex.match?(~r/\A\d*(>>|>\||>)\z/, token)
 
   defp collect_redirects([], acc), do: Enum.reverse(acc)
 
   defp collect_redirects([operator, target | rest], acc) do
-    if operator in @redirect_operators and not String.starts_with?(target, "&") do
+    if redirect_operator?(operator) and not String.starts_with?(target, "&") do
       collect_redirects(rest, [target | acc])
     else
       collect_redirects([target | rest], acc)

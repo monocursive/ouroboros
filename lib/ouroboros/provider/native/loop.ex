@@ -175,6 +175,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     subagent_parent: nil,
     subagent_task_id: nil,
     messages: [],
+    # How many messages this session had before `messages` begins. A resumed session holds
+    # only the tail its checkpoint kept, and the turn manifest counts from the start of the
+    # conversation, so a turn record that wrote `length(messages)` would name a boundary
+    # `rewind` cannot find. See `Ouroboros.Provider.Native.Checkpoint.load/1`.
+    message_offset: 0,
     reads: %{},
     session_grants: MapSet.new(),
     signatures: %{},
@@ -2250,7 +2255,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       end)
 
     case Checkpoint.record_turn(state.session_dir, state.turn_id, entries,
-           message_count: length(state.messages),
+           message_count: state.message_offset + length(state.messages),
            commands: state.turn_commands
          ) do
       {:ok, summary} ->

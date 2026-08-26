@@ -276,6 +276,59 @@ defmodule Ouroboros.TeamReliabilityTest do
     assert :ok = TeamStore.put(%{later | status: :closed, updated_at: Snapshot.timestamp()})
   end
 
+  test "repeated cancellation requests do not multiply the retry rate" do
+    team_id = unique_id("retry-rate-team")
+    worker_id = unique_id("retry-rate-worker")
+    delivered_id = unique_id("retry-rate-delivered")
+    orphan_id = unique_id("retry-rate-orphan")
+
+    assert {:ok, team} = Team.start(id: team_id)
+    assert {:ok, _worker} = Team.add_worker(team, worker_id)
+
+    assert {:ok, _delegation} =
+             Team.delegate(team, worker_id, "deliver before the orphan is injected",
+               id: delivered_id,
+               provider: @provider,
+               workspace: File.cwd!()
+             )
+
+    assert_receive {:ouroboros_test_adapter_started, _run_id, _request, adapter}, 1_000
+    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "delivered"})
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %{delivery: :delivered}} = Team.await(team, delivered_id, 2_000)
+
+    # A delegation whose coding task does not exist: every cancellation propagation
+    # fails, so the retry chain never settles on its own.
+    assert :ok = inject_orphan(team_id, delivered_id, orphan_id)
+
+    monitor = Process.monitor(team)
+    Process.exit(team, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^team, :killed}, 1_000
+    replacement = await_replacement(team_id, team)
+
+    Enum.each(1..5, fn _attempt -> assert :ok = Team.cancel(replacement, orphan_id) end)
+
+    assert_eventually(fn ->
+      match?(
+        %{delivery_error: {:cancellation_propagation_failed, _reason}},
+        Team.state(replacement).delegations[orphan_id]
+      )
+    end)
+
+    # Five asks are one pending retry, not five self-perpetuating chains: a 50ms
+    # retry over a 300ms window is bounded however often it was asked for.
+    :erlang.trace(replacement, true, [:receive])
+    Process.sleep(300)
+    :erlang.trace(replacement, false, [:receive])
+
+    assert count_traced(replacement, {:retry_cancel, orphan_id}) <= 10
+    assert map_size(:sys.get_state(replacement).timers) <= 2
+
+    assert :ok = DynamicSupervisor.terminate_child(Ouroboros.Team.Supervisor, replacement)
+    assert {:ok, snapshot} = TeamStore.get(team_id)
+    assert :ok = TeamStore.put(%{snapshot | status: :closed, updated_at: Snapshot.timestamp()})
+  end
+
   test "durability is reported per adapter and only a synced adapter claims host safety" do
     root = unique_dir("durability")
     on_exit(fn -> File.rm_rf(root) end)
@@ -303,6 +356,38 @@ defmodule Ouroboros.TeamReliabilityTest do
 
     assert :ok = Team.close(synced_team)
     assert :ok = Team.close(unsynced_team)
+  end
+
+  defp inject_orphan(team_id, template_id, orphan_id) do
+    {:ok, snapshot} = TeamStore.get(team_id)
+    now = Snapshot.timestamp()
+
+    orphan = %{
+      snapshot.delegations[template_id]
+      | id: orphan_id,
+        task_ref: TaskRef.new(Snapshot.coding_task_id(team_id, orphan_id)),
+        status: :running,
+        cursor: 0,
+        event_count: 0,
+        last_event: nil,
+        result: nil,
+        error: nil,
+        delivery: :pending,
+        delivery_error: nil,
+        created_at: now,
+        updated_at: now
+    }
+
+    TeamStore.put(%{snapshot | delegations: Map.put(snapshot.delegations, orphan_id, orphan)})
+  end
+
+  defp count_traced(pid, message, count \\ 0) do
+    receive do
+      {:trace, ^pid, :receive, ^message} -> count_traced(pid, message, count + 1)
+      {:trace, ^pid, :receive, _other} -> count_traced(pid, message, count)
+    after
+      0 -> count
+    end
   end
 
   defp start_store(label, storage) do

@@ -391,11 +391,19 @@ defmodule Ouroboros.Provider.Native.Mcp.Pool do
 
   defp claim(state, _key, nil), do: state
 
+  # One monitor per owner, not one per claim. `Map.update/4` would evaluate its initial
+  # value — and therefore `Process.monitor/1` — on every call including the ones that find
+  # the key, and every monitor after the first would be a reference nothing stores and
+  # nothing releases: a leak of one per tool call for the life of the node.
   defp claim(state, key, owner) when is_pid(owner) do
     owners =
-      Map.update(state.owners, owner, %{ref: Process.monitor(owner), keys: MapSet.new([key])}, fn
-        entry -> %{entry | keys: MapSet.put(entry.keys, key)}
-      end)
+      case Map.fetch(state.owners, owner) do
+        {:ok, entry} ->
+          Map.put(state.owners, owner, %{entry | keys: MapSet.put(entry.keys, key)})
+
+        :error ->
+          Map.put(state.owners, owner, %{ref: Process.monitor(owner), keys: MapSet.new([key])})
+      end
 
     case Map.fetch(state.servers, key) do
       {:ok, server} ->
@@ -414,6 +422,7 @@ defmodule Ouroboros.Provider.Native.Mcp.Pool do
   defp owner_down(state, owner) do
     {entry, owners} = Map.pop(state.owners, owner)
     state = %{state | owners: owners}
+    if is_reference(entry.ref), do: Process.demonitor(entry.ref, [:flush])
 
     Enum.reduce(entry.keys, state, fn key, state ->
       case Map.fetch(state.servers, key) do

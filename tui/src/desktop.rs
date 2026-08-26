@@ -3458,7 +3458,8 @@ fn render_transcript_divider(
         .items_center()
         .gap_3()
         .w_full()
-        .max_w(px(760.0))
+        .max_w(px(880.0))
+        .mx_auto()
         .py_2()
         .child(div().h_px().flex_1().bg(tokens.line))
         .child(div().text_xs().text_color(label_color).child(cell.label))
@@ -3501,6 +3502,8 @@ fn render_meta_cell(
         DesktopCellKind::Status => IconName::Info,
         DesktopCellKind::Divider => IconName::Dash,
     };
+    let label = cell.label;
+    let tooltip_label = label.clone();
     let body = cell.body;
     let preview = (cell.kind == DesktopCellKind::Tool)
         .then(|| collapsed_tool_body(&body))
@@ -3527,7 +3530,8 @@ fn render_meta_cell(
         .items_start()
         .gap_2()
         .w_full()
-        .max_w(px(760.0))
+        .max_w(px(880.0))
+        .mx_auto()
         .py_1()
         .text_color(tokens.ink_2)
         .child(
@@ -3552,10 +3556,22 @@ fn render_meta_cell(
                         .flex()
                         .items_center()
                         .gap_2()
+                        .w_full()
+                        .min_w_0()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(label_color)
-                        .child(cell.label)
+                        .child(
+                            div()
+                                .id(("meta-cell-label", index))
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .child(label)
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(tooltip_label.clone()).build(window, cx)
+                                }),
+                        )
                         .when(cell.streaming, |row| {
                             row.child(Spinner::new().small().color(tokens.accent))
                         }),
@@ -3564,6 +3580,8 @@ fn render_meta_cell(
                     if mono {
                         let output = design::inset(tokens)
                             .id(("tool-output", index))
+                            .w_full()
+                            .min_w_0()
                             .px_3()
                             .py_2()
                             .text_xs()

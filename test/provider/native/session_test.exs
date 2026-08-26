@@ -561,6 +561,60 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       assert File.read!(image.path) == File.read!(png)
     end
 
+    test "compacting a turn that carried an attachment does not take the session with it",
+         context do
+      png = Path.join(context.workspace, "diagram.png")
+      File.write!(png, <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3>>)
+
+      %{handle: handle} = open(context, @simple_script)
+      ready = await_event(:provider_event)
+
+      turn = TurnRequest.new!(%{prompt: "inspect this", attachments: [png]})
+      assert :ok = Session.send(handle, turn, "turn-image")
+      collect_until(:turn_completed)
+
+      # Attachment content is a list of parts, and everything on the compaction path used
+      # to call `to_string/1` on it. The session is `restart: :temporary`, so the raise was
+      # the session — `/compact` and the automatic threshold both reached it.
+      assert {:ok, report} = Session.compact(handle, nil)
+      assert Process.alive?(handle)
+      assert is_integer(report.before_tokens)
+
+      # And again after a round-trip through the checkpoint, where the parts' atom keys
+      # have become string ones.
+      {:ok, checkpoint_path, _durable?} = Checkpoint.locate(ready.provider_session_id)
+      assert {:ok, messages} = Checkpoint.read(checkpoint_path)
+      assert Enum.any?(messages, &is_list(&1[:content]))
+
+      Session.close(handle)
+
+      {model_spec, _agent} = NativeModelScript.start([[{:text, "resumed"}, {:finish, :stop}]])
+
+      resumed_request =
+        SessionRequest.new!(%{
+          provider: :native,
+          cwd: context.workspace,
+          model: model_spec,
+          provider_session_id: ready.provider_session_id
+        })
+
+      {:ok, resumed} =
+        Session.open(resumed_request, %{
+          session_id: "sess-resumed-attachment",
+          provider: :native,
+          owner: self(),
+          adapter: Ouroboros.Provider.Native,
+          config: %{},
+          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          telemetry_context: %{}
+        })
+
+      on_exit(fn -> if Process.alive?(resumed), do: Session.close(resumed) end)
+
+      assert {:ok, _report} = Session.compact(resumed, nil)
+      assert Process.alive?(resumed)
+    end
+
     test "rejects an oversized sparse image without staging it", context do
       image = Path.join(context.workspace, "oversized.png")
       {:ok, file} = :file.open(String.to_charlist(image), [:write, :binary])

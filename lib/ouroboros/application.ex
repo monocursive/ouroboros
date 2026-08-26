@@ -247,7 +247,9 @@ defmodule Ouroboros.Application do
         [{Ouroboros.RuntimeOwner, data_dir: data_dir} | after_owner]
 
       _unset ->
-        []
+        # Only the owner of a durable directory is dropped. The children behind it own no
+        # durable state of their own and still belong in an in-memory tree.
+        after_owner
     end
   end
 

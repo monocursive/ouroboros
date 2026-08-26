@@ -191,6 +191,8 @@ pub fn parse(text: &str, fallback_path: Option<&str>) -> ParsedDiff {
         current: None,
         truncated: false,
         rows: 0,
+        refused: 0,
+        refusing: false,
     };
 
     for raw in text.split('\n') {
@@ -209,6 +211,14 @@ pub fn parse(text: &str, fallback_path: Option<&str>) -> ParsedDiff {
     if files.len() > MAX_FILES {
         files.truncate(MAX_FILES);
         parser.truncated = true;
+    }
+
+    // Every `@@` line was written in a dialect this build cannot read, so the `---`/`+++`
+    // pair above them is all that survived. Reporting a file with no hunks would draw a
+    // header over an empty body; reporting nothing hands the text to the caller's
+    // verbatim fallback, which shows the change as the provider wrote it.
+    if parser.refused > 0 && files.iter().all(|file| file.hunks.is_empty()) {
+        files.clear();
     }
 
     for file in &mut files {
@@ -231,10 +241,18 @@ struct Parser {
     current: Option<DiffFile>,
     truncated: bool,
     rows: usize,
+    /// How many `@@` lines this parse could not read.
+    refused: usize,
+    /// Inside the body of a hunk whose header was refused. Its lines belong to no hunk
+    /// this parse holds, and appending them to the one above would count another hunk's
+    /// changes as that one's.
+    refusing: bool,
 }
 
 impl Parser {
     fn flush(&mut self) {
+        self.refusing = false;
+
         if let Some(file) = self.current.take() {
             // A `diff --git` pair with no hunks and no status is a mode change or an empty
             // rename; it is still a file the turn touched.
@@ -306,9 +324,16 @@ impl Parser {
         }
 
         if line.starts_with("@@") {
-            if let Some(hunk) = hunk_header(line) {
-                self.rows += 1;
-                self.file().hunks.push(hunk);
+            match hunk_header(line) {
+                Some(hunk) => {
+                    self.refusing = false;
+                    self.rows += 1;
+                    self.file().hunks.push(hunk);
+                }
+                None => {
+                    self.refusing = true;
+                    self.refused += 1;
+                }
             }
             return;
         }
@@ -345,6 +370,10 @@ impl Parser {
 
         // Only a line inside an open hunk is body. Everything else at this point — `index`,
         // mode lines, a commit message above the patch — is metadata this view ignores.
+        if self.refusing {
+            return;
+        }
+
         let Some(file) = self.current.as_mut() else {
             return;
         };
@@ -417,14 +446,18 @@ fn hunk_header(line: &str) -> Option<Hunk> {
     let mut old_start = 1;
     let mut new_start = 1;
     for token in ranges.split_whitespace() {
-        let (sign, body) = token.split_at(1);
-        let start = body
+        // By character, not by byte: a provider that wrote the Unicode minus in
+        // `@@ −1,4 +1,6 @@` would otherwise split this token inside a code point.
+        let mut characters = token.chars();
+        let sign = characters.next()?;
+        let start = characters
+            .as_str()
             .split(',')
             .next()
             .and_then(|number| number.parse::<usize>().ok())?;
         match sign {
-            "-" => old_start = start,
-            "+" => new_start = start,
+            '-' => old_start = start,
+            '+' => new_start = start,
             _ => return None,
         }
     }
@@ -1316,6 +1349,48 @@ Binary files a/logo.png and b/logo.png differ
         let parsed = parse(&text, None);
         assert!(parsed.truncated);
         assert!(parsed.additions() <= MAX_LINES);
+    }
+
+    /// A header whose signs are not ASCII `+`/`-` is written in a dialect this build does
+    /// not read. It used to split the token at byte 1, which is inside the code point for
+    /// every one of these.
+    #[test]
+    fn a_hunk_header_in_another_dialect_is_refused_rather_than_split_mid_character() {
+        for header in ["@@ −1,4 +1,6 @@", "@@ ±1,4 ±1,6 @@", "@@ 🙂1,4 🙂1,6 @@"] {
+            assert!(hunk_header(header).is_none(), "{header}");
+
+            let parsed = parse(
+                &format!("--- a/lib/one.ex\n+++ b/lib/one.ex\n{header}\n alpha\n-beta\n+BETA\n"),
+                None,
+            );
+
+            // Nothing was read as a hunk, so the parse reports nothing and the cell falls
+            // back to showing the provider's text as it was written.
+            assert!(parsed.is_empty(), "{header}: {parsed:?}");
+            assert_eq!((parsed.additions(), parsed.deletions()), (0, 0), "{header}");
+        }
+    }
+
+    /// The refusal is per header, not per patch: a file whose hunks this build *can* read
+    /// keeps them.
+    #[test]
+    fn a_readable_hunk_survives_an_unreadable_one_beside_it() {
+        let parsed = parse(
+            "\
+--- a/lib/one.ex
++++ b/lib/one.ex
+@@ -1,2 +1,2 @@
+-beta
++BETA
+@@ −9,1 +9,1 @@
+-gamma
+",
+            None,
+        );
+
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].hunks.len(), 1);
+        assert_eq!((parsed.additions(), parsed.deletions()), (1, 1));
     }
 
     #[test]

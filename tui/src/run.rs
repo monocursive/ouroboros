@@ -35,7 +35,7 @@
 //! on a human it does not have — the failure mode this replaces is a script that hangs
 //! until its CI job is killed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -104,6 +104,11 @@ const MAX_FILES: usize = 256;
 
 /// Ceiling on out-of-order events held while a gap is being replayed.
 const MAX_PENDING: usize = 10_000;
+
+/// Ceiling on remembered retired approval ids. A resumed run reads a session's whole
+/// retained history, and the set that keeps it from re-answering that history is bounded
+/// like everything else this command holds.
+const MAX_RESOLVED_APPROVALS: usize = 4_096;
 
 /// How stdout is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +508,9 @@ struct Run<'a> {
     draft: Option<String>,
     changed: ChangedFiles,
     approvals: JoinSet<Result<(), ClientError>>,
+    /// Approval requests the runtime has already retired. `--resume` streams the history
+    /// that raised them, and a question that has been answered is not asked again.
+    resolved: BTreeSet<String>,
     /// The send could not be reconciled. Only a turn-terminal event can clear it.
     unreconciled: Option<String>,
     /// The end state this command asked for — a `--timeout` that expired, or a Ctrl-C.
@@ -529,6 +537,7 @@ impl<'a> Run<'a> {
             draft: None,
             changed: ChangedFiles::default(),
             approvals: JoinSet::new(),
+            resolved: BTreeSet::new(),
             unreconciled: None,
             requested: None,
             settled: None,
@@ -1155,6 +1164,13 @@ impl<'a> Run<'a> {
     /// Stops at the event that settles the run: a turn that has ended has ended, and the
     /// session's later frames are not this turn's output.
     fn drain(&mut self, sinks: &mut Sinks<'_>) {
+        // A prune moves the cursor forward over events this run is still holding. They can
+        // never sit on it again, and leaving them behind would keep `pending` non-empty
+        // for the rest of the run: every later event would look like a gap, spend a resync
+        // round on a hole that is already closed, and say so on stderr.
+        let cursor = self.cursor;
+        self.pending.retain(|sequence, _| *sequence > cursor);
+
         while let Some((&sequence, _)) = self.pending.iter().next() {
             if sequence != self.cursor + 1 || self.settled.is_some() {
                 break;
@@ -1269,6 +1285,16 @@ impl<'a> Run<'a> {
             }
         }
 
+        // A replayed window regularly carries both an approval and the resolution that
+        // closed it. The fold below walks them in order and would answer the first before
+        // it ever reached the second, so the resolutions are read from the whole batch
+        // first — which is the difference between resuming a session and re-deciding it.
+        for event in &events {
+            if event.kind == EventType::ApprovalResolved {
+                self.retire(event);
+            }
+        }
+
         let count = events.len();
 
         for event in events {
@@ -1326,9 +1352,24 @@ impl<'a> Run<'a> {
             EventType::ToolCall if self.ours(event) => self.changed.note_call(&event.payload),
             EventType::ToolResult if self.ours(event) => self.changed.note_result(&event.payload),
             EventType::FileChange => self.changed.note_change(&event.payload),
+            EventType::ApprovalResolved => self.retire(event),
             EventType::ApprovalRequested => {
-                self.report.approvals_requested += 1;
-                self.answer_approval(event, sinks);
+                // Two ways an approval on this stream is not this run's to answer, and
+                // `--resume` meets both: a request the runtime has already retired, and a
+                // request another turn raised. Answering either would record a headless
+                // decision — in the runtime's ledger, under `actor: headless` — about a
+                // question nobody asked this command. The count follows the same rule,
+                // because `approvals.requested` is what this run was asked, not what the
+                // session's history contains.
+                let retired = event
+                    .request_id
+                    .as_deref()
+                    .is_some_and(|request_id| self.resolved.contains(request_id));
+
+                if !retired && self.ours(event) {
+                    self.report.approvals_requested += 1;
+                    self.answer_approval(event, sinks);
+                }
             }
             EventType::TurnCompleted if self.ours(event) => {
                 self.unreconciled = None;
@@ -1414,6 +1455,21 @@ impl<'a> Run<'a> {
 
         self.report.status = status;
         self.settled = Some(status);
+    }
+
+    /// Remembers that an approval has been decided, whoever decided it.
+    ///
+    /// Not gated on [`Self::ours`]: a resolution is a fact about the request, not about
+    /// the turn, and the whole point of holding it is that the request it retires may
+    /// belong to a turn this run does not own.
+    fn retire(&mut self, event: &Event) {
+        let Some(request_id) = event.request_id.clone().filter(|id| !id.is_empty()) else {
+            return;
+        };
+
+        if self.resolved.len() < MAX_RESOLVED_APPROVALS {
+            self.resolved.insert(request_id);
+        }
     }
 
     fn answer_approval(&mut self, event: &Event, sinks: &mut Sinks<'_>) {

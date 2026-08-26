@@ -307,4 +307,24 @@ defmodule Ouroboros.Gateway.ConnTest do
   test "an operate listener says so in its handshake", %{client: client} do
     assert hello(client)["result"]["scope"] == "operate"
   end
+
+  test "an orderly supervisor shutdown reaches terminate rather than killing the socket", %{
+    client: client,
+    conn: conn
+  } do
+    assert hello(client)["result"]
+
+    assert Process.info(conn, :trap_exit) == {:trap_exit, true}
+
+    # Standing in for the writer, so the flush that opens `terminate/2` is observable. A
+    # connection killed by the shutdown signal never sends it, which is what the 5s shutdown
+    # in `child_spec/1` was silently buying nothing for.
+    test_process = self()
+    :sys.replace_state(conn, fn state -> %{state | writer: test_process} end)
+
+    assert :ok = DynamicSupervisor.terminate_child(:gateway_conn_test_conns, conn)
+
+    assert_received {:flush, ^conn, _ref}
+    refute Process.alive?(conn)
+  end
 end

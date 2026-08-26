@@ -3,6 +3,8 @@ defmodule Ouroboros.Interactive.Store do
 
   use GenServer
 
+  require Logger
+
   alias Ouroboros.Interactive.State
 
   @store_key {:ouroboros, :interactive_sessions, 1}
@@ -243,27 +245,41 @@ defmodule Ouroboros.Interactive.Store do
     end
   end
 
+  # A corrupt *index* is this store's own state and fails closed. One unreadable session
+  # is not: halting there refuses to boot the whole interactive plane — and, under
+  # `rest_for_one`, everything started after it — over a single session nobody can read
+  # anyway. The bad session is quarantined instead: logged by id, dropped from the
+  # rebuilt index, and left on disk for whoever wants to look at it.
   defp load_index(ids, adapter, adapter_opts, key) when is_list(ids) do
     if ids == Enum.uniq(ids) and Enum.all?(ids, &is_binary/1) do
       state = %{adapter: adapter, opts: adapter_opts, key: key, sessions: %{}}
 
-      Enum.reduce_while(ids, {:ok, %{}}, fn id, {:ok, sessions} ->
-        case adapter_call(adapter, :get_checkpoint, [session_key(key, id), adapter_opts]) do
-          {:ok, %{^id => %State{id: ^id} = session}} ->
-            if State.loadable?(session),
-              do: {:cont, {:ok, Map.put(sessions, id, session)}},
-              else: {:halt, {:error, :invalid_interactive_checkpoint}}
+      {sessions, quarantined} =
+        Enum.reduce(ids, {%{}, []}, fn id, {sessions, quarantined} ->
+          case load_session(id, adapter, adapter_opts, key) do
+            {:ok, session} -> {Map.put(sessions, id, session), quarantined}
+            {:error, reason} -> {sessions, [{id, reason} | quarantined]}
+          end
+        end)
 
-          {:error, reason} ->
-            {:halt, {:error, {:interactive_checkpoint_unreadable, id, reason}}}
+      state = %{state | sessions: sessions}
 
-          _missing_or_invalid ->
-            {:halt, {:error, :invalid_interactive_checkpoint}}
-        end
-      end)
-      |> case do
-        {:ok, sessions} -> {:ok, %{state | sessions: sessions}}
-        {:error, reason} -> {:stop, reason}
+      case quarantined do
+        [] ->
+          {:ok, state}
+
+        quarantined ->
+          Enum.each(quarantined, fn {id, reason} ->
+            Logger.error(
+              "interactive session #{id} could not be loaded (#{inspect(reason)}); " <>
+                "quarantining it and continuing with the sessions that survived"
+            )
+          end)
+
+          case put_index(sessions, state) do
+            :ok -> {:ok, state}
+            {:error, reason} -> {:stop, {:interactive_quarantine_failed, reason}}
+          end
       end
     else
       {:stop, :invalid_interactive_checkpoint}
@@ -272,6 +288,21 @@ defmodule Ouroboros.Interactive.Store do
 
   defp load_index(_ids, _adapter, _adapter_opts, _key),
     do: {:stop, :invalid_interactive_checkpoint}
+
+  defp load_session(id, adapter, adapter_opts, key) do
+    case adapter_call(adapter, :get_checkpoint, [session_key(key, id), adapter_opts]) do
+      {:ok, %{^id => %State{id: ^id} = session}} ->
+        if State.loadable?(session),
+          do: {:ok, session},
+          else: {:error, :invalid_interactive_session}
+
+      {:error, reason} ->
+        {:error, {:interactive_checkpoint_unreadable, reason}}
+
+      _missing_or_invalid ->
+        {:error, :invalid_interactive_checkpoint}
+    end
+  end
 
   defp valid_sessions?(sessions) do
     Enum.all?(sessions, fn {id, session} ->

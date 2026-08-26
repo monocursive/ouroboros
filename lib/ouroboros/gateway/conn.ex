@@ -222,6 +222,12 @@ defmodule Ouroboros.Gateway.Conn do
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
 
+    # The 5s shutdown in `child_spec/1` is a promise that a supervisor's teardown flushes
+    # the client's last frame and releases this connection's subscriptions. Only a trapped
+    # exit reaches `terminate/2`; without this the supervisor's signal killed the process
+    # and the shutdown budget bought nothing.
+    Process.flag(:trap_exit, true)
+
     state = %{
       socket: Keyword.fetch!(opts, :socket),
       config: config,
@@ -360,7 +366,8 @@ defmodule Ouroboros.Gateway.Conn do
         _ = Process.cancel_timer(request.timer)
 
         Logger.warning(
-          "gateway method #{request.method} failed: #{inspect(reason, limit: 10)}",
+          "gateway method #{request.method} failed: " <>
+            inspect(reason, limit: 10, printable_limit: 200),
           gateway_peer: describe_peer(state.peer)
         )
 
@@ -374,6 +381,12 @@ defmodule Ouroboros.Gateway.Conn do
         |> maybe_stop()
     end
   end
+
+  # Trapping exits also turns the linked writer's and socket's death into a message. Both
+  # mean the frames this connection owes its client have nowhere to go, which is what it
+  # already concluded from a propagated exit before it trapped them. The supervisor's own
+  # signal never arrives here: `:gen_server` answers a parent exit with `terminate/2`.
+  def handle_info({:EXIT, _from, _reason}, state), do: {:stop, :normal, state}
 
   def handle_info(_message, state), do: {:noreply, state}
 

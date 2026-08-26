@@ -59,13 +59,26 @@ defmodule Ouroboros.Control.Permissions.Paths do
 
   def within?(_path, _root), do: false
 
-  @doc "Whether any segment of `path` is exactly `segment`."
-  @spec has_segment?(String.t(), String.t()) :: boolean()
-  def has_segment?(path, segment) when is_binary(path) and is_binary(segment) do
-    path |> String.split("/", trim: true) |> Enum.member?(segment)
+  @doc """
+  Whether any segment of `path` is `segment`.
+
+  The comparison is byte-exact unless `case: :insensitive` is passed. Folding is what a
+  protected-path check has to do on a case-insensitive filesystem — APFS and NTFS are
+  case-insensitive by default — where `.GIT/HEAD` and `.git/HEAD` are one file and a
+  byte-exact refusal lets the other spelling through. It is not the default, because a
+  glob an operator wrote is matched as written.
+  """
+  @spec has_segment?(String.t(), String.t(), keyword()) :: boolean()
+  def has_segment?(path, segment, opts \\ [])
+
+  def has_segment?(path, segment, opts) when is_binary(path) and is_binary(segment) do
+    fold = if Keyword.get(opts, :case) == :insensitive, do: &String.downcase/1, else: & &1
+    wanted = fold.(segment)
+
+    path |> String.split("/", trim: true) |> Enum.any?(&(fold.(&1) == wanted))
   end
 
-  def has_segment?(_path, _segment), do: false
+  def has_segment?(_path, _segment, _opts), do: false
 
   @doc """
   Whether a canonical `path` matches `glob`, itself resolved against `root` when relative.

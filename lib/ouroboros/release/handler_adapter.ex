@@ -62,7 +62,14 @@ defmodule Ouroboros.Release.HandlerAdapter.OTP do
   end
 
   @doc false
-  def unpack_release_with(package_name, unpacker) when is_function(unpacker, 1) do
+  def unpack_release_with(package_name, unpacker, sync \\ &sync_directory/1)
+
+  # Everything after a successful `File.ln` runs inside the `try`, so the alias is
+  # removed on every path out — including a failed directory sync. An alias left behind
+  # is not a lost temporary file: the next unpack of the same release gets `:eexist` and
+  # fails closed forever until an operator deletes it by hand.
+  def unpack_release_with(package_name, unpacker, sync)
+      when is_function(unpacker, 1) and is_function(sync, 1) do
     with {:ok, staged_name, expected_sha256} <- staged_identity(package_name),
          staged_path <- package_path(String.to_charlist(staged_name)) |> List.to_string(),
          {:ok, %{type: :regular}} <- File.lstat(staged_path),
@@ -71,13 +78,14 @@ defmodule Ouroboros.Release.HandlerAdapter.OTP do
          {:ok, otp_name} <- otp_release_name(binary),
          alias_path <- package_path(String.to_charlist(otp_name)) |> List.to_string(),
          true <- alias_path != staged_path || {:error, :invalid_release_package_alias},
-         :ok <- File.ln(staged_path, alias_path),
-         :ok <- sync_directory(Path.dirname(alias_path)) do
+         :ok <- File.ln(staged_path, alias_path) do
       try do
-        unpacker.(String.to_charlist(otp_name))
+        with :ok <- sync.(Path.dirname(alias_path)) do
+          unpacker.(String.to_charlist(otp_name))
+        end
       after
         _ = remove_if_present(alias_path)
-        _ = sync_directory(Path.dirname(alias_path))
+        _ = sync.(Path.dirname(alias_path))
       end
     else
       {:ok, %{type: type}} -> {:error, {:invalid_staged_release_file, type}}
@@ -91,7 +99,7 @@ defmodule Ouroboros.Release.HandlerAdapter.OTP do
     kind, reason -> {:error, {:staged_release_adapter_failed, kind, reason}}
   end
 
-  def unpack_release_with(_package_name, _unpacker),
+  def unpack_release_with(_package_name, _unpacker, _sync),
     do: {:error, :invalid_release_unpacker}
 
   @impl true

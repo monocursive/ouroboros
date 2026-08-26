@@ -41,7 +41,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   use GenServer
 
-  alias Ouroboros.Upgrade.{Artifact, Beam, Verifier}
+  alias Ouroboros.Upgrade.{Artifact, Beam, ModuleName, Verifier, Wire}
 
   @journal_version 2
   @public_operation_limit 50
@@ -77,6 +77,12 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defmodule Journal do
     @moduledoc false
+    # `expected_modules` holds exactly one entry per module name: committing, promoting,
+    # and rolling back all replace the entry for the modules they name rather than
+    # appending to it, so the map is bounded by the number of distinct modules this node
+    # has ever patched and not by how often it patched them. Entries are not capped or
+    # aged out on purpose — an expectation is what restart reconciliation fails closed
+    # against, and dropping one would silently widen what this node will accept.
     @enforce_keys [
       :version,
       :last_epoch,
@@ -187,6 +193,12 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   This replays the startup reconciliation checks against current state and journals the
   transition. Anything that still disagrees is returned as diagnostics and the executor
   stays quarantined; there is no way to declare a mismatch resolved.
+
+  An executor whose checkpoint could not be read at all has nothing to reconcile
+  against, and answers `{:error, {:journal_unloaded, reason}}`. The in-memory journal is
+  a placeholder, not history: clearing quarantine from it would report success while
+  overwriting the evidence on disk with an empty record. The only exit is an operator
+  who preserves or removes the checkpoint and restarts this node.
   """
   @spec reconcile_quarantine(keyword()) :: :ok | {:error, term()}
   def reconcile_quarantine(opts \\ [])
@@ -445,11 +457,17 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   def handle_call(:reconcile_quarantine, _from, state) do
-    case state.journal.mode do
-      :ready ->
+    cond do
+      # The placeholder journal an unreadable checkpoint comes up on satisfies every
+      # reconciliation check vacuously. Answering `:ok` here would tell an operator the
+      # node is reconciled and replace the preserved evidence with an empty record.
+      not state.journal_loaded? ->
+        {:reply, {:error, {:journal_unloaded, state.journal.quarantine_reason}}, state}
+
+      state.journal.mode == :ready ->
         {:reply, {:error, :not_quarantined}, state}
 
-      :quarantined ->
+      true ->
         case reconcile_current_state(state.journal) do
           :ok ->
             clear_quarantine(state)
@@ -503,7 +521,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
       {:error, reason} ->
         journal = quarantine_journal(empty_journal(), {:storage_configuration, reason})
-        base_state(nil, policy, journal)
+        unloaded_state(nil, policy, journal)
     end
   end
 
@@ -551,14 +569,14 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
           empty_journal()
           |> quarantine_journal({:journal_read_failed, public_storage_reason(reason)})
 
-        base_state(storage, policy, journal)
+        unloaded_state(storage, policy, journal)
 
       other ->
         journal =
           empty_journal()
           |> quarantine_journal({:invalid_storage_response, storage_response_kind(other)})
 
-        base_state(storage, policy, journal)
+        unloaded_state(storage, policy, journal)
     end
   end
 
@@ -569,7 +587,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
     # Do not overwrite corrupt evidence automatically. An operator must preserve or
     # replace it deliberately; the live executor remains available for inspection only.
-    base_state(storage, policy, journal)
+    unloaded_state(storage, policy, journal)
   end
 
   defp reconcile_loaded_journal(storage, policy, journal) do
@@ -636,7 +654,20 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp base_state(storage, policy, journal) do
-    %{storage: storage, trust_policy: policy, journal: journal, prepared: %{}}
+    %{
+      storage: storage,
+      trust_policy: policy,
+      journal: journal,
+      prepared: %{},
+      journal_loaded?: true
+    }
+  end
+
+  # A checkpoint that exists but could not be read is not history this executor holds.
+  # The journal it comes up on is a placeholder, and every write refuses rather than
+  # becoming the first writer over evidence nobody has read yet.
+  defp unloaded_state(storage, policy, journal) do
+    %{base_state(storage, policy, journal) | journal_loaded?: false}
   end
 
   defp empty_journal do
@@ -982,6 +1013,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     {:error, :storage_unavailable, state}
   end
 
+  defp persist_journal(%{journal_loaded?: false} = state, _journal) do
+    {:error, :journal_unloaded, state}
+  end
+
   defp persist_journal(state, journal) do
     case storage_put(state.storage, journal) do
       :ok -> {:ok, %{state | journal: journal}}
@@ -1017,14 +1052,151 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp storage_get(storage) do
-    safe_storage_call(fn -> storage.adapter.get_checkpoint(journal_key(), storage.opts) end)
+    safe_storage_call(fn ->
+      case storage.adapter.get_checkpoint(journal_key(), storage.opts) do
+        {:ok, wire} ->
+          case Wire.load(wire) do
+            %Journal{} = journal -> {:ok, journal_from_wire(journal)}
+            other -> {:ok, other}
+          end
+
+        other ->
+          other
+      end
+    end)
   end
 
   defp storage_put(storage, journal) do
     safe_storage_call(fn ->
-      storage.adapter.put_checkpoint(journal_key(), journal, storage.opts)
+      storage.adapter.put_checkpoint(
+        journal_key(),
+        Wire.dump(journal_to_wire(journal)),
+        storage.opts
+      )
     end)
   end
+
+  # ## Module names across the checkpoint boundary
+  #
+  # A capability module's name is an atom only in the VM that loaded its code. This
+  # journal is read by the VM that comes back after that one stopped, and
+  # `binary_to_term/2` in `[:safe]` mode refuses a term naming an atom the reader has
+  # never interned — so a journal that stored the atom would be read as corruption, come
+  # up on the empty placeholder, and lose the receipts and expectations that are the only
+  # way back. Names are written as binaries instead; see `Ouroboros.Upgrade.ModuleName`.
+  #
+  # Names that arrive next to BEAM bytes are resolved from those bytes: reading the
+  # stored code interns the module it defines, so nothing enters the atom table that this
+  # journal's own bytes do not already name, and `valid_beam_data?/1` still checks the
+  # journaled name against them. Receipts are converted first for that reason — an
+  # operation naming a receipt's modules carries the names without the bytes.
+  #
+  # A name that still does not resolve stays a binary, and reconciliation reads it for
+  # what it is: a module this node is not holding. That fails closed with the journal
+  # intact, which is the point.
+  defp journal_to_wire(%Journal{} = journal) do
+    map_journal_modules(journal, &ModuleName.to_wire/1, &beam_to_wire/1)
+  end
+
+  defp journal_from_wire(%Journal{} = journal) do
+    map_journal_modules(journal, &ModuleName.from_wire/1, &beam_from_wire/1)
+  end
+
+  defp map_journal_modules(journal, name, beam) do
+    receipts =
+      Map.new(journal.receipts, fn {id, receipt} -> {id, map_receipt(receipt, name, beam)} end)
+
+    operations = Enum.map(journal.operations, &map_operation(&1, name, beam))
+
+    reservations =
+      Map.new(journal.reservations, fn {digest, reservation} ->
+        {digest, map_reservation(reservation, name)}
+      end)
+
+    expected_modules =
+      Map.new(journal.expected_modules, fn {module, identity} -> {name.(module), identity} end)
+
+    %{
+      journal
+      | receipts: receipts,
+        operations: operations,
+        reservations: reservations,
+        expected_modules: expected_modules,
+        quarantine_reason: map_reason(journal.quarantine_reason, name)
+    }
+  end
+
+  defp beam_to_wire(%Beam{} = beam), do: %{beam | module: ModuleName.to_wire(beam.module)}
+  defp beam_to_wire(beam), do: beam
+
+  defp beam_from_wire(%Beam{module: module, binary: binary} = beam)
+       when is_binary(module) and is_binary(binary) do
+    _interned = Beam.inspect_binary(binary)
+    %{beam | module: ModuleName.from_wire(module)}
+  end
+
+  defp beam_from_wire(%Beam{module: module} = beam) when is_binary(module),
+    do: %{beam | module: ModuleName.from_wire(module)}
+
+  defp beam_from_wire(beam), do: beam
+
+  defp map_receipt(%Receipt{} = receipt, name, beam) do
+    artifact = map_artifact(receipt.artifact, beam)
+    %{receipt | artifact: artifact, migrations: map_migrations(receipt.migrations, name)}
+  end
+
+  defp map_receipt(receipt, _name, _beam), do: receipt
+
+  defp map_artifact(%Artifact{modules: modules} = artifact, beam) when is_list(modules),
+    do: %{artifact | modules: Enum.map(modules, beam)}
+
+  defp map_artifact(artifact, _beam), do: artifact
+
+  defp map_migrations(migrations, name) when is_list(migrations) do
+    Enum.map(migrations, fn
+      %Migration{} = migration -> %{migration | module: name.(migration.module)}
+      other -> other
+    end)
+  end
+
+  defp map_migrations(migrations, _name), do: migrations
+
+  defp map_reservation(%{modules: modules} = reservation, name) when is_list(modules),
+    do: %{reservation | modules: Enum.map(modules, name)}
+
+  defp map_reservation(reservation, _name), do: reservation
+
+  defp map_operation(operation, name, beam) when is_map(operation) do
+    operation
+    |> map_operation_key(:artifact, &map_artifact(&1, beam))
+    |> map_operation_key(:migrations, &map_migrations(&1, name))
+    |> map_operation_key(:modules, &map_module_identities(&1, name))
+    |> map_operation_key(:reason, &map_reason(&1, name))
+  end
+
+  defp map_operation(operation, _name, _beam), do: operation
+
+  defp map_operation_key(operation, key, fun) do
+    case Map.fetch(operation, key) do
+      {:ok, value} -> Map.put(operation, key, fun.(value))
+      :error -> operation
+    end
+  end
+
+  defp map_module_identities(modules, name) when is_list(modules) do
+    Enum.map(modules, fn
+      %{module: module} = identity -> %{identity | module: name.(module)}
+      module -> name.(module)
+    end)
+  end
+
+  defp map_module_identities(modules, _name), do: modules
+
+  defp map_reason(reason, name) when is_tuple(reason) do
+    reason |> Tuple.to_list() |> Enum.map(&map_reason(&1, name)) |> List.to_tuple()
+  end
+
+  defp map_reason(reason, name), do: name.(reason)
 
   # The journal version is deliberately *not* part of the key. Versioning the key would
   # hide an unreadable journal behind a `:not_found` and let this executor come up ready
@@ -1182,7 +1354,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       {digest, %{artifact_id: id, epoch: epoch, prepared_at: prepared_at, modules: modules}}
       when is_binary(digest) and byte_size(digest) == 64 and is_binary(id) and
              is_integer(epoch) and epoch > 0 and is_binary(prepared_at) and is_list(modules) ->
-        Enum.all?(modules, &is_atom/1)
+        Enum.all?(modules, &module_name?/1)
 
       _other ->
         false
@@ -1276,10 +1448,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
          epoch: epoch,
          disposition: disposition
        }}
-      when is_atom(module) and is_binary(sha256) and byte_size(sha256) == 64 and is_binary(md5) and
+      when is_binary(sha256) and byte_size(sha256) == 64 and is_binary(md5) and
              is_binary(artifact_id) and is_integer(epoch) and epoch > 0 and
              disposition in [:committed, :promoted, :rolled_back, :ambiguous] ->
-        true
+        module_name?(module)
 
       # The absent identity, and the only transition that can produce it: an
       # introduction that was rolled back. A committed or promoted module is present by
@@ -1292,8 +1464,8 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
          epoch: epoch,
          disposition: :rolled_back
        }}
-      when is_atom(module) and is_binary(artifact_id) and is_integer(epoch) and epoch > 0 ->
-        true
+      when is_binary(artifact_id) and is_integer(epoch) and epoch > 0 ->
+        module_name?(module)
 
       _other ->
         false
@@ -1301,6 +1473,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   end
 
   defp valid_expected_modules?(_expected), do: false
+
+  # A journaled module name is an atom when this VM knows it and the binary the
+  # checkpoint stored when it does not. Both are names; neither is corruption.
+  defp module_name?(module), do: (is_atom(module) and not is_nil(module)) or is_binary(module)
 
   defp valid_journal_relationships?(journal) do
     map_size(journal.reservations) <= 1 and
@@ -1485,10 +1661,11 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp optional_operation_modules?(modules) when is_list(modules) do
     Enum.all?(modules, fn
-      module when is_atom(module) -> true
-      %{module: module, md5: md5} when is_atom(module) and is_binary(md5) -> true
-      %{module: module, md5: :non_existing} when is_atom(module) -> true
-      _other -> false
+      %{module: module, md5: md5} ->
+        module_name?(module) and (is_binary(md5) or md5 == :non_existing)
+
+      module ->
+        module_name?(module)
     end)
   end
 
@@ -1543,6 +1720,8 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp safe_reason?(nil), do: true
   defp safe_reason?(reason) when is_atom(reason), do: true
+  # A reason naming a module this VM never interned carries the name as a binary.
+  defp safe_reason?(reason) when is_binary(reason), do: true
   defp safe_reason?({left, right}), do: safe_reason?(left) and safe_reason?(right)
 
   defp safe_reason?({first, second, third}),
@@ -1558,6 +1737,17 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
       end
     end)
   end
+
+  # A name this VM never interned cannot name loaded code, so an expectation of absence
+  # is satisfied by the name itself and any positive expectation is not. This is the
+  # ordinary shape of a restart: the capability code is gone, and the journal that
+  # describes it says so instead of reading as corruption.
+  defp reconcile_expected_module(module, %{sha256: :non_existing, md5: :non_existing})
+       when is_binary(module),
+       do: :ok
+
+  defp reconcile_expected_module(module, _expected) when is_binary(module),
+    do: {:error, {:module_unavailable, module}}
 
   # Absence is checked against the code server directly. `loaded_module_identity/1` would
   # ask `Code.ensure_loaded/1`, which is allowed to *load* the module it is asked about.
@@ -1626,6 +1816,13 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp pending_operation_matches_loaded_code(%{modules: expected_modules})
        when is_list(expected_modules) and expected_modules != [] do
     Enum.reduce_while(expected_modules, :ok, fn
+      %{module: module, md5: :non_existing}, :ok when is_binary(module) ->
+        {:cont, :ok}
+
+      %{module: module, md5: expected_md5}, :ok
+      when is_binary(module) and is_binary(expected_md5) ->
+        {:halt, {:error, {:module_unavailable, module}}}
+
       %{module: module, md5: :non_existing}, :ok when is_atom(module) ->
         if module_absent?(module),
           do: {:cont, :ok},
@@ -1834,7 +2031,7 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp expect_committed(journal, receipt, disposition) do
     expected =
       Enum.reduce(receipt.artifact.modules, journal.expected_modules, fn beam, acc ->
-        Map.put(acc, beam.module, %{
+        put_expectation(acc, beam.module, %{
           sha256: beam.sha256,
           md5: beam.md5,
           artifact_id: receipt.artifact.id,
@@ -1849,10 +2046,20 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp expect_preimages(journal, receipt) do
     expected =
       Enum.reduce(receipt.artifact.modules, journal.expected_modules, fn beam, acc ->
-        Map.put(acc, beam.module, preimage_expectation(beam, receipt.artifact))
+        put_expectation(acc, beam.module, preimage_expectation(beam, receipt.artifact))
       end)
 
     %{journal | expected_modules: expected}
+  end
+
+  # One module, one expectation. A name that was journaled as a binary because this VM
+  # could not intern it is retired here rather than left beside the atom it resolves to
+  # once the module is loaded again: two entries for one module would eventually disagree
+  # about whether it is supposed to be present.
+  defp put_expectation(expected, module, identity) do
+    expected
+    |> Map.delete(ModuleName.to_wire(module))
+    |> Map.put(module, identity)
   end
 
   defp preimage_expectation(%Beam{disposition: :replace} = beam, artifact) do
@@ -2070,7 +2277,13 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
   defp now, do: DateTime.utc_now() |> DateTime.to_iso8601()
 
   defp public_storage_reason(reason)
-       when reason in [:table_not_found, :adapter_exception, :adapter_exit, :adapter_failure],
+       when reason in [
+              :table_not_found,
+              :adapter_exception,
+              :adapter_exit,
+              :adapter_failure,
+              :journal_unloaded
+            ],
        do: reason
 
   defp public_storage_reason(_reason), do: :storage_unavailable
@@ -2092,6 +2305,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp public_quarantine_reason(nil), do: nil
   defp public_quarantine_reason(reason) when is_atom(reason), do: reason
+
+  # A module this VM never interned is named by the binary the journal stored. The name
+  # is the fact an operator needs, and it is bounded by the journal that produced it.
+  defp public_quarantine_reason(name) when is_binary(name), do: name
 
   defp public_quarantine_reason({tag, module}) when is_atom(tag) and is_atom(module),
     do: {tag, module}

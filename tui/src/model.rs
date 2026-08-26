@@ -510,6 +510,27 @@ pub fn compact(value: &Value) -> String {
     }
 }
 
+/// Blanks control characters — escape sequences included — in a string that came off the
+/// wire and is about to be written to a terminal this client does not own.
+///
+/// The ratatui surfaces are immune by construction: they paint cells, and a cell holds a
+/// grapheme rather than a byte a terminal would interpret. The plain pages the CLI
+/// subcommands print are not — they are `println!`ed as they stand — and the gateway on
+/// the other end is authenticated but not trusted. Every page that interpolates a runtime
+/// string into stdout passes it through here first, before the width is measured, so a
+/// truncation cannot cut an escape in half either.
+pub fn plain(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// A map's entries in sorted key order, whatever order the map itself iterates in.
 ///
 /// `serde_json::Map` is only a `BTreeMap` until something turns on `preserve_order` — and
