@@ -1239,6 +1239,8 @@ invariant applied to this document itself.
   pixels-to-vision-model path is covered by `Model.ReqLLM` unit tests. A vision
   model that reliably tool-calls would close it.
 
-**Deferred operator surface:** the `ouro desktop doctor` CLI (D2) is not yet
-built; `computer_use.status` is reachable over the gateway. Its TUI/GPUI
-catalogue rows (`docs/TUI.md` §2.4) land with that CLI.
+**Operator surface (built):** `ouro desktop doctor [--json]` (D2) queries
+`computer_use.status` over the gateway and prints readiness; both methods are in
+the `docs/TUI.md` §2.4 catalogue. Still deferred: an in-TUI `/computer-use`
+panel and the settings/always-allow list (§10) — the CLI and the gateway methods
+are the whole operator surface for now.

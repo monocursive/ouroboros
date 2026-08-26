@@ -353,8 +353,7 @@ defmodule Ouroboros.Gateway.ProtocolDocsTest do
   # rather than quietly fixed. Deleting a name from this list is what closing a gap looks
   # like: D6's two rewind verbs sat here until the client slice that wired `/rewind`
   # documented them, and the list has been empty since.
-  # Served now; their TUI/GPUI catalogue rows land with the `ouro desktop` client work.
-  @tui_catalog_gaps ~w(computer_use.status computer_use.artifact)
+  @tui_catalog_gaps ~w()
 
   describe "the generated reference" do
     test "on disk is exactly what this build generates" do
