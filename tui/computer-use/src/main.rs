@@ -11,38 +11,27 @@
 //!   * `doctor` — probe host permissions with no side effects, print the doctor JSON, exit.
 //!     The mode `ouro desktop doctor` shells out to.
 //!
-//! Phase 1 makes `doctor`, `windows`, and `state` real on macOS (CGWindowList enumeration, a
-//! ScreenCaptureKit screenshot, and an AXUIElement tree, all shaped by pure, TCC-free modules).
-//! `act` — input injection — is still an honest stub ("not implemented in phase 2").
+//! Phase 2 makes `doctor`, `windows`, `state`, and `act` real on macOS.
 //!
 //! macOS is the only platform this helper runs on. A non-macOS build compiles honest
-//! "unsupported platform" stubs for `windows`/`state`; the pure shaping modules those stubs
-//! would feed still compile (and are exercised by tests) but go unused there, so a non-macOS
-//! build allows dead code. macOS stays the strict gate — `clippy -D warnings` is clean there.
+//! "unsupported platform" stubs; the pure shaping modules still compile and are tested.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+mod act;
 mod args;
 mod codec;
 mod doctor;
+mod geometry;
+mod keys;
 mod screenshot;
 mod server;
 mod state;
 mod tree;
 mod windows;
 
-// `geometry` and `keys` are complete and unit-tested, but each still has runtime consumers that
-// only land in Phase 2's `act`: the point-mapping in `geometry` (`map_point`/`map_point_uniform`,
-// for translating a model's click coordinate back onto a window) and the whole key grammar. Phase
-// 1 wires only `geometry::image_scale`. `allow(dead_code)` is scoped to exactly these two
-// forward-looking modules, never the fully wired ones (codec, server, doctor, args, screenshot,
-// windows, tree, state, macos), so real dead code there is not hidden.
-#[allow(dead_code)]
-mod geometry;
-#[allow(dead_code)]
-mod keys;
-
 #[cfg(target_os = "macos")]
 mod macos;
+
 
 use std::process::ExitCode;
 

@@ -46,6 +46,11 @@ done
 mkdir -p "$macos" "$resources"
 install -m 0755 "$target_dir/ouro" "$macos/ouro"
 install -m 0755 "$target_dir/ouro-desktop" "$macos/ouro-desktop"
+if [[ -x "$repo_root/priv/computer-use/ouro-computer-use" ]]; then
+  install -m 0755 "$repo_root/priv/computer-use/ouro-computer-use" "$macos/ouro-computer-use"
+elif [[ -x "$target_dir/ouro-computer-use" ]]; then
+  install -m 0755 "$target_dir/ouro-computer-use" "$macos/ouro-computer-use"
+fi
 install -m 0644 "$repo_root/tui/macos/Info.plist" "$contents/Info.plist"
 
 # Preserve the hand-tuned small masters where macOS asks for them, and derive only the

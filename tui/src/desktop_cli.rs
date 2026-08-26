@@ -9,13 +9,18 @@ use serde_json::Value;
 use std::io::Write;
 
 const STATUS_METHOD: &str = "computer_use.status";
+const PROBE_METHOD: &str = "computer_use.probe";
 
-/// Query `computer_use.status` and write a summary (or the raw JSON) to `out`.
+/// Query readiness. Prefer `probe` (starts the helper so TCC is visible); fall back to
+/// start-nothing `status` on an older or read-only listener.
 pub async fn doctor<O: Write>(client: &Client, json: bool, out: &mut O) -> Result<()> {
-    let answer = client
-        .call(STATUS_METHOD, serde_json::json!({}))
-        .await
-        .map_err(|error| anyhow!("the runtime refused {STATUS_METHOD}: {error}"))?;
+    let answer = match client.call(PROBE_METHOD, serde_json::json!({})).await {
+        Ok(value) => value,
+        Err(_) => client
+            .call(STATUS_METHOD, serde_json::json!({}))
+            .await
+            .map_err(|error| anyhow!("the runtime refused {STATUS_METHOD}: {error}"))?,
+    };
 
     let text = if json {
         serde_json::to_string_pretty(&answer)?

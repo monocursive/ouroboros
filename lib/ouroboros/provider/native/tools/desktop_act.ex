@@ -17,6 +17,8 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
   redaction of typed text (§12) are later phases; nothing here injects an event.
   """
 
+  alias Ouroboros.Provider.Native.Desktop
+
   use Jido.Action,
     name: "desktop_act",
     description:
@@ -79,15 +81,19 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
                  pageup pagedown up down left right)
 
   @impl true
-  def run(params, _context) when is_map(params) do
+  def run(params, context) when is_map(params) do
+    context = if is_map(context), do: context, else: %{}
+
     case validate_args(params) do
       :ok ->
-        # Phase 0: the arguments are well-formed, but no helper is wired to act on them, so
-        # the call reports honestly rather than claiming an action it did not perform.
-        {:ok, %{output: @not_enabled, is_error: true}}
+        if Desktop.enabled?() or Map.has_key?(context, :desktop_runner) do
+          Desktop.act(params, context)
+        else
+          {:ok, %{output: @not_enabled, is_error: true, images: []}}
+        end
 
       {:error, message} ->
-        {:ok, %{output: message, is_error: true}}
+        {:ok, %{output: message, is_error: true, images: []}}
     end
   end
 

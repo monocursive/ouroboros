@@ -304,21 +304,19 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
   defp plan_section(_other), do: ""
 
-  # §5.4. Emitted only when the two desktop tools are actually in this session's tool list,
-  # and part of the cached prefix like the rest of `base/1` — never a per-turn injection,
-  # which would change the prefix fingerprint every turn (invariant #11). The date, the
-  # frontmost app, and doctor output are deliberately absent for the same reason.
   defp computer_use_section(tools) do
     if desktop_tools?(tools) do
+      act =
+        if Enum.any?(tools, &(&1.name == "desktop_act")) do
+          " Computer Use is available as desktop_state and desktop_act. Call desktop_state before every desktop_act."
+        else
+          " Computer Use is available as desktop_state."
+        end
+
       """
 
       ## Computer Use
-
-      Computer Use is available as desktop_state and desktop_act. Prefer workspace tools
-      and MCP. Use desktop_state when the fact you need exists only in a GUI. Call
-      desktop_state before every desktop_act. Do not operate Terminal, ouro, ouro-desktop,
-      or system permission dialogs. If desktop_state reports a denied app or missing OS
-      permission, tell the operator — do not retry around it.
+      #{act} Prefer workspace tools and MCP. Use desktop_state when the fact you need exists only in a GUI. Name the app or window; untargeted capture is refused. Do not operate Terminal, ouro, ouro-desktop, or system permission dialogs. If desktop_state reports a denied app or missing OS permission, tell the operator — do not retry around it.
       """
       |> String.trim_trailing()
       |> Kernel.<>("\n")
@@ -328,8 +326,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
   end
 
   defp desktop_tools?(tools) do
-    names = Enum.map(tools, & &1.name)
-    "desktop_state" in names and "desktop_act" in names
+    Enum.any?(tools, &(&1.name == "desktop_state"))
   end
 
   defp approvals(:plan),

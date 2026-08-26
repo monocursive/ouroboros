@@ -3,9 +3,12 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Provider.Native.Desktop
+  alias Ouroboros.Provider.Native.Loop
+  alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Tools
   alias Ouroboros.Provider.Native.Tools.DesktopAct
   alias Ouroboros.Provider.Native.Tools.DesktopState
+  alias Ouroboros.Test.NativeModelScript
 
   setup do
     original = Application.get_env(:ouroboros, :computer_use)
@@ -38,23 +41,23 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   end
 
   describe "enabled?/0 — the honest predicate" do
-    test "is false by default: the flag is off and no helper ships" do
+    test "is false when no helper is on disk, even if the flag would allow it" do
+      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: "/nope/missing")
       refute Desktop.enabled?()
       refute Desktop.helper_present?()
     end
 
-    test "is false with the flag on but no helper on disk" do
-      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: "/nope/missing")
+    test "is false with a helper present when OUROBOROS_COMPUTER_USE is 0" do
+      System.put_env("OUROBOROS_COMPUTER_USE", "0")
+      on_exit(fn -> System.delete_env("OUROBOROS_COMPUTER_USE") end)
+      Application.put_env(:ouroboros, :computer_use, helper_path: fake_helper())
       refute Desktop.enabled?()
+      refute Desktop.flag_allows?()
     end
 
-    test "is false with a helper present but the flag off" do
-      Application.put_env(:ouroboros, :computer_use, enabled: false, helper_path: fake_helper())
-      refute Desktop.enabled?()
-    end
-
-    test "is true only when the flag is on and the helper exists on disk" do
+    test "is true when the helper exists and the env has not killed the flag" do
       enable(fake_helper())
+      assert Desktop.flag_allows?()
       assert Desktop.enabled?()
       assert Desktop.helper_present?()
     end
@@ -64,7 +67,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       System.put_env("OUROBOROS_COMPUTER_USE_HELPER", helper)
       on_exit(fn -> System.delete_env("OUROBOROS_COMPUTER_USE_HELPER") end)
 
-      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: "/still/missing")
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/still/missing")
       assert Desktop.helper_path() == helper
       assert Desktop.enabled?()
     end
@@ -169,37 +172,44 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   end
 
   describe "status/0" do
-    test "reports the config posture and, with no pool, running: false (starts nothing)" do
+    test "reports the config posture and, with no ready helper, running: false" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
       status = Desktop.status()
 
-      # Config posture is always present.
       assert status.enabled == false
-      assert status.flag == false
+      assert status.flag == true
       assert is_list(status.denied_app_ids)
+      assert is_list(status.always_allowed_apps)
       assert is_binary(status.helper_path)
-      assert is_boolean(status.helper_present)
-
-      # No pool is running under a bare test, so the live block is absent and the honest
-      # `running: false` stands in — status must never spawn the pool to answer.
+      assert status.helper_present == false
       assert status.running == false
       refute Map.has_key?(status, :doctor)
     end
   end
 
   describe "specs/3 gating (D9, §5.1)" do
-    test "off by default: both names absent even with a workspace" do
+    test "off when the helper is missing: both names absent even with a workspace" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
       names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
       refute "desktop_state" in names
       refute "desktop_act" in names
     end
 
-    test "enabled + workspace: appended after the static tools, before MCP, in order" do
+    test "enabled + workspace: desktop_state then desktop_act after static tools" do
       enable(fake_helper())
       names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
 
-      assert Enum.slice(names, -2, 2) == ["desktop_state", "desktop_act"]
+      assert "desktop_state" in names
+      assert "desktop_act" in names
       assert Enum.find_index(names, &(&1 == "desktop_state")) == 15
       assert Enum.find_index(names, &(&1 == "desktop_act")) == 16
+    end
+
+    test "act_enabled false keeps observe but hides desktop_act" do
+      enable(fake_helper(), act_enabled: false)
+      names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
+      assert "desktop_state" in names
+      refute "desktop_act" in names
     end
 
     test "enabled but no workspace: absent (host-local gate, same as MCP)" do
@@ -209,14 +219,14 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       refute "desktop_act" in names
     end
 
-    test "disallowed_tools hides one desktop tool by name" do
+    test "disallowed_tools hides desktop_state by name" do
       enable(fake_helper())
-      names = Enum.map(Tools.specs(nil, ["desktop_act"], workspace: "/tmp"), & &1.name)
-      assert "desktop_state" in names
-      refute "desktop_act" in names
+      names = Enum.map(Tools.specs(nil, ["desktop_state"], workspace: "/tmp"), & &1.name)
+      refute "desktop_state" in names
     end
 
-    test "lookup resolves the names only while enabled" do
+    test "lookup resolves both desktop tools only while enabled" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
       assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
       assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
 
@@ -240,15 +250,19 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
     end
   end
 
-  describe "DesktopState.run/2 (Phase 0 stub)" do
+  describe "DesktopState.run/2 when off" do
     test "reports honestly that Computer Use is not enabled on this node" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
+
       assert {:ok, %{output: "computer use is not enabled on this node", is_error: true}} =
                DesktopState.run(%{include_image: true}, %{})
     end
   end
 
   describe "DesktopAct argument-validation table (§5.3)" do
-    test "well-formed args reach the Phase 0 not-enabled stub" do
+    test "well-formed args without a helper report not enabled" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
+
       assert {:ok, %{output: "computer use is not enabled on this node", is_error: true}} =
                DesktopAct.run(%{action: "click", element_index: 0}, %{})
     end
@@ -431,12 +445,11 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       raw = calculator_state(temp, sha(bytes))
 
       assert {:ok, result} =
-               DesktopState.run(%{include_image: true}, %{
+               DesktopState.run(%{app: "Calculator", include_image: true}, %{
                  session_dir: dir,
                  desktop_runner: ok(raw)
                })
 
-      refute result.is_error
       assert result.output =~ "app: com.apple.calculator (Calculator)"
       assert result.output =~ "nodes (2):"
       assert result.output =~ "image: 480x640 jpeg"
@@ -455,7 +468,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       raw = calculator_state(temp_image(jpeg("z")), sha(jpeg("z")))
 
       assert {:ok, result} =
-               DesktopState.run(%{include_image: false}, %{
+               DesktopState.run(%{app: "Calculator", include_image: false}, %{
                  session_dir: dir,
                  desktop_runner: ok(raw)
                })
@@ -481,11 +494,26 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert result.images == []
     end
 
+    test "untargeted observe is refused before capture" do
+      runner = fn _method, _params, _timeout ->
+        flunk("the helper must not be called without a target")
+      end
+
+      assert {:ok, result} =
+               DesktopState.run(%{}, %{session_dir: session_dir(), desktop_runner: runner})
+
+      assert result.is_error
+      assert result.output =~ "untargeted"
+    end
+
     test "a helper that is down is an honest in-band error, no image" do
       runner = fn "state", _params, _timeout -> {:error, :broken} end
 
       assert {:ok, result} =
-               DesktopState.run(%{}, %{session_dir: session_dir(), desktop_runner: runner})
+               DesktopState.run(%{app: "Calculator"}, %{
+                 session_dir: session_dir(),
+                 desktop_runner: runner
+               })
 
       assert result.is_error
       assert result.output =~ "not responding"
@@ -497,7 +525,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       raw = calculator_state("/no/such/screenshot.jpg", "deadbeef")
 
       assert {:ok, result} =
-               DesktopState.run(%{include_image: true}, %{
+               DesktopState.run(%{app: "Calculator", include_image: true}, %{
                  session_dir: dir,
                  desktop_runner: ok(raw)
                })
@@ -506,6 +534,37 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert result.images == []
       assert result.output =~ "nodes (2):"
       assert result.output =~ "could not be staged"
+    end
+
+    test "resolved denylist refuses after capture, with no image" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("t")), sha(jpeg("t")))
+      raw = put_in(raw, ["app", "id"], "com.apple.Terminal")
+
+      assert {:ok, result} =
+               DesktopState.run(%{window_id: "w_1"}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      assert result.is_error
+      assert result.output =~ "denylist"
+      assert result.images == []
+    end
+
+    test "claimed vs resolved mismatch is refused" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("m")), sha(jpeg("m")))
+
+      assert {:ok, result} =
+               DesktopState.run(%{app: "Safari"}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      assert result.is_error
+      assert result.output =~ "resolved com.apple.calculator"
+      assert result.images == []
     end
 
     test "no session directory is an honest error, no capture" do
@@ -517,6 +576,8 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
     end
 
     test "off node with no injected runner reports not enabled" do
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
+
       assert {:ok,
               %{output: "computer use is not enabled on this node", is_error: true, images: []}} =
                DesktopState.run(%{include_image: true}, %{session_dir: session_dir()})
@@ -594,5 +655,192 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       "readiness" => %{"screenshot" => "ok", "ax" => "ok", "input" => "ok"},
       "warnings" => []
     }
+  end
+
+  describe "Desktop.act/2" do
+    test "clicks by element_index against last state and sends the snapshot" do
+      enable(fake_helper())
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("act")), sha(jpeg("act")))
+      remember_last(dir, raw)
+
+      {:ok, box} = Agent.start_link(fn -> nil end)
+
+      runner = fn method, params, _timeout ->
+        Agent.update(box, fn _ -> {method, params} end)
+
+        {:ok,
+         %{
+           "ok" => true,
+           "backend" => "ax",
+           "app_id" => "com.apple.calculator",
+           "window_id" => "w_1",
+           "landing" => "focused role=AXButton editable=false name=2",
+           "warnings" => []
+         }}
+      end
+
+      assert {:ok, result} =
+               DesktopAct.run(%{action: "click", element_index: 1}, %{
+                 session_dir: dir,
+                 desktop_runner: runner
+               })
+
+      refute result.is_error
+      assert result.images == []
+      assert result.output =~ "ok=true"
+      assert result.output =~ "com.apple.calculator"
+
+      assert {"act", params} = Agent.get(box, & &1)
+      assert params["element"]["name"] == "2"
+      assert params["target"]["app_id"] == "com.apple.calculator"
+      assert params["target"]["window_id"] == "w_1"
+    end
+
+    test "a stale last state is refused before the helper is called" do
+      enable(fake_helper())
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("stale")), sha(jpeg("stale")))
+      remember_last(dir, raw, at: System.system_time(:millisecond) - 60_000)
+
+      runner = fn _method, _params, _timeout -> flunk("helper must not run for a stale act") end
+
+      assert {:ok, result} =
+               DesktopAct.run(%{action: "click", element_index: 1}, %{
+                 session_dir: dir,
+                 desktop_runner: runner
+               })
+
+      assert result.is_error
+      assert result.output =~ "stale"
+    end
+
+    test "a claimed app that is not the last state is refused" do
+      enable(fake_helper())
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("mis")), sha(jpeg("mis")))
+      remember_last(dir, raw)
+
+      runner = fn _method, _params, _timeout -> flunk("must not act on a mismatched app") end
+
+      assert {:ok, result} =
+               DesktopAct.run(%{action: "click", element_index: 1, app: "Safari"}, %{
+                 session_dir: dir,
+                 desktop_runner: runner
+               })
+
+      assert result.is_error
+      assert result.output =~ "com.apple.calculator"
+      assert result.output =~ "com.apple.Safari"
+    end
+
+    test "Terminal is denied by the named denylist before inject" do
+      enable(fake_helper())
+      dir = session_dir()
+
+      assert {:ok, result} =
+               DesktopAct.run(%{action: "focus", app: "Terminal"}, %{
+                 session_dir: dir,
+                 desktop_runner: fn _, _, _ -> flunk("denied") end
+               })
+
+      assert result.is_error
+      assert result.output =~ "denylist"
+      assert result.output =~ "com.apple.Terminal"
+    end
+
+    test "resolve_act returns the last state's app and refuses a mismatch" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("res")), sha(jpeg("res")))
+
+      assert {:ok, "com.apple.Safari"} =
+               Desktop.resolve_act(%{"action" => "focus", "app" => "Safari"}, dir)
+
+      remember_last(dir, raw)
+
+      assert {:ok, "com.apple.calculator"} =
+               Desktop.resolve_act(%{"action" => "click"}, dir)
+
+      assert {:error, message} =
+               Desktop.resolve_act(%{"action" => "click", "app" => "Safari"}, dir)
+
+      assert message =~ "com.apple.Safari"
+
+      assert {:ok, "com.apple.Safari"} =
+               Desktop.resolve_act(%{"action" => "focus", "app" => "Safari"}, dir)
+    end
+
+    test "sensitive_act? flags secret type text and secure fields" do
+      assert Desktop.sensitive_act?(%{action: "type", text: "sk-live-secret"}, nil)
+      refute Desktop.sensitive_act?(%{action: "type", text: "2"}, nil)
+
+      dir = session_dir()
+
+      raw =
+        calculator_state(temp_image(jpeg("sec")), sha(jpeg("sec")))
+        |> put_in(["nodes"], [
+          %{
+            "index" => 1,
+            "role" => "AXSecureTextField",
+            "name" => "Password",
+            "actions" => []
+          }
+        ])
+
+      remember_last(dir, raw)
+      assert Desktop.sensitive_act?(%{action: "click", element_index: 1}, dir)
+    end
+  end
+
+  defp remember_last(dir, raw, opts \\ []) do
+    at = Keyword.get(opts, :at, System.system_time(:millisecond))
+
+    Ouroboros.Provider.Native.Desktop.Pool.remember_state(
+      Ouroboros.Provider.Native.Desktop.Pool,
+      dir,
+      %{state: raw, at: at}
+    )
+  end
+
+  describe "loop gate — desktop_state asks" do
+    test "a :read desktop_state still raises approval_requested" do
+      enable(fake_helper())
+
+      root = Path.join(System.tmp_dir!(), "cu-ask-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "workspace"))
+      File.mkdir_p!(Path.join(root, "session"))
+      on_exit(fn -> File.rm_rf(root) end)
+
+      {:ok, scope} = Paths.scope(Path.join(root, "workspace"), [], :workspace_write)
+
+      {model_spec, _agent} =
+        NativeModelScript.start([
+          [
+            {:tool_call, %{id: "c1", name: "desktop_state", input: %{"app" => "Calculator"}}}
+          ]
+        ])
+
+      test = self()
+
+      loop = %Loop{
+        emit: fn event -> send(test, {:event, event}) end,
+        model_module: NativeModelScript,
+        model_spec: model_spec,
+        system: "system",
+        scope: scope,
+        session_dir: Path.join(root, "session"),
+        session_id: "sess-1",
+        provider_session_id: "native-x-y",
+        turn_id: "turn-1",
+        approval_mode: :ask,
+        approval_timeout_ms: :infinity
+      }
+
+      spawn_link(fn -> Loop.run_turn(loop, "look") end)
+
+      assert_receive {:event, %{type: :approval_requested, payload: payload}}, 5_000
+      assert payload["tool_call"]["name"] == "desktop_state"
+      assert payload["suggested_rule"]["pattern"] == "ComputerUse(app:com.apple.calculator)"
+    end
   end
 end

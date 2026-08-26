@@ -281,6 +281,8 @@ defmodule Ouroboros.Gateway.Methods do
     "mcp.list" => %{scope: :read, timeout: @default_timeout},
     "computer_use.status" => %{scope: :read, timeout: @default_timeout},
     "computer_use.artifact" => %{scope: :read, timeout: @default_timeout},
+    # Starts the helper so `ouro desktop doctor` can report TCC. Status stays start-nothing.
+    "computer_use.probe" => %{scope: :operate, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
     # This is intentionally not coupled to invitation cancellation. It is the explicit
     # state-loss boundary that lets an operator retire durable session-owner evidence
@@ -749,6 +751,11 @@ defmodule Ouroboros.Gateway.Methods do
          @authority_node
        ]},
     "computer_use.status" =>
+      {:closed,
+       [
+         @authority_node
+       ]},
+    "computer_use.probe" =>
       {:closed,
        [
          @authority_node
@@ -1367,10 +1374,6 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Computer Use — node-routed status and artifact fetch (docs/COMPUTER_USE.md §8.5)
-  # ---------------------------------------------------------------------------
-
   def invoke("computer_use.status", params) do
     with :ok <- only_keys(params, ["node"]),
          {:ok, target} <- permissions_node(params) do
@@ -1379,6 +1382,21 @@ defmodule Ouroboros.Gateway.Methods do
           {:ok, Desktop.status()}
         else
           {:ok, :erpc.call(target, Desktop, :status, [], @fleet_query_timeout)}
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("computer_use.probe", params) do
+    with :ok <- only_keys(params, ["node"]),
+         {:ok, target} <- permissions_node(params) do
+      safe(fn ->
+        if target == node() do
+          {:ok, Desktop.probe()}
+        else
+          {:ok, :erpc.call(target, Desktop, :probe, [], @fleet_query_timeout)}
         end
       end)
     else

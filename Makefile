@@ -12,7 +12,8 @@ MIX ?= mix
 CARGO ?= cargo
 RELEASE ?= ouroboros
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -38,6 +39,7 @@ help:
 	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
 	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
+	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -76,16 +78,48 @@ reset:
 logs:
 	@sh scripts/dev.sh logs
 
-desktop-dev:
+desktop-dev: computer-use-debug
 	@echo "==> desktop-dev: building the native client and its lifecycle helper"
 	cd tui && $(CARGO) build --features desktop --bin ouro --bin ouro-desktop
 	./scripts/bundle-macos-desktop.sh debug
 
-desktop-app: release-tarball
+desktop-app: computer-use release-tarball
 	@echo "==> desktop-app: embedding the runtime in both macOS app executables"
 	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
 	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features "embed desktop" --bin ouro --bin ouro-desktop
 	./scripts/bundle-macos-desktop.sh release
+
+computer-use:
+	@echo "==> computer-use: release helper into priv/computer-use/"
+	cd tui && $(CARGO) build --release -p ouro-computer-use
+	mkdir -p priv/computer-use
+	cp tui/target/release/ouro-computer-use priv/computer-use/ouro-computer-use
+	chmod 0755 priv/computer-use/ouro-computer-use
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
+	    chmod 0755 "$$dest/ouro-computer-use"; \
+	  fi; \
+	done
+
+computer-use-debug:
+	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
+	cd tui && $(CARGO) build -p ouro-computer-use
+	mkdir -p priv/computer-use
+	cp tui/target/debug/ouro-computer-use priv/computer-use/ouro-computer-use
+	chmod 0755 priv/computer-use/ouro-computer-use
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
+	    chmod 0755 "$$dest/ouro-computer-use"; \
+	  fi; \
+	done
+
+
 
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
@@ -140,7 +174,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball:
+release-tarball: computer-use
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

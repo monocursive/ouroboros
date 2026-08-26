@@ -195,6 +195,88 @@ fn canonical_order(mut modifiers: Vec<Modifier>) -> Vec<Modifier> {
     modifiers
 }
 
+/// ANSI-US virtual key code for a parsed key (Carbon `kVK_*`).
+pub fn virtual_key(key: Key) -> u16 {
+    match key {
+        Key::Named(NamedKey::Enter) => 0x24,
+        Key::Named(NamedKey::Tab) => 0x30,
+        Key::Named(NamedKey::Space) => 0x31,
+        Key::Named(NamedKey::Backspace) => 0x33,
+        Key::Named(NamedKey::Escape) => 0x35,
+        Key::Named(NamedKey::Home) => 0x73,
+        Key::Named(NamedKey::PageUp) => 0x74,
+        Key::Named(NamedKey::Delete) => 0x75,
+        Key::Named(NamedKey::End) => 0x77,
+        Key::Named(NamedKey::PageDown) => 0x79,
+        Key::Named(NamedKey::Left) => 0x7B,
+        Key::Named(NamedKey::Right) => 0x7C,
+        Key::Named(NamedKey::Down) => 0x7D,
+        Key::Named(NamedKey::Up) => 0x7E,
+        Key::Function(n) => function_virtual_key(n),
+        Key::Char(c) => char_virtual_key(c),
+    }
+}
+
+fn function_virtual_key(n: u8) -> u16 {
+    match n {
+        1 => 0x7A,
+        2 => 0x78,
+        3 => 0x63,
+        4 => 0x76,
+        5 => 0x60,
+        6 => 0x61,
+        7 => 0x62,
+        8 => 0x64,
+        9 => 0x65,
+        10 => 0x6D,
+        11 => 0x67,
+        12 => 0x6F,
+        _ => 0x7A,
+    }
+}
+
+fn char_virtual_key(c: char) -> u16 {
+    match c {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0B,
+        'q' => 0x0C,
+        'w' => 0x0D,
+        'e' => 0x0E,
+        'r' => 0x0F,
+        'y' => 0x10,
+        't' => 0x11,
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '9' => 0x19,
+        '7' => 0x1A,
+        '8' => 0x1C,
+        '0' => 0x1D,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        'k' => 0x28,
+        'i' => 0x22,
+        'o' => 0x1F,
+        'u' => 0x20,
+        'n' => 0x2D,
+        'm' => 0x2E,
+        _ => 0x00,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,4 +359,14 @@ mod tests {
             Err(KeyParseError::Unknown("frobnicate".to_string()))
         );
     }
+
+    #[test]
+    fn virtual_key_maps_named_and_letters() {
+        assert_eq!(virtual_key(Key::Named(NamedKey::Enter)), 0x24);
+        assert_eq!(virtual_key(Key::Named(NamedKey::Escape)), 0x35);
+        assert_eq!(virtual_key(Key::Char('a')), 0x00);
+        assert_eq!(virtual_key(Key::Char('2')), 0x13);
+        assert_eq!(virtual_key(Key::Function(1)), 0x7A);
+    }
+
 }

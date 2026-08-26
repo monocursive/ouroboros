@@ -25,16 +25,16 @@ use serde_json::{json, Value};
 mod caps {
     pub const DEFAULT_MAX_WIDTH: u32 = 1920;
     pub const DEFAULT_MAX_HEIGHT: u32 = 1920;
-    pub const CEIL_MAX_WIDTH: u32 = 8192;
-    pub const CEIL_MAX_HEIGHT: u32 = 8192;
+    pub const CEIL_MAX_WIDTH: u32 = 1920;
+    pub const CEIL_MAX_HEIGHT: u32 = 1920;
 
     pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
-    pub const CEIL_MAX_BYTES: usize = 16 * 1024 * 1024;
+    pub const CEIL_MAX_BYTES: usize = 2 * 1024 * 1024;
 
     pub const DEFAULT_MAX_NODES: usize = 1_000;
-    pub const CEIL_MAX_NODES: usize = 10_000;
+    pub const CEIL_MAX_NODES: usize = 1_000;
     pub const DEFAULT_MAX_DEPTH: usize = 32;
-    pub const CEIL_MAX_DEPTH: usize = 128;
+    pub const CEIL_MAX_DEPTH: usize = 32;
 
     pub const DEFAULT_QUALITY: u8 = 80;
 }
@@ -525,7 +525,7 @@ mod tests {
         }));
         assert_eq!(request.include_image, false);
         assert_eq!(request.max_width, caps::CEIL_MAX_WIDTH);
-        assert_eq!(request.max_height, 3000);
+        assert_eq!(request.max_height, caps::CEIL_MAX_HEIGHT);
         assert_eq!(request.max_bytes, caps::CEIL_MAX_BYTES);
         assert_eq!(request.format, Format::Png);
         assert_eq!(request.quality, 95);

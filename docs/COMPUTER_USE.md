@@ -243,25 +243,26 @@ name it cannot use.
 **Rejected: tools always listed, engine denies.** That spends prefix on a
 disabled feature and trains the model to call a name that always fails.
 
-### D10. Auto-approve does not cover `desktop_act`
+### D10. Auto-approve does not invent a Computer Use allow
 
 **Choice.** Client-side auto-approve (`approve, once, actor: automation`)
-already skips questions. It must also skip `desktop_act`. `desktop_state` may
-be auto-approved the way `read` is — it is observation — but the approval card
-for first-app observe still shows once, because the *app allowlist* is the
-product, not the tool mode.
+already skips questions. It must also skip Computer Use. `desktop_state`
+classifies as `:read` but still asks in `:ask` mode: the *app allowlist* is
+the product, not the tool mode.
 
-Implementation: the native loop's auto-approve path (and the desktop/TUI
-equivalent) treats `classified.tool == "desktop_act"` as a question. The
-engine still evaluates; a stored `ComputerUse(app:…)` allow may pass without
-a card. Auto-approve must not *invent* that allow.
+Implementation: the native loop treats `classified.tool` in
+`{"desktop_state", "desktop_act"}` as a question unless a stored
+`ComputerUse(app:…)` allow already covers it. Headless `ouro run
+--approve-all` uses the same carve-out. Auto-approve must not *invent* that
+allow.
 
 ### D11. One helper per node, last state per session
 
 **Choice.** Pool keyed like MCP's pool is *not* `{workspace, server}` — there
-is one helper process on the node. `Native.Desktop` holds
-`%{session_id => last_state}` in the BEAM. Session death drops the snapshot.
-Helper crash drops nothing durable; the next `state` rebuilds.
+is one helper process on the node. `Native.Desktop.Pool` is a supervised
+singleton. Last state is `%{session_dir => last_state}` in the BEAM. Session
+death drops the snapshot. Helper crash drops nothing durable; the next
+`state` rebuilds.
 
 **Rejected: one helper per session.** TCC prompts would fire per session.
 ScreenCaptureKit streams are expensive. Isolation we need is in Elixir
@@ -337,6 +338,7 @@ this engine.
 config :ouroboros,
   computer_use: [
     enabled: false,
+    act_enabled: false,             # Phase 2 ships desktop_act
     helper_path: :bundled,          # :bundled | "/absolute/path"
     handshake_timeout_ms: 5_000,
     state_timeout_ms: 5_000,
@@ -379,10 +381,11 @@ MCP requires trust.
 
 ### 5.1 When the tools appear
 
-`Tools.specs/3` appends the two desktop modules **after** the static fifteen
+`Tools.specs/3` appends desktop modules **after** the static fifteen
 and **before** MCP, only when all of:
 
 1. `Native.Desktop.enabled?/0` (flag on, helper binary present).
+   `desktop_act` additionally requires `Desktop.act_enabled?/0`.
 2. `opts[:workspace]` is a binary (same gate MCP uses — no workspace, no
    host-local extras).
 3. Session is not depth-capped in a way that hides them. Subagents **do** see
@@ -958,6 +961,7 @@ a 1.8 MiB JPEG is visible on the entry.
 
 ```
 ouro desktop doctor          # pretty or --json, calls computer_use.status
+ouro desktop doctor --probe  # operate: starts the helper, returns doctor
 ouro desktop enable          # tells the operator to set the flag / env;
                              # does not flip production config itself
 ```
@@ -1017,25 +1021,21 @@ text in the hook JSON. `desktop_act` `text` is redacted to
 ## 13. File layout
 
 ```
-lib/ouroboros/provider/native/desktop.ex          # enabled?, status, stage_image
-lib/ouroboros/provider/native/desktop/pool.ex     # one helper
-lib/ouroboros/provider/native/desktop/codec.ex    # JSON-RPC framing (may share MCP codec ideas, not the module)
-lib/ouroboros/provider/native/desktop/apps.ex     # name → bundle id, deny list
+lib/ouroboros/provider/native/desktop.ex          # enabled?, status, probe, artifact
+lib/ouroboros/provider/native/desktop/pool.ex     # supervised singleton helper
+lib/ouroboros/provider/native/desktop/codec.ex    # JSON-RPC framing
 lib/ouroboros/provider/native/tools/desktop_state.ex
 lib/ouroboros/provider/native/tools/desktop_act.ex
 lib/ouroboros/control/permissions/pattern.ex      # + ComputerUse
 lib/ouroboros/control/permissions/matcher.ex      # + ComputerUse
-tui/src/computer_use/                             # or crates/computer-use/
-  Cargo.toml                                      # ouro-computer-use bin
-  src/main.rs
-  src/doctor.rs
-  src/macos/{capture,ax,input,windows}.rs
-tui/src/images.rs                                 # session_desktop containment
-tui/src/ui/app/desktop.rs                         # Image cell, approval thumbnail
+lib/ouroboros/application.ex                      # Desktop.Pool child
+tui/crates/computer-use/                          # ouro-computer-use bin
+tui/src/bin/desktop_cli.rs                        # ouro desktop doctor
 config/config.exs                                 # :computer_use defaults
 test/provider/native/desktop_test.exs
+test/provider/native/desktop_pool_test.exs
 test/control/permissions_test.exs                 # ComputerUse patterns
-test/support/gateway_golden/                      # status + artifact + tool_result artifacts
+test/support/gateway_golden/
 ```
 
 Do not add a Linux crate tree until Phase 4. Do not copy
@@ -1183,64 +1183,36 @@ Windows, PiP overlay, `@App` composer sugar.
 13. A Linux port implements `doctor|state|act|windows`, not 18 MCP
     tools.
 
-## 18. Phase 0 + Phase 1 (observe) — as built and proven (2026-08-26)
+## 18. Phase 0–2 — as built (2026-08-26)
 
-Phase 0 and Phase 1 (observe) are implemented and merged to a feature branch
-(`computer-use-p1`, not `main`). What follows is what the code actually does,
-where it diverges from the design above, and what stays deferred — the honesty
-invariant applied to this document itself.
+Phase 0, Phase 1 (observe), and Phase 2 (act, macOS) are implemented.
 
-**Proven live on macOS (real capture, this host):**
+**Proven / contract-tested:**
 
-- The helper (`ouro-computer-use`) captures a real screenshot through
-  `SCScreenshotManager` over a desktop-independent `SCWindow` filter that never
-  raises the window (D8/§7.3), plus a real `AXUIElement` tree whose node bounds
-  are transformed into the screenshot's coordinate space. `doctor` reports every
-  capability green; `windows` returns real windows over the `serve` JSON-RPC.
-- `DesktopState.run` → `Native.Desktop.Pool` → helper → `state` → content-address
-  staging (`0600`, `<session_dir>/desktop/<sha>.jpg`) → a result carrying
-  `images: [%{path, media_type, sha256, size}]` was driven end-to-end (a
-  ~200 KB JPEG whose staged sha matched).
-- `computer_use.status` reports `running: true` with the pool's cached doctor;
-  `computer_use.artifact` returns the staged bytes base64 by sha, and refuses an
-  unknown sha or a non-64-hex sha (a path-traversal attempt) with `not_found`.
-- The ollama native path streams a full turn — the first live exercise of
-  `Model.ReqLLM` normalization.
+- Observe: ScreenCaptureKit + AX tree, staged JPEG, `computer_use.status` /
+  `probe` / `artifact`, vision seam, supervised pool, `--approve-all` cannot
+  invent a Computer Use allow.
+- Act: `desktop_act` is advertised when Computer Use is enabled (`act_enabled`
+  default true). Elixir resolves `element_index` against last state (30s
+  stale window), refuses a denied app and a last-state/app mismatch, and
+  sends the element snapshot to the helper. The helper rematches
+  role+name+bounds, prefers `AXPress` / `AXSetValue`, falls back to CGEvent
+  only when AX was not attempted, requires focus for `type`/`key`, refuses
+  self / ouro-desktop / permission sheets / `--deny-app`, and honors
+  `cancel` between events.
+- Two-phase: `Desktop.resolve_act/2` names the app the call would operate
+  (last state, or a `focus` retarget). The loop re-evaluates when that id
+  differs from the first classify. Always-allow Safari does not cover a
+  Mail focus. Sensitive type/secure-field acts ask again (`:once` card).
+- Interrupt: `Tools.execute` for `desktop_act` listens for
+  `:native_interrupt`, sends helper `cancel`, and the loop flushes the
+  interrupt so the turn stops.
 
-**Honest divergences and deferrals (do not "fix" without reading):**
+**Still deferred:**
 
-- **TUI inline pixels are deferred.** See §8.6 — ratatui strips the escape codes.
-  GPUI renders; the TUI shows a placeholder.
-- **§6.3 two-phase is Phase-1-partial.** For `desktop_state` the protections that
-  are live are: the claimed-app node-denylist check before capture, the helper's
-  `--deny-app` belt (the pool now launches `serve --deny-app <id>` for every
-  denied id, §7.3), and a helper that errors rather than substituting a different
-  app when the target does not resolve. The full **engine re-evaluate on the
-  resolved app** (an allow for app X must not cover a capture that resolved to Y)
-  lands with **`desktop_act` in Phase 2**, where the focus-only preflight makes it
-  load-bearing (clicking the wrong app is the real risk).
-- **`desktop_act` is a stub** (Phase 2): validation + key grammar are real and
-  tested, but no input is injected.
-- **The helper pool is an unlinked, lazily-started singleton** (no supervisor in
-  this slice; D11's "next state rebuilds" covers a crash). Wiring it under a
-  `Desktop.Supervisor` is a deferred refinement; `start_link/1` + `child_spec`
-  already ship.
-- **Last state is keyed by `session_dir`**, not `session_id` (the tool context
-  carries the former); rekeying is a one-line change if `session_id` is threaded.
-- **`computer_use.artifact` is pool-incarnation-scoped**: it searches only the
-  session dirs the live pool has staged into, so a sha from before a pool crash
-  is an honest miss. A durable sha→path index is a later refinement.
-- **`--approve-all` must not auto-answer `desktop_act`** (Δ1, D10): the headless
-  `ouro run` driver approves everything except `plan_exit`; the Phase-2
-  `desktop_act` work must add `desktop_act` (and a first-app `desktop_state`) to
-  that carve-out so an unattended run cannot click.
-- **Vision leg is unit-tested, not live-proven end-to-end.** A non-vision model
-  (e.g. `qwen2.5-coder`) receives the accessibility tree by design; the
-  pixels-to-vision-model path is covered by `Model.ReqLLM` unit tests. A vision
-  model that reliably tool-calls would close it.
+- TUI inline pixels (ratatui strips the codes). GPUI can render.
+- Live end-to-end "click Calculator 2" on this host is a manual
+  `make computer-use` smoke, not CI.
+- In-TUI `/computer-use` panel (Phase 3).
+- Linux adapter (Phase 4).
 
-**Operator surface (built):** `ouro desktop doctor [--json]` (D2) queries
-`computer_use.status` over the gateway and prints readiness; both methods are in
-the `docs/TUI.md` §2.4 catalogue. Still deferred: an in-TUI `/computer-use`
-panel and the settings/always-allow list (§10) — the CLI and the gateway methods
-are the whole operator surface for now.

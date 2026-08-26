@@ -171,6 +171,206 @@ fn is_secure(role: Option<&str>, subrole: Option<&str>) -> bool {
     role == Some("AXSecureTextField") || subrole == Some("AXSecureTextField")
 }
 
+/// Why a live rematch could not perform the requested AX action.
+#[derive(Debug)]
+pub enum MatchError {
+    /// No live node matched the snapshot.
+    Gone,
+    /// A match was found but it does not list the AX action we wanted (caller may CGEvent).
+    NoPress,
+    /// The AX call itself failed.
+    Failed(String),
+}
+
+/// Presses the live node that rematches `needle`, using `AXPress` only when the node lists it.
+pub fn press_matching(
+    pid: i32,
+    window_bounds: Option<Rect>,
+    needle: &crate::act::ElementSnapshot,
+) -> Result<(), MatchError> {
+    with_match(pid, window_bounds, needle, |elem, node| {
+        if !crate::act::lists_press(&node.actions) {
+            return Err(MatchError::NoPress);
+        }
+        perform(elem, "AXPress")
+    })
+}
+
+/// Sets `AXValue` on the rematched node.
+pub fn set_value_matching(
+    pid: i32,
+    window_bounds: Option<Rect>,
+    needle: &crate::act::ElementSnapshot,
+    text: &str,
+) -> Result<(), MatchError> {
+    with_match(pid, window_bounds, needle, |elem, _node| set_value(elem, text))
+}
+
+/// Makes the application frontmost so subsequent events land in it.
+pub fn set_frontmost(pid: i32) -> Result<(), String> {
+    let app = unsafe { AXUIElement::new_application(pid) };
+    set_bool(&app, "AXFrontmost", true)
+}
+
+/// Raises the window whose bounds match `target`.
+pub fn raise_window(pid: i32, target: Rect) -> Result<(), String> {
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let Some(root) = find_window_element(&app, target) else {
+        return Err("window element not found for raise".into());
+    };
+    perform(&root, "AXRaise").map_err(|e| match e {
+        MatchError::Failed(message) => message,
+        _other => "AXRaise failed".into(),
+    })
+}
+
+/// Bundle id of the frontmost on-screen layer-0 window (grant-free, via CGWindowList).
+pub fn frontmost_app_id() -> Option<String> {
+    let windows = crate::macos::windows::enumerate().ok()?;
+    windows
+        .into_iter()
+        .find(|w| w.on_screen && w.layer == 0)
+        .and_then(|w| w.app_id)
+}
+
+/// Focused element after an act, for landing notes.
+pub fn focused_summary(pid: i32, window_bounds: Option<Rect>) -> Option<crate::act::FocusedElement> {
+    let root = walk(pid, 256, 16, window_bounds);
+    find_focused(&root).map(|(role, name, editable)| crate::act::FocusedElement {
+        role,
+        name,
+        editable,
+    })
+}
+
+fn find_focused(node: &RawAxNode) -> Option<(String, String, bool)> {
+    if node.focused {
+        if let Some(role) = node.role.clone() {
+            let name = node
+                .title
+                .clone()
+                .or(node.description.clone())
+                .unwrap_or_default();
+            let editable = node.value_settable
+                || matches!(
+                    role.as_str(),
+                    "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
+                );
+            return Some((role, name, editable));
+        }
+    }
+    node.children.iter().find_map(find_focused)
+}
+
+fn with_match<T>(
+    pid: i32,
+    window_bounds: Option<Rect>,
+    needle: &crate::act::ElementSnapshot,
+    mut f: impl FnMut(&AXUIElement, &RawAxNode) -> Result<T, MatchError>,
+) -> Result<T, MatchError> {
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let mut result = None;
+    if let Some(bounds) = window_bounds {
+        if let Some(root) = find_window_element(&app, bounds) {
+            search(&root, needle, 0, 32, &mut f, &mut result);
+        }
+    }
+    if result.is_none() {
+        search(&app, needle, 0, 32, &mut f, &mut result);
+    }
+    result.unwrap_or(Err(MatchError::Gone))
+}
+
+fn search<T>(
+    elem: &AXUIElement,
+    needle: &crate::act::ElementSnapshot,
+    depth: usize,
+    max_depth: usize,
+    f: &mut impl FnMut(&AXUIElement, &RawAxNode) -> Result<T, MatchError>,
+    out: &mut Option<Result<T, MatchError>>,
+) -> bool {
+    if out.is_some() || depth > max_depth {
+        return out.is_some();
+    }
+    let node = describe(elem);
+    let role = node.role.clone().unwrap_or_default();
+    let name = node.title.clone().or(node.description.clone());
+    if crate::act::same_element(needle, &role, name.as_deref(), node.bounds) {
+        *out = Some(f(elem, &node));
+        return true;
+    }
+    let Some(children) = copy_attr(elem, &cfstr("AXChildren")) else {
+        return false;
+    };
+    let Some(array) = children.downcast_ref::<CFArray>() else {
+        return false;
+    };
+    let count = array.count();
+    for i in 0..count {
+        let child = unsafe { &*(array.value_at_index(i) as *const AXUIElement) };
+        if search(child, needle, depth + 1, max_depth, f, out) {
+            return true;
+        }
+    }
+    false
+}
+
+fn describe(elem: &AXUIElement) -> RawAxNode {
+    let role = string_attr(elem, "AXRole");
+    let subrole = string_attr(elem, "AXSubrole");
+    let secure = is_secure(role.as_deref(), subrole.as_deref());
+    RawAxNode {
+        role,
+        subrole,
+        title: string_attr(elem, "AXTitle"),
+        description: string_attr(elem, "AXDescription"),
+        value: None,
+        value_settable: attr_settable(elem, "AXValue"),
+        enabled: bool_attr(elem, "AXEnabled").unwrap_or(true),
+        focused: bool_attr(elem, "AXFocused").unwrap_or(false),
+        secure,
+        actions: read_actions(elem),
+        bounds: read_bounds(elem),
+        children: Vec::new(),
+    }
+}
+
+fn perform(elem: &AXUIElement, action: &'static str) -> Result<(), MatchError> {
+    let err = unsafe { elem.perform_action(&cfstr(action)) };
+    if err.0 == 0 {
+        Ok(())
+    } else {
+        Err(MatchError::Failed(format!(
+            "{action} failed (AX error {})",
+            err.0
+        )))
+    }
+}
+
+fn set_value(elem: &AXUIElement, text: &str) -> Result<(), MatchError> {
+    let value = CFString::from_str(text);
+    let err = unsafe { elem.set_attribute_value(&cfstr("AXValue"), value.as_ref()) };
+    if err.0 == 0 {
+        Ok(())
+    } else {
+        Err(MatchError::Failed(format!(
+            "AXSetValue failed (AX error {})",
+            err.0
+        )))
+    }
+}
+
+fn set_bool(elem: &AXUIElement, attr: &'static str, value: bool) -> Result<(), String> {
+    let boolean = CFBoolean::new(value);
+    let err = unsafe { elem.set_attribute_value(&cfstr(attr), boolean.as_ref()) };
+    if err.0 == 0 {
+        Ok(())
+    } else {
+        Err(format!("{attr} failed (AX error {})", err.0))
+    }
+}
+
+
 // --- attribute reads ---
 
 /// The owned value of an attribute, or `None` if the element does not have it. The copy

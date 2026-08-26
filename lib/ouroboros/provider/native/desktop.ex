@@ -46,8 +46,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
   session directory (D11); the helper stays stateless.
   """
 
+  alias Ouroboros.Control.Permissions
   alias Ouroboros.Provider.Native.Attachments
   alias Ouroboros.Provider.Native.Desktop.Pool
+  alias Ouroboros.Provider.Native.Paths, as: NativePaths
 
   # The image formats a Computer Use screenshot may be, verified from the bytes the helper
   # staged (§5.2 / §8.1). Narrower than `Attachments` on purpose: a desktop capture is a
@@ -93,11 +95,13 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   @defaults [
     enabled: false,
+    act_enabled: true,
     helper_path: :bundled,
     handshake_timeout_ms: 5_000,
     state_timeout_ms: 5_000,
     act_timeout_ms: 10_000,
     shutdown_grace_ms: 2_000,
+    stale_ms: 30_000,
     max_frame_bytes: 8 * 1024 * 1024,
     max_image_bytes: 2 * 1024 * 1024,
     max_image_width: 1920,
@@ -111,7 +115,13 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   # Timeouts fall back only when non-positive; a bigger value only makes this node wait
   # longer for its own helper, which is the operator's call to make.
-  @timeout_keys [:handshake_timeout_ms, :state_timeout_ms, :act_timeout_ms, :shutdown_grace_ms]
+  @timeout_keys [
+    :handshake_timeout_ms,
+    :state_timeout_ms,
+    :act_timeout_ms,
+    :shutdown_grace_ms,
+    :stale_ms
+  ]
 
   # Caps and limits fall back when non-positive *or raised above the shipped default*: a
   # value over the cap widens what a helper may consume on this node, which a typo must
@@ -129,12 +139,29 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   Whether Computer Use is genuinely usable on this node.
 
-  True only when the flag is on and the resolved helper binary exists on disk. With no
-  bundled helper this is false unless `OUROBOROS_COMPUTER_USE_HELPER` points at a built
-  binary — the feature does not claim a capability it cannot back.
+  True when the helper binary is on disk and Computer Use has not been explicitly
+  killed (`OUROBOROS_COMPUTER_USE=0`). A helper on disk is the operator opt-in —
+  they built or installed it. `OUROBOROS_COMPUTER_USE=1` still requires the helper.
   """
   @spec enabled?() :: boolean()
-  def enabled?, do: config(:enabled) == true and helper_present?()
+  def enabled?, do: helper_present?() and flag_allows?()
+
+  @doc "Effective flag: env 0/false kills, env 1/true or an unset env allows."
+  @spec flag_allows?() :: boolean()
+  def flag_allows? do
+    case System.get_env("OUROBOROS_COMPUTER_USE") do
+      value when value in ["0", "false"] -> false
+      value when value in ["1", "true"] -> true
+      _unset -> true
+    end
+  end
+
+  @doc """
+  Whether `desktop_act` is advertised. Default true now that Phase 2 ships injection.
+  Operators can set `:act_enabled` false for observe-only.
+  """
+  @spec act_enabled?() :: boolean()
+  def act_enabled?, do: config(:act_enabled) == true
 
   @doc "Whether the resolved helper binary exists on disk as a regular file."
   @spec helper_present?() :: boolean()
@@ -143,36 +170,69 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   The absolute path the helper would be spawned from.
 
-  `OUROBOROS_COMPUTER_USE_HELPER` wins, then the configured `:helper_path`, then the
-  bundled location. In Phase 0 nothing ships at the bundled location, so it resolves to a
-  path that does not exist and `enabled?/0` stays honestly false.
+  `OUROBOROS_COMPUTER_USE_HELPER` wins, then a configured absolute `:helper_path`, then
+  the first existing candidate: app priv, the checkout `priv/` (mix), or a sibling of
+  `ouro` / this executable (the macOS app bundle).
   """
   @spec helper_path() :: String.t()
   def helper_path do
     case System.get_env("OUROBOROS_COMPUTER_USE_HELPER") do
-      path when is_binary(path) and path != "" -> path
-      _unset -> configured_helper_path()
+      path when is_binary(path) and path != "" ->
+        path
+
+      _unset ->
+        case config(:helper_path) do
+          path when is_binary(path) and path != "" -> path
+          _bundled -> resolve_bundled_helper()
+        end
     end
   end
 
-  defp configured_helper_path do
-    case config(:helper_path) do
-      path when is_binary(path) and path != "" -> path
-      _bundled_or_invalid -> bundled_helper_path()
+  defp resolve_bundled_helper do
+    Enum.find(helper_candidates(), &File.regular?/1) || hd(helper_candidates())
+  end
+
+  defp helper_candidates do
+    name = "ouro-computer-use"
+
+    [
+      priv_helper(name),
+      Path.expand(Path.join(["priv", "computer-use", name])),
+      walk_priv_helper(name),
+      sibling_helper(name, :os.find_executable(~c"ouro")),
+      sibling_helper(name, :os.find_executable(~c"ouro-desktop"))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp walk_priv_helper(name) do
+    case File.cwd() do
+      {:ok, cwd} ->
+        cwd
+        |> Stream.iterate(&Path.dirname/1)
+        |> Enum.take(6)
+        |> Enum.find_value(fn dir ->
+          path = Path.join([dir, "priv", "computer-use", name])
+          if File.regular?(path), do: path
+        end)
+
+      {:error, _reason} ->
+        nil
     end
   end
 
-  defp bundled_helper_path do
+  defp priv_helper(name) do
     case :code.priv_dir(:ouroboros) do
-      priv when is_list(priv) ->
-        Path.join([List.to_string(priv), "computer-use", "ouro-computer-use"])
-
-      # An unloaded application has no priv dir; resolve somewhere that does not exist so
-      # `helper_present?/0` is false rather than raising.
-      _bad_name ->
-        "/nonexistent/ouro-computer-use"
+      priv when is_list(priv) -> Path.join([List.to_string(priv), "computer-use", name])
+      _bad_name -> nil
     end
   end
+
+  defp sibling_helper(_name, false), do: nil
+
+  defp sibling_helper(name, path) when is_list(path),
+    do: Path.join(Path.dirname(List.to_string(path)), name)
 
   @doc """
   The bundle ids this node refuses to drive, floor unioned with operator config.
@@ -213,19 +273,19 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   Node-facing Computer Use readiness for `computer_use.status` (§8.5). Starts nothing.
 
-  The config posture — `enabled`, `flag`, `helper_path`, `helper_present`,
-  `denied_app_ids` — is always reported. When the helper pool is already running, the
-  live block (`running: true`, the pool's cached handshake `doctor`, `phase`, `sessions`)
-  is folded in; with no pool it is an honest `running: false`. This never spawns the pool.
+  Config posture is always reported. `running` is true only when the helper has completed
+  its handshake — an idle supervised pool is not running. This never spawns the helper.
   """
   @spec status() :: map()
   def status do
     base = %{
       enabled: enabled?(),
-      flag: config(:enabled) == true,
+      flag: flag_allows?(),
       helper_path: helper_path(),
       helper_present: helper_present?(),
-      denied_app_ids: denied_app_ids()
+      denied_app_ids: denied_app_ids(),
+      always_allowed_apps: always_allowed_apps(),
+      helper_version: helper_version()
     }
 
     case Process.whereis(Pool) do
@@ -234,29 +294,54 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
       pid ->
         ps = Pool.status(pid)
+        ready? = ps.phase == :ready
 
-        Map.merge(base, %{
-          running: true,
-          phase: ps.phase,
-          doctor: ps.doctor,
-          sessions: ps.sessions
-        })
+        live =
+          %{running: ready?, phase: ps.phase, sessions: ps.sessions}
+          |> then(fn live ->
+            if ready? and is_map(ps.doctor), do: Map.put(live, :doctor, ps.doctor), else: live
+          end)
+          |> then(fn live ->
+            if ps.phase == :broken,
+              do: Map.put(live, :broken_reason, inspect(ps.broken_reason)),
+              else: live
+          end)
+
+        Map.merge(base, live)
     end
+  end
+
+  @doc """
+  Starts the helper if needed, waits for handshake, and returns `status/0`.
+
+  Operator surface for `ouro desktop doctor --probe` / `computer_use.probe`. With the
+  flag off this is start-nothing and returns the same posture as `status/0` — TCC is
+  not prompted on a node that has not opted in. Fleet `status` still starts nothing.
+  """
+  @spec probe() :: map()
+  def probe do
+    if config(:enabled) == true do
+      _ =
+        case pool() do
+          {:ok, pid} -> Pool.doctor(pid, config(:handshake_timeout_ms) + 1_000)
+          {:error, _reason} -> :error
+        end
+    end
+
+    status()
   end
 
   @doc """
   Serves one staged screenshot by content hash for `computer_use.artifact` (§8.5).
 
-  Searches only the `<session_dir>/desktop/` directories the live pool has staged into, so
-  an evicted or unknown sha — or a stopped pool — is an honest `{:error, :not_found}` rather
-  than a path traversal. Returns the bytes base64-encoded with the media type and size; the
-  pool is never started to answer a fetch.
+  Searches the live pool's session dirs and, if this node has a durable data directory,
+  every `<data_dir>/native/<session>/desktop/` folder. An unknown or non-64-hex sha is
+  `{:error, :not_found}` — never a path traversal. The pool is never started to answer.
   """
   @spec artifact(String.t()) :: {:ok, map()} | {:error, :not_found}
   def artifact(sha) when is_binary(sha) do
     with true <- sha =~ ~r/\A[a-f0-9]{64}\z/,
-         pid when is_pid(pid) <- Process.whereis(Pool),
-         staged when is_tuple(staged) <- find_staged(sha, Pool.session_dirs(pid)) do
+         staged when is_tuple(staged) <- find_staged(sha, artifact_dirs()) do
       read_artifact(staged)
     else
       _miss -> {:error, :not_found}
@@ -284,13 +369,86 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  @doc """
-  The node's helper pool, started detached on first use.
+  defp artifact_dirs do
+    live =
+      case Process.whereis(Pool) do
+        pid when is_pid(pid) -> Pool.session_dirs(pid)
+        nil -> []
+      end
 
-  There is one pool process per node (D11). It is resolved by name and started unlinked the
-  first time a tool needs it, so it outlives the transient task that spawned it; a caller
-  racing another to start it gets the winner. `{:error, reason}` when even starting the
-  supervisor-less singleton fails, which the caller reports as an honest in-band error.
+    Enum.uniq(live ++ durable_session_dirs())
+  end
+
+  defp durable_session_dirs do
+    root =
+      case Application.get_env(:ouroboros, :data_dir) do
+        path when is_binary(path) and path != "" -> Path.join(path, "native")
+        _unset -> nil
+      end
+
+    with root when is_binary(root) <- root,
+         {:ok, names} <- File.ls(root) do
+      Enum.flat_map(names, fn name ->
+        path = Path.join(root, name)
+
+        if NativePaths.validate_session_id(name) == :ok and File.dir?(Path.join(path, "desktop")) do
+          [path]
+        else
+          []
+        end
+      end)
+    else
+      _miss -> []
+    end
+  end
+
+  defp always_allowed_apps do
+    case Permissions.list([]) do
+      {:ok, rules} ->
+        rules
+        |> Enum.filter(&allow_app_rule?/1)
+        |> Enum.map(&app_from_rule/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      _unavailable ->
+        []
+    end
+  end
+
+  defp allow_app_rule?(%{decision: :allow, pattern: pattern}) when is_binary(pattern) do
+    case Ouroboros.Control.Permissions.Pattern.parse(pattern) do
+      {:ok, %{kind: :computer_use, spec: %{app: app}}} when is_binary(app) -> true
+      _other -> false
+    end
+  end
+
+  defp allow_app_rule?(_rule), do: false
+
+  defp app_from_rule(%{pattern: pattern}) do
+    case Ouroboros.Control.Permissions.Pattern.parse(pattern) do
+      {:ok, %{kind: :computer_use, spec: %{app: app}}} when is_binary(app) -> app
+      _other -> nil
+    end
+  end
+
+  defp helper_version do
+    case Process.whereis(Pool) do
+      pid when is_pid(pid) ->
+        case Pool.status(pid).doctor do
+          %{"version" => version} when is_binary(version) -> version
+          %{version: version} when is_binary(version) -> version
+          _absent -> nil
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  @doc """
+  The node's helper pool. Prefers the supervised singleton; tests without one start
+  a detached fallback.
   """
   @spec pool() :: {:ok, pid()} | {:error, term()}
   def pool do
@@ -329,6 +487,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
     outcome =
       with :ok <- refuse_denied(params),
            {:ok, session_dir} <- session_dir(context),
+           :ok <- require_target(params),
            {:ok, raw} <- run_state(params, context) do
         finish_observe(raw, params, session_dir)
       end
@@ -338,6 +497,32 @@ defmodule Ouroboros.Provider.Native.Desktop do
       {:error, message} when is_binary(message) -> {:ok, error_result(message)}
       {:error, reason} -> {:ok, error_result(pool_error_message(reason))}
     end
+  end
+
+  defp admit_resolved(raw, params) do
+    resolved = resolved_app_id(raw)
+    claimed = target_app(field(params, :app))
+
+    cond do
+      not is_binary(resolved) ->
+        {:error, "desktop_state: the helper did not resolve an app identity"}
+
+      denied_app?(resolved) ->
+        {:error,
+         "desktop_state: #{resolved} is on this node's Computer Use denylist and will not be captured"}
+
+      is_binary(claimed) and claimed != resolved ->
+        {:error,
+         "desktop_state: resolved #{resolved}, not #{claimed}. Call again naming the resolved app."}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp resolved_app_id(raw) do
+    app = field(raw, "app") || %{}
+    string(field(app, "id")) || string(field(app, :id))
   end
 
   @doc """
@@ -373,6 +558,104 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
+  @doc """
+  Runs one `desktop_act` (doc §5.3). No image. Failures are in-band.
+  """
+  @spec act(map(), map()) :: {:ok, %{output: String.t(), is_error: boolean(), images: [map()]}}
+  def act(params, context) when is_map(params) and is_map(context) do
+    alias Ouroboros.Provider.Native.Tools.DesktopAct
+
+    outcome =
+      with :ok <- DesktopAct.validate_args(params),
+           {:ok, session_dir} <- session_dir(context),
+           {:ok, snapshot} <- load_act_snapshot(params, session_dir),
+           :ok <- refuse_denied_act(params, snapshot),
+           {:ok, request} <- build_act_request(params, snapshot),
+           {:ok, raw} <- run_act(request, context) do
+        finish_act(raw)
+      end
+
+    case outcome do
+      %{output: _output} = ok -> {:ok, ok}
+      {:error, message} when is_binary(message) -> {:ok, error_result(message)}
+      {:error, reason} -> {:ok, error_result(pool_error_message(reason))}
+    end
+  end
+
+  @doc """
+  Resolves the app this `desktop_act` would operate, without injecting.
+
+  Used by the loop's two-phase gate (§6.3). Last state's resolved id wins unless the call
+  retargets via `app`/`window_id`/`title`. Stale or missing last state is an error except
+  for a `focus` that names a target.
+  """
+  @spec resolve_act(map(), String.t() | nil) :: {:ok, String.t()} | {:error, String.t()}
+  def resolve_act(params, session_dir) when is_map(params) do
+    action = string(field(params, :action))
+    claimed = target_app(field(params, :app))
+    snapshot = snapshot_for(session_dir)
+    last_app = snapshot_app(snapshot)
+
+    cond do
+      snapshot_stale?(snapshot) and action != "focus" ->
+        {:error, "desktop_act: last desktop_state is stale; call desktop_state again"}
+
+      action == "focus" and is_binary(claimed) ->
+        {:ok, claimed}
+
+      is_binary(last_app) and is_binary(claimed) and claimed != last_app ->
+        {:error,
+         "desktop_act: last state is #{last_app}, not #{claimed}. Call desktop_state again."}
+
+      is_binary(last_app) ->
+        {:ok, last_app}
+
+      true ->
+        {:error, "desktop_act: call desktop_state first"}
+    end
+  end
+
+  @doc "Fills a missing Computer Use `context.app` from the session's last state."
+  @spec enrich_classified(map(), String.t() | nil) :: map()
+  def enrich_classified(%{tool: tool, context: context} = classified, session_dir)
+      when tool in ["desktop_state", "desktop_act"] and is_map(context) do
+    if is_binary(context[:app]) do
+      classified
+    else
+      case snapshot_app(snapshot_for(session_dir)) do
+        app when is_binary(app) -> %{classified | context: Map.put(context, :app, app)}
+        _none -> classified
+      end
+    end
+  end
+
+  def enrich_classified(classified, _session_dir), do: classified
+
+  @doc """
+  Whether this act should ask even after an app allow (§6.6): a secure field, a
+  password-ish label, or type-text that looks like a secret.
+  """
+  @spec sensitive_act?(map(), String.t() | nil) :: boolean()
+  def sensitive_act?(params, session_dir) when is_map(params) do
+    action = string(field(params, :action))
+    text = string(field(params, :text))
+    element = act_element(params, snapshot_for(session_dir))
+
+    secret_text?(text) or secure_element?(element) or
+      (action in ["type", "key"] and passwordish_element?(element))
+  end
+
+  def sensitive_act?(_params, _session_dir), do: false
+
+  @doc "Asks the helper to abort an in-flight act (§7.5). Never starts the pool."
+  @spec cancel() :: :ok
+  def cancel do
+    case Process.whereis(Pool) do
+      pid when is_pid(pid) -> Pool.cancel(pid)
+      nil -> :ok
+    end
+  end
+
   @doc "Drops the last state for a session directory. Called when a session ends."
   @spec forget_state(String.t()) :: :ok
   def forget_state(session_dir) when is_binary(session_dir) do
@@ -396,6 +679,17 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
       _no_app ->
         :ok
+    end
+  end
+
+  defp require_target(params) do
+    if Enum.any?([:app, :window_id, :title], fn key ->
+         match?(value when is_binary(value) and value != "", field(params, key))
+       end) do
+      :ok
+    else
+      {:error,
+       "desktop_state: name an app, window_id, or title — untargeted frontmost capture is refused"}
     end
   end
 
@@ -463,10 +757,16 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp format(_jpeg_or_default), do: "jpeg"
 
   defp finish_observe(raw, params, session_dir) when is_map(raw) do
-    include_image = field(params, :include_image) != false
-    {images, image_note, staged} = stage_from_raw(raw, session_dir, include_image)
-    remember(session_dir, %{state: raw, image: staged})
-    %{output: render_state(raw, staged, image_note), is_error: false, images: images}
+    case admit_resolved(raw, params) do
+      :ok ->
+        include_image = field(params, :include_image) != false
+        {images, image_note, staged} = stage_from_raw(raw, session_dir, include_image)
+        remember(session_dir, %{state: raw, image: staged})
+        %{output: render_state(raw, staged, image_note), is_error: false, images: images}
+
+      {:error, message} ->
+        error_result(message)
+    end
   end
 
   defp finish_observe(_raw, _params, _session_dir),
@@ -491,6 +791,8 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp stage_from_raw(_raw, _session_dir, false), do: {[], nil, nil}
 
   defp remember(session_dir, last) do
+    last = Map.put(last, :at, System.system_time(:millisecond))
+
     case Process.whereis(Pool) do
       pid when is_pid(pid) -> Pool.remember_state(pid, session_dir, last)
       nil -> :ok
@@ -528,6 +830,227 @@ defmodule Ouroboros.Provider.Native.Desktop do
       _other ->
         "the desktop helper could not capture the screen"
     end
+  end
+
+  defp load_act_snapshot(params, session_dir) do
+    action = string(field(params, :action))
+    snapshot = snapshot_for(session_dir)
+    claimed = target_app(field(params, :app))
+    last_app = snapshot_app(snapshot)
+
+    cond do
+      snapshot_stale?(snapshot) and action != "focus" ->
+        {:error, "desktop_act: last desktop_state is stale; call desktop_state again"}
+
+      action != "focus" and is_binary(last_app) and is_binary(claimed) and claimed != last_app ->
+        {:error,
+         "desktop_act: last state is #{last_app}, not #{claimed}. Call desktop_state again."}
+
+      is_map(snapshot) ->
+        {:ok, snapshot}
+
+      action == "focus" and act_has_target?(params) ->
+        {:ok, nil}
+
+      true ->
+        {:error, "desktop_act: call desktop_state first"}
+    end
+  end
+
+  defp refuse_denied_act(params, snapshot) do
+    app = target_app(field(params, :app)) || snapshot_app(snapshot)
+
+    if denied_app?(app) do
+      {:error,
+       "desktop_act: #{app_alias(app)} is on this node's Computer Use denylist and will not be driven"}
+    else
+      :ok
+    end
+  end
+
+  defp run_act(request, context) do
+    runner = state_runner(context)
+    runner.("act", request, config(:act_timeout_ms))
+  end
+
+  defp build_act_request(params, snapshot) do
+    action = string(field(params, :action))
+    raw = snapshot_raw(snapshot)
+
+    {:ok,
+     %{
+       "action" => action,
+       "target" => act_target(params, raw),
+       "element" => act_element(params, snapshot),
+       "point" => act_point(params),
+       "from" => act_named_point(params, :from_x, :from_y),
+       "to" => act_named_point(params, :to_x, :to_y),
+       "text" => string(field(params, :text)),
+       "key" => string(field(params, :key)),
+       "button" => string(field(params, :button)) || "left",
+       "direction" => string(field(params, :direction)),
+       "pages" => field(params, :pages) || 1,
+       "require_focus" => action in ["type", "key"] or field(params, :require_focus) == true,
+       "coordinate_space" => coordinate_space(raw)
+     }
+     |> reject_nils_map()}
+  end
+
+  defp finish_act(raw) when is_map(raw) do
+    ok = field(raw, "ok") != false
+    error = string(field(raw, "error"))
+    landing = string(field(raw, "landing"))
+    backend = string(field(raw, "backend"))
+    app = string(field(raw, "app_id"))
+    window = string(field(raw, "window_id"))
+
+    lines =
+      [
+        if(ok, do: "ok=true", else: "ok=false"),
+        backend && "backend=#{backend}",
+        app && "app=#{app}",
+        window && "window=#{window}",
+        landing,
+        error && "error: #{error}"
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    warnings = raw |> field("warnings") |> List.wrap() |> Enum.filter(&is_binary/1)
+
+    output =
+      case warnings do
+        [] -> Enum.join(lines, "\n")
+        list -> Enum.join(lines ++ ["warnings:" | Enum.map(list, &("  - " <> &1))], "\n")
+      end
+
+    %{output: output, is_error: not ok or is_binary(error), images: []}
+  end
+
+  defp finish_act(_raw), do: error_result("the desktop helper returned an unreadable act result")
+
+  defp snapshot_for(session_dir) when is_binary(session_dir), do: last_state(session_dir)
+  defp snapshot_for(_session_dir), do: nil
+
+  defp snapshot_raw(%{state: raw}) when is_map(raw), do: raw
+  defp snapshot_raw(raw) when is_map(raw), do: raw
+  defp snapshot_raw(_other), do: nil
+
+  defp snapshot_app(snapshot) do
+    raw = snapshot_raw(snapshot)
+    app = raw && (field(raw, "app") || %{})
+    string(field(app || %{}, "id"))
+  end
+
+  defp snapshot_stale?(nil), do: false
+
+  defp snapshot_stale?(snapshot) do
+    case snapshot_at(snapshot) do
+      at when is_integer(at) ->
+        System.system_time(:millisecond) - at > config(:stale_ms)
+
+      _missing ->
+        false
+    end
+  end
+
+  defp snapshot_at(%{at: at}) when is_integer(at), do: at
+  defp snapshot_at(%{"at" => at}) when is_integer(at), do: at
+  defp snapshot_at(_other), do: nil
+
+  defp act_has_target?(params) do
+    Enum.any?([:app, :window_id, :title], fn key ->
+      match?(value when is_binary(value) and value != "", field(params, key))
+    end)
+  end
+
+  defp act_target(params, raw) do
+    window = (raw && field(raw, "window")) || %{}
+
+    %{}
+    |> put_if("app_id", target_app(field(params, :app)) || snapshot_app(%{state: raw}))
+    |> put_if("window_id", string(field(params, :window_id)) || string(field(window, "id")))
+    |> put_if("title", string(field(params, :title)))
+  end
+
+  defp act_element(params, snapshot) do
+    index = field(params, :element_index)
+    raw = snapshot_raw(snapshot)
+    nodes = (raw && field(raw, "nodes")) || []
+
+    cond do
+      is_integer(index) and is_list(nodes) ->
+        Enum.find(nodes, fn node -> integer(field(node, "index")) == index end)
+
+      true ->
+        nil
+    end
+  end
+
+  defp act_point(params) do
+    x = field(params, :x)
+    y = field(params, :y)
+
+    if is_integer(x) and is_integer(y), do: %{"x" => x, "y" => y}
+  end
+
+  defp act_named_point(params, xk, yk) do
+    x = field(params, xk)
+    y = field(params, yk)
+
+    if is_integer(x) and is_integer(y), do: %{"x" => x, "y" => y}
+  end
+
+  defp coordinate_space(nil), do: nil
+
+  defp coordinate_space(raw) do
+    window = field(raw, "window") || %{}
+    bounds = field(window, "bounds") || %{}
+    image = field(raw, "image") || %{}
+
+    origin_x = optional_number(field(bounds, "x"))
+    origin_y = optional_number(field(bounds, "y"))
+    width = optional_int(field(image, "coordinate_width")) || optional_int(field(bounds, "w"))
+    height = optional_int(field(image, "coordinate_height")) || optional_int(field(bounds, "h"))
+
+    if is_number(origin_x) and is_number(origin_y) and is_integer(width) and is_integer(height) and
+         width > 0 and height > 0 do
+      %{"origin_x" => origin_x, "origin_y" => origin_y, "width" => width, "height" => height}
+    end
+  end
+
+  defp secret_text?(text) when is_binary(text) do
+    String.contains?(text, "sk-") or String.contains?(text, "ghp_") or
+      (byte_size(text) > 32 and high_entropy?(text))
+  end
+
+  defp secret_text?(_text), do: false
+
+  defp high_entropy?(text) do
+    uniq = text |> String.graphemes() |> Enum.uniq() |> length()
+    uniq / max(String.length(text), 1) > 0.6
+  end
+
+  defp secure_element?(%{} = element) do
+    role = string(field(element, "role")) || ""
+    String.downcase(role) in ["axsecuretextfield", "securetextfield"]
+  end
+
+  defp secure_element?(_element), do: false
+
+  defp passwordish_element?(%{} = element) do
+    name = String.downcase(string(field(element, "name")) || "")
+
+    String.contains?(name, "password") or String.contains?(name, "passwd") or
+      String.contains?(name, "pin")
+  end
+
+  defp passwordish_element?(_element), do: false
+
+  defp reject_nils_map(map) do
+    Enum.reduce(map, %{}, fn
+      {_key, nil}, acc -> acc
+      {key, value}, acc -> Map.put(acc, key, value)
+    end)
   end
 
   ## §5.2 rendering
@@ -786,8 +1309,14 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp integer(value) when is_integer(value), do: value
   defp integer(_value), do: 0
 
+  defp optional_int(value) when is_integer(value), do: value
+  defp optional_int(_value), do: nil
+
   defp number(value) when is_number(value), do: value
   defp number(_value), do: 0
+
+  defp optional_number(value) when is_number(value), do: value
+  defp optional_number(_value), do: nil
 
   defp quality(value) when is_integer(value) and value >= 1 and value <= 95, do: value
   defp quality(_value), do: config(:jpeg_quality)
@@ -822,6 +1351,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   def all, do: Enum.map(@defaults, fn {key, _default} -> {key, config(key)} end)
 
   defp valid?(:enabled, _default, value), do: is_boolean(value)
+  defp valid?(:act_enabled, _default, value), do: is_boolean(value)
   defp valid?(:helper_path, _default, :bundled), do: true
   defp valid?(:helper_path, _default, value), do: is_binary(value) and value != ""
   defp valid?(:denied_app_ids, _default, value), do: is_list(value)

@@ -163,7 +163,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp desktop_specs(allowed, disallowed, opts) do
     with root when is_binary(root) and root != "" <- Keyword.get(opts, :workspace),
          true <- Desktop.enabled?() do
-      [DesktopState, DesktopAct]
+      desktop_modules()
       |> Enum.filter(fn module ->
         name = module.name()
         name not in disallowed and (allowed == [] or name in allowed)
@@ -172,6 +172,10 @@ defmodule Ouroboros.Provider.Native.Tools do
     else
       _off_or_no_workspace -> []
     end
+  end
+
+  defp desktop_modules do
+    [DesktopState] ++ if(Desktop.act_enabled?(), do: [DesktopAct], else: [])
   end
 
   # The filters apply to an MCP tool exactly as they apply to a static one, on its full
@@ -270,7 +274,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   # gates on a workspace, which this name-only lookup cannot see; that gate is what keeps
   # the model from being taught the name, so it is enough that a disabled node refuses here.
   defp desktop_module(name) do
-    if Desktop.enabled?(), do: Enum.find([DesktopState, DesktopAct], &(&1.name() == name))
+    if Desktop.enabled?(), do: Enum.find(desktop_modules(), &(&1.name() == name))
   end
 
   @doc "The name a tool name resolves to after aliases."
@@ -549,8 +553,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp context(_name, _input), do: %{}
 
   defp claimed_app(input) do
-    case Map.get(input, "app") do
-      app when is_binary(app) and app != "" -> app
+    case Map.get(input, "app") || Map.get(input, :app) do
+      app when is_binary(app) and app != "" -> Desktop.app_alias(app)
       _absent -> nil
     end
   end
@@ -578,10 +582,50 @@ defmodule Ouroboros.Provider.Native.Tools do
   def execute(module, input, context, timeout_ms) do
     task = Task.async(fn -> invoke(module, input, context) end)
 
-    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> normalize_result(result)
-      nil -> %{output: "#{label(module)} timed out after #{timeout_ms} ms.", is_error: true}
-      {:exit, reason} -> %{output: "#{label(module)} crashed: #{inspect(reason)}", is_error: true}
+    if module == DesktopAct do
+      await_interruptible(task, timeout_ms, label(module))
+    else
+      case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} ->
+          normalize_result(result)
+
+        nil ->
+          %{output: "#{label(module)} timed out after #{timeout_ms} ms.", is_error: true}
+
+        {:exit, reason} ->
+          %{output: "#{label(module)} crashed: #{inspect(reason)}", is_error: true}
+      end
+    end
+  end
+
+  defp await_interruptible(task, timeout_ms, label) do
+    ref = Process.monitor(task.pid)
+    task_ref = task.ref
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    await_interruptible_loop(task, task_ref, ref, deadline, label)
+  end
+
+  defp await_interruptible_loop(task, task_ref, ref, deadline, label) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^task_ref, result} ->
+        Process.demonitor(ref, [:flush])
+        normalize_result(result)
+
+      {:DOWN, ^ref, :process, _pid, reason} ->
+        %{output: "#{label} crashed: #{inspect(reason)}", is_error: true}
+
+      :native_interrupt ->
+        Desktop.cancel()
+        send(self(), :native_interrupt)
+        _ = Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
+        %{output: "#{label} was cancelled", is_error: true}
+    after
+      remaining ->
+        Desktop.cancel()
+        _ = Task.shutdown(task, :brutal_kill)
+        %{output: "#{label} timed out after the act deadline.", is_error: true}
     end
   end
 

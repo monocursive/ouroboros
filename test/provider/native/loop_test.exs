@@ -190,7 +190,9 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       [request] = NativeModelScript.requests(agent)
       assert request.system == "system"
 
-      assert Enum.map(request.tools, & &1.name) == [
+      names = Enum.map(request.tools, & &1.name)
+
+      assert Enum.take(names, 15) == [
                "read",
                "write",
                "edit",

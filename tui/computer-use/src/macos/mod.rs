@@ -1,6 +1,5 @@
-//! The macOS host layer (doc §13): permission probes for `doctor`, plus the Phase-1 observe
-//! backends split into [`windows`] (CGWindowList enumeration), [`capture`] (ScreenCaptureKit),
-//! and [`ax`] (AXUIElement walk). Input (`macos::input`) is Phase 2 and absent here.
+//! The macOS host layer (doc §13): permission probes for `doctor`, plus observe backends
+//! ([`windows`], [`capture`], [`ax`]) and input injection ([`input`]).
 //!
 //! This module root holds the probes and a handful of FFI helpers the backends share
 //! (NSString/NSError conversion, an attribute-name interner, the send-across-a-completion-block
@@ -14,12 +13,13 @@
 //!   * [`AXIsProcessTrusted`] reads Accessibility trust; `AXIsProcessTrustedWithOptions`
 //!     with the prompt option would prompt.
 //!   * [`IsSecureEventInputEnabled`] reads a global flag (Δ6): whether some app has secure
-//!     keyboard entry on, which will defeat synthetic `type`/`key` in Phase 2.
+//!     keyboard entry on, which will defeat synthetic `type`/`key`.
 
 #![allow(non_snake_case)]
 
 pub mod ax;
 pub mod capture;
+pub mod input;
 pub mod windows;
 
 use objc2_core_foundation::{CFRetained, CFString};

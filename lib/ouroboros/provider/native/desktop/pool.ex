@@ -59,9 +59,12 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   # this only bounds a pathologically long-lived node, and eviction is oldest-first.
   @max_sessions 128
 
+  # In-flight is one helper request. Further callers wait in this queue rather than failing
+  # `:busy` the moment two sessions observe at once.
+  @max_queue 4
   @typedoc "What `status/1` reports about the helper."
   @type status :: %{
-          phase: :handshaking | :ready | :broken,
+          phase: :idle | :handshaking | :ready | :broken,
           helper_path: String.t(),
           os_pid: pos_integer() | nil,
           doctor: map() | nil,
@@ -75,12 +78,8 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   end
 
   @doc """
-  Starts the node's helper pool **detached** from the caller.
-
-  Unlinked on purpose: the singleton must outlive the transient tool task that first needs
-  it, and there is no supervisor above it in this phase. A crash is recovered by the next
-  `Ouroboros.Provider.Native.Desktop.pool/0`, which starts a fresh one — the snapshot map is
-  rebuildable by design.
+  Starts a detached pool. Tests use this so a child's exit does not travel through
+  the test process. The node supervisor starts the named singleton via `start_link/1`.
   """
   @spec start(keyword()) :: GenServer.on_start()
   def start(opts) do
@@ -90,8 +89,8 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   @doc """
   Issues one request to the helper and waits at most `timeout_ms` for the answer.
 
-  Never raises and never exits the caller: a dead helper, a busy pool, a helper still
-  handshaking, and a helper that simply does not answer are all error tuples.
+  Never raises and never exits the caller. A dead helper, a full queue, and a helper
+  that does not answer are error tuples. Overlapping callers wait in a bounded queue.
   """
   @spec request(GenServer.server(), String.t(), map(), pos_integer()) ::
           {:ok, term()} | {:error, term()}
@@ -138,6 +137,15 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     GenServer.cast(server, {:forget_state, session_dir})
   end
 
+  @doc """
+  Tells an in-flight `act` to abort between events. A notification: no answer is owed,
+  and this never starts a helper that is not already running.
+  """
+  @spec cancel(GenServer.server()) :: :ok
+  def cancel(server \\ __MODULE__) do
+    GenServer.cast(server, :cancel)
+  end
+
   @doc "Describes the helper this node owns: phase, os pid, last doctor, session count."
   @spec status(GenServer.server()) :: status()
   def status(server \\ __MODULE__) do
@@ -159,8 +167,9 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       buffer: <<>>,
       noise: 0,
       next_id: 1,
-      phase: :broken,
+      phase: :idle,
       inflight: nil,
+      queue: :queue.new(),
       broken_until: 0,
       broken_reason: nil,
       doctor: nil,
@@ -168,31 +177,38 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       seq: 0
     }
 
-    {:ok, connect(state)}
-  end
-
-  @impl true
-  def handle_call({:request, _method, _params, _timeout}, _from, %{inflight: inflight} = state)
-      when inflight != nil and state.phase == :ready,
-      do: {:reply, {:error, :busy}, state}
-
-  def handle_call({:request, method, params, timeout}, from, %{phase: :ready} = state) do
-    case issue(state, method, params, {:caller, from}, timeout) do
-      {:ok, state} ->
-        {:noreply, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, go_broken(state, {:transport_closed, reason})}
+    # An explicit `helper_path` is a test (or operator override) that wants the child now.
+    # The supervised singleton stays idle until a request or probe needs it, so a node
+    # with the flag off never prompts TCC at boot.
+    if Keyword.has_key?(opts, :helper_path) do
+      {:ok, connect(state)}
+    else
+      {:ok, state}
     end
   end
 
-  def handle_call({:request, _method, _params, _timeout}, _from, %{phase: :handshaking} = state),
-    do: {:reply, {:error, :starting}, state}
+  @impl true
+  def handle_call({:request, method, params, timeout}, from, state) do
+    cond do
+      state.phase == :ready and state.inflight == nil ->
+        case issue(state, method, params, {:caller, from}, timeout) do
+          {:ok, state} ->
+            {:noreply, state}
 
-  def handle_call({:request, _method, _params, _timeout}, _from, %{phase: :broken} = state) do
-    if now() >= state.broken_until,
-      do: {:reply, {:error, :reconnecting}, connect(state)},
-      else: {:reply, {:error, :broken}, state}
+          {:error, reason} ->
+            {:reply, {:error, reason}, go_broken(state, {:transport_closed, reason})}
+        end
+
+      queueable?(state) ->
+        state = maybe_connect(state)
+        {:noreply, enqueue(state, from, method, params, timeout)}
+
+      state.phase == :broken ->
+        {:reply, {:error, :broken}, state}
+
+      true ->
+        {:reply, {:error, :busy}, state}
+    end
   end
 
   def handle_call({:last_state, session_dir}, _from, state) do
@@ -230,6 +246,14 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     {:noreply, %{state | snapshots: Map.delete(state.snapshots, session_dir)}}
   end
 
+  def handle_cast(:cancel, state) do
+    if is_port(state.port) and is_map(state.inflight) do
+      _ = write(state, Codec.notification("cancel", %{}))
+    end
+
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info({port, {:data, data}}, %{port: port} = state) do
     case Codec.decode(state.buffer <> data, state.settings.max_frame_bytes) do
@@ -259,7 +283,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
 
   def handle_info({:deadline, id}, %{inflight: %{id: id, kind: {:caller, from}}} = state) do
     GenServer.reply(from, {:error, :timeout})
-    {:noreply, %{state | inflight: nil}}
+    {:noreply, drain(%{state | inflight: nil})}
   end
 
   def handle_info({:deadline, _stale_id}, state), do: {:noreply, state}
@@ -304,7 +328,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   end
 
   defp handle_frame(%{"id" => id} = frame, %{inflight: %{id: id, kind: kind} = inflight} = state) do
-    cancel(inflight.deadline)
+    drop_timer(inflight.deadline)
     route(kind, answer(frame), %{state | inflight: nil})
   end
 
@@ -313,7 +337,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   defp handle_frame(_frame, state), do: state
 
   defp route(:handshake, {:ok, doctor}, state) do
-    %{state | phase: :ready, doctor: normalize_doctor(doctor)}
+    drain(%{state | phase: :ready, doctor: normalize_doctor(doctor)})
   end
 
   defp route(:handshake, {:error, reason}, state),
@@ -321,7 +345,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
 
   defp route({:caller, from}, reply, state) do
     GenServer.reply(from, reply)
-    state
+    drain(state)
   end
 
   defp answer(%{"error" => %{} = error}),
@@ -349,7 +373,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   # map, which a live session still needs, and the next call after the cooldown reconnects.
   defp go_broken(state, reason) do
     if state.inflight do
-      cancel(state.inflight.deadline)
+      drop_timer(state.inflight.deadline)
 
       case state.inflight.kind do
         {:caller, from} -> GenServer.reply(from, {:error, :broken})
@@ -357,12 +381,17 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       end
     end
 
+    Enum.each(:queue.to_list(Map.get(state, :queue, :queue.new())), fn %{from: from} ->
+      GenServer.reply(from, {:error, :broken})
+    end)
+
     Logger.debug(fn -> "computer-use helper broken: #{inspect(reason, limit: 10)}" end)
 
     %{
       close_port(state)
       | phase: :broken,
         inflight: nil,
+        queue: :queue.new(),
         buffer: <<>>,
         broken_until: now() + @broken_ms,
         broken_reason: reason
@@ -487,8 +516,43 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   defp normalize_doctor(doctor) when is_map(doctor), do: doctor
   defp normalize_doctor(_other), do: %{}
 
-  defp cancel(ref) when is_reference(ref), do: Process.cancel_timer(ref)
-  defp cancel(_ref), do: :ok
+  defp drop_timer(ref) when is_reference(ref), do: Process.cancel_timer(ref)
+  defp drop_timer(_ref), do: :ok
+
+  defp queueable?(state) do
+    :queue.len(Map.get(state, :queue, :queue.new())) < @max_queue and
+      (state.phase in [:idle, :ready, :handshaking] or
+         (state.phase == :broken and now() >= state.broken_until))
+  end
+
+  defp maybe_connect(%{phase: phase} = state) when phase in [:idle, :broken], do: connect(state)
+  defp maybe_connect(state), do: state
+
+  defp enqueue(state, from, method, params, timeout) do
+    item = %{from: from, method: method, params: params, timeout: timeout}
+    %{state | queue: :queue.in(item, Map.get(state, :queue, :queue.new()))}
+  end
+
+  defp drain(%{phase: :ready, inflight: nil} = state) do
+    case :queue.out(Map.get(state, :queue, :queue.new())) do
+      {:empty, _queue} ->
+        state
+
+      {{:value, item}, rest} ->
+        case issue(
+               %{state | queue: rest},
+               item.method,
+               item.params,
+               {:caller, item.from},
+               item.timeout
+             ) do
+          {:ok, state} -> state
+          {:error, reason} -> go_broken(state, {:transport_closed, reason})
+        end
+    end
+  end
+
+  defp drain(state), do: state
 
   defp now, do: System.monotonic_time(:millisecond)
 end

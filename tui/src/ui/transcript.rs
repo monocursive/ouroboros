@@ -442,6 +442,16 @@ impl ApprovalRequest {
         matches!(
             json_nonempty_str(&self.payload, "kind").as_deref(),
             Some("plan_exit") | Some("question")
+        ) || self.computer_use()
+    }
+
+    /// Computer Use observe/act. Auto-approve must not invent an app allow.
+    pub fn computer_use(&self) -> bool {
+        matches!(
+            self.payload
+                .pointer("/tool_call/name")
+                .and_then(Value::as_str),
+            Some("desktop_state") | Some("desktop_act")
         )
     }
 

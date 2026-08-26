@@ -480,6 +480,23 @@ if code_intel_memory_budget do
   config :ouroboros, :code_intel, memory_budget_bytes: code_intel_memory_budget
 end
 
+# Computer Use is host-privileged. Env 1/0 is the explicit switch; when unset the
+# helper-on-disk predicate in `Desktop.enabled?/0` is the opt-in. Do not force
+# `enabled: false` here — that made a GUI adopt a daemon that could never show the tools.
+case gateway_value.("OUROBOROS_COMPUTER_USE") do
+  nil ->
+    :ok
+
+  value when value in ["1", "true"] ->
+    config :ouroboros, :computer_use, enabled: true
+
+  value when value in ["0", "false"] ->
+    config :ouroboros, :computer_use, enabled: false
+
+  other ->
+    raise "OUROBOROS_COMPUTER_USE must be 1, 0, true, or false, got: #{other}"
+end
+
 if System.get_env("OUROBOROS_GATEWAY") == "1" do
   gateway_port =
     case Integer.parse(gateway_value.("OUROBOROS_GATEWAY_PORT") || "0") do

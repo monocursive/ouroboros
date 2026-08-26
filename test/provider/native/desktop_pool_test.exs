@@ -39,14 +39,16 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
       assert {:ok, %{"app" => %{"id" => "com.apple.calculator"}}} = Pool.state(pid, %{}, 2_000)
     end
 
-    test "a busy pool refuses a second in-flight request rather than queueing it" do
+    test "a second in-flight request waits in the queue and both complete" do
       pid = start_pool(slow_helper(), handshake_timeout_ms: 3_000)
       wait_status(pid, &(&1.phase == :ready), 3_000)
 
-      task = Task.async(fn -> Pool.state(pid, %{}, 3_000) end)
+      first = Task.async(fn -> Pool.state(pid, %{}, 3_000) end)
       Process.sleep(80)
-      assert {:error, :busy} = Pool.state(pid, %{}, 3_000)
-      assert {:ok, %{"app" => _}} = Task.await(task, 5_000)
+      second = Task.async(fn -> Pool.state(pid, %{}, 3_000) end)
+
+      assert {:ok, %{"app" => _}} = Task.await(first, 5_000)
+      assert {:ok, %{"app" => _}} = Task.await(second, 5_000)
     end
   end
 

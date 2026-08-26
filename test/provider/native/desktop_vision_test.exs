@@ -7,10 +7,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLMVisionTest do
   alias ReqLLM.Message.ContentPart
 
   describe "vision?/1 — a best-effort hint on the model spec (§8.2)" do
-    test "defaults to true for an unknown model and for nil" do
-      assert Client.vision?("no-such-provider:no-such-model")
-      assert Client.vision?(nil)
-      assert Client.vision?("")
+    test "defaults to false for an unknown model and for nil" do
+      refute Client.vision?("no-such-provider:no-such-model")
+      refute Client.vision?(nil)
+      refute Client.vision?("")
     end
   end
 

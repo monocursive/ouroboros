@@ -854,6 +854,7 @@ defmodule Ouroboros.Provider.Native.Session do
   def terminate(:normal, state) do
     _ = stop_loop(state)
     _ = stop_subagents(state, "session closed")
+    _ = Ouroboros.Provider.Native.Desktop.forget_state(state.session_dir)
     :ok
   rescue
     _error -> :ok
@@ -863,6 +864,7 @@ defmodule Ouroboros.Provider.Native.Session do
     _ = stop_loop(state)
     _ = stop_subagents(state, "session ended")
     _ = session_end(state, terminate_reason(reason))
+    _ = Ouroboros.Provider.Native.Desktop.forget_state(state.session_dir)
     :ok
   rescue
     _error -> :ok

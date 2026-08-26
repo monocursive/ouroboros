@@ -627,6 +627,8 @@ defmodule Ouroboros.Agent.EffectLedger do
     |> put_if(:hosts, subject_list(Map.get(subject, :hosts), @subject_hosts))
     |> put_if(:mcp_server, subject_name(Map.get(subject, :mcp_server)))
     |> put_if(:mcp_tool, subject_name(Map.get(subject, :mcp_tool)))
+    |> put_if(:app, subject_name(Map.get(subject, :app)))
+    |> put_if(:desktop_action, subject_name(Map.get(subject, :desktop_action)))
   end
 
   defp sanitize_subject(_subject), do: %{}

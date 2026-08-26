@@ -197,18 +197,15 @@ config :ouroboros,
   #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
   #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
   mcp_servers: %{},
-  # Computer Use (docs/COMPUTER_USE.md §4). Host-privileged GUI I/O for the native
-  # provider, default **off**: when it is off the tools are absent from the tool list
-  # entirely, not merely denied (D9). Same hardening posture as `:mcp` and `:code_intel`
-  # above — `Ouroboros.Provider.Native.Desktop` reads every value here and a non-positive
-  # timeout or a *raised* cap falls back to the shipped default, so an operator typo can
-  # never widen a bound. Only node config or the `OUROBOROS_COMPUTER_USE*` env can enable
-  # it; no workspace file can (§4), and `runtime.exs` may override these from env.
+  # Computer Use (docs/COMPUTER_USE.md §4). Tools appear when the helper is on disk
+  # unless `OUROBOROS_COMPUTER_USE=0`. A helper is the operator opt-in (they built it).
+  # Same hardening as `:mcp` / `:code_intel`: a typo never widens a bound.
   computer_use: [
-    enabled: false,
-    # `:bundled` resolves to the helper shipped next to `ouro`; a string is an absolute
-    # path. `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides it. No helper ships in
-    # Phase 0, so `enabled?/0` is honestly false until a built binary exists on disk.
+    enabled: true,
+    # Phase 2 ships `desktop_act`. Set false for observe-only.
+    act_enabled: true,
+    # `:bundled` resolves priv/, checkout priv/, or a sibling of `ouro`.
+    # `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides it.
     helper_path: :bundled,
     handshake_timeout_ms: 5_000,
     state_timeout_ms: 5_000,

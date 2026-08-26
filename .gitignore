@@ -39,5 +39,6 @@ ouroboros-*.tar
 !/dist/release.pub
 !/dist/homebrew/
 
-# Built on Linux by Mix.Tasks.Compile.OuroborosFsFilter; never a source artifact.
-/priv/native/
+
+# Built Computer Use helper; never a source artifact.
+/priv/computer-use/

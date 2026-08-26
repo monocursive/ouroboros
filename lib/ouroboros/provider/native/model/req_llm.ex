@@ -441,13 +441,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   @doc """
   Whether `model_spec` accepts image input, best-effort from `llm_db`.
 
-  Returns `false` only when `llm_db` positively lists a model's input modalities without
-  `:image`; unknown models and an absent `llm_db` default to `true`. That default keeps the
-  common case — the multimodal models a native session runs — working, and the loop only
-  ever *omits* an image on a `false`, so a wrong guess degrades a turn rather than failing
-  it. This is a hint on the spec, not a claim the model can see.
+  Returns `true` only when `llm_db` lists `:image` in the model's input modalities.
+  Unknown models and an absent `llm_db` default to `false`: sending a screenshot to a
+  coder model that cannot see it is a context-window tax, not a feature.
   """
-  @spec vision?(String.t() | nil) :: boolean()
   def vision?(model_spec) when is_binary(model_spec) and model_spec != "" do
     with true <- Code.ensure_loaded?(LLMDB),
          {:ok, model} <- LLMDB.model(model_spec),
@@ -455,15 +452,15 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
          input when is_list(input) <- Map.get(modalities, :input) do
       :image in input
     else
-      _unknown -> true
+      _unknown -> false
     end
   rescue
-    _error -> true
+    _error -> false
   catch
-    :exit, _reason -> true
+    :exit, _reason -> false
   end
 
-  def vision?(_model_spec), do: true
+  def vision?(_model_spec), do: false
 
   # Encodes a tool result's list content (§8.2) into `ReqLLM` content parts. Public with
   # `@doc false` — the loop's tool-result seam, exposed for the test that asserts a

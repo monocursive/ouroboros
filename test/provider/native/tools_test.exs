@@ -163,8 +163,16 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
     end
 
     test "the desktop tools are unknown and unlisted while Computer Use is off (D9)" do
-      # Default config ships Computer Use off, so the names are never taught to the model —
-      # absent from the tool list and `:unknown_tool` at lookup, workspace or not.
+      original = Application.get_env(:ouroboros, :computer_use)
+
+      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
+
+      on_exit(fn ->
+        if original == nil,
+          do: Application.delete_env(:ouroboros, :computer_use),
+          else: Application.put_env(:ouroboros, :computer_use, original)
+      end)
+
       assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
       assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
 
@@ -202,7 +210,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert %{tool: "desktop_state", mode: :read, paths: [], context: state_context} =
                Tools.classify("desktop_state", %{"app" => "Safari"}, scope)
 
-      assert state_context == %{app: "Safari", desktop_action: "state"}
+      assert state_context == %{app: "com.apple.Safari", desktop_action: "state"}
 
       # desktop_act operates: :execute, the claimed action carried through.
       assert %{tool: "desktop_act", mode: :execute, context: act_context} =

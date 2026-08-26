@@ -1478,13 +1478,23 @@ impl<'a> Run<'a> {
             return;
         };
 
-        // B2. A plan exit is not an ordinary approval and is not answered like one.
         if event.payload.get("kind").and_then(Value::as_str) == Some("plan_exit") {
             self.answer_plan_exit(&request_id, &event.payload, sinks);
             return;
         }
 
-        let (decision, reason) = if self.options.approve_all {
+        let desktop = event
+            .payload
+            .pointer("/tool_call/name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == "desktop_state" || name == "desktop_act");
+
+        let (decision, reason) = if desktop {
+            (
+                ApprovalDecision::Deny,
+                Some("headless will not grant Computer Use; add a ComputerUse(app:…) rule"),
+            )
+        } else if self.options.approve_all {
             (ApprovalDecision::Approve, None)
         } else {
             (ApprovalDecision::Deny, Some(HEADLESS_DENY_REASON))
