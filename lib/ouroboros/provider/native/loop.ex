@@ -1489,12 +1489,19 @@ defmodule Ouroboros.Provider.Native.Loop do
       paths: classified.paths,
       mode: classified.mode,
       domains: Map.get(classified, :domains, []),
-      context: %{
-        approval_mode: state.approval_mode,
-        sandbox_mode: state.scope.sandbox_mode,
-        workspace: state.scope.root,
-        turn_id: state.turn_id
-      }
+      # A tool may contribute context the engine matches on — Computer Use puts the
+      # resolved `:app`/`:desktop_action` here so a `ComputerUse(app:…)` rule can allow on
+      # the app this node measured. The loop's own keys are merged SECOND so they always
+      # win: a classifier can add facts but never spoof the approval mode, sandbox posture,
+      # workspace, or turn. `classify/3` returns `%{}` for every non-Computer-Use tool, so
+      # this is a no-op for them.
+      context:
+        Map.merge(Map.get(classified, :context, %{}), %{
+          approval_mode: state.approval_mode,
+          sandbox_mode: state.scope.sandbox_mode,
+          workspace: state.scope.root,
+          turn_id: state.turn_id
+        })
     }
   end
 
