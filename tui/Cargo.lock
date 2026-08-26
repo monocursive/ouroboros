@@ -4517,6 +4517,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ouro-computer-use"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "palette"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

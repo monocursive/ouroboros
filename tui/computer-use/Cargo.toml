@@ -1,0 +1,24 @@
+[package]
+name = "ouro-computer-use"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Ouroboros Computer Use native helper (macOS): the private JSON-RPC helper the runtime spawns for capture, accessibility, and input."
+publish = false
+
+# An isolated workspace member so ScreenCaptureKit / objc2 and the rest of the heavy macOS
+# stack that Phase 1 pulls in stay OUT of the `ouro` / `ouro-desktop` build graph. In Phase 0
+# the only host calls are three no-prompt permission probes, made through raw framework FFI
+# (CoreGraphics / ApplicationServices / Carbon) declared in `src/macos.rs`, so no external
+# macOS crate enters the graph at all. Non-macOS builds compile an honest
+# "unsupported platform" doctor and nothing else.
+
+[[bin]]
+name = "ouro-computer-use"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# The line loop, and the cancellation-safe input model Phase 1 needs (`tokio::sync::Mutex`,
+# detached tasks). Phase 0 uses only the runtime, stdio, and the byte utilities.
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }

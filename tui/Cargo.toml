@@ -1,4 +1,5 @@
 [workspace]
+members = [".", "computer-use"]
 
 [package]
 name = "ouro"
