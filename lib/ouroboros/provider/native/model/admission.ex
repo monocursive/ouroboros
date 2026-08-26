@@ -2,7 +2,7 @@ defmodule Ouroboros.Provider.Native.Model.Admission do
   @moduledoc """
   Node-wide admission control for Native model streams.
 
-  A Native session can fan out into four children and those children can fan out again.
+  A Native session can fan out into ten children and those children can fan out again.
   Per-session child limits therefore do not bound the number of long-lived HTTP streams on
   one runtime. Finch's HTTP/1 pool is the transport, not the scheduler: when its capacity is
   exceeded it queues against one selected pool worker and eventually raises an opaque checkout

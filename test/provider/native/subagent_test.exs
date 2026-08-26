@@ -380,7 +380,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert result.payload["output"] =~ "A grandchild may not spawn children"
     end
 
-    test "the fifth concurrent child is refused rather than queued", context do
+    test "a child beyond the concurrent limit is refused rather than queued", context do
       %{handle: handle} =
         open(
           context,
@@ -388,8 +388,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
           [[{:text, "unused"}, {:finish, :stop}]]
         )
 
-      # Four live children, tracked exactly as a real spawn tracks them. They answer one
-      # message and exit, so the session's own teardown does not wait on them.
+      # The maximum number of live children, tracked exactly as a real spawn tracks them.
+      # They answer one message and exit, so the session's own teardown does not wait on them.
       for index <- 1..AgentTool.max_concurrent() do
         pid = spawn(fn -> receive do: (_any -> :ok) end)
         assert :ok = GenServer.call(handle, {:subagent_track, "fake-#{index}", pid, %{}})
@@ -400,7 +400,10 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
       result = tool_result(events, "agent")
       assert result.payload["is_error"] == true
-      assert result.payload["output"] =~ "already running and the limit is 4"
+
+      assert result.payload["output"] =~
+               "already running and the limit is #{AgentTool.max_concurrent()}"
+
       assert result.payload["output"] =~ "agent_result"
       assert subagent_events(events, "spawned") == []
     end

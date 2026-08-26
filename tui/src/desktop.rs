@@ -26,6 +26,7 @@ use gpui_component::button::{ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Enter as InputEnter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
@@ -54,6 +55,11 @@ const COLLAPSED_TOOL_TAIL_LINES: usize = 4;
 const COLLAPSED_TOOL_CHARS: usize = 2_400;
 const COLLAPSED_TOOL_HEAD_CHARS: usize = 1_600;
 const COLLAPSED_TOOL_TAIL_CHARS: usize = 600;
+const DESKTOP_MIN_WIDTH: f32 = 860.0;
+const SESSION_RAIL_DEFAULT_WIDTH: f32 = 276.0;
+const SESSION_RAIL_MIN_WIDTH: f32 = 232.0;
+const SESSION_RAIL_MAX_WIDTH: f32 = 520.0;
+const SESSION_WORKSPACE_MIN_WIDTH: f32 = 520.0;
 /// The three things the one composer can be, said in the box itself. Enter does something
 /// different in each, and the placeholder is the only part of the control that can say so
 /// before it is pressed.
@@ -121,7 +127,7 @@ pub fn run(options: LaunchOptions) -> Result<()> {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(860.0), px(600.0))),
+                    window_min_size: Some(size(px(DESKTOP_MIN_WIDTH), px(600.0))),
                     focus: true,
                     app_id: Some("dev.ouroboros.desktop".to_string()),
                     titlebar: Some(TitlebarOptions {
@@ -1526,7 +1532,7 @@ impl DesktopView {
         div()
             .flex()
             .flex_col()
-            .w(px(276.0))
+            .w_full()
             .h_full()
             .flex_none()
             .bg(tokens.canvas)
@@ -1858,8 +1864,19 @@ impl DesktopView {
                     .border_color(tokens.line)
                     .text_xs()
                     .text_color(tokens.ink_3)
-                    .child("Right-click to manage")
-                    .child(design::keycap(tokens, "⌘N")),
+                    .child(
+                        div()
+                            .id("session-rail-hint")
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child("Drag divider to resize · Right-click rows")
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Drag divider to resize · Right-click rows")
+                                    .build(window, cx)
+                            }),
+                    )
+                    .child(design::keycap(tokens, "⌘N").flex_none()),
             )
     }
 
@@ -3133,6 +3150,96 @@ impl Render for DesktopView {
                 ),
             };
 
+        let session_workspace = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(68.0))
+                    .flex_none()
+                    .px_6()
+                    .border_b_1()
+                    .border_color(tokens.line)
+                    .bg(tokens.page)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(design::eyebrow(tokens, header_eyebrow))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_ellipsis()
+                                    .child(header_title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.ink_3)
+                                    .text_ellipsis()
+                                    .child(header_meta),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .max_w(px(420.0))
+                            .child(connection_icon)
+                            .child(design::status_tag(
+                                tokens,
+                                cx,
+                                connection_tone,
+                                connection_label,
+                            ))
+                            .child(
+                                div()
+                                    .max_w(px(240.0))
+                                    .text_xs()
+                                    .text_color(tokens.ink_3)
+                                    .text_ellipsis()
+                                    .child(connection_detail),
+                            ),
+                    ),
+            )
+            .when(self.show_new, |view| {
+                view.child(self.render_new_session(cx))
+            })
+            .when_some(notice, |view, (notice, tone)| {
+                let alert = match tone {
+                    Tone::Danger => Alert::error("desktop-notice", notice),
+                    Tone::Warning => Alert::warning("desktop-notice", notice),
+                    Tone::Accent => Alert::info("desktop-notice", notice),
+                    Tone::Success => Alert::success("desktop-notice", notice),
+                    Tone::Neutral => Alert::new("desktop-notice", notice),
+                };
+                view.child(
+                    div()
+                        .w_full()
+                        .max_w(px(880.0))
+                        .mx_auto()
+                        .mt_3()
+                        .child(alert.small()),
+                )
+            })
+            .children(self.render_account(cx))
+            .child(self.render_transcript(window, cx))
+            .children(self.render_approval(cx))
+            .when(!self.show_new && !approval_pending, |view| {
+                view.child(self.render_composer(cx))
+            });
+
         div()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::submit_composer))
@@ -3142,97 +3249,19 @@ impl Render for DesktopView {
             .bg(tokens.page)
             .text_color(tokens.ink)
             .text_sm()
-            .child(self.render_session_rail(cx))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
+                h_resizable("desktop-workspace")
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(68.0))
-                            .flex_none()
-                            .px_6()
-                            .border_b_1()
-                            .border_color(tokens.line)
-                            .bg(tokens.page)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(design::eyebrow(tokens, header_eyebrow))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_ellipsis()
-                                            .child(header_title),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(tokens.ink_3)
-                                            .text_ellipsis()
-                                            .child(header_meta),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .max_w(px(420.0))
-                                    .child(connection_icon)
-                                    .child(design::status_tag(
-                                        tokens,
-                                        cx,
-                                        connection_tone,
-                                        connection_label,
-                                    ))
-                                    .child(
-                                        div()
-                                            .max_w(px(240.0))
-                                            .text_xs()
-                                            .text_color(tokens.ink_3)
-                                            .text_ellipsis()
-                                            .child(connection_detail),
-                                    ),
-                            ),
+                        resizable_panel()
+                            .size(px(SESSION_RAIL_DEFAULT_WIDTH))
+                            .size_range(px(SESSION_RAIL_MIN_WIDTH)..px(SESSION_RAIL_MAX_WIDTH))
+                            .child(self.render_session_rail(cx)),
                     )
-                    .when(self.show_new, |view| {
-                        view.child(self.render_new_session(cx))
-                    })
-                    .when_some(notice, |view, (notice, tone)| {
-                        let alert = match tone {
-                            Tone::Danger => Alert::error("desktop-notice", notice),
-                            Tone::Warning => Alert::warning("desktop-notice", notice),
-                            Tone::Accent => Alert::info("desktop-notice", notice),
-                            Tone::Success => Alert::success("desktop-notice", notice),
-                            Tone::Neutral => Alert::new("desktop-notice", notice),
-                        };
-                        view.child(
-                            div()
-                                .w_full()
-                                .max_w(px(880.0))
-                                .mx_auto()
-                                .mt_3()
-                                .child(alert.small()),
-                        )
-                    })
-                    .children(self.render_account(cx))
-                    .child(self.render_transcript(window, cx))
-                    .children(self.render_approval(cx))
-                    .when(!self.show_new && !approval_pending, |view| {
-                        view.child(self.render_composer(cx))
-                    }),
+                    .child(
+                        resizable_panel()
+                            .size_range(px(SESSION_WORKSPACE_MIN_WIDTH)..gpui::Pixels::MAX)
+                            .child(session_workspace),
+                    ),
             )
     }
 }
@@ -4062,6 +4091,13 @@ mod tests {
             gpui::Keystroke::parse("secondary-enter").unwrap().unparse()
         );
         assert_eq!(shift_enter.keystrokes()[0].inner().unparse(), "shift-enter");
+    }
+
+    #[test]
+    fn resizable_session_rail_bounds_protect_both_panes() {
+        assert!(SESSION_RAIL_MIN_WIDTH < SESSION_RAIL_DEFAULT_WIDTH);
+        assert!(SESSION_RAIL_DEFAULT_WIDTH < SESSION_RAIL_MAX_WIDTH);
+        assert!(SESSION_RAIL_MIN_WIDTH + SESSION_WORKSPACE_MIN_WIDTH <= DESKTOP_MIN_WIDTH);
     }
 
     #[test]

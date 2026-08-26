@@ -158,7 +158,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   alias Ouroboros.Provider.Native.Subagent
 
   @max_depth 2
-  @max_concurrent 4
+  @max_concurrent 10
   @max_tracked 32
   @default_max_turns 12
   @max_turns 30

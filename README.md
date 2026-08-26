@@ -359,7 +359,7 @@ they move it to fences the child with its own rules on top — see *On another m
 | Bound | Value |
 |---|---|
 | Nesting depth | 2 — a child may spawn children, a grandchild may not. A session at the cap is shown no `agent` and no `agent_result`, and a call it invents is refused by name. |
-| Running children per session | 4. A fifth is **refused, not queued**, with a message saying to collect one first: a queue would block the parent's turn on work it cannot see. |
+| Running children per session | 10. An eleventh is **refused, not queued**, with a message saying to collect one first: a queue would block the parent's turn on work it cannot see. |
 | Tracked children per session | 32, running and settled-uncollected together. |
 | Model round-trips per child | `max_turns`, 12 by default, 30 at most. |
 | Wall clock per child | 300 s by default, 900 s at most, `provider_options["subagent_deadline_ms"]`. A child that hits it is stopped and reports `timed_out` with what it had done. |
