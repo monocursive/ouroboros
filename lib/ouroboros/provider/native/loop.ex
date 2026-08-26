@@ -798,12 +798,9 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp tool_result(state, call, result) do
-    emit(state, :tool_result, %{
-      "name" => call.name,
-      "call_id" => call.id,
-      "output" => result.output,
-      "is_error" => result.is_error
-    })
+    images = Map.get(result, :images, [])
+
+    emit(state, :tool_result, tool_result_event(call, result, images))
 
     %{
       state
@@ -814,11 +811,49 @@ defmodule Ouroboros.Provider.Native.Loop do
                 role: :tool,
                 tool_call_id: call.id,
                 name: call.name,
-                content: result.output,
+                content: tool_result_content(result.output, images),
                 is_error: result.is_error
               }
             ]
     }
+  end
+
+  # A tool result carrying staged images (`desktop_state`, §8.2) becomes a multimodal tool
+  # message: the text output plus one `:image` part per screenshot, which `Model.ReqLLM`
+  # encodes for a vision model and degrades to a marker otherwise. A tool with no images
+  # keeps the plain string content, so the cached prefix for every existing tool is
+  # byte-for-byte unchanged.
+  defp tool_result_content(output, []), do: output
+
+  defp tool_result_content(output, images),
+    do: [%{type: :text, text: output} | Enum.map(images, &Map.put(&1, :type, :image))]
+
+  # Clients never receive pixels on the event — they get the sha to fetch through
+  # `computer_use.artifact` (§8.5). `bytes` is the staged size; width/height are advisory
+  # and derived client-side from the fetched image.
+  defp tool_result_event(call, result, []) do
+    %{
+      "name" => call.name,
+      "call_id" => call.id,
+      "output" => result.output,
+      "is_error" => result.is_error
+    }
+  end
+
+  defp tool_result_event(call, result, images) do
+    artifacts =
+      Enum.map(images, fn image ->
+        %{
+          "kind" => "image",
+          "sha256" => image.sha256,
+          "media_type" => image.media_type,
+          "bytes" => image.size
+        }
+      end)
+
+    call
+    |> tool_result_event(result, [])
+    |> Map.put("artifacts", artifacts)
   end
 
   defp unknown_tool(name, state) do
