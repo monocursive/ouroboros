@@ -400,6 +400,13 @@ impl App {
                 Err(error) if show => self.action_failed("delegations", plane, &id, error),
                 Err(_quiet) => {}
             },
+            Tag::Artifact { sha } => {
+                if let Ok(value) = result {
+                    if let Ok(bytes) = model::decode_artifact(&value, &sha) {
+                        self.desktop_artifacts.insert(sha, Arc::new(bytes));
+                    }
+                }
+            }
             Tag::Action {
                 label, plane, id, ..
             } => match result {

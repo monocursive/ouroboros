@@ -55,7 +55,14 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       refute Desktop.flag_allows?()
     end
 
-    test "is true when the helper exists and the env has not killed the flag" do
+    test "is false when config(:enabled) is false even with a helper on disk" do
+      Application.put_env(:ouroboros, :computer_use, enabled: false, helper_path: fake_helper())
+      refute Desktop.enabled?()
+      assert Desktop.helper_present?()
+      assert Desktop.flag_allows?()
+    end
+
+    test "is true when a helper is on disk and the flag is not off" do
       enable(fake_helper())
       assert Desktop.flag_allows?()
       assert Desktop.enabled?()
@@ -105,7 +112,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
     test "a malformed config keyword list falls back to every default" do
       Application.put_env(:ouroboros, :computer_use, "not a keyword list")
-      assert Desktop.config(:enabled) == false
+      assert Desktop.config(:enabled) == true
       assert Desktop.config(:max_frame_bytes) == 8 * 1024 * 1024
     end
   end
@@ -168,6 +175,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert Desktop.denied_app?("com.apple.Terminal")
       refute Desktop.denied_app?("Safari")
       refute Desktop.denied_app?(nil)
+      assert Desktop.denied_app?("COM.APPLE.TERMINAL")
     end
   end
 
@@ -423,6 +431,15 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert {:error, :missing_path} = Desktop.stage_image(%{}, session_dir())
     end
 
+    test "a path outside $TMPDIR/ouro-cu is refused" do
+      dir = session_dir()
+      outside = Path.join(System.tmp_dir!(), "not-cu-#{System.unique_integer([:positive])}.jpg")
+      File.write!(outside, jpeg("x"))
+      on_exit(fn -> File.rm(outside) end)
+
+      assert {:error, :path_outside_temp} = Desktop.stage_image(%{"path" => outside}, dir)
+    end
+
     test "evicts oldest files past max_snapshots_per_session" do
       Application.put_env(:ouroboros, :computer_use, max_snapshots_per_session: 2)
       dir = session_dir()
@@ -552,6 +569,23 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert result.images == []
     end
 
+    test "evaluated app mismatch is refused even when the call named no app" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("ev")), sha(jpeg("ev")))
+
+      assert {:ok, result} =
+               DesktopState.run(%{window_id: "w_1"}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw),
+                 desktop_evaluated_app: "com.apple.Safari"
+               })
+
+      assert result.is_error
+      assert result.output =~ "resolved com.apple.calculator"
+      assert result.output =~ "com.apple.Safari"
+      assert result.images == []
+    end
+
     test "claimed vs resolved mismatch is refused" do
       dir = session_dir()
       raw = calculator_state(temp_image(jpeg("m")), sha(jpeg("m")))
@@ -603,6 +637,54 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
     end
   end
 
+  describe "artifact/2" do
+    test "serves a staged screenshot from the live pool, and from an existing named session dir" do
+      bytes = jpeg("art")
+      digest = sha(bytes)
+      dir = session_dir()
+      assert {:ok, _} = Desktop.stage_image(%{"path" => temp_image(bytes)}, dir)
+
+      remember_last(dir, calculator_state(Path.join([dir, "desktop", digest <> ".jpg"]), digest))
+
+      assert {:ok, fetched} = Desktop.artifact(digest)
+      assert fetched.media_type == "image/jpeg"
+      assert fetched.size == byte_size(bytes)
+      assert Base.decode64!(fetched.bytes) == bytes
+
+      assert {:error, :not_found} = Desktop.artifact("not-a-sha")
+      assert {:error, :not_found} = Desktop.artifact(String.duplicate("a", 64))
+
+      root = Path.join(System.tmp_dir!(), "ouro-cu-native-#{System.unique_integer([:positive])}")
+      session_id = "native-testhosttag1-testrandtag12"
+      named = Path.join(root, session_id)
+      File.mkdir_p!(Path.join(named, "desktop"))
+
+      File.cp!(
+        Path.join([dir, "desktop", digest <> ".jpg"]),
+        Path.join([named, "desktop", digest <> ".jpg"])
+      )
+
+      previous = Application.get_env(:ouroboros, :native_data_dir)
+      Application.put_env(:ouroboros, :native_data_dir, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if previous == nil,
+          do: Application.delete_env(:ouroboros, :native_data_dir),
+          else: Application.put_env(:ouroboros, :native_data_dir, previous)
+      end)
+
+      assert {:ok, named_fetched} = Desktop.artifact(digest, session_id)
+      assert Base.decode64!(named_fetched.bytes) == bytes
+
+      missing_id = "native-testhosttag1-missingdir000"
+      refute File.dir?(Path.join(root, missing_id))
+      assert {:error, :not_found} = Desktop.artifact(digest, missing_id)
+      refute File.dir?(Path.join(root, missing_id)), "artifact must not mkdir a guessed session"
+    end
+  end
+
   # A jpeg/png distinguished only by its magic bytes; the body is derived from `tag` so two
   # captures differ and hash apart, which is all staging and eviction need.
   defp jpeg(tag), do: <<0xFF, 0xD8, 0xFF, 0xE0>> <> :crypto.hash(:sha256, tag) <> <<0xFF, 0xD9>>
@@ -611,9 +693,11 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   defp sha(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp temp_image(bytes) do
-    path = Path.join(System.tmp_dir!(), "ouro-cu-temp-#{System.unique_integer([:positive])}")
+    dir = Path.join(System.tmp_dir!(), "ouro-cu")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "temp-#{System.unique_integer([:positive])}.jpg")
     File.write!(path, bytes)
-    on_exit(fn -> File.rm_rf(path) end)
+    on_exit(fn -> File.rm(path) end)
     path
   end
 
@@ -645,6 +729,8 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
         "coordinate_width" => 960,
         "coordinate_height" => 1280,
         "scale" => 2.0,
+        "origin_x" => 100.0,
+        "origin_y" => 120.0,
         "quality" => 80
       },
       "nodes" => [
@@ -695,6 +781,33 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert params["element"]["name"] == "2"
       assert params["target"]["app_id"] == "com.apple.calculator"
       assert params["target"]["window_id"] == "w_1"
+      assert params["require_focus"] == true
+      assert params["coordinate_space"]["origin_x"] == 100.0
+      assert params["coordinate_space"]["origin_y"] == 120.0
+      assert params["coordinate_space"]["scale"] == 2.0
+    end
+
+    test "a last state without :at is treated as stale" do
+      enable(fake_helper())
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("noat")), sha(jpeg("noat")))
+
+      Ouroboros.Provider.Native.Desktop.Pool.remember_state(
+        Ouroboros.Provider.Native.Desktop.Pool,
+        dir,
+        %{state: raw}
+      )
+
+      runner = fn _method, _params, _timeout -> flunk("helper must not run for a stale act") end
+
+      assert {:ok, result} =
+               DesktopAct.run(%{action: "click", element_index: 1}, %{
+                 session_dir: dir,
+                 desktop_runner: runner
+               })
+
+      assert result.is_error
+      assert result.output =~ "stale"
     end
 
     test "a stale last state is refused before the helper is called" do
@@ -789,6 +902,36 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
       remember_last(dir, raw)
       assert Desktop.sensitive_act?(%{action: "click", element_index: 1}, dir)
+    end
+
+    test "enrich_classified fills last-state app unless the call retargets without naming one" do
+      dir = session_dir()
+      raw = calculator_state(temp_image(jpeg("en")), sha(jpeg("en")))
+      remember_last(dir, raw)
+
+      filled =
+        Desktop.enrich_classified(
+          %{tool: "desktop_state", context: %{app: nil, desktop_action: "state"}},
+          dir
+        )
+
+      assert filled.context.app == "com.apple.calculator"
+
+      retarget =
+        Desktop.enrich_classified(
+          %{
+            tool: "desktop_state",
+            context: %{
+              app: nil,
+              desktop_action: "state",
+              window_id: "w_other",
+              title: nil
+            }
+          },
+          dir
+        )
+
+      assert retarget.context.app == nil
     end
   end
 

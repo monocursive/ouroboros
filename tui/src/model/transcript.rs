@@ -938,9 +938,12 @@ fn image_artifacts(payload: &Value) -> Vec<ImageArtifact> {
         })
         .filter_map(|entry| {
             let sha256 = text(entry, &["sha256", "sha", "digest"])?;
+            if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
 
             Some(ImageArtifact {
-                sha256,
+                sha256: sha256.to_ascii_lowercase(),
                 media_type: text(entry, &["media_type", "mediaType", "content_type"]),
                 size: number(entry, &["bytes", "size"]),
                 width: number(entry, &["width"]).map(|value| value.min(u32::MAX as u64) as u32),

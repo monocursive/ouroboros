@@ -80,12 +80,27 @@ impl CoordTransform {
     }
 
     /// Maps a global-point rect into coordinate space.
-    fn apply(&self, rect: Rect) -> Rect {
+    pub fn apply(&self, rect: Rect) -> Rect {
         Rect::new(
             (rect.x - self.origin.x) * self.scale,
             (rect.y - self.origin.y) * self.scale,
             rect.w * self.scale,
             rect.h * self.scale,
+        )
+    }
+
+    /// Inverse of [`apply`]: coordinate-space pixels back to global screen points.
+    pub fn unapply(&self, rect: Rect) -> Rect {
+        let scale = if self.scale.abs() > f64::EPSILON {
+            self.scale
+        } else {
+            1.0
+        };
+        Rect::new(
+            rect.x / scale + self.origin.x,
+            rect.y / scale + self.origin.y,
+            rect.w / scale,
+            rect.h / scale,
         )
     }
 }
@@ -520,6 +535,10 @@ mod tests {
         assert_eq!(
             shaped.nodes[1]["bounds"],
             json!({ "x": 80, "y": 80, "w": 64, "h": 64 })
+        );
+        assert_eq!(
+            transform.unapply(transform.apply(Rect::new(140.0, 160.0, 32.0, 32.0))),
+            Rect::new(140.0, 160.0, 32.0, 32.0)
         );
     }
 

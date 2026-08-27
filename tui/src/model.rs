@@ -2579,6 +2579,15 @@ pub fn decode_artifact(result: &Value, expected_sha: &str) -> Result<Vec<u8>, Ar
         .and_then(Value::as_str)
         .ok_or(ArtifactError::Missing)?;
 
+    // Refuse before allocating: base64 expands 4→3, so a huge envelope cannot make this
+    // client decode a gigabyte then notice it was over the ceiling.
+    let decoded_bound = encoded.len().saturating_mul(3) / 4;
+    if decoded_bound as u64 > crate::images::MAX_BYTES {
+        return Err(ArtifactError::TooLarge {
+            bytes: decoded_bound,
+        });
+    }
+
     let bytes = BASE64
         .decode(encoded.trim())
         .map_err(|_error| ArtifactError::NotBase64)?;

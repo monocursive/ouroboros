@@ -34,8 +34,6 @@ const MOVED: u32 = 5;
 const LEFT_DRAGGED: u32 = 6;
 const OTHER_DOWN: u32 = 25;
 const OTHER_UP: u32 = 26;
-const KEY_DOWN: u32 = 10;
-const KEY_UP: u32 = 11;
 const BUTTON_LEFT: u32 = 0;
 const BUTTON_RIGHT: u32 = 1;
 const BUTTON_CENTER: u32 = 2;
@@ -87,9 +85,7 @@ pub fn perform(
 
     let request = ActRequest::from_params(&params).map_err(|e| (ACT_ERROR, e))?;
 
-    if macos::secure_event_input_enabled()
-        && matches!(request.action, Action::Type | Action::Key)
-    {
+    if macos::secure_event_input_enabled() && matches!(request.action, Action::Type | Action::Key) {
         return Err((
             ACT_ERROR,
             "act: secure keyboard entry is on; type and key are blocked".into(),
@@ -132,20 +128,27 @@ pub fn perform(
         ));
     }
 
-    if request.require_focus {
+    if request.require_focus || request.action == Action::Focus {
         ax::set_frontmost(resolved.pid).map_err(|e| (ACT_ERROR, format!("act: {e}")))?;
         if let Some(bounds) = resolved.window_bounds {
             let _ = ax::raise_window(resolved.pid, bounds);
         }
         thread::sleep(Duration::from_millis(40));
-        if let Some(front) = ax::frontmost_app_id() {
-            if !front.eq_ignore_ascii_case(&resolved.app_id) {
+        match ax::frontmost_app_id() {
+            Some(front) if front.eq_ignore_ascii_case(&resolved.app_id) => {}
+            Some(front) => {
                 return Err((
                     ACT_ERROR,
                     format!(
                         "act: focused app is {front}, not {}; call desktop_state again",
                         resolved.app_id
                     ),
+                ));
+            }
+            None => {
+                return Err((
+                    ACT_ERROR,
+                    "act: could not verify the focused app; refusing".into(),
                 ));
             }
         }
@@ -177,7 +180,8 @@ pub fn perform(
     if matches!(request.action, Action::Type | Action::Key)
         && focused.as_ref().is_none_or(|el| !el.editable)
     {
-        warnings.push("warning: no editable element holds focus — treat input as not landed".into());
+        warnings
+            .push("warning: no editable element holds focus — treat input as not landed".into());
     }
 
     Ok(assemble(
@@ -219,13 +223,16 @@ struct Resolved {
 }
 
 fn resolve_target(request: &ActRequest) -> Result<Resolved, String> {
-
     let windows = macos::windows::enumerate().map_err(|e| e.to_string())?;
 
     let want_id = request.target.window_id.as_deref().and_then(parse_id);
     let want_app = request.target.app_id.as_deref();
     let want_title = request.target.title.as_deref();
     let want_pid = request.target.pid;
+
+    if want_id.is_none() && want_app.is_none() && want_title.is_none() && want_pid.is_none() {
+        return Err("name an app, window_id, or title — untargeted inject is refused".into());
+    }
 
     let found = windows.into_iter().find(|w| {
         if let Some(pid) = want_pid {
@@ -246,7 +253,10 @@ fn resolve_target(request: &ActRequest) -> Result<Resolved, String> {
         }
         if let Some(title) = want_title {
             match w.title.as_deref() {
-                Some(got) if got.to_ascii_lowercase().contains(&title.to_ascii_lowercase()) => {}
+                Some(got)
+                    if got
+                        .to_ascii_lowercase()
+                        .contains(&title.to_ascii_lowercase()) => {}
                 _ => return false,
             }
         }
@@ -278,11 +288,15 @@ fn click(
 ) -> Result<Backend, ActFail> {
     check(cancel)?;
     if let Some(element) = &request.element {
-        match ax::press_matching(resolved.pid, resolved.window_bounds, element) {
+        let needle = crate::act::element_in_global(element, request.coordinate_space);
+        match ax::press_matching(resolved.pid, resolved.window_bounds, &needle) {
             Ok(()) => return Ok(Backend::Ax),
             Err(ax::MatchError::Gone) => {
+                return Err(ActFail::Message("element gone; call state again".into()));
+            }
+            Err(ax::MatchError::Secure) => {
                 return Err(ActFail::Message(
-                    "element gone; call state again".into(),
+                    "act: refusing to interact with a secure field".into(),
                 ));
             }
             Err(ax::MatchError::NoPress) => {
@@ -308,16 +322,23 @@ fn type_text(
         .ok_or_else(|| ActFail::Message("act: type needs text".into()))?;
 
     if let Some(element) = &request.element {
-        match ax::set_value_matching(resolved.pid, resolved.window_bounds, element, text) {
+        let needle = crate::act::element_in_global(element, request.coordinate_space);
+        match ax::set_value_matching(resolved.pid, resolved.window_bounds, &needle, text) {
             Ok(()) => return Ok(Backend::Ax),
             Err(ax::MatchError::Gone) => {
+                return Err(ActFail::Message("element gone; call state again".into()));
+            }
+            Err(ax::MatchError::Secure) => {
                 return Err(ActFail::Message(
-                    "element gone; call state again".into(),
+                    "act: refusing to type into a secure field".into(),
                 ));
             }
-            Err(ax::MatchError::NoPress | ax::MatchError::Failed(_)) => {
-                // Fall through to unicode events; do not also AXSetValue.
+            Err(ax::MatchError::NoPress) => {
+                return Err(ActFail::Message(
+                    "act: the field does not accept AXSetValue".into(),
+                ));
             }
+            Err(ax::MatchError::Failed(message)) => return Err(ActFail::Message(message)),
         }
     }
 
@@ -543,7 +564,12 @@ fn post_chord(chord: &KeyChord, cancel: &AtomicBool) -> Result<(), ActFail> {
 fn type_unicode(text: &str, cancel: &AtomicBool) -> Result<(), ActFail> {
     let source = event_source()?;
     for ch in text.chars() {
-        check(cancel)?;
+        if let Err(fail) = check(cancel) {
+            unsafe {
+                CFRelease(source);
+            }
+            return Err(fail);
+        }
         let mut utf16 = [0u16; 2];
         let encoded = ch.encode_utf16(&mut utf16);
         unsafe {
@@ -557,7 +583,9 @@ fn type_unicode(text: &str, cancel: &AtomicBool) -> Result<(), ActFail> {
                     CFRelease(up);
                 }
                 CFRelease(source);
-                return Err(ActFail::Message("act: could not create unicode event".into()));
+                return Err(ActFail::Message(
+                    "act: could not create unicode event".into(),
+                ));
             }
             CGEventKeyboardSetUnicodeString(down, encoded.len(), encoded.as_ptr());
             CGEventKeyboardSetUnicodeString(up, encoded.len(), encoded.as_ptr());
@@ -611,4 +639,3 @@ fn check(cancel: &AtomicBool) -> Result<(), ActFail> {
         Ok(())
     }
 }
-

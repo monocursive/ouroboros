@@ -317,7 +317,7 @@ impl App {
                 .entries,
         )
         .into_iter()
-        .map(desktop_cell)
+        .map(|cell| desktop_cell(self.with_desktop_artifact_bytes(cell)))
         .collect::<Vec<_>>();
         let mut cells = attach_passive_metadata(projected);
 
@@ -339,7 +339,19 @@ impl App {
         cells
     }
 
-    /// The oldest unanswered approval for the open session.
+    /// Hands fetched artifact bytes onto the image cell before the desktop maps it, so
+    /// GPUI draws from the projection rather than a second cache at render time.
+    fn with_desktop_artifact_bytes(&self, mut cell: Cell) -> Cell {
+        if let Cell::Image(image) = &mut cell {
+            if image.bytes.is_none() {
+                if let Some(sha) = image.sha.as_ref() {
+                    image.bytes = self.desktop_artifacts.get(sha).cloned();
+                }
+            }
+        }
+        cell
+    }
+
     pub fn desktop_approval(&self) -> Option<DesktopApproval> {
         let (plane, id) = self.sessions.open.as_ref()?;
         let request = self.sessions.open_watch()?.next_approval()?;

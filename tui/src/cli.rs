@@ -353,7 +353,8 @@ pub struct LedgerArgs {
 #[derive(Debug, Subcommand)]
 pub enum DesktopCommand {
     /// Report Computer Use readiness on the node — helper presence, permissions, and
-    /// capabilities. Asks `computer_use.status`, which starts nothing.
+    /// capabilities. Asks `computer_use.status` by default (starts nothing). `--probe`
+    /// starts the helper so TCC is visible.
     Doctor(DesktopArgs),
 }
 
@@ -371,6 +372,11 @@ pub struct DesktopArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+
+    /// Start the helper and report live TCC (`computer_use.probe`). Default is
+    /// start-nothing `computer_use.status`.
+    #[arg(long)]
+    pub probe: bool,
 }
 
 /// `ouro update`'s flags.

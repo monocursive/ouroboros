@@ -2,20 +2,17 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @moduledoc """
   Computer Use configuration, readiness, and app identity for the native provider.
 
-  This is the Elixir side of `docs/COMPUTER_USE.md`. In Phase 0 it owns no helper
-  process and touches no pixels: it reads the `:computer_use` application environment,
-  answers whether the feature is genuinely usable on this node, and canonicalises app
-  identity. The helper pool, image staging, and per-session snapshot map (D11) arrive in
-  later phases; this module is deliberately the honest predicate they will build on.
+  This is the Elixir side of `docs/COMPUTER_USE.md`. It owns Computer Use configuration,
+  readiness, app identity, observe (`desktop_state`), act (`desktop_act`), staging, and
+  the last-state map. A helper on disk is the operator opt-in; `config(:enabled)` and
+  `OUROBOROS_COMPUTER_USE=0` can still kill the feature.
 
   ## The one honest predicate
 
-  `enabled?/0` is true only when the flag is on **and** a helper binary actually exists on
-  disk. There is no bundled helper in Phase 0, so the second half is false unless
-  `OUROBOROS_COMPUTER_USE_HELPER` points at a binary a developer built themselves. That is
-  the honesty invariant applied to a feature flag: a node cannot claim it can drive the
-  desktop when there is nothing on it that can. `Tools.specs/3` and `Tools.lookup/3` gate
-  on this, so an off node never teaches the model a tool name it cannot use (D9).
+  `enabled?/0` is true only when the helper binary exists on disk, Computer Use has not
+  been killed (`OUROBOROS_COMPUTER_USE=0`), **and** `config(:enabled)` is true. A helper
+  on disk is the operator opt-in; the config key is the node-local kill switch that
+  `enabled?/0` actually honours.
 
   ## Configuration bounds
 
@@ -94,7 +91,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   }
 
   @defaults [
-    enabled: false,
+    enabled: true,
     act_enabled: true,
     helper_path: :bundled,
     handshake_timeout_ms: 5_000,
@@ -139,12 +136,13 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   Whether Computer Use is genuinely usable on this node.
 
-  True when the helper binary is on disk and Computer Use has not been explicitly
-  killed (`OUROBOROS_COMPUTER_USE=0`). A helper on disk is the operator opt-in —
-  they built or installed it. `OUROBOROS_COMPUTER_USE=1` still requires the helper.
+  True when the helper binary is on disk, `config(:enabled)` is true, and Computer Use
+  has not been explicitly killed (`OUROBOROS_COMPUTER_USE=0`). A helper on disk is the
+  operator opt-in — they built or installed it. Setting `:enabled` false turns the
+  tools off even with a helper present.
   """
   @spec enabled?() :: boolean()
-  def enabled?, do: helper_present?() and flag_allows?()
+  def enabled?, do: helper_present?() and flag_allows?() and config(:enabled) == true
 
   @doc "Effective flag: env 0/false kills, env 1/true or an unset env allows."
   @spec flag_allows?() :: boolean()
@@ -253,7 +251,11 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   @doc "Whether a claimed or resolved app id is on this node's denylist."
   @spec denied_app?(String.t() | nil) :: boolean()
-  def denied_app?(app) when is_binary(app), do: app_alias(app) in denied_app_ids()
+  def denied_app?(app) when is_binary(app) do
+    id = app_alias(app)
+    Enum.any?(denied_app_ids(), &(String.downcase(&1) == String.downcase(id)))
+  end
+
   def denied_app?(_app), do: false
 
   @doc """
@@ -320,7 +322,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   """
   @spec probe() :: map()
   def probe do
-    if config(:enabled) == true do
+    if enabled?() do
       _ =
         case pool() do
           {:ok, pid} -> Pool.doctor(pid, config(:handshake_timeout_ms) + 1_000)
@@ -334,21 +336,25 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   Serves one staged screenshot by content hash for `computer_use.artifact` (§8.5).
 
-  Searches the live pool's session dirs and, if this node has a durable data directory,
-  every `<data_dir>/native/<session>/desktop/` folder. An unknown or non-64-hex sha is
+  Searches the live pool's session dirs by default. When `session_id` is a native
+  provider session id whose directory already exists, only that session's `desktop/`
+  folder is searched — never created. An unknown or non-64-hex sha is
   `{:error, :not_found}` — never a path traversal. The pool is never started to answer.
   """
   @spec artifact(String.t()) :: {:ok, map()} | {:error, :not_found}
-  def artifact(sha) when is_binary(sha) do
+  @spec artifact(String.t(), String.t() | nil) :: {:ok, map()} | {:error, :not_found}
+  def artifact(sha, session_id \\ nil)
+
+  def artifact(sha, session_id) when is_binary(sha) do
     with true <- sha =~ ~r/\A[a-f0-9]{64}\z/,
-         staged when is_tuple(staged) <- find_staged(sha, artifact_dirs()) do
+         staged when is_tuple(staged) <- find_staged(sha, artifact_dirs(session_id)) do
       read_artifact(staged)
     else
       _miss -> {:error, :not_found}
     end
   end
 
-  def artifact(_sha), do: {:error, :not_found}
+  def artifact(_sha, _session_id), do: {:error, :not_found}
 
   defp find_staged(sha, session_dirs) do
     Enum.find_value(session_dirs, fn dir ->
@@ -369,36 +375,43 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp artifact_dirs do
-    live =
-      case Process.whereis(Pool) do
-        pid when is_pid(pid) -> Pool.session_dirs(pid)
-        nil -> []
-      end
-
-    Enum.uniq(live ++ durable_session_dirs())
+  defp artifact_dirs(session_id) when is_binary(session_id) and session_id != "" do
+    case named_session_dir(session_id) do
+      path when is_binary(path) -> [path]
+      _miss -> []
+    end
   end
 
-  defp durable_session_dirs do
-    root =
-      case Application.get_env(:ouroboros, :data_dir) do
-        path when is_binary(path) and path != "" -> Path.join(path, "native")
-        _unset -> nil
-      end
+  defp artifact_dirs(_session_id) do
+    case Process.whereis(Pool) do
+      pid when is_pid(pid) -> Pool.session_dirs(pid)
+      nil -> []
+    end
+  end
 
-    with root when is_binary(root) <- root,
-         {:ok, names} <- File.ls(root) do
-      Enum.flat_map(names, fn name ->
-        path = Path.join(root, name)
-
-        if NativePaths.validate_session_id(name) == :ok and File.dir?(Path.join(path, "desktop")) do
-          [path]
-        else
-          []
-        end
-      end)
+  # Look up an existing native session directory without creating one. A fetch must not
+  # mkdir a guessed id.
+  defp named_session_dir(id) do
+    with :ok <- NativePaths.validate_session_id(id),
+         root when is_binary(root) <- native_root(),
+         path = Path.join(root, id),
+         true <- File.dir?(path) do
+      path
     else
-      _miss -> []
+      _miss -> nil
+    end
+  end
+
+  defp native_root do
+    case Application.get_env(:ouroboros, :native_data_dir) do
+      path when is_binary(path) and path != "" ->
+        path
+
+      _unset ->
+        case Application.get_env(:ouroboros, :data_dir) do
+          path when is_binary(path) and path != "" -> Path.join(path, "native")
+          _unset -> nil
+        end
     end
   end
 
@@ -489,7 +502,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
            {:ok, session_dir} <- session_dir(context),
            :ok <- require_target(params),
            {:ok, raw} <- run_state(params, context) do
-        finish_observe(raw, params, session_dir)
+        finish_observe(raw, params, session_dir, context)
       end
 
     case outcome do
@@ -499,9 +512,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp admit_resolved(raw, params) do
+  defp admit_resolved(raw, params, context) do
     resolved = resolved_app_id(raw)
     claimed = target_app(field(params, :app))
+    evaluated = target_app(field(context, :desktop_evaluated_app))
 
     cond do
       not is_binary(resolved) ->
@@ -514,6 +528,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
       is_binary(claimed) and claimed != resolved ->
         {:error,
          "desktop_state: resolved #{resolved}, not #{claimed}. Call again naming the resolved app."}
+
+      is_binary(evaluated) and evaluated != resolved ->
+        {:error,
+         "desktop_state: resolved #{resolved}, not #{evaluated}. Call again naming the resolved app."}
 
       true ->
         :ok
@@ -615,21 +633,35 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  @doc "Fills a missing Computer Use `context.app` from the session's last state."
+  @doc """
+  Fills a missing Computer Use `context.app` from the session's last state.
+
+  A call that retargets by `window_id` or `title` without naming an app is left unset, so
+  an Always-allow or session grant for last state's app cannot cover a different window.
+  """
   @spec enrich_classified(map(), String.t() | nil) :: map()
   def enrich_classified(%{tool: tool, context: context} = classified, session_dir)
       when tool in ["desktop_state", "desktop_act"] and is_map(context) do
     if is_binary(context[:app]) do
       classified
     else
-      case snapshot_app(snapshot_for(session_dir)) do
-        app when is_binary(app) -> %{classified | context: Map.put(context, :app, app)}
-        _none -> classified
+      if retarget_without_app?(context) do
+        classified
+      else
+        case snapshot_app(snapshot_for(session_dir)) do
+          app when is_binary(app) -> %{classified | context: Map.put(context, :app, app)}
+          _none -> classified
+        end
       end
     end
   end
 
   def enrich_classified(classified, _session_dir), do: classified
+
+  defp retarget_without_app?(context) do
+    is_nil(context[:app]) and
+      (is_binary(context[:window_id]) or is_binary(context[:title]))
+  end
 
   @doc """
   Whether this act should ask even after an app allow (§6.6): a secure field, a
@@ -756,8 +788,8 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp format("png"), do: "png"
   defp format(_jpeg_or_default), do: "jpeg"
 
-  defp finish_observe(raw, params, session_dir) when is_map(raw) do
-    case admit_resolved(raw, params) do
+  defp finish_observe(raw, params, session_dir, context) when is_map(raw) do
+    case admit_resolved(raw, params, context) do
       :ok ->
         include_image = field(params, :include_image) != false
         {images, image_note, staged} = stage_from_raw(raw, session_dir, include_image)
@@ -769,7 +801,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp finish_observe(_raw, _params, _session_dir),
+  defp finish_observe(_raw, _params, _session_dir, _context),
     do: error_result("the desktop helper returned an unreadable state")
 
   defp stage_from_raw(raw, session_dir, true) do
@@ -890,7 +922,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
        "button" => string(field(params, :button)) || "left",
        "direction" => string(field(params, :direction)),
        "pages" => field(params, :pages) || 1,
-       "require_focus" => action in ["type", "key"] or field(params, :require_focus) == true,
+       "require_focus" => field(params, :require_focus) != false,
        "coordinate_space" => coordinate_space(raw)
      }
      |> reject_nils_map()}
@@ -949,7 +981,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
         System.system_time(:millisecond) - at > config(:stale_ms)
 
       _missing ->
-        false
+        true
     end
   end
 
@@ -1007,14 +1039,25 @@ defmodule Ouroboros.Provider.Native.Desktop do
     bounds = field(window, "bounds") || %{}
     image = field(raw, "image") || %{}
 
-    origin_x = optional_number(field(bounds, "x"))
-    origin_y = optional_number(field(bounds, "y"))
+    origin_x =
+      optional_number(field(image, "origin_x")) || optional_number(field(bounds, "x"))
+
+    origin_y =
+      optional_number(field(image, "origin_y")) || optional_number(field(bounds, "y"))
+
     width = optional_int(field(image, "coordinate_width")) || optional_int(field(bounds, "w"))
     height = optional_int(field(image, "coordinate_height")) || optional_int(field(bounds, "h"))
+    scale = optional_number(field(image, "scale")) || 1.0
 
     if is_number(origin_x) and is_number(origin_y) and is_integer(width) and is_integer(height) and
-         width > 0 and height > 0 do
-      %{"origin_x" => origin_x, "origin_y" => origin_y, "width" => width, "height" => height}
+         width > 0 and height > 0 and is_number(scale) and scale > 0 do
+      %{
+        "origin_x" => origin_x,
+        "origin_y" => origin_y,
+        "width" => width,
+        "height" => height,
+        "scale" => scale
+      }
     end
   end
 
@@ -1167,10 +1210,32 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   defp temp_path(image) do
     case field(image, "path") do
-      path when is_binary(path) and path != "" -> {:ok, path}
-      _absent -> {:error, :missing_path}
+      path when is_binary(path) and path != "" ->
+        if helper_temp?(path), do: {:ok, path}, else: {:error, :path_outside_temp}
+
+      _absent ->
+        {:error, :missing_path}
     end
   end
+
+  # The helper writes `$TMPDIR/ouro-cu/{sha}.{ext}`. A path outside that directory is
+  # refused so a confused or hostile helper cannot make Elixir read an arbitrary file.
+  defp helper_temp?(path) do
+    expanded = Path.expand(path)
+    dir = Path.dirname(expanded)
+
+    Path.basename(dir) == "ouro-cu" and under_tmp?(Path.dirname(dir)) and
+      ".." not in Path.split(path)
+  end
+
+  defp under_tmp?(dir) do
+    tmp = strip_private(Path.expand(System.tmp_dir!()))
+    dir = strip_private(dir)
+    dir == tmp or String.starts_with?(dir, tmp <> "/")
+  end
+
+  defp strip_private("/private" <> rest), do: rest
+  defp strip_private(path), do: path
 
   defp read_capped(path) do
     max = config(:max_image_bytes)

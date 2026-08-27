@@ -1,10 +1,8 @@
 # Computer Use
 
-Status: Phase 0 + Phase 1 (observe) built and live-proven on a feature branch;
-`desktop_act` (Phase 2), the `ouro desktop` CLI, and the full §6.3 gate are
-deferred. See **§18** for what is actually built vs still designed. This document
-is the contract a PR is held to; it is not generated — edit it when the contract
-changes.
+Status: Phase 0–2 built (observe, act, helper-on-disk opt-in). See **§18** for
+what is actually built vs still designed. This document is the contract a PR is
+held to; it is not generated — edit it when the contract changes.
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md) (native loop, permissions, MCP),
 [DESKTOP.md](DESKTOP.md) (GPUI is presentation), [PROTOCOL.md](PROTOCOL.md)
@@ -25,8 +23,10 @@ a GPUI feature. The BEAM remains authoritative for policy, ledger, tool
 schemas, approvals, and replay. A Rust helper owns pixels, accessibility trees,
 and injected input. The helper never decides allow or deny.
 
-Default **off**. Absent from the tool list when off. A flag that hid the tools
-but left the names callable would be a different feature.
+Default **off unless a helper is on disk**. `config(:enabled)` defaults true;
+`OUROBOROS_COMPUTER_USE=0` and `enabled: false` still kill the tools. Absent from
+the tool list when off. A flag that hid the tools but left the names callable
+would be a different feature.
 
 ### 1.1 What it is not
 
@@ -337,8 +337,8 @@ this engine.
 # config/config.exs — defaults. runtime.exs may override from env.
 config :ouroboros,
   computer_use: [
-    enabled: false,
-    act_enabled: false,             # Phase 2 ships desktop_act
+    enabled: true,                  # helper-on-disk is the opt-in; this key still kills
+    act_enabled: true,              # false for observe-only
     helper_path: :bundled,          # :bundled | "/absolute/path"
     handshake_timeout_ms: 5_000,
     state_timeout_ms: 5_000,
@@ -369,7 +369,8 @@ falls back to the shipped default. An operator typo must not widen a bound.
 
 Env (optional, documented next to `OUROBOROS_*`):
 
-- `OUROBOROS_COMPUTER_USE=1` enables on this node.
+- `OUROBOROS_COMPUTER_USE=0` kills Computer Use on this node even with a helper.
+- `OUROBOROS_COMPUTER_USE=1` still requires the helper binary.
 - `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides the binary.
 
 No workspace file can enable Computer Use. A repo that shipped
@@ -911,7 +912,7 @@ New methods (add to `Gateway.Methods`, golden fixtures, then
 | method | scope | timeout | does |
 |---|---|---|---|
 | `computer_use.status` | read | default | doctor + enabled + helper version + always-allowed apps (ids only). Node-routed like `mcp.list`. Starts nothing. |
-| `computer_use.artifact` | read | default | `{sha256}` → bytes as base64 **or** a bounded binary frame. Cap = `max_image_bytes`. 404 if unknown to this node. Only shas this node's `session_dir/desktop/` contains. |
+| `computer_use.artifact` | read | default | `{sha256, session_id?}` → bytes as base64. Cap = `max_image_bytes`. 404 if unknown to this node. With `session_id`, only that existing native session's `desktop/` dir (never created). Without it, only the live helper pool's session dirs. |
 
 Decision on artifact transfer: **base64 in the JSON result**, one image,
 already size-capped. A second transport is not worth it for 2 MiB. The
@@ -1029,8 +1030,8 @@ lib/ouroboros/provider/native/tools/desktop_act.ex
 lib/ouroboros/control/permissions/pattern.ex      # + ComputerUse
 lib/ouroboros/control/permissions/matcher.ex      # + ComputerUse
 lib/ouroboros/application.ex                      # Desktop.Pool child
-tui/crates/computer-use/                          # ouro-computer-use bin
-tui/src/bin/desktop_cli.rs                        # ouro desktop doctor
+tui/computer-use/                                  # ouro-computer-use bin
+tui/src/desktop_cli.rs                             # ouro desktop doctor
 config/config.exs                                 # :computer_use defaults
 test/provider/native/desktop_test.exs
 test/provider/native/desktop_pool_test.exs
@@ -1194,23 +1195,29 @@ Phase 0, Phase 1 (observe), and Phase 2 (act, macOS) are implemented.
   invent a Computer Use allow.
 - Act: `desktop_act` is advertised when Computer Use is enabled (`act_enabled`
   default true). Elixir resolves `element_index` against last state (30s
-  stale window), refuses a denied app and a last-state/app mismatch, and
-  sends the element snapshot to the helper. The helper rematches
-  role+name+bounds, prefers `AXPress` / `AXSetValue`, falls back to CGEvent
-  only when AX was not attempted, requires focus for `type`/`key`, refuses
-  self / ouro-desktop / permission sheets / `--deny-app`, and honors
-  `cancel` between events.
+  stale window; a snapshot missing `:at` is stale), refuses a denied app and
+  a last-state/app mismatch, and sends the element snapshot plus capture
+  origin/scale to the helper. The helper rematches in global points (snapshot
+  bounds inverted through origin+scale), prefers `AXPress` / `AXSetValue`,
+  falls back to CGEvent only when AX was not attempted, requires focus for
+  every action (and always raises on `focus`), refuses secure fields / self /
+  ouro-desktop / permission sheets / `--deny-app` (baked floor, case-fold),
+  and honors `cancel` between events.
 - Two-phase: `Desktop.resolve_act/2` names the app the call would operate
   (last state, or a `focus` retarget). The loop re-evaluates when that id
   differs from the first classify. Always-allow Safari does not cover a
-  Mail focus. Sensitive type/secure-field acts ask again (`:once` card).
+  Mail focus. A `window_id`/`title` observe without `app` is not covered by
+  last state's grant; the helper ANDs `window_id` with `app_id`; untargeted
+  capture is refused. Sensitive type/secure-field acts ask again (`:once` card).
 - Interrupt: `Tools.execute` for `desktop_act` listens for
   `:native_interrupt`, sends helper `cancel`, and the loop flushes the
   interrupt so the turn stops.
+- GPUI fetches `computer_use.artifact` by sha (optional native `session_id`)
+  and overlays the bytes on Image cells. `enabled?/0` honours `config(:enabled)`.
 
 **Still deferred:**
 
-- TUI inline pixels (ratatui strips the codes). GPUI can render.
+- TUI inline pixels (ratatui strips the codes).
 - Live end-to-end "click Calculator 2" on this host is a manual
   `make computer-use` smoke, not CI.
 - In-TUI `/computer-use` panel (Phase 3).

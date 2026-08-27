@@ -433,6 +433,11 @@ pub enum Tag {
         id: String,
         show: bool,
     },
+    /// `computer_use.artifact {sha256}`. Keyed by sha so two screenshots can fetch at once
+    /// and a slow node cannot collapse them into one in-flight request.
+    Artifact {
+        sha: String,
+    },
 }
 
 /// B7. A `workspace.exec` the runtime would not run, as the composer states it.
@@ -928,6 +933,10 @@ pub struct App {
     completion_catalog: CompletionCatalog,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
+    /// Decoded `computer_use.artifact` bytes, keyed by sha256, overlaid onto Image cells
+    /// in [`Self::desktop_transcript`]. Projection stays fs-free: these were fetched by
+    /// RPC and handed in.
+    desktop_artifacts: HashMap<String, Arc<Vec<u8>>>,
     dropped_seen: u64,
     /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
     /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
@@ -1130,6 +1139,7 @@ impl App {
             completion_catalog: CompletionCatalog::default(),
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
+            desktop_artifacts: HashMap::new(),
             dropped_seen: 0,
             save_pending: false,
             save_quiet: false,

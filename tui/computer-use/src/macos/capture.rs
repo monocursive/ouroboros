@@ -94,9 +94,8 @@ pub struct Grabbed {
 
 /// Resolves a caller's target to a concrete on-screen window using `CGWindowList` only.
 ///
-/// Selection, in order: an explicit `window_id`; else the frontmost window matching the given
-/// app/title/pid; else the frontmost normal window. `CGWindowList`'s front-to-back order makes
-/// "first match" mean "frontmost".
+/// Selection is the frontmost window matching every named filter (app, title, pid,
+/// window_id AND'd). Untargeted capture is refused.
 pub fn resolve(target: &Target) -> Result<Resolved, String> {
     let all = super::windows::enumerate()?;
     let chosen = choose_window(&all, target)
@@ -121,21 +120,27 @@ pub fn resolve(target: &Target) -> Result<Resolved, String> {
 }
 
 /// Picks the target window from the front-to-back list (see [`resolve`]).
+///
+/// Every named filter is AND'd: a `window_id` of Mail with `app_id` Safari is not a
+/// match. Untargeted capture (no app, window, title, or pid) is refused — Elixir already
+/// requires a target; this is the helper's own belt.
 fn choose_window<'a>(all: &'a [RawWindow], target: &Target) -> Option<&'a RawWindow> {
-    if let Some(id) = target.window_id.as_deref().and_then(windows::parse_id) {
-        return all.iter().find(|w| w.window_id == id);
+    let has_filter = target.window_id.is_some()
+        || target.app_id.is_some()
+        || target.title.is_some()
+        || target.pid.is_some();
+    if !has_filter {
+        return None;
     }
-
-    let has_filter = target.app_id.is_some() || target.title.is_some() || target.pid.is_some();
-    if has_filter {
-        return all.iter().find(|w| matches_target(w, target));
-    }
-
-    // No target at all: the frontmost normal window.
-    all.iter().find(|w| w.on_screen && w.layer == 0)
+    all.iter().find(|w| matches_target(w, target))
 }
 
 fn matches_target(window: &RawWindow, target: &Target) -> bool {
+    if let Some(id) = target.window_id.as_deref().and_then(windows::parse_id) {
+        if window.window_id != id {
+            return false;
+        }
+    }
     if let Some(pid) = target.pid {
         if window.pid != pid {
             return false;
@@ -429,15 +434,29 @@ mod tests {
     }
 
     #[test]
-    fn no_target_picks_frontmost_normal_window() {
+    fn window_id_is_anded_with_app() {
+        let all = vec![win(1, 10, "a", "A", "t", 0), win(2, 20, "b", "B", "t", 0)];
+        let target = Target {
+            window_id: Some("w_2".into()),
+            app_id: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(choose_window(&all, &target).is_none());
+        let matching = Target {
+            window_id: Some("w_2".into()),
+            app_id: Some("b".into()),
+            ..Default::default()
+        };
+        assert_eq!(choose_window(&all, &matching).unwrap().window_id, 2);
+    }
+
+    #[test]
+    fn no_target_is_refused() {
         let all = vec![
             win(1, 10, "a", "A", "overlay", 25),
             win(2, 20, "b", "B", "doc", 0),
         ];
-        assert_eq!(
-            choose_window(&all, &Target::default()).unwrap().window_id,
-            2
-        );
+        assert!(choose_window(&all, &Target::default()).is_none());
     }
 
     #[test]

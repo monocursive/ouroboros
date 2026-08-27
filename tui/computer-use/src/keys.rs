@@ -368,5 +368,4 @@ mod tests {
         assert_eq!(virtual_key(Key::Char('2')), 0x13);
         assert_eq!(virtual_key(Key::Function(1)), 0x7A);
     }
-
 }

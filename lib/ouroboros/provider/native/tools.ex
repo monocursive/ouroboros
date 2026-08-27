@@ -539,16 +539,25 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp command(_name, _input), do: nil
 
-  # D4/§6.3: Computer Use puts app identity and the desktop action into the permission
-  # `context`, under atom keys the matcher reads via `context_value/2`, so a
-  # `ComputerUse(app:…)` rule can allow on the app this node measured. In Phase 0 `app` is
-  # the caller's *claimed* string (or nil); the resolved-app second evaluate is Phase 1 and
-  # is deliberately not implemented here. Every other tool carries an empty context.
+  # D4/§6.3: Computer Use puts claimed app identity, window_id, title, and the desktop
+  # action into the permission `context`. The loop may fill a missing app from last state
+  # unless the call retargets by window_id/title; after capture, `desktop_evaluated_app`
+  # is checked against the helper's resolved id. Every other tool carries an empty context.
   defp context("desktop_state", input),
-    do: %{app: claimed_app(input), desktop_action: "state"}
+    do: %{
+      app: claimed_app(input),
+      desktop_action: "state",
+      window_id: claimed_string(input, "window_id"),
+      title: claimed_string(input, "title")
+    }
 
   defp context("desktop_act", input),
-    do: %{app: claimed_app(input), desktop_action: claimed_action(input)}
+    do: %{
+      app: claimed_app(input),
+      desktop_action: claimed_action(input),
+      window_id: claimed_string(input, "window_id"),
+      title: claimed_string(input, "title")
+    }
 
   defp context(_name, _input), do: %{}
 
@@ -564,6 +573,19 @@ defmodule Ouroboros.Provider.Native.Tools do
       action when is_binary(action) and action != "" -> action
       _absent -> nil
     end
+  end
+
+  defp claimed_string(input, key) when is_binary(key) do
+    case Map.get(input, key) || Map.get(input, String.to_existing_atom(key)) do
+      value when is_binary(value) and value != "" -> value
+      _absent -> nil
+    end
+  rescue
+    ArgumentError ->
+      case Map.get(input, key) do
+        value when is_binary(value) and value != "" -> value
+        _absent -> nil
+      end
   end
 
   @doc """

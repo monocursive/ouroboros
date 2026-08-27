@@ -697,7 +697,8 @@ defmodule Ouroboros.Provider.Native.Loop do
       # so it is handed two closures over the session rather than a pid to call: the tool
       # never learns which process tracks what, and a run with no session gets `nil` and
       # says so instead of failing obscurely.
-      subagents: subagent_handles(state)
+      subagents: subagent_handles(state),
+      desktop_evaluated_app: classified.context[:app]
     }
 
     # Checkpoint before write, always, and before the language server is asked anything:
@@ -1186,21 +1187,36 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp desktop_tool?(_name), do: false
 
   defp redact_desktop_input("desktop_act", input) when is_map(input) do
-    action = Map.get(input, "action") || Map.get(input, :action)
+    input
+    |> redact_desktop_text()
+    |> redact_desktop_long_key()
+  end
 
-    if action == "type" do
-      text = Map.get(input, "text") || Map.get(input, :text)
-      bytes = if is_binary(text), do: byte_size(text), else: 0
+  defp redact_desktop_input(_name, input), do: input
 
+  defp redact_desktop_text(input) do
+    text = Map.get(input, "text") || Map.get(input, :text)
+
+    if is_binary(text) do
       input
       |> Map.drop(["text", :text])
-      |> Map.put("text_bytes", bytes)
+      |> Map.put("text_bytes", byte_size(text))
     else
       input
     end
   end
 
-  defp redact_desktop_input(_name, input), do: input
+  defp redact_desktop_long_key(input) do
+    key = Map.get(input, "key") || Map.get(input, :key)
+
+    if is_binary(key) and byte_size(key) > 32 do
+      input
+      |> Map.drop(["key", :key])
+      |> Map.put("key_bytes", byte_size(key))
+    else
+      input
+    end
+  end
 
   defp suggested_rule_payload(classified) do
     base = Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
@@ -1661,8 +1677,15 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp new_request_id,
     do: "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-  defp grant(state, classified, :session),
-    do: %{state | session_grants: MapSet.put(state.session_grants, grant_key(classified))}
+  defp grant(state, classified, :session) do
+    if desktop_tool?(classified.tool) and not is_binary(classified.context[:app]) do
+      # A session grant keyed on a missing app would cover every later window_id-only
+      # observe. Ask again instead.
+      state
+    else
+      %{state | session_grants: MapSet.put(state.session_grants, grant_key(classified))}
+    end
+  end
 
   defp grant(state, _classified, _once), do: state
 

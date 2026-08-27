@@ -4,17 +4,9 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
 
   Computer Use's act half (`docs/COMPUTER_USE.md` §5.3). It classifies as `mode: :execute`
   — plan mode refuses it, and auto-approve never answers it (D3, D10) — and it runs against
-  the latest `desktop_state` for this session.
-
-  ## What is real in Phase 0
-
-  The argument-validation table and the key grammar (§5.3) are pure and testable, so they
-  are implemented now: a malformed call — a click with no target, a `type` with no text, a
-  key that is not a real key or combo — comes back as an in-band error at once, without any
-  host IO. A well-formed call cannot yet act, because the helper that owns injected input
-  does not exist, so it returns the honest Phase 0 stub saying Computer Use is not enabled
-  on this node. The two-phase app gate (§6.3), focus verification, staleness (§5.3), and the
-  redaction of typed text (§12) are later phases; nothing here injects an event.
+  the latest `desktop_state` for this session. Typed `text` is redacted on the emitted
+  tool_call; the helper rematches in one coordinate space, refuses secure fields, and
+  focuses the target before injecting.
   """
 
   alias Ouroboros.Provider.Native.Desktop

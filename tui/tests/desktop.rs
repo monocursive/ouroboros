@@ -382,6 +382,76 @@ fn desktop_session_and_transcript_are_reducer_projections() {
 }
 
 #[test]
+fn desktop_fetches_artifact_bytes_and_overlays_them_on_the_transcript() {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+
+    let mut app = opened();
+    let png = {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes
+    };
+    let digest = ring::digest::digest(&ring::digest::SHA256, &png);
+    let sha: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+
+    notify(
+        &mut app,
+        1,
+        "tool_result",
+        json!({
+            "call_id": "d1",
+            "name": "desktop_state",
+            "output": "Calculator",
+            "is_error": false,
+            "artifacts": [{
+                "kind": "image",
+                "sha256": sha,
+                "media_type": "image/png",
+                "bytes": png.len(),
+                "width": 8,
+                "height": 8
+            }]
+        }),
+    );
+
+    let fetch = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "computer_use.artifact")
+        .expect("a screenshot on the transcript is fetched by sha");
+    assert_eq!(fetch.params["sha256"], sha);
+    assert!(matches!(fetch.tag, Tag::Artifact { sha: ref got } if *got == sha));
+
+    answer(
+        &mut app,
+        fetch.tag,
+        json!({ "bytes": BASE64.encode(&png), "media_type": "image/png" }),
+    );
+
+    let cells = app.desktop_transcript();
+    let image = cells
+        .iter()
+        .find(|cell| matches!(cell.kind, DesktopCellKind::Image { .. }))
+        .expect("the artifact is an Image cell");
+    match &image.kind {
+        DesktopCellKind::Image {
+            bytes,
+            sha: cell_sha,
+            ..
+        } => {
+            assert_eq!(cell_sha.as_deref(), Some(sha.as_str()));
+            assert_eq!(bytes.as_deref().map(Vec::as_slice), Some(png.as_slice()));
+        }
+        other => panic!("expected Image, got {other:?}"),
+    }
+}
+
+#[test]
 fn desktop_keeps_agent_metadata_visible_without_promoting_it_over_the_answer() {
     let mut app = opened();
     notify(

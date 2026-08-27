@@ -178,7 +178,10 @@ pub enum MatchError {
     Gone,
     /// A match was found but it does not list the AX action we wanted (caller may CGEvent).
     NoPress,
-    /// The AX call itself failed.
+    /// The match was a secure text field; injection is refused (doc §7.3 / D12).
+    Secure,
+    /// The AX action was attempted and the API returned a failure code. Not a signal to
+    /// fall through to CGEvent — the click/type already happened, or failed, on this node.
     Failed(String),
 }
 
@@ -203,7 +206,9 @@ pub fn set_value_matching(
     needle: &crate::act::ElementSnapshot,
     text: &str,
 ) -> Result<(), MatchError> {
-    with_match(pid, window_bounds, needle, |elem, _node| set_value(elem, text))
+    with_match(pid, window_bounds, needle, |elem, _node| {
+        set_value(elem, text)
+    })
 }
 
 /// Makes the application frontmost so subsequent events land in it.
@@ -234,7 +239,10 @@ pub fn frontmost_app_id() -> Option<String> {
 }
 
 /// Focused element after an act, for landing notes.
-pub fn focused_summary(pid: i32, window_bounds: Option<Rect>) -> Option<crate::act::FocusedElement> {
+pub fn focused_summary(
+    pid: i32,
+    window_bounds: Option<Rect>,
+) -> Option<crate::act::FocusedElement> {
     let root = walk(pid, 256, 16, window_bounds);
     find_focused(&root).map(|(role, name, editable)| crate::act::FocusedElement {
         role,
@@ -296,6 +304,10 @@ fn search<T>(
     let role = node.role.clone().unwrap_or_default();
     let name = node.title.clone().or(node.description.clone());
     if crate::act::same_element(needle, &role, name.as_deref(), node.bounds) {
+        if node.secure {
+            *out = Some(Err(MatchError::Secure));
+            return true;
+        }
         *out = Some(f(elem, &node));
         return true;
     }
@@ -369,7 +381,6 @@ fn set_bool(elem: &AXUIElement, attr: &'static str, value: bool) -> Result<(), S
         Err(format!("{attr} failed (AX error {})", err.0))
     }
 }
-
 
 // --- attribute reads ---
 

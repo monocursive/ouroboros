@@ -765,6 +765,8 @@ defmodule Ouroboros.Gateway.Methods do
        [
          {"sha256", :required, :string,
           "the content hash of a staged screenshot from a tool_result artifact; served as base64 from this node only"},
+         {"session_id", :optional, :string,
+          "native provider session id whose desktop/ dir to search; omitted, only the live helper pool's session dirs are searched"},
          @authority_node
        ]},
     "code_intel.diagnostics" =>
@@ -1405,14 +1407,15 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   def invoke("computer_use.artifact", params) do
-    with :ok <- only_keys(params, ["sha256", "node"]),
+    with :ok <- only_keys(params, ["sha256", "session_id", "node"]),
          {:ok, sha} <- fetch_string(params, "sha256"),
+         {:ok, session_id} <- fetch_optional_string(params, "session_id"),
          {:ok, target} <- permissions_node(params) do
       safe(fn ->
         if target == node() do
-          reply(Desktop.artifact(sha))
+          reply(Desktop.artifact(sha, session_id))
         else
-          reply(:erpc.call(target, Desktop, :artifact, [sha], @fleet_query_timeout))
+          reply(:erpc.call(target, Desktop, :artifact, [sha, session_id], @fleet_query_timeout))
         end
       end)
     else

@@ -2502,7 +2502,7 @@ async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
             let connected = attach_with(address, token, false, hook).await?;
 
             let mut out = std::io::stdout().lock();
-            ouro::desktop_cli::doctor(&connected.client, args.json, &mut out).await
+            ouro::desktop_cli::doctor(&connected.client, args.json, args.probe, &mut out).await
         }
     }
 }

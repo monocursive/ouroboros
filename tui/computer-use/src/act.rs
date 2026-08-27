@@ -13,8 +13,8 @@
 //!   never followed by a coordinate click.
 //! * Re-find the element by role+name+similar live bounds. Stale snapshot bounds are not
 //!   clicked.
-//! * `require_focus` (default for `type` and `key`) focuses the window and refuses if the
-//!   focused app is not the target.
+//! * `require_focus` (default true for every action) focuses the window and refuses if the
+//!   focused app is not the target. A `focus` action always raises, even if the flag is off.
 //! * A cancel flag is checked between events so a drag or chord can release what it holds.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,11 +97,15 @@ pub struct ElementSnapshot {
 }
 
 /// Capture origin + coordinate size so a model `x,y` maps back to screen points.
+///
+/// `scale` is the capture's points→pixels factor (Retina `pointPixelScale`). Coordinate-space
+/// pixels divide by it to recover global points; omitting it (or `0`) is treated as `1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoordinateSpace {
     pub origin: Point,
     pub width: f64,
     pub height: f64,
+    pub scale: f64,
 }
 
 impl ActRequest {
@@ -120,7 +124,7 @@ impl ActRequest {
         let require_focus = params
             .get("require_focus")
             .and_then(Value::as_bool)
-            .unwrap_or(matches!(action, Action::Type | Action::Key));
+            .unwrap_or(true);
 
         let pages = params
             .get("pages")
@@ -204,10 +208,14 @@ fn space_from(value: &Value) -> Option<CoordinateSpace> {
     if width <= 0.0 || height <= 0.0 {
         return None;
     }
+    let scale = number_field(value, "scale")
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
     Some(CoordinateSpace {
         origin,
         width,
         height,
+        scale,
     })
 }
 
@@ -235,12 +243,10 @@ fn rect_from(value: &Value) -> Option<Rect> {
 }
 
 fn number_field(value: &Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(Value::as_f64).or_else(|| {
-        value
-            .get(key)
-            .and_then(Value::as_i64)
-            .map(|n| n as f64)
-    })
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .or_else(|| value.get(key).and_then(Value::as_i64).map(|n| n as f64))
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -252,22 +258,48 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Maps a coordinate-space point onto global screen points using the capture origin and
-/// the coordinate rect (whose size is `coordinate_width × coordinate_height` in the same
-/// units the tree used).
+/// Maps a coordinate-space point onto global screen points: translate by the capture
+/// origin after dividing by the points→pixels scale (the inverse of the tree transform).
 pub fn screen_point(point: Point, space: CoordinateSpace) -> Point {
-    let src = Rect::new(0.0, 0.0, space.width, space.height);
-    let dst = Rect::new(space.origin.x, space.origin.y, space.width, space.height);
-    // When width/height of src and dst match, this is a pure translate by origin.
-    crate::geometry::map_point(point, src, dst).unwrap_or(Point {
-        x: space.origin.x + point.x,
-        y: space.origin.y + point.y,
-    })
+    let scale = if space.scale > 0.0 { space.scale } else { 1.0 };
+    Point {
+        x: space.origin.x + point.x / scale,
+        y: space.origin.y + point.y / scale,
+    }
+}
+
+/// Snapshot bounds are in capture/pixel space; live AX bounds are global points. Convert
+/// the snapshot into global space before [`same_element`] so rematch does not mix them.
+pub fn element_in_global(
+    element: &ElementSnapshot,
+    space: Option<CoordinateSpace>,
+) -> ElementSnapshot {
+    let mut element = element.clone();
+    if let (Some(bounds), Some(space)) = (element.bounds, space) {
+        let origin = screen_point(Point::new(bounds.x, bounds.y), space);
+        let scale = if space.scale > 0.0 { space.scale } else { 1.0 };
+        element.bounds = Some(Rect::new(
+            origin.x,
+            origin.y,
+            bounds.w / scale,
+            bounds.h / scale,
+        ));
+    }
+    element
 }
 
 /// Whether a live node is the snapshot Elixir sent. Role is compared with the `AX` prefix
-/// stripped; names are exact; bounds match when centres are close (or either side has none).
-pub fn same_element(snapshot: &ElementSnapshot, live_role: &str, live_name: Option<&str>, live_bounds: Option<Rect>) -> bool {
+/// stripped; names are exact; bounds match when centres are close. A snapshot that named
+/// bounds requires live bounds; a role-only snapshot (no name, no bounds) never matches.
+pub fn same_element(
+    snapshot: &ElementSnapshot,
+    live_role: &str,
+    live_name: Option<&str>,
+    live_bounds: Option<Rect>,
+) -> bool {
+    if snapshot.name.is_none() && snapshot.bounds.is_none() {
+        return false;
+    }
     if let Some(want) = snapshot.role.as_deref() {
         if normalize_role(want) != normalize_role(live_role) {
             return false;
@@ -280,7 +312,8 @@ pub fn same_element(snapshot: &ElementSnapshot, live_role: &str, live_name: Opti
     }
     match (snapshot.bounds, live_bounds) {
         (Some(a), Some(b)) => centres_close(a, b),
-        _ => true,
+        (Some(_), None) => false,
+        (None, _) => snapshot.name.is_some(),
     }
 }
 
@@ -375,7 +408,6 @@ pub fn is_cancelled(flag: &AtomicBool) -> bool {
     flag.load(Ordering::SeqCst)
 }
 
-
 /// Self / ouro surfaces the helper must never drive, even if Elixir failed to deny them.
 pub fn is_self_target(app_id: &str, pid: Option<i32>) -> bool {
     if let Some(pid) = pid {
@@ -452,14 +484,21 @@ mod tests {
     }
 
     #[test]
-    fn type_and_key_default_require_focus() {
+    fn every_action_defaults_require_focus() {
         let typed = ActRequest::from_params(&json!({"action": "type", "text": "hi"})).unwrap();
         assert!(typed.require_focus);
         let key = ActRequest::from_params(&json!({"action": "key", "key": "Enter"})).unwrap();
         assert!(key.require_focus);
         let click = ActRequest::from_params(&json!({"action": "click", "point": {"x": 1, "y": 2}}))
             .unwrap();
-        assert!(!click.require_focus);
+        assert!(click.require_focus);
+        let off = ActRequest::from_params(&json!({
+            "action": "click",
+            "point": {"x": 1, "y": 2},
+            "require_focus": false
+        }))
+        .unwrap();
+        assert!(!off.require_focus);
     }
 
     #[test]
@@ -489,6 +528,50 @@ mod tests {
             Some("2"),
             Some(Rect::new(400.0, 80.0, 32.0, 32.0))
         ));
+        assert!(
+            !same_element(&snap, "AXButton", Some("2"), None),
+            "a snapshot with bounds must rematch live bounds"
+        );
+        let role_only = ElementSnapshot {
+            index: 2,
+            role: Some("button".into()),
+            name: None,
+            bounds: None,
+            actions: vec![],
+        };
+        assert!(
+            !same_element(
+                &role_only,
+                "AXButton",
+                Some("2"),
+                Some(Rect::new(40.0, 80.0, 32.0, 32.0))
+            ),
+            "role-only snapshots never match"
+        );
+    }
+
+    #[test]
+    fn rematch_compares_snapshot_and_live_in_one_global_space() {
+        let snap = ElementSnapshot {
+            index: 1,
+            role: Some("button".into()),
+            name: Some("2".into()),
+            bounds: Some(Rect::new(80.0, 80.0, 64.0, 64.0)),
+            actions: vec!["AXPress".into()],
+        };
+        let space = CoordinateSpace {
+            origin: Point::new(100.0, 120.0),
+            width: 480.0,
+            height: 640.0,
+            scale: 2.0,
+        };
+        let live = Rect::new(140.0, 160.0, 32.0, 32.0);
+        assert!(
+            !same_element(&snap, "AXButton", Some("2"), Some(live)),
+            "coordinate-space bounds must not be compared to global AX points"
+        );
+        let global = element_in_global(&snap, Some(space));
+        assert!(same_element(&global, "AXButton", Some("2"), Some(live)));
     }
 
     #[test]
@@ -521,10 +604,24 @@ mod tests {
             origin: Point::new(100.0, 200.0),
             width: 240.0,
             height: 320.0,
+            scale: 1.0,
         };
         let mapped = screen_point(Point::new(10.0, 20.0), space);
         assert_eq!(mapped.x, 110.0);
         assert_eq!(mapped.y, 220.0);
+    }
+
+    #[test]
+    fn screen_point_divides_by_retina_scale() {
+        let space = CoordinateSpace {
+            origin: Point::new(100.0, 120.0),
+            width: 480.0,
+            height: 640.0,
+            scale: 2.0,
+        };
+        let mapped = screen_point(Point::new(80.0, 80.0), space);
+        assert_eq!(mapped.x, 140.0);
+        assert_eq!(mapped.y, 160.0);
     }
 
     #[test]

@@ -210,7 +210,12 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert %{tool: "desktop_state", mode: :read, paths: [], context: state_context} =
                Tools.classify("desktop_state", %{"app" => "Safari"}, scope)
 
-      assert state_context == %{app: "com.apple.Safari", desktop_action: "state"}
+      assert state_context == %{
+               app: "com.apple.Safari",
+               desktop_action: "state",
+               window_id: nil,
+               title: nil
+             }
 
       # desktop_act operates: :execute, the claimed action carried through.
       assert %{tool: "desktop_act", mode: :execute, context: act_context} =
@@ -220,11 +225,30 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                  scope
                )
 
-      assert act_context == %{app: "com.apple.Calculator", desktop_action: "click"}
+      assert act_context == %{
+               app: "com.apple.Calculator",
+               desktop_action: "click",
+               window_id: nil,
+               title: nil
+             }
 
-      # No claimed app or action is nil, not an invented value (Phase 0: the claim only).
-      assert %{context: %{app: nil, desktop_action: nil}} =
+      # No claimed app or action is nil, not an invented value.
+      assert %{context: %{app: nil, desktop_action: nil, window_id: nil, title: nil}} =
                Tools.classify("desktop_act", %{}, scope)
+
+      assert %{
+               context: %{
+                 app: nil,
+                 desktop_action: "state",
+                 window_id: "w_other",
+                 title: "Mail"
+               }
+             } =
+               Tools.classify(
+                 "desktop_state",
+                 %{"window_id" => "w_other", "title" => "Mail"},
+                 scope
+               )
     end
   end
 

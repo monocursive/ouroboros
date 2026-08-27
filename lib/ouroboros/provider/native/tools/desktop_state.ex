@@ -31,7 +31,8 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopState do
     schema: [
       app: [
         type: :string,
-        doc: "Which app to observe: a bundle id, app name, or app id. Defaults to the frontmost."
+        doc:
+          "Which app to observe: a bundle id, app name, or app id. Required unless window_id or title is set. Untargeted frontmost capture is refused."
       ],
       window_id: [
         type: :string,

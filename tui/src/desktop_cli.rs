@@ -11,15 +11,19 @@ use std::io::Write;
 const STATUS_METHOD: &str = "computer_use.status";
 const PROBE_METHOD: &str = "computer_use.probe";
 
-/// Query readiness. Prefer `probe` (starts the helper so TCC is visible); fall back to
-/// start-nothing `status` on an older or read-only listener.
-pub async fn doctor<O: Write>(client: &Client, json: bool, out: &mut O) -> Result<()> {
-    let answer = match client.call(PROBE_METHOD, serde_json::json!({})).await {
-        Ok(value) => value,
-        Err(_) => client
+/// Query readiness. `computer_use.status` by default (starts nothing). `--probe` asks
+/// `computer_use.probe` so TCC is visible; a probe error is reported, not swallowed.
+pub async fn doctor<O: Write>(client: &Client, json: bool, probe: bool, out: &mut O) -> Result<()> {
+    let answer = if probe {
+        client
+            .call(PROBE_METHOD, serde_json::json!({}))
+            .await
+            .map_err(|error| anyhow!("the runtime refused {PROBE_METHOD}: {error}"))?
+    } else {
+        client
             .call(STATUS_METHOD, serde_json::json!({}))
             .await
-            .map_err(|error| anyhow!("the runtime refused {STATUS_METHOD}: {error}"))?,
+            .map_err(|error| anyhow!("the runtime refused {STATUS_METHOD}: {error}"))?
     };
 
     let text = if json {

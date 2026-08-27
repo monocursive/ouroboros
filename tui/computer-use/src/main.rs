@@ -32,7 +32,6 @@ mod windows;
 #[cfg(target_os = "macos")]
 mod macos;
 
-
 use std::process::ExitCode;
 
 #[tokio::main(flavor = "current_thread")]

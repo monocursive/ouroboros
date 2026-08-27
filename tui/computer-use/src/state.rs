@@ -163,14 +163,40 @@ fn clamp_usize(value: Option<&Value>, default: usize, lo: usize, hi: usize) -> u
     }
 }
 
+/// The bundle ids this helper never observes or drives, even if `--deny-app` omitted them.
+/// Mirrors Elixir's baked floor; unioned with the argv list so a short launch cannot
+/// remove ouro or a terminal.
+const BAKED_DENY: &[&str] = &[
+    "com.ouroboros.desktop",
+    "com.ouroboros.tui",
+    "ouro-computer-use",
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "com.mitchellh.ghostty",
+    "net.kovidgoyal.kitty",
+    "com.apple.systempreferences",
+    "com.apple.loginwindow",
+    "dev.warp.Warp-Stable",
+    "org.alacritty",
+    "com.github.wez.wezterm",
+    "co.zeit.hyper",
+    "org.tabby",
+    "com.1password.1password",
+    "com.apple.keychainaccess",
+    "com.apple.SecurityAgent",
+];
+
 /// The denied-app belt (doc §7.3): whether a resolved bundle id is on the helper's
-/// `--deny-app` list. Comparison is case-insensitive — a belt errs toward refusing, and TCC
-/// treats bundle ids case-insensitively — so a case-shifted id can never slip a denied app
-/// past the helper even if Elixir's own denylist were incomplete.
+/// `--deny-app` list **or** the baked floor. Comparison is case-insensitive — a belt errs
+/// toward refusing, and TCC treats bundle ids case-insensitively — so a case-shifted id
+/// can never slip a denied app past the helper even if Elixir's own denylist were incomplete.
 pub fn is_denied(app_id: &str, deny_list: &[String]) -> bool {
-    deny_list
+    BAKED_DENY
         .iter()
         .any(|denied| denied.eq_ignore_ascii_case(app_id))
+        || deny_list
+            .iter()
+            .any(|denied| denied.eq_ignore_ascii_case(app_id))
 }
 
 /// The resolved app identity for the `state` response.
@@ -203,6 +229,10 @@ pub struct ImageMeta {
     pub coordinate_height: u32,
     pub scale: f64,
     pub sha256: String,
+    /// Capture region's top-left in global points (`contentRect` origin), so act can invert
+    /// the tree transform without guessing the window's outer bounds.
+    pub origin_x: f64,
+    pub origin_y: f64,
 }
 
 /// The three readiness signals `state` reports (doc §7.3 `readiness`).
@@ -268,6 +298,8 @@ fn image_json(image: &ImageMeta) -> Value {
         "coordinate_height": image.coordinate_height,
         "scale": image.scale,
         "sha256": image.sha256,
+        "origin_x": image.origin_x,
+        "origin_y": image.origin_y,
     })
 }
 
@@ -382,6 +414,8 @@ mod imp {
                 coordinate_height: grabbed.height,
                 scale,
                 sha256: sha,
+                origin_x: grabbed.content_origin.x,
+                origin_y: grabbed.content_origin.y,
             };
             let transform = CoordTransform {
                 origin: grabbed.content_origin,
@@ -558,8 +592,10 @@ mod tests {
     }
 
     #[test]
-    fn deny_empty_list_denies_nothing() {
-        assert!(!is_denied("com.apple.Terminal", &[]));
+    fn baked_floor_denies_terminals_without_argv() {
+        assert!(is_denied("com.apple.Terminal", &[]));
+        assert!(is_denied("COM.APPLE.TERMINAL", &[]));
+        assert!(!is_denied("com.apple.Safari", &[]));
     }
 
     #[test]
@@ -585,6 +621,8 @@ mod tests {
             coordinate_height: 1280,
             scale: 2.0,
             sha256: "deadbeef".into(),
+            origin_x: 100.0,
+            origin_y: 120.0,
         };
         let nodes = vec![json!({ "index": 0, "role": "window" })];
         let response = assemble(
@@ -611,6 +649,8 @@ mod tests {
         assert_eq!(response["image"]["coordinate_width"], 960);
         assert_eq!(response["image"]["scale"], 2.0);
         assert_eq!(response["image"]["sha256"], "deadbeef");
+        assert_eq!(response["image"]["origin_x"], 100.0);
+        assert_eq!(response["image"]["origin_y"], 120.0);
         assert_eq!(response["readiness"]["ax"], "ok");
         assert_eq!(response["focused_element"]["index"], 1);
         assert_eq!(response["warnings"], json!(["hi"]));
