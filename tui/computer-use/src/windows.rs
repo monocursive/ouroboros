@@ -13,7 +13,7 @@
 //! the underlying number is recycled by the window server after the window closes, so an id
 //! is only meaningful for a window that is currently alive.
 
-use crate::geometry::Rect;
+use crate::geometry::{Point, Rect};
 use serde_json::{json, Value};
 
 /// One window as read from the host, before shaping. Field names mirror what `CGWindowList`
@@ -46,14 +46,17 @@ pub fn parse_id(id: &str) -> Option<u32> {
 /// Serves the `windows` method. Real on macOS (a `CGWindowList` enumeration shaped by
 /// [`build_response`]); an honest unsupported-platform error elsewhere.
 #[cfg(target_os = "macos")]
-pub fn handle() -> Result<Value, (i64, String)> {
+pub fn handle(cancel: &std::sync::atomic::AtomicBool) -> Result<Value, (i64, String)> {
+    if crate::act::is_cancelled(cancel) {
+        return Err((crate::server::OBSERVE_ERROR, "windows: cancelled".into()));
+    }
     let raw = crate::macos::windows::enumerate()
         .map_err(|e| (crate::server::OBSERVE_ERROR, format!("windows: {e}")))?;
     Ok(build_response(&raw))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn handle() -> Result<Value, (i64, String)> {
+pub fn handle(_cancel: &std::sync::atomic::AtomicBool) -> Result<Value, (i64, String)> {
     Err((
         crate::server::UNSUPPORTED_PLATFORM,
         "windows: Computer Use is only supported on macOS".to_string(),
@@ -79,7 +82,20 @@ pub fn build_response(raw: &[RawWindow]) -> Value {
 /// is the first on-screen one at layer 0 (menus, the Dock, overlays sit at nonzero layers).
 /// This is a derivation from real z-order, not a fabricated flag; Elixir/AX can refine it.
 fn focused_index(raw: &[RawWindow]) -> Option<usize> {
-    raw.iter().position(|w| w.on_screen && w.layer == 0)
+    frontmost_normal(raw).and_then(|front| raw.iter().position(|window| window == front))
+}
+
+/// The normal window that currently owns focus, from a front-to-back CGWindowList snapshot.
+pub fn frontmost_normal(raw: &[RawWindow]) -> Option<&RawWindow> {
+    raw.iter().find(|w| w.on_screen && w.layer == 0)
+}
+
+/// The topmost on-screen window whose bounds own `point`. Unlike focus, this intentionally
+/// includes nonzero layers: a menu, sheet, overlay, or permission surface above the target
+/// would receive a CGEvent and therefore must make injection fail closed.
+pub fn frontmost_at(raw: &[RawWindow], point: Point) -> Option<&RawWindow> {
+    raw.iter()
+        .find(|window| window.on_screen && window.bounds.contains(point))
 }
 
 fn window_json(w: &RawWindow, focused: bool) -> Value {
@@ -148,6 +164,28 @@ mod tests {
         assert_eq!(windows[0]["focused"], false, "overlay is not focused");
         assert_eq!(windows[1]["focused"], true, "frontmost normal window");
         assert_eq!(windows[2]["focused"], false);
+    }
+
+    #[test]
+    fn point_hit_testing_keeps_front_to_back_order_and_includes_overlays() {
+        let mut overlay = win(1, 25, true);
+        overlay.bounds = Rect::new(20.0, 20.0, 40.0, 40.0);
+        let target = win(2, 0, true);
+        let raw = vec![overlay, target];
+
+        assert_eq!(
+            frontmost_at(&raw, Point::new(30.0, 30.0))
+                .unwrap()
+                .window_id,
+            1
+        );
+        assert_eq!(
+            frontmost_at(&raw, Point::new(80.0, 80.0))
+                .unwrap()
+                .window_id,
+            2
+        );
+        assert!(frontmost_at(&raw, Point::new(250.0, 80.0)).is_none());
     }
 
     #[test]

@@ -57,6 +57,20 @@ pub struct KeyChord {
     pub key: Key,
 }
 
+impl KeyChord {
+    /// Chords that leave the allowed app or quit it: Cmd+Tab, Cmd+Space, Cmd+Q (and
+    /// Ctrl+Cmd+Q). Meta is enough; extra modifiers do not make them safe.
+    pub fn forbidden(&self) -> bool {
+        if !self.modifiers.contains(&Modifier::Meta) {
+            return false;
+        }
+        matches!(
+            self.key,
+            Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Space) | Key::Char('q')
+        )
+    }
+}
+
 /// Why a string is not a chord. Each is a distinct, reportable reason rather than one opaque
 /// "invalid key", because the tool surfaces it to a model that has to correct itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,6 +316,16 @@ mod tests {
         assert_eq!(parse("ctrl+l"), expected);
         assert_eq!(parse("CONTROL-L"), expected);
         assert_eq!(parse("ctrl l"), expected);
+    }
+
+    #[test]
+    fn app_switcher_spotlight_and_quit_are_forbidden() {
+        assert!(parse("Cmd+Tab").unwrap().forbidden());
+        assert!(parse("Cmd+Space").unwrap().forbidden());
+        assert!(parse("Cmd+Q").unwrap().forbidden());
+        assert!(parse("Ctrl+Cmd+Q").unwrap().forbidden());
+        assert!(!parse("Cmd+L").unwrap().forbidden());
+        assert!(!parse("Tab").unwrap().forbidden());
     }
 
     #[test]

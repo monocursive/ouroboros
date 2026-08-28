@@ -1524,8 +1524,8 @@ impl App {
 
     /// What a live stream frame is worth interrupting someone for, and which session it
     /// was about. The final `bool` says whether an approval frame is a *question* — a
-    /// plan exit or `ask_user`'s `kind: "question"` — which auto-approve leaves for a
-    /// person and must therefore still ring.
+    /// plan exit, `ask_user`'s `kind: "question"`, or Computer Use — which auto-approve
+    /// leaves for a person and must therefore still ring.
     ///
     /// Live frames only — this is read from [`Msg::Notification`], never from a replay
     /// answer, so opening a session with history rings nothing.
@@ -1551,13 +1551,19 @@ impl App {
         };
 
         let question = matches!(EventType::parse(kind), EventType::ApprovalRequested)
-            && matches!(
+            && (matches!(
                 notification
                     .params
                     .pointer("/event/payload/kind")
                     .and_then(Value::as_str),
                 Some("plan_exit") | Some("question")
-            );
+            ) || matches!(
+                notification
+                    .params
+                    .pointer("/event/payload/tool_call/name")
+                    .and_then(Value::as_str),
+                Some("desktop_state") | Some("desktop_act")
+            ));
 
         Some((plane, id.to_string(), signal, question))
     }

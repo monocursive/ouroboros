@@ -79,8 +79,9 @@ defmodule Ouroboros.Agent.EffectLedger do
     # I1. One tool call the native agent was admitted to make, checkpointed before the
     # tool runs. `subject` is what the call is *about* — the paths it names, a digest of
     # the command line, the hosts it would reach, the MCP server and tool behind an
-    # `mcp__*` name — and never what any of them contain. `sanitize_subject/1` below is
-    # what makes that true here rather than at the call site's discretion.
+    # `mcp__*` name, the Computer Use app and window — and never what any of them contain.
+    # `sanitize_subject/1` below is what makes that true here rather than at the call
+    # site's discretion.
     tool_call: [
       :session_id,
       :turn_id,
@@ -629,6 +630,7 @@ defmodule Ouroboros.Agent.EffectLedger do
     |> put_if(:mcp_tool, subject_name(Map.get(subject, :mcp_tool)))
     |> put_if(:app, subject_name(Map.get(subject, :app)))
     |> put_if(:desktop_action, subject_name(Map.get(subject, :desktop_action)))
+    |> put_if(:window_id, subject_name(Map.get(subject, :window_id)))
   end
 
   defp sanitize_subject(_subject), do: %{}

@@ -50,6 +50,79 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
       assert {:ok, %{"app" => _}} = Task.await(first, 5_000)
       assert {:ok, %{"app" => _}} = Task.await(second, 5_000)
     end
+
+    test "a queued request expires on its original deadline and is never sent later" do
+      log = request_log()
+      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      first = Task.async(fn -> Pool.state(pid, %{"tag" => "first"}, 3_000) end)
+      wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "state"))
+      stale = Task.async(fn -> Pool.state(pid, %{"tag" => "stale"}, 100) end)
+
+      assert {:error, :timeout} = Task.await(stale, 1_000)
+      assert {:ok, %{"app" => _}} = Task.await(first, 5_000)
+      Process.sleep(100)
+
+      requests = File.read!(log)
+      assert requests =~ "first"
+      refute requests =~ "stale"
+    end
+
+    test "a queued request is removed when its caller dies" do
+      log = request_log()
+      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      first = Task.async(fn -> Pool.state(pid, %{"tag" => "first"}, 3_000) end)
+      wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "state"))
+
+      caller =
+        spawn(fn ->
+          _ = Pool.state(pid, %{"tag" => "abandoned"}, 3_000)
+        end)
+
+      wait_internal(pid, &(:queue.len(&1.queue) == 1))
+      Process.exit(caller, :kill)
+      wait_internal(pid, &(:queue.len(&1.queue) == 0))
+
+      assert {:ok, %{"app" => _}} = Task.await(first, 5_000)
+      Process.sleep(100)
+      refute File.read!(log) =~ "abandoned"
+    end
+
+    test "cancel of a queued caller does not abort a different caller's inflight act" do
+      log = request_log()
+      pid = start_pool(recording_act_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      first = Task.async(fn -> Pool.request(pid, "act", %{"tag" => "first"}, 3_000) end)
+      wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "act"))
+
+      second = Task.async(fn -> Pool.request(pid, "act", %{"tag" => "second"}, 3_000) end)
+      wait_internal(pid, &(:queue.len(&1.queue) == 1))
+
+      Pool.cancel(pid, second.pid)
+      Process.sleep(80)
+      refute File.read!(log) =~ "cancel"
+
+      assert {:ok, %{"ok" => true}} = Task.await(first, 5_000)
+      assert {:ok, %{"ok" => true}} = Task.await(second, 5_000)
+    end
+
+    test "an in-flight timeout stays occupied until the helper acknowledges, then drains" do
+      _log = request_log()
+      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
+      wait_status(pid, &(&1.phase == :ready), 3_000)
+
+      assert {:error, :timeout} = Pool.state(pid, %{"tag" => "timed-out"}, 100)
+
+      queued = Task.async(fn -> Pool.state(pid, %{"tag" => "after-timeout"}, 2_000) end)
+      wait_internal(pid, &(:queue.len(&1.queue) == 1))
+
+      assert {:ok, %{"app" => _}} = Task.await(queued, 3_000)
+      assert %{phase: :ready} = Pool.status(pid)
+    end
   end
 
   describe "broken is a state, not a crash (like MCP)" do
@@ -135,6 +208,21 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
     do_wait(pid, pred, deadline)
   end
 
+  defp wait_internal(pid, pred, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_internal(pid, pred, deadline)
+  end
+
+  defp do_wait_internal(pid, pred, deadline) do
+    state = :sys.get_state(pid)
+
+    cond do
+      pred.(state) -> state
+      System.monotonic_time(:millisecond) >= deadline -> flunk("pool state did not converge")
+      true -> Process.sleep(10) && do_wait_internal(pid, pred, deadline)
+    end
+  end
+
   defp do_wait(pid, pred, deadline) do
     status = Pool.status(pid)
 
@@ -150,6 +238,75 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
   # portable way to avoid a shell's stdout buffering stalling the handshake.
   defp responding_helper, do: write_helper(awk_body(""))
   defp slow_helper, do: write_helper(awk_body(~s|system("sleep 0.3"); |))
+
+  defp recording_act_helper do
+    write_helper("""
+    #!/bin/sh
+    exec awk '
+    {
+      line = $0
+      print line >> ENVIRON["OURO_CU_REQUEST_LOG"]
+      close(ENVIRON["OURO_CU_REQUEST_LOG"])
+      if ($0 ~ /"method":"cancel"/) {
+        fflush()
+        next
+      }
+      id = $0
+      sub(/.*"id":/, "", id)
+      sub(/[^0-9].*/, "", id)
+      if ($0 ~ /"method":"doctor"/) {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"readiness\\":{\\"screenshot\\":\\"ok\\",\\"ax\\":\\"ok\\",\\"input\\":\\"ok\\"}}}\\n", id)
+      } else if ($0 ~ /"method":"act"/) {
+        system("sleep 0.4")
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"ok\\":true}}\\n", id)
+      } else {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"error\\":{\\"code\\":-32601,\\"message\\":\\"nope\\"}}\\n", id)
+      }
+      fflush()
+    }
+    '
+    """)
+  end
+
+  defp recording_slow_helper do
+    write_helper("""
+    #!/bin/sh
+    exec awk '
+    {
+      line = $0
+      id = $0
+      sub(/.*"id":/, "", id)
+      sub(/[^0-9].*/, "", id)
+      if ($0 ~ /"method":"doctor"/) {
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"readiness\\":{\\"screenshot\\":\\"ok\\",\\"ax\\":\\"ok\\",\\"input\\":\\"ok\\"}}}\\n", id)
+      } else if ($0 ~ /"method":"state"/) {
+        print line >> ENVIRON["OURO_CU_REQUEST_LOG"]
+        close(ENVIRON["OURO_CU_REQUEST_LOG"])
+        system("sleep 0.6")
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"app\\":{\\"id\\":\\"com.apple.calculator\\"}}}\\n", id)
+      }
+      fflush()
+    }
+    '
+    """)
+  end
+
+  defp request_log do
+    path = Path.join(System.tmp_dir!(), "ouro-cu-requests-#{System.unique_integer([:positive])}")
+    File.write!(path, "")
+    previous = System.get_env("OURO_CU_REQUEST_LOG")
+    System.put_env("OURO_CU_REQUEST_LOG", path)
+
+    on_exit(fn ->
+      File.rm(path)
+
+      if previous,
+        do: System.put_env("OURO_CU_REQUEST_LOG", previous),
+        else: System.delete_env("OURO_CU_REQUEST_LOG")
+    end)
+
+    path
+  end
 
   defp awk_body(prelude) do
     """

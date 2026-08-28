@@ -229,14 +229,16 @@ defmodule Ouroboros.Application do
     # D4's MCP subtree and Computer Use's helper pool are last for the same reasons:
     # somebody else's program, or a host-privileged helper, on the end of a pipe, spawned
     # lazily, owning nothing any plane rebuilds from. Both run only on `:core`. Computer
-    # Use sits after MCP because it is newer and nothing in either depends on the other.
+    # Use precedes MCP because its pool holds the live per-session last-state map: an MCP
+    # subtree crash must not restart it and discard those snapshots. A Desktop supervisor
+    # crash may reconnect disposable MCP ports without losing durable session state.
     children ++
       [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
       gateway_children() ++
       [
         Ouroboros.CodeIntel.Supervisor,
-        Ouroboros.Provider.Native.Mcp.Supervisor,
-        Ouroboros.Provider.Native.Desktop.Supervisor
+        Ouroboros.Provider.Native.Desktop.Supervisor,
+        Ouroboros.Provider.Native.Mcp.Supervisor
       ]
   end
 

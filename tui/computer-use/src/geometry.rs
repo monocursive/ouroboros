@@ -50,7 +50,19 @@ impl Rect {
         Self { x, y, w, h }
     }
 
+    /// Whether a screen point is inside this non-degenerate rectangle. The far edge is
+    /// exclusive, matching window-server pixel ownership when two windows meet at an edge.
+    pub fn contains(&self, point: Point) -> bool {
+        self.w > 0.0
+            && self.h > 0.0
+            && point.x >= self.x
+            && point.y >= self.y
+            && point.x < self.x + self.w
+            && point.y < self.y + self.h
+    }
+
     /// Clamps a point into this rect's closed interval `[x, x+w] × [y, y+h]`.
+    #[cfg(test)]
     fn clamp(&self, point: Point) -> Point {
         Point {
             x: point.x.clamp(self.x, self.x + self.w),
@@ -70,6 +82,7 @@ pub enum ScaleError {
 
 /// Why a point could not be mapped.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(test)]
 pub enum MapError {
     /// The source rect had zero (or negative) width or height, so a position within it is
     /// undefined.
@@ -111,6 +124,7 @@ pub fn image_scale(payload: (f64, f64), coordinate: (f64, f64)) -> Result<f64, S
 /// on-screen bounds, or the reverse. Axes are scaled independently because both rects are
 /// real spaces whose aspect ratios should already match; where they *must* match, use
 /// [`map_point_uniform`], which refuses instead of silently distorting.
+#[cfg(test)]
 pub fn map_point(point: Point, src: Rect, dst: Rect) -> Result<Point, MapError> {
     if src.w <= 0.0 || src.h <= 0.0 {
         return Err(MapError::DegenerateSource);
@@ -130,6 +144,7 @@ pub fn map_point(point: Point, src: Rect, dst: Rect) -> Result<Point, MapError> 
 /// Like [`map_point`], but refuses when the source→destination axis scales disagree beyond
 /// [`SCALE_EPSILON`]. Use this for the payload↔coordinate mapping, where a single uniform
 /// `scale` is the contract and an anamorphic map would mean the capture geometry is wrong.
+#[cfg(test)]
 pub fn map_point_uniform(point: Point, src: Rect, dst: Rect) -> Result<Point, MapError> {
     if src.w <= 0.0 || src.h <= 0.0 {
         return Err(MapError::DegenerateSource);

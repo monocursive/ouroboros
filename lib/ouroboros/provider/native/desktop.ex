@@ -57,6 +57,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   # never narrow it. Mirrors `config/config.exs`'s `denied_app_ids` default; the two are
   # kept in step by `test/provider/native/desktop_test.exs`.
   @denied_app_ids [
+    "dev.ouroboros.desktop",
     "com.ouroboros.desktop",
     "com.ouroboros.tui",
     "com.apple.Terminal",
@@ -78,16 +79,21 @@ defmodule Ouroboros.Provider.Native.Desktop do
   # A small alias table so a model may pass `app: "Safari"` and the classifier still names
   # a bundle id the denylist and rules reason about (§16.4, §6.3 step 2). Deliberately tiny
   # and obvious; an unknown name passes through to the helper's own resolver, unchanged.
+  # Keys are compared case-insensitively via `app_alias/1`. Values stay the canonical
+  # bundle id the denylist and `ComputerUse(app:…)` rules reason about.
   @app_aliases %{
-    "Safari" => "com.apple.Safari",
-    "Calculator" => "com.apple.calculator",
-    "Finder" => "com.apple.finder",
-    "Notes" => "com.apple.Notes",
-    "Mail" => "com.apple.mail",
-    "Preview" => "com.apple.Preview",
-    "System Settings" => "com.apple.systempreferences",
-    "System Preferences" => "com.apple.systempreferences",
-    "Terminal" => "com.apple.Terminal"
+    "safari" => "com.apple.Safari",
+    "calculator" => "com.apple.calculator",
+    "finder" => "com.apple.finder",
+    "notes" => "com.apple.Notes",
+    "mail" => "com.apple.mail",
+    "preview" => "com.apple.Preview",
+    "system settings" => "com.apple.systempreferences",
+    "system preferences" => "com.apple.systempreferences",
+    "terminal" => "com.apple.Terminal",
+    "chrome" => "com.google.Chrome",
+    "google chrome" => "com.google.Chrome",
+    "firefox" => "org.mozilla.firefox"
   }
 
   @defaults [
@@ -265,8 +271,24 @@ defmodule Ouroboros.Provider.Native.Desktop do
   helper's own resolver to handle. Non-binaries pass through untouched.
   """
   @spec app_alias(term()) :: term()
-  def app_alias(name) when is_binary(name), do: Map.get(@app_aliases, name, name)
+  def app_alias(name) when is_binary(name) do
+    Map.get(@app_aliases, String.downcase(String.trim(name)), name)
+  end
+
   def app_alias(name), do: name
+
+  @doc """
+  Whether two claimed or resolved app identities name the same app.
+
+  Aliases and case are folded so `Chrome` matches `com.google.Chrome`. Distinct
+  bundle ids (Safari vs Mail) never match.
+  """
+  @spec same_app?(term(), term()) :: boolean()
+  def same_app?(left, right) when is_binary(left) and is_binary(right) do
+    String.downcase(app_alias(left)) == String.downcase(app_alias(right))
+  end
+
+  def same_app?(_left, _right), do: false
 
   @doc "The alias table, for tests and operator surfaces."
   @spec app_aliases() :: %{String.t() => String.t()}
@@ -366,12 +388,15 @@ defmodule Ouroboros.Provider.Native.Desktop do
   end
 
   defp read_artifact({path, media}) do
-    case File.read(path) do
-      {:ok, bytes} ->
-        {:ok, %{bytes: Base.encode64(bytes), media_type: media, size: byte_size(bytes)}}
+    cap = config(:max_image_bytes)
 
-      _unreadable ->
-        {:error, :not_found}
+    with {:ok, %File.Stat{size: size}} <- File.stat(path),
+         true <- size <= cap,
+         {:ok, bytes} <- File.read(path),
+         true <- byte_size(bytes) <= cap do
+      {:ok, %{bytes: Base.encode64(bytes), media_type: media, size: byte_size(bytes)}}
+    else
+      _oversized_or_missing -> {:error, :not_found}
     end
   end
 
@@ -525,11 +550,11 @@ defmodule Ouroboros.Provider.Native.Desktop do
         {:error,
          "desktop_state: #{resolved} is on this node's Computer Use denylist and will not be captured"}
 
-      is_binary(claimed) and claimed != resolved ->
+      is_binary(claimed) and not same_app?(claimed, resolved) ->
         {:error,
          "desktop_state: resolved #{resolved}, not #{claimed}. Call again naming the resolved app."}
 
-      is_binary(evaluated) and evaluated != resolved ->
+      is_binary(evaluated) and not same_app?(evaluated, resolved) ->
         {:error,
          "desktop_state: resolved #{resolved}, not #{evaluated}. Call again naming the resolved app."}
 
@@ -550,18 +575,22 @@ defmodule Ouroboros.Provider.Native.Desktop do
   matches the helper's claim, refuses anything over `max_image_bytes`, writes
   `session_dir/desktop/<sha>.<ext>` once at `0600` (the attachments write-once discipline),
   unlinks the temp, and evicts the oldest files past `max_snapshots_per_session`. Returns
-  `%{path, media_type, sha256, size}` — the exact part shape the loop and the model encoder
-  consume.
+  `%{path, media_type, sha256, size}` plus bounded advisory `width`/`height` when the helper
+  supplied them — the exact part shape the loop and the model encoder consume.
   """
   @spec stage_image(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def stage_image(%{} = image, session_dir) when is_binary(session_dir) do
-    with {:ok, temp} <- temp_path(image),
-         {:ok, bytes} <- read_capped(temp),
-         {:ok, media_type} <- verify(bytes, image),
-         {:ok, staged} <- persist(bytes, media_type, session_dir) do
+    with {:ok, temp} <- temp_path(image) do
+      result =
+        with {:ok, bytes} <- read_capped(temp),
+             {:ok, media_type} <- verify(bytes, image),
+             {:ok, staged} <- persist(bytes, media_type, session_dir) do
+          evict(Path.join(session_dir, "desktop"))
+          {:ok, Map.merge(staged, image_dimensions(image))}
+        end
+
       _ = File.rm(temp)
-      evict(Path.join(session_dir, "desktop"))
-      {:ok, staged}
+      result
     end
   end
 
@@ -621,7 +650,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
       action == "focus" and is_binary(claimed) ->
         {:ok, claimed}
 
-      is_binary(last_app) and is_binary(claimed) and claimed != last_app ->
+      is_binary(last_app) and is_binary(claimed) and not same_app?(claimed, last_app) ->
         {:error,
          "desktop_act: last state is #{last_app}, not #{claimed}. Call desktop_state again."}
 
@@ -679,11 +708,16 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   def sensitive_act?(_params, _session_dir), do: false
 
-  @doc "Asks the helper to abort an in-flight act (§7.5). Never starts the pool."
-  @spec cancel() :: :ok
-  def cancel do
+  @doc """
+  Asks the helper to abort the in-flight act owned by `caller` (§7.5).
+
+  Never starts the pool. A cancel for a queued caller does not abort a different
+  session's inflight act.
+  """
+  @spec cancel(pid()) :: :ok
+  def cancel(caller) when is_pid(caller) do
     case Process.whereis(Pool) do
-      pid when is_pid(pid) -> Pool.cancel(pid)
+      pid when is_pid(pid) -> Pool.cancel(pid, caller)
       nil -> :ok
     end
   end
@@ -797,6 +831,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
         %{output: render_state(raw, staged, image_note), is_error: false, images: images}
 
       {:error, message} ->
+        unlink_helper_temp(raw)
         error_result(message)
     end
   end
@@ -820,7 +855,25 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp stage_from_raw(_raw, _session_dir, false), do: {[], nil, nil}
+  defp stage_from_raw(raw, _session_dir, false) do
+    unlink_helper_temp(raw)
+    {[], nil, nil}
+  end
+
+  defp unlink_helper_temp(raw) when is_map(raw) do
+    case field(raw, "image") do
+      %{} = image ->
+        case temp_path(image) do
+          {:ok, path} -> File.rm(path)
+          _not_ours -> :ok
+        end
+
+      _no_image ->
+        :ok
+    end
+  end
+
+  defp unlink_helper_temp(_raw), do: :ok
 
   defp remember(session_dir, last) do
     last = Map.put(last, :at, System.system_time(:millisecond))
@@ -874,7 +927,8 @@ defmodule Ouroboros.Provider.Native.Desktop do
       snapshot_stale?(snapshot) and action != "focus" ->
         {:error, "desktop_act: last desktop_state is stale; call desktop_state again"}
 
-      action != "focus" and is_binary(last_app) and is_binary(claimed) and claimed != last_app ->
+      action != "focus" and is_binary(last_app) and is_binary(claimed) and
+          not same_app?(claimed, last_app) ->
         {:error,
          "desktop_act: last state is #{last_app}, not #{claimed}. Call desktop_state again."}
 
@@ -922,7 +976,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
        "button" => string(field(params, :button)) || "left",
        "direction" => string(field(params, :direction)),
        "pages" => field(params, :pages) || 1,
-       "require_focus" => field(params, :require_focus) != false,
+       "require_focus" => true,
        "coordinate_space" => coordinate_space(raw)
      }
      |> reject_nils_map()}
@@ -1075,7 +1129,18 @@ defmodule Ouroboros.Provider.Native.Desktop do
 
   defp secure_element?(%{} = element) do
     role = string(field(element, "role")) || ""
-    String.downcase(role) in ["axsecuretextfield", "securetextfield"]
+    subrole = string(field(element, "subrole")) || ""
+
+    states =
+      element
+      |> field("states")
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.downcase/1)
+
+    String.downcase(role) in ["axsecuretextfield", "securetextfield"] or
+      String.downcase(subrole) in ["axsecuretextfield", "securetextfield"] or
+      "secure" in states
   end
 
   defp secure_element?(_element), do: false
@@ -1258,6 +1323,20 @@ defmodule Ouroboros.Provider.Native.Desktop do
       byte_size(bytes) > config(:max_image_bytes) -> {:error, :too_large}
       is_binary(claimed) and claimed != digest -> {:error, :sha_mismatch}
       true -> {:ok, media}
+    end
+  end
+
+  # Dimensions reserve client layout; coordinate authority still comes from the capture
+  # metadata kept in last_state. Accept both only inside the same caps sent to the helper.
+  defp image_dimensions(image) do
+    width = integer(field(image, "width"))
+    height = integer(field(image, "height"))
+
+    if width > 0 and height > 0 and width <= config(:max_image_width) and
+         height <= config(:max_image_height) do
+      %{width: width, height: height}
+    else
+      %{}
     end
   end
 

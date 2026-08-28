@@ -104,8 +104,7 @@ pub fn resolve(target: &Target) -> Result<Resolved, String> {
     let app_id = chosen
         .app_id
         .clone()
-        .or_else(|| chosen.app_name.clone())
-        .unwrap_or_else(|| format!("pid:{}", chosen.pid));
+        .ok_or_else(|| "target did not resolve to a bundle id; refusing".to_string())?;
     let app_name = chosen.app_name.clone().unwrap_or_else(|| app_id.clone());
 
     Ok(Resolved {

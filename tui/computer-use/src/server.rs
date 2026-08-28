@@ -1,9 +1,10 @@
 //! The JSON-RPC dispatch and the `serve` loop (doc §7).
 //!
 //! `serve` reads one request per line from stdin and writes one response per line to stdout —
-//! the mode `Native.Desktop.Pool` spawns and speaks to. Observe methods stay sequential.
-//! `act` runs in a blocking task so a `cancel` notification (or EOF) can abort it between
-//! events without leaving a button held (doc §7.5).
+//! the mode `Native.Desktop.Pool` spawns and speaks to. Observe methods stay sequential on
+//! the wire. `windows`, `state`, and `act` all run in a blocking task so a `cancel`
+//! notification (or EOF) can abort them: AX walks and ScreenCaptureKit must not stall the
+//! tokio `current_thread` runtime, and an in-flight act must release what it holds (doc §7.5).
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
@@ -60,14 +61,12 @@ impl Server {
     }
 
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, (i64, String)> {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
         match method {
             "doctor" => Ok(doctor::report()),
-            "windows" => crate::windows::handle(),
-            "state" => crate::state::handle(self.deny_apps(), params),
-            "act" => {
-                let cancel = std::sync::atomic::AtomicBool::new(false);
-                crate::act::handle(&self.deny_apps, params, &cancel)
-            }
+            "windows" => crate::windows::handle(&cancel),
+            "state" => crate::state::handle(self.deny_apps(), params, &cancel),
+            "act" => crate::act::handle(&self.deny_apps, params, &cancel),
             "cancel" => Ok(Value::Null),
             other => Err((METHOD_NOT_FOUND, format!("method not found: {other}"))),
         }
@@ -115,8 +114,8 @@ where
                 Incoming::Message(value) => {
                     noise = 0;
                     let method = value.get("method").and_then(Value::as_str).unwrap_or("");
-                    if method == "act" {
-                        serve_act(
+                    if ["windows", "state", "act"].contains(&method) {
+                        serve_blocking(
                             &server,
                             &mut reader,
                             &mut writer,
@@ -156,7 +155,7 @@ async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, frame: &str) -> std::
     writer.flush().await
 }
 
-async fn serve_act<R, W>(
+async fn serve_blocking<R, W>(
     server: &Server,
     reader: &mut R,
     writer: &mut W,
@@ -174,9 +173,18 @@ where
     let cancel = Arc::new(AtomicBool::new(false));
     let deny = server.deny_apps().to_vec();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let id = request.get("id").cloned();
     let flag = cancel.clone();
-    let mut work = tokio::task::spawn_blocking(move || crate::act::handle(&deny, params, &flag));
+    let mut work = tokio::task::spawn_blocking(move || match method.as_str() {
+        "windows" => crate::windows::handle(&flag),
+        "state" => crate::state::handle(&deny, params, &flag),
+        _ => crate::act::handle(&deny, params, &flag),
+    });
 
     loop {
         tokio::select! {
@@ -184,7 +192,7 @@ where
             done = &mut work => {
                 let outcome = match done {
                     Ok(result) => result,
-                    Err(_) => Err((INTERNAL_ERROR, "act task panicked".into())),
+                    Err(_) => Err((INTERNAL_ERROR, "helper task panicked".into())),
                 };
                 if let Some(id) = id {
                     let frame = encode(match outcome {

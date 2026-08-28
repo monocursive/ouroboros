@@ -920,6 +920,72 @@ fn auto_approve_never_answers_an_ask_user_question() {
     );
 }
 
+#[test]
+fn auto_approve_never_answers_computer_use() {
+    let mut app = opened(full_hello());
+    compose(&mut app, "/auto-approve on");
+    app.drain();
+
+    approve(
+        &mut app,
+        json!({
+            "tool_call": { "name": "desktop_state", "cwd": "/tmp/w" },
+            "reason": "no permission rule engine is configured on this node, so every gated tool asks",
+            "suggested_rule": "ComputerUse(app:com.apple.calculator)"
+        }),
+    );
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "auto-approve must not invent a Computer Use allow"
+    );
+
+    let screen = render(&mut app, 120, 30);
+    assert!(
+        screen.contains("desktop_state"),
+        "the Computer Use card stays for a person:\n{}",
+        screen.text()
+    );
+}
+
+#[test]
+fn remembering_computer_use_writes_a_user_scoped_rule() {
+    let mut app = opened(full_hello());
+    approve(
+        &mut app,
+        json!({
+            "tool_call": { "name": "desktop_state", "cwd": "/tmp/w" },
+            "reason": "observe Calculator",
+            "suggested_rule": "ComputerUse(app:com.apple.calculator)"
+        }),
+    );
+
+    for _ in 0..5 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    let rule = calls
+        .iter()
+        .find(|call| call.method == "permissions.add")
+        .expect("Remember writes the suggested Computer Use rule");
+
+    assert_eq!(rule.params["scope"], "user");
+    assert_eq!(
+        rule.params["pattern"],
+        "ComputerUse(app:com.apple.calculator)"
+    );
+    assert_eq!(rule.params["decision"], "allow");
+    assert!(
+        rule.params.get("workspace").is_none(),
+        "D4: Computer Use remember is not workspace-scoped: {}",
+        rule.params
+    );
+}
+
 /// Composition: full access and auto-approve are two separate decisions, and an operator
 /// can hold both.
 ///

@@ -639,13 +639,13 @@ defmodule Ouroboros.Provider.Native.Tools do
         %{output: "#{label} crashed: #{inspect(reason)}", is_error: true}
 
       :native_interrupt ->
-        Desktop.cancel()
+        Desktop.cancel(task.pid)
         send(self(), :native_interrupt)
         _ = Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
         %{output: "#{label} was cancelled", is_error: true}
     after
       remaining ->
-        Desktop.cancel()
+        Desktop.cancel(task.pid)
         _ = Task.shutdown(task, :brutal_kill)
         %{output: "#{label} timed out after the act deadline.", is_error: true}
     end

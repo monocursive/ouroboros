@@ -425,6 +425,41 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       refute inspect(entry) =~ "rm -rf"
     end
 
+    test "a Computer Use subject keeps app, action, and window_id" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_started(
+                 %{
+                   id: "tool-cu",
+                   effect: :tool_call,
+                   principal: "session:s1",
+                   attempt: %{
+                     session_id: "s1",
+                     tool: "desktop_act",
+                     provider: :native,
+                     subject: %{
+                       app: "com.apple.calculator",
+                       desktop_action: "click",
+                       window_id: "w_1",
+                       input: @secret
+                     }
+                   },
+                   authority: %{decision: :allow},
+                   cause: %{signal_id: "tool-cu"}
+                 },
+                 ledger
+               )
+
+      assert entry.attempt.subject == %{
+               app: "com.apple.calculator",
+               desktop_action: "click",
+               window_id: "w_1"
+             }
+
+      refute inspect(entry) =~ @secret
+    end
+
     test "an outcome status outside the vocabulary is dropped, not coerced" do
       ledger = start_ledger!()
 

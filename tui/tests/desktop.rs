@@ -1366,6 +1366,38 @@ fn desktop_auto_approve_leaves_ask_user_questions_for_the_person() {
     assert!(approval.question, "and the card knows it is a question");
 }
 
+#[test]
+fn desktop_auto_approve_leaves_computer_use_for_the_person() {
+    let mut app = opened();
+    app.desktop_set_auto_approve(true)
+        .expect("a session is open");
+    app.drain();
+
+    notify(
+        &mut app,
+        1,
+        "approval_requested",
+        json!({
+            "request_id": "req-desktop-cu",
+            "tool_call": { "name": "desktop_act" },
+            "suggested_rule": "ComputerUse(app:com.apple.calculator)"
+        }),
+    );
+
+    assert!(
+        !app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.respond_approval"),
+        "auto-approve must not invent a Computer Use allow"
+    );
+
+    let approval = app
+        .desktop_approval()
+        .expect("the Computer Use request still renders as a card");
+    assert_eq!(approval.request_id, "req-desktop-cu");
+    assert!(approval.question);
+}
+
 /// One `runtime.models` answer, shaped as `Ouroboros.Models.list/0` encodes it.
 fn models_catalogue() -> Value {
     json!({

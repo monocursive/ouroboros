@@ -27,16 +27,17 @@ use crate::tree::RawAxNode;
 const WINDOW_MATCH_TOLERANCE: f64 = 8.0;
 
 /// Walks the accessibility tree for `pid`, rooted at the window matching `window_bounds` when
-/// one is found (so the tree lines up with the captured window), else at the application
-/// element. The returned tree is materialised eagerly and bounded by `max_depth` / `max_nodes`
-/// so a pathological UI cannot make the walk unbounded; the pure layer re-applies the same
-/// limits authoritatively.
+/// one is found (so the tree lines up with the captured window). When `window_bounds` is
+/// `Some` and no window root matches, returns `None` rather than falling back to the
+/// application tree. The returned tree is materialised eagerly and bounded by `max_depth` /
+/// `max_nodes` so a pathological UI cannot make the walk unbounded; the pure layer re-applies
+/// the same limits authoritatively.
 pub fn walk(
     pid: i32,
     max_nodes: usize,
     max_depth: usize,
     window_bounds: Option<Rect>,
-) -> RawAxNode {
+) -> Option<RawAxNode> {
     // SAFETY: `new_application` returns a valid application element for any pid (even a dead
     // one, whose later attribute reads simply fail and yield an empty node).
     let app = unsafe { AXUIElement::new_application(pid) };
@@ -44,12 +45,13 @@ pub fn walk(
     let mut budget = max_nodes.max(1);
 
     if let Some(bounds) = window_bounds {
-        if let Some(root) = find_window_element(&app, bounds) {
-            return build_node(&root, 0, max_depth, &mut budget);
-        }
+        // A window-rooted tree is required when the caller named a window. Falling back to
+        // the whole application would mix other windows' nodes into the snapshot (M8).
+        let root = find_window_element(&app, bounds)?;
+        return Some(build_node(&root, 0, max_depth, &mut budget));
     }
 
-    build_node(&app, 0, max_depth, &mut budget)
+    Some(build_node(&app, 0, max_depth, &mut budget))
 }
 
 /// Finds the application's window element whose bounds match `target`, returning a *borrowed*
@@ -171,6 +173,21 @@ fn is_secure(role: Option<&str>, subrole: Option<&str>) -> bool {
     role == Some("AXSecureTextField") || subrole == Some("AXSecureTextField")
 }
 
+fn passwordish(name: Option<&str>) -> bool {
+    let name = name.unwrap_or("").to_ascii_lowercase();
+    name.contains("password") || name.contains("passwd") || name.contains("pin")
+}
+
+fn injection_forbidden(node: &RawAxNode) -> bool {
+    node.secure
+        || passwordish(
+            node.title
+                .as_deref()
+                .or(node.description.as_deref())
+                .or(Some("")),
+        )
+}
+
 /// Why a live rematch could not perform the requested AX action.
 #[derive(Debug)]
 pub enum MatchError {
@@ -180,22 +197,35 @@ pub enum MatchError {
     NoPress,
     /// The match was a secure text field; injection is refused (doc §7.3 / D12).
     Secure,
+    /// More than one live node matched role+name+bounds; refuse rather than guess.
+    Ambiguous,
     /// The AX action was attempted and the API returned a failure code. Not a signal to
     /// fall through to CGEvent — the click/type already happened, or failed, on this node.
     Failed(String),
 }
 
-/// Presses the live node that rematches `needle`, using `AXPress` only when the node lists it.
+/// Presses the live node that rematches `needle`, using `AXPress` or `AXConfirm` when listed.
 pub fn press_matching(
     pid: i32,
     window_bounds: Option<Rect>,
     needle: &crate::act::ElementSnapshot,
 ) -> Result<(), MatchError> {
     with_match(pid, window_bounds, needle, |elem, node| {
-        if !crate::act::lists_press(&node.actions) {
-            return Err(MatchError::NoPress);
+        if node
+            .actions
+            .iter()
+            .any(|action| action.eq_ignore_ascii_case("AXPress"))
+        {
+            return perform(elem, "AXPress");
         }
-        perform(elem, "AXPress")
+        if node
+            .actions
+            .iter()
+            .any(|action| action.eq_ignore_ascii_case("AXConfirm"))
+        {
+            return perform(elem, "AXConfirm");
+        }
+        Err(MatchError::NoPress)
     })
 }
 
@@ -229,21 +259,12 @@ pub fn raise_window(pid: i32, target: Rect) -> Result<(), String> {
     })
 }
 
-/// Bundle id of the frontmost on-screen layer-0 window (grant-free, via CGWindowList).
-pub fn frontmost_app_id() -> Option<String> {
-    let windows = crate::macos::windows::enumerate().ok()?;
-    windows
-        .into_iter()
-        .find(|w| w.on_screen && w.layer == 0)
-        .and_then(|w| w.app_id)
-}
-
 /// Focused element after an act, for landing notes.
 pub fn focused_summary(
     pid: i32,
     window_bounds: Option<Rect>,
 ) -> Option<crate::act::FocusedElement> {
-    let root = walk(pid, 256, 16, window_bounds);
+    let root = walk(pid, 256, 16, window_bounds)?;
     find_focused(&root).map(|(role, name, editable)| crate::act::FocusedElement {
         role,
         name,
@@ -251,23 +272,71 @@ pub fn focused_summary(
     })
 }
 
-fn find_focused(node: &RawAxNode) -> Option<(String, String, bool)> {
-    if node.focused {
-        if let Some(role) = node.role.clone() {
-            let name = node
-                .title
-                .clone()
-                .or(node.description.clone())
-                .unwrap_or_default();
-            let editable = node.value_settable
-                || matches!(
-                    role.as_str(),
-                    "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
-                );
-            return Some((role, name, editable));
+/// Refuses when the live focused node is a secure or password-ish field (D12).
+pub fn refuse_secure_focus(pid: i32, window_bounds: Option<Rect>) -> Result<(), String> {
+    let Some(root) = walk(pid, 256, 16, window_bounds) else {
+        return Err(
+            "act: could not read the window accessibility tree; call desktop_state again".into(),
+        );
+    };
+    if let Some(node) = find_focused_node(&root) {
+        if injection_forbidden(node) {
+            return Err("act: refusing to interact with a secure field".into());
         }
     }
-    node.children.iter().find_map(find_focused)
+    Ok(())
+}
+
+/// Refuses when an AX node whose bounds contain `point` is a secure or password-ish field.
+pub fn refuse_secure_at(
+    pid: i32,
+    window_bounds: Option<Rect>,
+    point: crate::geometry::Point,
+) -> Result<(), String> {
+    let Some(root) = walk(pid, 256, 16, window_bounds) else {
+        return Ok(());
+    };
+    if hits_forbidden(&root, point) {
+        return Err("act: refusing to interact with a secure field".into());
+    }
+    Ok(())
+}
+
+fn find_focused(node: &RawAxNode) -> Option<(String, String, bool)> {
+    find_focused_node(node).and_then(|node| {
+        let role = node.role.clone()?;
+        let name = node
+            .title
+            .clone()
+            .or(node.description.clone())
+            .unwrap_or_default();
+        let editable = node.value_settable
+            || matches!(
+                role.as_str(),
+                "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField" | "AXSecureTextField"
+            );
+        Some((role, name, editable))
+    })
+}
+
+fn find_focused_node(node: &RawAxNode) -> Option<&RawAxNode> {
+    if node.focused && node.role.is_some() {
+        return Some(node);
+    }
+    node.children.iter().find_map(find_focused_node)
+}
+
+fn hits_forbidden(node: &RawAxNode, point: crate::geometry::Point) -> bool {
+    let here = node.bounds.is_some_and(|bounds| {
+        point.x >= bounds.x
+            && point.y >= bounds.y
+            && point.x < bounds.x + bounds.w
+            && point.y < bounds.y + bounds.h
+    }) && injection_forbidden(node);
+    here || node
+        .children
+        .iter()
+        .any(|child| hits_forbidden(child, point))
 }
 
 fn with_match<T>(
@@ -277,16 +346,73 @@ fn with_match<T>(
     mut f: impl FnMut(&AXUIElement, &RawAxNode) -> Result<T, MatchError>,
 ) -> Result<T, MatchError> {
     let app = unsafe { AXUIElement::new_application(pid) };
-    let mut result = None;
     if let Some(bounds) = window_bounds {
-        if let Some(root) = find_window_element(&app, bounds) {
-            search(&root, needle, 0, 32, &mut f, &mut result);
-        }
+        let Some(root) = find_window_element(&app, bounds) else {
+            return Err(MatchError::Gone);
+        };
+        match_in(&root, needle, &mut f)
+    } else {
+        match_in(&app, needle, &mut f)
     }
-    if result.is_none() {
-        search(&app, needle, 0, 32, &mut f, &mut result);
+}
+
+fn match_in<T>(
+    root: &AXUIElement,
+    needle: &crate::act::ElementSnapshot,
+    f: &mut impl FnMut(&AXUIElement, &RawAxNode) -> Result<T, MatchError>,
+) -> Result<T, MatchError> {
+    let matches = count_matches(root, needle, 0, 32);
+    if matches == 0 {
+        return Err(MatchError::Gone);
     }
+    if matches > 1 {
+        return Err(MatchError::Ambiguous);
+    }
+    let mut result = None;
+    search(root, needle, 0, 32, f, &mut result);
     result.unwrap_or(Err(MatchError::Gone))
+}
+
+fn count_matches(
+    elem: &AXUIElement,
+    needle: &crate::act::ElementSnapshot,
+    depth: usize,
+    max_depth: usize,
+) -> usize {
+    if depth > max_depth {
+        return 0;
+    }
+    let node = describe(elem);
+    let role = node.role.clone().unwrap_or_default();
+    let name = node.title.clone().or(node.description.clone());
+    let here = usize::from(crate::act::same_element(
+        needle,
+        &role,
+        name.as_deref(),
+        node.bounds,
+    ));
+    here + count_children(elem, needle, depth, max_depth)
+}
+
+fn count_children(
+    elem: &AXUIElement,
+    needle: &crate::act::ElementSnapshot,
+    depth: usize,
+    max_depth: usize,
+) -> usize {
+    let Some(children) = copy_attr(elem, &cfstr("AXChildren")) else {
+        return 0;
+    };
+    let Some(array) = children.downcast_ref::<CFArray>() else {
+        return 0;
+    };
+    let count = array.count();
+    let mut total = 0usize;
+    for i in 0..count {
+        let child = unsafe { &*(array.value_at_index(i) as *const AXUIElement) };
+        total += count_matches(child, needle, depth + 1, max_depth);
+    }
+    total
 }
 
 fn search<T>(
@@ -304,7 +430,7 @@ fn search<T>(
     let role = node.role.clone().unwrap_or_default();
     let name = node.title.clone().or(node.description.clone());
     if crate::act::same_element(needle, &role, name.as_deref(), node.bounds) {
-        if node.secure {
+        if injection_forbidden(&node) {
             *out = Some(Err(MatchError::Secure));
             return true;
         }
@@ -466,6 +592,13 @@ mod tests {
         assert!(is_secure(Some("AXTextField"), Some("AXSecureTextField")));
         assert!(!is_secure(Some("AXTextField"), None));
         assert!(!is_secure(None, None));
+    }
+
+    #[test]
+    fn passwordish_labels_are_treated_as_forbidden() {
+        assert!(passwordish(Some("Password")));
+        assert!(passwordish(Some("Enter PIN")));
+        assert!(!passwordish(Some("Username")));
     }
 
     #[test]

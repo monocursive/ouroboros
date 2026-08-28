@@ -394,6 +394,77 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       refute result["output"] =~ "ran"
     end
 
+    test "a no-op desktop hook sees redaction without replacing the real typed text", context do
+      trust(context.workspace)
+      captured = Path.join(context.root, "desktop-hook-input.json")
+
+      observer =
+        script(context.root, "observe-desktop.sh", """
+        cat > #{captured}
+        echo '{}'
+        """)
+
+      project_toml(context.workspace, """
+      [[hooks]]
+      event = "PreToolUse"
+      command = "#{observer}"
+      matcher = "desktop_act"
+      """)
+
+      helper = Path.join(context.root, "ouro-computer-use")
+      File.write!(helper, "#!/bin/sh\nexit 1\n")
+      previous = Application.get_env(:ouroboros, :computer_use)
+      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: helper)
+
+      on_exit(fn -> restore(:computer_use, previous) end)
+
+      snapshot = %{
+        state: %{
+          "app" => %{"id" => "com.apple.calculator"},
+          "window" => %{"id" => "w_1"},
+          "nodes" => []
+        },
+        at: System.system_time(:millisecond)
+      }
+
+      pool = Ouroboros.Provider.Native.Desktop.Pool
+      Ouroboros.Provider.Native.Desktop.Pool.remember_state(pool, context.session_dir, snapshot)
+
+      assert Ouroboros.Provider.Native.Desktop.Pool.last_state(pool, context.session_dir) ==
+               snapshot
+
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "desktop_act",
+             input: %{"action" => "type", "text" => "sk-live-secret"}
+           }}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      pid = run(loop)
+
+      assert_receive {:event, %{type: :approval_requested} = first}, 5_000
+      send(pid, {:native_approval, first.request_id, ApprovalResponse.new!(:approve)})
+
+      assert_receive {:event, %{type: :approval_requested} = sensitive}, 5_000
+      assert sensitive.request_id != first.request_id
+      assert sensitive.payload["reason"] =~ "password field or looks like a secret"
+      refute Map.has_key?(sensitive.payload, "suggested_rule")
+
+      hook_payload = JSON.decode!(File.read!(captured))
+      assert hook_payload["tool_input"]["text_bytes"] == byte_size("sk-live-secret")
+      refute Map.has_key?(hook_payload["tool_input"], "text")
+      refute File.read!(captured) =~ "sk-live-secret"
+
+      send(pid, {:native_approval, sensitive.request_id, ApprovalResponse.new!(:deny)})
+      [_result] = tool_results(collect())
+    end
+
     test "`additionalContext` is appended to the tool result", context do
       trust(context.workspace)
 
@@ -544,6 +615,82 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert payload["hook_event_name"] == "PostToolUse"
       assert payload["tool_response"]["is_error"] == false
       assert payload["tool_response"]["output"] =~ "ran"
+    end
+
+    test "desktop_act typed text is redacted on PostToolUseFailure", context do
+      trust(context.workspace)
+      capture = Path.join(context.root, "post-desktop.json")
+
+      recorder =
+        script(context.root, "post-desktop.sh", """
+        cat > #{capture}
+        echo '{"hookSpecificOutput":{"additionalContext":"post desktop"}}'
+        """)
+
+      project_toml(context.workspace, """
+      [[hooks]]
+      event = "PostToolUse"
+      matcher = "desktop_act"
+      command = "#{recorder}"
+
+      [[hooks]]
+      event = "PostToolUseFailure"
+      matcher = "desktop_act"
+      command = "#{recorder}"
+      """)
+
+      helper = Path.join(context.root, "ouro-computer-use")
+      File.write!(helper, "#!/bin/sh\nexit 1\n")
+      previous = Application.get_env(:ouroboros, :computer_use)
+      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: helper)
+      on_exit(fn -> restore(:computer_use, previous) end)
+
+      snapshot = %{
+        state: %{
+          "app" => %{"id" => "com.apple.calculator"},
+          "window" => %{"id" => "w_1"},
+          "nodes" => []
+        },
+        at: System.system_time(:millisecond)
+      }
+
+      pool = Ouroboros.Provider.Native.Desktop.Pool
+      Ouroboros.Provider.Native.Desktop.Pool.remember_state(pool, context.session_dir, snapshot)
+
+      assert Ouroboros.Provider.Native.Desktop.Pool.last_state(pool, context.session_dir) ==
+               snapshot
+
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "desktop_act",
+             input: %{"action" => "type", "text" => "hello from the hook"}
+           }}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} =
+        start_loop(context, script,
+          approval_mode: :ask,
+          approval_timeout_ms: :infinity,
+          desktop_runner: fn "act", _params, _timeout -> {:error, :broken} end
+        )
+
+      pid = run(loop)
+
+      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      send(pid, {:native_approval, ask.request_id, ApprovalResponse.new!(:approve)})
+
+      [result] = tool_results(collect())
+      assert result["output"] =~ "post desktop"
+
+      payload = capture |> File.read!() |> JSON.decode!()
+      assert payload["tool_input"]["text_bytes"] == byte_size("hello from the hook")
+      refute Map.has_key?(payload["tool_input"], "text")
+      refute File.read!(capture) =~ "hello from the hook"
     end
 
     test "a failing tool fires PostToolUseFailure instead", context do

@@ -121,7 +121,8 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
     test "always includes ouro and the terminals, whatever config says" do
       ids = Desktop.denied_app_ids()
 
-      for required <- ~w(com.ouroboros.desktop com.ouroboros.tui com.apple.Terminal
+      for required <-
+            ~w(dev.ouroboros.desktop com.ouroboros.desktop com.ouroboros.tui com.apple.Terminal
                          com.googlecode.iterm2 com.mitchellh.ghostty net.kovidgoyal.kitty) do
         assert required in ids, "expected #{required} in the denylist"
       end
@@ -143,6 +144,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
       assert "com.example.custom" in ids
       assert "com.apple.Terminal" in ids
+      assert "dev.ouroboros.desktop" in ids
       assert "com.ouroboros.desktop" in ids
     end
 
@@ -163,11 +165,18 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   describe "app_alias/1 and denied_app?/1" do
     test "maps obvious names to bundle ids and passes unknowns through" do
       assert Desktop.app_alias("Safari") == "com.apple.Safari"
+      assert Desktop.app_alias("safari") == "com.apple.Safari"
       assert Desktop.app_alias("Calculator") == "com.apple.calculator"
+      assert Desktop.app_alias("Chrome") == "com.google.Chrome"
+      assert Desktop.app_alias("google chrome") == "com.google.Chrome"
+      assert Desktop.app_alias("Firefox") == "org.mozilla.firefox"
       assert Desktop.app_alias("Terminal") == "com.apple.Terminal"
       assert Desktop.app_alias("Some Random App") == "Some Random App"
       assert Desktop.app_alias("com.apple.Safari") == "com.apple.Safari"
       assert Desktop.app_alias(nil) == nil
+      assert Desktop.same_app?("Chrome", "com.google.Chrome")
+      assert Desktop.same_app?("com.apple.safari", "com.apple.Safari")
+      refute Desktop.same_app?("Safari", "com.apple.mail")
     end
 
     test "denied_app? canonicalises a name before checking the denylist" do
@@ -301,11 +310,17 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert {:error, _} = DesktopAct.validate_args(%{action: "key"})
     end
 
-    test "scroll needs a direction" do
-      assert :ok = DesktopAct.validate_args(%{action: "scroll", direction: "down"})
+    test "scroll needs a direction and a click-style target" do
+      assert :ok =
+               DesktopAct.validate_args(%{action: "scroll", direction: "down", element_index: 1})
+
+      assert :ok = DesktopAct.validate_args(%{action: "scroll", direction: "down", x: 10, y: 20})
       assert {:error, message} = DesktopAct.validate_args(%{action: "scroll"})
       assert message =~ "direction"
       assert {:error, _} = DesktopAct.validate_args(%{action: "scroll", direction: "sideways"})
+
+      assert {:error, target} = DesktopAct.validate_args(%{action: "scroll", direction: "down"})
+      assert target =~ "element_index"
     end
 
     test "drag needs all four endpoints" do
@@ -340,8 +355,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
             "Tab",
             "space",
             "PageUp",
-            "page-up",
-            "page up",
+            "pageup",
             "Home",
             "End",
             "up",
@@ -351,7 +365,8 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
             "Z",
             "5",
             "Ctrl+L",
-            "cmd+space",
+            "Ctrl-L",
+            "CONTROL-L",
             "Ctrl+Shift+T",
             "meta+a"
           ] do
@@ -360,7 +375,22 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
     end
 
     test "rejects a bare modifier, two keys, out-of-range function keys, and junk" do
-      for key <- ["Ctrl", "a+b", "f13", "f0", "Frobnicate", "", "++", "ctrl+alt"] do
+      for key <- [
+            "Ctrl",
+            "a+b",
+            "f13",
+            "f0",
+            "Frobnicate",
+            "",
+            "++",
+            "ctrl+alt",
+            "page-up",
+            "page up",
+            "cmd+space",
+            "Cmd+Tab",
+            "Cmd+Q",
+            "Ctrl+Cmd+Q"
+          ] do
         refute DesktopAct.valid_key?(key), "expected #{inspect(key)} to be invalid"
       end
 
@@ -376,16 +406,34 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       temp = temp_image(bytes)
 
       assert {:ok, staged} =
-               Desktop.stage_image(%{"path" => temp, "sha256" => sha(bytes)}, dir)
+               Desktop.stage_image(
+                 %{"path" => temp, "sha256" => sha(bytes), "width" => 480, "height" => 640},
+                 dir
+               )
 
       assert staged.media_type == "image/jpeg"
       assert staged.sha256 == sha(bytes)
       assert staged.size == byte_size(bytes)
+      assert staged.width == 480
+      assert staged.height == 640
       assert staged.path == Path.join([dir, "desktop", sha(bytes) <> ".jpg"])
       assert File.read!(staged.path) == bytes
       assert {:ok, %File.Stat{mode: mode}} = File.stat(staged.path)
       assert Bitwise.band(mode, 0o777) == 0o600
       refute File.exists?(temp), "the helper temp is unlinked after staging"
+    end
+
+    test "drops malformed or over-cap advisory dimensions" do
+      dir = session_dir()
+
+      assert {:ok, staged} =
+               Desktop.stage_image(
+                 %{"path" => temp_image(jpeg("dims")), "width" => 99_999, "height" => 1},
+                 dir
+               )
+
+      refute Map.has_key?(staged, :width)
+      refute Map.has_key?(staged, :height)
     end
 
     test "stages a png" do
@@ -417,6 +465,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       bytes = jpeg("big") <> :binary.copy(<<0>>, 64)
       temp = temp_image(bytes)
       assert {:error, :too_large} = Desktop.stage_image(%{"path" => temp}, dir)
+      refute File.exists?(temp)
     end
 
     test "refuses when the sha256 the helper claimed does not match the bytes" do
@@ -588,7 +637,8 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
     test "claimed vs resolved mismatch is refused" do
       dir = session_dir()
-      raw = calculator_state(temp_image(jpeg("m")), sha(jpeg("m")))
+      temp = temp_image(jpeg("m"))
+      raw = calculator_state(temp, sha(jpeg("m")))
 
       assert {:ok, result} =
                DesktopState.run(%{app: "Safari"}, %{
@@ -598,7 +648,33 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
       assert result.is_error
       assert result.output =~ "resolved com.apple.calculator"
-      assert result.images == []
+      refute File.exists?(temp)
+    end
+
+    test "Chrome alias and case-fold match the resolved bundle id" do
+      dir = session_dir()
+
+      raw =
+        calculator_state(temp_image(jpeg("ch")), sha(jpeg("ch")))
+        |> put_in(["app", "id"], "com.google.Chrome")
+        |> put_in(["app", "name"], "Google Chrome")
+
+      assert {:ok, result} =
+               DesktopState.run(%{app: "chrome"}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(raw)
+               })
+
+      refute result.is_error
+      assert result.output =~ "com.google.Chrome"
+
+      assert {:ok, folded} =
+               DesktopState.run(%{app: "COM.APPLE.CALCULATOR"}, %{
+                 session_dir: dir,
+                 desktop_runner: ok(calculator_state(temp_image(jpeg("cf")), sha(jpeg("cf"))))
+               })
+
+      refute folded.is_error
     end
 
     test "no session directory is an honest error, no capture" do
@@ -650,6 +726,14 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
       assert fetched.media_type == "image/jpeg"
       assert fetched.size == byte_size(bytes)
       assert Base.decode64!(fetched.bytes) == bytes
+
+      previous_cu = Application.get_env(:ouroboros, :computer_use)
+      Application.put_env(:ouroboros, :computer_use, max_image_bytes: 16)
+      assert {:error, :not_found} = Desktop.artifact(digest)
+
+      if previous_cu == nil,
+        do: Application.delete_env(:ouroboros, :computer_use),
+        else: Application.put_env(:ouroboros, :computer_use, previous_cu)
 
       assert {:error, :not_found} = Desktop.artifact("not-a-sha")
       assert {:error, :not_found} = Desktop.artifact(String.duplicate("a", 64))
@@ -883,6 +967,20 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
                Desktop.resolve_act(%{"action" => "focus", "app" => "Safari"}, dir)
     end
 
+    test "resolve_act accepts a Chrome alias against last state's bundle id" do
+      dir = session_dir()
+
+      raw =
+        calculator_state(temp_image(jpeg("chres")), sha(jpeg("chres")))
+        |> put_in(["app", "id"], "com.google.Chrome")
+        |> put_in(["app", "name"], "Google Chrome")
+
+      remember_last(dir, raw)
+
+      assert {:ok, "com.google.Chrome"} =
+               Desktop.resolve_act(%{"action" => "click", "app" => "Chrome"}, dir)
+    end
+
     test "sensitive_act? flags secret type text and secure fields" do
       assert Desktop.sensitive_act?(%{action: "type", text: "sk-live-secret"}, nil)
       refute Desktop.sensitive_act?(%{action: "type", text: "2"}, nil)
@@ -902,6 +1000,19 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
       remember_last(dir, raw)
       assert Desktop.sensitive_act?(%{action: "click", element_index: 1}, dir)
+
+      state_only =
+        put_in(raw["nodes"], [
+          %{
+            "index" => 1,
+            "role" => "textField",
+            "subrole" => "AXSecureTextField",
+            "states" => ["enabled", "secure"]
+          }
+        ])
+
+      remember_last(dir, state_only)
+      assert Desktop.sensitive_act?(%{action: "type", element_index: 1, text: "ordinary"}, dir)
     end
 
     test "enrich_classified fills last-state app unless the call retargets without naming one" do
@@ -983,7 +1094,47 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
       assert_receive {:event, %{type: :approval_requested, payload: payload}}, 5_000
       assert payload["tool_call"]["name"] == "desktop_state"
-      assert payload["suggested_rule"]["pattern"] == "ComputerUse(app:com.apple.calculator)"
+      assert payload["suggested_rule"] == "ComputerUse(app:com.apple.calculator)"
+    end
+
+    test "auto_approve still cards a Computer Use observe" do
+      enable(fake_helper())
+
+      root = Path.join(System.tmp_dir!(), "cu-auto-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "workspace"))
+      File.mkdir_p!(Path.join(root, "session"))
+      on_exit(fn -> File.rm_rf(root) end)
+
+      {:ok, scope} = Paths.scope(Path.join(root, "workspace"), [], :workspace_write)
+
+      {model_spec, _agent} =
+        NativeModelScript.start([
+          [
+            {:tool_call, %{id: "c1", name: "desktop_state", input: %{"app" => "Calculator"}}}
+          ]
+        ])
+
+      test = self()
+
+      loop = %Loop{
+        emit: fn event -> send(test, {:event, event}) end,
+        model_module: NativeModelScript,
+        model_spec: model_spec,
+        system: "system",
+        scope: scope,
+        session_dir: Path.join(root, "session"),
+        session_id: "sess-1",
+        provider_session_id: "native-x-y",
+        turn_id: "turn-1",
+        approval_mode: :auto_approve,
+        approval_timeout_ms: :infinity
+      }
+
+      spawn_link(fn -> Loop.run_turn(loop, "look") end)
+
+      assert_receive {:event, %{type: :approval_requested, payload: payload}}, 5_000
+      assert payload["tool_call"]["name"] == "desktop_state"
+      refute_receive {:event, %{type: :tool_result}}, 200
     end
   end
 end

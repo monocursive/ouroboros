@@ -912,6 +912,54 @@ fn nothing_but_an_approval_or_a_turn_terminator_rings() {
 }
 
 #[test]
+fn auto_approve_still_rings_for_computer_use() {
+    let mut app = opened(
+        "running",
+        options(native_capabilities()),
+        usage(),
+        Vec::new(),
+    );
+    app.terminal = Terminal {
+        program: Some("iTerm.app".into()),
+        term: None,
+    };
+    app.config.notifications.mode = Some(NotifyMode::Bell.as_str().into());
+    app.config.notifications.when = Some(NotifyWhen::Always.as_str().into());
+    app.sessions
+        .auto_approve
+        .insert((Plane::Interactive, "session-a7".into()));
+    app.apply(Msg::Focus(true));
+    app.apply(Msg::Notification(Notification {
+        method: "interactive.event".into(),
+        params: json!({
+            "id": "session-a7",
+            "event": event(
+                99,
+                "approval_requested",
+                json!({
+                    "request_id": "req-cu",
+                    "tool_call": { "name": "desktop_state" },
+                    "suggested_rule": "ComputerUse(app:com.apple.calculator)"
+                }),
+                "2026-01-01T00:00:10.000000Z",
+            )
+        }),
+    }));
+
+    assert_eq!(
+        app.take_notifications(),
+        vec![(Channel::Bell, Signal::NeedsInput)],
+        "auto-approve must not swallow the Computer Use bell"
+    );
+    assert!(
+        app.drain()
+            .iter()
+            .all(|call| call.method != "interactive.respond_approval"),
+        "and it must not answer the card"
+    );
+}
+
+#[test]
 fn a_keystroke_and_a_replayed_backlog_never_ring() {
     let mut app = resolved();
     app.terminal = Terminal {

@@ -138,12 +138,18 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   end
 
   @doc """
-  Tells an in-flight `act` to abort between events. A notification: no answer is owed,
-  and this never starts a helper that is not already running.
+  Tells the in-flight `act` owned by `caller` to abort between events.
+
+  A notification: no answer is owed, and this never starts a helper that is not
+  already running. A cancel for a queued or unrelated caller is a no-op, so
+  interrupting session B cannot abort session A's inflight act.
   """
-  @spec cancel(GenServer.server()) :: :ok
-  def cancel(server \\ __MODULE__) do
-    GenServer.cast(server, :cancel)
+  @spec cancel(pid()) :: :ok
+  def cancel(caller) when is_pid(caller), do: cancel(__MODULE__, caller)
+
+  @spec cancel(GenServer.server(), pid()) :: :ok
+  def cancel(server, caller) when is_pid(caller) do
+    GenServer.cast(server, {:cancel, caller})
   end
 
   @doc "Describes the helper this node owns: phase, os pid, last doctor, session count."
@@ -188,24 +194,40 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
 
   @impl true
   def handle_call({:request, method, params, timeout}, from, state) do
+    # Mint the monitor and absolute deadline at receipt, before reconnect or queue work.
+    item = request_item(from, method, params, timeout)
+
     cond do
       state.phase == :ready and state.inflight == nil ->
-        case issue(state, method, params, {:caller, from}, timeout) do
+        case issue_item(state, item) do
           {:ok, state} ->
             {:noreply, state}
 
+          {:expired, state} ->
+            cleanup_item(item)
+            {:reply, {:error, :timeout}, state}
+
           {:error, reason} ->
+            cleanup_item(item)
             {:reply, {:error, reason}, go_broken(state, {:transport_closed, reason})}
         end
 
       queueable?(state) ->
         state = maybe_connect(state)
-        {:noreply, enqueue(state, from, method, params, timeout)}
+
+        if state.phase == :broken do
+          cleanup_item(item)
+          {:reply, {:error, :broken}, state}
+        else
+          {:noreply, enqueue(state, item)}
+        end
 
       state.phase == :broken ->
+        cleanup_item(item)
         {:reply, {:error, :broken}, state}
 
       true ->
+        cleanup_item(item)
         {:reply, {:error, :busy}, state}
     end
   end
@@ -245,9 +267,14 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     {:noreply, %{state | snapshots: Map.delete(state.snapshots, session_dir)}}
   end
 
-  def handle_cast(:cancel, state) do
-    if is_port(state.port) and is_map(state.inflight) do
-      _ = write(state, Codec.notification("cancel", %{}))
+  def handle_cast({:cancel, caller}, state) when is_pid(caller) do
+    case state.inflight do
+      %{kind: {:caller, item}, method: "act"}
+      when item.caller == caller and is_port(state.port) ->
+        _ = write(state, Codec.notification("cancel", %{}))
+
+      _other ->
+        :ok
     end
 
     {:noreply, state}
@@ -280,12 +307,57 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     {:noreply, go_broken(state, :handshake_timeout)}
   end
 
-  def handle_info({:deadline, id}, %{inflight: %{id: id, kind: {:caller, from}}} = state) do
-    GenServer.reply(from, {:error, :timeout})
-    {:noreply, drain(%{state | inflight: nil})}
+  def handle_info(
+        {:request_deadline, request_ref},
+        %{inflight: %{kind: {:caller, %{ref: request_ref} = item}}} = state
+      ) do
+    Process.demonitor(item.monitor, [:flush])
+    GenServer.reply(item.from, {:error, :timeout})
+    {:noreply, abandon_inflight(state, item)}
+  end
+
+  def handle_info({:request_deadline, request_ref}, state) do
+    case remove_queued(state.queue, request_ref, :ref) do
+      {nil, _queue} ->
+        {:noreply, state}
+
+      {item, queue} ->
+        Process.demonitor(item.monitor, [:flush])
+        GenServer.reply(item.from, {:error, :timeout})
+        {:noreply, %{state | queue: queue}}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _caller, _reason},
+        %{inflight: %{kind: {:caller, %{monitor: monitor} = item}}} = state
+      ) do
+    drop_timer(item.deadline)
+    {:noreply, abandon_inflight(state, item)}
+  end
+
+  def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
+    case remove_queued(state.queue, monitor, :monitor) do
+      {nil, _queue} ->
+        {:noreply, state}
+
+      {item, queue} ->
+        drop_timer(item.deadline)
+        {:noreply, %{state | queue: queue}}
+    end
+  end
+
+  def handle_info(
+        {:abandon_deadline, id},
+        %{inflight: %{id: id, kind: {:abandoned, _request_ref}}} = state
+      ) do
+    # The timed-out/callerless helper request did not acknowledge cancellation. Kill that
+    # exact child before reconnecting so it cannot execute later beside a replacement.
+    {:noreply, state |> Map.put(:inflight, nil) |> connect()}
   end
 
   def handle_info({:deadline, _stale_id}, state), do: {:noreply, state}
+  def handle_info({:abandon_deadline, _stale_id}, state), do: {:noreply, state}
 
   # The port is linked to this process and, because we trap exits, its termination arrives
   # here as an `{:EXIT, port, _}` in addition to the `{:exit_status, _}` the exit-status
@@ -311,7 +383,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   # broken rather than crashing it, so a node with the flag on but a missing or unrunnable
   # helper answers every call with an error instead of a supervision storm.
   defp connect(state) do
-    state = close_port(state)
+    state = hard_close(state)
 
     case open_port(%{state | buffer: <<>>, noise: 0, inflight: nil}) do
       {:ok, state} -> start_handshake(state)
@@ -342,10 +414,13 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   defp route(:handshake, {:error, reason}, state),
     do: go_broken(state, {:handshake_failed, reason})
 
-  defp route({:caller, from}, reply, state) do
-    GenServer.reply(from, reply)
+  defp route({:caller, item}, reply, state) when is_map(item) do
+    Process.demonitor(item.monitor, [:flush])
+    GenServer.reply(item.from, reply)
     drain(state)
   end
+
+  defp route({:abandoned, _request_ref}, _reply, state), do: drain(state)
 
   defp answer(%{"error" => %{} = error}),
     do: {:error, {:rpc_error, Map.get(error, "code"), Map.get(error, "message")}}
@@ -359,10 +434,35 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
     case write(state, Codec.request(id, method, params)) do
       :ok ->
         ref = Process.send_after(self(), {:deadline, id}, timeout_ms)
-        {:ok, %{state | inflight: %{id: id, kind: kind, deadline: ref}}}
+        {:ok, %{state | inflight: %{id: id, kind: kind, method: method, deadline: ref}}}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp issue_item(state, item) do
+    if item.expires_at <= now() or not Process.alive?(item.caller) do
+      {:expired, state}
+    else
+      {id, state} = take_id(state)
+
+      case write(state, Codec.request(id, item.method, item.params)) do
+        :ok ->
+          {:ok,
+           %{
+             state
+             | inflight: %{
+                 id: id,
+                 kind: {:caller, item},
+                 method: item.method,
+                 deadline: item.deadline
+               }
+           }}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -375,19 +475,27 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       drop_timer(state.inflight.deadline)
 
       case state.inflight.kind do
-        {:caller, from} -> GenServer.reply(from, {:error, :broken})
-        :handshake -> :ok
+        {:caller, item} when is_map(item) ->
+          Process.demonitor(item.monitor, [:flush])
+          GenServer.reply(item.from, {:error, :broken})
+
+        {:abandoned, _request_ref} ->
+          :ok
+
+        :handshake ->
+          :ok
       end
     end
 
-    Enum.each(:queue.to_list(Map.get(state, :queue, :queue.new())), fn %{from: from} ->
-      GenServer.reply(from, {:error, :broken})
+    Enum.each(:queue.to_list(Map.get(state, :queue, :queue.new())), fn item ->
+      cleanup_item(item)
+      GenServer.reply(item.from, {:error, :broken})
     end)
 
     Logger.debug(fn -> "computer-use helper broken: #{inspect(reason, limit: 10)}" end)
 
     %{
-      close_port(state)
+      hard_close(state)
       | phase: :broken,
         inflight: nil,
         queue: :queue.new(),
@@ -467,7 +575,15 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   # Closing the port closes the child's stdin, which is how a stdio server is asked to exit.
   # It does not reap the child, so a helper that ignores EOF is killed by its os pid.
   defp kill(state) do
-    %{os_pid: os_pid} = close_port(state)
+    _state = hard_close(state)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp hard_close(%{os_pid: os_pid} = state) do
+    # Kill while the port still names this child; closing first creates a needless PID-reuse
+    # race. `close_port/1` then releases the BEAM resource and makes old port messages stale.
 
     if is_integer(os_pid) and os_pid > 0 do
       case System.find_executable("kill") do
@@ -476,9 +592,11 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       end
     end
 
-    :ok
+    state
+    |> close_port()
+    |> Map.put(:os_pid, nil)
   rescue
-    _error -> :ok
+    _error -> state |> close_port() |> Map.put(:os_pid, nil)
   end
 
   ## Snapshots
@@ -503,7 +621,8 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   defp settings(opts) do
     %{
       max_frame_bytes: setting(opts, :max_frame_bytes),
-      handshake_timeout_ms: setting(opts, :handshake_timeout_ms)
+      handshake_timeout_ms: setting(opts, :handshake_timeout_ms),
+      shutdown_grace_ms: setting(opts, :shutdown_grace_ms)
     }
   end
 
@@ -529,8 +648,29 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   defp maybe_connect(%{phase: phase} = state) when phase in [:idle, :broken], do: connect(state)
   defp maybe_connect(state), do: state
 
-  defp enqueue(state, from, method, params, timeout) do
-    item = %{from: from, method: method, params: params, timeout: timeout}
+  defp request_item(from, method, params, timeout) do
+    caller = elem(from, 0)
+    request_ref = make_ref()
+
+    %{
+      ref: request_ref,
+      from: from,
+      caller: caller,
+      monitor: Process.monitor(caller),
+      method: method,
+      params: params,
+      expires_at: now() + timeout,
+      deadline: Process.send_after(self(), {:request_deadline, request_ref}, timeout)
+    }
+  end
+
+  defp cleanup_item(item) do
+    drop_timer(item.deadline)
+    Process.demonitor(item.monitor, [:flush])
+    :ok
+  end
+
+  defp enqueue(state, item) do
     %{state | queue: :queue.in(item, Map.get(state, :queue, :queue.new()))}
   end
 
@@ -540,20 +680,54 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
         state
 
       {{:value, item}, rest} ->
-        case issue(
-               %{state | queue: rest},
-               item.method,
-               item.params,
-               {:caller, item.from},
-               item.timeout
-             ) do
-          {:ok, state} -> state
-          {:error, reason} -> go_broken(state, {:transport_closed, reason})
+        state = %{state | queue: rest}
+
+        case issue_item(state, item) do
+          {:ok, state} ->
+            state
+
+          {:expired, state} ->
+            if Process.alive?(item.caller), do: GenServer.reply(item.from, {:error, :timeout})
+            cleanup_item(item)
+            drain(state)
+
+          {:error, reason} ->
+            cleanup_item(item)
+            GenServer.reply(item.from, {:error, :broken})
+            go_broken(state, {:transport_closed, reason})
         end
     end
   end
 
   defp drain(state), do: state
+
+  defp abandon_inflight(state, item) do
+    if state.inflight.method == "act" and is_port(state.port) do
+      _ = write(state, Codec.notification("cancel", %{}))
+    end
+
+    grace =
+      Process.send_after(
+        self(),
+        {:abandon_deadline, state.inflight.id},
+        state.settings.shutdown_grace_ms
+      )
+
+    put_in(state.inflight, %{
+      state.inflight
+      | kind: {:abandoned, item.ref},
+        deadline: grace
+    })
+  end
+
+  defp remove_queued(queue, value, key) do
+    items = :queue.to_list(queue)
+
+    case Enum.split_while(items, &(Map.fetch!(&1, key) != value)) do
+      {before, [item | after_items]} -> {item, :queue.from_list(before ++ after_items)}
+      {_all, []} -> {nil, queue}
+    end
+  end
 
   defp now, do: System.monotonic_time(:millisecond)
 end

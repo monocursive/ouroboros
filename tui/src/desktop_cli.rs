@@ -121,13 +121,17 @@ mod tests {
             "flag": false,
             "helper_present": false,
             "helper_path": "/nonexistent/ouro-computer-use",
-            "denied_app_ids": ["com.apple.Terminal", "com.ouroboros.desktop"],
+            "denied_app_ids": [
+                "com.apple.Terminal",
+                "dev.ouroboros.desktop",
+                "com.ouroboros.desktop"
+            ],
             "running": false
         }));
         assert!(text.contains("Computer Use: disabled"));
         assert!(text.contains("helper missing"));
         assert!(text.contains("helper pool: not running"));
-        assert!(text.contains("denied apps: 2"));
+        assert!(text.contains("denied apps: 3"));
     }
 
     #[test]

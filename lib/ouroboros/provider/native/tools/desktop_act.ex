@@ -65,12 +65,13 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
 
   @actions ~w(click type key scroll drag focus)
 
-  # Key grammar (§5.3), copied from the Linux crate: case-insensitive, hyphens and spaces
-  # ignored, combos joined with `+`. A combo is any number of modifiers and exactly one
-  # non-modifier key.
+  # Key grammar (§5.3), aligned with the helper's tokenizer: case-insensitive; `+`, `-`,
+  # and whitespace separate tokens. A combo is any number of modifiers and exactly one
+  # non-modifier key. Cmd+Tab / Cmd+Space / Cmd+Q (and Ctrl+Cmd+Q) are refused.
   @modifiers ~w(ctrl control alt option shift meta super cmd command)
   @named_keys ~w(enter return escape esc tab backspace delete del space home end
                  pageup pagedown up down left right)
+  @forbidden_meta_keys ~w(tab space q)
 
   @impl true
   def run(params, context) when is_map(params) do
@@ -135,12 +136,12 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
     tokens =
       key
       |> String.downcase()
-      |> String.split("+", trim: true)
-      |> Enum.map(&normalize_token/1)
+      |> String.split(~r/[+\s-]+/u, trim: true)
 
     tokens != [] and
       Enum.all?(tokens, &recognized_token?/1) and
-      Enum.count(tokens, &(not modifier_token?(&1))) == 1
+      Enum.count(tokens, &(not modifier_token?(&1))) == 1 and
+      not forbidden_chord?(tokens)
   end
 
   def valid_key?(_key), do: false
@@ -191,12 +192,20 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
     end
   end
 
-  # scroll: a direction. A target, when given, follows the click grammar; a scroll with no
-  # target scrolls the last-focused window, so only direction is required here.
+  # scroll: a direction plus a click-style target so the event cannot land on the
+  # wrong window.
   defp validate_scroll(params) do
     case get(params, :direction) do
       dir when dir in ~w(up down left right) ->
-        :ok
+        case validate_click(params) do
+          :ok ->
+            :ok
+
+          {:error, _click} ->
+            {:error,
+             "desktop_act scroll: provide element_index from the latest desktop_state, or both " <>
+               "x and y in screenshot-space pixels"}
+        end
 
       _absent ->
         {:error, "desktop_act scroll: direction is required and must be up, down, left, or right"}
@@ -213,11 +222,15 @@ defmodule Ouroboros.Provider.Native.Tools.DesktopAct do
     end
   end
 
-  defp normalize_token(token), do: token |> String.replace(["-", " "], "") |> String.trim()
-
   defp recognized_token?(token), do: modifier_token?(token) or key_token?(token)
 
   defp modifier_token?(token), do: token in @modifiers
+
+  defp forbidden_chord?(tokens) do
+    has_meta? = Enum.any?(tokens, &(&1 in ~w(meta super cmd command)))
+    key = Enum.find(tokens, &(not modifier_token?(&1)))
+    has_meta? and key in @forbidden_meta_keys
+  end
 
   defp key_token?(token), do: token in @named_keys or function_key?(token) or single_char?(token)
 

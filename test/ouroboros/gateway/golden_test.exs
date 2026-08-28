@@ -114,11 +114,14 @@ defmodule Ouroboros.Gateway.GoldenTest do
     assert coding["payload"]["diff"] == String.duplicate("b", 600)
   end
 
-  test "the two detail methods are advertised, so a client can feature-detect them" do
+  test "the two detail methods and Computer Use verbs are advertised" do
     methods = fixture("hello_result")["result"]["methods"]
 
     assert "interactive.event_detail" in methods
     assert "coding.event_detail" in methods
+    assert "computer_use.status" in methods
+    assert "computer_use.probe" in methods
+    assert "computer_use.artifact" in methods
   end
 
   test "the hello fixture lists exactly the methods this build serves" do

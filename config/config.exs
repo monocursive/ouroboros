@@ -224,6 +224,7 @@ config :ouroboros,
     # OS auth and secrets. `Native.Desktop.denied_app_ids/0` unions this with a baked
     # floor, so an operator may add to it but a typo can never remove ouro or a terminal.
     denied_app_ids: [
+      "dev.ouroboros.desktop",
       "com.ouroboros.desktop",
       "com.apple.Terminal",
       "com.googlecode.iterm2",

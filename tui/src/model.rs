@@ -2908,18 +2908,26 @@ pub fn attachment_refusal(diagnostic: &str) -> bool {
 
 /// The exact `params` for the durable half of a "don't ask again" answer.
 ///
-/// `scope` is `"workspace"` and never `"user"`: the modal names one workspace before the
-/// answer is chosen, and a client that widened that to the whole account because it had
-/// nowhere else to put the rule would be writing authority nobody read. `decision` is
-/// `"allow"` because this is only ever reached from an approve answer — the deny side of
-/// "don't ask again" is `permissions.add` with `deny`, which belongs to a rules editor and
-/// not to a modal about one command.
+/// `scope` is `"workspace"` for repository rules and `"user"` for `ComputerUse(app:…)`.
+/// Computer Use remember is account-wide (D4): a workspace-scoped app allow would not
+/// cover the next folder the operator opens. `decision` is `"allow"` because this is
+/// only ever reached from an approve answer — the deny side of "don't ask again" is
+/// `permissions.add` with `deny`, which belongs to a rules editor and not to a modal
+/// about one command.
 ///
 /// `pattern` is the runtime's own `suggested_rule` from the `approval_requested` payload.
 /// This client does not have the rule language and does not invent one:
 /// `Control.Permissions.Pattern` validates it, and an unvalidatable pattern comes back as
 /// `-32602` naming itself rather than as a rule that matches nothing.
 pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
+    if pattern.starts_with("ComputerUse(") {
+        return serde_json::json!({
+            "scope": "user",
+            "pattern": pattern,
+            "decision": "allow",
+        });
+    }
+
     serde_json::json!({
         "scope": "workspace",
         "pattern": pattern,
@@ -4153,6 +4161,22 @@ mod tests {
         let params = request.params().expect("an explicit remote workspace");
         assert_eq!(params["machine"], "mini");
         assert_eq!(params["workspace"], "/srv/project");
+    }
+
+    #[test]
+    fn computer_use_remember_is_user_scoped() {
+        let params = permission_add_params("ComputerUse(app:com.apple.Safari)", "/tmp/w");
+        assert_eq!(params["scope"], "user");
+        assert_eq!(params["pattern"], "ComputerUse(app:com.apple.Safari)");
+        assert_eq!(params["decision"], "allow");
+        assert!(
+            params.get("workspace").is_none(),
+            "a user-scoped Computer Use rule is not tied to one folder: {params}"
+        );
+
+        let bash = permission_add_params("Bash(cargo test *)", "/tmp/w");
+        assert_eq!(bash["scope"], "workspace");
+        assert_eq!(bash["workspace"], "/tmp/w");
     }
 
     #[test]

@@ -90,6 +90,7 @@ impl CoordTransform {
     }
 
     /// Inverse of [`apply`]: coordinate-space pixels back to global screen points.
+    #[cfg(test)]
     pub fn unapply(&self, rect: Rect) -> Rect {
         let scale = if self.scale.abs() > f64::EPSILON {
             self.scale

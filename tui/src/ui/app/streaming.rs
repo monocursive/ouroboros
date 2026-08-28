@@ -778,8 +778,8 @@ impl App {
     /// knows the rule language, and this client never invents one), this gateway must
     /// serve `permissions.add` (an older one does not, and the answer is then absent
     /// rather than broken), and the session must name the workspace the rule is scoped to
-    /// — `permissions.add` refuses a `workspace` rule without one, and picking `user`
-    /// scope instead would quietly write a broader rule than the operator was shown.
+    /// — `permissions.add` refuses a `workspace` rule without one. Computer Use
+    /// remember is user-scoped (`D4`), so a missing workspace does not hide the offer.
     fn approval_rule(
         &self,
         plane: Plane,
@@ -803,6 +803,16 @@ impl App {
             .and_then(|session| session.workspace.clone())
             .map(|workspace| workspace.trim().to_string())
             .filter(|workspace| !workspace.is_empty());
+
+        if pattern.starts_with("ComputerUse(") {
+            return (
+                Some(ApprovalRule {
+                    pattern: pattern.to_string(),
+                    workspace: workspace.unwrap_or_default(),
+                }),
+                None,
+            );
+        }
 
         match workspace {
             Some(workspace) => (

@@ -62,6 +62,11 @@ const SESSION_RAIL_DEFAULT_WIDTH: f32 = 276.0;
 const SESSION_RAIL_MIN_WIDTH: f32 = 232.0;
 const SESSION_RAIL_MAX_WIDTH: f32 = 520.0;
 const SESSION_WORKSPACE_MIN_WIDTH: f32 = 520.0;
+const _: () = {
+    assert!(SESSION_RAIL_MIN_WIDTH < SESSION_RAIL_DEFAULT_WIDTH);
+    assert!(SESSION_RAIL_DEFAULT_WIDTH < SESSION_RAIL_MAX_WIDTH);
+    assert!(SESSION_RAIL_MIN_WIDTH + SESSION_WORKSPACE_MIN_WIDTH <= DESKTOP_MIN_WIDTH);
+};
 /// The three things the one composer can be, said in the box itself. Enter does something
 /// different in each, and the placeholder is the only part of the control that can say so
 /// before it is pressed.
@@ -4343,13 +4348,6 @@ mod tests {
             gpui::Keystroke::parse("secondary-enter").unwrap().unparse()
         );
         assert_eq!(shift_enter.keystrokes()[0].inner().unparse(), "shift-enter");
-    }
-
-    #[test]
-    fn resizable_session_rail_bounds_protect_both_panes() {
-        assert!(SESSION_RAIL_MIN_WIDTH < SESSION_RAIL_DEFAULT_WIDTH);
-        assert!(SESSION_RAIL_DEFAULT_WIDTH < SESSION_RAIL_MAX_WIDTH);
-        assert!(SESSION_RAIL_MIN_WIDTH + SESSION_WORKSPACE_MIN_WIDTH <= DESKTOP_MIN_WIDTH);
     }
 
     #[test]

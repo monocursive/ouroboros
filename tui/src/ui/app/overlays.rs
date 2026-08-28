@@ -559,9 +559,8 @@ pub enum Overlay {
         /// opened rather than re-derived on every frame.
         detail: Box<ApprovalDetail>,
         /// The fifth answer, present only when the payload suggested a rule *and* this
-        /// gateway serves `permissions.add` *and* the session names a workspace to scope
-        /// it to. Absent rather than broken: an offer this client could not honour would
-        /// be worse than no offer.
+        /// gateway serves `permissions.add`. Workspace-scoped rules also need the session
+        /// to name a workspace; Computer Use remember is user-scoped and does not.
         rule: Option<ApprovalRule>,
         /// Why the fifth answer is missing although the payload suggested a rule. Shown,
         /// because "this runtime cannot remember that" and "nothing was suggested" are

@@ -204,12 +204,14 @@ defmodule Ouroboros.Provider.Native.Hooks do
   Runs every `PreToolUse` hook for a tool and folds their answers into one verdict.
 
       {:deny, reason}
-      {:ask, reason, input, context}     a hook asked for confirmation
-      {:allow, input, context}           a hook allowed it
-      {:none, input, context}            no hook expressed a decision
+      {:ask, reason, input, context, rewritten?} a hook asked for confirmation
+      {:allow, input, context, rewritten?}       a hook allowed it
+      {:none, input, context, rewritten?}        no hook expressed a decision
 
-  `input` is the tool's arguments after any `updatedInput`; `context` is the list of
-  `additionalContext` strings to append to the tool result. The four are distinct
+  `input` is the hook-visible arguments after any `updatedInput`; `rewritten?` distinguishes
+  an explicit rewrite from a no-op whose input was privacy-redacted before the hook ran;
+  `context` is the list of `additionalContext` strings to append to the tool result. The
+  verdicts are distinct
   because the caller has to tell "a hook said allow" from "no hook said anything": only
   the first resolves an engine `ask`, and treating silence as consent would make every
   installed hook an approval bypass.
@@ -220,14 +222,15 @@ defmodule Ouroboros.Provider.Native.Hooks do
   trusted the repository asked for.
   """
   @spec pre_tool_use(t(), String.t(), map(), map()) ::
-          {:allow, map(), [String.t()]}
-          | {:none, map(), [String.t()]}
-          | {:ask, String.t(), map(), [String.t()]}
+          {:allow, map(), [String.t()], boolean()}
+          | {:none, map(), [String.t()], boolean()}
+          | {:ask, String.t(), map(), [String.t()], boolean()}
           | {:deny, String.t()}
   def pre_tool_use(%__MODULE__{} = config, tool_name, input, base) do
     config
     |> matching(:pre_tool_use, tool_name)
-    |> Enum.reduce_while({:none, input, []}, fn hook, {verdict, input, context} ->
+    |> Enum.reduce_while({:none, input, [], false}, fn hook,
+                                                       {verdict, input, context, rewritten?} ->
       payload =
         Map.merge(base, %{
           "hook_event_name" => @event_names.pre_tool_use,
@@ -243,15 +246,27 @@ defmodule Ouroboros.Provider.Native.Hooks do
           {:halt, {:deny, denial_reason(answer, context, hook)}}
 
         {:ok, answer} ->
-          {:cont,
-           {answer.decision || verdict, answer.updated_input || input, context ++ answer.context}}
+          {input, rewritten?} =
+            case answer.updated_input do
+              %{} = updated -> {updated, true}
+              nil -> {input, rewritten?}
+            end
+
+          {:cont, {answer.decision || verdict, input, context ++ answer.context, rewritten?}}
       end
     end)
     |> case do
-      {:deny, reason} -> {:deny, reason}
-      {:ask, input, context} -> {:ask, ask_reason(context), input, context}
-      {:allow, input, context} -> {:allow, input, context}
-      {:none, input, context} -> {:none, input, context}
+      {:deny, reason} ->
+        {:deny, reason}
+
+      {:ask, input, context, rewritten?} ->
+        {:ask, ask_reason(context), input, context, rewritten?}
+
+      {:allow, input, context, rewritten?} ->
+        {:allow, input, context, rewritten?}
+
+      {:none, input, context, rewritten?} ->
+        {:none, input, context, rewritten?}
     end
   end
 

@@ -128,31 +128,14 @@ pub fn perform(
         ));
     }
 
-    if request.require_focus || request.action == Action::Focus {
-        ax::set_frontmost(resolved.pid).map_err(|e| (ACT_ERROR, format!("act: {e}")))?;
-        if let Some(bounds) = resolved.window_bounds {
-            let _ = ax::raise_window(resolved.pid, bounds);
-        }
-        thread::sleep(Duration::from_millis(40));
-        match ax::frontmost_app_id() {
-            Some(front) if front.eq_ignore_ascii_case(&resolved.app_id) => {}
-            Some(front) => {
-                return Err((
-                    ACT_ERROR,
-                    format!(
-                        "act: focused app is {front}, not {}; call desktop_state again",
-                        resolved.app_id
-                    ),
-                ));
-            }
-            None => {
-                return Err((
-                    ACT_ERROR,
-                    "act: could not verify the focused app; refusing".into(),
-                ));
-            }
-        }
+    // Every action raises and verifies the exact window. `require_focus: false` from a
+    // caller (or a hook rewrite) is ignored — it must not skip the frontmost gate.
+    ax::set_frontmost(resolved.pid).map_err(|e| (ACT_ERROR, format!("act: {e}")))?;
+    if let Some(bounds) = resolved.window_bounds {
+        let _ = ax::raise_window(resolved.pid, bounds);
     }
+    thread::sleep(Duration::from_millis(40));
+    verify_frontmost_window(&resolved).map_err(|message| (ACT_ERROR, message))?;
 
     if is_cancelled(cancel) {
         return Err((ACT_CANCELLED, "act: cancelled".into()));
@@ -162,7 +145,7 @@ pub fn perform(
         Action::Focus => Ok(Backend::Ax),
         Action::Click => click(&request, &resolved, cancel),
         Action::Type => type_text(&request, &resolved, cancel),
-        Action::Key => press_key(&request, cancel),
+        Action::Key => press_key(&request, &resolved, cancel),
         Action::Scroll => scroll(&request, &resolved, cancel),
         Action::Drag => drag(&request, &resolved, cancel),
     };
@@ -217,6 +200,7 @@ enum ActFail {
 struct Resolved {
     app_id: String,
     pid: i32,
+    window_number: u32,
     window_id: Option<String>,
     window_bounds: Option<crate::geometry::Rect>,
     title: Option<String>,
@@ -275,6 +259,7 @@ fn resolve_target(request: &ActRequest) -> Result<Resolved, String> {
     Ok(Resolved {
         app_id,
         pid: window.pid,
+        window_number: window.window_id,
         window_id: Some(crate::windows::mint_id(window.window_id)),
         window_bounds: Some(window.bounds),
         title: window.title,
@@ -299,13 +284,20 @@ fn click(
                     "act: refusing to interact with a secure field".into(),
                 ));
             }
+            Err(ax::MatchError::Ambiguous) => {
+                return Err(ActFail::Message(
+                    "act: more than one element matched; call desktop_state again".into(),
+                ));
+            }
             Err(ax::MatchError::NoPress) => {
-                // AXPress not listed — fall through to a coordinate click, once.
+                // AXPress/AXConfirm not listed — fall through to a coordinate click, once.
             }
             Err(ax::MatchError::Failed(message)) => return Err(ActFail::Message(message)),
         }
     }
     let point = click_point(request)?;
+    verify_event_point(resolved, point)?;
+    ax::refuse_secure_at(resolved.pid, resolved.window_bounds, point).map_err(ActFail::Message)?;
     post_click(point, request.button, cancel)?;
     Ok(Backend::Event)
 }
@@ -333,6 +325,11 @@ fn type_text(
                     "act: refusing to type into a secure field".into(),
                 ));
             }
+            Err(ax::MatchError::Ambiguous) => {
+                return Err(ActFail::Message(
+                    "act: more than one element matched; call desktop_state again".into(),
+                ));
+            }
             Err(ax::MatchError::NoPress) => {
                 return Err(ActFail::Message(
                     "act: the field does not accept AXSetValue".into(),
@@ -342,29 +339,58 @@ fn type_text(
         }
     }
 
+    verify_frontmost_window(resolved).map_err(ActFail::Message)?;
+    ax::refuse_secure_focus(resolved.pid, resolved.window_bounds).map_err(ActFail::Message)?;
+    if ax::focused_summary(resolved.pid, resolved.window_bounds).is_none() {
+        return Err(ActFail::Message(
+            "act: no focused element; use element_index from desktop_state".into(),
+        ));
+    }
     type_unicode(text, cancel)?;
     Ok(Backend::Event)
 }
 
-fn press_key(request: &ActRequest, cancel: &AtomicBool) -> Result<Backend, ActFail> {
+fn press_key(
+    request: &ActRequest,
+    resolved: &Resolved,
+    cancel: &AtomicBool,
+) -> Result<Backend, ActFail> {
     check(cancel)?;
     let chord = request
         .parsed_key()
         .map_err(ActFail::Message)?
         .ok_or_else(|| ActFail::Message("act: key is required".into()))?;
+    if chord.forbidden() {
+        return Err(ActFail::Message(
+            "act: that key chord is refused (app switcher, Spotlight, or quit)".into(),
+        ));
+    }
+    verify_frontmost_window(resolved).map_err(ActFail::Message)?;
+    ax::refuse_secure_focus(resolved.pid, resolved.window_bounds).map_err(ActFail::Message)?;
     post_chord(&chord, cancel)?;
     Ok(Backend::Event)
 }
 
 fn scroll(
     request: &ActRequest,
-    _resolved: &Resolved,
+    resolved: &Resolved,
     cancel: &AtomicBool,
 ) -> Result<Backend, ActFail> {
     check(cancel)?;
-    if let Some(point) = click_point(request).ok() {
-        move_cursor(point);
-    }
+    let point = if request.point.is_some()
+        || request
+            .element
+            .as_ref()
+            .is_some_and(|element| element.bounds.is_some())
+    {
+        click_point(request)?
+    } else {
+        return Err(ActFail::Message(
+            "act: scroll needs element_index or x,y from desktop_state".into(),
+        ));
+    };
+    verify_event_point(resolved, point)?;
+    move_cursor(point);
     let direction = request
         .direction
         .ok_or_else(|| ActFail::Message("act: scroll needs a direction".into()))?;
@@ -381,7 +407,7 @@ fn scroll(
 
 fn drag(
     request: &ActRequest,
-    _resolved: &Resolved,
+    resolved: &Resolved,
     cancel: &AtomicBool,
 ) -> Result<Backend, ActFail> {
     check(cancel)?;
@@ -393,6 +419,9 @@ fn drag(
         .to
         .and_then(|p| map_point(request, p))
         .ok_or_else(|| ActFail::Message("act: drag needs to_x/to_y".into()))?;
+
+    verify_event_point(resolved, from)?;
+    verify_event_point(resolved, to)?;
 
     let source = event_source()?;
     let start = cgpoint(from);
@@ -453,8 +482,55 @@ fn click_point(request: &ActRequest) -> Result<Point, ActFail> {
 
 fn map_point(request: &ActRequest, point: Point) -> Option<Point> {
     match request.coordinate_space {
-        Some(space) => Some(screen_point(point, space)),
+        Some(space)
+            if point.x >= 0.0
+                && point.y >= 0.0
+                && point.x < space.width
+                && point.y < space.height =>
+        {
+            Some(screen_point(point, space))
+        }
+        Some(_outside) => None,
         None => Some(point),
+    }
+}
+
+/// Re-enumerates immediately before a focus-dependent keyboard event. App identity alone is
+/// insufficient: another window from the same app (or a modal sheet) can own the keystrokes.
+fn verify_frontmost_window(resolved: &Resolved) -> Result<(), String> {
+    let windows = macos::windows::enumerate()
+        .map_err(|error| format!("act: could not verify the focused window: {error}"))?;
+
+    match crate::windows::frontmost_normal(&windows) {
+        Some(front) if front.window_id == resolved.window_number => Ok(()),
+        Some(front) => Err(format!(
+            "act: focused window is {}, not {}; call desktop_state again",
+            crate::windows::mint_id(front.window_id),
+            crate::windows::mint_id(resolved.window_number)
+        )),
+        None => Err("act: could not verify the focused window; refusing".into()),
+    }
+}
+
+/// Re-enumerates immediately before a pointer event and requires the exact resolved window
+/// to be the topmost surface at that point. This catches overlapping apps, same-app windows,
+/// menus, sheets, and permission overlays rather than trusting focus alone.
+fn verify_event_point(resolved: &Resolved, point: Point) -> Result<(), ActFail> {
+    let windows = macos::windows::enumerate().map_err(|error| {
+        ActFail::Message(format!(
+            "act: could not verify the event landing point: {error}"
+        ))
+    })?;
+
+    match crate::windows::frontmost_at(&windows, point) {
+        Some(front) if front.window_id == resolved.window_number => Ok(()),
+        Some(front) => Err(ActFail::Message(format!(
+            "act: {} covers the requested point; call desktop_state again",
+            crate::windows::mint_id(front.window_id)
+        ))),
+        None => Err(ActFail::Message(
+            "act: the requested point is not owned by the target window".into(),
+        )),
     }
 }
 

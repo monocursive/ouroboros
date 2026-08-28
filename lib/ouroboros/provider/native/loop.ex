@@ -160,6 +160,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     # turn. Loading it per tool call would read and parse `ouroboros.toml` on every
     # dispatch, and would let a hook edit its own configuration mid-turn.
     hooks: nil,
+    # Injected 3-arity helper (`method, params, timeout`) for Computer Use. Production
+    # leaves this nil and `Desktop` uses the pool; tests stub a failing or canned act
+    # without starting the live helper.
+    desktop_runner: nil,
     # The tool schemas, built once at the start of the turn. Two reasons, and the second
     # is the important one: building thirteen JSON Schemas per model call is measurable,
     # and a tool list that could change between two calls of one turn is a changed cached
@@ -641,7 +645,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           classified = put_in(classified.context[:app], resolved)
 
           allowed =
-            if claimed == resolved do
+            if claimed != nil and Desktop.same_app?(claimed, resolved) do
               {:allow, state, call, classified, hook_context, authority}
             else
               reevaluate_desktop(state, call, classified, hook_context)
@@ -689,17 +693,19 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp execute(state, call, module, classified, hook_context, effect_id) do
-    context = %{
-      scope: state.scope,
-      session_dir: state.session_dir,
-      reads: state.reads,
-      # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
-      # so it is handed two closures over the session rather than a pid to call: the tool
-      # never learns which process tracks what, and a run with no session gets `nil` and
-      # says so instead of failing obscurely.
-      subagents: subagent_handles(state),
-      desktop_evaluated_app: classified.context[:app]
-    }
+    context =
+      %{
+        scope: state.scope,
+        session_dir: state.session_dir,
+        reads: state.reads,
+        # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
+        # so it is handed two closures over the session rather than a pid to call: the tool
+        # never learns which process tracks what, and a run with no session gets `nil` and
+        # says so instead of failing obscurely.
+        subagents: subagent_handles(state),
+        desktop_evaluated_app: classified.context[:app]
+      }
+      |> maybe_desktop_runner(state)
 
     # Checkpoint before write, always, and before the language server is asked anything:
     # the baseline is a convenience and the snapshot is the thing a rewind depends on.
@@ -771,7 +777,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         Hooks.post_tool_use(
           state.hooks,
           classified.tool,
-          call.input,
+          redact_desktop_input(classified.tool, call.input),
           %{"output" => result.output, "is_error" => result.is_error},
           hook_base(state)
         ) ++ hook_context
@@ -789,6 +795,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
 
   defp execute_timeout(state, _classified), do: state.tool_timeout_ms
+
+  defp maybe_desktop_runner(context, %{desktop_runner: fun}) when is_function(fun, 3),
+    do: Map.put(context, :desktop_runner, fun)
+
+  defp maybe_desktop_runner(context, _state), do: context
 
   defp flush_interrupt(state) do
     receive do
@@ -958,8 +969,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: [%{type: :text, text: output} | Enum.map(images, &Map.put(&1, :type, :image))]
 
   # Clients never receive pixels on the event — they get the sha to fetch through
-  # `computer_use.artifact` (§8.5). `bytes` is the staged size; width/height are advisory
-  # and derived client-side from the fetched image.
+  # `computer_use.artifact` (§8.5). `bytes` is the staged size; width/height are bounded,
+  # advisory capture metadata that lets a client reserve layout before the fetch.
   defp tool_result_event(call, result, []) do
     %{
       "name" => call.name,
@@ -978,6 +989,8 @@ defmodule Ouroboros.Provider.Native.Loop do
           "media_type" => image.media_type,
           "bytes" => image.size
         }
+        |> put_nonempty("width", Map.get(image, :width))
+        |> put_nonempty("height", Map.get(image, :height))
       end)
 
     call
@@ -1053,20 +1066,50 @@ defmodule Ouroboros.Provider.Native.Loop do
 
         # A hook's `ask` outranks the *mode*, not just the rule: `auto_approve` swallowing
         # it would make the decision meaningless in the mode people actually run.
-        {:ask, hook_reason, input, context} ->
-          revise(state, call, classified, input, :ask_human, hook_reason, context, authority)
+        {:ask, hook_reason, input, context, rewritten?} ->
+          revise(
+            state,
+            call,
+            classified,
+            input,
+            rewritten?,
+            :ask_human,
+            hook_reason,
+            context,
+            authority
+          )
 
         # A hook that said `allow` resolves an engine `ask`. It can, because it is either
         # the operator's own user-scope hook or a repository hook the operator trusted —
         # the same two authorities a rule answers to. It can never resolve a `deny`,
         # because on a denial no hook was invoked at all.
-        {:allow, input, context} ->
-          revise(state, call, classified, input, :allow, reason, context, hook_allowed(authority))
+        {:allow, input, context, rewritten?} ->
+          revise(
+            state,
+            call,
+            classified,
+            input,
+            rewritten?,
+            :allow,
+            reason,
+            context,
+            hook_allowed(authority)
+          )
 
         # Silence is not consent. A hook that only annotated or rewrote leaves the
         # engine's verdict exactly where it was.
-        {:none, input, context} ->
-          revise(state, call, classified, input, verdict, reason, context, authority)
+        {:none, input, context, rewritten?} ->
+          revise(
+            state,
+            call,
+            classified,
+            input,
+            rewritten?,
+            verdict,
+            reason,
+            context,
+            authority
+          )
       end
     else
       proceed(state, call, classified, verdict, reason, [], authority)
@@ -1075,8 +1118,18 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # A hook that rewrote the input hands back a different call, so the engine sees the
   # call that will actually run and not the one the model proposed.
-  defp revise(state, call, classified, input, verdict, reason, context, authority) do
-    if input == call.input do
+  defp revise(
+         state,
+         call,
+         classified,
+         input,
+         rewritten?,
+         verdict,
+         reason,
+         context,
+         authority
+       ) do
+    if not rewritten? or input == call.input do
       # Unchanged arguments keep the classification already computed: re-deriving it
       # would run `code_intel`'s rename preview a second time for nothing.
       proceed(state, call, classified, verdict, reason, context, authority)
@@ -1219,13 +1272,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp suggested_rule_payload(classified) do
-    base = Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
     app = get_in(classified, [:context, :app])
 
     if desktop_tool?(classified.tool) and is_binary(app) do
-      Map.put(base, "pattern", "ComputerUse(app:#{app})")
+      "ComputerUse(app:#{app})"
     else
-      base
+      Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
     end
   end
 
@@ -1251,10 +1303,9 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp ask(state, call, classified, reason, context) do
     request_id = new_request_id()
+    persist? = persist_grant?(reason)
 
-    emit(
-      state,
-      :approval_requested,
+    payload =
       %{
         "kind" => approval_kind(classified.tool),
         "tool_call" =>
@@ -1265,11 +1316,15 @@ defmodule Ouroboros.Provider.Native.Loop do
           }
           |> reject_nils(),
         "paths" => classified.paths,
-        "reason" => reason_text(reason),
-        "suggested_rule" => suggested_rule_payload(classified)
-      },
-      request_id
-    )
+        "reason" => reason_text(reason)
+      }
+
+    payload =
+      if persist?,
+        do: Map.put(payload, "suggested_rule", suggested_rule_payload(classified)),
+        else: payload
+
+    emit(state, :approval_requested, payload, request_id)
 
     _ =
       Hooks.notify(
@@ -1284,16 +1339,17 @@ defmodule Ouroboros.Provider.Native.Loop do
       request_id,
       classified,
       context,
+      persist?,
       deadline(state.approval_timeout_ms)
     )
   end
 
-  defp wait_for_approval(state, call, request_id, classified, context, deadline) do
+  defp wait_for_approval(state, call, request_id, classified, context, persist?, deadline) do
     remaining = remaining(deadline)
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
-        state = grant(state, classified, response.scope)
+        state = if persist?, do: grant(state, classified, response.scope), else: state
 
         {:allow, state, call, classified, context,
          authority(
@@ -1321,14 +1377,14 @@ defmodule Ouroboros.Provider.Native.Loop do
          )}
 
       {:native_approval, _other_id, _response} ->
-        wait_for_approval(state, call, request_id, classified, context, deadline)
+        wait_for_approval(state, call, request_id, classified, context, persist?, deadline)
 
       :native_interrupt ->
         {:interrupted, %{state | interrupted?: true}, classified}
 
       {:native_steer, text} ->
         state = %{state | steer: state.steer ++ [text]}
-        wait_for_approval(state, call, request_id, classified, context, deadline)
+        wait_for_approval(state, call, request_id, classified, context, persist?, deadline)
     after
       remaining ->
         ref = {:timeout, state.approval_timeout_ms}
@@ -1741,6 +1797,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         })
     }
   end
+
+  defp persist_grant?(:sensitive_desktop_act), do: false
+  defp persist_grant?(_reason), do: true
 
   defp approval_kind("bash"), do: "command"
   defp approval_kind(name) when name in ["write", "edit", "apply_patch"], do: "file_change"
@@ -2329,6 +2388,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     |> put_subject(:hosts, Map.get(classified, :domains, []))
     |> put_subject(:app, context[:app])
     |> put_subject(:desktop_action, context[:desktop_action])
+    |> put_subject(:window_id, context[:window_id])
     |> Map.merge(mcp_subject(classified.tool))
   end
 

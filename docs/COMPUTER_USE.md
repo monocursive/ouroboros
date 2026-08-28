@@ -274,7 +274,7 @@ ScreenCaptureKit streams are expensive. Isolation we need is in Elixir
 is operator configuration; `remember` already refuses `:node`):
 
 ```
-deny ComputerUse(app:com.ouroboros.desktop)
+deny ComputerUse(app:dev.ouroboros.desktop)
 deny ComputerUse(app:com.ouroboros.tui)          # if bundled separately
 deny ComputerUse(app:com.apple.Terminal)
 deny ComputerUse(app:com.googlecode.iterm2)
@@ -353,6 +353,7 @@ config :ouroboros,
     max_snapshots_per_session: 8,
     jpeg_quality: 80,
     denied_app_ids: [               # node deny, not remember-able
+      "dev.ouroboros.desktop",
       "com.ouroboros.desktop",
       "com.apple.Terminal",
       "com.googlecode.iterm2",
@@ -593,9 +594,12 @@ Sequence:
 5. Ledger the attempt against the **resolved** id.
 
 If step 4 asks, the helper has already taken a screenshot (state) or must
-**not** have acted. For `desktop_act`, resolution happens with a
-**focus-only** preflight (`windows` + identify) before `act`. Never click
-first and ask after.
+**not** have acted. For `desktop_act`, resolution happens against last
+state (app identity AND'd, aliases and case folded: `Chrome` matches
+`com.google.Chrome`; Safari vs Mail does not) before `act`. Never click
+first and ask after. Observe refuses when the helper cannot resolve a
+bundle id — name/`pid:N` fallbacks are not an identity the denylist can
+reason about.
 
 ### 6.4 Default and remember
 
@@ -606,7 +610,8 @@ No rule → `{:ask, :no_rule}` (existing). The card:
 - subject: resolved app name + bundle id
 - thumbnail: last screenshot sha if we have one (state), else none
 - choices: Once / This session / Always this app / Deny
-- `suggested_rule`: `ComputerUse(app:com.apple.Calculator)`
+- `suggested_rule`: the string `ComputerUse(app:com.apple.calculator)`
+  (not a map). Remember is **user**-scoped (D4).
 
 Once → no `remember`. Session → `remember(..., :session)`. Always →
 `remember(..., :user)`. Deny-once → no remember. Deny-always →
@@ -774,19 +779,34 @@ in the live AX tree (same role+name+similar bounds). If it cannot, it
 returns `ok: false, error: "element gone; call state again"` and does
 not click the stale bounds.
 
-`require_focus: true` (default for `type` and `key`): helper focuses the
-window, verifies AX focused app == target, else refuses.
+`require_focus` is always on. Elixir sends `true`; the helper ignores a
+caller (or hook rewrite) sending `false`. Every action raises the window
+and verifies the exact frontmost window is still the target. Before a
+CGEvent pointer action it also re-enumerates z-order and refuses unless
+that exact window is the topmost surface at every event point. Type and
+key without an `element_index` refuse if the focused AX node is a secure
+or password-ish field, even when rematch was skipped. Coordinate clicks
+refuse the same way after the z-order check. More than one in-window
+rematch is `ambiguous`, not first-hit. Cmd+Tab / Cmd+Space / Cmd+Q are
+refused.
 
 Password / permission-sheet detection happens here, before inject.
+
+A `desktop_act` is never sent until last state's resolved app AND's with
+the call's claimed app (alias + case-fold). Missing last state (except
+a named `focus`) is "call desktop_state first".
 
 Response: `{ ok, focused_element, warnings, error }`.
 
 ### 7.5 Input lock and cancel
 
-One act at a time (`tokio::sync::Mutex`, as the Linux crate). A gateway
-interrupt (`Command-.` / session cancel) closes stdin or sends
-`{"method":"cancel"}`. In-flight act aborts between events (a drag may
-end mid-way; say so in the error). Do not leave a button held.
+One act at a time on the helper. Elixir's pool is one-inflight plus a
+short queue. A gateway interrupt or act timeout sends `{"method":"cancel"}`
+**only if that caller owns the inflight act** — interrupting session B
+must not abort session A's click. In-flight act aborts between events (a
+drag may end mid-way; say so in the error). Do not leave a button held.
+`windows` and `state` also run in `spawn_blocking` so an AX walk cannot
+stall the tokio `current_thread` runtime.
 
 ### 7.6 macOS implementation notes
 
@@ -1167,22 +1187,31 @@ Windows, PiP overlay, `@App` composer sugar.
 
 ## 17. Invariants
 
-1. Flag default false. Off → no tools, no helper.
+1. Helper-on-disk is the opt-in. `enabled` defaults true; `OUROBOROS_COMPUTER_USE=0`
+   (or `enabled: false`) hides the tools and the supervised pool stays idle.
+   Off → no tools, no helper spawn at boot, no TCC prompt.
 2. Helper never allow/denies policy. Elixir never injects events.
 3. No MCP image passthrough. No fifth permission mode.
 4. Two model tools. Doctor is not a tool.
 5. Last snapshot is per session in the BEAM, not in the helper.
-6. Act never runs against a snapshot the helper cannot re-find.
-7. Screenshots live in `session_dir/desktop/`, fetched by sha.
-8. Ledger and hooks never carry pixels or typed text.
+6. Act never runs against a snapshot the helper cannot re-find. Last
+   state's resolved app is AND'd with the call (aliases + case-fold).
+7. Screenshots live in `session_dir/desktop/`, fetched by sha, recapped
+   on `computer_use.artifact` read.
+8. Ledger and hooks never carry pixels or typed text (PreToolUse and
+   PostToolUse both see `text_bytes`, not `text`).
 9. Node denylist and helper denylist both refuse ouro and terminals.
 10. Auto-approve never invents an app allow and never answers
-    `desktop_act` without a stored `ComputerUse(app:…)` allow.
+    `desktop_act` or `desktop_state` without a stored `ComputerUse(app:…)`
+    allow. The card still rings.
 11. Prefix changes only on configure (flag) or compaction, not on
     doctor becoming green.
 12. Plan mode can look and cannot click.
 13. A Linux port implements `doctor|state|act|windows`, not 18 MCP
     tools.
+14. `require_focus` is not overridable. AXConfirm is a press. Secure
+    fields refuse type/key/click without a rematch. Cmd+Q/Tab/Space are
+    refused. Sensitive acts ask `:once` with no Remember.
 
 ## 18. Phase 0–2 — as built (2026-08-26)
 
@@ -1199,19 +1228,22 @@ Phase 0, Phase 1 (observe), and Phase 2 (act, macOS) are implemented.
   a last-state/app mismatch, and sends the element snapshot plus capture
   origin/scale to the helper. The helper rematches in global points (snapshot
   bounds inverted through origin+scale), prefers `AXPress` / `AXSetValue`,
-  falls back to CGEvent only when AX was not attempted, requires focus for
-  every action (and always raises on `focus`), refuses secure fields / self /
-  ouro-desktop / permission sheets / `--deny-app` (baked floor, case-fold),
-  and honors `cancel` between events.
+  falls back to CGEvent only when AX was not attempted (`AXPress` /
+  `AXConfirm`), requires focus for every action (`require_focus: false` is
+  ignored), refuses secure / password-ish fields on rematch *and* on
+  type/key/coordinate-click fallbacks, refuses Cmd+Q/Tab/Space, refuses an
+  observe with no bundle id, and honors a **caller-scoped** `cancel`
+  between events. `windows`/`state`/`act` run in `spawn_blocking`.
 - Two-phase: `Desktop.resolve_act/2` names the app the call would operate
-  (last state, or a `focus` retarget). The loop re-evaluates when that id
-  differs from the first classify. Always-allow Safari does not cover a
-  Mail focus. A `window_id`/`title` observe without `app` is not covered by
-  last state's grant; the helper ANDs `window_id` with `app_id`; untargeted
-  capture is refused. Sensitive type/secure-field acts ask again (`:once` card).
+  (last state, or a `focus` retarget; `Chrome` aliases `com.google.Chrome`).
+  The loop re-evaluates when that id differs from the first classify.
+  Always-allow Safari does not cover a Mail focus. A `window_id`/`title`
+  observe without `app` is not covered by last state's grant; the helper
+  ANDs `window_id` with `app_id`; untargeted capture is refused. Sensitive
+  type/secure-field acts ask again (`:once` card, no `suggested_rule`).
 - Interrupt: `Tools.execute` for `desktop_act` listens for
-  `:native_interrupt`, sends helper `cancel`, and the loop flushes the
-  interrupt so the turn stops.
+  `:native_interrupt`, sends helper `cancel` for **that Task pid**, and the
+  loop flushes the interrupt so the turn stops.
 - GPUI fetches `computer_use.artifact` by sha (optional native `session_id`)
   and overlays the bytes on Image cells. `enabled?/0` honours `config(:enabled)`.
 
@@ -1222,4 +1254,3 @@ Phase 0, Phase 1 (observe), and Phase 2 (act, macOS) are implemented.
   `make computer-use` smoke, not CI.
 - In-TUI `/computer-use` panel (Phase 3).
 - Linux adapter (Phase 4).
-

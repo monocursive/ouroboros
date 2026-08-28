@@ -167,6 +167,7 @@ fn clamp_usize(value: Option<&Value>, default: usize, lo: usize, hi: usize) -> u
 /// Mirrors Elixir's baked floor; unioned with the argv list so a short launch cannot
 /// remove ouro or a terminal.
 const BAKED_DENY: &[&str] = &[
+    "dev.ouroboros.desktop",
     "com.ouroboros.desktop",
     "com.ouroboros.tui",
     "ouro-computer-use",
@@ -307,7 +308,11 @@ fn image_json(image: &ImageMeta) -> Value {
 pub use imp::handle;
 
 #[cfg(not(target_os = "macos"))]
-pub fn handle(_deny_apps: &[String], _params: Value) -> Result<Value, (i64, String)> {
+pub fn handle(
+    _deny_apps: &[String],
+    _params: Value,
+    _cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Value, (i64, String)> {
     Err((
         crate::server::UNSUPPORTED_PLATFORM,
         "state: Computer Use observe is only supported on macOS".to_string(),
@@ -325,7 +330,15 @@ mod imp {
     /// Order matters: resolve the target and its bundle id first, refuse a denied app **before**
     /// any capture (doc §7.3), then capture (never raising, Δ8), then walk AX. A failure at any
     /// step is an honest JSON-RPC error — never a partial or fabricated snapshot.
-    pub fn handle(deny_apps: &[String], params: Value) -> Result<Value, (i64, String)> {
+    pub fn handle(
+        deny_apps: &[String],
+        params: Value,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Value, (i64, String)> {
+        if crate::act::is_cancelled(cancel) {
+            return Err((OBSERVE_ERROR, "state: cancelled".into()));
+        }
+
         let request = StateRequest::from_params(&params);
 
         let resolved = crate::macos::capture::resolve(&request.target)
@@ -347,6 +360,10 @@ mod imp {
         let (image_meta, transform, screenshot_readiness) = if request.include_image {
             let grabbed = crate::macos::capture::grab(&resolved)
                 .map_err(|e| (OBSERVE_ERROR, format!("state: capture failed: {e}")))?;
+
+            if crate::act::is_cancelled(cancel) {
+                return Err((OBSERVE_ERROR, "state: cancelled".into()));
+            }
 
             let encoded = crate::screenshot::encode(
                 &grabbed.rgba,
@@ -434,28 +451,37 @@ mod imp {
 
         // Accessibility tree, rooted at the captured window so its bounds share one space.
         let (nodes, focused_element, ax_readiness) = if crate::macos::accessibility_trusted() {
-            let root = crate::macos::ax::walk(
+            match crate::macos::ax::walk(
                 resolved.pid,
                 request.max_nodes,
                 request.max_depth,
                 Some(resolved.window_bounds),
-            );
-            let shaped = tree::flatten(
-                &root,
-                &tree::Limits {
-                    max_nodes: request.max_nodes,
-                    max_depth: request.max_depth,
-                },
-                &transform,
-            );
-            if shaped.truncated {
-                warnings.push(format!(
-                    "accessibility tree truncated at max_nodes ({})",
-                    request.max_nodes
-                ));
+            ) {
+                Some(root) => {
+                    let shaped = tree::flatten(
+                        &root,
+                        &tree::Limits {
+                            max_nodes: request.max_nodes,
+                            max_depth: request.max_depth,
+                        },
+                        &transform,
+                    );
+                    if shaped.truncated {
+                        warnings.push(format!(
+                            "accessibility tree truncated at max_nodes ({})",
+                            request.max_nodes
+                        ));
+                    }
+                    let readiness = if shaped.truncated { "partial" } else { "ok" };
+                    (shaped.nodes, shaped.focused_element, readiness)
+                }
+                None => {
+                    warnings.push(
+                        "accessibility window root not found; call desktop_state again".into(),
+                    );
+                    (Vec::new(), None, "unavailable")
+                }
             }
-            let readiness = if shaped.truncated { "partial" } else { "ok" };
-            (shaped.nodes, shaped.focused_element, readiness)
         } else {
             warnings.push(
                 "Accessibility is not granted to ouro-computer-use; no accessibility tree"
@@ -533,7 +559,7 @@ mod tests {
     #[test]
     fn defaults_when_params_empty() {
         let request = StateRequest::from_params(&json!({}));
-        assert_eq!(request.include_image, true);
+        assert!(request.include_image);
         assert_eq!(request.max_width, 1920);
         assert_eq!(request.max_height, 1920);
         assert_eq!(request.max_bytes, 2 * 1024 * 1024);
@@ -557,7 +583,7 @@ mod tests {
             "max_nodes": 999999,
             "max_depth": 9999
         }));
-        assert_eq!(request.include_image, false);
+        assert!(!request.include_image);
         assert_eq!(request.max_width, caps::CEIL_MAX_WIDTH);
         assert_eq!(request.max_height, caps::CEIL_MAX_HEIGHT);
         assert_eq!(request.max_bytes, caps::CEIL_MAX_BYTES);
@@ -592,7 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn baked_floor_denies_terminals_without_argv() {
+    fn baked_floor_denies_self_and_terminals_without_argv() {
+        assert!(is_denied("dev.ouroboros.desktop", &[]));
         assert!(is_denied("com.apple.Terminal", &[]));
         assert!(is_denied("COM.APPLE.TERMINAL", &[]));
         assert!(!is_denied("com.apple.Safari", &[]));

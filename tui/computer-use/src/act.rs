@@ -8,13 +8,13 @@
 //!
 //! * Never inject into this helper or `ouro-desktop`.
 //! * Honor `--deny-app` before any focus or event.
-//! * Prefer `AXPress` / `AXSetValue` when the live node lists them; fall back to CGEvent
-//!   only when the AX action was **not attempted**. A successful (or unknown) AXPress is
-//!   never followed by a coordinate click.
+//! * Prefer `AXPress` / `AXConfirm` / `AXSetValue` when the live node lists them; fall back
+//!   to CGEvent only when the AX action was **not attempted**. A successful (or unknown)
+//!   AXPress is never followed by a coordinate click.
 //! * Re-find the element by role+name+similar live bounds. Stale snapshot bounds are not
-//!   clicked.
-//! * `require_focus` (default true for every action) focuses the window and refuses if the
-//!   focused app is not the target. A `focus` action always raises, even if the flag is off.
+//!   clicked. More than one in-window match is refused as ambiguous.
+//! * `require_focus` is always true. A caller (or a hook rewrite) sending `false` is ignored.
+//!   Every action raises the window and refuses if the focused app is not the target.
 //! * A cancel flag is checked between events so a drag or chord can release what it holds.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,10 +121,7 @@ impl ActRequest {
             None => return Err("act: action is required".into()),
         };
 
-        let require_focus = params
-            .get("require_focus")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let require_focus = true;
 
         let pages = params
             .get("pages")
@@ -332,9 +329,11 @@ fn centres_close(a: Rect, b: Rect) -> bool {
     (ac.x - bc.x).abs() <= CENTRE_TOLERANCE && (ac.y - bc.y).abs() <= CENTRE_TOLERANCE
 }
 
-/// Whether a live action list includes AXPress (any capitalisation).
+/// Whether a live action list includes AXPress or AXConfirm (any capitalisation).
 pub fn lists_press(actions: &[String]) -> bool {
-    actions.iter().any(|a| a.eq_ignore_ascii_case("AXPress"))
+    actions
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case("AXPress") || a.eq_ignore_ascii_case("AXConfirm"))
 }
 
 /// Landing copy for the model: what holds focus after the act, or a warning that input
@@ -415,7 +414,8 @@ pub fn is_self_target(app_id: &str, pid: Option<i32>) -> bool {
             return true;
         }
     }
-    app_id.eq_ignore_ascii_case("com.ouroboros.desktop")
+    app_id.eq_ignore_ascii_case("dev.ouroboros.desktop")
+        || app_id.eq_ignore_ascii_case("com.ouroboros.desktop")
         || app_id.eq_ignore_ascii_case("com.ouroboros.tui")
         || app_id.eq_ignore_ascii_case("ouro-computer-use")
 }
@@ -498,7 +498,18 @@ mod tests {
             "require_focus": false
         }))
         .unwrap();
-        assert!(!off.require_focus);
+        assert!(
+            off.require_focus,
+            "require_focus: false from a caller is ignored"
+        );
+    }
+
+    #[test]
+    fn lists_press_accepts_axpress_and_axconfirm() {
+        assert!(lists_press(&["AXPress".into()]));
+        assert!(lists_press(&["axconfirm".into()]));
+        assert!(lists_press(&["AXSetValue".into(), "AXConfirm".into()]));
+        assert!(!lists_press(&["AXSetValue".into()]));
     }
 
     #[test]
@@ -588,6 +599,7 @@ mod tests {
 
     #[test]
     fn self_and_permission_sheet_are_detected() {
+        assert!(is_self_target("dev.ouroboros.desktop", None));
         assert!(is_self_target("com.ouroboros.desktop", None));
         assert!(is_self_target("other", Some(std::process::id() as i32)));
         assert!(!is_self_target("com.apple.calculator", Some(1)));
