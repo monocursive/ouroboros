@@ -13,10 +13,10 @@ use ratatui::Frame;
 
 use super::access;
 use super::app::{
-    provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddStep, App,
-    ApprovalRule, CommandPalette, Connection, FormField, FormKind, MachineForm, MachineReport,
-    MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice,
-    SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES,
+    provider_choices, AccountDialog, AccountFlow, AddField, AddMachine, AddMethod, AddProgress,
+    AddStage, AddStep, App, ApprovalRule, CommandPalette, Connection, FormField, FormKind,
+    MachineForm, MachineReport, MachineSecurity, Machines, Mode, NewField, NewSession, NoticeKind,
+    Overlay, ProviderChoice, SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::editor::COMMANDS;
 use super::theme;
@@ -1955,7 +1955,8 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
                 Style::default().fg(theme::muted()),
             )));
         }
-        AddStep::Method | AddStep::Pick => {}
+        // A form never asks for guided-enrollment consent; only the add flow does.
+        AddStep::Method | AddStep::Pick | AddStep::Consent => {}
     }
     if let Some(error) = &form.error {
         lines.push(Line::from(""));
@@ -2063,6 +2064,15 @@ fn machine_report(frame: &mut Frame, area: Rect, report: &MachineReport) {
 
 fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, add: &AddMachine) {
     let standalone = app.fleet_profile.is_none();
+
+    // A streamed add owns the whole pane: it needs the room for a rail, a link and a log.
+    if add.step == AddStep::Working {
+        if let Some(progress) = add.progress.as_ref() {
+            add_stepper(frame, area, app, add, progress);
+            return;
+        }
+    }
+
     let mut lines = vec![Line::from(Span::styled(
         "Add another machine from this instance",
         theme::heading(),
@@ -2170,6 +2180,42 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
                 Style::default().fg(theme::muted()),
             )));
         }
+        AddStep::Consent => {
+            let target = add.target.trim();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("Guided Tailscale enrollment on {target}"),
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "These run as root on {target}, in this order, before any invitation exists:"
+            )));
+            for command in app.guided_consent_commands() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {command}"),
+                    Style::default().fg(theme::accent()),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "The first downloads and executes the vendor's installer as root. The second is started detached and prints a one-time sign-in link, which this pane will show you.",
+                Style::default().fg(theme::muted()),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "It needs passwordless sudo on {target}; if `sudo -n true` fails there, nothing runs and nothing is created."
+                ),
+                Style::default().fg(theme::muted()),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter agrees and starts the add · Esc goes back without running anything",
+                Style::default().fg(theme::muted()),
+            )));
+        }
         AddStep::Working => {
             lines.push(Line::from(""));
             lines.push(theme::working(app.ticks, "Adding the machine…"));
@@ -2205,6 +2251,214 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// The live add: a stage rail, whatever the typed events have said, the sign-in link
+/// when there is one, and the pipeline's own progress lines under it.
+///
+/// The rail is moved only by typed events. When the pipeline sends nothing but `Line`s —
+/// which is what it sends today — the rail stays unlit and says so, and the log pane is
+/// the whole surface. Nothing here reads the text of a line to guess a stage.
+fn add_stepper(frame: &mut Frame, area: Rect, app: &App, add: &AddMachine, progress: &AddProgress) {
+    let target = {
+        let target = add.target.trim();
+        if target.is_empty() {
+            add.host.trim()
+        } else {
+            target
+        }
+    };
+
+    let foot = stepper_footer(add, progress);
+    let foot_height = (foot.len() as u16).min(area.height);
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(foot_height)]).split(area);
+
+    let mut lines = Vec::new();
+    lines.push(
+        match (&progress.failure, progress.finished, progress.cancelling) {
+            (Some(_), _, _) => Line::from(Span::styled(
+                format!("Add failed — {target}"),
+                Style::default()
+                    .fg(theme::bad())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            (None, true, _) => Line::from(Span::styled(
+                format!("Added {target}"),
+                Style::default().fg(theme::good()),
+            )),
+            (None, false, true) => Line::from(Span::styled(
+                format!("Cancel requested — {target}"),
+                Style::default().fg(theme::warn()),
+            )),
+            (None, false, false) => theme::working(app.ticks, format!("Adding {target}…")),
+        },
+    );
+    lines.push(stage_rail(progress));
+
+    if progress.reached.is_none() && progress.failure.is_none() {
+        lines.push(Line::from(Span::styled(
+            "No stage reported yet — this pipeline is sending progress lines only.",
+            Style::default().fg(theme::muted()),
+        )));
+    }
+
+    for (label, detail) in [
+        ("probed", progress.probe.as_deref()),
+        ("network", progress.network.as_deref()),
+        ("binary", progress.install.as_deref()),
+        ("copying", progress.copying.as_deref()),
+    ] {
+        if let Some(detail) = detail {
+            let style = if label == "network" && progress.guided {
+                Style::default().fg(theme::warn())
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {label:<9}"), theme::label()),
+                Span::styled(detail.to_string(), style),
+            ]));
+        }
+    }
+
+    // The sign-in link. Its own block, on its own line, because it is time-critical and
+    // has to be readable and selectable in a terminal. No OSC 8 is emitted here.
+    if let Some(url) = progress.auth_url.as_deref() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Open this link to approve the machine (a one-time Tailscale sign-in):",
+            Style::default()
+                .fg(theme::warn())
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            url.to_string(),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(countdown) = progress.countdown() {
+            lines.push(Line::from(Span::styled(
+                format!("waiting for a tailnet address · {countdown}"),
+                Style::default().fg(theme::muted()),
+            )));
+        }
+        lines.push(Line::from(""));
+    } else if let Some(countdown) = progress.countdown() {
+        lines.push(Line::from(Span::styled(
+            format!("  waiting for a tailnet address · {countdown}"),
+            Style::default().fg(theme::muted()),
+        )));
+    }
+
+    if let Some(failure) = progress.failure.as_ref() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            failure.error.clone(),
+            Style::default().fg(theme::bad()),
+        )));
+        if !failure.residue.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "What it left behind:",
+                theme::label(),
+            )));
+            for residue in &failure.residue {
+                lines.push(Line::from(Span::styled(
+                    format!("  · {residue}"),
+                    Style::default().fg(theme::warn()),
+                )));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "Running the same add again converges the state: it reuses whatever is already in place and carries on from there.",
+            Style::default().fg(theme::muted()),
+        )));
+    }
+
+    // Whatever room is left goes to the pipeline's lines, following the tail.
+    let used = lines.len() as u16;
+    let budget = rows[0].height.saturating_sub(used + 1) as usize;
+    if budget > 0 && !progress.log.is_empty() {
+        lines.push(Line::from(""));
+        let skip = progress.log.len().saturating_sub(budget);
+        for line in progress.log.iter().skip(skip) {
+            lines.push(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(theme::muted()),
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+    frame.render_widget(Paragraph::new(foot).wrap(Wrap { trim: false }), rows[1]);
+}
+
+/// `probe → network → binary → copy → enroll → done`, lit only as far as typed events go.
+fn stage_rail(progress: &AddProgress) -> Line<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    for (index, stage) in AddStage::ALL.iter().copied().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" → ", Style::default().fg(theme::muted())));
+        }
+        let current = progress.reached == Some(stage);
+        let style = if progress.failure.is_some() && current {
+            Style::default()
+                .fg(theme::bad())
+                .add_modifier(Modifier::BOLD)
+        } else if current && !progress.finished {
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
+        } else if progress.reached_stage(stage) {
+            Style::default().fg(theme::good())
+        } else {
+            Style::default().fg(theme::muted())
+        };
+        spans.push(Span::styled(stage.label(), style));
+    }
+    Line::from(spans)
+}
+
+/// The keys, and — while a cancel is being asked about or has been sent — exactly what a
+/// cancel can and cannot stop.
+fn stepper_footer(add: &AddMachine, progress: &AddProgress) -> Vec<Line<'static>> {
+    if add.cancel_confirm {
+        return vec![
+            Line::from(Span::styled(
+                "Cancel this add? It stops at the next pipeline boundary — a remote call already in flight finishes first.",
+                Style::default().fg(theme::warn()),
+            )),
+            Line::from(Span::styled(
+                "Enter/y cancels · Esc/n keeps going",
+                Style::default().fg(theme::muted()),
+            )),
+        ];
+    }
+    if progress.finished {
+        return vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Enter/Esc back to the plan — rerunning the same add is safe.",
+                Style::default().fg(theme::muted()),
+            )),
+        ];
+    }
+    if progress.cancelling {
+        return vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Cancel sent. The add stops at the next pipeline boundary; a remote call already in flight finishes first.",
+                Style::default().fg(theme::warn()),
+            )),
+        ];
+    }
+    vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Esc asks to cancel. Invitation contents and sign-in links are never written to the log.",
+            Style::default().fg(theme::muted()),
+        )),
+    ]
+}
+
 fn method_row(focused: bool, label: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -2221,9 +2475,22 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
         AddField::Machine => ("machine", add.machine.as_str()),
         AddField::Host => ("fleet host", add.host.as_str()),
         AddField::Via => ("via", add.via_label()),
+        AddField::Tailscale => (
+            "tailscale setup",
+            if add.setup_tailscale {
+                "on — asks first, then runs as root there"
+            } else {
+                "off"
+            },
+        ),
         AddField::Binary => ("dest. binary", add.binary.as_str()),
         AddField::OwnerHost => ("this Mac host", add.owner_host.as_str()),
         AddField::OwnerMachine => ("this Mac name", add.owner_machine.as_str()),
+    };
+    let value_style = if field == AddField::Tailscale && add.setup_tailscale {
+        Style::default().fg(theme::warn())
+    } else {
+        Style::default()
     };
     let mut spans = vec![
         Span::styled(
@@ -2231,9 +2498,12 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
             Style::default().fg(theme::accent()),
         ),
         Span::styled(format!("{label:<16}"), theme::label()),
-        Span::raw(if value.is_empty() { "—" } else { value }.to_string()),
+        Span::styled(
+            if value.is_empty() { "—" } else { value }.to_string(),
+            value_style,
+        ),
     ];
-    if focused && field != AddField::Via {
+    if focused && !matches!(field, AddField::Via | AddField::Tailscale) {
         spans.push(Span::styled(
             "_",
             Style::default().add_modifier(Modifier::SLOW_BLINK),
