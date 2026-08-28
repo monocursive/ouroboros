@@ -452,14 +452,13 @@ fn human_seconds(seconds: u64) -> String {
 
 /// The vendor's installer one-liner, quoted on the consent step exactly as
 /// `fleet_add`'s `TAILSCALE_INSTALL` runs it. That constant is private to the pipeline
-/// module, so this is a copy, pinned by
-/// `guided_consent_quotes_the_pipeline_commands_verbatim`.
-pub const TAILSCALE_INSTALL_QUOTED: &str =
-    "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+/// module; it re-exports the pipeline's own constant so the consent text cannot drift,
+/// and `guided_consent_quotes_the_pipeline_commands_verbatim` pins the literal.
+pub const TAILSCALE_INSTALL_QUOTED: &str = crate::fleet_add::TAILSCALE_INSTALL;
 
-/// What the pipeline starts, detached, once the installer has run — the `sudo -n
-/// tailscale up` inside `fleet_add`'s `TAILSCALE_UP_SCRIPT`.
-pub const TAILSCALE_UP_QUOTED: &str = "sudo -n tailscale up";
+/// What the pipeline starts, detached, once the installer has run — the pipeline's own
+/// operator-facing quote of `TAILSCALE_UP_SCRIPT`.
+pub const TAILSCALE_UP_QUOTED: &str = crate::fleet_add::TAILSCALE_UP_COMMAND;
 
 #[derive(Debug, Clone)]
 pub struct AddMachine {

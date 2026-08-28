@@ -291,7 +291,12 @@ fi
 /// The vendor's own documented one-liner, printed verbatim before it runs because it
 /// downloads and executes code as root on someone else's machine. `curl` stays
 /// unprivileged; only the shell that interprets the script is elevated.
-const TAILSCALE_INSTALL: &str = "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+pub const TAILSCALE_INSTALL: &str = "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+
+/// The operator-facing quote of what guided enrollment starts detached — the exact
+/// `sudo -n tailscale up` inside [`TAILSCALE_UP_SCRIPT`]. Public so every consent surface
+/// quotes this one string instead of holding a copy that can drift.
+pub const TAILSCALE_UP_COMMAND: &str = "sudo -n tailscale up";
 
 /// Both facts guided enrollment branches on, in one round trip. It always exits 0 so a
 /// missing `tailscale` or a locked-down `sudo` is an answer rather than a transport error.

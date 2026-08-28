@@ -144,6 +144,9 @@ jobs:
       # Toolchain while exercising the exact framework versions shipped by the app.
       - run: cargo check --locked --features desktop --bin ouro-desktop
       - run: cargo test --locked --features desktop --test desktop
+      # The desktop unit tests live in the lib target (desktop.rs, desktop_design.rs,
+      # desktop/machines.rs); `--test desktop` alone never runs them.
+      - run: cargo test --locked --features desktop --lib
 
   golden:
     name: Golden fixtures

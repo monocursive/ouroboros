@@ -175,12 +175,11 @@ it. This window will show the roster once a profile exists.";
 /// from `fleet_add`'s `TAILSCALE_INSTALL` so the consent text cannot drift away from what
 /// actually executes. `curl` stays unprivileged; only the shell interpreting the script is
 /// elevated.
-pub const TAILSCALE_INSTALL_COMMAND: &str =
-    "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+pub const TAILSCALE_INSTALL_COMMAND: &str = crate::fleet_add::TAILSCALE_INSTALL;
 
 /// The second command, from `fleet_add`'s `TAILSCALE_UP_SCRIPT`. It is started detached so
 /// the sign-in link can be read out of its output while it blocks on the operator.
-pub const TAILSCALE_UP_COMMAND: &str = "sudo -n tailscale up";
+pub const TAILSCALE_UP_COMMAND: &str = crate::fleet_add::TAILSCALE_UP_COMMAND;
 
 /// The sentences shown beside the two commands above. Guided enrollment is the one thing
 /// this form does that changes a machine the operator is not sitting at, so what it does
