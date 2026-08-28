@@ -86,7 +86,127 @@ remote attachment uses device code. Session start and send remain disabled until
 runtime reports that the selected subscription model is usable. Tokens never cross the
 gateway into GPUI.
 
+## Machines
+
+The globe button in the session rail's header opens **Machines**: the fleet this runtime
+belongs to, and the form that adds another machine to it. It sits beside **New** because
+both are window-level actions rather than anything about the open session, and it draws as
+a full-width panel in the workspace column — the same shape and the same slot as the
+new-session form. Only one of the two is up at a time; each wants the whole column, and the
+composer is hidden while either is showing.
+
+The panel names the fleet, states which member is this machine and at what address, and
+lists every member with its address, node, and a connected/offline chip. The chip wears the
+semantic tones — success for connected, warning for offline, neutral for unknown — never the
+action accent, because a machine being up is an operational outcome and not something to
+click. A member is **connected** when the runtime names its node in `connected_nodes`, or
+when it is this machine's own node: the local runtime does not list itself among its peers,
+and drawing this machine as offline in its own window would be a false report. Before any
+runtime status has arrived every peer is **unknown** rather than assumed offline, and the
+list says so.
+
+With no fleet profile in the data directory the panel shows an empty state that names
+`ouro fleet create` and the terminal client's own Machines flow, rather than an Add button
+that cannot work. The desktop reads the profile itself — `App::fleet_profile` is filled in
+by the terminal launcher and not by the desktop driver — once per data directory and again
+after an add settles.
+
+### Adding a machine
+
+The form takes a destination (`user@host`, required, the same thing you would type after
+`ssh`) and optionally a machine name and a private address; both optional fields say in
+their placeholder that the probe suggests them, so leaving them blank is the ordinary
+answer rather than an omission. A destination containing whitespace or starting with `-` is
+refused with a sentence, because it would reach `ssh` as something other than a machine.
+
+**Set up Tailscale on the destination** is off by default. Switching it on reveals what it
+will do — the two commands, quoted verbatim from the pipeline, that run as root over SSH on
+the destination:
+
+```sh
+curl -fsSL https://tailscale.com/install.sh | sudo -n sh
+sudo -n tailscale up
+```
+
+and a separate acknowledgement that must be ticked before the add can start. The toggle is
+not the consent; it is what reveals what is being consented to. Turning it back off
+withdraws the acknowledgement, so switching it on again asks afresh. Guided enrollment needs
+passwordless sudo on the destination; without it nothing runs and nothing is changed there.
+
+### The progress card
+
+The add runs on its own thread through `fleet_add::spawn_add`. Its sink does nothing but
+send each `AddEvent` into a channel, which the window drains on the tick it already has, so
+the pipeline never touches GPUI state.
+
+The card carries a six-step rail — probe, network, binary, copy, enroll, done — **driven
+only by the typed events**. `AddEvent::Line` is free-form text that happens to be what the
+CLI prints; reading a stage out of it would be the client inventing progress the pipeline
+never claimed, so a line moves nothing but the log. Each typed event settles its own stage
+and every stage before it (an install decision cannot exist without a probe) and lights the
+next.
+
+Today `spawn_add` emits only `Line` plus one terminal event. An add in flight therefore
+shows an unlit rail with a line saying exactly that, and the log tail — bounded, and honest
+about how many earlier lines it dropped — is the whole progress report. A `Line`-only run
+that reaches `Done` still completes the rail, because `Done` is typed and genuinely implies
+every step before it. When the pipeline gains the rest of its typed vocabulary the same card
+lights up with no change to the window.
+
+`Install(DistArtifact(path))` names the artifact by file and by full path.
+`WaitingForAddress` renders as a countdown against its budget, and says so plainly once that
+budget is spent instead of sitting at "0s left". `Done` shows a summary in the outcome's own
+words, any remaining recipe, and refreshes the member list. `Failed` shows the error, the
+residue lines naming what the failure left behind, and the sentence that matters most —
+running the add again resumes it and reuses what already succeeded.
+
+**Stop** calls `AddHandle::cancel`, which sets a flag the pipeline reads at its next
+boundary. A blocking remote call already in flight finishes first, so the card says
+"stopping" and states that, rather than claiming the add has ended before a terminal event
+says it has.
+
+### The Tailscale sign-in link
+
+`AuthUrl` gets its own card inside the progress card: the instruction, the URL as readable
+text, and a button that hands it to the system browser through `cx.open_url` — the same
+affordance, and the same HTTPS-only guard, as the ChatGPT sign-in card. A link that is not
+HTTPS is shown but never opened, and the card says why.
+
+The link is a live, time-critical, one-time credential, and it is treated as the pipeline
+treats it: held in memory only for as long as it is live, dropped as soon as the network
+step settles or the add finishes, and written nowhere — not to a log, not to a file, not
+into the invitation. Its in-memory holder redacts itself in `Debug` output so a panic or a
+stray log line cannot leak it.
+
+One caveat worth stating plainly: on today's bridge the pipeline also *prints* that URL as
+an ordinary progress line, because the CLI's guided-enrollment path writes it to the
+terminal. Those lines land in the card's in-memory log tail and are rendered verbatim —
+the same text the terminal client shows. The tail is memory only and dies with the card,
+but it is not redacted, so nothing should debug-print a whole card.
+
+### Limits of this slice
+
+- **Nothing here has been verified by eye.** A GPUI window cannot be screenshotted from the
+  build that produced it, so every claim above about layout, spacing, and tone is a claim
+  about the code that draws it, not about pixels that were looked at. The state machine
+  underneath is covered by tests; the drawing is not.
+- **The desktop and the TUI keep separate stepper state, deliberately.** The terminal
+  client's Machines stepper and this card were built in parallel against the same
+  `AddEvent` contract and share none of their state. That is a known unification candidate,
+  not a design position: one projection with two renderers is what the transcript already
+  does, and this should follow it once both halves have settled.
+- The member list is a projection over the local roster and the runtime's peer list. It
+  performs no reachability probe of its own, so "offline" means the runtime is not connected
+  to that node, not that the machine is down.
+- `cargo test --features desktop --lib` is currently not run by CI, which runs
+  `--features desktop --test desktop`. The unit tests for this surface — and the
+  pre-existing ones in `desktop.rs` and `desktop_design.rs` — need that step to be covered.
+
 ## Visual system
+
+`tui/src/desktop/machines.rs` holds the Machines surface as state rather than pixels — the
+fleet projection, the form's validation, and the card's event fold — with no GPUI in it, so
+each rule above is a test rather than a screenshot. `tui/src/desktop.rs` renders it.
 
 `tui/src/desktop_design.rs` is the native design-system boundary. It defines paired dark
 and light palettes, the page/panel/card/inset layer order, semantic tones, GPUI Component

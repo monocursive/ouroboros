@@ -24,20 +24,29 @@ use gpui::{
 };
 use gpui_component::alert::Alert;
 use gpui_component::button::{ButtonVariant, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Enter as InputEnter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::spinner::Spinner;
+use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable as _, Icon, IconName, Root, Sizable as _, WindowExt as _};
 use gpui_component_assets::Assets as ComponentAssets;
 use tokio::sync::mpsc as tokio_mpsc;
 
+/// The Machines surface's state machine: fleet projection, form validation, and the card a
+/// running deploy drives. Kept out of this file because none of it needs a window, which is
+/// what lets it be tested without one.
+mod machines;
+
 use crate::config;
 use crate::desktop_design::{self as design, DesktopTokens, Tone};
+use crate::fleet::Profile as FleetProfile;
+use crate::fleet_add::{spawn_add, AddEvent, AddHandle};
 use crate::model::{
     ApprovalDecision, ApprovalScope, Effort, ModelsCatalog, Plane, ProviderEntry, SandboxMode,
     Triage,
@@ -49,6 +58,7 @@ use crate::ui::app::{
     DesktopTone, Loadable, Mode, Msg, NoticeKind, ProviderChoice,
 };
 use crate::ui::{self, TICK};
+use machines::{AddCard, AddForm, Phase as AddPhase, Presence, Stage, StageState};
 
 const LAUNCHER_ERROR_LIMIT: usize = 16 * 1024;
 const COLLAPSED_TOOL_LINES: usize = 12;
@@ -527,6 +537,37 @@ struct DesktopView {
     /// record; selecting another model starts at High again.
     new_reasoning_effort: Effort,
     show_new: bool,
+    /// The Machines surface. A peer of the new-session form: both are full-width panels in
+    /// the workspace column, both are opened from the rail header, and only one is up at a
+    /// time because each wants the whole column.
+    show_machines: bool,
+    /// The three Add Machine fields. Target is required; the other two are what the probe
+    /// would otherwise suggest, which is what their placeholders say.
+    add_target: Entity<InputState>,
+    add_machine: Entity<InputState>,
+    add_host: Entity<InputState>,
+    /// The parts of the form that are not text. Held here rather than read back out of the
+    /// widgets, for the same reason the provider and model choices are — see [`ModelPicker`].
+    add_toggles: AddForm,
+    /// A refusal the operator has actually seen, raised by pressing Start. The form does not
+    /// scold while it is being filled in.
+    add_error: Option<String>,
+    /// The fleet roster this window last read, and the data directory it was read from. The
+    /// desktop path never fills `App::fleet_profile`, so this is the desktop's own copy;
+    /// re-read when the surface opens and after an add settles, not every frame.
+    fleet: Option<FleetProfile>,
+    fleet_error: Option<String>,
+    /// Whether the fleet CA key is present, read once with the profile. `render` asks this
+    /// every frame and the answer is a file on disk.
+    fleet_can_invite: bool,
+    fleet_loaded: bool,
+    fleet_loaded_for: Option<String>,
+    /// The running add: the card the events drive, the handle that can ask it to stop, and
+    /// the receiver the sink writes into. All three live and die together.
+    add_card: Option<AddCard>,
+    add_handle: Option<AddHandle>,
+    add_events: Option<Receiver<AddEvent>>,
+    add_scroll: ScrollHandle,
     action_error: Option<String>,
     transcript_scroll: ScrollHandle,
     session_scroll: UniformListScrollHandle,
@@ -615,6 +656,15 @@ impl DesktopView {
                 .default_value(workspace_value)
         });
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
+        // The two optional fields say what leaving them blank means, because blank is the
+        // ordinary answer: the probe already knows this machine's hostname and address.
+        let add_target = cx.new(|cx| InputState::new(window, cx).placeholder("user@host"));
+        let add_machine = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Optional — the probe suggests one"));
+        let add_host = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Optional — the probe suggests a private address")
+        });
         let provider_select =
             cx.new(|cx| SelectState::new(Vec::<ProviderRow>::new(), None, window, cx));
         let model_picker = Self::new_model_picker(window, cx);
@@ -625,6 +675,9 @@ impl DesktopView {
             model.clone(),
             workspace.clone(),
             rename.clone(),
+            add_target.clone(),
+            add_machine.clone(),
+            add_host.clone(),
         ] {
             subscriptions.push(cx.subscribe_in(
                 &input,
@@ -696,6 +749,21 @@ impl DesktopView {
             new_sandbox: None,
             new_reasoning_effort: Effort::High,
             show_new: false,
+            show_machines: false,
+            add_target,
+            add_machine,
+            add_host,
+            add_toggles: AddForm::default(),
+            add_error: None,
+            fleet: None,
+            fleet_error: None,
+            fleet_can_invite: false,
+            fleet_loaded: false,
+            fleet_loaded_for: None,
+            add_card: None,
+            add_handle: None,
+            add_events: None,
+            add_scroll: ScrollHandle::new(),
             action_error: None,
             transcript_scroll: ScrollHandle::new(),
             session_scroll: UniformListScrollHandle::new(),
@@ -776,6 +844,7 @@ impl DesktopView {
             }
         }
 
+        self.drain_add_events();
         self.flush_calls();
         if let Some(app) = self.app.as_ref() {
             let len = app.desktop_transcript().len();
@@ -784,6 +853,66 @@ impl DesktopView {
             }
             self.transcript_len = len;
         }
+    }
+
+    /// Fold whatever the add pipeline has produced since the last tick into the card.
+    ///
+    /// The sink runs on the pipeline's own thread and does nothing but send; the window
+    /// reads on the tick it already has. That is the same shape as the connection driver
+    /// above, and it means the pipeline never touches GPUI state.
+    fn drain_add_events(&mut self) {
+        let Some(events) = self.add_events.as_ref() else {
+            return;
+        };
+        let mut settled = false;
+        while let Ok(event) = events.try_recv() {
+            let terminal = matches!(event, AddEvent::Done(_) | AddEvent::Failed { .. });
+            if let Some(card) = self.add_card.as_mut() {
+                card.observe(event);
+            }
+            if terminal {
+                settled = true;
+                break;
+            }
+        }
+        if settled {
+            // The thread is finished by construction — the terminal event is the last thing
+            // it sends — so the handle has nothing left to cancel and the roster on disk is
+            // now whatever the add made it.
+            self.add_events = None;
+            self.add_handle = None;
+            self.fleet_loaded = false;
+            self.reload_fleet();
+        }
+    }
+
+    /// Re-read the fleet profile for the data directory the runtime named.
+    ///
+    /// `App::fleet_profile` is filled in by the terminal launcher and not by the desktop
+    /// driver, so this window keeps its own copy rather than reaching into a reducer field
+    /// nothing populates here. One read per data directory, plus one after an add settles.
+    fn reload_fleet(&mut self) {
+        let data_dir = self.app.as_ref().and_then(|app| app.data_dir.clone());
+        if self.fleet_loaded && self.fleet_loaded_for == data_dir {
+            return;
+        }
+        match machines::load_profile(data_dir.as_deref()) {
+            Ok(profile) => {
+                self.fleet = profile;
+                self.fleet_error = None;
+            }
+            Err(error) => {
+                self.fleet = None;
+                self.fleet_error = Some(error);
+            }
+        }
+        self.fleet_can_invite = self
+            .fleet
+            .as_ref()
+            .zip(data_dir.as_deref())
+            .is_some_and(|(profile, data_dir)| profile.can_invite(Path::new(data_dir)));
+        self.fleet_loaded = true;
+        self.fleet_loaded_for = data_dir;
     }
 
     fn flush_calls(&mut self) {
@@ -1630,19 +1759,44 @@ impl DesktopView {
                             ),
                     )
                     .child(
-                        design::secondary_button("new-session", "New")
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .flex_none()
-                            .icon(IconName::Plus)
-                            .tooltip("New session · ⌘N")
-                            .disabled(self.app.is_none())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_new = !this.show_new;
-                                this.action_error = None;
-                                if this.show_new {
-                                    this.open_new_session(window, cx);
-                                }
-                                cx.notify();
-                            })),
+                            // Machines sits beside New because both are window-level
+                            // actions rather than anything about the open session.
+                            .child(
+                                design::icon_button(
+                                    "open-machines",
+                                    IconName::Globe,
+                                    "Machines — the fleet this runtime belongs to",
+                                )
+                                .disabled(self.app.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.show_machines {
+                                        this.close_machines(cx);
+                                    } else {
+                                        this.open_machines(cx);
+                                    }
+                                })),
+                            )
+                            .child(
+                                design::secondary_button("new-session", "New")
+                                    .flex_none()
+                                    .icon(IconName::Plus)
+                                    .tooltip("New session · ⌘N")
+                                    .disabled(self.app.is_none())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.show_new = !this.show_new;
+                                        this.action_error = None;
+                                        if this.show_new {
+                                            this.show_machines = false;
+                                            this.open_new_session(window, cx);
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -2364,6 +2518,809 @@ impl DesktopView {
                         })),
                     ),
             )
+    }
+
+    // ------------------------------------------------------------------------------
+    // Machines.
+    //
+    // Placed where the new-session form is placed, for the same reason: it is a
+    // full-width panel that wants the workspace column, opened from the rail header
+    // where the window's other global action already lives. A fleet is not a property
+    // of the open session, so it does not belong in the session rail's list or the
+    // composer footer.
+    // ------------------------------------------------------------------------------
+
+    fn open_machines(&mut self, cx: &mut Context<Self>) {
+        self.show_machines = true;
+        // Two panels competing for one column is a layout with no winner.
+        self.show_new = false;
+        self.action_error = None;
+        self.reload_fleet();
+        cx.notify();
+    }
+
+    fn close_machines(&mut self, cx: &mut Context<Self>) {
+        self.show_machines = false;
+        self.add_error = None;
+        cx.notify();
+    }
+
+    /// The form as it currently reads, with the text pulled out of the three inputs and
+    /// the toggles taken from the record this window keeps.
+    fn add_form(&self, cx: &GpuiApp) -> AddForm {
+        AddForm {
+            target: self.add_target.read(cx).value().to_string(),
+            machine: self.add_machine.read(cx).value().to_string(),
+            host: self.add_host.read(cx).value().to_string(),
+            joined_without_signing_key: !self.can_invite(),
+            ..self.add_toggles.clone()
+        }
+    }
+
+    /// Whether this machine holds the key that signs an invitation. A member that joined
+    /// from one does not — the same fact, from the same file, that the terminal client
+    /// checks before its own Add. Read with the profile rather than here, because `render`
+    /// asks every frame and the answer lives on disk.
+    fn can_invite(&self) -> bool {
+        self.fleet_can_invite
+    }
+
+    /// Launch the add on its own thread and point the card at its events.
+    ///
+    /// The sink is the pipeline's only contact with this window: it sends into a channel
+    /// and returns, so nothing on that thread touches GPUI state and a window that has
+    /// gone away is a closed channel rather than a crash.
+    fn start_add(&mut self, cx: &mut Context<Self>) {
+        if self
+            .add_card
+            .as_ref()
+            .is_some_and(|card| !card.phase().settled())
+        {
+            return;
+        }
+        let request = match self.add_form(cx).validate() {
+            Ok(request) => request,
+            Err(refusal) => {
+                self.add_error = Some(refusal.message().to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let Some(data_dir) = self.app.as_ref().and_then(|app| app.data_dir.clone()) else {
+            self.add_error = Some(
+                "this window does not know the runtime's data directory yet, so it cannot \
+                 run an add. Wait for the connection to settle and try again."
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        // The same value the CLI passes: the owner's host, from the profile on disk.
+        let owner_host = self.fleet.as_ref().map(|profile| profile.host.clone());
+        let params = request.params(Path::new(&data_dir), owner_host);
+
+        let (sender, receiver) = mpsc::channel();
+        // A closed channel is a window that went away, not a reason to stop: dropping the
+        // handle does not stop the pipeline, so a closed window lets the add finish on the
+        // destination rather than abandoning it half-done.
+        let handle = spawn_add(params, move |event| {
+            let _ = sender.send(event);
+        });
+        self.add_card = Some(AddCard::new(request.target));
+        self.add_handle = Some(handle);
+        self.add_events = Some(receiver);
+        self.add_error = None;
+        cx.notify();
+    }
+
+    fn cancel_add(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.add_handle.as_ref() {
+            handle.cancel();
+        }
+        if let Some(card) = self.add_card.as_mut() {
+            card.request_cancel();
+        }
+        cx.notify();
+    }
+
+    fn dismiss_add_card(&mut self, cx: &mut Context<Self>) {
+        if self
+            .add_card
+            .as_ref()
+            .is_some_and(|card| card.phase().settled())
+        {
+            self.add_card = None;
+        }
+        cx.notify();
+    }
+
+    fn render_machines(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = design::tokens(cx);
+        let view = self.fleet.as_ref().map(|profile| {
+            machines::fleet_view(
+                profile,
+                self.app.as_ref().and_then(|app| app.status.value.as_ref()),
+            )
+        });
+
+        design::panel(tokens)
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(880.0))
+            .mx_auto()
+            .mt_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(tokens.line)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(design::icon_tile(tokens, cx, Tone::Accent, IconName::Globe))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(match view.as_ref() {
+                                                Some(view) => format!("Fleet · {}", view.fleet),
+                                                None => "Machines".to_string(),
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.ink_2)
+                                            .child(match view.as_ref() {
+                                                Some(view) => format!(
+                                                    "This machine is {} at {} · {} connected · {} offline",
+                                                    view.this_machine,
+                                                    view.this_host,
+                                                    view.connected(),
+                                                    view.offline()
+                                                ),
+                                                None => "Fleet membership for this runtime".to_string(),
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        design::icon_button("close-machines", IconName::Close, "Close Machines")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_machines(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .when_some(self.fleet_error.clone(), |body, error| {
+                        body.child(
+                            Alert::error("machines-profile-error", format!(
+                                "This data directory has a fleet directory whose profile could not be read: {error}"
+                            ))
+                            .small(),
+                        )
+                    })
+                    .map(|body| match view.as_ref() {
+                        Some(view) => body.child(self.render_member_list(view, tokens, cx)),
+                        None => body.child(design::empty_state(
+                            tokens,
+                            cx,
+                            IconName::Globe,
+                            machines::NO_FLEET_TITLE,
+                            machines::NO_FLEET_BODY,
+                        )),
+                    })
+                    .when(view.is_some(), |body| {
+                        body.children(self.render_add_card(tokens, cx))
+                            .child(self.render_add_form(tokens, cx))
+                    }),
+            )
+    }
+
+    fn render_member_list(
+        &self,
+        view: &machines::FleetView,
+        tokens: DesktopTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(design::eyebrow(tokens, "MEMBERS"))
+            .children(view.members.iter().enumerate().map(|(index, member)| {
+                // Connected/offline is an operational outcome, so it wears the semantic
+                // tones. The accent is reserved for what an operator can act on, and a
+                // machine being up is not an action.
+                let tone = match member.presence {
+                    Presence::Connected => Tone::Success,
+                    Presence::Offline => Tone::Warning,
+                    Presence::Unknown => Tone::Neutral,
+                };
+                design::inset(tokens)
+                    .id(("fleet-member", index))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .p_3()
+                    .child(design::icon_tile(
+                        tokens,
+                        cx,
+                        tone,
+                        if member.is_this_machine {
+                            IconName::CircleUser
+                        } else {
+                            IconName::Globe
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .truncate()
+                                            .child(member.machine.clone()),
+                                    )
+                                    .when(member.is_this_machine, |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(tokens.ink_3)
+                                                .child("this machine"),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("fleet-member-meta", index))
+                                    .text_xs()
+                                    .text_color(tokens.ink_3)
+                                    .truncate()
+                                    .child(format!("{} · {}", member.host, member.node)),
+                            ),
+                    )
+                    .child(
+                        design::status_tag(tokens, cx, tone, member.presence.label()).flex_none(),
+                    )
+            }))
+            .when(
+                self.app
+                    .as_ref()
+                    .is_none_or(|app| app.status.value.is_none()),
+                |list| {
+                    list.child(div().text_xs().text_color(tokens.ink_3).child(
+                        "No runtime status has arrived yet, so who is answering is unknown \
+                         rather than offline.",
+                    ))
+                },
+            )
+    }
+
+    fn render_add_form(&self, tokens: DesktopTokens, cx: &mut Context<Self>) -> gpui::Div {
+        let running = self
+            .add_card
+            .as_ref()
+            .is_some_and(|card| !card.phase().settled());
+        let form = self.add_form(cx);
+        let refusal = form.validate().err();
+        let setup = self.add_toggles.setup_tailscale;
+        let consented = self.add_toggles.consented;
+
+        design::inset(tokens)
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child(design::eyebrow(tokens, "ADD A MACHINE"))
+            // A standing condition rather than a form still being filled in, so it is
+            // stated above the fields instead of as a nudge under the button.
+            .when(refusal == Some(machines::FormRefusal::NotAnOwner), |body| {
+                body.child(
+                    Alert::warning(
+                        "machines-not-owner",
+                        machines::FormRefusal::NotAnOwner.message(),
+                    )
+                    .small(),
+                )
+            })
+            .child(design::field(
+                tokens,
+                "Destination",
+                Some("Required · reached over SSH".into()),
+                Input::new(&self.add_target).cleanable(true),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        design::field(
+                            tokens,
+                            "Machine name",
+                            None,
+                            Input::new(&self.add_machine).cleanable(true),
+                        )
+                        .flex_1(),
+                    )
+                    .child(
+                        design::field(
+                            tokens,
+                            "Private address",
+                            None,
+                            Input::new(&self.add_host).cleanable(true),
+                        )
+                        .flex_1(),
+                    ),
+            )
+            .child(
+                Switch::new("add-setup-tailscale")
+                    .checked(setup)
+                    .label("Set up Tailscale on the destination")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.add_toggles.set_setup_tailscale(*checked);
+                        this.add_error = None;
+                        cx.notify();
+                    })),
+            )
+            .when(setup, |body| {
+                // The consequence is stated before it can be authorised, and in the
+                // installer's own words rather than a paraphrase of them.
+                body.child(
+                    design::card(tokens, cx, Tone::Warning)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .children(machines::TAILSCALE_CONSENT.iter().enumerate().map(
+                            |(index, line)| {
+                                let paragraph =
+                                    div().text_xs().text_color(tokens.ink_2).child(*line);
+                                if index == 0 {
+                                    paragraph
+                                } else {
+                                    paragraph.mt_1()
+                                }
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .rounded(tokens.radius)
+                                .bg(tokens.inset)
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(tokens.ink)
+                                .child(machines::TAILSCALE_INSTALL_COMMAND)
+                                .child(machines::TAILSCALE_UP_COMMAND),
+                        )
+                        .child(
+                            Checkbox::new("add-tailscale-consent")
+                                .checked(consented)
+                                .label(machines::TAILSCALE_CONSENT_ACK)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.add_toggles.consented = *checked;
+                                    this.add_error = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .when_some(self.add_error.clone(), |body, error| {
+                body.child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.tone(cx, Tone::Danger).foreground)
+                        .child(error),
+                )
+            })
+            .child(
+                div().flex().items_center().justify_end().gap_2().child(
+                    design::primary_button("start-add", "Add machine")
+                        .icon(IconName::ArrowRight)
+                        .loading(running)
+                        .disabled(running || refusal.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.start_add(cx))),
+                ),
+            )
+            .when_some(
+                refusal
+                    .filter(|_| !running)
+                    // Already stated above the fields, in a louder place.
+                    .filter(|refusal| *refusal != machines::FormRefusal::NotAnOwner),
+                |body, refusal| {
+                    body.child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.ink_3)
+                            .child(refusal.message()),
+                    )
+                },
+            )
+    }
+
+    fn render_add_card(
+        &self,
+        tokens: DesktopTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let card = self.add_card.as_ref()?;
+        let phase = card.phase();
+        let (tone, title) = match phase {
+            AddPhase::Running => (Tone::Accent, format!("Adding {}", card.target)),
+            AddPhase::Cancelling => (Tone::Warning, format!("Stopping {}", card.target)),
+            AddPhase::Succeeded => (Tone::Success, format!("Added {}", card.target)),
+            AddPhase::Failed => (Tone::Danger, format!("{} was not added", card.target)),
+        };
+
+        Some(
+            design::card(tokens, cx, tone)
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(match phase {
+                            AddPhase::Running | AddPhase::Cancelling => Spinner::new()
+                                .small()
+                                .color(tokens.tone(cx, tone).foreground)
+                                .into_any_element(),
+                            AddPhase::Succeeded => Icon::new(IconName::CircleCheck)
+                                .text_color(tokens.tone(cx, tone).foreground)
+                                .into_any_element(),
+                            AddPhase::Failed => Icon::new(IconName::CircleX)
+                                .text_color(tokens.tone(cx, tone).foreground)
+                                .into_any_element(),
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .when(card.can_cancel(), |row| {
+                            row.child(
+                                design::danger_button("cancel-add", "Stop")
+                                    .flex_none()
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_add(cx))),
+                            )
+                        })
+                        .when(phase.settled(), |row| {
+                            row.child(
+                                design::icon_button(
+                                    "dismiss-add",
+                                    IconName::Close,
+                                    "Dismiss this add",
+                                )
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_add_card(cx))),
+                            )
+                        }),
+                )
+                .when(card.cancel_requested(), |view| {
+                    view.child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.tone(cx, Tone::Warning).foreground)
+                            .child(machines::CANCEL_NOTE),
+                    )
+                })
+                .children(self.render_auth_prompt(card, tokens, cx))
+                .when_some(card.countdown(), |view, countdown| {
+                    // A spent budget is a failure that has not been reported yet. Saying
+                    // "0s left" and nothing else would read as a wait that is still going.
+                    let (color, text) = if countdown.expired() {
+                        (
+                            tokens.tone(cx, Tone::Warning).foreground,
+                            format!(
+                                "The {}s wait for a tailnet address is spent. The pipeline is \
+                                 about to give up; running the add again resumes it.",
+                                countdown.budget_s
+                            ),
+                        )
+                    } else {
+                        (
+                            tokens.ink_2,
+                            format!(
+                                "Waiting for the destination to receive a tailnet address — \
+                                 {}s left of {}s.",
+                                countdown.remaining_s(),
+                                countdown.budget_s
+                            ),
+                        )
+                    };
+                    view.child(div().text_xs().text_color(color).child(text))
+                })
+                .child(self.render_stage_rail(card, tokens, cx))
+                .children(self.render_add_lines(card, tokens))
+                .when_some(card.outcome().cloned(), |view, outcome| {
+                    view.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.tone(cx, Tone::Success).foreground)
+                                    .child(machines::success_summary(&outcome)),
+                            )
+                            .children(outcome.recipe.as_ref().map(|recipe| {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(design::eyebrow(tokens, "WHAT REMAINS"))
+                                    .children(recipe.lines.iter().map(|line| {
+                                        div()
+                                            .text_xs()
+                                            .font_family("monospace")
+                                            .text_color(tokens.ink_2)
+                                            .child(line.clone())
+                                    }))
+                            })),
+                    )
+                })
+                .when_some(card.failure().cloned(), |view, failure| {
+                    view.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.tone(cx, Tone::Danger).foreground)
+                                    .child(failure.error.clone()),
+                            )
+                            .when(!failure.residue.is_empty(), |body| {
+                                body.child(design::eyebrow(tokens, "WHAT THIS LEFT BEHIND"))
+                                    .children(failure.residue.iter().map(|line| {
+                                        div().text_xs().text_color(tokens.ink_2).child(line.clone())
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.ink_2)
+                                    .child(machines::RESUME_NOTE),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The sign-in link's moment. It is the one thing on this card an operator must act on
+    /// within a time budget, so it gets a button, and the URL is rendered as text beside it
+    /// because a link that cannot be read cannot be checked.
+    fn render_auth_prompt(
+        &self,
+        card: &AddCard,
+        tokens: DesktopTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let auth = card.auth()?;
+        let url = auth.url().to_string();
+        let openable = auth.openable();
+        Some(
+            design::card(tokens, cx, Tone::Warning)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_color(tokens.tone(cx, Tone::Warning).foreground)
+                        .child(Icon::new(IconName::ExternalLink).small())
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Approve this machine on Tailscale"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.ink_2)
+                        .child(machines::AUTH_INSTRUCTION),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(tokens.ink_3)
+                        .child(url.clone()),
+                )
+                .child(div().flex().items_center().gap_2().child(if openable {
+                    design::primary_button("open-tailscale-signin", "Open sign-in link")
+                        .icon(IconName::ExternalLink)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            // Same guard as the ChatGPT card: the browser is only
+                            // handed an HTTPS URL, and the check is made here rather
+                            // than trusted from upstream.
+                            if url.starts_with("https://") {
+                                cx.open_url(&url);
+                            }
+                        }))
+                        .into_any_element()
+                } else {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.tone(cx, Tone::Danger).foreground)
+                        .child(
+                            "This sign-in link is not HTTPS, so it was not opened. \
+                                     Check it before using it.",
+                        )
+                        .into_any_element()
+                }))
+                .into_any_element(),
+        )
+    }
+
+    fn render_stage_rail(
+        &self,
+        card: &AddCard,
+        tokens: DesktopTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let running = !card.phase().settled();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(card.only_lines_so_far() && running, |rail| {
+                rail.child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.ink_3)
+                        .child(machines::LINE_ONLY_NOTE),
+                )
+            })
+            .children(machines::STAGES.into_iter().map(|stage| {
+                let state = card.stage_state(stage);
+                let tone = match state {
+                    StageState::Done => Tone::Success,
+                    StageState::Active => Tone::Accent,
+                    StageState::Failed => Tone::Danger,
+                    StageState::Pending => Tone::Neutral,
+                };
+                let detail = self.stage_detail(card, stage);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(match state {
+                        StageState::Active => Spinner::new()
+                            .small()
+                            .color(tokens.tone(cx, tone).foreground)
+                            .into_any_element(),
+                        StageState::Done => Icon::new(IconName::CircleCheck)
+                            .small()
+                            .text_color(tokens.tone(cx, tone).foreground)
+                            .into_any_element(),
+                        StageState::Failed => Icon::new(IconName::CircleX)
+                            .small()
+                            .text_color(tokens.tone(cx, tone).foreground)
+                            .into_any_element(),
+                        StageState::Pending => Icon::new(IconName::Dash)
+                            .small()
+                            .text_color(tokens.ink_3)
+                            .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(if state == StageState::Active {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .text_color(if state == StageState::Pending {
+                                tokens.ink_3
+                            } else {
+                                tokens.ink
+                            })
+                            .child(stage.title()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.ink_3)
+                            .truncate()
+                            .child(detail.unwrap_or_else(|| stage.describe().to_string())),
+                    )
+            }))
+    }
+
+    /// What the pipeline actually said about a stage, where it said anything. Never a
+    /// summary of the log lines — only the typed events carry these.
+    fn stage_detail(&self, card: &AddCard, stage: Stage) -> Option<String> {
+        match stage {
+            Stage::Probe => card.probe().map(str::to_string),
+            Stage::Network => card.network().map(str::to_string),
+            Stage::Binary => card.install().map(str::to_string),
+            Stage::Copy => card.copying().map(|what| format!("sending the {what}")),
+            Stage::Enroll | Stage::Finish => None,
+        }
+    }
+
+    fn render_add_lines(&self, card: &AddCard, tokens: DesktopTokens) -> Option<gpui::Div> {
+        let lines = card.lines().map(str::to_string).collect::<Vec<_>>();
+        if lines.is_empty() {
+            return None;
+        }
+        let omitted = card.lines_omitted();
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(design::eyebrow(tokens, "PIPELINE OUTPUT"))
+                .child(
+                    div()
+                        .id("add-lines")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(180.0))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.add_scroll)
+                        .p_2()
+                        .rounded(tokens.radius)
+                        .bg(tokens.inset)
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(tokens.ink_2)
+                        .when(omitted > 0, |body| {
+                            body.child(
+                                div()
+                                    .text_color(tokens.ink_3)
+                                    .child(format!("… {omitted} earlier lines omitted …")),
+                            )
+                        })
+                        .children(lines.into_iter().map(|line| div().child(line))),
+                ),
+        )
     }
 
     fn render_account(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -3362,6 +4319,9 @@ impl Render for DesktopView {
             .when(self.show_new, |view| {
                 view.child(self.render_new_session(cx))
             })
+            .when(self.show_machines, |view| {
+                view.child(self.render_machines(cx))
+            })
             .when_some(notice, |view, (notice, tone)| {
                 let alert = match tone {
                     Tone::Danger => Alert::error("desktop-notice", notice),
@@ -3382,9 +4342,10 @@ impl Render for DesktopView {
             .children(self.render_account(cx))
             .child(self.render_transcript(window, cx))
             .children(self.render_approval(cx))
-            .when(!self.show_new && !approval_pending, |view| {
-                view.child(self.render_composer(cx))
-            });
+            .when(
+                !self.show_new && !self.show_machines && !approval_pending,
+                |view| view.child(self.render_composer(cx)),
+            );
 
         div()
             .track_focus(&self.focus_handle)
