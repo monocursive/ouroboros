@@ -804,6 +804,11 @@ impl DesktopView {
                     // it opens rather than a frame or two after. A reconnect builds a new
                     // `App`, so this is genuinely once per connection.
                     app.desktop_fetch_pickers();
+                    // A reconnect builds a fresh `App`; if the Machines panel is already
+                    // showing, re-arm its live status polling on the new connection.
+                    if self.show_machines {
+                        app.desktop_machines_open(true);
+                    }
                     self.status = format!("Connected · {} · {}", app.hello.node, app.hello.scope);
                     self.app = Some(app);
                     self.seeded = false;
@@ -1792,6 +1797,9 @@ impl DesktopView {
                                         this.action_error = None;
                                         if this.show_new {
                                             this.show_machines = false;
+                                            if let Some(app) = this.app.as_mut() {
+                                                app.desktop_machines_open(false);
+                                            }
                                             this.open_new_session(window, cx);
                                         }
                                         cx.notify();
@@ -2536,12 +2544,18 @@ impl DesktopView {
         self.show_new = false;
         self.action_error = None;
         self.reload_fleet();
+        if let Some(app) = self.app.as_mut() {
+            app.desktop_machines_open(true);
+        }
         cx.notify();
     }
 
     fn close_machines(&mut self, cx: &mut Context<Self>) {
         self.show_machines = false;
         self.add_error = None;
+        if let Some(app) = self.app.as_mut() {
+            app.desktop_machines_open(false);
+        }
         cx.notify();
     }
 

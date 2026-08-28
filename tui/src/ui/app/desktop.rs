@@ -607,6 +607,22 @@ impl App {
         self.fetch_models();
     }
 
+    /// The desktop's Machines panel opened or closed. While it is open, the shared tick
+    /// polls `runtime.status` at the same cadence the TUI's machines overlay uses, so
+    /// member presence chips stay live; opening also asks immediately rather than
+    /// waiting out the cadence. Closing merely stops the extra polling.
+    pub fn desktop_machines_open(&mut self, open: bool) {
+        self.desktop_machines_open = open;
+        if open {
+            self.issue_if_due(
+                super::Tag::Status,
+                "runtime.status",
+                serde_json::json!({}),
+                super::STATUS_TICKS,
+            );
+        }
+    }
+
     /// Reasoning levels both the selected model and provider transport declare usable.
     /// A missing catalogue/provider row returns none rather than a generic three-row list:
     /// the caller asked for what is available for this model, and silence is not proof.

@@ -847,6 +847,11 @@ pub struct App {
     pub ticks: u64,
     pub account: Loadable<AccountState>,
     pub status: Loadable<RuntimeStatus>,
+    /// The desktop's Machines panel is open, so member presence must stay live. The TUI's
+    /// machines overlay gets the same status cadence through `Overlay::Machines`; the
+    /// desktop has no overlay, so it raises this flag through
+    /// [`App::desktop_machines_open`] instead.
+    pub desktop_machines_open: bool,
     pub providers: Loadable<Vec<ProviderEntry>>,
     /// What the runtime can vouch for about each provider's models. Fetched on demand by
     /// the surfaces that offer a model picker; a gateway that does not serve
@@ -1108,6 +1113,7 @@ impl App {
             ticks: 0,
             account: Loadable::default(),
             status: Loadable::default(),
+            desktop_machines_open: false,
             providers: Loadable::default(),
             models: Loadable::default(),
             sessions: SessionsTab::default(),
@@ -2377,6 +2383,7 @@ impl App {
         // subscribe calls.
         if !self.sessions.recovering.is_empty()
             || matches!(self.overlay, Some(Overlay::Machines(_)))
+            || self.desktop_machines_open
         {
             self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
         }
