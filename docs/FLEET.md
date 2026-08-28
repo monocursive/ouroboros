@@ -144,6 +144,27 @@ runs that exercise on Linux before a release artifact may publish. This remains 
 isolated same-host proof, not a claim that a release has already been installed on three
 physical networks.
 
+What has been proven across two real machines (2026-08-28): a `make dist-linux`
+artifact was deployed from a macOS checkout to a fresh Ubuntu 26.04 VPS by
+`ouro fleet add` (probe, artifact resolution, binary + invitation copy, remote join),
+the two packaged runtimes formed this TLS mesh over a WAN link, `fleet doctor` passed
+on both ends, and `ouro run --machine` executed a real model turn on the remote
+machine. Two honest limits of that run: the VPS was enrolled at loopback and reached
+through an SSH port-forward plus a held EPMD registration — a lab topology, not yet a
+tailnet-address formation — and the remote runtime had to be started by hand once,
+because enroll's start validation raced its own runtime boot on the pinned gateway
+port on that cold 4-core machine (both boots died `eaddrinuse`; a manual `ouro daemon`
+on the same profile came up clean). That race is an open defect. A second lesson from
+the same topology: when one side's address silently drops the other's SYNs (the VPS
+dialing the Mac's CGNAT tailnet address), that side sits in `connecting` for minutes at
+a time and Erlang's simultaneous-connect tiebreak can repeatedly sacrifice the good
+incoming link for the doomed outgoing one — formation then only wins races. Making the
+unroutable dial fail fast (an ICMP-reject rule on the dialer) dissolved the livelock in
+seconds. A tailnet formation has no such asymmetry. The same run caught
+and fixed a real portability stop: Ubuntu 25.10+ ships coreutils as a multi-call
+binary, so `/usr/bin/id` is a symlink and the data-directory validator refused to
+boot every release there until it learned to follow it.
+
 For a real network, run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`
 before `fleet create`. Create prints the exact fleet-specific EPMD port and TLS
 distribution range to allow only between the private fleet addresses. The full
