@@ -1436,6 +1436,11 @@ pub async fn run(
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // The running add, kept only so a confirmed cancel has something to call. It requests
+    // a stop at the next pipeline boundary; a blocking remote call already in flight
+    // finishes first.
+    let mut add_handle: Option<fleet_add::AddHandle> = None;
+
     // The first poll before the first frame, so the Dashboard is asking for its data
     // while it draws its first "waiting" state rather than after it.
     app.apply(Msg::Tick);
@@ -1458,7 +1463,18 @@ pub async fn run(
             spawn_machine_scan(sender.clone());
         }
         if let Some(job) = app.take_fleet_job() {
-            spawn_fleet_job(app.data_dir.clone(), job, client.clone(), sender.clone());
+            if let Some(handle) =
+                spawn_fleet_job(app.data_dir.clone(), job, client.clone(), sender.clone())
+            {
+                // Dropping the previous handle detaches; it never stopped that pipeline
+                // anyway, and only one add is reachable from the overlay at a time.
+                add_handle = Some(handle);
+            }
+        }
+        if app.take_fleet_add_cancel() {
+            if let Some(handle) = add_handle.as_ref() {
+                handle.cancel();
+            }
         }
         if let Some(intent) = app.take_fleet_intent() {
             match app.data_dir.as_deref() {
@@ -1701,13 +1717,39 @@ fn machine_candidate(candidate: fleet_add::Candidate) -> app::MachineCandidate {
     }
 }
 
+/// Runs a confirmed fleet job. An SSH add is the one job that streams: it returns the
+/// handle that can cancel it, and its events reach the UI as they happen. Everything else
+/// keeps reporting once, at the end, exactly as before.
 fn spawn_fleet_job(
     data_dir: Option<String>,
     job: app::FleetJob,
     client: Client,
     sender: mpsc::UnboundedSender<Msg>,
-) {
+) -> Option<fleet_add::AddHandle> {
     match job {
+        app::FleetJob::Add {
+            prepare: false,
+            target: Some(target),
+            machine,
+            host,
+            via,
+            binary,
+            setup_tailscale,
+        } => match add_params(
+            data_dir,
+            target,
+            machine,
+            host,
+            via,
+            binary,
+            setup_tailscale,
+        ) {
+            Ok(params) => Some(spawn_streaming_add(params, sender)),
+            Err(error) => {
+                send_fleet_job(sender, Vec::new(), Err(error));
+                None
+            }
+        },
         app::FleetJob::Status => {
             tokio::spawn(async move {
                 let live = client
@@ -1718,6 +1760,7 @@ fn spawn_fleet_job(
                     .unwrap_or_else(|error| Err(format!("{error:#}")));
                 send_fleet_job(sender, Vec::new(), result);
             });
+            None
         }
         app::FleetJob::Doctor => {
             tokio::spawn(async move {
@@ -1729,6 +1772,7 @@ fn spawn_fleet_job(
                     .unwrap_or_else(|error| Err(format!("{error:#}")));
                 send_fleet_job(sender, Vec::new(), result);
             });
+            None
         }
         job => {
             tokio::task::spawn_blocking(move || {
@@ -1738,8 +1782,64 @@ fn spawn_fleet_job(
                     Err(error) => send_fleet_job(sender, Vec::new(), Err(error)),
                 }
             });
+            None
         }
     }
+}
+
+fn add_params(
+    data_dir: Option<String>,
+    target: String,
+    machine: String,
+    host: String,
+    via: String,
+    binary: Option<String>,
+    setup_tailscale: bool,
+) -> Result<fleet_add::AddParams, String> {
+    let data_dir = require_data_dir(data_dir)?;
+    let via = fleet_add::Via::parse(&via).map_err(|error| format!("{error:#}"))?;
+    Ok(fleet_add::AddParams {
+        data_dir,
+        target,
+        machine: Some(machine),
+        host: Some(host),
+        via,
+        binary: binary.map(PathBuf::from),
+        owner_host: None,
+        options: fleet_add::AddOptions {
+            // Only ever true once the consent step in Machines was answered yes.
+            setup_tailscale,
+            ..fleet_add::AddOptions::default()
+        },
+    })
+}
+
+/// Bridges the pipeline's sink onto the UI's message channel. Every event is forwarded
+/// for the stepper; the terminal event is *also* sent as the `FleetJobFinished` the
+/// Machines flow has always settled the step and the recipe on, so nothing downstream of
+/// the end of a run had to change.
+fn spawn_streaming_add(
+    params: fleet_add::AddParams,
+    sender: mpsc::UnboundedSender<Msg>,
+) -> fleet_add::AddHandle {
+    fleet_add::spawn_add(params, move |event| {
+        let finished = match &event {
+            fleet_add::AddEvent::Done(outcome) => Some((
+                outcome.log.clone(),
+                Ok(outcome
+                    .recipe
+                    .as_ref()
+                    .map(fleet_add::Recipe::text)
+                    .unwrap_or_default()),
+            )),
+            fleet_add::AddEvent::Failed { error, .. } => Some((Vec::new(), Err(error.clone()))),
+            _ => None,
+        };
+        let _ = sender.send(Msg::FleetAddEvent(Box::new(event)));
+        if let Some((log, result)) = finished {
+            let _ = sender.send(Msg::FleetJobFinished { log, result });
+        }
+    })
 }
 
 fn send_fleet_job(
@@ -1791,6 +1891,9 @@ fn run_blocking_fleet_job(
 ) -> Result<(Vec<String>, String), String> {
     let data_dir = require_data_dir(data_dir)?;
     match job {
+        // Only the prepare path and a malformed SSH add reach here; a real SSH add
+        // streams through `spawn_streaming_add`, which is where `setup_tailscale` is
+        // honoured. Neither case has a destination to run guided enrollment on.
         app::FleetJob::Add {
             prepare,
             target,
@@ -1798,6 +1901,7 @@ fn run_blocking_fleet_job(
             host,
             via,
             binary,
+            setup_tailscale: _,
         } => {
             let outcome = if prepare {
                 fleet_add::prepare(&data_dir, &machine, &host, None)

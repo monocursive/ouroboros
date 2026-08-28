@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::fleet_add;
+
 /// One row in the Machines menu. Enter runs it after any form/confirm the action needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItem {
@@ -183,6 +185,9 @@ pub enum AddStep {
     Pick,
     Form,
     Confirm,
+    /// Guided Tailscale enrollment was asked for; this quotes what runs as root on the
+    /// destination and waits for an explicit yes. Nothing is launched from here without it.
+    Consent,
     Working,
     Done,
 }
@@ -193,10 +198,268 @@ pub enum AddField {
     Machine,
     Host,
     Via,
+    /// Guided Tailscale enrollment. Off unless the operator turns it on and then consents.
+    Tailscale,
     Binary,
     OwnerHost,
     OwnerMachine,
 }
+
+// -----------------------------------------------------------------------------------
+// The add stepper.
+//
+// The rail below is driven *only* by the typed variants of [`fleet_add::AddEvent`].
+// `Line` events are progress prose — exactly what the CLI would print — and they feed
+// the log pane and nothing else. That separation is the whole point: while the pipeline
+// still emits only `Line` plus one terminal event, the rail simply stays where it is and
+// the log pane carries the run; as the typed variants arrive the rail lights up. No
+// stage is ever inferred from the text of a line.
+// -----------------------------------------------------------------------------------
+
+/// One rung of the stage rail, in pipeline order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AddStage {
+    Probe,
+    Network,
+    Binary,
+    Copy,
+    Enroll,
+    Done,
+}
+
+impl AddStage {
+    pub const ALL: [Self; 6] = [
+        Self::Probe,
+        Self::Network,
+        Self::Binary,
+        Self::Copy,
+        Self::Enroll,
+        Self::Done,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Probe => "probe",
+            Self::Network => "network",
+            Self::Binary => "binary",
+            Self::Copy => "copy",
+            Self::Enroll => "enroll",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// What a failed add left behind, as the pipeline reported it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddFailure {
+    pub error: String,
+    pub residue: Vec<String>,
+}
+
+/// Live state of one running add, rebuilt purely from the event stream.
+#[derive(Debug, Clone, Default)]
+pub struct AddProgress {
+    /// The furthest stage a *typed* event has proven. `None` means nothing typed has
+    /// arrived yet, which is the honest state under a `Line`-only stream.
+    pub reached: Option<AddStage>,
+    /// `Line` events, oldest first. Never consulted for stage progress.
+    pub log: Vec<String>,
+    pub probe: Option<String>,
+    pub network: Option<String>,
+    /// The network step chose guided Tailscale enrollment.
+    pub guided: bool,
+    pub install: Option<String>,
+    pub copying: Option<String>,
+    /// The live Tailscale sign-in link. Held only for the on-screen block: it is
+    /// time-critical and credential-bearing, so it is kept out of `log` and out of every
+    /// report this flow persists or copies.
+    pub auth_url: Option<String>,
+    /// `(elapsed_s, budget_s)` from the last `WaitingForAddress`.
+    pub waiting: Option<(u64, u64)>,
+    pub failure: Option<AddFailure>,
+    /// The run finished (either terminal event arrived).
+    pub finished: bool,
+    /// A cancel was requested and handed to `AddHandle::cancel()`.
+    pub cancelling: bool,
+}
+
+/// How many `Line`s the pane keeps. A long add prints a lot and none of it is a record;
+/// the pipeline's own log is what survives in the outcome.
+const ADD_LOG_LIMIT: usize = 400;
+
+impl AddProgress {
+    /// Fold one event in. The only writer of `reached` is a typed variant.
+    pub fn apply(&mut self, event: &fleet_add::AddEvent) {
+        use fleet_add::AddEvent;
+
+        match event {
+            // The only event that never touches the rail.
+            AddEvent::Line(line) => self.push_line(line.clone()),
+            AddEvent::Probed {
+                triple,
+                home,
+                tailscale,
+                hostname,
+                has_ouro,
+            } => {
+                self.reach(AddStage::Probe);
+                let mut detail = format!("{triple} · home {home}");
+                if let Some(hostname) = hostname {
+                    detail.push_str(&format!(" · {hostname}"));
+                }
+                if let Some(address) = tailscale {
+                    detail.push_str(&format!(" · tailscale {address}"));
+                }
+                detail.push_str(if *has_ouro {
+                    " · ouro present"
+                } else {
+                    " · no ouro yet"
+                });
+                self.probe = Some(detail);
+            }
+            AddEvent::Network(plan) => {
+                self.reach(AddStage::Network);
+                self.network = Some(match plan {
+                    fleet_add::NetworkPlan::HostProvided(host) => {
+                        format!("using the address you named: {host}")
+                    }
+                    fleet_add::NetworkPlan::TailscaleExisting(host) => {
+                        format!("it already answers on {host}")
+                    }
+                    fleet_add::NetworkPlan::GuidedSetup => {
+                        "guided Tailscale enrollment (installer and sign-in run as root there)"
+                            .into()
+                    }
+                });
+                self.guided = matches!(plan, fleet_add::NetworkPlan::GuidedSetup);
+            }
+            AddEvent::AuthUrl(url) => {
+                self.auth_url = Some(url.clone());
+                // The pipeline also prints the link as a progress line today. One copy on
+                // screen, in the block built for it, is enough — and the log is what gets
+                // carried into reports.
+                self.scrub_url(url);
+            }
+            AddEvent::WaitingForAddress {
+                elapsed_s,
+                budget_s,
+            } => {
+                self.waiting = Some((*elapsed_s, *budget_s));
+            }
+            AddEvent::Install(decision) => {
+                self.reach(AddStage::Binary);
+                self.install = Some(match decision {
+                    fleet_add::InstallDecision::RemoteExisting(version) => {
+                        format!("it already runs a matching ouro ({version})")
+                    }
+                    fleet_add::InstallDecision::SelfCopy => {
+                        "this executable matches; copying itself".into()
+                    }
+                    fleet_add::InstallDecision::DistArtifact(path) => {
+                        format!("dist artifact {}", path.display())
+                    }
+                    fleet_add::InstallDecision::RecipeOnly => {
+                        "nothing installable from here; the invitation carries a recipe".into()
+                    }
+                });
+            }
+            AddEvent::Copying { what } => {
+                self.reach(AddStage::Copy);
+                self.copying = Some((*what).to_string());
+            }
+            AddEvent::Enrolling => self.reach(AddStage::Enroll),
+            AddEvent::Done(_) => {
+                self.reach(AddStage::Done);
+                self.finish();
+            }
+            AddEvent::Failed { error, residue } => {
+                self.failure = Some(AddFailure {
+                    error: error.clone(),
+                    residue: residue.clone(),
+                });
+                self.finish();
+            }
+        }
+    }
+
+    fn push_line(&mut self, line: String) {
+        // An already-known link must not reappear in the log through a later line.
+        if self
+            .auth_url
+            .as_deref()
+            .is_some_and(|url| line.contains(url))
+        {
+            return;
+        }
+        self.log.push(line);
+        if self.log.len() > ADD_LOG_LIMIT {
+            let overflow = self.log.len() - ADD_LOG_LIMIT;
+            self.log.drain(..overflow);
+        }
+    }
+
+    fn scrub_url(&mut self, url: &str) {
+        self.log.retain(|line| !line.contains(url));
+    }
+
+    /// The rail only moves forward. Out-of-order or repeated events never walk it back.
+    fn reach(&mut self, stage: AddStage) {
+        self.reached = Some(match self.reached {
+            Some(current) if current > stage => current,
+            _ => stage,
+        });
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+        // The link dies with the run; nothing is served by leaving it on screen.
+        self.auth_url = None;
+        self.waiting = None;
+    }
+
+    /// Whether the rail has proven this stage. Under a `Line`-only stream this is false
+    /// for every stage, and the rail renders as "not reported yet" rather than as a guess.
+    pub fn reached_stage(&self, stage: AddStage) -> bool {
+        self.reached.is_some_and(|reached| reached >= stage)
+    }
+
+    pub fn running(&self) -> bool {
+        !self.finished
+    }
+
+    /// The countdown shown under the sign-in link, e.g. `"1m30s left of 5m"`.
+    pub fn countdown(&self) -> Option<String> {
+        let (elapsed, budget) = self.waiting?;
+        let left = budget.saturating_sub(elapsed);
+        Some(format!(
+            "{} left of {}",
+            human_seconds(left),
+            human_seconds(budget)
+        ))
+    }
+}
+
+/// Seconds as the terse `2m30s` the fleet log already uses.
+fn human_seconds(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let rest = seconds % 60;
+    match (minutes, rest) {
+        (0, rest) => format!("{rest}s"),
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, rest) => format!("{minutes}m{rest}s"),
+    }
+}
+
+/// The vendor's installer one-liner, quoted on the consent step exactly as
+/// `fleet_add`'s `TAILSCALE_INSTALL` runs it. That constant is private to the pipeline
+/// module, so this is a copy, pinned by
+/// `guided_consent_quotes_the_pipeline_commands_verbatim`.
+pub const TAILSCALE_INSTALL_QUOTED: &str =
+    "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+
+/// What the pipeline starts, detached, once the installer has run — the `sudo -n
+/// tailscale up` inside `fleet_add`'s `TAILSCALE_UP_SCRIPT`.
+pub const TAILSCALE_UP_QUOTED: &str = "sudo -n tailscale up";
 
 #[derive(Debug, Clone)]
 pub struct AddMachine {
@@ -215,6 +478,16 @@ pub struct AddMachine {
     pub recipe: Option<String>,
     pub pending: bool,
     pub candidate: usize,
+    /// The operator asked for guided Tailscale enrollment. Off by default; on its own it
+    /// launches nothing — [`AddStep::Consent`] is still in the way.
+    pub setup_tailscale: bool,
+    /// The consent step was answered yes for the plan as it currently stands.
+    pub consented: bool,
+    /// Live stepper state, present only while a streamed SSH add is running or has just
+    /// ended. The prepare/restart paths never set it and keep the old plain log view.
+    pub progress: Option<AddProgress>,
+    /// Esc was pressed on a running add and the confirmation is on screen.
+    pub cancel_confirm: bool,
 }
 
 impl AddMachine {
@@ -235,6 +508,10 @@ impl AddMachine {
             recipe: None,
             pending: false,
             candidate: 0,
+            setup_tailscale: false,
+            consented: false,
+            progress: None,
+            cancel_confirm: false,
         }
     }
 
@@ -265,6 +542,30 @@ impl AddMachine {
         }
     }
 
+    /// Flipping the switch withdraws any consent already given: the operator agreed to a
+    /// specific plan, and this is a different one.
+    fn toggle_setup_tailscale(&mut self) {
+        self.setup_tailscale = !self.setup_tailscale;
+        self.consented = false;
+    }
+
+    fn push_field_char(&mut self, c: char) {
+        match self.field {
+            AddField::Target => self.target.push(c),
+            AddField::Machine => self.machine.push(c),
+            AddField::Host => self.host.push(c),
+            AddField::Binary => self.binary.push(c),
+            AddField::OwnerHost => self.owner_host.push(c),
+            AddField::OwnerMachine => self.owner_machine.push(c),
+            AddField::Via | AddField::Tailscale => {}
+        }
+    }
+
+    /// Guided enrollment is asked for and is a legal thing to ask for on this plan.
+    pub fn wants_guided_tailscale(&self) -> bool {
+        self.setup_tailscale && self.method == AddMethod::Ssh
+    }
+
     pub fn fields(&self, standalone: bool) -> Vec<AddField> {
         let mut fields = match self.method {
             AddMethod::Ssh => vec![
@@ -272,6 +573,7 @@ impl AddMachine {
                 AddField::Machine,
                 AddField::Host,
                 AddField::Via,
+                AddField::Tailscale,
                 AddField::Binary,
             ],
             AddMethod::Prepare => vec![AddField::Machine, AddField::Host],
@@ -398,6 +700,8 @@ pub enum FleetJob {
         host: String,
         via: String,
         binary: Option<String>,
+        /// Only ever `true` after [`AddStep::Consent`] was answered yes.
+        setup_tailscale: bool,
     },
     Invite {
         machine: String,
@@ -1066,7 +1370,8 @@ impl App {
                 }
                 _ => {}
             },
-            AddStep::Method | AddStep::Pick => {}
+            // Guided-enrollment consent belongs to the add flow; no form reaches it.
+            AddStep::Method | AddStep::Pick | AddStep::Consent => {}
         }
     }
 
@@ -1359,20 +1664,34 @@ impl App {
 
         match step {
             AddStep::Working => {
-                if matches!(key.code, KeyCode::Esc) {
-                    if self.quit == Some(Quit::ApplyFleetIntent) {
-                        return;
-                    }
-                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                        if let Some(add) = machines.add.as_mut() {
-                            add.step = AddStep::Confirm;
-                            add.pending = false;
-                            add.error = Some(
-                                "cancelled waiting; the remote work may still be running".into(),
-                            );
+                if self.quit == Some(Quit::ApplyFleetIntent) {
+                    return;
+                }
+                let streaming = match self.overlay.as_ref() {
+                    Some(Overlay::Machines(machines)) => machines
+                        .add
+                        .as_ref()
+                        .is_some_and(|add| add.progress.is_some()),
+                    _ => false,
+                };
+                if !streaming {
+                    // The restart/prepare path still reports only at the end; Esc there is
+                    // still "stop waiting", and it never claimed to stop the remote work.
+                    if matches!(key.code, KeyCode::Esc) {
+                        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                            if let Some(add) = machines.add.as_mut() {
+                                add.step = AddStep::Confirm;
+                                add.pending = false;
+                                add.error = Some(
+                                    "cancelled waiting; the remote work may still be running"
+                                        .into(),
+                                );
+                            }
                         }
                     }
+                    return;
                 }
+                self.streaming_add_key(key);
             }
             AddStep::Method => match key.code {
                 KeyCode::Esc => {
@@ -1391,6 +1710,10 @@ impl App {
                     if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                         if let Some(add) = machines.add.as_mut() {
                             add.method = AddMethod::Prepare;
+                            // Nothing here reaches the other machine, so guided
+                            // enrollment has no destination to run on.
+                            add.setup_tailscale = false;
+                            add.consented = false;
                         }
                     }
                 }
@@ -1478,8 +1801,10 @@ impl App {
                 KeyCode::Left | KeyCode::Right => {
                     if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                         if let Some(add) = machines.add.as_mut() {
-                            if add.field == AddField::Via {
-                                add.via = 1 - add.via;
+                            match add.field {
+                                AddField::Via => add.via = 1 - add.via,
+                                AddField::Tailscale => add.toggle_setup_tailscale(),
+                                _ => {}
                             }
                         }
                     }
@@ -1491,18 +1816,21 @@ impl App {
                         }
                     }
                 }
+                KeyCode::Char(' ') => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            if add.field == AddField::Tailscale {
+                                add.toggle_setup_tailscale();
+                                return;
+                            }
+                            add.push_field_char(' ');
+                        }
+                    }
+                }
                 KeyCode::Char(c) if !c.is_control() => {
                     if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                         if let Some(add) = machines.add.as_mut() {
-                            match add.field {
-                                AddField::Target => add.target.push(c),
-                                AddField::Machine => add.machine.push(c),
-                                AddField::Host => add.host.push(c),
-                                AddField::Binary => add.binary.push(c),
-                                AddField::OwnerHost => add.owner_host.push(c),
-                                AddField::OwnerMachine => add.owner_machine.push(c),
-                                AddField::Via => {}
-                            }
+                            add.push_field_char(c);
                         }
                     }
                 }
@@ -1516,7 +1844,7 @@ impl App {
                                 AddField::Binary => &mut add.binary,
                                 AddField::OwnerHost => &mut add.owner_host,
                                 AddField::OwnerMachine => &mut add.owner_machine,
-                                AddField::Via => return,
+                                AddField::Via | AddField::Tailscale => return,
                             };
                             buffer.pop();
                         }
@@ -1540,6 +1868,27 @@ impl App {
                 KeyCode::Enter => self.confirm_add_machine(),
                 _ => {}
             },
+            AddStep::Consent => match key.code {
+                // Back to the plan, and the yes goes with it: a changed plan is a new
+                // question, not a standing permission.
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.step = AddStep::Confirm;
+                            add.consented = false;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.consented = true;
+                        }
+                    }
+                    self.confirm_add_machine();
+                }
+                _ => {}
+            },
             AddStep::Done => match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
@@ -1561,6 +1910,60 @@ impl App {
                 _ => {}
             },
         }
+    }
+
+    /// Keys while a streamed add is on screen: Esc asks before it cancels, and the answer
+    /// is honest about what a cancel can and cannot stop.
+    fn streaming_add_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        let Some(Overlay::Machines(machines)) = self.overlay.as_mut() else {
+            return;
+        };
+        let Some(add) = machines.add.as_mut() else {
+            return;
+        };
+        let Some(progress) = add.progress.as_mut() else {
+            return;
+        };
+
+        if progress.finished {
+            // The run is over and the stepper is showing how it ended. Either key goes
+            // back to the plan, which is also the way to rerun it.
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                add.error = progress
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.error.clone());
+                add.step = AddStep::Confirm;
+                add.pending = false;
+                add.cancel_confirm = false;
+            }
+            return;
+        }
+
+        if add.cancel_confirm {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    add.cancel_confirm = false;
+                    progress.cancelling = true;
+                    self.fleet_add_cancel_pending = true;
+                }
+                KeyCode::Esc | KeyCode::Char('n') => add.cancel_confirm = false,
+                _ => {}
+            }
+            return;
+        }
+
+        if key.code == KeyCode::Esc && !progress.cancelling {
+            add.cancel_confirm = true;
+        }
+    }
+
+    /// Exactly what guided enrollment will run as root on the destination. Quoted, not
+    /// summarised: consent to a paraphrase is not consent.
+    pub fn guided_consent_commands(&self) -> [&'static str; 2] {
+        [TAILSCALE_INSTALL_QUOTED, TAILSCALE_UP_QUOTED]
     }
 
     pub fn add_command_preview(&self) -> String {
@@ -1596,6 +1999,9 @@ impl App {
                     add.host.trim(),
                     add.via_label()
                 );
+                if add.wants_guided_tailscale() {
+                    command.push_str(" --setup-tailscale");
+                }
                 if !add.binary.trim().is_empty() {
                     command.push_str(&format!(" --binary {}", add.binary.trim()));
                 }
@@ -1647,6 +2053,23 @@ impl App {
             self.set_add_error(format!("{error:#}"));
             self.set_add_step(AddStep::Form, None);
             return;
+        }
+
+        if add.wants_guided_tailscale() {
+            if standalone {
+                // The first add restarts this Mac and replays a saved plan, and that plan
+                // has nowhere to record consent. Rather than drop the switch quietly,
+                // say so.
+                self.set_add_error(
+                    "guided Tailscale enrollment cannot be carried through the restart this first add needs. Create the fleet first and add this machine afterwards, or run `ouro fleet add … --setup-tailscale` in a terminal",
+                );
+                self.set_add_step(AddStep::Form, Some(AddField::Tailscale));
+                return;
+            }
+            if !add.consented {
+                self.set_add_step(AddStep::Consent, None);
+                return;
+            }
         }
 
         if standalone {
@@ -1715,11 +2138,16 @@ impl App {
             return;
         }
 
+        let streamed = add.method == AddMethod::Ssh;
         if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
             if let Some(add) = machines.add.as_mut() {
                 add.step = AddStep::Working;
                 add.pending = true;
                 add.error = None;
+                add.cancel_confirm = false;
+                // The stepper exists for the streamed SSH pipeline. A prepare writes a
+                // file locally and has no stages to rail.
+                add.progress = streamed.then(AddProgress::default);
             }
         }
         self.fleet_job_pending = Some(FleetJob::Add {
@@ -1734,6 +2162,7 @@ impl App {
                 let binary = add.binary.trim();
                 (!binary.is_empty()).then(|| binary.to_string())
             },
+            setup_tailscale: add.wants_guided_tailscale() && add.consented,
         });
     }
 
@@ -1763,4 +2192,552 @@ fn friendly_machine(node: &str) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("this machine")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fleet_add::{AddEvent, InstallDecision, NetworkPlan, Outcome, OutcomeKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use std::path::PathBuf;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    fn probed() -> AddEvent {
+        AddEvent::Probed {
+            triple: "x86_64-unknown-linux-gnu".into(),
+            home: "/home/op".into(),
+            tailscale: None,
+            hostname: Some("vps".into()),
+            has_ouro: false,
+        }
+    }
+
+    fn outcome() -> Outcome {
+        Outcome {
+            machine: "vps".into(),
+            host: "vps.tailnet.ts.net".into(),
+            kind: OutcomeKind::Enrolled,
+            log: vec!["enrolled vps".into()],
+            recipe: None,
+        }
+    }
+
+    fn fold(events: &[AddEvent]) -> AddProgress {
+        let mut progress = AddProgress::default();
+        for event in events {
+            progress.apply(event);
+        }
+        progress
+    }
+
+    /// An owner that can invite, so the add takes the streamed path rather than the
+    /// restart-as-a-fleet one.
+    fn owner() -> App {
+        let mut app = App::new(
+            Mode::Spawned { pid: 4242 },
+            "127.0.0.1:4560".into(),
+            crate::proto::Hello::default(),
+            None,
+        );
+        app.data_dir = Some("/tmp/ouro-test".into());
+        app.can_invite = true;
+        app.fleet_profile = Some(
+            serde_json::from_value(json!({
+                "schema": 1,
+                "fleet_id": "fleet-test-0123456789",
+                "name": "Studio fleet",
+                "machine": "studio",
+                "host": "studio.test",
+                "node": "ouro@studio.test",
+                "role": "core",
+                "members": [],
+                "gateway_port": 47_123,
+                "dist_port_min": 43_700,
+                "dist_port_max": 43_729
+            }))
+            .expect("a fleet profile"),
+        );
+        app
+    }
+
+    /// Drives the menu into a filled-in SSH add sitting on the confirm step.
+    fn add_on_confirm(app: &mut App) {
+        app.open_machines();
+        app.machines_key(key(KeyCode::Enter));
+        for c in "op@vps".chars() {
+            app.machines_key(key(KeyCode::Char(c)));
+        }
+        app.machines_key(key(KeyCode::Tab));
+        for c in "vps".chars() {
+            app.machines_key(key(KeyCode::Char(c)));
+        }
+        app.machines_key(key(KeyCode::Tab));
+        for c in "vps.tailnet.ts.net".chars() {
+            app.machines_key(key(KeyCode::Char(c)));
+        }
+        app.machines_key(key(KeyCode::Enter));
+        assert_eq!(step(app), AddStep::Confirm);
+    }
+
+    fn add_of(app: &App) -> &AddMachine {
+        match app.overlay.as_ref() {
+            Some(Overlay::Machines(machines)) => machines.add.as_ref().expect("an add in flight"),
+            _ => panic!("machines is not open"),
+        }
+    }
+
+    fn step(app: &App) -> AddStep {
+        add_of(app).step
+    }
+
+    #[test]
+    fn typed_events_walk_the_stage_rail_in_pipeline_order() {
+        let mut progress = AddProgress::default();
+        assert_eq!(progress.reached, None);
+
+        progress.apply(&probed());
+        assert_eq!(progress.reached, Some(AddStage::Probe));
+        assert!(progress.probe.as_deref().is_some_and(|probe| probe
+            .contains("x86_64-unknown-linux-gnu")
+            && probe.contains("no ouro yet")));
+
+        progress.apply(&AddEvent::Network(NetworkPlan::TailscaleExisting(
+            "vps.tailnet.ts.net".into(),
+        )));
+        assert_eq!(progress.reached, Some(AddStage::Network));
+        assert!(!progress.guided);
+
+        progress.apply(&AddEvent::Install(InstallDecision::DistArtifact(
+            PathBuf::from("/dist/ouro-linux-x86_64"),
+        )));
+        assert_eq!(progress.reached, Some(AddStage::Binary));
+        assert!(
+            progress
+                .install
+                .as_deref()
+                .is_some_and(|install| install.contains("/dist/ouro-linux-x86_64")),
+            "the operator is told which artifact was picked: {:?}",
+            progress.install
+        );
+
+        progress.apply(&AddEvent::Copying { what: "binary" });
+        assert_eq!(progress.reached, Some(AddStage::Copy));
+
+        progress.apply(&AddEvent::Enrolling);
+        assert_eq!(progress.reached, Some(AddStage::Enroll));
+
+        progress.apply(&AddEvent::Done(outcome()));
+        assert_eq!(progress.reached, Some(AddStage::Done));
+        assert!(progress.finished);
+        assert!(AddStage::ALL
+            .iter()
+            .all(|stage| progress.reached_stage(*stage)));
+    }
+
+    /// The bridge that ships today sends progress prose and one terminal event. The rail
+    /// has to stay honestly dark through all of it rather than guess from the words.
+    #[test]
+    fn a_line_only_stream_never_lights_the_stage_rail() {
+        let progress = fold(&[
+            AddEvent::Line("probing op@vps over ssh".into()),
+            AddEvent::Line("remote is x86_64-unknown-linux-gnu (home /home/op)".into()),
+            AddEvent::Line("copying the binary".into()),
+            AddEvent::Line("enrolling vps".into()),
+        ]);
+
+        assert_eq!(
+            progress.reached, None,
+            "no typed event arrived, so no stage may be claimed"
+        );
+        assert!(AddStage::ALL
+            .iter()
+            .all(|stage| !progress.reached_stage(*stage)));
+        assert_eq!(progress.log.len(), 4, "the lines are the whole surface");
+        assert!(progress.running());
+    }
+
+    /// And the terminal event alone still finishes it, so the bridge's shape has an end.
+    #[test]
+    fn a_line_only_stream_still_ends_on_its_terminal_event() {
+        let progress = fold(&[
+            AddEvent::Line("probing op@vps over ssh".into()),
+            AddEvent::Done(outcome()),
+        ]);
+
+        assert_eq!(progress.reached, Some(AddStage::Done));
+        assert!(progress.finished);
+        assert!(progress.failure.is_none());
+    }
+
+    #[test]
+    fn out_of_order_events_never_walk_the_rail_backwards() {
+        let progress = fold(&[
+            AddEvent::Enrolling,
+            probed(),
+            AddEvent::Copying { what: "invitation" },
+        ]);
+
+        assert_eq!(progress.reached, Some(AddStage::Enroll));
+    }
+
+    #[test]
+    fn a_failure_keeps_the_rail_where_it_stopped_and_names_the_residue() {
+        let progress = fold(&[
+            probed(),
+            AddEvent::Network(NetworkPlan::HostProvided("vps.tailnet.ts.net".into())),
+            AddEvent::Line("copying the binary".into()),
+            AddEvent::Failed {
+                error: "ssh: connection closed by remote host".into(),
+                residue: vec![
+                    "an invitation for vps is pending on this Mac".into(),
+                    "vps joined the tailnet but is not running ouro".into(),
+                ],
+            },
+        ]);
+
+        assert_eq!(
+            progress.reached,
+            Some(AddStage::Network),
+            "a failure does not invent progress it never made"
+        );
+        assert!(progress.finished);
+        let failure = progress.failure.expect("the failure");
+        assert_eq!(failure.error, "ssh: connection closed by remote host");
+        assert_eq!(failure.residue.len(), 2);
+        assert!(failure.residue[0].contains("pending"));
+    }
+
+    #[test]
+    fn the_guided_path_is_flagged_and_the_wait_counts_down() {
+        let mut progress = fold(&[
+            probed(),
+            AddEvent::Network(NetworkPlan::GuidedSetup),
+            AddEvent::AuthUrl("https://login.tailscale.com/a/abc123".into()),
+            AddEvent::WaitingForAddress {
+                elapsed_s: 30,
+                budget_s: 300,
+            },
+        ]);
+
+        assert!(progress.guided);
+        assert!(progress
+            .network
+            .as_deref()
+            .is_some_and(|network| network.contains("guided")));
+        assert_eq!(
+            progress.auth_url.as_deref(),
+            Some("https://login.tailscale.com/a/abc123")
+        );
+        assert_eq!(progress.countdown().as_deref(), Some("4m30s left of 5m"));
+
+        progress.apply(&AddEvent::WaitingForAddress {
+            elapsed_s: 300,
+            budget_s: 300,
+        });
+        assert_eq!(progress.countdown().as_deref(), Some("0s left of 5m"));
+
+        // The link dies with the run and must not outlive it on screen.
+        progress.apply(&AddEvent::Done(outcome()));
+        assert_eq!(progress.auth_url, None);
+        assert_eq!(progress.countdown(), None);
+    }
+
+    /// The sign-in link is credential-bearing. It lives in exactly one place — the block
+    /// built for it — and never in the log that reports carry.
+    #[test]
+    fn the_sign_in_link_is_kept_out_of_the_log() {
+        let url = "https://login.tailscale.com/a/abc123";
+        let progress = fold(&[
+            // The pipeline prints the link as a progress line too; that copy is dropped
+            // retroactively when the typed event names it...
+            AddEvent::Line(format!("  {url}")),
+            AddEvent::AuthUrl(url.into()),
+            // ...and any later line repeating it is dropped on the way in.
+            AddEvent::Line(format!("still waiting on {url}")),
+            AddEvent::Line("Waiting up to 5m for op@vps to receive a tailnet address...".into()),
+        ]);
+
+        assert_eq!(progress.auth_url.as_deref(), Some(url));
+        assert!(
+            progress.log.iter().all(|line| !line.contains(url)),
+            "the link must not be in the log: {:?}",
+            progress.log
+        );
+        assert_eq!(progress.log.len(), 1);
+    }
+
+    #[test]
+    fn the_log_pane_is_bounded_and_keeps_the_tail() {
+        let mut progress = AddProgress::default();
+        for index in 0..(ADD_LOG_LIMIT + 50) {
+            progress.apply(&AddEvent::Line(format!("line {index}")));
+        }
+
+        assert_eq!(progress.log.len(), ADD_LOG_LIMIT);
+        assert_eq!(
+            progress.log.last().map(String::as_str),
+            Some(format!("line {}", ADD_LOG_LIMIT + 49).as_str())
+        );
+    }
+
+    /// Consent to a paraphrase is not consent: the step quotes what `fleet_add` runs.
+    #[test]
+    fn guided_consent_quotes_the_pipeline_commands_verbatim() {
+        assert_eq!(
+            TAILSCALE_INSTALL_QUOTED,
+            "curl -fsSL https://tailscale.com/install.sh | sudo -n sh"
+        );
+        assert_eq!(TAILSCALE_UP_QUOTED, "sudo -n tailscale up");
+    }
+
+    #[test]
+    fn guided_tailscale_launches_nothing_until_the_consent_step_is_answered() {
+        let mut app = owner();
+        add_on_confirm(&mut app);
+
+        // Turn the switch on from the form, then confirm the plan.
+        app.machines_key(key(KeyCode::Esc));
+        assert_eq!(step(&app), AddStep::Form);
+        // The form left off on the fleet host; the switch sits two fields on, past `via`.
+        app.machines_key(key(KeyCode::Tab));
+        app.machines_key(key(KeyCode::Tab));
+        assert_eq!(add_of(&app).field, AddField::Tailscale);
+        app.machines_key(key(KeyCode::Char(' ')));
+        assert!(add_of(&app).setup_tailscale);
+        assert!(app.add_command_preview().contains("--setup-tailscale"));
+
+        app.machines_key(key(KeyCode::Enter));
+        assert_eq!(step(&app), AddStep::Confirm);
+        app.machines_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            step(&app),
+            AddStep::Consent,
+            "confirming a guided add asks before it runs"
+        );
+        assert!(
+            app.take_fleet_job().is_none(),
+            "nothing may be launched from the consent step itself"
+        );
+
+        app.machines_key(key(KeyCode::Enter));
+        match app.take_fleet_job().expect("the consented add") {
+            FleetJob::Add {
+                setup_tailscale,
+                target,
+                ..
+            } => {
+                assert!(setup_tailscale);
+                assert_eq!(target.as_deref(), Some("op@vps"));
+            }
+            other => panic!("expected an add job, got {other:?}"),
+        }
+        assert_eq!(step(&app), AddStep::Working);
+        assert!(add_of(&app).progress.is_some(), "the stepper is live");
+    }
+
+    #[test]
+    fn backing_out_of_consent_withdraws_it_and_runs_nothing() {
+        let mut app = owner();
+        add_on_confirm(&mut app);
+        if let Some(Overlay::Machines(machines)) = app.overlay.as_mut() {
+            machines.add.as_mut().expect("an add").setup_tailscale = true;
+        }
+
+        app.machines_key(key(KeyCode::Enter));
+        assert_eq!(step(&app), AddStep::Consent);
+
+        app.machines_key(key(KeyCode::Esc));
+        assert_eq!(step(&app), AddStep::Confirm);
+        assert!(!add_of(&app).consented);
+        assert!(app.take_fleet_job().is_none());
+
+        // And turning the switch off and on again does not carry an old yes forward.
+        if let Some(Overlay::Machines(machines)) = app.overlay.as_mut() {
+            let add = machines.add.as_mut().expect("an add");
+            add.consented = true;
+            add.toggle_setup_tailscale();
+            add.toggle_setup_tailscale();
+            assert!(add.setup_tailscale);
+            assert!(!add.consented);
+        }
+    }
+
+    #[test]
+    fn an_add_without_the_switch_never_sees_the_consent_step() {
+        let mut app = owner();
+        add_on_confirm(&mut app);
+        app.machines_key(key(KeyCode::Enter));
+
+        assert_eq!(step(&app), AddStep::Working);
+        match app.take_fleet_job().expect("a plain add") {
+            FleetJob::Add {
+                setup_tailscale, ..
+            } => assert!(!setup_tailscale, "off is the default and it stays off"),
+            other => panic!("expected an add job, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelling_a_running_add_asks_first_then_hands_the_request_to_the_driver() {
+        let mut app = owner();
+        add_on_confirm(&mut app);
+        app.machines_key(key(KeyCode::Enter));
+        let _ = app.take_fleet_job();
+        assert_eq!(step(&app), AddStep::Working);
+
+        app.apply(Msg::FleetAddEvent(Box::new(AddEvent::Line(
+            "probing op@vps over ssh".into(),
+        ))));
+
+        // Esc asks rather than cancelling outright.
+        app.machines_key(key(KeyCode::Esc));
+        assert!(add_of(&app).cancel_confirm);
+        assert!(!app.take_fleet_add_cancel());
+
+        // Declining leaves the add alone.
+        app.machines_key(key(KeyCode::Esc));
+        assert!(!add_of(&app).cancel_confirm);
+        assert!(!app.take_fleet_add_cancel());
+
+        app.machines_key(key(KeyCode::Esc));
+        app.machines_key(key(KeyCode::Enter));
+        assert!(!add_of(&app).cancel_confirm);
+        assert!(
+            add_of(&app)
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.cancelling),
+            "the pane says a cancel is in flight"
+        );
+        assert!(
+            app.take_fleet_add_cancel(),
+            "the driver is the only thing holding the AddHandle"
+        );
+        assert_eq!(
+            step(&app),
+            AddStep::Working,
+            "the add keeps running until the pipeline says otherwise"
+        );
+    }
+
+    /// A streamed failure is read on the stepper, with its residue, rather than throwing
+    /// the operator back to a form with a one-line error.
+    #[test]
+    fn a_streamed_failure_stays_on_the_stepper_until_it_is_dismissed() {
+        let mut app = owner();
+        add_on_confirm(&mut app);
+        app.machines_key(key(KeyCode::Enter));
+        let _ = app.take_fleet_job();
+
+        app.apply(Msg::FleetAddEvent(Box::new(probed())));
+        app.apply(Msg::FleetAddEvent(Box::new(AddEvent::Failed {
+            error: "ssh: connection closed".into(),
+            residue: vec!["an invitation for vps is pending on this Mac".into()],
+        })));
+        app.apply(Msg::FleetJobFinished {
+            log: Vec::new(),
+            result: Err("ssh: connection closed".into()),
+        });
+
+        assert_eq!(step(&app), AddStep::Working);
+        let progress = add_of(&app).progress.as_ref().expect("the stepper");
+        assert_eq!(progress.reached, Some(AddStage::Probe));
+        let failure = progress.failure.as_ref().expect("the failure");
+        assert_eq!(failure.residue.len(), 1);
+
+        // Either key returns to the plan, carrying the error, so it can be rerun.
+        app.machines_key(key(KeyCode::Enter));
+        assert_eq!(step(&app), AddStep::Confirm);
+        assert_eq!(
+            add_of(&app).error.as_deref(),
+            Some("ssh: connection closed")
+        );
+    }
+
+    /// The prepare path reports once, at the end. It has no rail, and Esc there still
+    /// only stops the waiting.
+    #[test]
+    fn the_prepare_path_keeps_its_end_only_reporting() {
+        let mut app = owner();
+        app.open_machines();
+        app.machines_key(key(KeyCode::Enter));
+        app.machines_key(key(KeyCode::Esc));
+        app.machines_key(key(KeyCode::Down));
+        assert_eq!(add_of(&app).method, AddMethod::Prepare);
+        app.machines_key(key(KeyCode::Enter));
+
+        for c in "vps".chars() {
+            app.machines_key(key(KeyCode::Char(c)));
+        }
+        app.machines_key(key(KeyCode::Tab));
+        for c in "vps.tailnet.ts.net".chars() {
+            app.machines_key(key(KeyCode::Char(c)));
+        }
+        app.machines_key(key(KeyCode::Enter));
+        app.machines_key(key(KeyCode::Enter));
+
+        match app.take_fleet_job().expect("a prepare job") {
+            FleetJob::Add { prepare, .. } => assert!(prepare),
+            other => panic!("expected an add job, got {other:?}"),
+        }
+        assert!(
+            add_of(&app).progress.is_none(),
+            "no rail for work that has no stages here"
+        );
+
+        app.machines_key(key(KeyCode::Esc));
+        assert_eq!(step(&app), AddStep::Confirm);
+        assert!(add_of(&app)
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("may still be running")));
+    }
+
+    /// The first add restarts this Mac and replays a saved plan that has nowhere to record
+    /// consent, so the switch is refused there rather than silently dropped.
+    #[test]
+    fn a_standalone_first_add_refuses_guided_enrollment_rather_than_dropping_it() {
+        let mut app = App::new(
+            Mode::Spawned { pid: 4242 },
+            "127.0.0.1:4560".into(),
+            crate::proto::Hello::default(),
+            None,
+        );
+        app.data_dir = Some("/tmp/ouro-test".into());
+        add_on_confirm(&mut app);
+        if let Some(Overlay::Machines(machines)) = app.overlay.as_mut() {
+            let add = machines.add.as_mut().expect("an add");
+            add.setup_tailscale = true;
+            add.owner_host = "studio.tailnet.ts.net".into();
+        }
+
+        app.machines_key(key(KeyCode::Enter));
+
+        assert_eq!(step(&app), AddStep::Form);
+        assert_eq!(add_of(&app).field, AddField::Tailscale);
+        assert!(add_of(&app)
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot be carried through the restart")));
+        assert!(app.take_fleet_job().is_none());
+        assert!(app.quit.is_none(), "and nothing restarts");
+    }
+
+    #[test]
+    fn seconds_read_as_the_terse_durations_the_fleet_log_uses() {
+        assert_eq!(human_seconds(0), "0s");
+        assert_eq!(human_seconds(45), "45s");
+        assert_eq!(human_seconds(60), "1m");
+        assert_eq!(human_seconds(90), "1m30s");
+        assert_eq!(human_seconds(3_600), "60m");
+    }
 }

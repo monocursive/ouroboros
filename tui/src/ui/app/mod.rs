@@ -79,9 +79,9 @@ pub use desktop::{
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{
-    AddField, AddMachine, AddMethod, AddStep, FleetJob, FormField, FormKind, MachineAction,
-    MachineCandidate, MachineChoice, MachineForm, MachineReport, MachineSecurity, MachineSummary,
-    Machines, MenuItem,
+    AddFailure, AddField, AddMachine, AddMethod, AddProgress, AddStage, AddStep, FleetJob,
+    FormField, FormKind, MachineAction, MachineCandidate, MachineChoice, MachineForm,
+    MachineReport, MachineSecurity, MachineSummary, Machines, MenuItem,
 };
 pub use overlays::{
     approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
@@ -505,6 +505,10 @@ pub enum Msg {
         local_machine: Option<String>,
         local_host: Option<String>,
     },
+    /// One typed event from the add pipeline, as it happens. Drives the Machines stepper
+    /// and nothing else; the terminal event still arrives separately as
+    /// [`Msg::FleetJobFinished`], which is what settles the step and the recipe.
+    FleetAddEvent(Box<crate::fleet_add::AddEvent>),
     /// Result of a confirmed `fleet add` / prepare job the driver ran.
     FleetJobFinished {
         log: Vec<String>,
@@ -915,6 +919,9 @@ pub struct App {
     join_intent_pending: Option<JoinIntent>,
     /// Confirmed add/prepare for a live fleet owner. The driver runs it.
     fleet_job_pending: Option<FleetJob>,
+    /// The operator confirmed a cancel of the running add. The driver owns the
+    /// `AddHandle` and is the only thing that can act on it.
+    fleet_add_cancel_pending: bool,
     /// Open Machines after a fleet-intent restart so the operator sees what happened.
     pub open_machines_on_start: bool,
     /// Progress from that restart's add, shown on the Add Done step.
@@ -1129,6 +1136,7 @@ impl App {
             fleet_intent_pending: None,
             join_intent_pending: None,
             fleet_job_pending: None,
+            fleet_add_cancel_pending: false,
             open_machines_on_start: false,
             resume_add_log: Vec::new(),
             resume_add_recipe: None,
@@ -1753,6 +1761,10 @@ impl App {
         self.fleet_job_pending.take()
     }
 
+    pub fn take_fleet_add_cancel(&mut self) -> bool {
+        std::mem::take(&mut self.fleet_add_cancel_pending)
+    }
+
     pub fn leader_pending(&self) -> bool {
         self.leader_until.is_some()
     }
@@ -2213,6 +2225,15 @@ impl App {
                     }
                 }
             }
+            Msg::FleetAddEvent(event) => {
+                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                    if let Some(progress) =
+                        machines.add.as_mut().and_then(|add| add.progress.as_mut())
+                    {
+                        progress.apply(&event);
+                    }
+                }
+            }
             Msg::FleetJobFinished { log, result } => {
                 if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                     if let Some(add) = machines.add.as_mut() {
@@ -2225,7 +2246,16 @@ impl App {
                                 add.error = None;
                             }
                             Err(error) => {
-                                add.step = AddStep::Confirm;
+                                // A streamed add keeps the stepper up so the failure is
+                                // read where it happened, with its residue. Enter or Esc
+                                // there returns to the plan, which is how it is rerun.
+                                let streamed = add
+                                    .progress
+                                    .as_ref()
+                                    .is_some_and(|progress| progress.failure.is_some());
+                                if !streamed {
+                                    add.step = AddStep::Confirm;
+                                }
                                 add.error = Some(error);
                             }
                         }

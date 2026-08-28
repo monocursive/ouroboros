@@ -2871,6 +2871,53 @@ rediscovered:
   standalone Mac restarts once. Invitation bytes never appear on screen, in argv, or in
   the recipe. A Mac binary is never copied onto Linux. Provider sign-in stays on the
   destination. `y` still copies the equivalent CLI.
+- **An SSH add is watched, not waited on.** It runs through
+  [`fleet_add::spawn_add`](../tui/src/fleet_add.rs), whose typed `AddEvent`s reach the App
+  as `Msg::FleetAddEvent` while the pipeline runs, instead of one log dump at the end. The
+  pane shows a stage rail — `probe → network → binary → copy → enroll → done` — over a log
+  pane carrying the pipeline's own progress lines. Exactly one terminal event ends every
+  run, and it still arrives as the `Msg::FleetJobFinished` this flow has always settled the
+  step and the recipe on, so nothing about how an add *ends* changed.
+- **The rail is moved only by typed events, never by reading the log.** `Probed`,
+  `Network`, `Install`, `Copying`, `Enrolling` and the terminal event are the only things
+  that light a stage; `Line` feeds the log pane and nothing else. This matters because the
+  pipeline currently emits `Line` plus one terminal event and the typed variants are being
+  wired to that seam separately. Under a `Line`-only stream the rail stays dark and says
+  so — "No stage reported yet — this pipeline is sending progress lines only" — and the
+  log pane is the whole surface. A rail that guessed a stage from the words in a line
+  would be reporting this client's parser, not the pipeline. Events that arrive out of
+  order never walk it backwards. `Install(DistArtifact)` names the artifact that was
+  picked, and `Network(GuidedSetup)` is called out as the guided path.
+- **Guided Tailscale enrollment is a switch plus a consent step, in that order.** The SSH
+  add form has a `tailscale setup` toggle, default off. Confirming a plan with it on does
+  not launch anything: it opens a consent step that quotes, verbatim, what will run as
+  root on the destination — the vendor's installer one-liner and `sudo -n tailscale up` —
+  says it needs passwordless sudo there, and waits. Enter agrees and starts the add with
+  `AddOptions.setup_tailscale`; Esc goes back having run nothing, and flipping the switch
+  withdraws a yes already given, because consent was to a specific plan. The first add on
+  a standalone Mac *refuses* the switch rather than dropping it: that add restarts this Mac
+  and replays a saved plan which has nowhere to record consent.
+- **The sign-in link gets its own block, and only that block.** `AuthUrl` renders under an
+  instruction line, on a line of its own so a terminal's own selection can take it — this
+  client emits no OSC 8 — with the `WaitingForAddress` countdown under it. The link is
+  time-critical and credential-bearing, so it is held for the screen and kept out of the
+  log: the pipeline also prints it as a progress line, and that copy is dropped, as is any
+  later line repeating it. It disappears when the run ends, along with the countdown.
+- **Esc on a running add asks, and then says what a cancel can actually do.** The
+  confirmation and the state after it both say the same true thing: the add stops at the
+  next pipeline boundary, and a remote call already in flight finishes first. Only the
+  driver holds the `AddHandle`; the App raises a flag and the driver calls `cancel()`. The
+  add keeps running until the pipeline itself ends, because a cancel is a request, not a
+  kill.
+- **A failed add is read where it failed.** `Failed { error, residue }` keeps the stepper
+  up with the rail stopped where it stopped, the error, each residue line under "What it
+  left behind", and the guidance that rerunning the same add converges the state — it
+  reuses whatever is already in place. Enter or Esc returns to the plan, which is how it is
+  rerun. The older paths that report only at the end (the enroll-recipe add, the
+  restart-as-a-fleet add) keep their end-only behaviour and have no rail: they have no
+  stages to show here.
+- **The desktop's own add pane is a separate slice.** Nothing above describes it; this is
+  the terminal surface.
 - **Machines keeps membership removal and state retirement separate.** Its guidance says
   cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
   removed owner's state, importing the signed roster, and restarting does it show the
