@@ -108,4 +108,31 @@ defmodule Ouroboros.DataDirTest do
       end
     end
   end
+
+  describe "trusted executables" do
+    # Ubuntu 25.10+ ships coreutils as one multi-call binary: `/usr/bin/id` is a
+    # root-owned symlink into `/usr/lib/cargo/bin/coreutils/`. The trust anchor is the
+    # absolute path, so a symlink that resolves to a regular executable is accepted.
+    test "accepts a symlink resolving to a regular executable", %{tmp_dir: dir} do
+      real = Path.join(dir, "real-id")
+      File.write!(real, "#!/bin/sh\necho 0\n")
+      File.chmod!(real, 0o755)
+      link = Path.join(dir, "id")
+      File.ln_s!(real, link)
+
+      assert DataDir.trusted_executable!([link], "id") == link
+    end
+
+    test "refuses a dangling symlink and a non-executable file", %{tmp_dir: dir} do
+      dangling = Path.join(dir, "dangling")
+      File.ln_s!(Path.join(dir, "absent"), dangling)
+      plain = Path.join(dir, "plain")
+      File.write!(plain, "data")
+      File.chmod!(plain, 0o644)
+
+      assert_raise RuntimeError, ~r/trusted absolute id executable/, fn ->
+        DataDir.trusted_executable!([dangling, plain], "id")
+      end
+    end
+  end
 end

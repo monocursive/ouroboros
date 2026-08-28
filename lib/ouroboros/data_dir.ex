@@ -209,9 +209,15 @@ defmodule Ouroboros.DataDir do
     end
   end
 
-  defp trusted_executable!(paths, name) do
+  # `File.stat/2` follows symlinks: the trust anchor is the absolute system path itself,
+  # not the file's link count. Ubuntu 25.10+ ships coreutils as a multi-call binary, so
+  # `/usr/bin/id` is a root-owned symlink into `/usr/lib` — refusing it (as the previous
+  # `lstat` did) made every release refuse to boot there, and anyone who can plant a
+  # symlink at these paths could as easily plant a regular file.
+  @doc false
+  def trusted_executable!(paths, name) do
     Enum.find(paths, fn path ->
-      case File.lstat(path, time: :posix) do
+      case File.stat(path, time: :posix) do
         {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
         _other -> false
       end
