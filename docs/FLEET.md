@@ -10,15 +10,23 @@ this document. From the first Mac you launch, `/machines` is a menu that can add
 join, invite, check, and diagnose. Known Tailscale/SSH hosts are rows you can run. A first
 create or add restarts that standalone runtime once to become the fleet owner. SSH/Tailscale
 SSH copies a private invitation as a file and enrolls when the destination can run this
-binary; a Mac build is never copied onto Linux. When SSH is unavailable, "I'll set it up
-myself" / `ouro fleet add --print-script` writes the invitation here and prints
-`ouro fleet enroll`.
+binary; a Mac build is never copied onto Linux. What *is* copied onto Linux is a release
+artifact already built for that OS/CPU at this exact version (see below). When SSH is
+unavailable, "I'll set it up myself" / `ouro fleet add --print-script` writes the
+invitation here and prints `ouro fleet enroll`.
 
 ```sh
 # First machine (already running ouro): /machines → Add, or:
 ouro fleet list
 ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
 ouro fleet add --print-script --machine laptop --host laptop.example-tailnet.ts.net
+
+# Mac → Linux, with a Linux artifact built first
+make dist-linux
+ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
+
+# A destination with no tailnet yet. This runs commands as root over there.
+ouro fleet add user@vps --setup-tailscale
 
 # First add while this Mac is still standalone
 ouro stop
@@ -97,6 +105,29 @@ Implemented now:
   targets. Enter runs add, create, join/enroll, invite, service install, status, doctor,
   and roster export after confirm. A first create or add on a standalone Mac restarts
   once. Invitation bytes never appear on screen;
+- cross-platform artifact resolution in `ouro fleet add`. When the destination is a
+  different OS/CPU, has no `ouro`, and no `--binary` was given, the add looks for
+  `ouro-<this version>-<destination triple>` — the exact name `make dist` writes — in
+  `$OUROBOROS_DIST_DIR`, then in every `dist` directory above this executable's real path,
+  then in `./dist`. The first hit is copied and the add log records which file it was. The
+  version in the name must equal this binary's: an artifact for the right CPU at a
+  different version is named and refused, never copied, because placement fences on an
+  exact version match. Nothing is built on demand — with no artifact present the add still
+  delivers the invitation and prints the recipe, now naming the filename it wanted, the
+  directories it looked in, and `make dist-linux`;
+- `ouro fleet add --setup-tailscale`: consent-gated guided enrollment for a destination
+  that cannot yet prove a private address. It runs the vendor's own installer
+  (`curl -fsSL https://tailscale.com/install.sh | sudo -n sh`) and `sudo tailscale up`
+  **as root on that machine**, printing each command before it runs; it needs passwordless
+  sudo there and refuses by name when `sudo -n true` fails. `tailscale up` blocks, so it is
+  started detached and its output polled for the sign-in link, which is printed to this
+  terminal and deliberately kept out of the add log, the invitation, and the howto file.
+  The add then waits up to five minutes for a tailnet address and re-probes. All of this
+  happens before any invitation exists, so a refusal or a timeout leaves no private
+  material anywhere; resuming is running the same command again, which reuses an already
+  installed and already up Tailscale. Without the flag a destination with no private
+  address is refused exactly as before, with the flag now named in the message. This is
+  CLI only: the `/machines` menu does not drive `--setup-tailscale` yet;
 - a connected-machine New Session picker, and retained cursor recovery when a remote
   owner temporarily disappears;
 - remote Team worker reconciliation after the worker's machine restarts;
