@@ -1,3 +1,6 @@
+# Finder metadata is machine-local, never repository input.
+.DS_Store
+
 # The directory Mix will write compiled artifacts to.
 /_build/
 

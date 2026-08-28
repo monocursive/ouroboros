@@ -79,11 +79,17 @@ impl Peer {
     }
 
     pub async fn hello(&mut self, methods: &[&str]) -> Value {
+        self.hello_with_token(TOKEN, methods).await
+    }
+
+    /// A handshake that insists on a specific token — how a test proves a reconnect
+    /// presented the *rotated* credential rather than the one it first connected with.
+    pub async fn hello_with_token(&mut self, token: &str, methods: &[&str]) -> Value {
         let request = self.request().await.expect("a hello");
 
         assert_eq!(request["method"], "hello");
         assert_eq!(request["params"]["protocol"], 1);
-        assert_eq!(request["params"]["token"], TOKEN);
+        assert_eq!(request["params"]["token"], token);
         assert!(request["params"]["client"]
             .as_str()
             .expect("a client name")

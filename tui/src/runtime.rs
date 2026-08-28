@@ -66,7 +66,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use zeroize::Zeroize;
 
-use crate::transport::Secret;
+use crate::transport::{EndpointSource, Secret};
 
 #[cfg(feature = "embed")]
 pub mod embed;
@@ -717,6 +717,61 @@ pub fn read_live_publication(data_dir: &Path) -> Result<Option<Publication>> {
     match read_owned_publication(data_dir)? {
         Some(publication) if publication_is_live(&publication)? => Ok(Some(publication)),
         Some(_) | None => Ok(None),
+    }
+}
+
+/// The gateway endpoint as the data directory publishes it right now: the port from a
+/// live `gateway.json`, the token from the file beside it. Reconnect attempts consult
+/// this so an attached client outlives `ouro stop` + `ouro daemon` — the restart rotates
+/// the token and may move the port, and both are on disk before the new gateway accepts
+/// its first connection. No live publication, or one this client cannot read, is `None`:
+/// the runtime is down and the client's honest move is to keep waiting, not to guess.
+#[derive(Debug)]
+pub struct PublishedEndpoint {
+    data_dir: PathBuf,
+    token_file: PathBuf,
+}
+
+impl PublishedEndpoint {
+    pub fn new(data_dir: PathBuf, token_file: PathBuf) -> Self {
+        Self {
+            data_dir,
+            token_file,
+        }
+    }
+}
+
+impl EndpointSource for PublishedEndpoint {
+    fn current(&self) -> Option<(std::net::SocketAddr, Secret)> {
+        let publication = read_live_publication(&self.data_dir).ok().flatten()?;
+        let token = read_token(&self.token_file).ok()?;
+
+        Some((
+            std::net::SocketAddr::from(([127, 0, 0, 1], publication.port)),
+            token,
+        ))
+    }
+}
+
+/// A fixed `--addr` whose token file is re-read before each reconnect attempt. The port
+/// cannot move — the caller chose it — but a restart on the other end still rotates the
+/// token, and the file the caller named is where the rotation lands.
+#[derive(Debug)]
+pub struct TokenFileEndpoint {
+    addr: std::net::SocketAddr,
+    token_file: PathBuf,
+}
+
+impl TokenFileEndpoint {
+    pub fn new(addr: std::net::SocketAddr, token_file: PathBuf) -> Self {
+        Self { addr, token_file }
+    }
+}
+
+impl EndpointSource for TokenFileEndpoint {
+    fn current(&self) -> Option<(std::net::SocketAddr, Secret)> {
+        let token = read_token(&self.token_file).ok()?;
+        Some((self.addr, token))
     }
 }
 
@@ -3100,6 +3155,7 @@ mod tests {
             crate::fleet::Ports {
                 gateway: Some(48_501),
                 dist: Some(44_501),
+                ..crate::fleet::ephemeral_ports()
             },
         )
         .unwrap();
@@ -3146,7 +3202,7 @@ mod tests {
             None,
             "alpha",
             "127.0.0.1",
-            crate::fleet::Ports::DEFAULT,
+            crate::fleet::ephemeral_ports(),
         )
         .unwrap();
         let error = spawn(

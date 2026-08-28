@@ -24,8 +24,15 @@
 //! ## Reconnect is transport-level only
 //!
 //! A dropped connection is retried with capped exponential backoff and jitter, and the
-//! handshake is repeated. A *refused* handshake is not retried: a rejected token and an
-//! unsupported protocol are decisions, and retrying a decision is a spin, not a repair.
+//! handshake is repeated. When the config carries an [`EndpointSource`], each attempt
+//! first re-resolves the address and token through it: a restarted runtime rotates the
+//! token (and may move the port) and publishes both before accepting its first
+//! connection, so the endpoint this client remembers is exactly the one credential set
+//! guaranteed to be wrong after the most routine lifecycle event there is. A *refused*
+//! handshake is still not retried: a rejected token and an unsupported protocol are
+//! decisions, and retrying a decision is a spin, not a repair. The one carve-out is an
+//! unauthenticated refusal of credentials the source has already replaced — that is the
+//! rotation race, not a decision about the token this client would present next.
 //! [`ReconnectHook`] is where the interactive UI re-subscribes every watched session
 //! after a successful re-handshake. Headless commands (`ouro run`, `ouro stop`,
 //! `mcp-serve`) pass [`NoReconnectHook`]: a lost socket is the answer, not a fault to
@@ -206,6 +213,25 @@ impl ReconnectHook for NoReconnectHook {
     }
 }
 
+/// Where reconnect attempts learn the gateway's *current* address and token.
+///
+/// `ouro stop` + `ouro daemon` rotates the token and may move the port, and the new
+/// runtime publishes both before it accepts a connection. An attached client only finds
+/// out through the publication, so each reconnect attempt asks this source instead of
+/// reusing what the first handshake used. `None` means nothing usable is published right
+/// now — the runtime is down, or the publication is unreadable — and the honest answer is
+/// to keep waiting for one rather than to guess at a port that may belong to someone
+/// else by now.
+pub trait EndpointSource: Send + Sync + 'static {
+    fn current(&self) -> Option<(SocketAddr, Secret)>;
+}
+
+impl fmt::Debug for dyn EndpointSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EndpointSource")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     pub addr: SocketAddr,
@@ -220,6 +246,9 @@ pub struct TransportConfig {
     /// Whether a lost connection is re-established. `ouro stop` turns this off: it asks
     /// the runtime to exit, so the close that follows is the answer, not a fault.
     pub reconnect: bool,
+    /// Re-resolves `addr` and `token` before each reconnect attempt. `None` reconnects
+    /// to the endpoint above for the life of the client.
+    pub refresh: Option<Arc<dyn EndpointSource>>,
 }
 
 impl TransportConfig {
@@ -235,6 +264,7 @@ impl TransportConfig {
             notification_capacity: DEFAULT_NOTIFICATION_CAPACITY,
             backoff: Backoff::default(),
             reconnect: true,
+            refresh: None,
         }
     }
 }
@@ -491,7 +521,9 @@ pub async fn connect(
 ) -> Result<Connected, ClientError> {
     let config = Arc::new(config);
     let ids = Arc::new(AtomicU64::new(1));
-    let (wire, hello) = connect_once(&config, &ids).await?;
+    let addr = config.addr;
+    let token = config.token.clone();
+    let (wire, hello) = connect_once(&config, addr, &token, &ids).await?;
 
     let (commands, inbox) = mpsc::channel(COMMAND_CAPACITY);
     let (notifications, stream) = mpsc::channel(config.notification_capacity);
@@ -506,6 +538,8 @@ pub async fn connect(
 
     let actor = Actor {
         config,
+        addr,
+        token,
         hook,
         ids,
         inbox,
@@ -527,9 +561,11 @@ pub async fn connect(
 
 async fn connect_once(
     config: &TransportConfig,
+    addr: SocketAddr,
+    token: &Secret,
     ids: &AtomicU64,
 ) -> Result<(TcpWire, Hello), ClientError> {
-    let stream = tokio::time::timeout(config.connect_timeout, TcpStream::connect(config.addr))
+    let stream = tokio::time::timeout(config.connect_timeout, TcpStream::connect(addr))
         .await
         .map_err(|_elapsed| ClientError::Timeout)?
         .map_err(|error| ClientError::Io(error.to_string()))?;
@@ -544,7 +580,7 @@ async fn connect_once(
         max_outbound: config.max_outbound,
     };
 
-    let hello = handshake(&mut wire, config, ids).await?;
+    let hello = handshake(&mut wire, config, token, ids).await?;
 
     Ok((wire, hello))
 }
@@ -552,12 +588,13 @@ async fn connect_once(
 async fn handshake<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     wire: &mut Wire<R, W>,
     config: &TransportConfig,
+    token: &Secret,
     ids: &AtomicU64,
 ) -> Result<Hello, ClientError> {
     let id = ids.fetch_add(1, Ordering::Relaxed);
 
     let params = serde_json::to_value(HelloParams {
-        token: config.token.expose(),
+        token: token.expose(),
         protocol: proto::PROTOCOL,
         client: &config.client,
     })
@@ -603,6 +640,11 @@ enum Outcome {
 
 struct Actor {
     config: Arc<TransportConfig>,
+    /// The endpoint the current connection was made to. With a refresh source this
+    /// follows the publication across runtime restarts; without one it never changes
+    /// from `config.addr` / `config.token`.
+    addr: SocketAddr,
+    token: Secret,
     hook: Arc<dyn ReconnectHook>,
     ids: Arc<AtomicU64>,
     inbox: mpsc::Receiver<Command>,
@@ -721,14 +763,58 @@ impl Actor {
             tokio::time::sleep(self.config.backoff.delay(attempt)).await;
             attempt = attempt.saturating_add(1);
 
-            match connect_once(&self.config, &self.ids).await {
+            // A restarted runtime rotated the token and may have moved the port, and
+            // published both before accepting its first connection — so each attempt
+            // starts from the publication as it is now, not as it was at first connect.
+            // No publication means the runtime is down: connecting anywhere would be a
+            // guess, so wait for the next attempt to find one.
+            if let Some(source) = &self.config.refresh {
+                match source.current() {
+                    Some((addr, token)) => {
+                        self.addr = addr;
+                        self.token = token;
+                    }
+                    None => continue,
+                }
+            }
+
+            match connect_once(&self.config, self.addr, &self.token, &self.ids).await {
                 Ok(established) => {
                     self.shared.reconnects.fetch_add(1, Ordering::Relaxed);
                     return Ok(established);
                 }
-                Err(error) if error.is_fatal() => return Err(error),
+                Err(error) if error.is_fatal() => {
+                    if self.refusal_is_stale(&error) {
+                        continue;
+                    }
+
+                    return Err(error);
+                }
                 Err(_transient) => continue,
             }
+        }
+    }
+
+    /// Whether an unauthenticated refusal was aimed at credentials the publication has
+    /// already replaced. The token can rotate between an attempt's re-read and its
+    /// handshake; surviving that race is not retrying a decision, because the decision
+    /// was about a token this client no longer intends to present. A gateway refusing
+    /// what the publication *currently* names — or any refusal without a refresh source
+    /// to consult — is the real thing, and stays fatal.
+    fn refusal_is_stale(&self, error: &ClientError) -> bool {
+        if error.code() != Some(proto::ErrorCode::Unauthenticated) {
+            return false;
+        }
+
+        let Some(source) = &self.config.refresh else {
+            return false;
+        };
+
+        match source.current() {
+            Some((addr, token)) => addr != self.addr || token.expose() != self.token.expose(),
+            // The publication vanished mid-attempt, so the refusing gateway is no
+            // longer the published one; the next attempt waits for its replacement.
+            None => true,
         }
     }
 

@@ -10,6 +10,8 @@
 
 mod support;
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,9 +20,11 @@ use tokio::sync::mpsc;
 
 use ouro::proto::ErrorCode;
 use ouro::proto::Hello;
-use ouro::transport::{self, Client, ClientError, HookFuture, NoReconnectHook, ReconnectHook};
+use ouro::transport::{
+    self, Client, ClientError, EndpointSource, HookFuture, NoReconnectHook, ReconnectHook, Secret,
+};
 
-use support::{config, listener, Peer, PATIENCE};
+use support::{config, listener, Peer, PATIENCE, TOKEN};
 
 fn hook() -> Arc<dyn ReconnectHook> {
     Arc::new(NoReconnectHook)
@@ -459,6 +463,283 @@ async fn a_dropped_connection_is_re_established_and_re_handshaken() {
         .expect("a result on the re-established connection");
 
     assert_eq!(status["node"], "after-reconnect");
+
+    script.await.expect("the script finished");
+}
+
+/// The token a restart publishes in this file's scripts. Any value other than `TOKEN`
+/// would do; the length just mirrors the real one.
+const ROTATED: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// A scripted publication: consult number N answers with step N, the last step repeating.
+/// This is the on-disk `gateway.json` + `gateway.token` pair as a state machine, so a test
+/// can pin *when* the reconnect loop re-reads it and what each read must produce.
+struct ScriptedEndpoint {
+    steps: Vec<Option<(SocketAddr, &'static str)>>,
+    consulted: AtomicUsize,
+}
+
+impl ScriptedEndpoint {
+    fn new(steps: Vec<Option<(SocketAddr, &'static str)>>) -> Arc<Self> {
+        Arc::new(Self {
+            steps,
+            consulted: AtomicUsize::new(0),
+        })
+    }
+
+    fn consulted(&self) -> usize {
+        self.consulted.load(Ordering::SeqCst)
+    }
+}
+
+impl EndpointSource for ScriptedEndpoint {
+    fn current(&self) -> Option<(SocketAddr, Secret)> {
+        let call = self.consulted.fetch_add(1, Ordering::SeqCst);
+        let step = self.steps.get(call).or_else(|| self.steps.last())?;
+
+        step.as_ref()
+            .map(|(addr, token)| (*addr, Secret::new((*token).to_string())))
+    }
+}
+
+fn reconnecting_config(
+    address: SocketAddr,
+    source: Arc<ScriptedEndpoint>,
+) -> transport::TransportConfig {
+    let mut config = config(address);
+    config.reconnect = true;
+    config.backoff.initial = Duration::from_millis(20);
+    config.backoff.max = Duration::from_millis(50);
+    config.refresh = Some(source);
+    config
+}
+
+#[tokio::test]
+async fn a_reconnect_presents_the_published_token_not_the_one_it_connected_with() {
+    let (server, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut first = Peer::accept(&server).await;
+        first.hello(&["hello", "runtime.status"]).await;
+        drop(first);
+
+        // The restarted runtime knows only the rotated token; `hello_with_token`
+        // asserts that is what the client presented.
+        let mut second = Peer::accept(&server).await;
+        second
+            .hello_with_token(ROTATED, &["hello", "runtime.status"])
+            .await;
+
+        let request = second.request().await.expect("a call after the rotation");
+        second
+            .result(&request["id"], json!({ "node": "after-rotation" }))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let source = ScriptedEndpoint::new(vec![Some((address, ROTATED))]);
+    let (reconnected, mut reconnects) = mpsc::unbounded_channel();
+
+    let connected = transport::connect(
+        reconnecting_config(address, source.clone()),
+        Arc::new(RecordReconnect(reconnected)),
+    )
+    .await
+    .expect("the first handshake still uses the connect-time token");
+
+    tokio::time::timeout(PATIENCE, reconnects.recv())
+        .await
+        .expect("a reconnect in time")
+        .expect("a hook call");
+
+    let status = tokio::time::timeout(PATIENCE, connected.client.call("runtime.status", json!({})))
+        .await
+        .expect("an answer in time")
+        .expect("a result over the re-established connection");
+
+    assert_eq!(status["node"], "after-rotation");
+    assert_eq!(connected.client.reconnects(), 1);
+    assert!(source.consulted() >= 1, "the publication was never re-read");
+
+    script.await.expect("the script finished");
+}
+
+#[tokio::test]
+async fn an_unauthenticated_reconnect_re_reads_the_publication_and_survives_the_rotation() {
+    let (server, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut first = Peer::accept(&server).await;
+        first.hello(&["hello", "runtime.status"]).await;
+        drop(first);
+
+        // The rotation lands between the attempt's re-read and its handshake, so this
+        // gateway refuses the stale token the way the real one would.
+        let mut refusing = Peer::accept(&server).await;
+        let request = refusing.request().await.expect("a stale hello");
+        assert_eq!(request["params"]["token"], TOKEN);
+        refusing
+            .error(
+                &request["id"],
+                -32001,
+                "hello did not present the token this listener was started with",
+                None,
+            )
+            .await;
+        drop(refusing);
+
+        let mut third = Peer::accept(&server).await;
+        third
+            .hello_with_token(ROTATED, &["hello", "runtime.status"])
+            .await;
+
+        let request = third.request().await.expect("a call after the refusal");
+        third
+            .result(&request["id"], json!({ "node": "after-refusal" }))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    // Read 1 (before the first attempt) still says the stale token; read 2 is the
+    // re-read the -32001 must trigger, and it says the publication changed; read 3
+    // (before the next attempt) is what that attempt presents.
+    let source = ScriptedEndpoint::new(vec![
+        Some((address, TOKEN)),
+        Some((address, ROTATED)),
+        Some((address, ROTATED)),
+    ]);
+    let (reconnected, mut reconnects) = mpsc::unbounded_channel();
+
+    let connected = transport::connect(
+        reconnecting_config(address, source.clone()),
+        Arc::new(RecordReconnect(reconnected)),
+    )
+    .await
+    .expect("a handshake");
+
+    tokio::time::timeout(PATIENCE, reconnects.recv())
+        .await
+        .expect("the refusal of a rotated-away token must not kill the client")
+        .expect("a hook call");
+
+    let status = tokio::time::timeout(PATIENCE, connected.client.call("runtime.status", json!({})))
+        .await
+        .expect("an answer in time")
+        .expect("a result over the re-established connection");
+
+    assert_eq!(status["node"], "after-refusal");
+    assert!(
+        source.consulted() >= 3,
+        "an unauthenticated refusal must re-read the publication, saw {} reads",
+        source.consulted()
+    );
+
+    script.await.expect("the script finished");
+}
+
+#[tokio::test]
+async fn an_absent_publication_holds_the_reconnect_until_one_returns() {
+    let (server, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut first = Peer::accept(&server).await;
+        first.hello(&["hello", "runtime.status"]).await;
+        drop(first);
+
+        // Only one further connection: while the publication is absent the client must
+        // wait rather than dial the port it remembers.
+        let mut second = Peer::accept(&server).await;
+        second.hello(&["hello", "runtime.status"]).await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    // Two reads find the runtime down; the third finds the new publication.
+    let source = ScriptedEndpoint::new(vec![None, None, Some((address, TOKEN))]);
+    let (reconnected, mut reconnects) = mpsc::unbounded_channel();
+
+    let connected = transport::connect(
+        reconnecting_config(address, source.clone()),
+        Arc::new(RecordReconnect(reconnected)),
+    )
+    .await
+    .expect("a handshake");
+
+    tokio::time::timeout(PATIENCE, reconnects.recv())
+        .await
+        .expect("a reconnect once the publication returned")
+        .expect("a hook call");
+
+    assert_eq!(connected.client.reconnects(), 1);
+    assert!(
+        source.consulted() >= 3,
+        "the absent publication must be polled, saw {} reads",
+        source.consulted()
+    );
+
+    script.await.expect("the script finished");
+}
+
+#[tokio::test]
+async fn a_refusal_of_the_currently_published_token_is_still_fatal() {
+    let (server, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut first = Peer::accept(&server).await;
+        first.hello(&["hello", "runtime.status"]).await;
+        drop(first);
+
+        // The publication has not changed, so this refusal is a decision about the
+        // exact credentials the client would present next — retrying it would spin.
+        let mut refusing = Peer::accept(&server).await;
+        let request = refusing.request().await.expect("a hello");
+        refusing
+            .error(
+                &request["id"],
+                -32001,
+                "hello did not present the token this listener was started with",
+                None,
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let source = ScriptedEndpoint::new(vec![Some((address, TOKEN))]);
+
+    let connected = transport::connect(
+        reconnecting_config(address, source.clone()),
+        Arc::new(NoReconnectHook),
+    )
+    .await
+    .expect("a handshake");
+
+    let reason = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match connected
+                .client
+                .call_with_timeout("runtime.status", json!({}), Duration::from_millis(100))
+                .await
+            {
+                Err(ClientError::Stopped(reason)) => return reason,
+                _ => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .expect("the client records the refusal in time");
+
+    assert!(
+        reason.contains("unauthenticated"),
+        "the stop reason must name the refusal, got {reason:?}"
+    );
+    assert!(
+        source.consulted() >= 2,
+        "the refusal must be checked against a re-read publication, saw {} reads",
+        source.consulted()
+    );
 
     script.await.expect("the script finished");
 }

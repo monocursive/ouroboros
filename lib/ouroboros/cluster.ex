@@ -462,7 +462,7 @@ defmodule Ouroboros.Cluster.Monitor do
     do: Map.get(state, :session_owners, %{interactive: MapSet.new(), coding: MapSet.new()})
 
   defp load_session_owners do
-    case session_owner_storage() do
+    case fleet_profile_storage() do
       :ephemeral ->
         {empty_session_owners(), :reliable}
 
@@ -507,7 +507,7 @@ defmodule Ouroboros.Cluster.Monitor do
 
   defp persist_session_owners(owners) do
     with :ok <- validate_session_owners(owners) do
-      case session_owner_storage() do
+      case fleet_profile_storage() do
         :ephemeral ->
           :ok
 
@@ -575,7 +575,7 @@ defmodule Ouroboros.Cluster.Monitor do
   end
 
   defp forget_session_owner_from_profile(state, machine) do
-    case session_owner_storage() do
+    case fleet_profile_storage() do
       :ephemeral ->
         {:error, :fleet_profile_unavailable}
 
@@ -708,7 +708,15 @@ defmodule Ouroboros.Cluster.Monitor do
 
   defp valid_node_name?(_invalid), do: false
 
-  defp session_owner_storage do
+  # Public because the saved profile answers two different questions and both must read
+  # it through the same validation: this monitor's durable session-owner evidence, and
+  # `Ouroboros.Cluster.membership_hosts/0`'s live dial list. Two readers with two
+  # notions of a valid profile is exactly the divergence that let a running owner keep
+  # a boot-time host list while its saved roster had already grown.
+  @doc false
+  @spec fleet_profile_storage() ::
+          {:ok, String.t(), map(), keyword()} | :ephemeral | {:error, term()}
+  def fleet_profile_storage do
     data_dir = Application.get_env(:ouroboros, :data_dir)
     fleet_id = System.get_env("OUROBOROS_FLEET_ID")
 
@@ -726,7 +734,7 @@ defmodule Ouroboros.Cluster.Monitor do
         root = Path.join(Path.expand(data_dir), "fleet")
         profile = Path.join(root, "profile.json")
 
-        case read_fleet_tombstones(profile, fleet_id) do
+        case read_fleet_profile(profile, fleet_id) do
           {:ok, profile} ->
             {:ok, fleet_id, profile, [path: Path.join(root, "cluster-directory")]}
 
@@ -740,13 +748,13 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
-  defp read_fleet_tombstones(profile, fleet_id) do
+  defp read_fleet_profile(profile, fleet_id) do
     with {:ok, %File.Stat{type: :regular, size: size}}
          when size <= @max_fleet_profile_bytes <- File.lstat(profile),
          {:ok, encoded} <- read_bounded_fleet_profile(profile),
          {:ok, decoded} <- Jason.decode(encoded),
-         {:ok, tombstones} <- decode_fleet_tombstones(decoded, fleet_id) do
-      {:ok, tombstones}
+         {:ok, roster} <- decode_fleet_roster(decoded, fleet_id) do
+      {:ok, roster}
     else
       {:error, :enoent} ->
         {:error, :enoent}
@@ -794,7 +802,7 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
-  defp decode_fleet_tombstones(
+  defp decode_fleet_roster(
          %{
            "schema" => 1,
            "fleet_id" => fleet_id,
@@ -819,17 +827,22 @@ defmodule Ouroboros.Cluster.Monitor do
            decode_profile_members(:tombstones, Map.get(profile, "tombstones", [])),
          true <- MapSet.disjoint?(active.nodes, removed.nodes),
          true <- MapSet.disjoint?(active.machines, removed.machines) do
-      {:ok, %{roster_revision: revision, tombstones: removed.by_machine}}
+      {:ok,
+       %{
+         roster_revision: revision,
+         members: active.by_machine,
+         tombstones: removed.by_machine
+       }}
     else
       _invalid -> {:error, :invalid_fleet_profile_roster}
     end
   end
 
-  defp decode_fleet_tombstones(%{"fleet_id" => recorded}, fleet_id)
+  defp decode_fleet_roster(%{"fleet_id" => recorded}, fleet_id)
        when is_binary(recorded) and recorded != fleet_id,
        do: {:error, :fleet_profile_identity_mismatch}
 
-  defp decode_fleet_tombstones(_invalid, _fleet_id),
+  defp decode_fleet_roster(_invalid, _fleet_id),
     do: {:error, :invalid_fleet_profile}
 
   defp decode_profile_members(kind, entries) when is_list(entries) do
@@ -951,8 +964,11 @@ defmodule Ouroboros.Cluster do
 
     * `none` (default) — no discovery. Nodes connect because something else connected
       them, exactly as before this module existed.
-    * `epmd` — a static list of node names in `OUROBOROS_CLUSTER_HOSTS`
-      (comma-separated), retried on an interval so boot order does not matter.
+    * `epmd` — a list of node names, retried on an interval so boot order does not
+      matter. `OUROBOROS_CLUSTER_HOSTS` (comma-separated) seeds the list at boot; when
+      this node runs from a saved fleet profile, every retry re-resolves membership
+      from that profile (`membership_hosts/0`), so `ouro fleet add` and `ouro fleet
+      invite cancel` reach a running node's dialer without a restart.
     * `gossip` — libcluster's multicast gossip, optionally keyed by
       `OUROBOROS_CLUSTER_GOSSIP_SECRET`.
     * `dns` — poll the A records of `OUROBOROS_CLUSTER_DNS_QUERY` and connect
@@ -974,11 +990,14 @@ defmodule Ouroboros.Cluster do
 
   use Supervisor
 
+  require Logger
+
   @roles [:core, :builder, :signer]
   @strategies [:none, :epmd, :gossip, :dns]
   @session_planes [:interactive, :coding]
   @role_key {__MODULE__, :node_role}
   @formation_name __MODULE__.Formation
+  @membership_cache {__MODULE__, :membership_hosts}
   @probe_timeout 5_000
   @directory_timeout 2_000
   @default_reconnect_ms 5_000
@@ -1183,18 +1202,94 @@ defmodule Ouroboros.Cluster do
     }
   end
 
-  @doc "Returns the static nodes this machine expects to meet, when the topology names them."
+  @doc "Returns the nodes this machine expects to meet, when the topology names them."
   @spec expected_nodes() :: [node()]
   def expected_nodes do
     expected =
       case strategy() do
-        {:ok, :epmd} -> node_list("OUROBOROS_CLUSTER_HOSTS")
+        {:ok, :epmd} -> membership_hosts()
         _other -> []
       end
 
     [node() | expected]
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  @doc """
+  Returns the node names formation should currently dial.
+
+  When this node runs from a saved fleet profile, membership is re-read from that
+  profile on every call, so a roster change made while the runtime is up — `ouro fleet
+  add`, `ouro fleet invite cancel` — reaches both the dialer and the expected-machine
+  directory without a restart. `OUROBOROS_CLUSTER_HOSTS` remains the boot seed, and the
+  whole answer for a topology configured by environment alone.
+
+  A profile that turns unreadable keeps the last membership this node successfully
+  read, with one warning per distinct failure, rather than silently shrinking back to
+  the boot seed: dialing a just-canceled member a while longer is recoverable noise,
+  while dropping a just-added one recreates the wait-forever failure this function
+  exists to prevent.
+  """
+  @spec membership_hosts() :: [node()]
+  def membership_hosts do
+    case __MODULE__.Monitor.fleet_profile_storage() do
+      {:ok, fleet_id, profile, _opts} ->
+        hosts =
+          profile.members
+          |> Map.values()
+          |> Enum.sort()
+          |> Enum.map(&String.to_atom/1)
+
+        remember_membership(fleet_id, hosts)
+        hosts
+
+      :ephemeral ->
+        node_list("OUROBOROS_CLUSTER_HOSTS")
+
+      {:error, reason} ->
+        recall_membership(reason)
+    end
+  end
+
+  @doc false
+  def reset_membership_cache, do: :persistent_term.erase(@membership_cache)
+
+  defp remember_membership(fleet_id, hosts) do
+    entry = %{fleet_id: fleet_id, hosts: hosts, failure: nil}
+
+    # `:persistent_term.put` triggers a global scan whenever the stored term changes,
+    # and this runs once per reconnect sweep; only write when membership actually moved.
+    if :persistent_term.get(@membership_cache, nil) != entry do
+      :persistent_term.put(@membership_cache, entry)
+    end
+  end
+
+  defp recall_membership(reason) do
+    case :persistent_term.get(@membership_cache, nil) do
+      %{hosts: hosts, failure: ^reason} ->
+        hosts
+
+      %{hosts: hosts} = entry ->
+        Logger.warning(
+          "fleet profile is unreadable; formation keeps dialing the last membership it read: " <>
+            inspect(reason, limit: 10, printable_limit: 200)
+        )
+
+        :persistent_term.put(@membership_cache, %{entry | failure: reason})
+        hosts
+
+      nil ->
+        seed = node_list("OUROBOROS_CLUSTER_HOSTS")
+
+        Logger.warning(
+          "fleet profile is unreadable and no membership was ever read; formation dials " <>
+            "the boot seed list: " <> inspect(reason, limit: 10, printable_limit: 200)
+        )
+
+        :persistent_term.put(@membership_cache, %{fleet_id: nil, hosts: seed, failure: reason})
+        seed
+    end
   end
 
   @doc "Formation facts needed by an operator, without strategy credentials."
@@ -1404,13 +1499,15 @@ defmodule Ouroboros.Cluster do
         {:error, {:missing_cluster_configuration, "OUROBOROS_CLUSTER_HOSTS"}}
 
       hosts ->
-        # `timeout` is libcluster's retry interval, not a deadline. Leaving it
-        # `:infinity` would attempt connection once, at boot, and a cluster whose
-        # members boot in any order would never form.
+        # `timeout` is the retry interval, not a deadline. Leaving it `:infinity` would
+        # attempt connection once, at boot, and a cluster whose members boot in any
+        # order would never form. `hosts` here is only the boot seed: RosterEpmd
+        # re-resolves membership through `membership_hosts/0` on every retry, so the
+        # saved fleet profile — not this frozen list — is what a running node dials.
         {:ok,
          [
            ouroboros: [
-             strategy: Cluster.Strategy.Epmd,
+             strategy: Ouroboros.Cluster.RosterEpmd,
              config: [hosts: hosts, timeout: reconnect_interval()]
            ]
          ]}

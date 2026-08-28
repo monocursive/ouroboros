@@ -42,7 +42,8 @@ use ouro::model::{ApprovalMode, Plane, SandboxMode, StartError, StartRequest, St
 use ouro::proto::Hello;
 use ouro::runtime::{Daemon, Launcher, Output, Paths, Publication};
 use ouro::transport::{
-    Client, ClientError, Connected, NoReconnectHook, ReconnectHook, Secret, TransportConfig,
+    Client, ClientError, Connected, EndpointSource, NoReconnectHook, ReconnectHook, Secret,
+    TransportConfig,
 };
 use ouro::ui::boot::{Boot, BootEvent, BootProgress, Progress};
 use ouro::ui::{self, App, Mode, Quit, Screen};
@@ -340,6 +341,10 @@ async fn attach_local_with(
         boot,
         local_address(publication.port),
         token,
+        Some(Arc::new(runtime::PublishedEndpoint::new(
+            paths.data_dir.clone(),
+            paths.token_file(),
+        ))),
         supervision(&daemon),
         daemon,
         None,
@@ -450,7 +455,15 @@ async fn new_session(
         address: address.to_string(),
     });
 
-    let attached = match boot.drive(attach_with(address, token, true, hook)).await {
+    let refresh: Arc<dyn EndpointSource> = Arc::new(runtime::PublishedEndpoint::new(
+        paths.data_dir.clone(),
+        paths.token_file(),
+    ));
+
+    let attached = match boot
+        .drive(attach_with(address, token, true, Some(refresh), hook))
+        .await
+    {
         Ok(attached) => attached,
         Err(error) => {
             return Err(fail_boot_with_owned_daemon(
@@ -871,7 +884,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     // Reconnect stays off deliberately. A silent re-handshake would drop this run's
     // subscription and leave it waiting out its whole `--timeout` on a stream that is
     // never coming back; a closed connection is instead an observable `lost`.
-    let attached = match attach_with(address, token, false, hook).await {
+    let attached = match attach_with(address, token, false, None, hook).await {
         Ok(attached) => attached,
         Err(error) => {
             return Err(clean_up_owned_daemon_after_error(
@@ -1041,7 +1054,7 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
     // re-handshake would drop every session's subscription and leave the editor watching a
     // stream that is never coming back. A closed connection ends this process instead, and
     // the editor restarts it.
-    let attached = match attach_with(address, token, false, hook).await {
+    let attached = match attach_with(address, token, false, None, hook).await {
         Ok(attached) => attached,
         Err(error) => {
             return Err(clean_up_owned_daemon_after_error(
@@ -1334,6 +1347,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 fleet::Ports {
                     gateway: gateway_port,
                     dist: dist_port,
+                    epmd: None,
                 },
             )?;
             let address_note = if fleet::host_is_local_only(&profile.host) {
@@ -1410,6 +1424,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 fleet::Ports {
                     gateway: gateway_port,
                     dist: dist_port,
+                    epmd: None,
                 },
             )
             .await
@@ -1448,7 +1463,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     fleet::cancel_invite(&paths.data_dir, &cancel_machine, &roster_output)?;
                 let roster_arg = fleet::shell_quote_path(&roster_output)?;
                 println!(
-                    "Stopped expecting invitation for {} ({}).\n  roster       revision {} in {} (mode 0600)\n\nExisting fleet machines still have their older saved seed list. Copy this roster privately to each one. On every recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThis owner already saved the new roster but also loads seed topology only at boot; restart it with the same service-aware stop/start flow when convenient (no import needed). This update does NOT revoke any copied invitation, certificate, or shared cookie. A leaked invitation compromises the fleet until whole-fleet credential rotation: deactivate/remove recovery on every machine, leave them, recreate the fleet, and issue fresh invitations.",
+                    "Stopped expecting invitation for {} ({}).\n  roster       revision {} in {} (mode 0600)\n\nExisting fleet machines still have their older saved seed list. Copy this roster privately to each one. On every recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThis owner already saved the new roster, and a running owner runtime stops expecting and dialing the canceled machine within a few seconds; no owner restart or import is needed. This update does NOT revoke any copied invitation, certificate, or shared cookie. A leaked invitation compromises the fleet until whole-fleet credential rotation: deactivate/remove recovery on every machine, leave them, recreate the fleet, and issue fresh invitations.",
                     removed.machine,
                     removed.node,
                     revision,
@@ -1479,6 +1494,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 fleet::Ports {
                     gateway: gateway_port,
                     dist: dist_port,
+                    epmd: None,
                 },
                 replace,
             )?;
@@ -1494,7 +1510,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 ""
             };
             println!(
-                "Private invitation created.\n  machine      {}\n  address      {}{}{}\n  invitation   {} (mode 0600)\n\nCopy it through a private channel. Copy tools may widen permissions; on the receiving machine run:\n  chmod 600 {}\n  ouro fleet join {}\n\nAfter it joins, delete the copied invitation from both machines. Its contents are secret and were not printed. The seven-day wrapper-age check prevents stale setup mistakes, but an already copied credential remains usable material; a leak requires whole-fleet credential rotation.",
+                "Private invitation created.\n  machine      {}\n  address      {}{}{}\n  invitation   {} (mode 0600)\n\nCopy it through a private channel. Copy tools may widen permissions; on the receiving machine run:\n  chmod 600 {}\n  ouro fleet join {}\n\nA running owner runtime starts expecting and dialing the new machine within a few seconds; no owner restart is needed for it to connect. After it joins, delete the copied invitation from both machines. Its contents are secret and were not printed. The seven-day wrapper-age check prevents stale setup mistakes, but an already copied credential remains usable material; a leak requires whole-fleet credential rotation.",
                 member.machine,
                 member.host,
                 address_note,
@@ -1521,6 +1537,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 fleet::Ports {
                     gateway: gateway_port,
                     dist: dist_port,
+                    epmd: None,
                 },
             )?;
             let address_note = if fleet::host_is_local_only(&profile.host) {
@@ -1546,9 +1563,10 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 let query = async {
                     let token = runtime::read_token(&paths.token_file())?;
                     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-                    let attached = attach_with(local_address(publication.port), token, false, hook)
-                        .await
-                        .context("connecting to the local runtime")?;
+                    let attached =
+                        attach_with(local_address(publication.port), token, false, None, hook)
+                            .await
+                            .context("connecting to the local runtime")?;
                     let result = attached
                         .client
                         .call_with_timeout("fleet.status", json!({}), Duration::from_secs(5))
@@ -1578,9 +1596,10 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 let query = async {
                     let token = runtime::read_token(&paths.token_file())?;
                     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-                    let attached = attach_with(local_address(publication.port), token, false, hook)
-                        .await
-                        .context("connecting to the local runtime")?;
+                    let attached =
+                        attach_with(local_address(publication.port), token, false, None, hook)
+                            .await
+                            .context("connecting to the local runtime")?;
                     let result = attached
                         .client
                         .call_with_timeout("fleet.doctor", json!({}), Duration::from_secs(5))
@@ -1682,9 +1701,10 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     })?;
                 let token = runtime::read_token(&paths.token_file())?;
                 let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-                let attached = attach_with(local_address(publication.port), token, false, hook)
-                    .await
-                    .context("connecting to this machine's local runtime")?;
+                let attached =
+                    attach_with(local_address(publication.port), token, false, None, hook)
+                        .await
+                        .context("connecting to this machine's local runtime")?;
                 let result = attached
                     .client
                     .call_with_timeout(
@@ -2369,7 +2389,7 @@ async fn mcp_list(
 
     let (address, token) = remote_endpoint(paths, addr, token_file).await?;
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-    let Connected { client, hello, .. } = attach_with(address, token, false, hook).await?;
+    let Connected { client, hello, .. } = attach_with(address, token, false, None, hook).await?;
 
     if !hello.serves("mcp.list") {
         client.stop().await;
@@ -2409,7 +2429,7 @@ async fn agents_page(
 ) -> Result<()> {
     let (address, token) = remote_endpoint(paths, addr, token_file).await?;
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-    let Connected { client, hello, .. } = attach_with(address, token, false, hook).await?;
+    let Connected { client, hello, .. } = attach_with(address, token, false, None, hook).await?;
 
     // `hello.methods` is the gate here as everywhere: a gateway that serves neither list
     // is told apart from one whose lists are empty, because those are different answers.
@@ -2462,14 +2482,32 @@ async fn attach_remote(
     print: bool,
     config: Loaded,
 ) -> Result<()> {
+    let explicit_addr = addr.is_some();
+    let token_path = token_file.clone().unwrap_or_else(|| paths.token_file());
     let (address, token) = remote_endpoint(paths, addr, token_file).await?;
 
     if print {
         report_dev_data_dir_override(paths, dev, &Progress::Plain);
         let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
 
-        return print_page(address, attach_with(address, token, false, hook).await?).await;
+        return print_page(
+            address,
+            attach_with(address, token, false, None, hook).await?,
+        )
+        .await;
     }
+
+    // Reconnect attempts re-resolve what a restart on the other end rotates: with an
+    // explicit --addr only the token file can change, otherwise the local publication
+    // names the port too.
+    let refresh: Arc<dyn EndpointSource> = if explicit_addr {
+        Arc::new(runtime::TokenFileEndpoint::new(address, token_path))
+    } else {
+        Arc::new(runtime::PublishedEndpoint::new(
+            paths.data_dir.clone(),
+            token_path,
+        ))
+    };
 
     // No spawn to watch, so the boot screen is one phase long — but it is still where the
     // terminal is taken, so the handshake to a runtime on the other end of a tunnel has
@@ -2481,6 +2519,7 @@ async fn attach_remote(
         boot,
         address,
         token,
+        Some(refresh),
         Mode::Attached,
         None,
         None,
@@ -2506,7 +2545,7 @@ async fn attach_remote(
 async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
     let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-    let connected = attach_with(address, token, false, hook).await?;
+    let connected = attach_with(address, token, false, None, hook).await?;
 
     let options = ouro::ledger_cli::Options {
         fleet: args.fleet,
@@ -2528,7 +2567,7 @@ async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
         DesktopCommand::Doctor(args) => {
             let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
             let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-            let connected = attach_with(address, token, false, hook).await?;
+            let connected = attach_with(address, token, false, None, hook).await?;
 
             let mut out = std::io::stdout().lock();
             ouro::desktop_cli::doctor(&connected.client, args.json, args.probe, &mut out).await
@@ -2597,6 +2636,7 @@ async fn draw(
     mut boot: Boot,
     address: SocketAddr,
     token: Secret,
+    refresh: Option<Arc<dyn EndpointSource>>,
     mode: Mode,
     mut daemon: Option<Daemon>,
     open: Option<(Plane, String, Option<String>)>,
@@ -2610,7 +2650,10 @@ async fn draw(
         address: address.to_string(),
     });
 
-    let attached = match boot.drive(attach_with(address, token, true, hook)).await {
+    let attached = match boot
+        .drive(attach_with(address, token, true, refresh, hook))
+        .await
+    {
         Ok(attached) => attached,
         Err(error) => {
             return Err(fail_boot_with_owned_daemon(
@@ -2995,7 +3038,7 @@ where
     // Reconnect is off: this connection exists to end the thing on the other side of it,
     // so the close that follows is the answer rather than a fault to repair.
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-    let attached = attach_with(address, token, false, hook).await?;
+    let attached = attach_with(address, token, false, None, hook).await?;
 
     if attached.hello.node != publication.node {
         bail!(
@@ -3367,14 +3410,20 @@ fn release_launcher(_paths: &Paths) -> Result<Launcher> {
     )
 }
 
+/// `refresh` is where reconnect attempts re-resolve the endpoint; a runtime restart
+/// rotates the token, so every surface that reconnects should pass one. `None` is for
+/// one-shot connections (`reconnect: false`) and for a test that wants a fixed token
+/// refused.
 async fn attach_with(
     address: SocketAddr,
     token: Secret,
     reconnect: bool,
+    refresh: Option<Arc<dyn EndpointSource>>,
     hook: Arc<dyn ReconnectHook>,
 ) -> Result<Connected> {
     let mut config = TransportConfig::new(address, token);
     config.reconnect = reconnect;
+    config.refresh = refresh;
 
     transport::connect(config, hook)
         .await
@@ -3432,6 +3481,38 @@ mod tests {
             .expect("a private scratch data directory");
     }
 
+    /// Distinct free loopback ports so this binary's tests never bind the production
+    /// dist range or the derived EPMD/gateway spaces a live same-host lab occupies.
+    /// The library's test-only allocator is not compiled into this crate's dev build.
+    fn ephemeral_fleet_ports() -> fleet::Ports {
+        let mut held = Vec::new();
+        let mut ports = Vec::new();
+        while ports.len() < 3 {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("a free ephemeral loopback port");
+            let port = listener
+                .local_addr()
+                .expect("a bound loopback address")
+                .port();
+            held.push(listener);
+            if port != 4369
+                && !(fleet::DEFAULT_DIST_PORT_MIN..=fleet::DEFAULT_DIST_PORT_MAX).contains(&port)
+                && !(fleet::DEFAULT_EPMD_BASE..fleet::DEFAULT_EPMD_BASE + fleet::DEFAULT_EPMD_SPAN)
+                    .contains(&port)
+                && !(fleet::DEFAULT_GATEWAY_BASE
+                    ..fleet::DEFAULT_GATEWAY_BASE + fleet::DEFAULT_GATEWAY_SPAN)
+                    .contains(&port)
+            {
+                ports.push(port);
+            }
+        }
+        fleet::Ports {
+            gateway: Some(ports[0]),
+            dist: Some(ports[1]),
+            epmd: Some(ports[2]),
+        }
+    }
+
     fn interactive_request(machine: &str) -> StartRequest {
         StartRequest {
             id: "test-start-id".into(),
@@ -3470,7 +3551,7 @@ mod tests {
             None,
             "service-race",
             "127.0.0.1",
-            fleet::Ports::DEFAULT,
+            ephemeral_fleet_ports(),
         )
         .unwrap();
         ensure_start_requirement(&paths, StartRequirement::Fleet).unwrap();
@@ -4053,6 +4134,9 @@ mod tests {
             boot,
             local_address(publication.port),
             Secret::new("deliberately-wrong-token-for-cleanup-regression".into()),
+            // No refresh on purpose: the claim is about what a refused *first*
+            // handshake does to the daemon, so the wrong token must stay presented.
+            None,
             mode,
             daemon,
             None,

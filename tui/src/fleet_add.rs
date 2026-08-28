@@ -839,6 +839,10 @@ pub fn take_intent(data_dir: &Path) -> Result<Option<Intent>> {
 /// machine. The owner runtime must already be stopped. The intent stays on disk until the
 /// add succeeds, so a failed SSH step can be retried without recreating the fleet.
 pub fn apply_intent(data_dir: &Path) -> Result<Outcome> {
+    apply_intent_with_ports(data_dir, Ports::DEFAULT)
+}
+
+fn apply_intent_with_ports(data_dir: &Path, ports: Ports) -> Result<Outcome> {
     let intent = load_intent(data_dir)?.ok_or_else(|| {
         anyhow!(
             "no add-machine intent at {}; this restart has nothing to apply",
@@ -851,7 +855,7 @@ pub fn apply_intent(data_dir: &Path) -> Result<Outcome> {
             intent.fleet_name.as_deref(),
             &intent.owner_machine,
             &intent.owner_host,
-            Ports::DEFAULT,
+            ports,
         )?;
     }
     let outcome = match &intent.add {
@@ -2173,7 +2177,7 @@ pub fn render_outcome(outcome: &Outcome) -> String {
     match outcome.kind {
         OutcomeKind::Enrolled => {
             text.push_str(&format!(
-                "{machine} is joining at {host}. On this Mac run `ouro fleet status`.\nProvider sign-in stays on that machine; start a session there after it is connected.\n",
+                "{machine} is joining at {host}. This Mac's runtime dials it as it comes up — no restart here; watch `ouro fleet status`.\nProvider sign-in stays on that machine; start a session there after it is connected.\n",
                 machine = outcome.machine,
                 host = outcome.host
             ));
@@ -2541,7 +2545,7 @@ mod tests {
     #[test]
     fn prepare_writes_an_invite_and_a_howto_without_secrets() {
         let data = scratch("prepare");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let outcome = prepare(&data, "vps", "localhost", Some("studio.tailnet.ts.net")).unwrap();
         assert_eq!(outcome.kind, OutcomeKind::Prepared);
         let invite = fleet::pending_invite_path(&data, "vps").unwrap();
@@ -2561,7 +2565,7 @@ mod tests {
     #[test]
     fn ssh_add_without_a_matching_binary_still_copies_only_the_invite_file() {
         let data = scratch("cross-arch");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = FakeRemote::linux("/home/op");
         // Empty roots, not discovered ones: whether this machine happens to have run
         // `make dist-linux` must not decide what this test asserts.
@@ -2605,7 +2609,7 @@ mod tests {
     #[test]
     fn ssh_add_refuses_to_interpolate_an_unsafe_remote_home() {
         let data = scratch("unsafe-home");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = FakeRemote::linux("/tmp/x;id");
         let error = add_with(
             &data,
@@ -2626,7 +2630,7 @@ mod tests {
     #[test]
     fn a_failed_enroll_names_the_pending_invitation_that_remains() {
         let data = scratch("enroll-fail");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let mut remote = FakeRemote::linux("/home/op");
         remote.fail_enroll = true;
         let error = add_with(
@@ -2683,7 +2687,7 @@ mod tests {
             load_intent(&data).unwrap().unwrap().add.unwrap().machine,
             "vps"
         );
-        let outcome = apply_intent(&data).unwrap();
+        let outcome = apply_intent_with_ports(&data, fleet::ephemeral_ports()).unwrap();
         assert_eq!(outcome.machine, "vps");
         assert!(fleet::load(&data).unwrap().is_some());
         assert!(!path.exists(), "the intent is consumed");
@@ -2704,7 +2708,7 @@ mod tests {
             },
         )
         .unwrap();
-        let outcome = apply_intent(&data).unwrap();
+        let outcome = apply_intent_with_ports(&data, fleet::ephemeral_ports()).unwrap();
         assert_eq!(outcome.kind, OutcomeKind::Created);
         assert_eq!(outcome.machine, "studio");
         assert!(fleet::load(&data).unwrap().is_some());
@@ -2896,7 +2900,7 @@ mod tests {
     #[test]
     fn a_resolved_dist_artifact_flows_through_the_copy_path_and_enrolls() {
         let data = scratch("dist-copy-flow");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let root = dist_fixture("dist-copy", local_version(), &foreign_triple());
         let artifact = root.join(dist_artifact_name(local_version(), &foreign_triple()));
 
@@ -2955,7 +2959,7 @@ mod tests {
     #[test]
     fn an_add_without_setup_tailscale_names_the_flag_when_no_address_is_provable() {
         let data = scratch("no-address");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false)]),
             ..ScriptedRemote::default()
@@ -2987,7 +2991,7 @@ mod tests {
     #[test]
     fn setup_tailscale_installs_surfaces_the_url_and_waits_for_the_address() {
         let data = scratch("guided-install");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
             capability: queue(&[
@@ -3047,7 +3051,7 @@ mod tests {
     #[test]
     fn setup_tailscale_refuses_without_passwordless_sudo_and_changes_nothing() {
         let data = scratch("guided-nosudo");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false)]),
             capability: queue(&["tailscale=missing\nsudo=no\n"]),
@@ -3089,7 +3093,7 @@ mod tests {
     #[test]
     fn setup_tailscale_reuses_an_installed_tailscale_that_is_already_up() {
         let data = scratch("guided-idempotent");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
             capability: queue(&["tailscale=present\nsudo=yes\n"]),
@@ -3134,7 +3138,7 @@ mod tests {
     #[test]
     fn setup_tailscale_timeout_names_how_to_resume() {
         let data = scratch("guided-timeout");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false)]),
             capability: queue(&["tailscale=present\nsudo=yes\n"]),
@@ -3188,7 +3192,7 @@ mod tests {
     #[test]
     fn setup_tailscale_is_a_no_op_when_the_destination_already_has_an_address() {
         let data = scratch("guided-noop");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(true, true)]),
             ..ScriptedRemote::default()
@@ -3235,7 +3239,7 @@ mod tests {
     #[test]
     fn the_tailscale_sign_in_url_never_reaches_the_add_log_or_a_file() {
         let data = scratch("guided-url-privacy");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false), &probe_text(true, false)]),
             capability: queue(&["tailscale=present\nsudo=yes\n"]),
@@ -3382,7 +3386,7 @@ mod tests {
     #[test]
     fn a_guided_tailscale_add_emits_the_whole_typed_sequence() {
         let data = scratch("events-guided");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
             capability: queue(&[
@@ -3464,7 +3468,7 @@ mod tests {
     #[test]
     fn a_cross_triple_dist_artifact_add_names_the_resolved_path_in_its_install_event() {
         let data = scratch("events-dist");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let root = dist_fixture("events-dist-root", local_version(), &foreign_triple());
         let artifact = root.join(dist_artifact_name(local_version(), &foreign_triple()));
         let remote = ScriptedRemote {
@@ -3510,7 +3514,7 @@ mod tests {
     #[test]
     fn a_failure_after_the_invitation_copy_carries_its_residue() {
         let data = scratch("events-residue");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let remote = ScriptedRemote {
             probes: queue(&[&probe_text(true, true)]),
             fail_enroll: true,
@@ -3579,7 +3583,7 @@ mod tests {
     #[test]
     fn a_cancel_between_stages_fails_with_only_the_residue_that_is_true() {
         let data = scratch("events-cancel");
-        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let scripted = ScriptedRemote {
             probes: queue(&[&probe_text(true, true)]),
             ..ScriptedRemote::default()

@@ -53,10 +53,10 @@ const MAX_CLUSTER_CHECKPOINT_TEMPS: usize = 4;
 
 pub const DEFAULT_DIST_PORT_MIN: u16 = 43_700;
 pub const DEFAULT_DIST_PORT_MAX: u16 = 43_729;
-const DEFAULT_GATEWAY_BASE: u16 = 47_000;
-const DEFAULT_GATEWAY_SPAN: u16 = 1_000;
-const DEFAULT_EPMD_BASE: u16 = 14_000;
-const DEFAULT_EPMD_SPAN: u16 = 1_000;
+pub const DEFAULT_GATEWAY_BASE: u16 = 47_000;
+pub const DEFAULT_GATEWAY_SPAN: u16 = 1_000;
+pub const DEFAULT_EPMD_BASE: u16 = 14_000;
+pub const DEFAULT_EPMD_SPAN: u16 = 1_000;
 const PROFILE_SCHEMA: u8 = 1;
 const INVITATION_SCHEMA: u8 = 1;
 const INVITATION_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
@@ -243,6 +243,10 @@ pub struct Ports {
     /// A single listener port is useful for several test nodes on one host. `None` uses
     /// the small production range, allowing the OS to select an available listener.
     pub dist: Option<u16>,
+    /// `None` derives the fleet-specific EPMD port from the fleet id on create. An
+    /// explicit port keeps test fleets out of that derived space, where a probe or a
+    /// retirement check could meet an unrelated live daemon.
+    pub epmd: Option<u16>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,7 +261,40 @@ impl Ports {
     pub const DEFAULT: Self = Self {
         gateway: None,
         dist: None,
+        epmd: None,
     };
+}
+
+/// Distinct free loopback ports for one test fleet. Suites must never touch the
+/// production port spaces — the dist range plus the derived EPMD and gateway spaces —
+/// because a live same-host lab legitimately occupies them, and Linux's ephemeral range
+/// overlaps the dist range, so OS-assigned ports are also screened against all three.
+#[cfg(test)]
+pub(crate) fn ephemeral_ports() -> Ports {
+    let mut held = Vec::new();
+    let mut ports = Vec::new();
+    while ports.len() < 3 {
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free ephemeral loopback port");
+        let port = listener
+            .local_addr()
+            .expect("a bound loopback address")
+            .port();
+        // Keeping every allocation bound until all three are chosen makes them distinct.
+        held.push(listener);
+        if port != legacy_epmd_port()
+            && !(DEFAULT_DIST_PORT_MIN..=DEFAULT_DIST_PORT_MAX).contains(&port)
+            && !(DEFAULT_EPMD_BASE..DEFAULT_EPMD_BASE + DEFAULT_EPMD_SPAN).contains(&port)
+            && !(DEFAULT_GATEWAY_BASE..DEFAULT_GATEWAY_BASE + DEFAULT_GATEWAY_SPAN).contains(&port)
+        {
+            ports.push(port);
+        }
+    }
+    Ports {
+        gateway: Some(ports[0]),
+        dist: Some(ports[1]),
+        epmd: Some(ports[2]),
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -553,7 +590,7 @@ pub fn create(
 
     let fleet_id = random_hex(12)?;
     let member = member(machine, host);
-    let epmd_port = default_epmd_port(&fleet_id);
+    let epmd_port = ports.epmd.unwrap_or_else(|| default_epmd_port(&fleet_id));
     ensure_epmd_port_available(host, epmd_port)?;
     let (dist_port_min, dist_port_max) = dist_ports(ports.dist);
     let profile = Profile {
@@ -778,8 +815,10 @@ pub fn cancel_invite(
     validate_machine(machine_name)?;
     ensure_data_dir(data_dir)?;
     refuse_existing_output(roster_output, "roster sync")?;
-    // Like invite, cancel changes only the saved next-start topology. It is serialized
-    // with lifecycle commands but remains safe while this runtime serves agents.
+    // Like invite, cancel changes only the saved membership file. A running runtime
+    // re-reads it on every reconnect sweep and stops dialing the canceled machine
+    // within seconds. It is serialized with lifecycle commands but remains safe while
+    // this runtime serves agents.
     let _lock = lock_live_fleet_update(data_dir, "ouro fleet invite cancel")?;
     let mut profile = load(data_dir)?.ok_or_else(|| {
         anyhow!("this machine is standalone; there is no saved invitation to cancel")
@@ -5496,6 +5535,14 @@ fn validate_ports(ports: Ports) -> Result<()> {
             bail!("distribution port 4369 is reserved for EPMD; choose another port");
         }
     }
+    if let Some(port) = ports.epmd {
+        validate_port(port, "EPMD port")?;
+        if port == 4369 {
+            bail!(
+                "EPMD port 4369 is the host-global default and cannot prove a private listener; choose a fleet-specific port"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5924,6 +5971,7 @@ mod tests {
             Ports {
                 gateway: Some(48_001),
                 dist: Some(44_001),
+                ..ephemeral_ports()
             },
         )
         .unwrap();
@@ -6004,7 +6052,7 @@ mod tests {
     fn invite_and_join_share_trust_but_not_the_ca_signing_key() {
         let owner = scratch("owner");
         let joined = scratch("joined");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("worker.ouro-fleet");
         invite(
             &owner,
@@ -6014,6 +6062,7 @@ mod tests {
             Ports {
                 gateway: Some(48_102),
                 dist: Some(44_102),
+                epmd: None,
             },
         )
         .unwrap();
@@ -6025,6 +6074,7 @@ mod tests {
             Ports {
                 gateway: Some(48_103),
                 dist: Some(44_103),
+                epmd: None,
             },
         )
         .unwrap();
@@ -6038,7 +6088,7 @@ mod tests {
             "third",
             "127.0.0.3",
             &joined.join("nope"),
-            Ports::DEFAULT
+            ephemeral_ports()
         )
         .is_err());
         assert_eq!(
@@ -6066,6 +6116,7 @@ mod tests {
             Ports {
                 gateway: Some(gateway_port),
                 dist: Some(free_dist_port),
+                ..ephemeral_ports()
             },
         )
         .unwrap_err()
@@ -6079,9 +6130,16 @@ mod tests {
         drop(gateway);
 
         let owner = scratch("occupied-join-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("worker.ouro");
-        invite(&owner, "worker", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "worker",
+            "127.0.0.1",
+            &invitation,
+            ephemeral_ports(),
+        )
+        .unwrap();
         let joined = scratch("occupied-join-ports");
         let distribution = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let distribution_port = distribution.local_addr().unwrap().port();
@@ -6094,6 +6152,7 @@ mod tests {
             Ports {
                 gateway: Some(free_gateway_port),
                 dist: Some(distribution_port),
+                epmd: None,
             },
         )
         .unwrap_err()
@@ -6116,7 +6175,7 @@ mod tests {
         let staging = recovered.join(".fleet.setup.123.001122aabbcc");
         DirBuilder::new().mode(0o700).create(&staging).unwrap();
         write_private_new(&staging.join(COOKIE_FILE), b"interrupted-secret", "fixture").unwrap();
-        create(&recovered, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&recovered, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         assert!(!staging.exists());
         assert!(fleet_dir(&recovered).exists());
 
@@ -6126,7 +6185,7 @@ mod tests {
             .mode(0o755)
             .create(&unsafe_staging)
             .unwrap();
-        let error = create(&unsafe_data, None, "owner", "127.0.0.1", Ports::DEFAULT)
+        let error = create(&unsafe_data, None, "owner", "127.0.0.1", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(error.contains("mode-0700 real directory"), "{error}");
@@ -6142,7 +6201,7 @@ mod tests {
         use std::cell::Cell;
 
         let owner = scratch("invite-publish-order");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let original = load(&owner).unwrap().unwrap();
         let mut proposed = original.clone();
         proposed.members.push(member("worker", "127.0.0.1"));
@@ -6192,12 +6251,12 @@ mod tests {
     fn an_exact_lost_machine_can_be_reissued_without_duplicating_membership() {
         let owner = scratch("replace-owner");
         let joined = scratch("replace-joined");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let first = owner.join("worker-first.ouro");
-        invite(&owner, "worker", "127.0.0.1", &first, Ports::DEFAULT).unwrap();
+        invite(&owner, "worker", "127.0.0.1", &first, ephemeral_ports()).unwrap();
 
         let duplicate = owner.join("worker-duplicate.ouro");
-        let error = invite(&owner, "worker", "127.0.0.1", &duplicate, Ports::DEFAULT)
+        let error = invite(&owner, "worker", "127.0.0.1", &duplicate, ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(error.contains("--replace"), "{error}");
@@ -6210,18 +6269,24 @@ mod tests {
             "worker",
             "127.0.0.1",
             &replacement,
-            Ports::DEFAULT,
+            ephemeral_ports(),
             true,
         )
         .unwrap();
         assert_eq!(load(&owner).unwrap().unwrap().members.len(), 2);
-        join(&joined, &replacement, Ports::DEFAULT).unwrap();
+        join(&joined, &replacement, ephemeral_ports()).unwrap();
 
         let moved = owner.join("worker-moved.ouro");
-        let error =
-            invite_with_replace(&owner, "worker", "127.0.0.3", &moved, Ports::DEFAULT, true)
-                .unwrap_err()
-                .to_string();
+        let error = invite_with_replace(
+            &owner,
+            "worker",
+            "127.0.0.3",
+            &moved,
+            ephemeral_ports(),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("exact recorded"), "{error}");
         assert!(error.contains("Rebuild the fleet"), "{error}");
         assert!(!moved.exists());
@@ -6234,19 +6299,19 @@ mod tests {
     fn owner_cancellation_is_live_safe_and_signed_roster_removes_the_peer_everywhere() {
         let owner = scratch("cancel-invite-owner");
         let charlie = scratch("cancel-invite-charlie");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let first = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.1", &first, Ports::DEFAULT).unwrap();
+        invite(&owner, "alpha", "127.0.0.1", &first, ephemeral_ports()).unwrap();
         let charlie_invitation = owner.join("charlie.ouro");
         invite(
             &owner,
             "charlie",
             "127.0.0.1",
             &charlie_invitation,
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap();
-        join(&charlie, &charlie_invitation, Ports::DEFAULT).unwrap();
+        join(&charlie, &charlie_invitation, ephemeral_ports()).unwrap();
         assert!(load(&charlie)
             .unwrap()
             .unwrap()
@@ -6294,7 +6359,14 @@ mod tests {
         );
 
         let replacement = owner.join("alpha-after-cancel.ouro");
-        invite(&owner, "alpha", "127.0.0.1", &replacement, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "alpha",
+            "127.0.0.1",
+            &replacement,
+            ephemeral_ports(),
+        )
+        .unwrap();
         let profile = load(&owner).unwrap().unwrap();
         assert_eq!(profile.members.len(), 3);
         assert!(!profile
@@ -6309,9 +6381,9 @@ mod tests {
     #[test]
     fn stale_and_future_invitations_are_refused_before_install() {
         let owner = scratch("invitation-age-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.2", &invitation, Ports::DEFAULT).unwrap();
+        invite(&owner, "alpha", "127.0.0.2", &invitation, ephemeral_ports()).unwrap();
         let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6335,7 +6407,7 @@ mod tests {
             value["created_unix"] = Value::from(created);
             write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
             let unsigned_join = scratch(&format!("invitation-age-tamper-{index}"));
-            let tamper = join(&unsigned_join, &invitation, Ports::DEFAULT)
+            let tamper = join(&unsigned_join, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(tamper.contains("changed after"), "{tamper}");
@@ -6345,7 +6417,7 @@ mod tests {
             resign_invitation_value(&owner, &mut value);
             write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
             let joined = scratch(&format!("invitation-age-join-{index}"));
-            let error = join(&joined, &invitation, Ports::DEFAULT)
+            let error = join(&joined, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{error}");
@@ -6359,9 +6431,16 @@ mod tests {
     #[test]
     fn invitation_attestation_binds_member_and_port_fields_before_they_are_trusted() {
         let owner = scratch("invitation-attestation-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("worker.ouro");
-        invite(&owner, "worker", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "worker",
+            "127.0.0.1",
+            &invitation,
+            ephemeral_ports(),
+        )
+        .unwrap();
         let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
         for (label, value) in [
             {
@@ -6384,7 +6463,7 @@ mod tests {
         ] {
             write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
             let joined = scratch(&format!("invitation-attestation-{label}"));
-            let error = join(&joined, &invitation, Ports::DEFAULT)
+            let error = join(&joined, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("changed after"), "{label}: {error}");
@@ -6398,12 +6477,12 @@ mod tests {
     fn invitation_is_create_new_and_requires_private_permissions() {
         let owner = scratch("invite-private");
         let joined = scratch("invite-public-refused");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let path = owner.join("invite");
-        invite(&owner, "worker", "127.0.0.2", &path, Ports::DEFAULT).unwrap();
-        assert!(invite(&owner, "other", "127.0.0.3", &path, Ports::DEFAULT).is_err());
+        invite(&owner, "worker", "127.0.0.2", &path, ephemeral_ports()).unwrap();
+        assert!(invite(&owner, "other", "127.0.0.3", &path, ephemeral_ports()).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        let error = join(&joined, &path, Ports::DEFAULT)
+        let error = join(&joined, &path, ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(error.contains("mode 0600"), "{error}");
@@ -6426,8 +6505,8 @@ mod tests {
         .unwrap();
 
         for error in [
-            create(&live, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap_err(),
-            join(&live, &live.join("missing.ouro"), Ports::DEFAULT).unwrap_err(),
+            create(&live, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap_err(),
+            join(&live, &live.join("missing.ouro"), ephemeral_ports()).unwrap_err(),
             leave(&live).unwrap_err(),
         ] {
             let error = error.to_string();
@@ -6438,7 +6517,7 @@ mod tests {
 
         fs::remove_file(live.join(runtime::PUBLICATION_FILE)).unwrap();
         let held = runtime::acquire_spawn_lock(&live).unwrap();
-        let concurrent = create(&live, None, "owner", "127.0.0.1", Ports::DEFAULT)
+        let concurrent = create(&live, None, "owner", "127.0.0.1", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(concurrent.contains("another ouro"), "{concurrent}");
@@ -6451,7 +6530,7 @@ mod tests {
             format!(r#"{{"pid":{},"owner":"test-live-vm"}}"#, std::process::id()).as_bytes(),
         )
         .unwrap();
-        let error = create(&unpublished, None, "owner", "127.0.0.1", Ports::DEFAULT)
+        let error = create(&unpublished, None, "owner", "127.0.0.1", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(
@@ -6468,12 +6547,18 @@ mod tests {
     #[test]
     fn invitations_are_serialized_but_remain_allowed_while_the_runtime_is_live() {
         let owner = scratch("invite-lock");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let blocked_path = owner.join("blocked.ouro");
         let held = runtime::acquire_spawn_lock(&owner).unwrap();
-        let error = invite(&owner, "alpha", "127.0.0.1", &blocked_path, Ports::DEFAULT)
-            .unwrap_err()
-            .to_string();
+        let error = invite(
+            &owner,
+            "alpha",
+            "127.0.0.1",
+            &blocked_path,
+            ephemeral_ports(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("another ouro"), "{error}");
         assert!(!blocked_path.exists());
         assert_eq!(load(&owner).unwrap().unwrap().members.len(), 1);
@@ -6489,7 +6574,7 @@ mod tests {
         )
         .unwrap();
         let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
+        invite(&owner, "alpha", "127.0.0.1", &invitation, ephemeral_ports()).unwrap();
         assert!(invitation.exists());
         assert_eq!(load(&owner).unwrap().unwrap().members.len(), 2);
 
@@ -6500,10 +6585,17 @@ mod tests {
     fn the_only_invitation_authority_cannot_leave_a_multi_machine_fleet() {
         let owner = scratch("owner-leave");
         let joined = scratch("joined-leave");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("worker.ouro");
-        invite(&owner, "worker", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
-        join(&joined, &invitation, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "worker",
+            "127.0.0.1",
+            &invitation,
+            ephemeral_ports(),
+        )
+        .unwrap();
+        join(&joined, &invitation, ephemeral_ports()).unwrap();
 
         let error = leave_with_inactive_manager(&owner).unwrap_err().to_string();
         assert!(error.contains("sole signing authority"), "{error}");
@@ -6524,7 +6616,7 @@ mod tests {
     #[test]
     fn unusable_ipv6_and_colon_hosts_are_refused_before_any_credential_is_created() {
         let data = scratch("ipv6");
-        let error = create(&data, None, "owner", "::1", Ports::DEFAULT)
+        let error = create(&data, None, "owner", "::1", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(
@@ -6534,7 +6626,7 @@ mod tests {
         assert!(!fleet_dir(&data).exists());
 
         for host in ["0.0.0.0", "169.254.1.2", "224.0.0.1", "255.255.255.255"] {
-            let error = create(&data, None, "owner", host, Ports::DEFAULT)
+            let error = create(&data, None, "owner", host, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -6543,7 +6635,7 @@ mod tests {
             );
             assert!(!fleet_dir(&data).exists());
         }
-        let public = create(&data, None, "owner", "8.8.8.8", Ports::DEFAULT)
+        let public = create(&data, None, "owner", "8.8.8.8", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(public.contains("public IPv4 address"), "{public}");
@@ -6552,16 +6644,16 @@ mod tests {
         assert!(private_fleet_ipv4("100.64.0.1".parse().unwrap()));
         assert!(private_fleet_ipv4("10.0.0.1".parse().unwrap()));
         assert!(!private_fleet_ipv4("1.1.1.1".parse().unwrap()));
-        let error = create(&data, None, "owner", "ipv6-only.invalid", Ports::DEFAULT)
+        let error = create(&data, None, "owner", "ipv6-only.invalid", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(error.contains("resolving fleet host"), "{error}");
         assert!(!fleet_dir(&data).exists());
 
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         for host in ["2001:db8::1", "host:epmd"] {
             let invitation = data.join(format!("{}.ouro", host.replace(':', "-")));
-            let error = invite(&data, "worker", host, &invitation, Ports::DEFAULT)
+            let error = invite(&data, "worker", host, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("resolving to IPv4"), "{error}");
@@ -6748,7 +6840,7 @@ mod tests {
     #[test]
     fn leave_preserves_an_unowned_compatible_epmd_and_all_credentials() {
         let data = scratch("epmd-unowned-leave");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let stop = Arc::new(AtomicBool::new(false));
         let server = fake_epmd(profile.epmd_port, stop.clone());
@@ -6772,7 +6864,7 @@ mod tests {
     #[test]
     fn stale_epmd_marker_cleanup_ignores_a_reused_numeric_pid_without_lock_or_listener() {
         let data = scratch("epmd-reused-pid");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
         let lock = create_epmd_lock(&lock_path).unwrap();
@@ -6816,7 +6908,7 @@ mod tests {
     #[test]
     fn leave_retires_owned_epmd_after_address_change_and_release_gc() {
         let data = scratch("epmd-upgrade-leave");
-        create(&data, None, "leaf", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "leaf", "127.0.0.1", ephemeral_ports()).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
         let lock = create_epmd_lock(&lock_path).unwrap();
@@ -6910,7 +7002,7 @@ mod tests {
     #[test]
     fn startup_retires_loopback_only_owned_epmd_before_rebinding_changed_address() {
         let data = scratch("epmd-address-change-start");
-        create(&data, None, "leaf", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "leaf", "127.0.0.1", ephemeral_ports()).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
         let lock_path = epmd_owner_lock_path(&data);
         let lock = create_epmd_lock(&lock_path).unwrap();
@@ -7030,7 +7122,7 @@ mod tests {
             None,
             "owner",
             &unavailable.to_string(),
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap_err()
         .to_string();
@@ -7041,20 +7133,20 @@ mod tests {
         assert!(!fleet_dir(&created).exists());
 
         let owner = scratch("nonlocal-join-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("remote.ouro");
         invite(
             &owner,
             "remote",
             &unavailable.to_string(),
             &invitation,
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap();
         let joined = scratch("nonlocal-join");
         let error = format!(
             "{:#}",
-            join(&joined, &invitation, Ports::DEFAULT).unwrap_err()
+            join(&joined, &invitation, ephemeral_ports()).unwrap_err()
         );
         assert!(error.contains("not a local private interface"), "{error}");
         assert!(
@@ -7071,9 +7163,16 @@ mod tests {
     #[test]
     fn invitation_and_installed_cookie_validation_matches_the_beam_exactly() {
         let owner = scratch("cookie-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("worker.ouro");
-        invite(&owner, "worker", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "worker",
+            "127.0.0.1",
+            &invitation,
+            ephemeral_ports(),
+        )
+        .unwrap();
         let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap())
             .expect("private invitation JSON");
 
@@ -7090,7 +7189,7 @@ mod tests {
             resign_invitation_value(&owner, &mut value);
             write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
             let joined = scratch(&format!("cookie-join-{index}"));
-            let error = join(&joined, &invitation, Ports::DEFAULT)
+            let error = join(&joined, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -7117,17 +7216,24 @@ mod tests {
     fn join_rejects_tampered_certificate_chain_key_and_machine_identity_before_install() {
         let owner = scratch("tls-owner");
         let other_owner = scratch("tls-other-owner");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         create(
             &other_owner,
             None,
             "other-owner",
             "127.0.0.1",
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap();
         let invitation = owner.join("worker.ouro");
-        invite(&owner, "worker", "127.0.0.1", &invitation, Ports::DEFAULT).unwrap();
+        invite(
+            &owner,
+            "worker",
+            "127.0.0.1",
+            &invitation,
+            ephemeral_ports(),
+        )
+        .unwrap();
         let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
 
         let unrelated_key = KeyPair::generate().unwrap().serialize_pem();
@@ -7168,7 +7274,7 @@ mod tests {
             write_private_atomic(&invitation, &serde_json::to_vec_pretty(&tampered).unwrap())
                 .unwrap();
             let joined = scratch(&format!("tls-tamper-{index}"));
-            let error = join(&joined, &invitation, Ports::DEFAULT)
+            let error = join(&joined, &invitation, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "expected {expected:?}: {error}");
@@ -7184,13 +7290,13 @@ mod tests {
     fn doctor_and_invite_reject_installed_key_mismatches_before_beam_uses_them() {
         let owner = scratch("tls-installed-owner");
         let other_owner = scratch("tls-installed-other");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         create(
             &other_owner,
             None,
             "other-owner",
             "127.0.0.1",
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap();
 
@@ -7232,7 +7338,7 @@ mod tests {
         let output = owner.join("must-not-exist.ouro");
         let error = format!(
             "{:#}",
-            invite(&owner, "worker", "127.0.0.1", &output, Ports::DEFAULT).unwrap_err()
+            invite(&owner, "worker", "127.0.0.1", &output, ephemeral_ports()).unwrap_err()
         );
         assert!(error.contains("CA private key does not match"), "{error}");
         assert!(!output.exists());
@@ -7244,7 +7350,7 @@ mod tests {
     #[test]
     fn startup_and_doctor_reject_any_generated_tls_or_vm_policy_drift() {
         let data = scratch("generated-policy-drift");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let root = fleet_dir(&data);
         let original_tls = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
         let weakened = original_tls.replace("verify_peer", "verify_none");
@@ -7285,7 +7391,7 @@ mod tests {
     #[test]
     fn leave_refuses_unknown_files_before_deleting_any_known_secret() {
         let data = scratch("leave-unknown");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
         let error = leave_with_inactive_manager(&data).unwrap_err().to_string();
         assert!(error.contains("unknown entries"), "{error}");
@@ -7301,7 +7407,7 @@ mod tests {
     #[test]
     fn leave_removes_only_the_exact_private_cluster_checkpoint_shape() {
         let data = scratch("leave-cluster-directory");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let cluster = fleet_dir(&data).join(CLUSTER_DIRECTORY_DIR);
         let checkpoints = cluster.join(CLUSTER_CHECKPOINTS_DIR);
         DirBuilder::new()
@@ -7326,7 +7432,7 @@ mod tests {
         assert!(!fleet_dir(&data).exists());
 
         let unsafe_data = scratch("leave-cluster-directory-symlink");
-        create(&unsafe_data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&unsafe_data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let cluster = fleet_dir(&unsafe_data).join(CLUSTER_DIRECTORY_DIR);
         let checkpoints = cluster.join(CLUSTER_CHECKPOINTS_DIR);
         DirBuilder::new()
@@ -7356,7 +7462,7 @@ mod tests {
             None,
             "incomplete-test-machine",
             "127.0.0.1",
-            Ports::DEFAULT,
+            ephemeral_ports(),
         )
         .unwrap();
         fs::remove_file(profile_path(&data)).unwrap();
@@ -7391,11 +7497,11 @@ mod tests {
     #[test]
     fn validation_errors_teach_the_expected_shape() {
         let data = scratch("validation");
-        let machine = create(&data, None, "bad name", "127.0.0.1", Ports::DEFAULT)
+        let machine = create(&data, None, "bad name", "127.0.0.1", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(machine.contains("studio-mini"), "{machine}");
-        let host = create(&data, None, "good", "name@host", Ports::DEFAULT)
+        let host = create(&data, None, "good", "name@host", ephemeral_ports())
             .unwrap_err()
             .to_string();
         assert!(host.contains("Tailscale"), "{host}");
@@ -7407,6 +7513,7 @@ mod tests {
             Ports {
                 gateway: None,
                 dist: Some(4369),
+                epmd: None,
             },
         )
         .unwrap_err()
@@ -7438,9 +7545,9 @@ mod tests {
     #[test]
     fn live_status_keeps_a_just_invited_machine_visible_before_runtime_reload() {
         let owner = scratch("live-status-invite-union");
-        create(&owner, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.2", &invitation, Ports::DEFAULT).unwrap();
+        invite(&owner, "alpha", "127.0.0.2", &invitation, ephemeral_ports()).unwrap();
 
         let rendered = render_live_status(
             &owner,
@@ -7475,7 +7582,7 @@ mod tests {
     #[test]
     fn stale_publication_status_recommends_restart_not_attach() {
         let data = scratch("stale-status-guidance");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         write_private_atomic(
             &data.join(runtime::PUBLICATION_FILE),
             br#"{"port":47004,"protocol":1,"node":"ouro-owner@127.0.0.1","pid":2147483647,"scope":"operate"}"#,
@@ -7493,7 +7600,7 @@ mod tests {
     #[test]
     fn summary_never_contains_secret_material() {
         let data = scratch("summary");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let cookie = fs::read_to_string(fleet_dir(&data).join(COOKIE_FILE)).unwrap();
         let rendered = format!("{:?}", summary(&data));
         assert!(!rendered.contains(cookie.trim()));

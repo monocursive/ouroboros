@@ -2,10 +2,9 @@ defmodule Ouroboros.ClusterTest do
   use ExUnit.Case, async: false
 
   # libcluster's strategies are aliased first, on purpose: `Ouroboros.Cluster` takes the
-  # `Cluster` alias below, after which `Cluster.Strategy.Epmd` would name a module that
-  # does not exist.
+  # `Cluster` alias below, after which `Cluster.Strategy.DNSPoll` would name a module
+  # that does not exist. The epmd strategy is Ouroboros' own `Cluster.RosterEpmd`.
   alias Cluster.Strategy.DNSPoll
-  alias Cluster.Strategy.Epmd
   alias Cluster.Strategy.Gossip
 
   alias Ouroboros.Cluster
@@ -289,6 +288,156 @@ defmodule Ouroboros.ClusterTest do
       refute second_name in Node.list()
     end
 
+    test "expected membership follows the saved fleet profile while the runtime is up" do
+      fleet_id = "aaaa1111bbbb2222cccc3333"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      owner = test_fleet_member("owner", "127.0.0.1")
+      late = test_fleet_member("late", "127.0.0.1")
+      owner_node = :"ouro-owner@127.0.0.1"
+      late_node = :"ouro-late@127.0.0.1"
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Cluster.reset_membership_cache()
+
+      on_exit(fn ->
+        Cluster.reset_membership_cache()
+
+        if previous_data_dir,
+          do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+          else: Application.delete_env(:ouroboros, :data_dir)
+      end)
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(owner_node),
+          "OUROBOROS_FLEET_ID" => fleet_id
+        },
+        fn ->
+          Application.put_env(:ouroboros, :data_dir, data_dir)
+
+          write_test_fleet_profile!(fleet_dir, fleet_id, local: owner, members: [owner])
+          assert owner_node in Cluster.expected_nodes()
+          refute late_node in Cluster.expected_nodes()
+
+          # The roster grows while the runtime is up: no restart, no environment
+          # change — only the saved profile moves, exactly what `ouro fleet add` does.
+          write_test_fleet_profile!(fleet_dir, fleet_id,
+            local: owner,
+            members: [owner, late],
+            roster_revision: 2
+          )
+
+          assert late_node in Cluster.membership_hosts()
+          assert late_node in Cluster.expected_nodes()
+
+          # An unreadable profile must keep the membership last read, never shrink to
+          # the boot seed: dropping the just-added member is the wait-forever bug again.
+          File.write!(Path.join(fleet_dir, "profile.json"), "{ not json")
+          assert late_node in Cluster.membership_hosts()
+
+          # The inverse: a canceled member leaves the dial list without a restart.
+          write_test_fleet_profile!(fleet_dir, fleet_id,
+            local: owner,
+            members: [owner],
+            tombstones: [late],
+            roster_revision: 3
+          )
+
+          refute late_node in Cluster.membership_hosts()
+          refute late_node in Cluster.expected_nodes()
+
+          # With no active profile the boot seed is the whole answer, as before.
+          File.rm!(Path.join(fleet_dir, "profile.json"))
+          assert Cluster.membership_hosts() == [owner_node]
+        end
+      )
+    end
+
+    @tag timeout: 300_000
+    test "a member invited while the owner runtime is live is dialed without a restart" do
+      ensure_distributed!()
+      host = hostname()
+      unique = System.unique_integer([:positive])
+      owner_machine = "own#{unique}"
+      late_machine = "late#{unique}"
+      owner_name = :"ouro-#{owner_machine}@#{host}"
+      late_name = :"ouro-#{late_machine}@#{host}"
+      fleet_id = "feed5eed0123456789abcdef"
+
+      data_dir = tmp_dir!()
+      # The owner peer boots the full runtime on this directory, and the runtime
+      # refuses a data directory that is not private.
+      File.chmod!(data_dir, 0o700)
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      owner_member = test_fleet_member(owner_machine, host)
+      late_member = test_fleet_member(late_machine, host)
+      write_test_fleet_profile!(fleet_dir, fleet_id, local: owner_member, members: [owner_member])
+
+      owner = start_unformed_peer!(owner_name)
+      late = start_unformed_peer!(late_name)
+
+      # Only the owner forms. The late member never dials anyone — this is the NATed
+      # owner + reachable member shape, where the mesh forms only if the owner's own
+      # dialer learns the roster change while running.
+      configure_formation!(owner, Atom.to_string(owner_name))
+      :ok = :peer.call(owner, System, :put_env, [%{"OUROBOROS_FLEET_ID" => fleet_id}])
+
+      :ok =
+        :peer.call(late, Application, :put_env, [
+          :ouroboros,
+          :coding_storage,
+          {Jido.Storage.ETS, table: :ouroboros_late_invite_coding}
+        ])
+
+      for peer <- [owner, late] do
+        assert {:ok, _applications} =
+                 :peer.call(peer, Application, :ensure_all_started, [:ouroboros], 60_000)
+      end
+
+      # Set after boot: a durable data directory at boot demands the trusted `ouro`
+      # process-identity helper this test VM cannot provide. The monitor and the
+      # dialer read the profile live either way.
+      :ok = :peer.call(owner, Application, :put_env, [:ouroboros, :data_dir, data_dir])
+
+      # Several sweeps pass; a one-machine roster must not invent the other machine.
+      Process.sleep(600)
+      refute late_name in :peer.call(owner, Node, :list, [])
+
+      # `ouro fleet add` while the owner runtime is up: only the saved profile changes.
+      write_test_fleet_profile!(fleet_dir, fleet_id,
+        local: owner_member,
+        members: [owner_member, late_member],
+        roster_revision: 2
+      )
+
+      assert_eventually(fn -> late_name in :peer.call(owner, Node, :list, []) end, 300)
+      assert late_name in :peer.call(owner, Cluster, :expected_nodes, [])
+
+      # The inverse: cancellation stops the dialing without a restart. Wait until the
+      # owner has seen the shrunk roster, break the link, and prove it stays down.
+      write_test_fleet_profile!(fleet_dir, fleet_id,
+        local: owner_member,
+        members: [owner_member],
+        tombstones: [late_member],
+        roster_revision: 3
+      )
+
+      assert_eventually(
+        fn -> late_name not in :peer.call(owner, Cluster, :expected_nodes, []) end,
+        300
+      )
+
+      true = :peer.call(owner, Node, :disconnect, [late_name])
+      Process.sleep(1_000)
+      refute late_name in :peer.call(owner, Node, :list, [])
+    end
+
     test "a strategy that is named but unusable refuses to build a topology" do
       with_env(%{"OUROBOROS_CLUSTER_STRATEGY" => "none"}, fn ->
         assert Cluster.strategy() == {:ok, :none}
@@ -323,7 +472,8 @@ defmodule Ouroboros.ClusterTest do
         },
         fn ->
           assert {:ok, [ouroboros: topology]} = Cluster.topologies()
-          assert topology[:strategy] == Epmd
+          assert topology[:strategy] == Cluster.RosterEpmd
+          # The seed list: every sweep re-resolves through `membership_hosts/0`.
           assert topology[:config][:hosts] == [:a@host, :b@host]
           # Not `:infinity`: a cluster whose members boot in any order must retry.
           assert topology[:config][:timeout] == 750

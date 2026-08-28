@@ -52,7 +52,7 @@ use crate::model::{
     Triage,
 };
 use crate::runtime::{self, Paths};
-use crate::transport::{self, Secret, TransportConfig};
+use crate::transport::{self, EndpointSource, Secret, TransportConfig};
 use crate::ui::app::{
     provider_choices, App, Call, Connection, DesktopApprovalChoice, DesktopCell, DesktopCellKind,
     DesktopTone, Loadable, Mode, Msg, NoticeKind, ProviderChoice,
@@ -283,13 +283,17 @@ async fn run_driver(
     mut commands: tokio_mpsc::UnboundedReceiver<DriverCommand>,
     events: Sender<DriverEvent>,
 ) -> Result<()> {
-    let (address, token, data_dir) = endpoint(&options, &events).await?;
+    let (address, token, data_dir, refresh) = endpoint(&options, &events).await?;
     let _ = events.send(DriverEvent::Status(format!("Connecting to {address}…")));
 
     let (hook, channel) = ui::hook();
     let (cursors, ui_sender, mut ui_receiver) = channel.into_parts();
     let mut config = TransportConfig::new(address, token);
     config.reconnect = true;
+    // A runtime restart rotates the token; reconnect attempts must present what the
+    // data dir publishes *now*, or the "Reconnecting" banner would spin forever against
+    // a gateway that is up and refusing the credentials it already replaced.
+    config.refresh = Some(refresh);
 
     let connected = transport::connect(config, hook)
         .await
@@ -361,7 +365,7 @@ async fn run_driver(
 async fn endpoint(
     options: &LaunchOptions,
     events: &Sender<DriverEvent>,
-) -> Result<(SocketAddr, Secret, Option<String>)> {
+) -> Result<(SocketAddr, Secret, Option<String>, Arc<dyn EndpointSource>)> {
     if let Some(address) = options.addr {
         let token_file = options
             .token_file
@@ -369,7 +373,11 @@ async fn endpoint(
             .ok_or_else(|| anyhow!("--addr requires --token-file"))?;
         let token = runtime::read_token(token_file)
             .with_context(|| format!("reading the token from {}", token_file.display()))?;
-        return Ok((address, token, None));
+        let refresh = Arc::new(runtime::TokenFileEndpoint::new(
+            address,
+            token_file.to_path_buf(),
+        ));
+        return Ok((address, token, None, refresh));
     }
 
     let paths = Paths::discover(options.dev)?;
@@ -392,8 +400,17 @@ async fn endpoint(
     })?;
     let token = runtime::read_token(&paths.token_file())?;
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), publication.port);
+    let refresh = Arc::new(runtime::PublishedEndpoint::new(
+        paths.data_dir.clone(),
+        paths.token_file(),
+    ));
 
-    Ok((address, token, Some(paths.data_dir.display().to_string())))
+    Ok((
+        address,
+        token,
+        Some(paths.data_dir.display().to_string()),
+        refresh,
+    ))
 }
 
 /// Delegates local process ownership to the existing CLI lifecycle. This keeps desktop

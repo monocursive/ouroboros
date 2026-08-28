@@ -114,11 +114,40 @@ PY
 
 ORIGINAL_GATEWAY_SNAPSHOT=$(file_snapshot "$ORIGINAL_GATEWAY")
 ORIGINAL_OWNER_SNAPSHOT=$(file_snapshot "$ORIGINAL_OWNER")
+ORIGINAL_GATEWAY_PID=""
+ORIGINAL_OWNER_PID=""
 ORIGINAL_DEFAULT_PID=""
+ORIGINAL_DEFAULT_STALE_PID=""
 if [[ "$ORIGINAL_GATEWAY_SNAPSHOT" == present:* ]]; then
-  ORIGINAL_DEFAULT_PID=$(json_integer "$ORIGINAL_GATEWAY" pid 2>/dev/null || true)
-elif [[ "$ORIGINAL_OWNER_SNAPSHOT" == present:* ]]; then
-  ORIGINAL_DEFAULT_PID=$(json_integer "$ORIGINAL_OWNER" pid 2>/dev/null || true)
+  ORIGINAL_GATEWAY_PID=$(json_integer "$ORIGINAL_GATEWAY" pid 2>/dev/null) ||
+    die "the caller's default gateway marker has no valid pid: $ORIGINAL_GATEWAY"
+fi
+if [[ "$ORIGINAL_OWNER_SNAPSHOT" == present:* ]]; then
+  ORIGINAL_OWNER_PID=$(json_integer "$ORIGINAL_OWNER" pid 2>/dev/null) ||
+    die "the caller's durable owner marker has no valid pid: $ORIGINAL_OWNER"
+fi
+
+ORIGINAL_GATEWAY_LIVE=0
+ORIGINAL_OWNER_LIVE=0
+if [[ -n "$ORIGINAL_GATEWAY_PID" ]] && kill -0 "$ORIGINAL_GATEWAY_PID" 2>/dev/null; then
+  ORIGINAL_GATEWAY_LIVE=1
+elif [[ -n "$ORIGINAL_GATEWAY_PID" ]]; then
+  ORIGINAL_DEFAULT_STALE_PID="$ORIGINAL_GATEWAY_PID"
+fi
+if [[ -n "$ORIGINAL_OWNER_PID" ]] && kill -0 "$ORIGINAL_OWNER_PID" 2>/dev/null; then
+  ORIGINAL_OWNER_LIVE=1
+elif [[ -n "$ORIGINAL_OWNER_PID" && "$ORIGINAL_OWNER_PID" != "$ORIGINAL_DEFAULT_STALE_PID" ]]; then
+  ORIGINAL_DEFAULT_STALE_PID="${ORIGINAL_DEFAULT_STALE_PID:+$ORIGINAL_DEFAULT_STALE_PID,}$ORIGINAL_OWNER_PID"
+fi
+
+if [[ "$ORIGINAL_GATEWAY_LIVE" == 1 && "$ORIGINAL_OWNER_LIVE" == 1 &&
+  "$ORIGINAL_GATEWAY_PID" != "$ORIGINAL_OWNER_PID" ]]; then
+  die "the caller's default markers name different live runtimes (gateway $ORIGINAL_GATEWAY_PID, owner $ORIGINAL_OWNER_PID)"
+fi
+if [[ "$ORIGINAL_GATEWAY_LIVE" == 1 ]]; then
+  ORIGINAL_DEFAULT_PID="$ORIGINAL_GATEWAY_PID"
+elif [[ "$ORIGINAL_OWNER_LIVE" == 1 ]]; then
+  ORIGINAL_DEFAULT_PID="$ORIGINAL_OWNER_PID"
 fi
 
 TMP_BASE=${TMPDIR:-/tmp}
@@ -132,6 +161,7 @@ esac
 CORE_DATA="$LAB_ROOT/core"
 ALPHA_DATA="$LAB_ROOT/alpha"
 BRAVO_DATA="$LAB_ROOT/bravo"
+DELTA_DATA="$LAB_ROOT/delta"
 LOG_DIR="$LAB_ROOT/logs"
 LAB_PIDS="$LAB_ROOT/lab-pids.tsv"
 SERVICE_ATTEMPTS="$LAB_ROOT/bravo-service-attempts"
@@ -148,7 +178,7 @@ LAB_EPMD_PID=""
 LAB_EPMD_BIRTH=""
 # These are runtime authority roots, not ordinary fixture folders. Create every leaf at
 # the same private mode production requires before any create/join command can inspect it.
-mkdir -m 700 "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA" "$LOG_DIR"
+mkdir -m 700 "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA" "$DELTA_DATA" "$LOG_DIR"
 : >"$LAB_PIDS"
 : >"$SERVICE_ATTEMPTS"
 : >"$SERVICE_STATUSES"
@@ -518,14 +548,14 @@ cleanup() {
     : >"$SERVICE_STOP_FILE"
     # Stop through each lab's authenticated local gateway first. Never issue a broad
     # process-name signal and never address the caller's ordinary data directory.
-    for data_dir in "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA"; do
+    for data_dir in "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA" "$DELTA_DATA"; do
       node_cmd "$data_dir" stop >/dev/null 2>&1 || true
     done
 
     # A failure may have happened between publication and a normal stop. A marker is
     # eligible for fallback only when its validated birth still matches the live kernel
     # process. A recycled PID is preserved and turns cleanup into a visible failure.
-    for data_dir in "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA"; do
+    for data_dir in "$CORE_DATA" "$ALPHA_DATA" "$BRAVO_DATA" "$DELTA_DATA"; do
       case "$data_dir" in
         "$LAB_ROOT"/*) ;;
         *) continue ;;
@@ -596,13 +626,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-read -r CORE_GATEWAY CORE_DIST ALPHA_GATEWAY ALPHA_DIST BRAVO_GATEWAY BRAVO_DIST < <(
+read -r CORE_GATEWAY CORE_DIST ALPHA_GATEWAY ALPHA_DIST BRAVO_GATEWAY BRAVO_DIST \
+  DELTA_GATEWAY DELTA_DIST < <(
   python3 <<'PY'
 import socket
 
 sockets = []
 ports = []
-for _ in range(6):
+for _ in range(8):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     sockets.append(sock)
@@ -615,13 +646,21 @@ RUN_ID=$(printf '%s' "$LAB_ROOT" | cksum | awk '{print $1}')
 CORE_MACHINE="e2e-core-$RUN_ID"
 ALPHA_MACHINE="e2e-alpha-$RUN_ID"
 BRAVO_MACHINE="e2e-bravo-$RUN_ID"
+DELTA_MACHINE="e2e-delta-$RUN_ID"
+ECHO_MACHINE="e2e-echo-$RUN_ID"
 BRAVO_INVITE="$LAB_ROOT/bravo.ouro"
 ALPHA_INVITE="$LAB_ROOT/alpha.ouro"
+DELTA_INVITE="$LAB_ROOT/delta.ouro"
+ECHO_INVITE="$LAB_ROOT/echo.ouro"
+ECHO_CANCEL_ROSTER="$LAB_ROOT/echo-cancel.roster"
 
 log "Isolation contract"
 printf 'caller default data  %s\n' "$ORIGINAL_DEFAULT_DATA"
 if [[ -n "$ORIGINAL_DEFAULT_PID" ]]; then
   printf 'caller default pid   %s (must remain alive)\n' "$ORIGINAL_DEFAULT_PID"
+elif [[ -n "$ORIGINAL_DEFAULT_STALE_PID" ]]; then
+  printf 'caller stale pid(s)  %s (already stopped before this lab)\n' \
+    "$ORIGINAL_DEFAULT_STALE_PID"
 else
   printf 'caller default pid   none published\n'
 fi
@@ -924,7 +963,67 @@ IFS=$'\t' read -r BRAVO_EPMD_STABLE_PID _ <<<"$BRAVO_EPMD_STABLE_IDENTITY"
 [[ "$BRAVO_EPMD_STABLE_PID" == "$BRAVO_EPMD_RECOVERY_PID" ]] ||
   die "EPMD recovery started more than one replacement runtime"
 
-log "Deactivate the recovery unit, then stop exactly the three lab runtimes"
+log "Invite a member while every runtime stays up; the live owner dials it without a restart"
+node_cmd "$CORE_DATA" fleet invite \
+  --machine "$DELTA_MACHINE" \
+  --host 127.0.0.1 \
+  --gateway-port "$DELTA_GATEWAY" \
+  --dist-port "$DELTA_DIST" \
+  --out "$DELTA_INVITE" | tee "$LOG_DIR/invite-delta.log"
+assert_private_file "$DELTA_INVITE"
+
+# The regression this guards: the owner's runtime has been up since long before this
+# invitation. Its live directory must grow to the invited machine and its dialer must
+# start retrying it — before roster changes reached the running dialer, both stayed
+# frozen at boot-time membership and only an owner restart ever formed the mesh.
+wait_status "$CORE_DATA" core-expects-delta 4 3 1
+
+DELTA_DIAL_DEADLINE=$((SECONDS + 45))
+until grep -q "unable to connect to.*$DELTA_MACHINE" "$CORE_DATA/runtime.log" 2>/dev/null; do
+  ((SECONDS < DELTA_DIAL_DEADLINE)) ||
+    die "the running owner never dialed invited machine $DELTA_MACHINE (no connect attempt in its runtime.log)"
+  sleep 1
+done
+printf 'the running owner is dialing %s before that machine even exists\n' "$DELTA_MACHINE"
+
+node_cmd "$DELTA_DATA" fleet join "$DELTA_INVITE" | tee "$LOG_DIR/join-delta.log"
+start_node "$DELTA_DATA" delta
+wait_status "$CORE_DATA" core-with-delta 4 4 0
+wait_status "$DELTA_DATA" delta-full 4 4 0
+doctor_node "$DELTA_DATA" delta-full
+
+log "Cancel an unanswered invitation; the live owner stops expecting and dialing it"
+node_cmd "$CORE_DATA" fleet invite \
+  --machine "$ECHO_MACHINE" \
+  --host 127.0.0.1 \
+  --out "$ECHO_INVITE" | tee "$LOG_DIR/invite-echo.log"
+wait_status "$CORE_DATA" core-expects-echo 5 4 1
+
+node_cmd "$CORE_DATA" fleet invite cancel \
+  --machine "$ECHO_MACHINE" \
+  --out "$ECHO_CANCEL_ROSTER" | tee "$LOG_DIR/cancel-echo.log"
+
+# The last-known directory deliberately remembers the canceled machine, so the count
+# needle cannot prove the cancellation; the owner's live doctor distinguishes an
+# expected member it keeps retrying from a machine that is merely remembered.
+ECHO_CANCEL_DEADLINE=$((SECONDS + 45))
+while :; do
+  ECHO_DOCTOR=$(node_cmd "$CORE_DATA" fleet doctor 2>&1 || true)
+  if grep -Fq "$ECHO_MACHINE is offline; it was learned from another machine" <<<"$ECHO_DOCTOR"; then
+    break
+  fi
+  ((SECONDS < ECHO_CANCEL_DEADLINE)) || {
+    printf '%s\n' "$ECHO_DOCTOR" >&2
+    die "the running owner still expects canceled machine $ECHO_MACHINE"
+  }
+  sleep 1
+done
+rm -f "$ECHO_INVITE"
+printf 'the running owner stopped expecting %s without a restart\n' "$ECHO_MACHINE"
+
+stop_node "$DELTA_DATA" delta
+
+log "Deactivate the recovery unit, then stop the three remaining lab runtimes"
 : >"$SERVICE_STOP_FILE"
 stop_node "$BRAVO_DATA" bravo
 if ! wait "$BRAVO_SERVICE_MANAGER_PID"; then
@@ -938,7 +1037,8 @@ stop_node "$ALPHA_DATA" alpha
 stop_node "$CORE_DATA" core
 
 while IFS=$'\t' read -r pid birth data_dir; do
-  [[ "$data_dir" == "$CORE_DATA" || "$data_dir" == "$ALPHA_DATA" || "$data_dir" == "$BRAVO_DATA" ]] ||
+  [[ "$data_dir" == "$CORE_DATA" || "$data_dir" == "$ALPHA_DATA" ||
+    "$data_dir" == "$BRAVO_DATA" || "$data_dir" == "$DELTA_DATA" ]] ||
     die "recorded pid $pid did not come from a lab data directory"
   state=$(process_identity_state "$pid" "$birth")
   case "$state" in
@@ -989,4 +1089,5 @@ fi
   die "a lab command wrote unexpected files to its ordinary default data directory"
 
 printf '\nPASS: packaged three-node fleet created, joined, formed in reverse order, survived hub loss, and automatically recovered a service-owned SIGKILL over TLS.\n'
+printf 'PASS: a live owner dialed a machine invited after boot and dropped a canceled one, with no restart.\n'
 printf 'PASS: stopped only lab runtimes; caller default pid/data stayed untouched.\n'

@@ -1,0 +1,21 @@
+{
+  "source": {
+    "figmaFile": "https://www.figma.com/design/5Eh2aEO6voPQjTXBb8aMRt/Ouroboros-Logo-%E2%80%94-Ink-Crown-Rework?node-id=0-1",
+    "page": "0:1",
+    "backgroundNode": "12:30"
+  },
+  "exports": [
+    { "name": "primary", "node": "6:2", "width": 720, "height": 720, "png": "ouroboros-primary-720.png", "svg": "ouroboros-primary-720.svg" },
+    { "name": "negative", "node": "33:2", "width": 360, "height": 360, "png": "ouroboros-negative-360.png", "svg": "ouroboros-negative-360.svg" },
+    { "name": "app-mark", "node": "33:30", "width": 1024, "height": 1024, "png": "ouroboros-app-mark-1024.png", "svg": "ouroboros-app-mark-290.svg" },
+    { "name": "mark-160", "node": "35:2", "width": 160, "height": 160, "png": "ouroboros-mark-160.png", "svg": "ouroboros-mark-160.svg" },
+    { "name": "mark-80", "node": "35:30", "width": 80, "height": 80, "png": "ouroboros-mark-80.png", "svg": "ouroboros-mark-80.svg" },
+    { "name": "mark-40", "node": "35:58", "width": 40, "height": 40, "png": "ouroboros-mark-40.png", "svg": "ouroboros-mark-40.svg" }
+  ],
+  "appIcons": [
+    { "width": 1024, "height": 1024, "markNode": "33:30", "png": "../ouroboros-icon-1024.png", "svg": "../ouroboros-icon-1024.svg" },
+    { "width": 128, "height": 128, "markNode": "35:2", "png": "../ouroboros-icon-128.png", "svg": "../ouroboros-icon-128.svg" },
+    { "width": 32, "height": 32, "markNode": "35:30", "png": "../ouroboros-icon-32.png", "svg": "../ouroboros-icon-32.svg" },
+    { "width": 16, "height": 16, "markNode": "35:58", "png": "../ouroboros-icon-16.png", "svg": "../ouroboros-icon-16.svg" }
+  ]
+}
