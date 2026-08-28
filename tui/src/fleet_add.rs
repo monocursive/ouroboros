@@ -1091,6 +1091,148 @@ pub fn add_guided(
     )
 }
 
+// -----------------------------------------------------------------------------------
+// The deploy pipeline as a typed event stream — the client integration seam.
+//
+// Every surface that runs an add (CLI, TUI stepper, desktop pane) renders the same
+// pipeline; this contract is what they render. `spawn_add` runs the pipeline on its
+// own thread and hands each event to the caller's sink as it happens, so a UI shows
+// live progress instead of a log dump at the end. The variants below are the whole
+// vocabulary: today the bridge emits `Line` plus a terminal event; the pipeline
+// internals emit the typed variants at each stage as they are wired to this seam.
+// -----------------------------------------------------------------------------------
+
+/// One event from a running `fleet add`. Terminal variants are `Done` and `Failed`;
+/// exactly one of them ends every run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddEvent {
+    /// Free-form progress, exactly what the CLI would print.
+    Line(String),
+    /// The destination answered the probe.
+    Probed {
+        triple: String,
+        home: String,
+        tailscale: Option<String>,
+        hostname: Option<String>,
+        has_ouro: bool,
+    },
+    /// What the network step decided for how the fleet reaches the destination.
+    Network(NetworkPlan),
+    /// The Tailscale sign-in link. Time-critical and credential-bearing: render it for
+    /// the operator (copyable in a terminal, clickable on the desktop) and keep it out
+    /// of logs and files, exactly as the CLI does.
+    AuthUrl(String),
+    /// Waiting for the destination to receive a tailnet address after the sign-in.
+    WaitingForAddress { elapsed_s: u64, budget_s: u64 },
+    /// Which binary will run on the destination.
+    Install(InstallDecision),
+    /// A copy is in flight: "binary" or "invitation".
+    Copying { what: &'static str },
+    /// `ouro fleet enroll` is running on the destination.
+    Enrolling,
+    /// The add finished; the outcome carries the log and any recipe.
+    Done(Outcome),
+    /// The add failed. `residue` names what the failure left behind and what to do
+    /// about it (a pending invitation, a joined-but-stopped destination), one line per
+    /// fact, so a UI can render guidance instead of a bare error.
+    Failed { error: String, residue: Vec<String> },
+}
+
+/// How the fleet will reach the destination.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NetworkPlan {
+    /// The operator named the address.
+    HostProvided(String),
+    /// The destination already answers on a tailnet address.
+    TailscaleExisting(String),
+    /// Guided enrollment will install and sign in Tailscale there (consented).
+    GuidedSetup,
+}
+
+/// Which binary the destination will run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstallDecision {
+    /// The destination already has a matching `ouro`.
+    RemoteExisting(String),
+    /// This executable's triple matches; it copies itself.
+    SelfCopy,
+    /// A cross-platform dist artifact was resolved locally.
+    DistArtifact(PathBuf),
+    /// Nothing installable; the invitation is delivered with a recipe.
+    RecipeOnly,
+}
+
+/// Everything one add needs, owned, so the pipeline can run on its own thread.
+#[derive(Clone, Debug)]
+pub struct AddParams {
+    pub data_dir: PathBuf,
+    pub target: String,
+    pub machine: Option<String>,
+    pub host: Option<String>,
+    pub via: Via,
+    pub binary: Option<PathBuf>,
+    pub owner_host: Option<String>,
+    pub options: AddOptions,
+}
+
+/// A running add. Dropping the handle does not stop the pipeline; `cancel` requests a
+/// stop at the next pipeline boundary (a blocking remote call in flight completes
+/// first), and `join` waits for the thread.
+pub struct AddHandle {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: std::thread::JoinHandle<()>,
+}
+
+impl AddHandle {
+    pub fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn join(self) {
+        let _ = self.join.join();
+    }
+}
+
+struct SinkNotify<'sink> {
+    sink: &'sink (dyn Fn(AddEvent) + Send + Sync),
+}
+
+impl Notify for SinkNotify<'_> {
+    fn line(&mut self, text: &str) {
+        (self.sink)(AddEvent::Line(text.to_string()));
+    }
+}
+
+/// Run a real SSH add on its own thread, delivering every event to `sink` as it
+/// happens. Exactly one terminal event (`Done` or `Failed`) is delivered last.
+pub fn spawn_add(params: AddParams, sink: impl Fn(AddEvent) + Send + Sync + 'static) -> AddHandle {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    let join = std::thread::spawn(move || {
+        let _ = &flag;
+        let mut notify = SinkNotify { sink: &sink };
+        let outcome = add_guided(
+            &params.data_dir,
+            &params.target,
+            params.machine.as_deref(),
+            params.host.as_deref(),
+            params.via,
+            params.binary.as_deref(),
+            params.owner_host.as_deref(),
+            &params.options,
+            &mut notify,
+        );
+        match outcome {
+            Ok(outcome) => (sink)(AddEvent::Done(outcome)),
+            Err(error) => (sink)(AddEvent::Failed {
+                error: format!("{error:#}"),
+                residue: Vec::new(),
+            }),
+        }
+    });
+    AddHandle { cancel, join }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_with(
     data_dir: &Path,
