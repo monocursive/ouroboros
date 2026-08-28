@@ -1,0 +1,63 @@
+# The local-development twin of the `x86_64-unknown-linux-gnu` job in
+# `.github/workflows/release.yml`. Same OS, same OTP, same Elixir, same Rust — because a
+# fleet placement fence compares `{fleet_protocol_revision, ouroboros_version,
+# otp_release}` (lib/ouroboros/cluster.ex) and the forge verifier additionally compares
+# `elixir_version` and `system_architecture` (lib/ouroboros/upgrade/verifier.ex). A client
+# built on a different OTP is a client the fleet refuses to place work on, so the toolchain
+# here is pinned by exact tag rather than by a floating one.
+#
+# This image is NOT the release path. It is what `make dist-linux` uses to hand a
+# developer on an Apple Silicon Mac an `ouro` that a Linux x86-64 machine can actually
+# run, so that `ouro fleet add` has something to copy. The artifact of record is still the
+# one a tagged build uploads from a real `ubuntu-24.04` runner. See docs/DISTRIBUTION.md §8.
+#
+# Ubuntu 24.04 (noble, glibc 2.39) is the floor on purpose: glibc symbol versioning is
+# forward-compatible, so a binary linked against 2.39 runs on a newer target (Ubuntu 26.04
+# ships glibc 2.43) and one linked against 2.43 would not run on 24.04. Matching the
+# release runner's distribution is the same choice for the same reason.
+FROM hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1
+
+# `.github/workflows/ci.yml` sets RUST_VERSION: "1.88" and release.yml installs 1.88; the
+# crate's own `rust-version` is 1.88. Overridable so a bisect does not need a new file.
+ARG RUST_VERSION=1.88
+
+# `mix compile` runs a custom compiler that builds `c_src/fs_filter.c` with whichever of
+# cc/gcc/clang it finds (lib/mix/tasks/compile.ouroboros_fs_filter.ex), `ring` needs a C
+# toolchain, `jido_harness` is a git dependency pinned by ref, and the in-container build
+# runs the repository's own `make dist`. rsync stages the source into the build volume.
+#
+# `libsctp1` is not optional garnish. Without it OTP's socket NIF cannot dlopen
+# `libsctp.so.1` and prints an `=ESOCK WARNING MSG=` block — on **stdout**, because a
+# `-noshell` node's group leader is stdout. `deps/erlexec/c_src/Makefile` sets
+# `TARGET := $(shell erl -noshell -eval '...system_architecture...')`, so that warning
+# lands inside a make variable that is then used as a target name, and the build dies with
+# `Makefile:133: *** multiple target patterns` — an error that says nothing about SCTP.
+# Installing the library is the fix; silencing the logger would only move the problem.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      git \
+      libsctp1 \
+      make \
+      pkg-config \
+      rsync \
+ && rm -rf /var/lib/apt/lists/*
+
+# Outside $HOME so the toolchain belongs to the image rather than to whichever user the
+# container is told to run as, and so a cache volume can be mounted over the registry
+# without swallowing the compiler with it.
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}" \
+ && rustc -vV \
+ && cargo --version
+
+COPY build.sh /usr/local/bin/ouro-dist-linux-build
+RUN chmod 0755 /usr/local/bin/ouro-dist-linux-build
+
+ENTRYPOINT ["/usr/local/bin/ouro-dist-linux-build"]

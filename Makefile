@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -38,6 +38,8 @@ help:
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
 	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
 	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
+	@echo "make dist-linux       the same, for x86_64-unknown-linux-gnu, built in Docker"
+	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
 	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 
@@ -201,3 +203,15 @@ dist: ouro
 	triple=$$(rustc -vV | sed -n 's/^host: //p'); \
 	cp tui/target/release/ouro "dist/ouro-$$version-$$triple"; \
 	echo "dist/ouro-$$version-$$triple"
+
+# The one place `dist` above cannot reach: a machine that is not the target. ERTS is not
+# cross-compiled, so this does not cross-compile — it runs the identical `make dist` on an
+# emulated x86-64 Linux, in a container pinned to the release runner's OTP, Elixir, and
+# Rust. Slow, and honestly labelled: it is the development path that gives `ouro fleet add`
+# something to copy to a Linux box, not the release path. See docs/DISTRIBUTION.md §8.
+dist-linux:
+	@echo "==> dist-linux: dist/ouro-<version>-x86_64-unknown-linux-gnu, via Docker"
+	@sh scripts/dist-linux.sh
+
+dist-linux-clean:
+	@sh scripts/dist-linux.sh --clean

@@ -93,12 +93,19 @@ gpui = { version = "=0.2.2", optional = true, features = ["runtime_shaders"] }
 gpui-component = { version = "=0.5.1", optional = true }
 gpui-component-assets = { version = "=0.5.1", optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-cocoa = { version = "=0.26.0", optional = true }
-
+# The `embed` feature's three crates, and they belong in the platform-independent table
+# rather than under the `cfg(target_os = "macos")` header below. A blank line does not end
+# a TOML table: while these sat after that header they were macOS-only dependencies, so
+# `cargo build --features embed` on Linux compiled `src/runtime/embed.rs` against three
+# crates that were not in the graph and failed on every one of them. `make dist` on the
+# release workflow's `ubuntu-24.04` runner would have hit exactly this; `make dist-linux`
+# is what actually hit it.
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = { version = "=0.26.0", optional = true }
 
 [build-dependencies]
 sha2 = { version = "0.10", optional = true }

@@ -308,7 +308,161 @@ disagreeing with the disk and the next `upgrade` silently reverts yours.
 
 ---
 
-## 8. Open questions
+## 8. `make dist-linux` — a Linux client from a Mac
+
+```
+make dist-linux         → dist/ouro-<version>-x86_64-unknown-linux-gnu
+make dist-linux-clean   → drops the image and the three cache volumes
+```
+
+### What it is
+
+The development path for one specific problem: `ouro fleet add` wants to copy an `ouro`
+onto a Linux x86-64 machine, and the developer is sitting at an Apple Silicon Mac, where
+`make dist` can only ever produce `aarch64-apple-darwin`. `make dist-linux` runs the
+repository's own `make dist` inside an emulated x86-64 Linux container and copies the one
+artifact out.
+
+It is deliberately not a second recipe. `dist/docker/build.sh` stages the source and then
+calls `make dist` — the same target a laptop runs, for the same reason the release workflow
+does: a command only CI (or only a container) knows is a command nobody can reproduce when
+it breaks.
+
+### What it is not
+
+**Not the release path.** The artifact of record is the one a tagged build uploads from a
+real `ubuntu-24.04` runner (§3). Nothing here is signed, nothing here appears in
+`SHA256SUMS`, and `ouro update` will never fetch it. A binary from this target is
+hand-carried and hand-trusted; if you want the signature chain of §1, use a release.
+
+**Not a cross-compile.** ERTS is not cross-compiled — `mix release` bakes the runtime
+system of the machine that ran it — so this emulates an x86-64 machine rather than
+targeting one from arm64. Everything downstream of that, including the `c_src` NIF and
+`cargo build --features embed`, is a native build inside that emulated machine.
+
+### Pinning, and why it is exact
+
+`dist/docker/Dockerfile.linux-x86_64` pins
+`hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1` and rustup 1.88 by exact tag,
+because the fleet does not treat a runtime as interchangeable:
+
+- **Placement** compares `{fleet_protocol_revision, ouroboros_version, otp_release}`
+  (`lib/ouroboros/cluster.ex`). A node built on OTP 28 is a node the fleet refuses to
+  place work on, however well the binary runs.
+- **The forge verifier** additionally compares `elixir_version` and `system_architecture`
+  (`lib/ouroboros/upgrade/verifier.ex`) and refuses an artifact whose triple does not
+  match, which is why one image builds one triple and says so out loud.
+
+So the image tracks `.github/workflows/ci.yml`'s `ELIXIR_VERSION: "1.20"`,
+`OTP_VERSION: "29"`, `RUST_VERSION: "1.88"` and `release.yml`'s `ubuntu-24.04` runner.
+When those move, this moves with them; a floating tag would let them drift apart silently.
+
+Ubuntu 24.04 (glibc 2.39) is also the ABI floor. glibc symbol versioning is
+forward-compatible, so a binary linked against 2.39 runs on a newer target — Ubuntu 26.04's
+glibc 2.43, for instance — while the reverse does not hold. Same trade-off §9's "Linux ABI"
+note describes for the release artifacts, because it is the same distribution.
+
+One entry in the image's package list looks like padding and is not. Without `libsctp1`,
+OTP's socket NIF cannot open `libsctp.so.1` and prints an `=ESOCK WARNING MSG=` block on
+**stdout** — a `-noshell` node's group leader is stdout, not stderr. `deps/erlexec`'s
+`c_src/Makefile` captures `erl -noshell -eval '…system_architecture…'` into a make variable
+and then uses it as a target name, so the warning lands inside a target and the build dies
+with `Makefile:133: *** multiple target patterns`, an error that mentions neither SCTP nor
+Erlang. Installing the library is the fix; silencing the logger would only move it.
+
+### The build context, and why the checkout is read-only
+
+A working tree carries multi-gigabyte `_build/`, `deps/`, and `tui/target/` directories.
+`docker build` would tar all of them up as context before reading the first Dockerfile
+line, so the context is `dist/docker/` — a few kilobytes — and the checkout reaches the
+build as a **read-only bind mount** instead. Inside, `rsync` copies the source (with those
+directories excluded, and `.git/` and `.claude/` with them) into a named volume the
+container owns.
+
+That read-only mount is not caution for its own sake. The container's `_build/` and
+`tui/target/` hold x86-64 objects and the developer's hold arm64 ones; a shared directory
+would corrupt both. The only thing written back into the checkout is `dist/`.
+
+Three named volumes carry the caches between runs:
+`ouro-dist-linux-x86_64-work` (source, `deps/`, `_build/`, `tui/target/`),
+`ouro-dist-linux-x86_64-cargo` (the crates.io registry), and
+`ouro-dist-linux-x86_64-home` (hex packages). `make dist-linux-clean` removes all three.
+
+### The emulation caveat
+
+Emulation is cheaper than it sounds and less transparent than it looks, and the second
+half is the one that matters.
+
+Measured on an Apple M5 Pro (18 cores to the Docker VM), under OrbStack's Rosetta: a run
+with all three volumes deleted — 40 hex packages fetched, 231 crates downloaded, 188 of
+them compiled, plus `mix release` and the whole `ouro` binary — takes **2m 34s**, and a
+run that only has to notice the source changed takes **48s**. Building the image itself
+from scratch (apt, then rustup) adds about a minute the first time. Expect worse on fewer
+cores or a colder network; the point is that this is a target you can afford to type, not
+an overnight job.
+
+The lack of transparency is the real cost, and one instance is load-bearing enough to
+name.
+**Apple's Rosetta cannot run OTP ≥ 28 as shipped.** The BEAM's JIT writes machine code
+through one mapping and executes it through another; Rosetta does not invalidate its
+translation cache for the second one, so `prim_tty`'s NIFs never take effect and the node
+dies in `user_drv` before `mix` gets a turn. `scripts/dist-linux.sh` therefore runs the
+in-container BEAM with `ERL_FLAGS='+JMsingle true'`, which asks the JIT for a single
+read-write-execute mapping that Rosetta does follow. It is an ordinary supported emulator
+flag, it applies only to the VM that *runs* the build, and it does not touch the ERTS
+inside the artifact. Override it with `OURO_DIST_LINUX_ERL_FLAGS` if some other emulator
+needs something else. Switching emulators is not the obvious escape it looks like: the
+`qemu-x86_64` that ships with Ubuntu 24.04 (8.2.2) dies on the same BEAM with
+`QEMU internal SIGSEGV` before it reaches the JIT at all.
+
+A preflight runs `erl -noshell -eval 'halt(0).'` in the image before the build starts, so
+an emulator that cannot boot OTP 29 fails in seconds with that explanation, rather than
+part-way through `mix deps.get` inside an unreadable crash dump.
+
+### What it found on its first run
+
+The first thing this target did was fail, and the failure was in the repository rather
+than in the container. `tui/Cargo.toml` declared `flate2`, `tar`, and `sha2` — the entire
+`embed` feature — inside the `[target.'cfg(target_os = "macos")'.dependencies]` table,
+separated from it only by a blank line, which TOML does not treat as a boundary. So
+`cargo build --release --features embed` could never have produced a Linux binary: it
+compiled `src/runtime/embed.rs` against three crates that were not in the graph. `make
+dist` on the release workflow's `ubuntu-24.04` runner would have failed on exactly those
+three errors, and §7 already says why nobody knew — the workflow has never run.
+
+That is the argument for a Linux build a laptop can run. A platform whose only build
+happens on a runner nobody has triggered is a platform nobody has built.
+
+### What is verified, and what is not
+
+Verified, by running it on an Apple Silicon Mac under OrbStack/Rosetta: `make dist-linux`
+completes from deleted caches, `file` reports the artifact as `ELF 64-bit LSB pie
+executable, x86-64 … dynamically linked … stripped`, and
+
+```
+$ docker run --rm --platform linux/amd64 \
+    -v "$PWD/dist/ouro-0.1.0-x86_64-unknown-linux-gnu:/ouro:ro" ubuntu:24.04 /ouro version
+ouro 0.1.0
+  protocol  1
+  release   0.1.0 (sha256 e64e5d53068623b3)
+```
+
+exits 0 in a container that has nothing installed. The third line is the one worth
+reading: `release   none embedded` would mean the tarball never made it into the binary
+and the whole exercise produced a client that can only attach to a runtime somebody else
+started.
+
+Not verified: nothing has run this on a **real** x86-64 Linux machine, so "runs under
+emulation" is the claim, not "runs on the hardware you are about to copy it to". `make
+test` and `scripts/fleet-e2e.sh` are not run inside the container either — the release
+workflow gates on both, this target does not, and a binary from here has therefore passed
+no suite on the platform it targets. Successive builds are also not byte-reproducible: the
+release tarball differs run to run, so its digest differs, and the binary that embeds it
+differs with it.
+
+---
+
+## 9. Open questions
 
 - **Key rotation.** There is none. The public key is compiled in, so rotating it means
   every older binary can no longer verify a new release and must be replaced by hand. The
