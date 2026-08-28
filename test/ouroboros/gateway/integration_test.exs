@@ -178,6 +178,63 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert output == ""
   end
 
+  @tag :tmp_dir
+  test "a pinned port briefly held by another socket is rebound once the holder leaves", %{
+    tmp_dir: tmp_dir
+  } do
+    data_dir = Path.join(tmp_dir, "pinned-retry")
+
+    # The holder stands in for a kernel-assigned ephemeral port on the pinned number:
+    # bound at the moment the gateway starts, gone moments later. This is the enrollment
+    # race observed on a real fleet machine — the boot must outlast it, not die on it.
+    {:ok, holder} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(holder)
+
+    release = Task.async(fn -> Process.sleep(400) == :ok and :gen_tcp.close(holder) end)
+
+    {:ok, listener} =
+      Listener.start_link(
+        name: :gateway_pinned_retry_listener,
+        config: Config.new!(token: @token, data_dir: data_dir, port: port),
+        conn_supervisor: :gateway_pinned_retry_conns,
+        task_supervisor: :gateway_pinned_retry_tasks,
+        listen_retry: [budget_ms: 5_000, interval_ms: 50]
+      )
+
+    Task.await(release)
+    assert Listener.port(listener) == port
+
+    published = data_dir |> Listener.publication_path() |> File.read!() |> JSON.decode!()
+    assert published["port"] == port
+
+    GenServer.stop(listener)
+  end
+
+  @tag :tmp_dir
+  test "a pinned port held past the rebind budget still fails with the honest reason", %{
+    tmp_dir: tmp_dir
+  } do
+    data_dir = Path.join(tmp_dir, "pinned-honest")
+
+    {:ok, holder} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(holder)
+
+    # A refused init exits the linked starter too; trapping keeps the refusal observable
+    # as a return value, which is exactly what a supervisor would see.
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:gateway_listen_failed, "127.0.0.1", ^port, :eaddrinuse}} =
+             Listener.start_link(
+               name: :gateway_pinned_exhausted_listener,
+               config: Config.new!(token: @token, data_dir: data_dir, port: port),
+               conn_supervisor: :gateway_pinned_exhausted_conns,
+               task_supervisor: :gateway_pinned_exhausted_tasks,
+               listen_retry: [budget_ms: 200, interval_ms: 50]
+             )
+
+    :gen_tcp.close(holder)
+  end
+
   test "the publication is removed when the gateway stops gracefully", %{data_dir: data_dir} do
     path = Listener.publication_path(data_dir)
     assert File.exists?(path)

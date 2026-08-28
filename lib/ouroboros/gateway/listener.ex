@@ -54,6 +54,15 @@ defmodule Ouroboros.Gateway.Listener do
   @protocol 1
   @accept_retry_ms 100
 
+  # A pinned port (fleet profiles pin the gateway) can be held at bind time by a socket
+  # the kernel numbered itself — an ephemeral source port of some loopback client, often
+  # this very fleet's EPMD chatter — because historical fleet defaults sit inside Linux's
+  # ephemeral range (32768-60999). Such holders are gone within moments, so a bounded
+  # rebind is the difference between a failed enrollment and a boot nobody noticed was
+  # racing. Port 0 never retries: the kernel always has another number.
+  @pinned_rebind_budget_ms 15_000
+  @pinned_rebind_interval_ms 250
+
   @doc "Starts the listener."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -73,10 +82,11 @@ defmodule Ouroboros.Gateway.Listener do
     config = Keyword.fetch!(opts, :config)
     conn_supervisor = Keyword.fetch!(opts, :conn_supervisor)
     task_supervisor = Keyword.fetch!(opts, :task_supervisor)
+    retry = Keyword.get(opts, :listen_retry, [])
     DataDir.ensure_private!(config.data_dir)
     Process.flag(:trap_exit, true)
 
-    case :gen_tcp.listen(config.port, listen_options(config)) do
+    case listen_pinned_port(config, retry) do
       {:ok, listen_socket} ->
         {:ok, port} = :inet.port(listen_socket)
         {path, publication_stat} = publish!(config, port)
@@ -136,6 +146,49 @@ defmodule Ouroboros.Gateway.Listener do
       packet_size: config.max_frame,
       buffer: config.max_frame
     ]
+  end
+
+  # Bind, and when the port is pinned, outlast a transient holder. Only `:eaddrinuse`
+  # retries — every other refusal is a fact about the machine that waiting cannot change,
+  # and it is reported immediately with the honest reason.
+  defp listen_pinned_port(config, retry) do
+    budget_ms = Keyword.get(retry, :budget_ms, @pinned_rebind_budget_ms)
+    interval_ms = Keyword.get(retry, :interval_ms, @pinned_rebind_interval_ms)
+    deadline = System.monotonic_time(:millisecond) + budget_ms
+    listen_attempt(config, budget_ms, interval_ms, deadline, 0)
+  end
+
+  defp listen_attempt(config, budget_ms, interval_ms, deadline, attempts) do
+    case :gen_tcp.listen(config.port, listen_options(config)) do
+      {:ok, listen_socket} ->
+        if attempts > 0 do
+          Logger.info(
+            "gateway bound pinned port #{Config.bind_to_string(config.bind)}:#{config.port} " <>
+              "after #{attempts} rebind attempt(s); the earlier holder released it"
+          )
+        end
+
+        {:ok, listen_socket}
+
+      {:error, :eaddrinuse} = error when config.port != 0 ->
+        if System.monotonic_time(:millisecond) < deadline do
+          if attempts == 0 do
+            Logger.warning(
+              "pinned gateway port #{Config.bind_to_string(config.bind)}:#{config.port} is " <>
+                "in use; retrying for up to #{div(budget_ms, 1000)}s — a collision with a " <>
+                "kernel-assigned ephemeral port clears itself, a real listener does not"
+            )
+          end
+
+          Process.sleep(interval_ms)
+          listen_attempt(config, budget_ms, interval_ms, deadline, attempts + 1)
+        else
+          error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp announce(config, port, path) do

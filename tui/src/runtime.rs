@@ -1966,7 +1966,20 @@ pub struct Daemon {
     child: Option<Child>,
     identity: ProcessIdentity,
     logs: LogRing,
-    epmd_failure: Option<tokio::sync::oneshot::Receiver<String>>,
+    epmd: EpmdLifecycle,
+    data_dir: PathBuf,
+}
+
+/// The EPMD this start selected, in the phase it is currently owned.
+///
+/// During startup validation the exact watch handle stays here, so a boot that fails
+/// can reap the daemon it just launched instead of orphaning it behind a durable
+/// ownership marker. Only a validated start hands the handle to the detached monitor;
+/// after that, health arrives on the oneshot channel as before.
+enum EpmdLifecycle {
+    Absent,
+    Boot(crate::fleet::EpmdRuntimeWatch),
+    Supervised(tokio::sync::oneshot::Receiver<String>),
 }
 
 impl Daemon {
@@ -2001,12 +2014,19 @@ impl Daemon {
     /// Used by `ouro service-run`: the service manager supervises this foreground client,
     /// and this client in turn must remain attached to the BEAM child it started.
     pub async fn wait(&mut self) -> Result<ExitStatus> {
+        // A caller that keeps waiting on the runtime has accepted the start; the boot
+        // watch has nothing left to attribute and the monitor owns health from here.
+        self.arm_epmd_supervision();
         let pid = self.identity.pid;
         let child = self
             .child
             .as_mut()
             .ok_or_else(|| anyhow!("cannot wait for a detached runtime"))?;
-        let status = if let Some(epmd_failure) = self.epmd_failure.as_mut() {
+        let epmd_failure = match &mut self.epmd {
+            EpmdLifecycle::Supervised(receiver) => Some(receiver),
+            EpmdLifecycle::Absent | EpmdLifecycle::Boot(_) => None,
+        };
+        let status = if let Some(epmd_failure) = epmd_failure {
             tokio::select! {
                 status = child.wait() => status.context("waiting for the runtime")?,
                 failure = epmd_failure => {
@@ -2030,7 +2050,7 @@ impl Daemon {
             child.wait().await.context("waiting for the runtime")?
         };
         self.child = None;
-        self.epmd_failure = None;
+        self.epmd = EpmdLifecycle::Absent;
         Ok(status)
     }
 
@@ -2110,7 +2130,41 @@ impl Daemon {
     /// `ouro daemon` and the UI's deliberate detach choice exit this way.
     pub fn detach(&mut self) {
         self.child = None;
-        self.epmd_failure = None;
+        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
+            // Detach means the runtime — and therefore its EPMD — deliberately outlives
+            // this process; the ownership marker stays behind as the durable claim.
+            watch.disarm();
+        }
+        self.epmd = EpmdLifecycle::Absent;
+    }
+
+    /// Hands the boot-phase EPMD watch to the detached monitor. Called exactly when
+    /// startup validation has passed; before that, the watch stays reapable in place.
+    pub fn arm_epmd_supervision(&mut self) {
+        if matches!(self.epmd, EpmdLifecycle::Boot(_)) {
+            let EpmdLifecycle::Boot(watch) = std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent)
+            else {
+                unreachable!("the Boot variant was just matched");
+            };
+            self.epmd = EpmdLifecycle::Supervised(watch.supervise());
+        }
+    }
+
+    /// After a failed startup validation: stop the packaged EPMD this exact start
+    /// launched and remove its ownership marker and lock, so a retry begins from a
+    /// machine that looks the way it did before the attempt. A reused incumbent daemon
+    /// is never touched — `Ok(false)` reports that nothing needed reaping.
+    pub fn reap_spawned_epmd(&mut self) -> Result<bool> {
+        match std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent) {
+            EpmdLifecycle::Boot(watch) => watch.reap_spawned(&self.data_dir),
+            EpmdLifecycle::Absent => Ok(false),
+            EpmdLifecycle::Supervised(receiver) => {
+                // Supervision only starts after validation passed, so there is nothing
+                // to undo; put the health channel back.
+                self.epmd = EpmdLifecycle::Supervised(receiver);
+                Ok(false)
+            }
+        }
     }
 
     pub fn log_tail(&self, count: usize) -> String {
@@ -2131,17 +2185,20 @@ impl Daemon {
     }
 
     fn take_epmd_failure(&mut self) -> Option<String> {
-        let receiver = self.epmd_failure.as_mut()?;
-        match receiver.try_recv() {
-            Ok(reason) => {
-                self.epmd_failure = None;
-                Some(reason)
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                self.epmd_failure = None;
-                None
-            }
+        match &mut self.epmd {
+            EpmdLifecycle::Absent => None,
+            EpmdLifecycle::Boot(watch) => watch.health(),
+            EpmdLifecycle::Supervised(receiver) => match receiver.try_recv() {
+                Ok(reason) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    Some(reason)
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    None
+                }
+            },
         }
     }
 }
@@ -2251,16 +2308,21 @@ pub fn spawn(
         }
     }
 
-    // The detached monitor owns/reaps a foreground EPMD child when this launcher
-    // created one. For a compatible incumbent it only observes NAMES health. It reports
-    // loss back to this exact child owner; it never signals an unowned EPMD or a bare PID.
-    let epmd_failure = epmd_watch.map(crate::fleet::EpmdRuntimeWatch::supervise);
+    // The watch stays in the boot phase until startup validation passes: the readiness
+    // loop checks its health in place, and a failed validation reaps the exact EPMD
+    // child it names instead of orphaning it. `arm_epmd_supervision` hands it to the
+    // detached monitor, which never signals an unowned EPMD or a bare PID.
+    let epmd = match epmd_watch {
+        Some(watch) => EpmdLifecycle::Boot(watch),
+        None => EpmdLifecycle::Absent,
+    };
 
     Ok(Daemon {
         child: Some(child),
         identity: ProcessIdentity { pid, birth },
         logs,
-        epmd_failure,
+        epmd,
+        data_dir: data_dir.to_path_buf(),
     })
 }
 
@@ -3936,7 +3998,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: None,
+            epmd: EpmdLifecycle::Absent,
+            data_dir: std::env::temp_dir(),
         };
 
         assert!(pid_alive(pid));
@@ -3971,7 +4034,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: None,
+            epmd: EpmdLifecycle::Absent,
+            data_dir: std::env::temp_dir(),
         };
 
         daemon.detach();
@@ -4018,7 +4082,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: Some(receiver),
+            epmd: EpmdLifecycle::Supervised(receiver),
+            data_dir: std::env::temp_dir(),
         };
 
         failure
@@ -4051,13 +4116,14 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: Some(receiver),
+            epmd: EpmdLifecycle::Supervised(receiver),
+            data_dir: std::env::temp_dir(),
         };
 
         let status = daemon.wait().await.expect("reap the normal runtime exit");
         assert!(status.success());
         assert!(daemon.child.is_none());
-        assert!(daemon.epmd_failure.is_none());
+        assert!(matches!(daemon.epmd, EpmdLifecycle::Absent));
         assert!(
             failure.send("late EPMD failure".into()).is_err(),
             "normal runtime completion must close and disarm its health receiver"

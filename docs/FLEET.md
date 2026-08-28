@@ -154,7 +154,22 @@ through an SSH port-forward plus a held EPMD registration — a lab topology, no
 tailnet-address formation — and the remote runtime had to be started by hand once,
 because enroll's start validation raced its own runtime boot on the pinned gateway
 port on that cold 4-core machine (both boots died `eaddrinuse`; a manual `ouro daemon`
-on the same profile came up clean). That race is an open defect. A second lesson from
+on the same profile came up clean). That race has since been diagnosed and fixed. The
+mechanism was not a double boot — enroll spawns exactly one runtime, and release
+extraction completes before the readiness deadline is armed. The first-generation
+default gateway ports (47000-47999) sat inside Linux's default ephemeral range
+(32768-60999), so the kernel could number any of the fleet's own loopback client
+sockets — the launcher's 4-per-second EPMD NAMES probes, the BEAM's own EPMD
+registration, sshd's forwarded connections in that lab topology — with the machine's
+pinned gateway port at the moment the gateway tried to bind it. That is why
+`ss -tlnp` showed nothing moments later: the holder was never a listener. Three
+defenses now stand: the gateway retries a pinned bind for up to 15s when it loses
+`eaddrinuse` (the holder is ephemeral by nature), new fleets derive gateway
+(17000-17999) and TLS distribution (13700-13729) defaults below the ephemeral floor,
+and `fleet doctor` warns when an existing profile's pinned ports overlap the live
+range read from the kernel. A failed start validation now also stops the packaged
+EPMD it launched and removes its ownership marker, instead of leaving an orphan to
+kill by hand. A second lesson from
 the same topology: when one side's address silently drops the other's SYNs (the VPS
 dialing the Mac's CGNAT tailnet address), that side sits in `connecting` for minutes at
 a time and Erlang's simultaneous-connect tiebreak can repeatedly sacrifice the good

@@ -3147,6 +3147,10 @@ async fn start(
         );
     }
 
+    // Validation passed: from here the EPMD belongs to the running fleet, and its
+    // health is the detached monitor's to watch rather than this start's to reap.
+    daemon.arm_epmd_supervision();
+
     progress.report(BootEvent::Published {
         port: publication.port,
     });
@@ -3174,13 +3178,26 @@ async fn clean_up_daemon_after_error(
 ) -> anyhow::Error {
     let pid = daemon.pid();
 
-    match daemon.terminate(SHUTDOWN_GRACE).await {
+    let error = match daemon.terminate(SHUTDOWN_GRACE).await {
         Ok(Some(status)) => error.context(format!(
             "{activity}; runtime pid {pid} was stopped ({status})"
         )),
         Ok(None) => error.context(format!("{activity}; runtime pid {pid} had already exited")),
         Err(cleanup_error) => error.context(format!(
             "{activity}; runtime pid {pid} could not be stopped: {cleanup_error}"
+        )),
+    };
+
+    // A failed start must not strand the packaged EPMD it launched moments earlier: the
+    // next attempt — or the operator — should find the machine as it was before. A
+    // reused incumbent EPMD is deliberately not ours to stop and stays untouched.
+    match daemon.reap_spawned_epmd() {
+        Ok(true) => error.context(
+            "the packaged EPMD this start launched was stopped and its ownership marker removed",
+        ),
+        Ok(false) => error,
+        Err(reap_error) => error.context(format!(
+            "the packaged EPMD this start launched could not be cleaned up: {reap_error:#}"
         )),
     }
 }

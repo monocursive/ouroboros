@@ -51,9 +51,16 @@ const CLUSTER_CHECKPOINTS_DIR: &str = "checkpoints";
 const CLUSTER_CHECKPOINT_FILE: &str = "JMVhBnhGdi3kKCz92XK5UwsBskr_HhSrc81LxYXn7a4.term";
 const MAX_CLUSTER_CHECKPOINT_TEMPS: usize = 4;
 
-pub const DEFAULT_DIST_PORT_MIN: u16 = 43_700;
-pub const DEFAULT_DIST_PORT_MAX: u16 = 43_729;
-const DEFAULT_GATEWAY_BASE: u16 = 47_000;
+// Every default pinned port lives below 32768, the floor of Linux's default ephemeral
+// range (32768-60999; macOS uses 49152-65535). The first defaults did not — gateway
+// 47000-47999 and distribution 43700-43729 — and a real enrollment died on it: the
+// kernel numbered a fleet-owned loopback client socket with the machine's own pinned
+// gateway port during boot, the gateway's bind failed `eaddrinuse`, and moments later
+// `ss -tlnp` showed nothing because the holder was never a listener. Existing profiles
+// keep their recorded numbers; `fleet doctor` warns when they overlap the live range.
+pub const DEFAULT_DIST_PORT_MIN: u16 = 13_700;
+pub const DEFAULT_DIST_PORT_MAX: u16 = 13_729;
+const DEFAULT_GATEWAY_BASE: u16 = 17_000;
 const DEFAULT_GATEWAY_SPAN: u16 = 1_000;
 const DEFAULT_EPMD_BASE: u16 = 14_000;
 const DEFAULT_EPMD_SPAN: u16 = 1_000;
@@ -113,9 +120,104 @@ pub(crate) struct EpmdRuntimeWatch {
     child: Option<Child>,
     address: Ipv4Addr,
     port: u16,
+    failed_probes: u8,
+    last_probe: Option<Instant>,
 }
 
 impl EpmdRuntimeWatch {
+    fn new(child: Option<Child>, address: Ipv4Addr, port: u16) -> Self {
+        Self {
+            child,
+            address,
+            port,
+            failed_probes: 0,
+            last_probe: None,
+        }
+    }
+
+    /// One boot-time health step, called from the starter's readiness loop before the
+    /// detached monitor exists. It observes and reports; it never kills, because the
+    /// failure path that receives the report owns the cleanup and must find the exact
+    /// child still attributable.
+    pub(crate) fn health(&mut self) -> Option<String> {
+        let address = self.address;
+        let port = self.port;
+        if let Some(epmd) = self.child.as_mut() {
+            match epmd.try_wait() {
+                Ok(Some(status)) => {
+                    return Some(format!("owned EPMD {address}:{port} exited with {status}"));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Some(format!(
+                        "owned EPMD {address}:{port} health could not be read: {error}"
+                    ));
+                }
+            }
+        }
+
+        // The readiness loop polls faster than the monitor; keep the NAMES cadence so a
+        // boot does not multiply loopback connections beyond what supervision would make.
+        if let Some(last) = self.last_probe {
+            if last.elapsed() < EPMD_WATCH_INTERVAL {
+                return None;
+            }
+        }
+        self.last_probe = Some(Instant::now());
+
+        let advertised = epmd_responds(address, port);
+        let loopback = address.is_loopback() || epmd_responds(Ipv4Addr::LOCALHOST, port);
+        if advertised && loopback {
+            self.failed_probes = 0;
+            return None;
+        }
+        self.failed_probes = self.failed_probes.saturating_add(1);
+        if self.failed_probes >= EPMD_WATCH_FAILURES {
+            return Some(format!(
+                "EPMD {address}:{port} failed {EPMD_WATCH_FAILURES} consecutive NAMES probes"
+            ));
+        }
+        None
+    }
+
+    /// Removes exactly what this spawn created: the foreground EPMD child plus the
+    /// ownership marker and lock written for it. A reused compatible incumbent has no
+    /// child here and is deliberately left running and unowned — `Ok(false)` says so.
+    pub(crate) fn reap_spawned(mut self, data_dir: &Path) -> Result<bool> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(false);
+        };
+        if child.try_wait()?.is_none() {
+            child
+                .kill()
+                .context("stopping the packaged EPMD this start launched")?;
+        }
+        let _ = child.wait();
+
+        // The child held the inherited flock across exec; reaping it released the lock,
+        // so the marker-and-lock pair can be removed through the same guarded path a
+        // stale-artifact cleanup uses. The release is not atomic with the reap under
+        // load, hence the short bounded wait.
+        let deadline = Instant::now() + EPMD_STOP_DEADLINE;
+        loop {
+            match remove_epmd_owner_artifacts(data_dir) {
+                Ok(()) => return Ok(true),
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                Err(error) => {
+                    return Err(error).context(
+                        "the packaged EPMD was stopped, but its ownership artifacts could not be removed",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Gives up the child handle without stopping the daemon. A deliberate detach means
+    /// the EPMD keeps serving the fleet after this process exits.
+    pub(crate) fn disarm(&mut self) {
+        self.child = None;
+    }
+
     pub(crate) fn supervise(mut self) -> tokio::sync::oneshot::Receiver<String> {
         let (failure, receiver) = tokio::sync::oneshot::channel();
         let mut child = self.child.take();
@@ -2489,6 +2591,12 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
             Err(error) => checks.push(problem(format!("security material: {error:#}"))),
         }
 
+        if let Some(range) = local_ephemeral_port_range() {
+            for warning in ephemeral_overlap_warnings(profile, range) {
+                checks.push(warn(warning));
+            }
+        }
+
         let publication_running = match runtime::read_live_publication(data_dir) {
             Ok(Some(_)) => true,
             Ok(None) => false,
@@ -4585,11 +4693,7 @@ pub(crate) fn ensure_owned_epmd_for_runtime(
         let state = ensure_owned_epmd_listener_state(&owner)?;
         match (alive, held, state) {
             (true, true, OwnedEpmdListenerState::CompatibleRunning) if owner.address == address => {
-                return Ok(Some(EpmdRuntimeWatch {
-                    child: None,
-                    address: owner.address,
-                    port: owner.port,
-                }));
+                return Ok(Some(EpmdRuntimeWatch::new(None, owner.address, owner.port)));
             }
             (true, true, OwnedEpmdListenerState::CompatibleRunning)
             | (true, true, OwnedEpmdListenerState::LoopbackOnly) => {
@@ -4644,11 +4748,7 @@ pub(crate) fn ensure_owned_epmd_for_runtime(
     if state == EpmdPortState::CompatibleRunning {
         // This daemon predated the launcher observation. It is safe to reuse after the
         // scope checks above, but it deliberately remains unowned and unkillable by leave.
-        return Ok(Some(EpmdRuntimeWatch {
-            child: None,
-            address,
-            port: profile.epmd_port,
-        }));
+        return Ok(Some(EpmdRuntimeWatch::new(None, address, profile.epmd_port)));
     }
 
     start_owned_epmd(data_dir, &profile, address, epmd_program).map(Some)
@@ -4778,11 +4878,7 @@ fn start_owned_epmd(
             "packaged EPMD was stopped because its ownership marker could not be published",
         );
     }
-    Ok(EpmdRuntimeWatch {
-        child: Some(child),
-        address,
-        port: profile.epmd_port,
-    })
+    Ok(EpmdRuntimeWatch::new(Some(child), address, profile.epmd_port))
 }
 
 fn validate_epmd_program(path: &Path) -> Result<(PathBuf, fs::Metadata)> {
@@ -5322,6 +5418,85 @@ fn epmd_probe(address: Ipv4Addr, port: u16) -> EpmdProbe {
     } else {
         EpmdProbe::Incompatible
     }
+}
+
+/// This machine's ephemeral (dynamic) local port range, when the operating system will
+/// say. A pinned fleet port inside it can be handed out by the kernel as the source
+/// port of any outgoing connection; the runtime's later bind then loses `eaddrinuse`
+/// with no listener anywhere in sight. `None` on platforms that do not expose it.
+fn local_ephemeral_port_range() -> Option<(u16, u16)> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok()?;
+        let mut parts = text.split_whitespace();
+        let low = parts.next()?.parse().ok()?;
+        let high = parts.next()?.parse().ok()?;
+        Some((low, high))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fn sysctl_port(name: &str) -> Option<u16> {
+            let name = std::ffi::CString::new(name).ok()?;
+            let mut value: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>();
+            // SAFETY: the buffer is a live c_int and `len` names its exact size.
+            let rc = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr(),
+                    (&raw mut value).cast(),
+                    &mut len,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if rc != 0 {
+                return None;
+            }
+            u16::try_from(value).ok()
+        }
+        Some((
+            sysctl_port("net.inet.ip.portrange.first")?,
+            sysctl_port("net.inet.ip.portrange.last")?,
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// One warning per pinned port family that the kernel could also hand to an outgoing
+/// connection. Pure over the profile and an observed range so the exposure is testable
+/// without a particular kernel's sysctls.
+fn ephemeral_overlap_warnings(profile: &Profile, range: (u16, u16)) -> Vec<String> {
+    let (low, high) = range;
+    let inside = |port: u16| (low..=high).contains(&port);
+    let advice = format!(
+        "the kernel can hand that number to any outgoing connection, and a runtime start \
+         then fails `eaddrinuse` with no visible listener. The gateway retries its bind \
+         briefly; to remove the collision entirely, reserve the port from ephemeral use \
+         (Linux: net.ipv4.ip_local_reserved_ports) or re-form the fleet with ports below {low}"
+    );
+    let mut warnings = Vec::new();
+    if inside(profile.gateway_port) {
+        warnings.push(format!(
+            "pinned local gateway port {} is inside this machine's ephemeral port range {low}-{high}: {advice}",
+            profile.gateway_port
+        ));
+    }
+    if inside(profile.epmd_port) {
+        warnings.push(format!(
+            "pinned fleet EPMD port {} is inside this machine's ephemeral port range {low}-{high}: {advice}",
+            profile.epmd_port
+        ));
+    }
+    if profile.dist_port_min <= high && profile.dist_port_max >= low {
+        warnings.push(format!(
+            "pinned TLS distribution range {}-{} overlaps this machine's ephemeral port range {low}-{high}: {advice}",
+            profile.dist_port_min, profile.dist_port_max
+        ));
+    }
+    warnings
 }
 
 /// Reserve every local listener policy before publishing credentials. The sockets are
@@ -6696,12 +6871,7 @@ mod tests {
             .expect("a Unix sleep executable");
         let epmd = Command::new(sleep).arg("30").spawn().unwrap();
         let epmd_pid = epmd.id() as i32;
-        let failure = EpmdRuntimeWatch {
-            child: Some(epmd),
-            address: Ipv4Addr::LOCALHOST,
-            port: 65_300,
-        }
-        .supervise();
+        let failure = EpmdRuntimeWatch::new(Some(epmd), Ipv4Addr::LOCALHOST, 65_300).supervise();
 
         runtime::send_signal(epmd_pid, libc::SIGKILL).unwrap();
         let reason = failure.blocking_recv().unwrap();
@@ -6709,6 +6879,106 @@ mod tests {
         assert!(
             !runtime::pid_alive(epmd_pid),
             "the EPMD child was not reaped"
+        );
+    }
+
+    #[test]
+    fn failed_startup_validation_reaps_its_own_epmd_and_never_an_incumbent() {
+        let data = scratch("epmd-reap-failed-start");
+        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        let profile = assign_free_loopback_epmd_port(&data);
+
+        // The exact shape start_owned_epmd leaves behind: a foreground child holding the
+        // inherited flock, and a durable marker naming that lock's inode.
+        let lock_path = epmd_owner_lock_path(&data);
+        let lock = create_epmd_lock(&lock_path).unwrap();
+        let lock_metadata = lock.metadata().unwrap();
+        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
+            .into_iter()
+            .find(|path| path.is_file())
+            .expect("a Unix sleep executable");
+        let mut command = Command::new(sleep);
+        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
+        let child = command.arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        drop(lock);
+        assert!(epmd_lock_held(&lock_path, lock_metadata.dev(), lock_metadata.ino()).unwrap());
+
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let executable_metadata = fs::symlink_metadata(&executable).unwrap();
+        let owner = EpmdOwner {
+            schema: EPMD_OWNER_SCHEMA,
+            fleet_id: profile.fleet_id.clone(),
+            host: profile.host.clone(),
+            address: Ipv4Addr::LOCALHOST,
+            port: profile.epmd_port,
+            pid,
+            executable,
+            executable_dev: executable_metadata.dev(),
+            executable_ino: executable_metadata.ino(),
+            lock_dev: lock_metadata.dev(),
+            lock_ino: lock_metadata.ino(),
+        };
+        write_private_new(
+            &epmd_owner_path(&data),
+            &serde_json::to_vec_pretty(&owner).unwrap(),
+            "test EPMD ownership marker",
+        )
+        .unwrap();
+
+        let watch = EpmdRuntimeWatch::new(Some(child), Ipv4Addr::LOCALHOST, profile.epmd_port);
+        assert!(watch.reap_spawned(&data).unwrap());
+        assert!(
+            !runtime::pid_alive(pid),
+            "the launched EPMD survived the failed start"
+        );
+        assert!(!epmd_owner_path(&data).try_exists().unwrap());
+        assert!(!epmd_owner_lock_path(&data).try_exists().unwrap());
+
+        // A reused compatible incumbent has no child here; reaping must refuse to touch
+        // anything and say that nothing was stopped.
+        let incumbent = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, profile.epmd_port);
+        assert!(!incumbent.reap_spawned(&data).unwrap());
+
+        fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn doctor_warns_when_pinned_ports_sit_inside_the_ephemeral_range() {
+        let first_generation = Profile {
+            schema: PROFILE_SCHEMA,
+            fleet_id: "cafecafecafecafecafecafe".into(),
+            name: "lab".into(),
+            machine: "vps".into(),
+            host: "127.0.0.1".into(),
+            node: "ouro-vps@127.0.0.1".into(),
+            role: "core".into(),
+            members: vec![member("vps", "127.0.0.1")],
+            roster_revision: initial_roster_revision(),
+            tombstones: Vec::new(),
+            // The exact exposure a real enrollment died on: gateway and distribution
+            // pinned inside Linux's default ephemeral range, EPMD safely below it.
+            gateway_port: 47_704,
+            epmd_port: 14_321,
+            dist_port_min: 43_700,
+            dist_port_max: 43_729,
+        };
+        let warnings = ephemeral_overlap_warnings(&first_generation, (32_768, 60_999));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("47704"), "{}", warnings[0]);
+        assert!(warnings[0].contains("eaddrinuse"), "{}", warnings[0]);
+        assert!(warnings[1].contains("43700-43729"), "{}", warnings[1]);
+
+        let current_defaults = Profile {
+            gateway_port: default_gateway_port("cafecafecafecafecafecafe", "vps"),
+            epmd_port: default_epmd_port("cafecafecafecafecafecafe"),
+            dist_port_min: DEFAULT_DIST_PORT_MIN,
+            dist_port_max: DEFAULT_DIST_PORT_MAX,
+            ..first_generation
+        };
+        assert_eq!(
+            ephemeral_overlap_warnings(&current_defaults, (32_768, 60_999)),
+            Vec::<String>::new()
         );
     }
 
@@ -6725,12 +6995,7 @@ mod tests {
             .expect("a Unix sleep executable");
         let mut unrelated = Command::new(sleep).arg("30").spawn().unwrap();
         let unrelated_pid = unrelated.id() as i32;
-        let failure = EpmdRuntimeWatch {
-            child: None,
-            address: Ipv4Addr::LOCALHOST,
-            port,
-        }
-        .supervise();
+        let failure = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, port).supervise();
 
         assert!(epmd_responds(Ipv4Addr::LOCALHOST, port));
         stop.store(true, Ordering::Relaxed);
