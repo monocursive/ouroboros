@@ -1241,18 +1241,29 @@ async fn fleet_add_command(
         setup_tailscale,
         ..fleet_add::AddOptions::default()
     };
-    // Guided enrollment prints a live sign-in link while the add is still running, so it
-    // needs the terminal rather than the outcome this function returns.
-    let outcome = fleet_add::add_guided(
-        &paths.data_dir,
-        &target,
-        machine.as_deref(),
-        host.as_deref(),
+    // The add runs as a typed event stream — the same one the TUI stepper and the desktop
+    // pane render. This terminal renders it through `NotifyEvents`, the adapter that turns
+    // events back into the lines `StderrNotify` has always printed, so the CLI cannot
+    // drift from the stream it now consumes. It runs on this thread and keeps the `?`:
+    // the terminal `Failed` event is for surfaces that render a failure, while a shell
+    // wants the error on stderr and a non-zero exit, which is what returning `Err` does.
+    let params = fleet_add::AddParams {
+        data_dir: paths.data_dir.clone(),
+        target: target.clone(),
+        machine,
+        host,
         via,
-        binary.as_deref(),
-        owner_host.as_deref(),
-        &options,
-        &mut fleet_add::StderrNotify,
+        binary,
+        owner_host,
+        options,
+    };
+    let mut notify = fleet_add::StderrNotify;
+    let mut sink = fleet_add::NotifyEvents::new(&mut notify);
+    let outcome = fleet_add::add_with_events(
+        &params,
+        &fleet_add::SshRemote { via },
+        &fleet_add::Cancel::default(),
+        &mut sink,
     )?;
     print!("{}", fleet_add::render_outcome(&outcome));
     Ok(())

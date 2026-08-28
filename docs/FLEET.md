@@ -138,6 +138,18 @@ Implemented now:
 - downloadable per-platform release assets plus checksums in the tag workflow (the
   workflow remains honestly unproven until the first tag runs).
 
+`ouro fleet add` runs as a typed event stream, and that stream is the client seam every
+surface renders. The pipeline emits `Probed`, the `Network` plan it chose, the Tailscale
+`AuthUrl`, a `WaitingForAddress` per poll round, the `Install` decision, each `Copying`
+step, `Enrolling`, and exactly one terminal `Done` or `Failed`; a failure carries
+structured residue naming what it left behind — the pending invitation and the
+treat-as-issued rule, and after a refused enroll the possibility of a joined-but-stopped
+destination. `spawn_add` runs it on its own thread for a UI, `add_with_events` runs it on
+the caller's; the CLI takes the second and renders the same stream back into the lines it
+has always printed, so terminal output is unchanged. A cancel is honored at the next
+pipeline boundary — before each remote command, each copy, and each poll round — and
+never inside a blocking SSH call already in flight.
+
 The checked-in packaged exercise builds a three-node TLS mesh with reverse/cold boot,
 late join, hub loss/rejoin, automatic service-run crash restart, and final cleanup. CI
 runs that exercise on Linux before a release artifact may publish. This remains an

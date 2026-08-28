@@ -1156,7 +1156,9 @@ pub enum InstallDecision {
     RemoteExisting(String),
     /// This executable's triple matches; it copies itself.
     SelfCopy,
-    /// A cross-platform dist artifact was resolved locally.
+    /// A local file this Mac will copy: a cross-platform dist artifact resolved for the
+    /// destination's triple, or the one the operator named with `--binary`. Both are a
+    /// path on this Mac that is about to become the destination's `ouro`.
     DistArtifact(PathBuf),
     /// Nothing installable; the invitation is delivered with a recipe.
     RecipeOnly,
@@ -1175,17 +1177,89 @@ pub struct AddParams {
     pub options: AddOptions,
 }
 
+/// Where a running add delivers its events. One method, so a UI thread's channel, a
+/// terminal, or a test's vector are all the same thing to the pipeline.
+pub trait EventSink {
+    fn emit(&mut self, event: AddEvent);
+}
+
+/// Adapts a closure into an [`EventSink`].
+pub struct FnSink<F>(pub F);
+
+impl<F: FnMut(AddEvent)> EventSink for FnSink<F> {
+    fn emit(&mut self, event: AddEvent) {
+        (self.0)(event);
+    }
+}
+
+/// Renders the event stream back into the line-oriented [`Notify`] the CLI and the
+/// pre-event callers already speak.
+///
+/// This is the one place that turns typed events into operator text, so the CLI and
+/// `add_with_options` cannot drift apart: the typed variants a line-oriented surface has
+/// nothing to say about are dropped, because the add log already carries those facts and
+/// the CLI prints it at the end. `AuthUrl` is the exception — the sign-in link is
+/// time-critical, so it is printed the moment it exists, exactly as before.
+pub struct NotifyEvents<'notify> {
+    notify: &'notify mut dyn Notify,
+}
+
+impl<'notify> NotifyEvents<'notify> {
+    pub fn new(notify: &'notify mut dyn Notify) -> Self {
+        Self { notify }
+    }
+}
+
+impl EventSink for NotifyEvents<'_> {
+    fn emit(&mut self, event: AddEvent) {
+        match event {
+            AddEvent::Line(text) => self.notify.line(&text),
+            AddEvent::AuthUrl(url) => {
+                self.notify.line("");
+                self.notify
+                    .line("Open this link and approve the machine (a one-time Tailscale sign-in):");
+                self.notify.line(&format!("  {url}"));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The stop request shared with a running add.
+///
+/// It is checked at every pipeline boundary: before each remote command, before each
+/// copy, and once per poll round. The honest limit is that a boundary is between remote
+/// calls, not inside one — an SSH command already in flight is not interrupted, so a
+/// cancel raised during a `tailscale up` install or a slow `scp` takes effect when that
+/// call returns. Nothing kills the remote process.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Cancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A running add. Dropping the handle does not stop the pipeline; `cancel` requests a
 /// stop at the next pipeline boundary (a blocking remote call in flight completes
 /// first), and `join` waits for the thread.
 pub struct AddHandle {
-    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancel: Cancel,
     join: std::thread::JoinHandle<()>,
 }
 
 impl AddHandle {
     pub fn cancel(&self) {
-        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel.cancel();
     }
 
     pub fn join(self) {
@@ -1193,44 +1267,52 @@ impl AddHandle {
     }
 }
 
-struct SinkNotify<'sink> {
-    sink: &'sink (dyn Fn(AddEvent) + Send + Sync),
-}
-
-impl Notify for SinkNotify<'_> {
-    fn line(&mut self, text: &str) {
-        (self.sink)(AddEvent::Line(text.to_string()));
-    }
-}
-
 /// Run a real SSH add on its own thread, delivering every event to `sink` as it
 /// happens. Exactly one terminal event (`Done` or `Failed`) is delivered last.
 pub fn spawn_add(params: AddParams, sink: impl Fn(AddEvent) + Send + Sync + 'static) -> AddHandle {
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = Cancel::new();
     let flag = cancel.clone();
     let join = std::thread::spawn(move || {
-        let _ = &flag;
-        let mut notify = SinkNotify { sink: &sink };
-        let outcome = add_guided(
-            &params.data_dir,
-            &params.target,
-            params.machine.as_deref(),
-            params.host.as_deref(),
-            params.via,
-            params.binary.as_deref(),
-            params.owner_host.as_deref(),
-            &params.options,
-            &mut notify,
-        );
-        match outcome {
-            Ok(outcome) => (sink)(AddEvent::Done(outcome)),
-            Err(error) => (sink)(AddEvent::Failed {
-                error: format!("{error:#}"),
-                residue: Vec::new(),
-            }),
-        }
+        let remote = SshRemote { via: params.via };
+        let mut sink = FnSink(sink);
+        let _ = add_with_events(&params, &remote, &flag, &mut sink);
     });
     AddHandle { cancel, join }
+}
+
+/// Run one add on this thread, delivering every event to `sink` as it happens —
+/// including exactly one terminal event.
+///
+/// The returned `Result` is the same one [`add_with_options`] returns, so a caller that
+/// already reports failures its own way (the CLI, which exits on an `Err`) can ignore the
+/// terminal event and keep its exit path while still rendering the live stream.
+pub fn add_with_events(
+    params: &AddParams,
+    remote: &dyn Remote,
+    cancel: &Cancel,
+    sink: &mut dyn EventSink,
+) -> Result<Outcome> {
+    let (result, residue) = add_pipeline(
+        &params.data_dir,
+        &params.target,
+        params.machine.as_deref(),
+        params.host.as_deref(),
+        params.via,
+        params.binary.as_deref(),
+        params.owner_host.as_deref(),
+        remote,
+        &params.options,
+        sink,
+        cancel,
+    );
+    match &result {
+        Ok(outcome) => sink.emit(AddEvent::Done(outcome.clone())),
+        Err(error) => sink.emit(AddEvent::Failed {
+            error: format!("{error:#}"),
+            residue,
+        }),
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1271,19 +1353,97 @@ pub fn add_with_options(
     options: &AddOptions,
     notify: &mut dyn Notify,
 ) -> Result<Outcome> {
+    let mut sink = NotifyEvents::new(notify);
+    add_pipeline(
+        data_dir,
+        target,
+        machine,
+        host,
+        via,
+        binary,
+        owner_host,
+        remote,
+        options,
+        &mut sink,
+        &Cancel::default(),
+    )
+    .0
+}
+
+/// The pipeline plus the residue it would leave behind if it stopped right now.
+///
+/// The residue is a side channel rather than a return value because it is true of the
+/// run, not of the error: a cancel and a refused enroll at the same point leave exactly
+/// the same private material behind, and both callers need to say so.
+#[allow(clippy::too_many_arguments)]
+fn add_pipeline(
+    data_dir: &Path,
+    target: &str,
+    machine: Option<&str>,
+    host: Option<&str>,
+    via: Via,
+    binary: Option<&Path>,
+    owner_host: Option<&str>,
+    remote: &dyn Remote,
+    options: &AddOptions,
+    sink: &mut dyn EventSink,
+    cancel: &Cancel,
+) -> (Result<Outcome>, Vec<String>) {
+    let mut residue = Residue::default();
+    let result = run_add(
+        data_dir,
+        target,
+        machine,
+        host,
+        via,
+        binary,
+        owner_host,
+        remote,
+        options,
+        sink,
+        cancel,
+        &mut residue,
+    );
+    let lines = if result.is_ok() {
+        Vec::new()
+    } else {
+        residue.lines()
+    };
+    (result, lines)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_add(
+    data_dir: &Path,
+    target: &str,
+    machine: Option<&str>,
+    host: Option<&str>,
+    via: Via,
+    binary: Option<&Path>,
+    owner_host: Option<&str>,
+    remote: &dyn Remote,
+    options: &AddOptions,
+    sink: &mut dyn EventSink,
+    cancel: &Cancel,
+    residue: &mut Residue,
+) -> Result<Outcome> {
     let mut log = Vec::new();
     log.push(format!("probing {target} over {}", via.as_str()));
+    check_cancel(cancel)?;
     let probe_text = remote.run(target, PROBE_SCRIPT)?;
     let mut probe = parse_probe(&probe_text)?;
     require_safe_unix_path(&probe.home, "home")?;
     let remote_triple = probe.triple()?;
     let local = local_triple()?;
+    sink.emit(probed(&probe, &remote_triple));
     log.push(format!("remote is {remote_triple} (home {})", probe.home));
 
     let requested_host = host
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let host_was_requested = requested_host.is_some();
+    let mut guided = false;
 
     // Guided enrollment runs before any invitation exists, so a refusal or a timeout here
     // leaves nothing private on either machine.
@@ -1297,10 +1457,26 @@ pub fn add_with_options(
                 "--setup-tailscale did nothing: {target} already answers on {existing}"
             ));
         } else {
-            setup_tailscale(remote, target, options.tailscale_poll, &mut log, notify)?;
+            // The decision is announced before the work starts: guided enrollment is
+            // minutes of installing, signing in, and polling.
+            guided = true;
+            sink.emit(AddEvent::Network(NetworkPlan::GuidedSetup));
+            setup_tailscale(
+                remote,
+                target,
+                options.tailscale_poll,
+                &mut log,
+                sink,
+                cancel,
+            )?;
+            check_cancel(cancel)?;
             let reprobed = remote.run(target, PROBE_SCRIPT)?;
             probe = parse_probe(&reprobed)?;
             require_safe_unix_path(&probe.home, "home")?;
+            // The triple the rest of this add acts on is still the first probe's: the
+            // re-probe is the same machine, and reporting a triple the pipeline does not
+            // use would mislead whatever renders this.
+            sink.emit(probed(&probe, &remote_triple));
             log.push(format!("re-probed {target} after Tailscale enrollment"));
         }
     }
@@ -1312,6 +1488,14 @@ pub fn add_with_options(
                 "could not prove a private address for {target}; pass --host with a Tailscale MagicDNS name or private IPv4 address, or rerun with --setup-tailscale to install Tailscale and sign in on that machine (it runs the vendor's installer and `tailscale up` as root there)"
             )
         })?;
+    if !guided {
+        sink.emit(AddEvent::Network(if host_was_requested {
+            NetworkPlan::HostProvided(host.clone())
+        } else {
+            NetworkPlan::TailscaleExisting(host.clone())
+        }));
+    }
+
     let machine = machine
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1320,7 +1504,10 @@ pub fn add_with_options(
         .ok_or_else(|| anyhow!("could not derive a machine name for {target}; pass --machine"))?;
     fleet::validate_machine(&machine)?;
 
+    // The last boundary before private material exists anywhere.
+    check_cancel(cancel)?;
     let invite = write_pending_invite(data_dir, &machine, &host)?;
+    residue.invite = Some(invite.clone());
     log.push(format!("created a private invitation for {machine}"));
 
     let remote_invite = format!(
@@ -1331,8 +1518,12 @@ pub fn add_with_options(
         "{}/.local/share/ouroboros/incoming",
         probe.home.trim_end_matches('/')
     );
+    check_cancel(cancel)?;
     remote.run(target, &format!("mkdir -p -m 700 '{incoming_dir}'"))?;
+    check_cancel(cancel)?;
+    sink.emit(AddEvent::Copying { what: "invitation" });
     remote.copy_to(&invite, target, &remote_invite)?;
+    residue.delivered = Some(remote_invite.clone());
     log.push(format!("copied the invitation to {target}:{remote_invite}"));
 
     let dist_roots = options
@@ -1348,9 +1539,13 @@ pub fn add_with_options(
         &dist_roots,
     )
     .map_err(|error| pending_invite_error(error, &invite))?;
+    sink.emit(AddEvent::Install(install_decision(&install, binary)));
     match &install {
         InstallPlan::UseExisting(path) => {
             log.push(format!("remote already has {path}"));
+            check_cancel(cancel)?;
+            residue.enrolling = Some(machine.clone());
+            sink.emit(AddEvent::Enrolling);
             enroll_remote(remote, target, path, &remote_invite)
                 .map_err(|error| pending_invite_error(error, &invite))?;
             finish_enroll(&mut log, &invite, &machine, &host, OutcomeKind::Enrolled)
@@ -1360,6 +1555,7 @@ pub fn add_with_options(
                 log.push(note.clone());
             }
             let remote_bin = format!("{}/.local/bin/ouro", probe.home.trim_end_matches('/'));
+            check_cancel(cancel)?;
             remote
                 .run(
                     target,
@@ -1369,9 +1565,12 @@ pub fn add_with_options(
                     ),
                 )
                 .map_err(|error| pending_invite_error(error, &invite))?;
+            check_cancel(cancel)?;
+            sink.emit(AddEvent::Copying { what: "binary" });
             remote
                 .copy_to(path, target, &format!("{remote_bin}.partial"))
                 .map_err(|error| pending_invite_error(error, &invite))?;
+            check_cancel(cancel)?;
             remote
                 .run(
                     target,
@@ -1381,6 +1580,9 @@ pub fn add_with_options(
                 )
                 .map_err(|error| pending_invite_error(error, &invite))?;
             log.push(format!("installed {} as {remote_bin}", path.display()));
+            check_cancel(cancel)?;
+            residue.enrolling = Some(machine.clone());
+            sink.emit(AddEvent::Enrolling);
             enroll_remote(remote, target, &remote_bin, &remote_invite)
                 .map_err(|error| pending_invite_error(error, &invite))?;
             finish_enroll(&mut log, &invite, &machine, &host, OutcomeKind::Enrolled)
@@ -1422,13 +1624,94 @@ enum InstallPlan {
     },
 }
 
+/// What a stopped add left behind, as facts rather than as prose.
+///
+/// Every field is set at the moment the thing it names becomes true, so whatever stops
+/// the run — a refused enroll, a cancel, a dropped SSH connection — reports the same
+/// residue. The one-line form goes on the error chain for the CLI; the line-per-fact form
+/// rides on `Failed` for a UI that can render guidance.
+#[derive(Clone, Debug, Default)]
+struct Residue {
+    /// The private invitation this add created on this Mac.
+    invite: Option<PathBuf>,
+    /// Where it was copied on the destination, once that copy succeeded.
+    delivered: Option<String>,
+    /// The machine name, set once `ouro fleet enroll` is about to run there: from this
+    /// point a failure may have a completed join behind it.
+    enrolling: Option<String>,
+}
+
+impl Residue {
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(invite) = &self.invite {
+            lines.extend(invite_residue(invite));
+        }
+        if let Some(delivered) = &self.delivered {
+            lines.push(format!("a copy of it is on the destination at {delivered}"));
+        }
+        if let Some(machine) = &self.enrolling {
+            lines.push(format!(
+                "`ouro fleet enroll` had already started on the destination: if its join completed before this, {machine} is joined but stopped"
+            ));
+            lines.push(format!(
+                "`ouro daemon` on {machine} starts it, and rerunning this same add converges it once the invitation above is removed"
+            ));
+        }
+        lines
+    }
+}
+
+/// The two facts an invitation that is already out leaves behind. Joined with `; ` they
+/// are the single line the CLI error chain has always carried.
+fn invite_residue(invite: &Path) -> [String; 2] {
+    [
+        format!("the invitation remains at {} (mode 0600)", invite.display()),
+        "if it may already have been copied, treat it as issued — otherwise delete it with rm before adding again".to_string(),
+    ]
+}
+
 /// Wrap a failure after the invitation was copied so the operator knows exactly what
 /// private material is now where, and what to do before retrying.
 fn pending_invite_error(error: anyhow::Error, invite: &Path) -> anyhow::Error {
-    error.context(format!(
-        "the invitation remains at {} (mode 0600); if it may already have been copied, treat it as issued — otherwise delete it with rm before adding again",
-        invite.display()
-    ))
+    error.context(invite_residue(invite).join("; "))
+}
+
+/// A pipeline boundary. The flag is only ever set through [`AddHandle::cancel`], so this
+/// is a no-op for every caller that does not spawn one.
+fn check_cancel(cancel: &Cancel) -> Result<()> {
+    if cancel.is_cancelled() {
+        bail!("cancelled by the operator");
+    }
+    Ok(())
+}
+
+/// Everything the destination answered, as the event a UI renders.
+fn probed(probe: &Probe, triple: &str) -> AddEvent {
+    AddEvent::Probed {
+        triple: triple.to_string(),
+        home: probe.home.clone(),
+        tailscale: probe.suggested_host(),
+        hostname: probe.hostname.clone(),
+        has_ouro: probe.ouro.is_some(),
+    }
+}
+
+/// The plan as the decision a UI names. `--binary` and a resolved dist artifact are both
+/// a local path this Mac is about to copy; only the same-triple self-copy has neither an
+/// operator-given path nor a resolution note.
+fn install_decision(plan: &InstallPlan, binary: Option<&Path>) -> InstallDecision {
+    match plan {
+        InstallPlan::UseExisting(path) => InstallDecision::RemoteExisting(path.clone()),
+        InstallPlan::Copy { path, note } => {
+            if binary.is_some() || note.is_some() {
+                InstallDecision::DistArtifact(path.clone())
+            } else {
+                InstallDecision::SelfCopy
+            }
+        }
+        InstallPlan::RecipeOnly { .. } => InstallDecision::RecipeOnly,
+    }
 }
 
 /// Remove the local copy of a consumed invitation. A failed removal is logged, never
@@ -1521,14 +1804,16 @@ fn install_plan(
 ///
 /// Every remote interaction goes through [`Remote`]. Nothing here touches an invitation:
 /// this runs before one exists, so a refusal or a timeout leaves no private material
-/// anywhere. The sign-in URL reaches `notify` and nothing else.
+/// anywhere. The sign-in URL reaches `sink` as [`AddEvent::AuthUrl`] and nothing else.
 fn setup_tailscale(
     remote: &dyn Remote,
     target: &str,
     budget: PollBudget,
     log: &mut Vec<String>,
-    notify: &mut dyn Notify,
+    sink: &mut dyn EventSink,
+    cancel: &Cancel,
 ) -> Result<()> {
+    check_cancel(cancel)?;
     let facts = key_values(&remote.run(target, TAILSCALE_CAPABILITY_SCRIPT)?);
     let installed = value_of(&facts, "tailscale") == Some("present");
     let sudo = value_of(&facts, "sudo") == Some("yes");
@@ -1547,11 +1832,13 @@ fn setup_tailscale(
     if installed {
         log.push(format!("tailscale is already installed on {target}"));
     } else {
-        notify.line(&format!(
+        sink.emit(AddEvent::Line(format!(
             "{target}: installing Tailscale with the vendor's own installer, as root:"
-        ));
-        notify.line(&format!("  {TAILSCALE_INSTALL}"));
+        )));
+        sink.emit(AddEvent::Line(format!("  {TAILSCALE_INSTALL}")));
+        check_cancel(cancel)?;
         remote.run(target, TAILSCALE_INSTALL)?;
+        check_cancel(cancel)?;
         let after = key_values(&remote.run(target, TAILSCALE_CAPABILITY_SCRIPT)?);
         if value_of(&after, "tailscale") != Some("present") {
             bail!(
@@ -1561,7 +1848,10 @@ fn setup_tailscale(
         log.push(format!("installed Tailscale on {target}"));
     }
 
-    notify.line(&format!("{target}: running as root: sudo tailscale up"));
+    sink.emit(AddEvent::Line(format!(
+        "{target}: running as root: sudo tailscale up"
+    )));
+    check_cancel(cancel)?;
     let started = key_values(&remote.run(target, TAILSCALE_UP_SCRIPT)?);
     match value_of(&started, "state") {
         Some("up") => {
@@ -1578,20 +1868,19 @@ fn setup_tailscale(
             // The path came back from the destination, so it is data until it is proven
             // safe to interpolate into the next command.
             require_safe_unix_path(&log_path, "tailscale up output path")?;
-            let url = wait_for_auth_url(remote, target, &log_path, budget)?;
-            notify.line("");
-            notify.line("Open this link and approve the machine (a one-time Tailscale sign-in):");
-            notify.line(&format!("  {url}"));
-            notify.line(&format!(
+            let url = wait_for_auth_url(remote, target, &log_path, budget, cancel)?;
+            // The URL is a live sign-in link. It reaches the operator through the event
+            // stream and nowhere else: not the add log, not the invitation, not the howto
+            // file. `NotifyEvents` renders it as the same three lines the CLI printed.
+            sink.emit(AddEvent::AuthUrl(url));
+            sink.emit(AddEvent::Line(format!(
                 "Waiting up to {} for {target} to receive a tailnet address...",
                 human_duration(budget.ip_window())
-            ));
-            // The URL is a live sign-in link. It goes to this terminal and nowhere else:
-            // not the add log, not the invitation, not the howto file.
+            )));
             log.push(format!(
                 "printed the Tailscale sign-in URL for {target} to this terminal"
             ));
-            let waited = wait_for_tailnet_address(remote, target, budget);
+            let waited = wait_for_tailnet_address(remote, target, budget, sink, cancel);
             // Best effort: `tailscale up` wrote that URL into a temp file on the
             // destination, so remove it whether or not the wait succeeded.
             let _ = remote.run(target, &format!("rm -f '{log_path}'"));
@@ -1611,8 +1900,10 @@ fn wait_for_auth_url(
     target: &str,
     log_path: &str,
     budget: PollBudget,
+    cancel: &Cancel,
 ) -> Result<String> {
     for _ in 0..budget.url_attempts.max(1) {
+        check_cancel(cancel)?;
         std::thread::sleep(budget.interval);
         // Remote output is data: it is scanned for one URL-shaped token and never echoed.
         let text = remote.run(
@@ -1629,9 +1920,22 @@ fn wait_for_auth_url(
     )
 }
 
-fn wait_for_tailnet_address(remote: &dyn Remote, target: &str, budget: PollBudget) -> Result<()> {
-    for _ in 0..budget.ip_attempts.max(1) {
+fn wait_for_tailnet_address(
+    remote: &dyn Remote,
+    target: &str,
+    budget: PollBudget,
+    sink: &mut dyn EventSink,
+    cancel: &Cancel,
+) -> Result<()> {
+    for round in 0..budget.ip_attempts.max(1) {
+        check_cancel(cancel)?;
         std::thread::sleep(budget.interval);
+        // Elapsed is the schedule this loop actually slept, not a wall clock: it is what
+        // the budget promised, and it keeps the event stream reproducible in tests.
+        sink.emit(AddEvent::WaitingForAddress {
+            elapsed_s: (budget.interval * (round + 1)).as_secs(),
+            budget_s: budget.ip_window().as_secs(),
+        });
         let facts = key_values(&remote.run(target, TAILSCALE_IP_SCRIPT)?);
         if value_of(&facts, "ip").is_some_and(|ip| !ip.is_empty()) {
             return Ok(());
@@ -1930,6 +2234,9 @@ mod tests {
         up: Mutex<VecDeque<String>>,
         log_reads: Mutex<VecDeque<String>>,
         ip_polls: Mutex<VecDeque<String>>,
+        /// Refuse the remote enroll, the one failure that happens after the invitation is
+        /// already on the destination.
+        fail_enroll: bool,
     }
 
     fn queue(replies: &[&str]) -> Mutex<VecDeque<String>> {
@@ -1977,6 +2284,9 @@ mod tests {
             }
             if script.contains("printf 'ip=") {
                 return Self::serve(&self.ip_polls, "tailscale ip");
+            }
+            if self.fail_enroll && script.contains("fleet enroll") {
+                bail!("remote enroll refused");
             }
             Ok(String::new())
         }
@@ -2993,5 +3303,370 @@ mod tests {
         assert_eq!(auth_url("http://login.tailscale.com/a/x"), None);
         assert_eq!(auth_url("https://"), None);
         assert_eq!(auth_url("Backend state: NeedsLogin\n"), None);
+    }
+
+    // -------------------------------------------------------------------------------
+    // The event stream: what every client surface renders
+    // -------------------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct Events(Vec<AddEvent>);
+
+    impl EventSink for Events {
+        fn emit(&mut self, event: AddEvent) {
+            self.0.push(event);
+        }
+    }
+
+    /// A remote that trips the cancel flag once a named copy has gone through, so a test
+    /// can cancel at an exact point between two stages rather than by racing a thread.
+    struct CancelAfterCopy<'remote> {
+        inner: &'remote ScriptedRemote,
+        cancel: Cancel,
+        suffix: &'remote str,
+    }
+
+    impl Remote for CancelAfterCopy<'_> {
+        fn run(&self, target: &str, script: &str) -> Result<String> {
+            self.inner.run(target, script)
+        }
+
+        fn copy_to(&self, local: &Path, target: &str, remote_path: &str) -> Result<()> {
+            let result = self.inner.copy_to(local, target, remote_path);
+            if remote_path.ends_with(self.suffix) {
+                self.cancel.cancel();
+            }
+            result
+        }
+    }
+
+    fn add_params(
+        data: &Path,
+        machine: Option<&str>,
+        host: Option<&str>,
+        options: AddOptions,
+    ) -> AddParams {
+        AddParams {
+            data_dir: data.to_path_buf(),
+            target: "op@vps".to_string(),
+            machine: machine.map(str::to_string),
+            host: host.map(str::to_string),
+            via: Via::Ssh,
+            binary: None,
+            owner_host: Some("studio.tailnet.ts.net".to_string()),
+            options,
+        }
+    }
+
+    /// Exactly one terminal event ends every run, and it is last.
+    fn split_terminal(mut events: Vec<AddEvent>) -> (Vec<AddEvent>, AddEvent) {
+        let terminal = events.pop().expect("a run delivers a terminal event");
+        assert!(
+            matches!(terminal, AddEvent::Done(_) | AddEvent::Failed { .. }),
+            "the last event must be terminal: {terminal:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AddEvent::Done(_) | AddEvent::Failed { .. })),
+            "only the last event may be terminal: {events:?}"
+        );
+        (events, terminal)
+    }
+
+    #[test]
+    fn a_guided_tailscale_add_emits_the_whole_typed_sequence() {
+        let data = scratch("events-guided");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
+            capability: queue(&[
+                "tailscale=missing\nsudo=yes\n",
+                "tailscale=present\nsudo=yes\n",
+            ]),
+            up: queue(&[UP_STARTING]),
+            log_reads: queue(&["", AUTH_LOG]),
+            ip_polls: queue(&["ip=\n", "ip=100.64.0.8\n"]),
+            ..ScriptedRemote::default()
+        };
+        let params = add_params(
+            &data,
+            None,
+            None,
+            AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+        );
+        let mut events = Events::default();
+        let outcome = add_with_events(&params, &remote, &Cancel::default(), &mut events).unwrap();
+        let (stream, terminal) = split_terminal(events.0);
+
+        assert_eq!(
+            stream,
+            vec![
+                AddEvent::Probed {
+                    triple: foreign_triple(),
+                    home: "/home/op".into(),
+                    tailscale: None,
+                    hostname: Some("vps".into()),
+                    has_ouro: false,
+                },
+                AddEvent::Network(NetworkPlan::GuidedSetup),
+                AddEvent::Line(
+                    "op@vps: installing Tailscale with the vendor's own installer, as root:".into()
+                ),
+                AddEvent::Line(format!("  {TAILSCALE_INSTALL}")),
+                AddEvent::Line("op@vps: running as root: sudo tailscale up".into()),
+                AddEvent::AuthUrl("https://login.tailscale.com/a/deadbeef".into()),
+                AddEvent::Line(
+                    "Waiting up to 0s for op@vps to receive a tailnet address...".into()
+                ),
+                AddEvent::WaitingForAddress {
+                    elapsed_s: 0,
+                    budget_s: 0,
+                },
+                AddEvent::WaitingForAddress {
+                    elapsed_s: 0,
+                    budget_s: 0,
+                },
+                // The re-probe is a second, honest `Probed`: the address is what changed.
+                AddEvent::Probed {
+                    triple: foreign_triple(),
+                    home: "/home/op".into(),
+                    tailscale: Some("100.64.0.8".into()),
+                    hostname: Some("vps".into()),
+                    has_ouro: true,
+                },
+                AddEvent::Copying { what: "invitation" },
+                AddEvent::Install(InstallDecision::RemoteExisting(
+                    "/home/op/.local/bin/ouro".into()
+                )),
+                AddEvent::Enrolling,
+            ]
+        );
+        assert_eq!(terminal, AddEvent::Done(outcome.clone()));
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        assert_eq!(outcome.host, "100.64.0.8");
+
+        // The seam keeps the guarantee the notify path had: the live link is an event and
+        // never a log line, an outcome field, or a file.
+        assert!(!outcome.log.join("\n").contains("login.tailscale.com"));
+        assert!(!all_file_text(&data).contains("login.tailscale.com"));
+    }
+
+    #[test]
+    fn a_cross_triple_dist_artifact_add_names_the_resolved_path_in_its_install_event() {
+        let data = scratch("events-dist");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let root = dist_fixture("events-dist-root", local_version(), &foreign_triple());
+        let artifact = root.join(dist_artifact_name(local_version(), &foreign_triple()));
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, false)]),
+            ..ScriptedRemote::default()
+        };
+        let params = add_params(
+            &data,
+            Some("vps"),
+            Some("100.64.0.8"),
+            AddOptions {
+                dist_roots: Some(vec![root.clone()]),
+                ..AddOptions::default()
+            },
+        );
+        let mut events = Events::default();
+        let outcome = add_with_events(&params, &remote, &Cancel::default(), &mut events).unwrap();
+        let (stream, terminal) = split_terminal(events.0);
+
+        assert_eq!(
+            stream,
+            vec![
+                AddEvent::Probed {
+                    triple: foreign_triple(),
+                    home: "/home/op".into(),
+                    tailscale: Some("100.64.0.8".into()),
+                    hostname: Some("vps".into()),
+                    has_ouro: false,
+                },
+                AddEvent::Network(NetworkPlan::HostProvided("100.64.0.8".into())),
+                AddEvent::Copying { what: "invitation" },
+                AddEvent::Install(InstallDecision::DistArtifact(artifact)),
+                AddEvent::Copying { what: "binary" },
+                AddEvent::Enrolling,
+            ]
+        );
+        assert_eq!(terminal, AddEvent::Done(outcome.clone()));
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+    }
+
+    /// A refused enroll is the failure that leaves the most behind: an invitation here, a
+    /// copy of it there, and a join that may or may not have completed.
+    #[test]
+    fn a_failure_after_the_invitation_copy_carries_its_residue() {
+        let data = scratch("events-residue");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, true)]),
+            fail_enroll: true,
+            ..ScriptedRemote::default()
+        };
+        let params = add_params(
+            &data,
+            Some("vps"),
+            Some("100.64.0.8"),
+            AddOptions {
+                dist_roots: Some(Vec::new()),
+                ..AddOptions::default()
+            },
+        );
+        let mut events = Events::default();
+        let error = add_with_events(&params, &remote, &Cancel::default(), &mut events).unwrap_err();
+        let (stream, terminal) = split_terminal(events.0);
+        let invite = fleet::pending_invite_path(&data, "vps").unwrap();
+
+        assert_eq!(
+            stream,
+            vec![
+                AddEvent::Probed {
+                    triple: foreign_triple(),
+                    home: "/home/op".into(),
+                    tailscale: Some("100.64.0.8".into()),
+                    hostname: Some("vps".into()),
+                    has_ouro: true,
+                },
+                AddEvent::Network(NetworkPlan::HostProvided("100.64.0.8".into())),
+                AddEvent::Copying { what: "invitation" },
+                AddEvent::Install(InstallDecision::RemoteExisting(
+                    "/home/op/.local/bin/ouro".into()
+                )),
+                AddEvent::Enrolling,
+            ]
+        );
+        assert_eq!(
+            terminal,
+            AddEvent::Failed {
+                error: format!("{error:#}"),
+                residue: vec![
+                    format!("the invitation remains at {} (mode 0600)", invite.display()),
+                    "if it may already have been copied, treat it as issued — otherwise delete it with rm before adding again".into(),
+                    "a copy of it is on the destination at /home/op/.local/share/ouroboros/incoming/vps.ouro".into(),
+                    "`ouro fleet enroll` had already started on the destination: if its join completed before this, vps is joined but stopped".into(),
+                    "`ouro daemon` on vps starts it, and rerunning this same add converges it once the invitation above is removed".into(),
+                ],
+            }
+        );
+        // The CLI's error text is unchanged by the restructuring: the first two residue
+        // facts are still one line on the error chain.
+        assert!(
+            error.to_string().contains("the invitation remains at")
+                && error.to_string().contains("treat it as issued"),
+            "{error:#}"
+        );
+        assert!(
+            invite.exists(),
+            "the invitation the residue names must be there"
+        );
+    }
+
+    /// A cancel never half-reports: the run stops at the next boundary and says exactly
+    /// what it had already done, no more.
+    #[test]
+    fn a_cancel_between_stages_fails_with_only_the_residue_that_is_true() {
+        let data = scratch("events-cancel");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let scripted = ScriptedRemote {
+            probes: queue(&[&probe_text(true, true)]),
+            ..ScriptedRemote::default()
+        };
+        let cancel = Cancel::new();
+        let remote = CancelAfterCopy {
+            inner: &scripted,
+            cancel: cancel.clone(),
+            suffix: "vps.ouro",
+        };
+        let params = add_params(
+            &data,
+            Some("vps"),
+            Some("100.64.0.8"),
+            AddOptions {
+                dist_roots: Some(Vec::new()),
+                ..AddOptions::default()
+            },
+        );
+        let mut events = Events::default();
+        let error = add_with_events(&params, &remote, &cancel, &mut events).unwrap_err();
+        let (stream, terminal) = split_terminal(events.0);
+        let invite = fleet::pending_invite_path(&data, "vps").unwrap();
+
+        assert_eq!(
+            stream,
+            vec![
+                AddEvent::Probed {
+                    triple: foreign_triple(),
+                    home: "/home/op".into(),
+                    tailscale: Some("100.64.0.8".into()),
+                    hostname: Some("vps".into()),
+                    has_ouro: true,
+                },
+                AddEvent::Network(NetworkPlan::HostProvided("100.64.0.8".into())),
+                AddEvent::Copying { what: "invitation" },
+                AddEvent::Install(InstallDecision::RemoteExisting(
+                    "/home/op/.local/bin/ouro".into()
+                )),
+            ]
+        );
+        assert_eq!(
+            terminal,
+            AddEvent::Failed {
+                error: "cancelled by the operator".into(),
+                residue: vec![
+                    format!("the invitation remains at {} (mode 0600)", invite.display()),
+                    "if it may already have been copied, treat it as issued — otherwise delete it with rm before adding again".into(),
+                    "a copy of it is on the destination at /home/op/.local/share/ouroboros/incoming/vps.ouro".into(),
+                ],
+            }
+        );
+        assert_eq!(format!("{error:#}"), "cancelled by the operator");
+        assert!(
+            !scripted.ran("fleet enroll"),
+            "a cancel before the enroll boundary must not enroll: {:?}",
+            scripted.runs.lock().unwrap()
+        );
+        assert!(invite.exists());
+    }
+
+    /// The bridge the CLI and the pre-event callers share: typed events become exactly the
+    /// lines `ouro fleet add` has always printed, and nothing else reaches the terminal.
+    #[test]
+    fn notify_events_renders_the_sign_in_link_and_drops_what_the_log_already_says() {
+        let mut lines = Lines::default();
+        let mut sink = NotifyEvents::new(&mut lines);
+        sink.emit(AddEvent::Line(
+            "op@vps: running as root: sudo tailscale up".into(),
+        ));
+        sink.emit(AddEvent::AuthUrl(
+            "https://login.tailscale.com/a/deadbeef".into(),
+        ));
+        sink.emit(AddEvent::Probed {
+            triple: "x86_64-unknown-linux-gnu".into(),
+            home: "/home/op".into(),
+            tailscale: None,
+            hostname: None,
+            has_ouro: false,
+        });
+        sink.emit(AddEvent::Copying { what: "binary" });
+        sink.emit(AddEvent::Enrolling);
+
+        assert_eq!(
+            lines.0,
+            vec![
+                "op@vps: running as root: sudo tailscale up".to_string(),
+                String::new(),
+                "Open this link and approve the machine (a one-time Tailscale sign-in):"
+                    .to_string(),
+                "  https://login.tailscale.com/a/deadbeef".to_string(),
+            ]
+        );
     }
 }
