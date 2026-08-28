@@ -705,6 +705,12 @@ pub enum FleetCommand {
         #[arg(long, value_name = "FILE")]
         binary: Option<PathBuf>,
 
+        /// When the destination has no private address yet, install Tailscale there and
+        /// sign it in. Runs the vendor's installer and `tailscale up` as root on that
+        /// machine (passwordless sudo required) and prints the sign-in link here.
+        #[arg(long)]
+        setup_tailscale: bool,
+
         /// Do not SSH. Write the invitation and print the command to run on the other
         /// machine.
         #[arg(long)]
@@ -1434,6 +1440,30 @@ mod tests {
         assert_eq!(via, "tailscale");
         assert!(init);
         assert!(!print_script);
+
+        // Guided Tailscale enrollment is opt-in and off unless the operator names it.
+        let Some(Command::Fleet {
+            command: FleetCommand::Add {
+                setup_tailscale, ..
+            },
+        }) = parse(&["fleet", "add", "op@vps"]).command
+        else {
+            panic!("fleet add must parse without options");
+        };
+        assert!(!setup_tailscale);
+        let Some(Command::Fleet {
+            command:
+                FleetCommand::Add {
+                    setup_tailscale,
+                    host,
+                    ..
+                },
+        }) = parse(&["fleet", "add", "op@vps", "--setup-tailscale"]).command
+        else {
+            panic!("fleet add --setup-tailscale must parse");
+        };
+        assert!(setup_tailscale);
+        assert!(host.is_none());
         assert!(matches!(
             parse(&["fleet", "list"]).command,
             Some(Command::Fleet {

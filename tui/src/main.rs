@@ -1173,6 +1173,7 @@ async fn fleet_add_command(
     host: Option<String>,
     via: String,
     binary: Option<PathBuf>,
+    setup_tailscale: bool,
     print_script: bool,
     init: bool,
     owner_host: Option<String>,
@@ -1189,6 +1190,13 @@ async fn fleet_add_command(
             "name the destination as `ouro fleet add user@host`, or pass `--print-script --machine NAME --host HOST` to enroll it yourself. `ouro fleet list` shows Tailscale and SSH hosts this Mac already knows"
         ),
         _ => {}
+    }
+    // Guided enrollment is a thing done to a destination over SSH; there is no
+    // destination to do it to when nothing is being reached.
+    if setup_tailscale && (print_script || target.is_none()) {
+        bail!(
+            "--setup-tailscale needs a destination to reach over SSH; it cannot be combined with --print-script"
+        );
     }
 
     if init && fleet::load(&paths.data_dir)?.is_none() {
@@ -1229,7 +1237,13 @@ async fn fleet_add_command(
 
     let target = target.expect("target is present when not printing a script");
     let via = fleet_add::Via::parse(&via)?;
-    let outcome = fleet_add::add(
+    let options = fleet_add::AddOptions {
+        setup_tailscale,
+        ..fleet_add::AddOptions::default()
+    };
+    // Guided enrollment prints a live sign-in link while the add is still running, so it
+    // needs the terminal rather than the outcome this function returns.
+    let outcome = fleet_add::add_guided(
         &paths.data_dir,
         &target,
         machine.as_deref(),
@@ -1237,6 +1251,8 @@ async fn fleet_add_command(
         via,
         binary.as_deref(),
         owner_host.as_deref(),
+        &options,
+        &mut fleet_add::StderrNotify,
     )?;
     print!("{}", fleet_add::render_outcome(&outcome));
     Ok(())
@@ -1341,6 +1357,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             host,
             via,
             binary,
+            setup_tailscale,
             print_script,
             init,
             owner_host,
@@ -1356,6 +1373,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 host,
                 via,
                 binary,
+                setup_tailscale,
                 print_script,
                 init,
                 owner_host,

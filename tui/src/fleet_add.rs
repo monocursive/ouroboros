@@ -11,13 +11,22 @@
 //!   destination architecture cannot run this Mac's binary.
 //!
 //! The invitation never appears on a command line, in argv, or in progress text. A
-//! mismatched OS/CPU is a named limit, not a silent copy of the wrong ERTS.
+//! mismatched OS/CPU is a named limit, not a silent copy of the wrong ERTS — but when a
+//! release artifact for that exact OS/CPU *and* this exact version is already sitting in
+//! a `dist` directory, the add finds it and copies that instead of refusing.
+//!
+//! `--setup-tailscale` is the one place this file changes the destination beyond
+//! Ouroboros' own files: with that consent it runs the vendor's Tailscale installer and
+//! `tailscale up` as root there, surfaces the sign-in URL on this terminal, and waits for
+//! a tailnet address. Without it, a destination with no private address is refused, as
+//! before.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -47,6 +56,76 @@ impl Via {
             other => bail!("--via must be ssh or tailscale, got {other}"),
         }
     }
+}
+
+/// Where guided-enrollment progress and the Tailscale sign-in URL go.
+///
+/// The URL is operator-facing, time-critical, and credential-bearing, so it is written
+/// straight to the terminal and never into the add log, an invitation, or a howto file.
+pub trait Notify {
+    fn line(&mut self, text: &str);
+}
+
+/// Production for the CLI: stderr, so a piped `ouro fleet add` still shows the URL.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StderrNotify;
+
+impl Notify for StderrNotify {
+    fn line(&mut self, text: &str) {
+        eprintln!("{text}");
+    }
+}
+
+/// The TUI owns the whole screen; nothing may be printed underneath it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SilentNotify;
+
+impl Notify for SilentNotify {
+    fn line(&mut self, _text: &str) {}
+}
+
+/// How long guided Tailscale enrollment waits, and how often it asks. Split out of the
+/// flow so the timeout path is a test rather than five real minutes of waiting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PollBudget {
+    pub interval: Duration,
+    /// Rounds spent waiting for `tailscale up` to print its sign-in URL.
+    pub url_attempts: u32,
+    /// Rounds spent waiting for the operator to finish that sign-in.
+    pub ip_attempts: u32,
+}
+
+impl Default for PollBudget {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(5),
+            url_attempts: 24,
+            ip_attempts: 60,
+        }
+    }
+}
+
+impl PollBudget {
+    fn url_window(self) -> Duration {
+        self.interval * self.url_attempts.max(1)
+    }
+
+    fn ip_window(self) -> Duration {
+        self.interval * self.ip_attempts.max(1)
+    }
+}
+
+/// Everything one add may do beyond addressing. `Default` is exactly the flow that
+/// shipped before: no guided enrollment, dist artifacts discovered from the environment.
+#[derive(Clone, Debug, Default)]
+pub struct AddOptions {
+    /// Operator consent for guided Tailscale enrollment. It runs the vendor's installer
+    /// and `tailscale up` as root on the destination.
+    pub setup_tailscale: bool,
+    /// Overrides where a cross-platform dist artifact is looked for. `None` discovers the
+    /// roots from `OUROBOROS_DIST_DIR`, this executable's real path, and the CWD.
+    pub dist_roots: Option<Vec<PathBuf>>,
+    pub tailscale_poll: PollBudget,
 }
 
 /// What a successful add did, without repeating invitation bytes.
@@ -209,6 +288,43 @@ else
 fi
 "#;
 
+/// The vendor's own documented one-liner, printed verbatim before it runs because it
+/// downloads and executes code as root on someone else's machine. `curl` stays
+/// unprivileged; only the shell that interprets the script is elevated.
+const TAILSCALE_INSTALL: &str = "curl -fsSL https://tailscale.com/install.sh | sudo -n sh";
+
+/// Both facts guided enrollment branches on, in one round trip. It always exits 0 so a
+/// missing `tailscale` or a locked-down `sudo` is an answer rather than a transport error.
+const TAILSCALE_CAPABILITY_SCRIPT: &str = r#"if command -v tailscale >/dev/null 2>&1; then
+  printf 'tailscale=present\n'
+else
+  printf 'tailscale=missing\n'
+fi
+if sudo -n true >/dev/null 2>&1; then
+  printf 'sudo=yes\n'
+else
+  printf 'sudo=no\n'
+fi
+"#;
+
+/// `tailscale up` blocks until the operator authenticates, so it is started detached with
+/// its output in a private temp file this flow then polls. An address already present
+/// means a rerun of the same add: report it and start nothing.
+const TAILSCALE_UP_SCRIPT: &str = r#"existing=$(tailscale ip -4 2>/dev/null | head -n 1)
+if [ -n "$existing" ]; then
+  printf 'state=up\n'
+  exit 0
+fi
+umask 077
+log=$(mktemp /tmp/ouro-tailscale-up.XXXXXX) || exit 1
+nohup sudo -n tailscale up </dev/null >"$log" 2>&1 &
+printf 'state=starting\n'
+printf 'log=%s\n' "$log"
+"#;
+
+const TAILSCALE_IP_SCRIPT: &str = r#"printf 'ip=%s\n' "$(tailscale ip -4 2>/dev/null | head -n 1)"
+"#;
+
 /// Remote shell used by [`add_with`]. Tests inject a fake; production uses SSH.
 pub trait Remote {
     fn run(&self, target: &str, script: &str) -> Result<String>;
@@ -330,6 +446,133 @@ pub fn triple(os: &str, arch: &str) -> Result<String> {
         "darwin" | "macos" => Ok(format!("{arch}-apple-darwin")),
         "linux" => Ok(format!("{arch}-unknown-linux-gnu")),
         other => bail!("unsupported OS `{other}` for a packaged ouro binary"),
+    }
+}
+
+/// This binary's release version.
+///
+/// It is the same `CARGO_PKG_VERSION` that `ouro version` prints on its first line and
+/// that `ouro update` fences on, so an artifact resolved by the name below is an artifact
+/// of *this* build. `make dist` takes its version from the packaged release tarball; the
+/// crate and the mix project are held at one number deliberately. If they ever diverge,
+/// the lookup below simply misses and the operator gets the honest recipe — never a
+/// binary the fleet would refuse to form with anyway.
+pub fn local_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Byte-for-byte the name `make dist` (and `make dist-linux`) writes into `dist/`.
+pub fn dist_artifact_name(version: &str, triple: &str) -> String {
+    format!("ouro-{version}-{triple}")
+}
+
+/// Candidate `dist` directories, most specific first.
+///
+/// Pure, so the search order is a test rather than a description: an explicit
+/// `OUROBOROS_DIST_DIR`, then every `dist` above this executable's real path (a checkout's
+/// `tui/target/release/ouro` therefore finds the repo root's), then `./dist`.
+fn dist_roots(env_dir: Option<&str>, exe: Option<&Path>, cwd: Option<&Path>) -> Vec<PathBuf> {
+    fn push(roots: &mut Vec<PathBuf>, root: PathBuf) {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+
+    let mut roots = Vec::new();
+    if let Some(dir) = env_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
+        push(&mut roots, PathBuf::from(dir));
+    }
+    if let Some(exe) = exe {
+        // `ancestors()` starts at the file itself; `skip(1)` starts at its directory.
+        for ancestor in exe.ancestors().skip(1) {
+            push(&mut roots, ancestor.join("dist"));
+        }
+    }
+    if let Some(cwd) = cwd {
+        push(&mut roots, cwd.join("dist"));
+    }
+    roots
+}
+
+fn discovered_dist_roots() -> Vec<PathBuf> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok());
+    let cwd = std::env::current_dir().ok();
+    dist_roots(
+        std::env::var("OUROBOROS_DIST_DIR").ok().as_deref(),
+        exe.as_deref(),
+        cwd.as_deref(),
+    )
+}
+
+/// What a `dist` search found for one destination triple.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DistLookup {
+    Found(PathBuf),
+    /// Right OS/CPU, wrong Ouroboros version. Placement fences on an exact version match,
+    /// so this is named and refused rather than copied.
+    VersionMismatch {
+        path: PathBuf,
+        found: String,
+    },
+    Missing,
+}
+
+fn find_dist_artifact(roots: &[PathBuf], version: &str, triple: &str) -> DistLookup {
+    let wanted = dist_artifact_name(version, triple);
+    let mut mismatch = None;
+    for root in roots {
+        let candidate = root.join(&wanted);
+        if candidate.is_file() {
+            return DistLookup::Found(candidate);
+        }
+        if mismatch.is_none() {
+            mismatch = other_version_for(root, triple);
+        }
+    }
+    match mismatch {
+        Some((path, found)) => DistLookup::VersionMismatch { path, found },
+        None => DistLookup::Missing,
+    }
+}
+
+/// The first `dist` entry built for this destination but at some other version.
+fn other_version_for(root: &Path, triple: &str) -> Option<(PathBuf, String)> {
+    let suffix = format!("-{triple}");
+    let mut found: Vec<(PathBuf, String)> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let version = path
+                .file_name()?
+                .to_str()?
+                .strip_prefix("ouro-")?
+                .strip_suffix(&suffix)?
+                .to_string();
+            (!version.is_empty()).then_some((path, version))
+        })
+        .collect();
+    // Directory order is filesystem order; sort so the named artifact is stable.
+    found.sort();
+    found.into_iter().next()
+}
+
+/// The directories actually looked in, for a refusal that can be acted on.
+fn searched_text(roots: &[PathBuf]) -> String {
+    let dirs: Vec<String> = roots
+        .iter()
+        .filter(|root| root.is_dir())
+        .map(|root| root.display().to_string())
+        .collect();
+    if dirs.is_empty() {
+        "no `dist` directory (none exists beside this binary, above it, or in the current directory)".to_string()
+    } else {
+        dirs.join(", ")
     }
 }
 
@@ -821,6 +1064,33 @@ pub fn add(
     )
 }
 
+/// The CLI's entry point: real SSH, operator options, and a terminal to print to.
+#[allow(clippy::too_many_arguments)]
+pub fn add_guided(
+    data_dir: &Path,
+    target: &str,
+    machine: Option<&str>,
+    host: Option<&str>,
+    via: Via,
+    binary: Option<&Path>,
+    owner_host: Option<&str>,
+    options: &AddOptions,
+    notify: &mut dyn Notify,
+) -> Result<Outcome> {
+    add_with_options(
+        data_dir,
+        target,
+        machine,
+        host,
+        via,
+        binary,
+        owner_host,
+        &SshRemote { via },
+        options,
+        notify,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_with(
     data_dir: &Path,
@@ -832,23 +1102,72 @@ pub fn add_with(
     owner_host: Option<&str>,
     remote: &dyn Remote,
 ) -> Result<Outcome> {
+    add_with_options(
+        data_dir,
+        target,
+        machine,
+        host,
+        via,
+        binary,
+        owner_host,
+        remote,
+        &AddOptions::default(),
+        &mut SilentNotify,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_with_options(
+    data_dir: &Path,
+    target: &str,
+    machine: Option<&str>,
+    host: Option<&str>,
+    via: Via,
+    binary: Option<&Path>,
+    owner_host: Option<&str>,
+    remote: &dyn Remote,
+    options: &AddOptions,
+    notify: &mut dyn Notify,
+) -> Result<Outcome> {
     let mut log = Vec::new();
     log.push(format!("probing {target} over {}", via.as_str()));
     let probe_text = remote.run(target, PROBE_SCRIPT)?;
-    let probe = parse_probe(&probe_text)?;
+    let mut probe = parse_probe(&probe_text)?;
     require_safe_unix_path(&probe.home, "home")?;
     let remote_triple = probe.triple()?;
     let local = local_triple()?;
     log.push(format!("remote is {remote_triple} (home {})", probe.home));
 
-    let host = host
+    let requested_host = host
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(str::to_string);
+
+    // Guided enrollment runs before any invitation exists, so a refusal or a timeout here
+    // leaves nothing private on either machine.
+    if options.setup_tailscale {
+        if let Some(host) = &requested_host {
+            log.push(format!(
+                "--setup-tailscale did nothing: --host {host} already names how the fleet reaches {target}"
+            ));
+        } else if let Some(existing) = probe.suggested_host() {
+            log.push(format!(
+                "--setup-tailscale did nothing: {target} already answers on {existing}"
+            ));
+        } else {
+            setup_tailscale(remote, target, options.tailscale_poll, &mut log, notify)?;
+            let reprobed = remote.run(target, PROBE_SCRIPT)?;
+            probe = parse_probe(&reprobed)?;
+            require_safe_unix_path(&probe.home, "home")?;
+            log.push(format!("re-probed {target} after Tailscale enrollment"));
+        }
+    }
+
+    let host = requested_host
         .or_else(|| probe.suggested_host())
         .ok_or_else(|| {
             anyhow!(
-                "could not prove a private address for {target}; pass --host with a Tailscale MagicDNS name or private IPv4 address"
+                "could not prove a private address for {target}; pass --host with a Tailscale MagicDNS name or private IPv4 address, or rerun with --setup-tailscale to install Tailscale and sign in on that machine (it runs the vendor's installer and `tailscale up` as root there)"
             )
         })?;
     let machine = machine
@@ -874,7 +1193,19 @@ pub fn add_with(
     remote.copy_to(&invite, target, &remote_invite)?;
     log.push(format!("copied the invitation to {target}:{remote_invite}"));
 
-    let install = install_plan(&local, &remote_triple, binary, probe.ouro.as_deref())?;
+    let dist_roots = options
+        .dist_roots
+        .clone()
+        .unwrap_or_else(discovered_dist_roots);
+    let install = install_plan(
+        &local,
+        &remote_triple,
+        binary,
+        probe.ouro.as_deref(),
+        local_version(),
+        &dist_roots,
+    )
+    .map_err(|error| pending_invite_error(error, &invite))?;
     match &install {
         InstallPlan::UseExisting(path) => {
             log.push(format!("remote already has {path}"));
@@ -882,7 +1213,10 @@ pub fn add_with(
                 .map_err(|error| pending_invite_error(error, &invite))?;
             finish_enroll(&mut log, &invite, &machine, &host, OutcomeKind::Enrolled)
         }
-        InstallPlan::Copy(path) => {
+        InstallPlan::Copy { path, note } => {
+            if let Some(note) = note {
+                log.push(note.clone());
+            }
             let remote_bin = format!("{}/.local/bin/ouro", probe.home.trim_end_matches('/'));
             remote
                 .run(
@@ -932,10 +1266,18 @@ pub fn add_with(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum InstallPlan {
     UseExisting(String),
-    Copy(PathBuf),
-    RecipeOnly { reason: String },
+    /// `note` is the one line the add log gains when the path was resolved rather than
+    /// named by the operator, so the run records which artifact it picked.
+    Copy {
+        path: PathBuf,
+        note: Option<String>,
+    },
+    RecipeOnly {
+        reason: String,
+    },
 }
 
 /// Wrap a failure after the invitation was copied so the operator knows exactly what
@@ -978,12 +1320,17 @@ fn install_plan(
     remote_triple: &str,
     binary: Option<&Path>,
     remote_ouro: Option<&str>,
+    version: &str,
+    dist_roots: &[PathBuf],
 ) -> Result<InstallPlan> {
     if let Some(path) = binary {
         if !path.is_file() {
             bail!("--binary {} is not a file", path.display());
         }
-        return Ok(InstallPlan::Copy(path.to_path_buf()));
+        return Ok(InstallPlan::Copy {
+            path: path.to_path_buf(),
+            note: None,
+        });
     }
     if let Some(path) = remote_ouro {
         return Ok(InstallPlan::UseExisting(path.to_string()));
@@ -993,13 +1340,211 @@ fn install_plan(
             .context("locating this ouro executable")?
             .canonicalize()
             .context("resolving this ouro executable")?;
-        return Ok(InstallPlan::Copy(exe));
+        return Ok(InstallPlan::Copy {
+            path: exe,
+            note: None,
+        });
     }
-    Ok(InstallPlan::RecipeOnly {
-        reason: format!(
-            "this Mac is {local_triple}; the destination is {remote_triple}. Ouroboros cannot copy this binary there. Install the matching ouro on that machine, then run the printed enroll command. The invitation is already on the destination."
+    // Different OS/CPU: this build cannot run there, but a release artifact built for
+    // that triple at this exact version can.
+    let wanted = dist_artifact_name(version, remote_triple);
+    match find_dist_artifact(dist_roots, version, remote_triple) {
+        DistLookup::Found(path) => Ok(InstallPlan::Copy {
+            note: Some(format!(
+                "this Mac is {local_triple} and the destination is {remote_triple}; resolved {wanted} at {}",
+                path.display()
+            )),
+            path,
+        }),
+        DistLookup::VersionMismatch { path, found } => Ok(InstallPlan::RecipeOnly {
+            reason: format!(
+                "this Mac is {local_triple}; the destination is {remote_triple}. {artifact} is built for that destination but is version {found}, and this ouro is {version}. A fleet only forms between matching Ouroboros versions, so it was not copied. Build the matching artifact with `make dist-linux` (it writes {wanted}), or pass --binary with a {remote_triple} build of {version}. The invitation is already on the destination.",
+                artifact = path.display()
+            ),
+        }),
+        DistLookup::Missing => Ok(InstallPlan::RecipeOnly {
+            reason: format!(
+                "this Mac is {local_triple}; the destination is {remote_triple}. Ouroboros cannot copy this binary there, and no {wanted} was found in {searched}. Build one with `make dist-linux`, pass --binary with a {remote_triple} build of {version}, or set OUROBOROS_DIST_DIR to the directory holding it. Otherwise install the matching ouro on that machine and run the printed enroll command. The invitation is already on the destination.",
+                searched = searched_text(dist_roots)
+            ),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------------
+// Guided Tailscale enrollment
+// -----------------------------------------------------------------------------------
+
+/// Install Tailscale on the destination and sign it in, with the operator watching.
+///
+/// Every remote interaction goes through [`Remote`]. Nothing here touches an invitation:
+/// this runs before one exists, so a refusal or a timeout leaves no private material
+/// anywhere. The sign-in URL reaches `notify` and nothing else.
+fn setup_tailscale(
+    remote: &dyn Remote,
+    target: &str,
+    budget: PollBudget,
+    log: &mut Vec<String>,
+    notify: &mut dyn Notify,
+) -> Result<()> {
+    let facts = key_values(&remote.run(target, TAILSCALE_CAPABILITY_SCRIPT)?);
+    let installed = value_of(&facts, "tailscale") == Some("present");
+    let sudo = value_of(&facts, "sudo") == Some("yes");
+
+    if !sudo {
+        let blocked = if installed {
+            "`sudo tailscale up`"
+        } else {
+            "the Tailscale installer"
+        };
+        bail!(
+            "guided Tailscale enrollment needs passwordless sudo on {target}, and `sudo -n true` failed there, so {blocked} cannot run. Nothing was changed on {target} and no invitation was created. Install and sign in to Tailscale on that machine yourself and run this add again, or pass --host with a private address it already answers on"
+        );
+    }
+
+    if installed {
+        log.push(format!("tailscale is already installed on {target}"));
+    } else {
+        notify.line(&format!(
+            "{target}: installing Tailscale with the vendor's own installer, as root:"
+        ));
+        notify.line(&format!("  {TAILSCALE_INSTALL}"));
+        remote.run(target, TAILSCALE_INSTALL)?;
+        let after = key_values(&remote.run(target, TAILSCALE_CAPABILITY_SCRIPT)?);
+        if value_of(&after, "tailscale") != Some("present") {
+            bail!(
+                "the Tailscale installer ran on {target}, but `tailscale` is still not on its PATH. Install it by hand there and run this add again; no invitation was created"
+            );
+        }
+        log.push(format!("installed Tailscale on {target}"));
+    }
+
+    notify.line(&format!("{target}: running as root: sudo tailscale up"));
+    let started = key_values(&remote.run(target, TAILSCALE_UP_SCRIPT)?);
+    match value_of(&started, "state") {
+        Some("up") => {
+            log.push(format!("tailscale was already up on {target}"));
+            Ok(())
+        }
+        Some("starting") => {
+            let log_path = value_of(&started, "log")
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("`tailscale up` on {target} did not report where it writes its output")
+                })?
+                .to_string();
+            // The path came back from the destination, so it is data until it is proven
+            // safe to interpolate into the next command.
+            require_safe_unix_path(&log_path, "tailscale up output path")?;
+            let url = wait_for_auth_url(remote, target, &log_path, budget)?;
+            notify.line("");
+            notify.line("Open this link and approve the machine (a one-time Tailscale sign-in):");
+            notify.line(&format!("  {url}"));
+            notify.line(&format!(
+                "Waiting up to {} for {target} to receive a tailnet address...",
+                human_duration(budget.ip_window())
+            ));
+            // The URL is a live sign-in link. It goes to this terminal and nowhere else:
+            // not the add log, not the invitation, not the howto file.
+            log.push(format!(
+                "printed the Tailscale sign-in URL for {target} to this terminal"
+            ));
+            let waited = wait_for_tailnet_address(remote, target, budget);
+            // Best effort: `tailscale up` wrote that URL into a temp file on the
+            // destination, so remove it whether or not the wait succeeded.
+            let _ = remote.run(target, &format!("rm -f '{log_path}'"));
+            waited?;
+            log.push(format!("{target} has a Tailscale address"));
+            Ok(())
+        }
+        other => bail!(
+            "`tailscale up` on {target} reported an unexpected state (`{}`); run it there by hand and run this add again",
+            other.unwrap_or("")
         ),
-    })
+    }
+}
+
+fn wait_for_auth_url(
+    remote: &dyn Remote,
+    target: &str,
+    log_path: &str,
+    budget: PollBudget,
+) -> Result<String> {
+    for _ in 0..budget.url_attempts.max(1) {
+        std::thread::sleep(budget.interval);
+        // Remote output is data: it is scanned for one URL-shaped token and never echoed.
+        let text = remote.run(
+            target,
+            &format!("head -c 4096 '{log_path}' 2>/dev/null || true"),
+        )?;
+        if let Some(url) = auth_url(&text) {
+            return Ok(url);
+        }
+    }
+    bail!(
+        "`sudo tailscale up` on {target} printed no sign-in URL within {}. Run `sudo tailscale up` there and follow the link it prints, then run this add again. Nothing was enrolled and no invitation was created",
+        human_duration(budget.url_window())
+    )
+}
+
+fn wait_for_tailnet_address(remote: &dyn Remote, target: &str, budget: PollBudget) -> Result<()> {
+    for _ in 0..budget.ip_attempts.max(1) {
+        std::thread::sleep(budget.interval);
+        let facts = key_values(&remote.run(target, TAILSCALE_IP_SCRIPT)?);
+        if value_of(&facts, "ip").is_some_and(|ip| !ip.is_empty()) {
+            return Ok(());
+        }
+    }
+    bail!(
+        "{target} still has no Tailscale address after {}. Finish the sign-in in the browser, then run the same `ouro fleet add` command again: with Tailscale installed and up it reuses both and continues. Nothing was enrolled and no invitation was created",
+        human_duration(budget.ip_window())
+    )
+}
+
+/// The first URL-shaped token in remote output, or nothing.
+///
+/// `tailscale up` prints `To authenticate, visit:` and then the link, but the surrounding
+/// prose is not a contract. The token is accepted only if every character is URL-safe
+/// ASCII, so nothing from the destination can carry an escape sequence to this terminal.
+fn auth_url(text: &str) -> Option<String> {
+    fn url_safe(c: char) -> bool {
+        c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
+    }
+
+    text.split_whitespace()
+        .map(|token| token.trim_end_matches(['.', ',', ')', ']', '>', '"', '\'']))
+        .find(|token| {
+            token.starts_with("https://")
+                && token.len() > "https://".len()
+                && token.len() <= 512
+                && token.chars().all(url_safe)
+        })
+        .map(str::to_string)
+}
+
+/// `key=value` lines, the shape every script in this file answers in.
+fn key_values(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect()
+}
+
+fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+}
+
+fn human_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 60 && seconds.is_multiple_of(60) {
+        let minutes = seconds / 60;
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn enroll_remote(remote: &dyn Remote, target: &str, ouro: &str, invite: &str) -> Result<()> {
@@ -1228,7 +1773,168 @@ pub fn enroll_preflight(invitation: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    /// A remote whose every answer is written down in the test that needs it. Replies are
+    /// served in order and the last one repeats, so a poll can be scripted as
+    /// "not yet, not yet, here it is".
+    #[derive(Default)]
+    struct ScriptedRemote {
+        runs: Mutex<Vec<String>>,
+        copies: Mutex<Vec<(PathBuf, String)>>,
+        probes: Mutex<VecDeque<String>>,
+        capability: Mutex<VecDeque<String>>,
+        up: Mutex<VecDeque<String>>,
+        log_reads: Mutex<VecDeque<String>>,
+        ip_polls: Mutex<VecDeque<String>>,
+    }
+
+    fn queue(replies: &[&str]) -> Mutex<VecDeque<String>> {
+        Mutex::new(replies.iter().map(|reply| reply.to_string()).collect())
+    }
+
+    impl ScriptedRemote {
+        fn serve(queue: &Mutex<VecDeque<String>>, what: &str) -> Result<String> {
+            let mut queue = queue.lock().unwrap();
+            if queue.len() > 1 {
+                return Ok(queue.pop_front().expect("length was checked"));
+            }
+            queue
+                .front()
+                .cloned()
+                .ok_or_else(|| anyhow!("the scripted remote has no {what} reply"))
+        }
+
+        fn ran(&self, needle: &str) -> bool {
+            self.runs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|script| script.contains(needle))
+        }
+    }
+
+    impl Remote for ScriptedRemote {
+        fn run(&self, _target: &str, script: &str) -> Result<String> {
+            self.runs.lock().unwrap().push(script.to_string());
+            if script.contains("printf 'os=") {
+                return Self::serve(&self.probes, "probe");
+            }
+            if script.contains("printf 'tailscale=present") {
+                return Self::serve(&self.capability, "capability");
+            }
+            if script == TAILSCALE_INSTALL {
+                return Ok(String::new());
+            }
+            if script.contains("tailscale up") {
+                return Self::serve(&self.up, "tailscale up");
+            }
+            if script.starts_with("head -c") {
+                return Self::serve(&self.log_reads, "tailscale up log");
+            }
+            if script.contains("printf 'ip=") {
+                return Self::serve(&self.ip_polls, "tailscale ip");
+            }
+            Ok(String::new())
+        }
+
+        fn copy_to(&self, local: &Path, _target: &str, remote_path: &str) -> Result<()> {
+            self.copies
+                .lock()
+                .unwrap()
+                .push((local.to_path_buf(), remote_path.to_string()));
+            Ok(())
+        }
+    }
+
+    /// The injected live-print seam.
+    #[derive(Default)]
+    struct Lines(Vec<String>);
+
+    impl Notify for Lines {
+        fn line(&mut self, text: &str) {
+            self.0.push(text.to_string());
+        }
+    }
+
+    impl Lines {
+        fn text(&self) -> String {
+            self.0.join("\n")
+        }
+    }
+
+    /// An OS/CPU that is never this host's, so a cross-triple test stays cross-triple
+    /// wherever it is run.
+    fn foreign_os_arch() -> (&'static str, &'static str) {
+        if local_triple().unwrap() == "x86_64-unknown-linux-gnu" {
+            ("Darwin", "arm64")
+        } else {
+            ("Linux", "x86_64")
+        }
+    }
+
+    fn foreign_triple() -> String {
+        let (os, arch) = foreign_os_arch();
+        triple(os, arch).unwrap()
+    }
+
+    fn probe_text(tailscale: bool, ouro: bool) -> String {
+        let (os, arch) = foreign_os_arch();
+        let mut text = format!("os={os}\narch={arch}\nhome=/home/op\nhostname=vps\n");
+        if ouro {
+            text.push_str("ouro=/home/op/.local/bin/ouro\nversion=ouro 0.1.0\n");
+        } else {
+            text.push_str("ouro=\n");
+        }
+        if tailscale {
+            // A CGNAT literal rather than a MagicDNS name: `fleet::invite` resolves what
+            // it is given, and these tests must not depend on a resolver.
+            text.push_str("tailscale=yes\ntailscale_ip=100.64.0.8\n");
+        } else {
+            text.push_str("tailscale=no\n");
+        }
+        text
+    }
+
+    const UP_STARTING: &str = "state=starting\nlog=/tmp/ouro-tailscale-up.abc123\n";
+    const AUTH_LOG: &str =
+        "To authenticate, visit:\n\n\thttps://login.tailscale.com/a/deadbeef\n\n";
+
+    /// A budget that spends no wall-clock time, so timeouts are testable.
+    fn instant_budget(url_attempts: u32, ip_attempts: u32) -> PollBudget {
+        PollBudget {
+            interval: Duration::ZERO,
+            url_attempts,
+            ip_attempts,
+        }
+    }
+
+    /// A `dist` directory holding one artifact, named exactly as `make dist` names it.
+    fn dist_fixture(label: &str, version: &str, triple: &str) -> PathBuf {
+        let root = scratch(label);
+        let artifact = root.join(dist_artifact_name(version, triple));
+        fs::write(&artifact, b"#!/bin/sh\n# not a real ouro\n").unwrap();
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o755)).unwrap();
+        root
+    }
+
+    /// Every regular file under `root`, so a test can prove a secret is in none of them.
+    fn all_file_text(root: &Path) -> String {
+        let mut text = String::new();
+        let Ok(entries) = fs::read_dir(root) else {
+            return text;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                text.push_str(&all_file_text(&path));
+            } else if let Ok(contents) = fs::read_to_string(&path) {
+                text.push_str(&contents);
+            }
+        }
+        text
+    }
 
     struct FakeRemote {
         probe: String,
@@ -1400,7 +2106,9 @@ mod tests {
         let data = scratch("cross-arch");
         fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
         let remote = FakeRemote::linux("/home/op");
-        let outcome = add_with(
+        // Empty roots, not discovered ones: whether this machine happens to have run
+        // `make dist-linux` must not decide what this test asserts.
+        let outcome = add_with_options(
             &data,
             "op@vps",
             Some("vps"),
@@ -1409,6 +2117,11 @@ mod tests {
             None,
             Some("studio.tailnet.ts.net"),
             &remote,
+            &AddOptions {
+                dist_roots: Some(Vec::new()),
+                ..AddOptions::default()
+            },
+            &mut SilentNotify,
         )
         .unwrap();
         assert_eq!(outcome.kind, OutcomeKind::InviteDelivered);
@@ -1549,5 +2262,594 @@ mod tests {
         fs::set_permissions(&invite, fs::Permissions::from_mode(0o644)).unwrap();
         let error = enroll_preflight(&invite).unwrap_err().to_string();
         assert!(error.contains("0600"), "{error}");
+    }
+
+    // -------------------------------------------------------------------------------
+    // Resolving a cross-platform dist artifact
+    // -------------------------------------------------------------------------------
+
+    /// The name searched for has to be the name `make dist` writes, and the version in it
+    /// has to be the version this binary reports. Both are pinned here rather than
+    /// described, because a silent divergence would mean either a miss on every lookup or
+    /// — worse — copying a build the fleet then refuses to form with.
+    #[test]
+    fn the_dist_artifact_name_pins_the_running_version_and_the_make_dist_shape() {
+        assert_eq!(local_version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            crate::update::running_version().to_string(),
+            local_version(),
+            "`ouro update` and the dist lookup must fence on one version"
+        );
+        assert_eq!(
+            crate::proto::client_name(),
+            format!("ouro {}", local_version()),
+            "`ouro version` prints this string on its first line"
+        );
+        assert_eq!(
+            dist_artifact_name(local_version(), "x86_64-unknown-linux-gnu"),
+            format!("ouro-{}-x86_64-unknown-linux-gnu", local_version()),
+            "make dist writes dist/ouro-<version>-<triple>"
+        );
+    }
+
+    #[test]
+    fn dist_roots_search_the_env_override_then_upward_then_the_cwd() {
+        let roots = dist_roots(
+            Some("/opt/ouro-artifacts"),
+            Some(Path::new("/src/repo/tui/target/release/ouro")),
+            Some(Path::new("/src/repo/tui")),
+        );
+        assert_eq!(roots[0], PathBuf::from("/opt/ouro-artifacts"));
+        assert_eq!(roots[1], PathBuf::from("/src/repo/tui/target/release/dist"));
+        assert_eq!(roots[2], PathBuf::from("/src/repo/tui/target/dist"));
+        assert_eq!(roots[3], PathBuf::from("/src/repo/tui/dist"));
+        assert_eq!(
+            roots[4],
+            PathBuf::from("/src/repo/dist"),
+            "a checkout's release binary must find the repo root's dist"
+        );
+        // `/src/repo/tui/dist` is both an ancestor root and the CWD root; it appears once.
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|root| *root == Path::new("/src/repo/tui/dist"))
+                .count(),
+            1
+        );
+        // An empty or unset override contributes nothing.
+        let bare = dist_roots(Some("   "), None, Some(Path::new("/work")));
+        assert_eq!(bare, vec![PathBuf::from("/work/dist")]);
+    }
+
+    #[test]
+    fn a_cross_triple_install_plan_resolves_a_matching_dist_artifact() {
+        let root = dist_fixture("dist-hit", "9.9.9", "x86_64-unknown-linux-gnu");
+        let plan = install_plan(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            None,
+            None,
+            "9.9.9",
+            &[root.join("nowhere"), root.clone()],
+        )
+        .unwrap();
+        let InstallPlan::Copy { path, note } = plan else {
+            panic!("a matching artifact must become a Copy: {plan:?}");
+        };
+        assert_eq!(path, root.join("ouro-9.9.9-x86_64-unknown-linux-gnu"));
+        let note = note.expect("a resolved artifact records where it came from");
+        assert!(
+            note.contains("resolved ouro-9.9.9-x86_64-unknown-linux-gnu"),
+            "{note}"
+        );
+        assert!(note.contains(&root.display().to_string()), "{note}");
+    }
+
+    #[test]
+    fn the_env_dist_dir_wins_over_a_dist_directory_above_this_binary() {
+        let preferred = dist_fixture("dist-env", "9.9.9", "x86_64-unknown-linux-gnu");
+        let fallback = dist_fixture("dist-walkup", "9.9.9", "x86_64-unknown-linux-gnu");
+        let plan = install_plan(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            None,
+            None,
+            "9.9.9",
+            &[preferred.clone(), fallback.clone()],
+        )
+        .unwrap();
+        let InstallPlan::Copy { path, .. } = plan else {
+            panic!("both roots hold the artifact; the first must win");
+        };
+        assert!(path.starts_with(&preferred), "{}", path.display());
+        assert!(!path.starts_with(&fallback), "{}", path.display());
+    }
+
+    /// Placement fences on an exact version match, so a build for the right CPU but the
+    /// wrong version is named and left alone — never copied to save the operator a step.
+    #[test]
+    fn a_dist_artifact_of_another_version_is_named_and_refused_not_copied() {
+        let root = dist_fixture("dist-mismatch", "0.2.0", "x86_64-unknown-linux-gnu");
+        let plan = install_plan(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            None,
+            None,
+            "0.1.0",
+            std::slice::from_ref(&root),
+        )
+        .unwrap();
+        let InstallPlan::RecipeOnly { reason } = plan else {
+            panic!("a version mismatch must refuse, not copy");
+        };
+        assert!(reason.contains("is version 0.2.0"), "{reason}");
+        assert!(reason.contains("this ouro is 0.1.0"), "{reason}");
+        assert!(reason.contains("was not copied"), "{reason}");
+        assert!(reason.contains("make dist-linux"), "{reason}");
+        assert!(
+            reason.contains("ouro-0.1.0-x86_64-unknown-linux-gnu"),
+            "the refusal must name the artifact that would work: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_missing_dist_artifact_names_the_file_the_directories_and_make_dist_linux() {
+        let empty = scratch("dist-empty");
+        let plan = install_plan(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            None,
+            None,
+            "0.1.0",
+            std::slice::from_ref(&empty),
+        )
+        .unwrap();
+        let InstallPlan::RecipeOnly { reason } = plan else {
+            panic!("nothing to copy must stay a recipe");
+        };
+        assert!(reason.contains("cannot copy this binary"), "{reason}");
+        assert!(
+            reason.contains("ouro-0.1.0-x86_64-unknown-linux-gnu"),
+            "{reason}"
+        );
+        assert!(reason.contains(&empty.display().to_string()), "{reason}");
+        assert!(reason.contains("make dist-linux"), "{reason}");
+        assert!(reason.contains("OUROBOROS_DIST_DIR"), "{reason}");
+
+        // With nowhere to look at all, the refusal says so rather than naming ghosts.
+        let nothing = install_plan(
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            None,
+            None,
+            "0.1.0",
+            &[],
+        )
+        .unwrap();
+        let InstallPlan::RecipeOnly { reason } = nothing else {
+            panic!("no roots must stay a recipe");
+        };
+        assert!(reason.contains("no `dist` directory"), "{reason}");
+        assert!(reason.contains("make dist-linux"), "{reason}");
+    }
+
+    /// The resolved artifact must take the same route a `--binary` one takes: staged as
+    /// `.partial`, moved into place, chmod 755, then enroll. Nothing about the copy path
+    /// changes because the path was found rather than typed.
+    #[test]
+    fn a_resolved_dist_artifact_flows_through_the_copy_path_and_enrolls() {
+        let data = scratch("dist-copy-flow");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let root = dist_fixture("dist-copy", local_version(), &foreign_triple());
+        let artifact = root.join(dist_artifact_name(local_version(), &foreign_triple()));
+
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, false)]),
+            ..ScriptedRemote::default()
+        };
+        let outcome = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            Some("100.64.0.8"),
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                dist_roots: Some(vec![root.clone()]),
+                ..AddOptions::default()
+            },
+            &mut SilentNotify,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        let copies = remote.copies.lock().unwrap();
+        assert_eq!(copies.len(), 2, "the invitation and the binary: {copies:?}");
+        assert!(copies[0].1.ends_with("vps.ouro"));
+        assert_eq!(copies[1].0, artifact);
+        assert_eq!(copies[1].1, "/home/op/.local/bin/ouro.partial");
+        drop(copies);
+        assert!(remote.ran("mv '/home/op/.local/bin/ouro.partial' '/home/op/.local/bin/ouro'"));
+        assert!(remote.ran("fleet enroll '/home/op/.local/share/ouroboros/incoming/vps.ouro'"));
+        assert!(
+            outcome
+                .log
+                .iter()
+                .any(|line| line.contains("resolved") && line.contains("ouro-")),
+            "the add log must record which artifact was chosen: {:?}",
+            outcome.log
+        );
+        assert!(
+            outcome
+                .log
+                .iter()
+                .any(|line| line.contains(&artifact.display().to_string())),
+            "the add log must record where it was found: {:?}",
+            outcome.log
+        );
+    }
+
+    // -------------------------------------------------------------------------------
+    // Guided Tailscale enrollment
+    // -------------------------------------------------------------------------------
+
+    #[test]
+    fn an_add_without_setup_tailscale_names_the_flag_when_no_address_is_provable() {
+        let data = scratch("no-address");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false)]),
+            ..ScriptedRemote::default()
+        };
+        let error = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions::default(),
+            &mut SilentNotify,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("could not prove a private address"),
+            "{error}"
+        );
+        assert!(error.contains("--setup-tailscale"), "{error}");
+        assert!(error.contains("as root"), "{error}");
+        assert!(remote.copies.lock().unwrap().is_empty());
+        assert!(!fleet::pending_invite_path(&data, "vps").unwrap().exists());
+    }
+
+    #[test]
+    fn setup_tailscale_installs_surfaces_the_url_and_waits_for_the_address() {
+        let data = scratch("guided-install");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
+            capability: queue(&[
+                "tailscale=missing\nsudo=yes\n",
+                "tailscale=present\nsudo=yes\n",
+            ]),
+            up: queue(&[UP_STARTING]),
+            log_reads: queue(&["", AUTH_LOG]),
+            ip_polls: queue(&["ip=\n", "ip=100.64.0.8\n"]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let outcome = add_with_options(
+            &data,
+            "op@vps",
+            None,
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+            &mut notify,
+        )
+        .unwrap();
+
+        // The exact command is printed before it runs, because it fetches and executes
+        // code as root on someone else's machine.
+        let printed = notify.text();
+        assert!(printed.contains(TAILSCALE_INSTALL), "{printed}");
+        assert!(
+            printed.contains("https://login.tailscale.com/a/deadbeef"),
+            "the sign-in URL must reach the operator live: {printed}"
+        );
+        assert!(printed.contains("sudo tailscale up"), "{printed}");
+        assert!(remote.ran(TAILSCALE_INSTALL));
+        assert!(remote.ran("rm -f '/tmp/ouro-tailscale-up.abc123'"));
+
+        // The re-probe supplies both the machine name and the tailnet address.
+        assert_eq!(outcome.machine, "vps");
+        assert_eq!(outcome.host, "100.64.0.8");
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        assert!(outcome
+            .log
+            .iter()
+            .any(|line| line.contains("installed Tailscale on op@vps")));
+        assert!(outcome
+            .log
+            .iter()
+            .any(|line| line.contains("re-probed op@vps")));
+    }
+
+    #[test]
+    fn setup_tailscale_refuses_without_passwordless_sudo_and_changes_nothing() {
+        let data = scratch("guided-nosudo");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false)]),
+            capability: queue(&["tailscale=missing\nsudo=no\n"]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let error = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+            &mut notify,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("passwordless sudo on op@vps"), "{error}");
+        assert!(error.contains("sudo -n true"), "{error}");
+        assert!(error.contains("the Tailscale installer"), "{error}");
+        assert!(error.contains("Nothing was changed"), "{error}");
+        assert!(!remote.ran("install.sh"), "the installer must not have run");
+        assert!(!remote.ran("tailscale up"));
+        assert!(remote.copies.lock().unwrap().is_empty());
+        assert!(!fleet::pending_invite_path(&data, "vps").unwrap().exists());
+        assert!(notify.0.is_empty(), "{:?}", notify.0);
+    }
+
+    /// Resuming after a timeout is "run the same command again". That is only true if a
+    /// second run installs nothing and starts nothing when Tailscale is already up.
+    #[test]
+    fn setup_tailscale_reuses_an_installed_tailscale_that_is_already_up() {
+        let data = scratch("guided-idempotent");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false), &probe_text(true, true)]),
+            capability: queue(&["tailscale=present\nsudo=yes\n"]),
+            up: queue(&["state=up\n"]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let outcome = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+            &mut notify,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        assert!(
+            !remote.ran("install.sh"),
+            "a present tailscale is not reinstalled"
+        );
+        assert!(
+            !remote.ran("head -c"),
+            "an already-up tailnet needs no URL poll"
+        );
+        assert!(outcome
+            .log
+            .iter()
+            .any(|line| line.contains("already installed")));
+        assert!(outcome.log.iter().any(|line| line.contains("already up")));
+    }
+
+    #[test]
+    fn setup_tailscale_timeout_names_how_to_resume() {
+        let data = scratch("guided-timeout");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false)]),
+            capability: queue(&["tailscale=present\nsudo=yes\n"]),
+            up: queue(&[UP_STARTING]),
+            log_reads: queue(&[AUTH_LOG]),
+            ip_polls: queue(&["ip=\n"]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let error = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(2, 4),
+            },
+            &mut notify,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("still has no Tailscale address"), "{error}");
+        assert!(
+            error.contains("run the same `ouro fleet add` command again"),
+            "{error}"
+        );
+        assert!(error.contains("Nothing was enrolled"), "{error}");
+        assert!(!fleet::pending_invite_path(&data, "vps").unwrap().exists());
+        // The temp file `tailscale up` wrote the URL into is removed either way.
+        assert!(remote.ran("rm -f '/tmp/ouro-tailscale-up.abc123'"));
+        assert_eq!(
+            remote
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|script| script.contains("printf 'ip="))
+                .count(),
+            4,
+            "the poll is bounded by the budget"
+        );
+    }
+
+    #[test]
+    fn setup_tailscale_is_a_no_op_when_the_destination_already_has_an_address() {
+        let data = scratch("guided-noop");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, true)]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let outcome = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+            &mut notify,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        assert!(
+            outcome
+                .log
+                .iter()
+                .any(|line| line.contains("--setup-tailscale did nothing")
+                    && line.contains("100.64.0.8")),
+            "{:?}",
+            outcome.log
+        );
+        assert!(
+            !remote.ran("sudo -n true"),
+            "nothing is asked of the destination"
+        );
+        assert!(!remote.ran("tailscale up"));
+        assert!(notify.0.is_empty(), "{:?}", notify.0);
+    }
+
+    /// The sign-in link is a live credential. It belongs on the terminal and nowhere the
+    /// add can persist it: not the log the TUI keeps, not the invitation, not the howto.
+    #[test]
+    fn the_tailscale_sign_in_url_never_reaches_the_add_log_or_a_file() {
+        let data = scratch("guided-url-privacy");
+        fleet::create(&data, None, "studio", "localhost", Ports::DEFAULT).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(false, false), &probe_text(true, false)]),
+            capability: queue(&["tailscale=present\nsudo=yes\n"]),
+            up: queue(&[UP_STARTING]),
+            log_reads: queue(&[AUTH_LOG]),
+            ip_polls: queue(&["ip=100.64.0.8\n"]),
+            ..ScriptedRemote::default()
+        };
+        let mut notify = Lines::default();
+        let outcome = add_with_options(
+            &data,
+            "op@vps",
+            Some("vps"),
+            None,
+            Via::Ssh,
+            None,
+            Some("studio.tailnet.ts.net"),
+            &remote,
+            &AddOptions {
+                setup_tailscale: true,
+                dist_roots: Some(Vec::new()),
+                tailscale_poll: instant_budget(3, 3),
+            },
+            &mut notify,
+        )
+        .unwrap();
+
+        // Cross-triple with no artifact: the invitation and the howto both stay on disk.
+        assert_eq!(outcome.kind, OutcomeKind::InviteDelivered);
+        assert!(notify.text().contains("login.tailscale.com"));
+        assert!(
+            !outcome.log.join("\n").contains("login.tailscale.com"),
+            "{:?}",
+            outcome.log
+        );
+        assert!(!render_outcome(&outcome).contains("login.tailscale.com"));
+        assert!(
+            !all_file_text(&data).contains("login.tailscale.com"),
+            "no file under the data directory may hold the sign-in URL"
+        );
+        assert!(
+            remote
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|script| !script.contains("login.tailscale.com")),
+            "and it is never sent back to the destination on a command line"
+        );
+    }
+
+    /// Remote output is data. Only a URL-shaped, URL-safe token is ever surfaced, so a
+    /// destination cannot paint this terminal with an escape sequence.
+    #[test]
+    fn only_a_url_safe_token_is_taken_from_remote_tailscale_output() {
+        assert_eq!(
+            auth_url(AUTH_LOG).as_deref(),
+            Some("https://login.tailscale.com/a/deadbeef")
+        );
+        assert_eq!(
+            auth_url("To authenticate, visit: https://login.tailscale.com/a/beef.").as_deref(),
+            Some("https://login.tailscale.com/a/beef"),
+            "trailing sentence punctuation is not part of the link"
+        );
+        assert_eq!(
+            auth_url("visit: https://login.tailscale.com/a/\u{1b}[2Jwipe").as_deref(),
+            None,
+            "an escape sequence disqualifies the token"
+        );
+        assert_eq!(auth_url("http://login.tailscale.com/a/x"), None);
+        assert_eq!(auth_url("https://"), None);
+        assert_eq!(auth_url("Backend state: NeedsLogin\n"), None);
     }
 }
