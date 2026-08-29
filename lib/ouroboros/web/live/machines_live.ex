@@ -39,14 +39,18 @@ defmodule Ouroboros.Web.Live.MachinesLive do
   walks the whole directory, and putting that on a three-second cadence would be this page
   spending the fleet's time to keep a panel warm.
 
-  ## What `fleet.status` does not carry
+  ## The fleet's name, and what it took to get it here
 
-  It names no fleet. The saved profile has a `name`, but `Ouroboros.Cluster`'s decoder
-  keeps only the roster, the revision and the tombstones out of it
-  (`lib/ouroboros/cluster.ex:805-839`), and the method's answer is the directory:
-  `local_node`, `summary`, `machines`, `formation`, `security`. So the header names the
-  fleet the way the runtime does — by this machine's node — rather than inventing a label
-  the daemon never said.
+  W7 shipped without one and said so: `fleet.status` answered a directory —
+  `local_node`, `summary`, `machines`, `formation`, `security` — and no label, because
+  `Ouroboros.Cluster`'s profile decoder kept the roster, the revision and the tombstones
+  and dropped the `name` the saved profile has always carried. The page named the fleet by
+  this machine's node instead, which is one member standing in for the whole.
+
+  W8 retained it: `Ouroboros.Cluster.fleet_name/0` and a `fleet_name` key on the status.
+  `nil` is a real answer and means "not in a named fleet", so the header shows the name when
+  the runtime gives one and the word "Machines" when it does not. It still invents nothing:
+  falling back to a node name would be the original problem with a coat of paint.
 
   It carries no per-member address either, but it does not need to: a fleet node is
   `ouro-<machine>@<host>` by construction and the profile decoder refuses a profile whose
@@ -241,7 +245,8 @@ defmodule Ouroboros.Web.Live.MachinesLive do
   of connectivity, and the chips must never be able to disagree with the number above them.
   """
   @spec view(map() | nil, map() | nil) :: map()
-  def view(nil, _status), do: %{fleet?: false, members: [], connected: 0, offline: 0, unknown: 0}
+  def view(nil, _status),
+    do: %{fleet?: false, name: nil, members: [], connected: 0, offline: 0, unknown: 0}
 
   def view(fleet, status) when is_map(fleet) do
     local = fleet |> Map.get(:local_node) |> name()
@@ -250,6 +255,10 @@ defmodule Ouroboros.Web.Live.MachinesLive do
 
     %{
       fleet?: clustered?(fleet),
+      # What the runtime called this fleet, or nothing. Never a substitute invented here:
+      # a page that fell back to a node name would be naming one member and calling it the
+      # whole, which is what this page did before `fleet_name` existed.
+      name: fleet |> Map.get(:fleet_name) |> label(),
       local_node: local,
       this_machine: Enum.find_value(members, & &1.this_machine?, & &1.machine),
       this_address: Enum.find_value(members, & &1.this_machine?, & &1.host),
@@ -274,6 +283,11 @@ defmodule Ouroboros.Web.Live.MachinesLive do
   end
 
   defp machines(fleet), do: fleet |> Map.get(:machines, []) |> List.wrap()
+
+  # `Ouroboros.Cluster` already bounds and screens this name where it reads it; this is the
+  # renderer declining to draw a blank heading if it ever answers one.
+  defp label(name) when is_binary(name), do: if(String.trim(name) == "", do: nil, else: name)
+  defp label(_absent), do: nil
 
   # `nil` is "no runtime status has arrived", which is not the same answer as "the status
   # arrived and named nobody" — the first makes every peer unknown, the second makes every
@@ -394,7 +408,8 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     ~H"""
     <main class="ouro-page ouro-machines">
       <header class="ouro-header">
-        <h1>Machines</h1>
+        <p :if={@view.name} class="ouro-subhead">Machines</p>
+        <h1>{@view.name || "Machines"}</h1>
         <p class="ouro-subhead ouro-top-row">
           <a class="ouro-backlink" href="/">the deck</a>
           <Layouts.theme_toggle />

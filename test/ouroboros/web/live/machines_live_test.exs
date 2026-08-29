@@ -71,6 +71,10 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
   defp fleet(nodes, opts \\ []) do
     %{
       local_node: @local,
+      # W8. `fleet.status` carried no label until `Ouroboros.Cluster` retained the profile's
+      # own `name`; `nil` is the real answer for a runtime in no named fleet, so the fixture
+      # takes it as an option rather than always supplying one.
+      fleet_name: Keyword.get(opts, :fleet_name),
       generated_at: "2026-08-29T11:16:13.152773Z",
       monitoring_since: "2026-08-29T11:00:00.000000Z",
       summary: %{
@@ -101,6 +105,55 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
 
   defp presence_of(view, machine),
     do: view.members |> Enum.find(&(&1.machine == machine)) |> Map.fetch!(:presence)
+
+  # ------------------------------------------------------------------------------------
+  # The fleet's name (W8)
+  #
+  # W7 shipped without one and said so in the moduledoc: `fleet.status` answered a
+  # directory and no label, so the page named the fleet by this machine's node — one member
+  # standing in for the whole. `Ouroboros.Cluster` now retains the profile's `name`.
+  # ------------------------------------------------------------------------------------
+
+  describe "the fleet's name" do
+    test "the header uses it when the runtime gives one" do
+      view = MachinesLive.view(fleet([@local, @peer], fleet_name: "Ironworks"), status([@peer]))
+
+      assert view.name == "Ironworks"
+
+      html = render_component(&MachinesLive.roster/1, view: view, error: nil)
+      # The roster panel is still headed by the node, which is an address: the name belongs
+      # to the page, not to this machine's row in it.
+      assert html =~ to_string(@local)
+    end
+
+    test "and says nothing rather than inventing one when it does not" do
+      view = MachinesLive.view(fleet([@local, @peer]), status([@peer]))
+
+      # Never the node name in its place. That substitution is the exact thing W8 fixed,
+      # and a fallback here would be it again with a coat of paint.
+      assert view.name == nil
+    end
+
+    test "a blank or missing name reads as unnamed" do
+      for blank <- [nil, "", "   "] do
+        assert MachinesLive.view(fleet([@local], fleet_name: blank), nil).name == nil
+      end
+    end
+
+    test "a runtime with no fleet at all has no name to show" do
+      assert MachinesLive.view(nil, nil).name == nil
+    end
+
+    test "the page draws the name it was given, and the word Machines when it has none",
+         %{conn: conn} do
+      # The real method, on a suite host that is in no fleet: the honest unnamed case, end
+      # to end. A named one cannot be reached without a real profile, which is why the
+      # projection above is tested directly.
+      {:ok, _view, html} = live(conn, "/machines")
+
+      assert html =~ "<h1>Machines</h1>"
+    end
+  end
 
   # ------------------------------------------------------------------------------------
   # The presence rules, ported from `tui/src/desktop/machines.rs:107`
