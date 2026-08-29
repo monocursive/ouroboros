@@ -410,6 +410,28 @@ if config_env() == :prod do
       # make a first boot a two-step ceremony.
       token_generate: true
 
+    # Wherever the gateway is on, the web is on. It is the same risk class answered the
+    # same way — loopback plus the same token, one operator credential per data directory
+    # — so an operator who accepted one has accepted this, and requiring a second opt-in
+    # would only mean the browser surface is missing on every machine nobody remembered
+    # to type it on. `OUROBOROS_WEB=0` is the way out, and it is the only variable read
+    # in this branch: everything else about a defaulted daemon is a value nobody typed.
+    #
+    # Port 0 does not mean a different port every boot. The endpoint reads the port it
+    # published to `web.json` last time and tries that first, so a bookmark and a session
+    # cookie survive a restart; see `Ouroboros.Web.Endpoint`.
+    unless env_value.("OUROBOROS_WEB") == "0" do
+      config :ouroboros, :web,
+        enabled: true,
+        port: 0,
+        bind: "127.0.0.1",
+        allow_remote: false,
+        scope: :operate,
+        token_file: Path.join(data_dir, "gateway.token"),
+        token_generate: true,
+        secret_file: Path.join(data_dir, "web.secret")
+    end
+
     # A client that spawns this node as a child process owns its stdout, and the notice
     # the listener prints on a defaulted boot goes there. stderr is the foreground
     # default; the managed-file block below replaces it for a detached/service spawn.
@@ -616,6 +638,124 @@ if System.get_env("OUROBOROS_GATEWAY") == "1" do
   # A client that spawns this node as a child process owns its stdout. stderr is the
   # foreground default; the managed-file block below replaces it for a detached/service
   # spawn so neither posture interleaves Logger output with daemon notices.
+  config :logger, :default_handler, config: [type: :standard_error]
+end
+
+# The browser operator surface (docs/WEB.md), read the same way and in the same place as
+# the gateway above, for the same reason: `mix run --no-halt` on a laptop has to be able
+# to serve one, and a section that only existed in a release would make the development
+# loop a different surface than the shipped one.
+#
+# `Ouroboros.Web.Config` re-validates every one of these at init, on purpose, for the
+# operator who writes application environment directly. What is duplicated here is only
+# what must be able to refuse a boot before this application's modules are guaranteed
+# loadable — the loopback rule and the token requirement — and this copy therefore stands
+# on `System` alone.
+if System.get_env("OUROBOROS_WEB") == "1" do
+  web_port =
+    case Integer.parse(gateway_value.("OUROBOROS_WEB_PORT") || "0") do
+      {value, ""} when value >= 0 and value <= 65_535 ->
+        value
+
+      _other ->
+        raise "OUROBOROS_WEB_PORT must be an integer between 0 and 65535; 0 reuses the " <>
+                "port in web.json when it is free and takes an ephemeral one otherwise"
+    end
+
+  web_bind = gateway_value.("OUROBOROS_WEB_BIND") || "127.0.0.1"
+
+  web_bind_address =
+    case :inet.parse_address(String.to_charlist(web_bind)) do
+      {:ok, address} ->
+        address
+
+      {:error, _reason} ->
+        raise "OUROBOROS_WEB_BIND must be a literal IPv4 or IPv6 address, got: " <> web_bind
+    end
+
+  web_loopback? =
+    case web_bind_address do
+      {127, _, _, _} -> true
+      {0, 0, 0, 0, 0, 0, 0, 1} -> true
+      _other -> false
+    end
+
+  web_allow_remote = System.get_env("OUROBOROS_WEB_ALLOW_REMOTE") == "1"
+
+  # v1 ships no TLS, and the session cookie this surface hands a browser is an operator
+  # console. Leaving loopback therefore puts that console on the network in cleartext, so
+  # this refuses the boot instead of warning, and the override has to be typed out on the
+  # host that wants it — the same posture OUROBOROS_GATEWAY_ALLOW_REMOTE and
+  # OUROBOROS_ALLOW_INSECURE_DIST take.
+  if not web_loopback? and not web_allow_remote do
+    raise """
+    OUROBOROS_WEB_BIND=#{web_bind} puts the web surface on a network interface, and it \
+    ships no TLS: the session cookie and every page after it cross the wire in the clear, \
+    and the cookie is an operator console.
+
+    Put TLS and an identity in front of the loopback bind instead — `tailscale serve` is \
+    the documented posture, an operator's own reverse proxy is the other — or set \
+    OUROBOROS_WEB_ALLOW_REMOTE=1 to accept a cleartext operator surface on a trusted \
+    network.
+    """
+  end
+
+  # One operator credential per data directory: unset, the web surface reads whatever
+  # file the gateway on this host was pointed at. What it will not do is invent one.
+  web_token_file =
+    gateway_value.("OUROBOROS_WEB_TOKEN_FILE") || gateway_value.("OUROBOROS_GATEWAY_TOKEN_FILE")
+
+  web_token = gateway_value.("OUROBOROS_WEB_TOKEN")
+
+  if is_nil(web_token_file) and is_nil(web_token) do
+    raise "OUROBOROS_WEB=1 enables an operator surface, so it requires a token. Set " <>
+            "OUROBOROS_WEB_TOKEN_FILE to a 0600 file holding at least 32 bytes — it falls " <>
+            "back to OUROBOROS_GATEWAY_TOKEN_FILE, because the two surfaces share one " <>
+            "credential by default — or OUROBOROS_WEB_TOKEN for a development loop."
+  end
+
+  if is_nil(gateway_data_dir) do
+    raise "OUROBOROS_WEB=1 requires OUROBOROS_DATA_DIR: the bound port and scope are " <>
+            "published to web.json there, the session cookie's key lives in web.secret " <>
+            "beside it, and that publication is how `ouro web` finds this node."
+  end
+
+  web_scope =
+    case gateway_value.("OUROBOROS_WEB_SCOPE") || "read" do
+      "read" -> :read
+      "operate" -> :operate
+      other -> raise "OUROBOROS_WEB_SCOPE must be read or operate, got: " <> other
+    end
+
+  # A proxied or tailnet-served deployment presents an origin that is the proxy's, not
+  # the loopback socket's, so the endpoint's computed `check_origin` would refuse its own
+  # LiveView socket. This is the override, and it is a list because one deployment can be
+  # reachable by more than one name.
+  web_origin =
+    case gateway_value.("OUROBOROS_WEB_ORIGIN") do
+      nil ->
+        nil
+
+      value ->
+        value
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+    end
+
+  config :ouroboros, :web,
+    enabled: true,
+    port: web_port,
+    bind: web_bind,
+    allow_remote: web_allow_remote,
+    token_file: web_token_file,
+    token: web_token,
+    scope: web_scope,
+    secret_file: gateway_value.("OUROBOROS_WEB_SECRET_FILE"),
+    origin: web_origin
+
+  # Same reason as the gateway block above: a client that spawns this node as a child
+  # process owns its stdout, and Logger output must not interleave with daemon notices.
   config :logger, :default_handler, config: [type: :standard_error]
 end
 

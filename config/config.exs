@@ -197,6 +197,14 @@ config :ouroboros,
   #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
   #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
   mcp_servers: %{},
+  # The LiveView operator surface (docs/WEB.md). The opposite default to `:code_intel`
+  # and `:mcp`, and deliberately: those two are bounds on things this runtime already
+  # does, while this one is a port a stranger can reach, so absent configuration has to
+  # mean no endpoint at all rather than a disabled one. `config/runtime.exs` is the only
+  # thing that turns it on, and every other value — a bind, a port, a token path — is a
+  # decision that belongs to the machine rather than to the build. Their defaults and the
+  # refusals that go with them live in `Ouroboros.Web.Config`.
+  web: [enabled: false],
   # Computer Use (docs/COMPUTER_USE.md §4). Tools appear when the helper is on disk
   # unless `OUROBOROS_COMPUTER_USE=0`. A helper is the operator opt-in (they built it).
   # Same hardening as `:mcp` / `:code_intel`: a typo never widens a bound.
@@ -242,6 +250,15 @@ config :ouroboros,
       "com.apple.SecurityAgent"
     ]
   ]
+
+# The two facts about the web endpoint that are genuinely compile-time, and no others.
+# Everything runtime — the bind, the port, the cookie key, the origin policy — is handed
+# to it as a start option by `Ouroboros.Web`, built from one `Ouroboros.Web.Config` that
+# has already raised over anything unusable. Phoenix reads this key on the way up and
+# warns when a configured endpoint has none, so it is also how a boot stays quiet.
+config :ouroboros, Ouroboros.Web.Endpoint,
+  adapter: Bandit.PhoenixAdapter,
+  render_errors: [formats: [html: Ouroboros.Web.ErrorHTML], layout: false]
 
 # Keep every upstream Codex execution and validation behavior, but normalize the one
 # command-start event the pinned Harness currently leaves provider-specific before its
