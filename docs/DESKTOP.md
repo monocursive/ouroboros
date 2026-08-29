@@ -1,5 +1,21 @@
 # Native desktop client
 
+> **Feature-frozen, pending removal.** From the acceptance of `docs/WEB.md` this client
+> takes **defects only, no new slices** (`WEB.md` §10, D13). Its replacement —
+> `Ouroboros.Web`, a Phoenix LiveView surface served by the daemon itself — landed across
+> W0–W8 and reaches parity with everything described below except add-machine, which is
+> deferred by name (`WEB.md` §4, D10) rather than dropped. W9 deletes the GPUI layer; what
+> goes, what collapses, and what is deliberately **kept** is enumerated in
+> [`WEB.md` §10](WEB.md#10-gpui-removal-d13), and the removal checklist that gates it is at
+> the end of §9. Nothing in this document has been removed yet: it is the inventory the
+> parity map in `WEB.md` §4 was built from, and it stays accurate until the code does not.
+>
+> The one paragraph here that is still load-bearing for code being written today is the
+> new-session panel's defaulting rule under "Development" ("What the file supplies is where
+> the control *starts*…"). `Ouroboros.Web.Prefs` and `Ouroboros.Web.Live.NewSession` match
+> it deliberately, including the part that reads oddly at first: a stored default **is**
+> sendable, and only the absence of one leaves the field off the request.
+
 `ouro-desktop` is the GPUI presentation of the same Rust client state machine used by the
 Ratatui client. The BEAM runtime remains authoritative. Reconnect replay, cursor pruning,
 session triage, turn mutation reconciliation, and approval routing are not reimplemented
