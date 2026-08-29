@@ -26,6 +26,12 @@ defmodule Ouroboros.Web.ConfigTest do
   @data_dir "OUROBOROS_DATA_DIR"
   @gateway_token_file "OUROBOROS_GATEWAY_TOKEN_FILE"
 
+  # The three variables whose absence is what makes the production block's defaulted
+  # single-machine branch reachable at all.
+  @gateway "OUROBOROS_GATEWAY"
+  @node "OUROBOROS_NODE"
+  @cluster_strategy "OUROBOROS_CLUSTER_STRATEGY"
+
   @managed [
     @web,
     @bind,
@@ -36,7 +42,10 @@ defmodule Ouroboros.Web.ConfigTest do
     @port,
     @origin,
     @data_dir,
-    @gateway_token_file
+    @gateway_token_file,
+    @gateway,
+    @node,
+    @cluster_strategy
   ]
 
   setup do
@@ -232,6 +241,58 @@ defmodule Ouroboros.Web.ConfigTest do
     end
   end
 
+  describe "the defaulted single-machine posture" do
+    setup %{data_dir: dir} do
+      # The branch is narrow on purpose: naming a gateway, a node, or a cluster strategy
+      # makes it unreachable, and then every OUROBOROS_*  variable is read the other way.
+      System.put_env(@data_dir, dir)
+      Enum.each([@gateway, @node, @cluster_strategy, @web], &System.delete_env/1)
+      :ok
+    end
+
+    test "gives a release nobody configured a browser surface beside its gateway",
+         %{data_dir: dir} do
+      config = prod_config()
+      web = get_in(config, [:ouroboros, :web])
+
+      assert web[:enabled] == true
+      assert web[:bind] == "127.0.0.1"
+      assert web[:allow_remote] == false
+      assert web[:port] == 0
+
+      # The same scope the auto-gateway takes, because it is the same operator on the
+      # same machine reaching the same runtime.
+      assert web[:scope] == :operate
+      assert get_in(config, [:ouroboros, :gateway, :scope]) == :operate
+
+      # And the same credential, created the same way, so a first boot is not a two-step
+      # ceremony on either surface.
+      assert web[:token_file] == Path.join(dir, "gateway.token")
+      assert web[:token_file] == get_in(config, [:ouroboros, :gateway, :token_file])
+      assert web[:token_generate] == true
+      assert web[:secret_file] == Path.join(dir, "web.secret")
+    end
+
+    test "OUROBOROS_WEB=0 is the way out, and takes nothing else with it" do
+      System.put_env(@web, "0")
+      config = prod_config()
+
+      refute get_in(config, [:ouroboros, :web])
+
+      # The gateway is untouched: opting out of the browser must not opt out of `ouro`.
+      assert get_in(config, [:ouroboros, :gateway, :enabled]) == true
+    end
+
+    test "naming a gateway makes the branch unreachable for the web too", %{data_dir: dir} do
+      # This is the posture where every OUROBOROS_WEB_* variable is read instead, and
+      # where the web surface is absent unless OUROBOROS_WEB=1 says otherwise.
+      System.put_env(@gateway, "1")
+      System.put_env(@gateway_token_file, write_token(dir))
+
+      refute get_in(prod_config(), [:ouroboros, :web])
+    end
+  end
+
   describe "the cookie secret" do
     test "is generated once, 0600, and never written over", %{data_dir: dir} do
       write_token(dir)
@@ -340,6 +401,10 @@ defmodule Ouroboros.Web.ConfigTest do
   # the reader wanted here is Elixir's own.
   defp runtime_config do
     Elixir.Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+  end
+
+  defp prod_config do
+    Elixir.Config.Reader.read!("config/runtime.exs", env: :prod, target: :host)
   end
 
   defp restore_env(name, previous) do
