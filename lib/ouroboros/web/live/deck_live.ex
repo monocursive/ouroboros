@@ -905,14 +905,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> Enum.flat_map(fn %{row: row} ->
       title = Rail.title(row)
 
+      # `group` is the session; `key` is the ask. They are different jobs. The key is what
+      # must never ring twice, so it is the finest identity available. The group is what a
+      # banner is *about*, and it is what `app.js` hands the browser as the notification's
+      # tag — so three approvals landing on one session replace each other into one banner
+      # naming it once, rather than stacking three that all say the same words.
+      group = "#{row.plane}:#{row.id}"
+
       case {open, approvals} do
         {{plane, id}, [_first | _rest]} when {plane, id} == {row.plane, row.id} ->
           approvals
           |> Enum.reject(&MapSet.member?(answered, &1.request_id))
-          |> Enum.map(&%{key: &1.request_id, title: title})
+          |> Enum.map(&%{key: &1.request_id, group: group, title: title})
 
         _not_the_open_session ->
-          [%{key: "#{row.plane}:#{row.id}", title: title}]
+          [%{key: group, group: group, title: title}]
       end
     end)
   end

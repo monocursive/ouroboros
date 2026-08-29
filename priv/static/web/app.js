@@ -192,9 +192,12 @@
       rung[session.key] = true;
 
       try {
+        // The tag is the *session*, not the ask. Two approvals landing on one session are
+        // two things that must each be checked against `rung`, but one thing to tell
+        // somebody about — and a same-tag notification replaces its predecessor rather
+        // than stacking a second banner saying the same words.
         var note = new Notifications((session.title || "A session") + " needs you", {
-          body: session.body || undefined,
-          tag: session.key
+          tag: session.group || session.key
         });
 
         // Focus the tab and get out of the way. Deliberately not a navigation: the deck

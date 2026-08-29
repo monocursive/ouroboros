@@ -439,8 +439,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       poll(view)
 
       assert_push_event(view, "needs-you", %{sessions: sessions})
-      assert [%{key: key, title: "Rewire the listener"}] = sessions
+      assert [%{key: key, group: group, title: "Rewire the listener"}] = sessions
       assert key == "interactive:#{id}"
+
+      # The group is what a banner is about; `app.js` hands it to the browser as the
+      # notification tag so two asks on one session do not stack two banners.
+      assert group == "interactive:#{id}"
 
       # And not again while it is still waiting. A standing ask is one notification.
       poll(view)
@@ -491,7 +495,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
 
-      assert_push_event(view, "needs-you", %{sessions: [%{key: "req-web-bell"}]})
+      assert_push_event(view, "needs-you", %{sessions: [session]})
+      assert session.key == "req-web-bell"
+
+      # And its group is still the session, so a second ask on the same conversation
+      # replaces this banner instead of stacking beside it.
+      assert session.group == "interactive:#{id}"
     end
 
     test "a request auto-approve answered never rings", %{conn: conn} do
