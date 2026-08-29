@@ -1541,6 +1541,42 @@ defmodule Ouroboros.Web.TranscriptTest do
       assert Transcript.project([]) == []
     end
 
+    test "every presentation the port can mint has a projection arm" do
+      # The companion to `every_normalized_kind_has_a_presentation_and_none_is_dropped`:
+      # that one proves `from_event/1` names every kind, this one proves `project/1`
+      # draws every name. Together they close the loop a catch-all would have hidden.
+      payload = %{
+        "text" => "words",
+        "kind" => "acp_update",
+        "call_id" => "c1",
+        "decision" => "approve"
+      }
+
+      runtime_native = [
+        {:provider_event, %{"kind" => "operator_shell", "command_digest" => "d"}},
+        {:provider_event, %{"kind" => "compaction", "trigger" => "manual"}},
+        {:provider_event, %{"kind" => "subagent", "phase" => "spawned", "task_id" => "t"}},
+        {:delegation, %{"task_id" => "t", "status" => "started"}},
+        {:a_kind_no_build_knows, %{"reason" => "novel"}}
+      ]
+
+      cases =
+        Enum.map(Presentation.canonical_types(), &{&1, payload}) ++
+          runtime_native ++
+          [
+            {:output_text_delta, %{"text" => ""}},
+            {:thinking_delta, %{}},
+            {:command_output_delta, %{}}
+          ]
+
+      for {type, payload} <- cases do
+        events = [event(type, payload, sequence: 1, request_id: "r1")]
+
+        assert is_list(project(events)),
+               "#{type} has a presentation with no projection arm"
+      end
+    end
+
     test "a hidden presentation draws nothing but never removes what came before" do
       cells =
         project([
