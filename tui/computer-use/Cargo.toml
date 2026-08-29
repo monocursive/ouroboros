@@ -7,7 +7,7 @@ description = "Ouroboros Computer Use native helper (macOS): the private JSON-RP
 publish = false
 
 # An isolated workspace member so ScreenCaptureKit / objc2 and the rest of the heavy macOS
-# stack that Phase 1 pulls in stay OUT of the `ouro` / `ouro-desktop` build graph. In Phase 0
+# stack that Phase 1 pulls in stay OUT of the `ouro` build graph. In Phase 0
 # the only host calls are three no-prompt permission probes, made through raw framework FFI
 # (CoreGraphics / ApplicationServices / Carbon) declared in `src/macos.rs`, so no external
 # macOS crate enters the graph at all. Non-macOS builds compile an honest
@@ -33,8 +33,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 sha2 = "0.10"
 
 # The macOS observe stack lives ONLY here, behind `cfg(target_os = "macos")`, so a non-macOS
-# build compiles the honest "unsupported platform" path and pulls none of it. `ouro` /
-# `ouro-desktop` never depend on this member, so none of this reaches their graph either.
+# build compiles the honest "unsupported platform" path and pulls none of it. `ouro` never
+# depends on this member, so none of this reaches its graph either.
 [target.'cfg(target_os = "macos")'.dependencies]
 # Objective-C runtime + typed framework bindings (objc2 0.6 family). Chosen over raw
 # msg_send FFI because ScreenCaptureKit's async, block-based capture and the AXUIElement walk

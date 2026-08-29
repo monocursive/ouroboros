@@ -661,10 +661,15 @@ pub struct ImageCell {
     /// The decoded bytes, once a surface that can draw pixels has fetched them by sha.
     ///
     /// The drawable the projection carries so a renderer never stats a file: the fs-free
-    /// contract is kept because these were decoded at absorb time and handed in, not read
-    /// from disk during projection. Absent until `computer_use.artifact` has answered;
-    /// present and ready to hand to a real image renderer (the GPUI desktop) afterwards.
-    /// `Arc` so the per-frame projection clone is a refcount, not a copy of a screenshot.
+    /// contract is kept because bytes arrive decoded, handed in by whoever fetched them,
+    /// rather than read from disk during projection.
+    ///
+    /// **Nothing fills this today.** The terminal draws the placeholder below and never
+    /// needs the pixels, and the web surface fetches artifacts in-process rather than
+    /// through this projection. It is the seam an inline-pixel pass would fill (see the
+    /// note on [`Cell::Image`]'s rendering), kept because the sha beside it is meaningless
+    /// without somewhere for the answer to land. `Arc` so the per-frame projection clone
+    /// stays a refcount rather than a copy of a screenshot.
     pub bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
 
@@ -2065,15 +2070,31 @@ fn project_agent_text(
     }
 
     if final_text {
-        let fallback = pending.take().map(|draft| draft.text).unwrap_or_default();
+        let draft = pending.take();
+        let had_draft = draft.is_some();
+        let fallback = draft.map(|draft| draft.text).unwrap_or_default();
         let text = if text.is_empty() { fallback } else { text };
 
         if !text.trim().is_empty() {
-            cells.push(Cell::Message {
+            // A note that arrived between the draft and its final flushed the draft into a
+            // cell of its own — that is what keeps the note *after* the words it follows —
+            // so there is nothing left here to absorb and pushing would say the answer
+            // twice. Settle the cell the draft became instead.
+            let settled = match had_draft {
+                true => None,
+                false => settled_draft(cells, &text),
+            };
+
+            let message = Cell::Message {
                 speaker: Speaker::Agent,
                 text,
                 streaming: false,
-            });
+            };
+
+            match settled {
+                Some(at) => cells[at] = message,
+                None => cells.push(message),
+            }
         }
     } else if !text.is_empty() {
         let draft = pending.get_or_insert_with(|| PendingOutput {
@@ -2082,6 +2103,32 @@ fn project_agent_text(
         });
         append_bounded(&mut draft.text, &text, AGENT_OUTPUT_BYTES, AGENT_TRUNCATION);
     }
+}
+
+/// The agent message a settled final supersedes, if it supersedes one.
+///
+/// Scans back for the most recent thing the agent said and stops at the first boundary —
+/// a message from the operator, or any divider — because nothing before one of those
+/// belongs to the exchange this text is part of.
+///
+/// The candidate is only settled when the final text *continues* it. A draft is a literal
+/// prefix of the answer it was streaming; a turn's second block (text → tool → text) is
+/// not a prefix of its first, so it stays its own message. That test is the whole
+/// difference between folding a duplicate away and eating half a turn.
+fn settled_draft(cells: &[Cell], final_text: &str) -> Option<usize> {
+    for (at, cell) in cells.iter().enumerate().rev() {
+        match cell {
+            Cell::Message {
+                speaker: Speaker::Agent,
+                text,
+                ..
+            } => return final_text.starts_with(text.as_str()).then_some(at),
+            Cell::Message { .. } | Cell::Divider { .. } => return None,
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn flush_agent(cells: &mut Vec<Cell>, pending: &mut Option<PendingOutput>, streaming: bool) {
@@ -3075,8 +3122,7 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
 /// transcript is a `Paragraph` over that buffer, so there is no seam through which a
 /// [`crate::images::render`] escape could travel from here. Inline pixels need a surface
 /// that writes raw bytes to the terminal — a cursor-positioned placement pass over the
-/// backend, which is an operator-surface concern outside this projection — or a real image
-/// renderer, which is what the GPUI desktop is: it draws the same bytes with `gpui::img`.
+/// backend, which is an operator-surface concern outside this projection.
 ///
 /// So the honest thing on this surface is the label, with real dimensions from the artifact
 /// where it is one. The bytes the cell may carry are the drawable for those other surfaces,

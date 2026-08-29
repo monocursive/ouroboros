@@ -120,34 +120,6 @@ jobs:
       - run: cargo test
       - run: cargo test --features embed
 
-  desktop:
-    name: Rust GPUI desktop
-    runs-on: macos-15
-    defaults:
-      run:
-        working-directory: tui
-    steps:
-      - uses: actions/checkout@v4
-
-      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal && rustup default ${{ env.RUST_VERSION }}
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            tui/target
-          key: ${{ runner.os }}-desktop-cargo-${{ hashFiles('tui/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-desktop-cargo-
-
-      # `runtime_shaders` keeps this build independent of the optional Xcode Metal
-      # Toolchain while exercising the exact framework versions shipped by the app.
-      - run: cargo check --locked --features desktop --bin ouro-desktop
-      - run: cargo test --locked --features desktop --test desktop
-      # The desktop unit tests live in the lib target (desktop.rs, desktop_design.rs,
-      # desktop/machines.rs); `--test desktop` alone never runs them.
-      - run: cargo test --locked --features desktop --lib
-
   golden:
     name: Golden fixtures
     runs-on: ubuntu-24.04

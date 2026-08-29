@@ -438,26 +438,6 @@ impl App {
         self.issue(Call::new(Tag::Providers, "runtime.providers", json!({})));
     }
 
-    /// Asks for the model catalogue if this connection has not got one yet.
-    ///
-    /// Gated on `hello.methods` rather than asked-and-refused: an older gateway would
-    /// answer `-32601`, and a picker reading that error would report a broken runtime
-    /// where the truth is a runtime that predates the verb. Left unasked, the catalogue
-    /// stays empty and the surfaces that would have used it stay free-text — which is
-    /// exactly what they were before this existed.
-    pub(super) fn fetch_models(&mut self) {
-        if !self.hello.serves("runtime.models") {
-            return;
-        }
-
-        if self.models.value.is_some() || self.models.pending {
-            return;
-        }
-
-        self.models.started();
-        self.issue(Call::new(Tag::Models, "runtime.models", json!({})));
-    }
-
     pub(super) fn new_session_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
@@ -609,20 +589,12 @@ impl App {
         // error would trap the caller in same-id reconciliation despite a known outcome.
         if let Some(failure) = start_failure {
             if let Some(first_message) = self.first_message.take() {
-                // A native window draws neither the session composer nor its saved drafts,
-                // so a prompt it typed goes back through the desktop seam instead. One
-                // owner rather than two: text left in both places would collide with the
-                // terminal-draft guard in `desktop_submit_message`.
-                if first_message.desktop {
-                    self.desktop_restored_draft = Some(first_message.input);
-                } else {
-                    self.restore_refused_first_message(
-                        plane,
-                        &started.id,
-                        first_message.input,
-                        ComposerVerb::Message,
-                    );
-                }
+                self.restore_refused_first_message(
+                    plane,
+                    &started.id,
+                    first_message.input,
+                    ComposerVerb::Message,
+                );
             }
 
             self.inform(
@@ -687,13 +659,6 @@ impl App {
                     ),
                     NoticeKind::Warn,
                 );
-
-                // A native window has no session composer to retype it in; its prompt goes
-                // back through the desktop seam.
-                if first_message.desktop {
-                    self.desktop_restored_draft = Some(first_message.input);
-                    return;
-                }
 
                 if let Some(composer) = self.sessions.composer.as_mut() {
                     composer.editor.clear_text();
@@ -950,18 +915,10 @@ impl App {
         {
             self.home_pending = false;
             if outcome_unknown {
-                let mut handed_back = None;
+                // The prompt is still in the home draft; resubmitting it unchanged is what
+                // replays this same session id.
                 if let Some(pending) = self.first_message.as_mut() {
                     pending.start_outcome_unknown = true;
-                    if pending.desktop {
-                        handed_back = Some(pending.input.clone());
-                    }
-                }
-                // The terminal still has this prompt in its home draft. A native window
-                // cleared its box when the start was issued, so the text goes back there —
-                // resubmitting it unchanged is what replays this same session id.
-                if let Some(text) = handed_back {
-                    self.desktop_restored_draft = Some(text);
                 }
                 self.home_error = Some(format!(
                     "{message}. Session {id} may already exist; press Enter to reconcile the \
@@ -969,10 +926,9 @@ impl App {
                 ));
             } else {
                 // A definite refusal means this id cannot become a session. Keep the
-                // visible draft, but the next submission mints a fresh start identity.
-                if let Some(pending) = self.first_message.take().filter(|pending| pending.desktop) {
-                    self.desktop_restored_draft = Some(pending.input);
-                }
+                // visible draft, but drop the pending start so the next submission mints a
+                // fresh start identity.
+                self.first_message = None;
                 self.home_error = Some(message);
             }
             return;

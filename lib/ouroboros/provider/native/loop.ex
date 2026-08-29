@@ -1271,16 +1271,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  defp suggested_rule_payload(classified) do
-    app = get_in(classified, [:context, :app])
-
-    if desktop_tool?(classified.tool) and is_binary(app) do
-      "ComputerUse(app:#{app})"
-    else
-      Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
-    end
-  end
-
   defp image_bytes(%{images: images}) when is_list(images) do
     Enum.reduce(images, 0, fn
       %{size: size}, acc when is_integer(size) and size > 0 -> acc + size
@@ -1319,10 +1309,17 @@ defmodule Ouroboros.Provider.Native.Loop do
         "reason" => reason_text(reason)
       }
 
+    # Only where the engine had a pattern to offer. An absent key is a card with no
+    # remember row; a key carrying anything `permissions.add` will not take is a row that
+    # cannot be saved, which is worse.
     payload =
-      if persist?,
-        do: Map.put(payload, "suggested_rule", suggested_rule_payload(classified)),
-        else: payload
+      with true <- persist?,
+           rule when is_binary(rule) <-
+             Permissions.suggested_rule(permission_request(state, classified)) do
+        Map.put(payload, "suggested_rule", rule)
+      else
+        _no_rule_to_offer -> payload
+      end
 
     emit(state, :approval_requested, payload, request_id)
 
@@ -1550,29 +1547,33 @@ defmodule Ouroboros.Provider.Native.Loop do
     request_id = new_request_id()
     classified = pending.classified
 
-    emit(
-      state,
-      :approval_requested,
-      %{
-        # A kind clients already render as an approval modal. The payload is deliberately
-        # the same shape `ask/5` emits for an ordinary command approval, so a client that
-        # has not learned this kind still shows a legible question with the command, the
-        # working directory, and why it is being asked.
-        "kind" => "sandbox_escalation",
-        "tool_call" =>
-          %{
-            "name" => pending.call.name,
-            "command" => classified.command,
-            "cwd" => state.scope.root
-          }
-          |> reject_nils(),
-        "paths" => classified.paths,
-        "reason" => pending.offer.reason,
-        "suggested_rule" =>
-          Permissions.suggested_rule(classified.tool, classified.command, classified.paths)
-      },
-      request_id
-    )
+    payload = %{
+      # A kind clients already render as an approval modal. The payload is deliberately
+      # the same shape `ask/5` emits for an ordinary command approval, so a client that
+      # has not learned this kind still shows a legible question with the command, the
+      # working directory, and why it is being asked.
+      "kind" => "sandbox_escalation",
+      "tool_call" =>
+        %{
+          "name" => pending.call.name,
+          "command" => classified.command,
+          "cwd" => state.scope.root
+        }
+        |> reject_nils(),
+      "paths" => classified.paths,
+      "reason" => pending.offer.reason
+    }
+
+    # The engine's pattern, or no key at all — the same rule `ask/5` follows. This is the
+    # card where remembering matters most, and it is the one that used to carry a map no
+    # client could draw and `permissions.add` would not take.
+    payload =
+      case Permissions.suggested_rule(permission_request(state, classified)) do
+        rule when is_binary(rule) -> Map.put(payload, "suggested_rule", rule)
+        nil -> payload
+      end
+
+    emit(state, :approval_requested, payload, request_id)
 
     _ =
       Hooks.notify(

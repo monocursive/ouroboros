@@ -493,6 +493,13 @@ Totals: **23 / 75**. Table-stakes rows (1–3, 5, 8–12, 15, 18–19, 21–22) 
 the four open-slot rows (15, 16, 20, 24) average 1.5 with two of them already at 2 —
 the inverse of every incumbent, which is exactly the shape of an opportunity.
 
+> **Client surface note (W9).** The GPUI desktop client was removed
+> ([`WEB.md` §10](WEB.md#10-gpui-removal-d13), [`DESKTOP.md`](DESKTOP.md)); the client
+> rows above are retired to the TUI and the web surface that replaces it. **The scores
+> have not been re-run** — they date from the 2026-08 wave and are read against the
+> client of that day. Row 19's "No phone/web surface" is the one line this removal is
+> known to have overtaken.
+
 ### 3.2 Server-ready, client-unreachable
 
 A distinct class of gap, and the cheapest to close: capabilities the runtime already

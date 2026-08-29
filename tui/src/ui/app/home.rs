@@ -151,7 +151,7 @@ impl App {
             return;
         }
 
-        if let Err(refusal) = self.issue_quick_start(provider, prompt, false) {
+        if let Err(refusal) = self.issue_quick_start(provider, prompt) {
             self.home_error = Some(refusal);
         }
     }
@@ -159,29 +159,22 @@ impl App {
     /// Issues one interactive quick start and holds `prompt` as that session's first
     /// message until the start answers.
     ///
-    /// The terminal home and the desktop's no-session composer both submit through here so
-    /// that the request they build, the same-id replay after an outcome-unknown refusal,
-    /// and the bookkeeping [`App::started`] dispatches the prompt from cannot drift apart.
+    /// Separate from its caller so that the request built here, the same-id replay after an
+    /// outcome-unknown refusal, and the bookkeeping [`App::started`] dispatches the prompt
+    /// from cannot drift apart.
     ///
-    /// Callers keep their own refusals: capability, scope, empty-prompt, and account checks
-    /// read differently on a home screen and in a window, and this function makes none of
-    /// them. The one refusal it can produce is the request's own — a `StartRequest` that
-    /// does not describe a session — returned rather than displayed, because the two
-    /// surfaces show it in different places.
+    /// The caller keeps its own refusals: capability, scope, empty-prompt, and account
+    /// checks are the home screen's to make, and this function makes none of them. The one
+    /// refusal it can produce is the request's own — a `StartRequest` that does not
+    /// describe a session — returned rather than displayed.
     ///
-    /// `desktop` records which surface typed the prompt, so a refused start can hand the
-    /// text back to a composer that surface actually draws.
-    ///
-    /// The stored provider default and the welcome marker are written for both callers: the
-    /// provider written down is exactly the one this start used, and reaching a first
-    /// session is the same event whichever composer it was typed in. The desktop driver
-    /// does not drain [`App::take_config_save`] today, so there the two are in-memory state
-    /// rather than a file write — nothing on screen says otherwise.
+    /// The stored provider default and the welcome marker are written here: the provider
+    /// written down is exactly the one this start used, and reaching a first session is the
+    /// event the marker records.
     pub(super) fn issue_quick_start(
         &mut self,
         provider: String,
         prompt: String,
-        desktop: bool,
     ) -> Result<(), String> {
         let request = self
             .first_message
@@ -216,7 +209,6 @@ impl App {
                     && pending.start.id == request.id =>
             {
                 pending.start_outcome_unknown = false;
-                pending.desktop = desktop;
             }
             _ => {
                 self.first_message = Some(PendingFirstMessage {
@@ -224,7 +216,6 @@ impl App {
                     turn_id: new_turn_id(),
                     start: request.clone(),
                     start_outcome_unknown: false,
-                    desktop,
                 });
             }
         }

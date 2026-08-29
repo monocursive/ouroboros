@@ -217,6 +217,59 @@ defmodule Ouroboros.Web.CorpusParityTest do
                 false}
     end
 
+    # Mirrors `a_final_settles_the_draft_a_note_flushed_early`. The case the adjacent test
+    # above cannot reach: a provider note and a usage row land between the draft and the
+    # final that supersedes it.
+    #
+    # A note flushes the pending draft so it can be drawn *after* the words it follows.
+    # That leaves nothing for the final to absorb, and both clients used to push a second
+    # message carrying the same answer — a duplicate an operator saw in a live browser.
+    #
+    # The corpus is one event per file, so no single fixture can express an interleaving;
+    # the ordering is the test's and every payload is the corpus's, which is the same
+    # composition `cells/1` already does elsewhere. `event_output_text_delta_partial`
+    # exists for this: its text is a literal prefix of the final's, which the other delta
+    # fixture deliberately is not.
+    test "a_final_settles_the_draft_a_note_flushed_early" do
+      projected =
+        cells([
+          "event_output_text_delta_partial",
+          "event_provider_event_compaction",
+          "event_usage",
+          "event_output_text_final",
+          "event_turn_completed"
+        ])
+
+      # One message, and the notes still sit after the words they follow.
+      assert [message, %Cell.Runtime{}, %Cell.Usage{}, %Cell.Divider{kind: :turn_end}] = projected
+
+      assert message(message) ==
+               {:agent, "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+                false}
+    end
+
+    # Mirrors `a_later_block_of_the_same_turn_is_its_own_message`. The guard on the rule
+    # above: a turn that says something, calls a tool, then says something else must keep
+    # both halves. The final's text does not begin with the flushed draft's, so it is a
+    # new block and is pushed rather than folded into it.
+    test "a_later_block_of_the_same_turn_is_its_own_message" do
+      projected =
+        cells([
+          "event_output_text_delta",
+          "event_tool_call_bash",
+          "event_tool_result_bash",
+          "event_output_text_final"
+        ])
+
+      assert [first, %Cell.Tool{}, second] = projected
+
+      assert message(first) == {:agent, "Running the suite now.", false}
+
+      assert message(second) ==
+               {:agent, "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+                false}
+    end
+
     # Mirrors `reasoning_is_its_own_cell_and_never_the_agents_answer`.
     test "reasoning_is_its_own_cell_and_never_the_agents_answer" do
       assert %Cell.Thinking{text: text, lines: lines, state: state} =
@@ -563,18 +616,18 @@ defmodule Ouroboros.Web.CorpusParityTest do
                "no permission rule engine is configured on this node, so every tool call is put " <>
                  "to you"
 
-      assert detail.suggested_rule == "Bash(git push:*)"
+      assert detail.suggested_rule == "Bash(git push *)"
       assert detail.plan == nil
       assert detail.subagent == nil
       assert detail.options == []
       assert detail.diff == nil
     end
 
-    # Mirrors `a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions`.
+    # Mirrors `a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers`.
     # `ask_user` rides the approval channel to put a question to a person. Auto-approve
     # must refuse it: a robot `approve` carries no answer, which is the one outcome the
     # tool exists to prevent.
-    test "a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions" do
+    test "a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers" do
       request = approval("event_approval_requested_question")
 
       assert Approval.question?(request)
@@ -584,12 +637,30 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.kind == "question"
       assert detail.command == nil
 
-      assert detail.options == [],
-             "ask_user options are plain strings, not the provider options a modal maps"
+      assert Approval.question_text(request.payload) ==
+               "Need a decision — Which database should the staging environment point at?"
+
+      assert Approval.subject(request) ==
+               "Need a decision — Which database should the staging environment point at?",
+             "the words it asks, not the whole payload as JSON"
+
+      # `AskUser.question/1` writes plain strings, which both readers used to drop for
+      # having no `name`. They are the answers themselves: the string is the label and the
+      # words sent back, and nothing on the wire says what they mean.
+      assert Enum.map(detail.options, & &1.name) == ["staging-db", "scratch-db"]
+      assert Enum.map(detail.options, & &1.answer) == ["staging-db", "scratch-db"]
+      assert Enum.map(detail.options, & &1.option_id) == [nil, nil]
+      assert Enum.map(detail.options, & &1.kind) == [nil, nil]
+
+      assert Enum.map(detail.options, &Approval.Option.decision/1) == [nil, nil],
+             "no vendor kind said what these mean, so the four-way table maps nothing"
+
+      assert Enum.all?(detail.options, &Approval.Option.answerable?/1),
+             "a bare-string option is an answer, and choosing it sends those words"
 
       assert status(cell("event_approval_requested_question")) ==
                {"Approval needed",
-                ~S({"header":"Need a decision","kind":"question","options":["staging-db","scratch-db"],"question":"Which database should the staging environment point at?"}),
+                "Need a decision — Which database should the staging environment point at?",
                 :warning}
     end
 
@@ -634,12 +705,13 @@ defmodule Ouroboros.Web.CorpusParityTest do
              "shown verbatim: it is the only place the consequences of each answer are stated"
     end
 
-    # Mirrors `a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line`. The
-    # escalation asks the same question as an ordinary command approval, which is what
-    # keeps a client that never learned the kind useful. Its `suggested_rule` is a map
-    # rather than a pattern, so there is no rule line to draw — and inventing one from the
-    # map would claim a rule nobody wrote.
-    test "a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line" do
+    # Mirrors `a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it`.
+    # The escalation asks the same question as an ordinary command approval, which is what
+    # keeps a client that never learned the kind useful. Its `suggested_rule` is the
+    # engine's own pattern — the grammar `permissions.add` validates against and the only
+    # thing a remember row can save — and not the shape-of-a-rule map the native loop used
+    # to send, which no client could render and no rule could be built from.
+    test "a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it" do
       request = approval("event_approval_requested_sandbox_escalation")
       detail = Approval.detail(request)
 
@@ -650,7 +722,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.reason ==
                "the command wrote outside the workspace and the sandbox stopped it"
 
-      assert detail.suggested_rule == nil
+      assert detail.suggested_rule == "Bash(cargo build *)"
 
       assert Approval.subject(request) ==
                "cargo build --release — the command wrote outside the workspace and the sandbox " <>
@@ -872,6 +944,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_input_accepted_steer",
         "event_input_accepted_unrecorded",
         "event_output_text_delta",
+        "event_output_text_delta_partial",
         "event_output_text_final",
         "event_plan_updated",
         "event_provider_event_compaction",

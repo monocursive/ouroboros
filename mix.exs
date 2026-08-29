@@ -141,6 +141,12 @@ defmodule Ouroboros.MixProject do
       # Bandit rather than Cowboy: it is pure Elixir, so the web surface adds nothing to
       # the release's native build graph, which the Rust dist triples already pay for.
       {:bandit, "~> 1.12"},
+      # Markdown for agent messages. Pure Elixir on purpose: MDEx renders faster but is a
+      # Rust NIF, which would entangle the two dist triples for no user-visible gain at
+      # these payload sizes (docs/WEB.md §3). Agent output is untrusted, so it is rendered
+      # with `escape: true` and never with raw HTML passed through — see
+      # `Ouroboros.Web.Live.Markdown`.
+      {:earmark, "~> 1.4"},
       # Jido.Harness 2.0 is not on Hex yet. Pin the reviewed upstream commit so
       # provider protocol changes cannot enter the runtime implicitly.
       {:jido_harness,
@@ -148,7 +154,12 @@ defmodule Ouroboros.MixProject do
       # Gradual success typing (`mix dialyzer` / `make dialyzer`, and a CI job). Runtime
       # false so a packaged node never ships the checker; `:dev`/`:test` so the lock
       # still pins it for CI.
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      # `Phoenix.LiveViewTest` refuses to mount a view without this and says so by name
+      # (`phoenix_live_view/test/dom.ex:15`). It is the HTML parser the test helpers walk
+      # the rendered page with, it is `only: :test`, and without it the web surface has no
+      # headless test story at all — which was the argument for the surface.
+      {:lazy_html, ">= 0.1.0", only: :test}
     ]
   end
 

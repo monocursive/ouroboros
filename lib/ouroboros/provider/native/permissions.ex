@@ -184,27 +184,47 @@ defmodule Ouroboros.Provider.Native.Permissions do
     "Refused: permission rule #{format_rule(rule_ref)} denies #{tool} for this session."
   end
 
-  @doc "The rule a human approval would create, offered alongside the ask."
-  @spec suggested_rule(String.t(), String.t() | nil, [String.t()]) :: map()
-  def suggested_rule(tool, command, paths) do
-    %{"tool" => tool}
-    |> maybe_put("command_prefix", command_prefix(command))
-    |> maybe_put("paths", if(paths == [], do: nil, else: paths))
-  end
+  @doc """
+  The rule a human approval would create, offered alongside the ask. The engine's own
+  pattern, or `nil`.
 
-  defp command_prefix(nil), do: nil
+  This module used to build a *shape* of a rule here — `%{"tool" => …, "command_prefix" =>
+  …}` — from the command's first whitespace token. Nothing could use it. The only thing a
+  client's "don't ask again" row can call is `permissions.add`, whose `pattern` is
+  "validated by `Control.Permissions.Pattern` and by nothing else"
+  (`Ouroboros.Gateway.Methods`), and `Rule.new/1` refuses a map outright with
+  `{:invalid_pattern, …}`. A map on that key therefore reached every client as a rule row
+  it could not draw and a rule nobody could save, and one token of a command line
+  (`"dir=$(printf"`) was not a rule in the first place.
 
-  defp command_prefix(command) when is_binary(command) do
-    case command |> String.trim() |> String.split(~r/\s+/, parts: 2) do
-      [head | _rest] when head != "" -> head
-      _empty -> nil
+  So it is asked for rather than built: `suggest/1` is the engine's, the grammar is the
+  engine's, and this module — the loop's one door to the engine — carries the answer
+  across unchanged. That is what every other emitter in the tree already does
+  (`Control.Permissions.Seam.suggested/2`, `Interactive.Task.Approvals`,
+  `Interactive.Task.Shell`), each guarding `is_binary` exactly as this now does.
+
+  `nil` where no engine is loaded, where it exports no `suggest/1`, or where it had
+  nothing honest to say. The caller omits the key rather than inventing one: this surface
+  never writes the rule language itself.
+
+  The argument is the same request `evaluate/1` takes, so the suggestion is derived from
+  the mode, the domains and the context the engine was asked about — including the
+  resolved `context.app` a Computer Use ask carries, which is where
+  `ComputerUse(app:…)` comes from.
+  """
+  @spec suggested_rule(map()) :: String.t() | nil
+  def suggested_rule(request) when is_map(request) do
+    if exported?(:suggest, 1) do
+      case apply(engine(), :suggest, [request]) do
+        pattern when is_binary(pattern) and pattern != "" -> pattern
+        _nothing_to_suggest -> nil
+      end
     end
+  rescue
+    _error -> nil
+  catch
+    :exit, _reason -> nil
   end
-
-  defp command_prefix(_command), do: nil
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp format_rule(nil), do: "(unnamed)"
   defp format_rule(rule) when is_binary(rule), do: rule

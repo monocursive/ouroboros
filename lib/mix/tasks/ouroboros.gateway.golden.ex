@@ -132,6 +132,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"coding_event_detail_result", coding_event_detail_result()},
       {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"mcp_list_result", mcp_list_result()},
+      {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
@@ -201,6 +202,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"event_output_text_final", "the settled agent message for a turn", :interactive, 104,
        :output_text_final,
        %{"text" => "The suite passed: 412 tests, 0 failures.\n\nNothing else to change."}, []},
+      # The same turn's answer, half-arrived. Its text is a literal **prefix** of
+      # `event_output_text_final`'s, which is what a real delta stream is and what the
+      # other delta above deliberately is not: that one is a separate sentence, so the two
+      # of them together cannot express the case where a settled final supersedes the
+      # draft it was streamed from. This one can, and both renderers use the pair to pin
+      # what happens when a provider note lands between the draft and its final.
+      {"event_output_text_delta_partial",
+       "a streaming chunk that is a prefix of this turn's settled text", :interactive, 105,
+       :output_text_delta, %{"text" => "The suite passed: 412 "}, []},
       {"event_thinking_delta", "reasoning the provider chose to publish", :interactive, 105,
        :thinking_delta, %{"text" => "The failure is in the diff parser, not the transport."}, []},
       {"event_command_output_delta", "a chunk of live command output", :interactive, 106,
@@ -425,7 +435,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          "reason" =>
            "no permission rule engine is configured on this node, so every tool call is " <>
              "put to you",
-         "suggested_rule" => "Bash(git push:*)"
+         "suggested_rule" => "Bash(git push *)"
        }, request_id: "req-permission-000000000001"},
       {"event_approval_requested_question",
        "the native `ask_user` question, whose options are plain strings and not the " <>
@@ -440,8 +450,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
        "the plan-exit question, with the three answers in the runtime's own words", :interactive,
        134, :approval_requested, plan_exit_payload(), request_id: "req-plan-exit-000000000001"},
       {"event_approval_requested_sandbox_escalation",
-       "a re-run outside the sandbox, whose `suggested_rule` is a map rather than the " <>
-         "string a client renders", :interactive, 135, :approval_requested,
+       "a re-run outside the sandbox, carrying the C1 pattern its remember row would " <>
+         "save — the shape every `suggested_rule` has, on the path where it matters most",
+       :interactive, 135, :approval_requested,
        %{
          "kind" => "sandbox_escalation",
          "tool_call" => %{
@@ -451,7 +462,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          },
          "paths" => ["/srv/repo/target"],
          "reason" => "the command wrote outside the workspace and the sandbox stopped it",
-         "suggested_rule" => %{"tool" => "bash", "command_prefix" => "cargo"}
+         "suggested_rule" => "Bash(cargo build *)"
        }, request_id: "req-escalation-00000000001"},
       {"event_approval_requested_subagent",
        "a child agent's own permission, relayed whole with one key naming the asker and " <>
@@ -1093,6 +1104,32 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           detail: "`url` names an HTTP/SSE server; this client speaks stdio only"
         }
       ]
+    })
+  end
+
+  # D11. One directory listing, from literal paths rather than from a walk of whatever
+  # machine runs this task — a fixture that read a real filesystem would differ on every
+  # one of them, and what a second implementation has to agree about is the shape: an
+  # absolute `path`, a `parent` that is `null` at a root boundary and an absolute path
+  # everywhere else, the `roots` the answer was held to, entry rows that are directories
+  # and say so, and `truncated`.
+  #
+  # This is the ordinary answer, so `truncated` is `false` and the entry list is short.
+  # Pinning the cut here would mean either five hundred rows nobody reviews or three rows
+  # beside a flag claiming five hundred were dropped, which is a frame this build cannot
+  # produce; the cut itself is asserted where it is cheap and real — against a directory
+  # the test makes — in `Ouroboros.Gateway.WorkspaceBrowseTest`.
+  defp workspace_browse_result do
+    Conn.result_frame(13, %{
+      "path" => "/srv/repo",
+      "parent" => "/srv",
+      "roots" => ["/home/operator", "/srv"],
+      "entries" => [
+        %{"name" => "apps", "dir" => true},
+        %{"name" => "deps", "dir" => true},
+        %{"name" => "lib", "dir" => true}
+      ],
+      "truncated" => false
     })
   end
 

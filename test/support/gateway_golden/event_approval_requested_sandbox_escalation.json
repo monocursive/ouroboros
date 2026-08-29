@@ -12,10 +12,7 @@
           "/srv/repo/target"
         ],
         "reason": "the command wrote outside the workspace and the sandbox stopped it",
-        "suggested_rule": {
-          "command_prefix": "cargo",
-          "tool": "bash"
-        },
+        "suggested_rule": "Bash(cargo build *)",
         "tool_call": {
           "command": "cargo build --release",
           "cwd": "/srv/repo",

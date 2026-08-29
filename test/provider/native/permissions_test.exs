@@ -47,18 +47,56 @@ defmodule Ouroboros.Provider.Native.PermissionsTest do
     assert {:ask, :no_rule} = Permissions.evaluate(@request)
   end
 
-  test "suggests a rule keyed on the tool and the command's first word" do
-    assert Permissions.suggested_rule("bash", "mix test --stale", []) == %{
-             "tool" => "bash",
-             "command_prefix" => "mix"
-           }
+  # The rule the card's remember row would save. It has to be a pattern the engine's own
+  # grammar accepts, because `permissions.add` validates it with `Control.Permissions
+  # .Pattern` "and by nothing else" — the map this used to build was a shape no client
+  # could render and `Rule.new/1` refused outright.
+  test "suggests the engine's own pattern, in the grammar permissions.add validates" do
+    assert Permissions.suggested_rule(%{@request | command: "mix test --stale"}) ==
+             "Bash(mix test *)"
 
-    assert Permissions.suggested_rule("edit", nil, ["/w/lib/a.ex"]) == %{
-             "tool" => "edit",
-             "paths" => ["/w/lib/a.ex"]
-           }
+    assert Permissions.suggested_rule(%{
+             @request
+             | tool: "edit",
+               command: nil,
+               mode: :write,
+               paths: ["/w/lib/a.ex"]
+           }) == "Edit(/w/lib/**)"
 
-    assert Permissions.suggested_rule("read", nil, []) == %{"tool" => "read"}
+    assert Permissions.suggested_rule(%{
+             @request
+             | tool: "desktop_act",
+               command: nil,
+               mode: :execute,
+               context: %{app: "com.apple.calculator"}
+           }) == "ComputerUse(app:com.apple.calculator)"
+  end
+
+  test "every suggestion it offers is one permissions.add would accept" do
+    for command <- ["mix test --stale", "git push --force origin main", "cargo build"] do
+      rule = Permissions.suggested_rule(%{@request | command: command})
+
+      assert {:ok, _pattern} = Ouroboros.Control.Permissions.Pattern.parse(rule),
+             "#{inspect(rule)} is not a pattern the rule store would take"
+    end
+  end
+
+  test "a request the engine has nothing honest to say about carries no rule" do
+    assert Permissions.suggested_rule(%{
+             @request
+             | tool: "unknown",
+               command: nil,
+               mode: :read,
+               paths: []
+           }) == nil
+  end
+
+  # The loop never writes the rule language itself, so a node with no engine offers no
+  # rule rather than a made-up one.
+  test "with no engine loaded there is no rule to suggest" do
+    without_engine(fn ->
+      assert Permissions.suggested_rule(@request) == nil
+    end)
   end
 
   test "a denial names the rule it came from" do

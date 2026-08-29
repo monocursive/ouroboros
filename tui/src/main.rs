@@ -206,6 +206,7 @@ async fn run(cli: Cli) -> Result<()> {
             print,
         }) => attach_remote(&paths, cli.dev, addr, token_file, print, config).await,
         Some(Command::Mcp { command }) => mcp_command(&paths, command).await,
+        Some(Command::Web { print }) => web(&paths, cli.dev, print).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
         Some(Command::Desktop { command }) => desktop(&paths, command).await,
@@ -2278,6 +2279,44 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// `ouro web` (docs/WEB.md D14): bring a runtime up if there is none, then hand a browser
+/// the one link that gets it a session.
+///
+/// The runtime half is [`local_runtime`]'s, unchanged and deliberately so — the bare
+/// command's adopt-or-start under the spawn lock, with the same refusals. What differs is
+/// only what happens afterwards: this command prints a URL and exits, so the child is
+/// detached for `ouro daemon`'s reason. A runtime that died with this process would leave
+/// the browser it just opened talking to nothing.
+///
+/// Boot lines go to stderr rather than through [`Progress::Plain`], because stdout here is
+/// one URL and `ouro web --print` exists to be read by something that is not a person.
+async fn web(paths: &Paths, dev: bool, print: bool) -> Result<()> {
+    paths.ensure_private_data_dir()?;
+
+    let boot = Arc::new(std::sync::Mutex::new(BootProgress::new()));
+    let started = local_runtime(paths, dev, &Progress::Screen(boot.clone())).await;
+
+    // Before the `?`: a spawn that failed said something on the way down, and those lines
+    // are most of what makes the failure legible.
+    ouro::web_cli::report_boot(&boot, &mut std::io::stderr().lock());
+
+    let (_publication, _token, daemon) = started.context(ouro::web_cli::NO_RUNTIME_REFUSAL)?;
+
+    if let Some(mut daemon) = daemon {
+        daemon.detach();
+    }
+
+    ouro::web_cli::open(
+        &paths.data_dir,
+        &paths.token_file(),
+        print,
+        &ouro::web_cli::SystemOpener,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    )
+    .await
 }
 
 /// `ouro agents` (G2): every session this runtime can see, grouped by what it needs.

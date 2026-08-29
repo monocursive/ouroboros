@@ -533,11 +533,12 @@ pub fn plain(text: &str) -> String {
 
 /// A map's entries in sorted key order, whatever order the map itself iterates in.
 ///
-/// `serde_json::Map` is only a `BTreeMap` until something turns on `preserve_order` — and
-/// the desktop build's gpui dependency tree does, for the whole crate graph, features
-/// being additive. A rendering that followed the map's own order would therefore say
-/// different things in `ouro` and `ouro-desktop`. Every user-facing walk of a payload map
-/// sorts instead, so the same payload reads the same in both binaries.
+/// `serde_json::Map` is only a `BTreeMap` until something in the crate graph turns on
+/// `preserve_order`, and cargo features are additive: any dependency, anywhere in the
+/// graph, can turn it on for everyone without this code changing a line. A rendering that
+/// followed the map's own order would therefore be one `cargo add` away from saying
+/// something different. Every user-facing walk of a payload map sorts instead, so what a
+/// reader sees is a property of this function rather than of the build.
 pub fn sorted_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
     let mut entries: Vec<_> = fields.iter().collect();
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -993,9 +994,9 @@ pub struct RuntimeStatus {
     /// it stays a tree rather than a type.
     #[serde(default)]
     pub cluster: Value,
-    /// Sorted by construction: `serde_json::Map` is only a `BTreeMap` until
-    /// `preserve_order` is on — and the desktop build's gpui tree turns it on — so a
-    /// `BTreeMap` here says sorted rather than relying on it.
+    /// Sorted by construction: `serde_json::Map` is only a `BTreeMap` while nothing in the
+    /// crate graph enables `preserve_order`, so a `BTreeMap` here states the ordering
+    /// instead of inheriting it from whatever else happens to be compiled in.
     #[serde(default)]
     pub availability: BTreeMap<String, Availability>,
     #[serde(default)]
@@ -3467,6 +3468,7 @@ mod tests {
                 "event_input_accepted_steer",
                 "event_input_accepted_unrecorded",
                 "event_output_text_delta",
+                "event_output_text_delta_partial",
                 "event_output_text_final",
                 "event_plan_updated",
                 "event_provider_event_compaction",
@@ -3509,6 +3511,7 @@ mod tests {
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
+                "workspace_browse_result",
             ]
         );
     }
@@ -3667,6 +3670,100 @@ mod tests {
         let decoded: Value =
             serde_json::from_str(line["line"].as_str().expect("a line")).expect("a JSON object");
         assert_eq!(decoded["id"], line["id"]);
+    }
+
+    /// D11's `workspace.browse` (docs/WEB.md §7). No client renders this yet — the web
+    /// surface is what will — but the decode contract lands with the method rather than
+    /// after it, because a shape nobody read is a shape that drifts.
+    ///
+    /// What a picker branches on: `path` is where it really is, `parent` is where "up"
+    /// goes *or* `null` at a root boundary, `roots` is the surface the answer was held to,
+    /// every entry is a directory with a bare name, and `truncated` says whether it was
+    /// shown everything.
+    #[test]
+    fn the_workspace_browse_fixture_carries_what_a_picker_reads() {
+        let listing = &fixture("workspace_browse_result")["result"];
+
+        let path = listing["path"].as_str().expect("an absolute path");
+        assert!(path.starts_with('/'), "{path}");
+
+        // The directory above, absolute like `path`, so navigating up is a second call
+        // with a value read straight out of this one.
+        assert_eq!(listing["parent"], "/srv");
+
+        let roots: Vec<&str> = listing["roots"]
+            .as_array()
+            .expect("the roots")
+            .iter()
+            .map(|root| root.as_str().expect("an absolute root"))
+            .collect();
+
+        assert!(!roots.is_empty());
+        assert!(roots.iter().all(|root| root.starts_with('/')));
+        assert!(
+            roots.iter().any(|root| path.starts_with(root)),
+            "the answer is inside the surface it names: {path} in {roots:?}"
+        );
+
+        let entries = listing["entries"].as_array().expect("the entries");
+        assert!(!entries.is_empty());
+
+        let mut names = Vec::new();
+
+        for entry in entries {
+            let name = entry["name"].as_str().expect("a name");
+
+            // A bare name, never a path: a row that carried its own absolute path would
+            // let a client skip the containment check the next call makes.
+            assert!(!name.contains('/'), "{name}");
+            assert!(!name.starts_with('.'), "dotfiles are excluded: {name}");
+            assert_eq!(entry["dir"], true, "{entry}");
+
+            names.push(name);
+        }
+
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "entries arrive name-sorted");
+
+        // Present and `false`: "you were shown everything" is a fact, and a client that
+        // read a missing key as `false` could not tell it from a gateway too old to say.
+        assert_eq!(listing["truncated"], false);
+        assert!(listing.get("truncated").is_some());
+    }
+
+    /// The two answers the pinned frame cannot also be: the top of a root, where "up" is
+    /// `null` rather than absent, and a listing the 500-entry bound cut.
+    #[test]
+    fn a_browse_answer_says_when_it_is_at_a_root_and_when_it_was_cut() {
+        let at_root = serde_json::json!({
+            "path": "/srv",
+            "parent": Value::Null,
+            "roots": ["/srv"],
+            "entries": [{"name": "repo", "dir": true}],
+            "truncated": false,
+        });
+
+        // Null, not missing, and not the empty string — a picker draws "you are at the
+        // top" from this and must not offer an "up" that resolves to `""`.
+        assert!(at_root.get("parent").is_some());
+        assert!(at_root["parent"].is_null());
+        assert_eq!(at_root["parent"].as_str(), None);
+
+        let cut = serde_json::json!({
+            "path": "/srv/repo",
+            "parent": "/srv",
+            "roots": ["/srv"],
+            "entries": [{"name": "apps", "dir": true}],
+            "truncated": true,
+        });
+
+        assert_eq!(cut["truncated"], true);
+        assert_eq!(
+            cut["truncated"].as_bool(),
+            Some(true),
+            "the cut is a boolean a client renders, never an absence it infers"
+        );
     }
 
     #[test]

@@ -8,12 +8,13 @@ defmodule Ouroboros.Web.Transcript.Approval.Option do
   (`tui/src/ui/transcript.rs:261-273`).
   """
 
-  defstruct [:option_id, :kind, name: ""]
+  defstruct [:option_id, :kind, :answer, name: ""]
 
   @type t :: %__MODULE__{
           option_id: String.t() | nil,
           name: String.t(),
-          kind: String.t() | nil
+          kind: String.t() | nil,
+          answer: String.t() | nil
         }
 
   @doc """
@@ -41,6 +42,23 @@ defmodule Ouroboros.Web.Transcript.Approval.Option do
     do: {:deny, :session}
 
   def decision(%__MODULE__{}), do: nil
+
+  @doc """
+  Whether a surface can send this option at all.
+
+  Two shapes answer, for different reasons. A vendor option answers where its `kind` names
+  one of the four `interactive.respond_approval` accepts. An `ask_user` option answers
+  because it *is* the answer: a bare string carries no `kind` and means nothing to the
+  four-way table, and choosing it approves the question once with those words riding
+  `reason` — the only key the envelope will carry to
+  `Provider.Native.Tools.AskUser.answer_text/1`.
+
+  Everything else is drawn as words and never as a button
+  (`tui/src/ui/transcript.rs`).
+  """
+  @spec answerable?(t()) :: boolean()
+  def answerable?(%__MODULE__{answer: answer}) when is_binary(answer), do: true
+  def answerable?(%__MODULE__{} = option), do: decision(option) != nil
 end
 
 defmodule Ouroboros.Web.Transcript.Approval.Edit do
@@ -335,6 +353,29 @@ defmodule Ouroboros.Web.Transcript.Approval do
   end
 
   @doc """
+  The words an `ask_user` question actually asks.
+
+  `Provider.Native.Tools.AskUser.question/1` writes `header`, `question` and `options` and
+  nothing a permission carries — no `tool_call`, no `command`, no `reason` — so the generic
+  fallback reaches the end of its key list and compacts the whole payload. That is how a
+  card headline becomes `{"header":…,"kind":"question",…}`.
+
+  Both fields are the runtime's own and both earn the line: the header is the two or three
+  words saying what kind of decision this is, and the question is the decision. `nil` where
+  neither arrived, which is the one case with nothing better than the fallback
+  (`tui/src/ui/transcript.rs`).
+  """
+  @spec question_text(map()) :: String.t() | nil
+  def question_text(payload) do
+    case {text(payload, "header"), text(payload, "question")} do
+      {nil, nil} -> nil
+      {header, nil} -> header
+      {nil, question} -> question
+      {header, question} -> "#{header} — #{question}"
+    end
+  end
+
+  @doc """
   The tool call the provider is asking permission for, as one line.
 
   A sandbox escalation should read as `git commit … — writes to .git`, not as the raw JSON
@@ -342,16 +383,23 @@ defmodule Ouroboros.Web.Transcript.Approval do
   """
   @spec subject(t()) :: String.t()
   def subject(%__MODULE__{payload: payload}) do
-    # B2. A plan exit names no command and no tool, so the generic fallback would render
-    # the whole payload as JSON. Its own header is the sentence a person needs there.
-    if text(payload, "kind") == "plan_exit" do
-      text(payload, "header") || "plan ready — build it, or keep planning"
-    else
-      case {command(payload), text(payload, "reason")} do
-        {nil, _reason} -> fallback_subject(payload)
-        {command, nil} -> command
-        {command, reason} -> "#{command} — #{reason}"
-      end
+    case text(payload, "kind") do
+      # B2. A plan exit names no command and no tool, so the generic fallback would render
+      # the whole payload as JSON. Its own header is the sentence a person needs there.
+      "plan_exit" ->
+        text(payload, "header") || "plan ready — build it, or keep planning"
+
+      # An `ask_user` question names no command and no tool either, and the words it asks
+      # are the entire reason it was put to a person.
+      "question" ->
+        question_text(payload) || fallback_subject(payload)
+
+      _permission ->
+        case {command(payload), text(payload, "reason")} do
+          {nil, _reason} -> fallback_subject(payload)
+          {command, nil} -> command
+          {command, reason} -> "#{command} — #{reason}"
+        end
     end
   end
 
@@ -483,28 +531,43 @@ defmodule Ouroboros.Web.Transcript.Approval do
     end
   end
 
-  # ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them.
+  # ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them —
+  # and the native `ask_user`'s `options: ["…", "…"]`, which are not that shape at all.
   #
   # Bounded: these are drawn as rows, and a provider that offered two hundred of them
   # would push the command off the screen.
   defp options(payload) do
     payload
     |> array("options")
-    |> Enum.map(fn option ->
-      case text(option, "name") || text(option, "label") do
-        nil ->
-          nil
-
-        name ->
-          %Option{
-            option_id: text(option, "optionId") || text(option, "option_id"),
-            name: name,
-            kind: text(option, "kind")
-          }
-      end
-    end)
+    |> Enum.map(&option/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.take(@options)
+  end
+
+  # `Provider.Native.Tools.AskUser.question/1` declares `options: {:list, :string}` and
+  # writes exactly that. A reader that insists on `name` drops every one of them, and a
+  # question whose whole point is "which database?" renders as Allow/Deny. The string is
+  # the label and the words to send back; nothing on the wire says what it *means*, so it
+  # carries no `optionId` and no `kind` and maps onto none of the four.
+  defp option(option) when is_binary(option) do
+    case nonempty(option) do
+      nil -> nil
+      answer -> %Option{option_id: nil, name: answer, kind: nil, answer: answer}
+    end
+  end
+
+  defp option(option) do
+    case text(option, "name") || text(option, "label") do
+      nil ->
+        nil
+
+      name ->
+        %Option{
+          option_id: text(option, "optionId") || text(option, "option_id"),
+          name: name,
+          kind: text(option, "kind")
+        }
+    end
   end
 
   # ACP's `toolCall.locations: [{path, line?}]`, paths only.

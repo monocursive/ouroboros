@@ -1,6 +1,7 @@
 #!/bin/sh
-# Development lifecycle for the checkout's three artifacts: the dev daemon (a BEAM
-# runtime started from this checkout), the terminal client, and the macOS desktop app.
+# Development lifecycle for the checkout's two artifacts: the dev daemon (a BEAM
+# runtime started from this checkout) and the clients it serves — the terminal client and
+# the browser surface `ouro web` opens.
 #
 # `ouro --dev` already owns the hard parts — the isolated `ouroboros-dev` data
 # directory, the spawn lock, stale-publication recovery, and clean shutdown. This script
@@ -9,7 +10,7 @@
 # stray daemons that accumulate when none of that exists (three of them did, on the day
 # this file was written).
 #
-# Verbs: status | daemon | daemon-stop | daemon-restart | gui | gui-stop | stop-all | logs
+# Verbs: status | daemon | daemon-stop | daemon-restart | web | stop-all | logs
 # Honour OUROBOROS_DATA_DIR when the caller sets one (ouro --dev does the same, with a
 # warning), so a scratch cycle never touches the real dev runtime.
 
@@ -20,7 +21,6 @@ DATA_DIR="${OUROBOROS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ouroboros-d
 DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ouroboros-dev"
 GATEWAY="$DATA_DIR/gateway.json"
 OURO="$REPO/tui/target/debug/ouro"
-APP="$REPO/tui/target/debug/Ouroboros.app"
 
 say() { printf '%s\n' "$*"; }
 
@@ -109,19 +109,6 @@ ensure_ouro() {
     fi
 }
 
-# Always rebuilt and repackaged, not just built when missing: `open` launches whatever
-# binary the bundle holds, so an existence check leaves `make gui` claiming "restarting
-# onto this build" while showing yesterday's UI. cargo makes this cheap when nothing
-# changed, and the bundle script is a copy.
-ensure_app() {
-    (cd "$REPO" && make desktop-dev)
-}
-
-# Matched by bundle-relative suffix, not absolute path: the app is launched both ways
-# (`open` uses the absolute bundle, a shell often uses `./tui/target/...`), and a
-# lifecycle that only sees one spelling restarts nothing while claiming it did.
-gui_pid() { pgrep -f "Ouroboros.app/Contents/MacOS/ouro-desktop" 2>/dev/null | head -1 || true; }
-
 daemon_start() {
     ensure_ouro
     pid="$(daemon_pid)"
@@ -163,28 +150,12 @@ daemon_restart() {
     daemon_start
 }
 
-gui_start() {
-    ensure_app
-    pid="$(gui_pid)"
-    if [ -n "$pid" ]; then
-        say "==> desktop app already running (pid $pid); restarting it onto this build"
-        gui_stop
-    fi
-    say "==> launching $APP"
-    open "$APP" --args --dev
-}
-
-gui_stop() {
-    pid="$(gui_pid)"
-    if [ -z "$pid" ]; then
-        say "desktop app is not running"
-        return 0
-    fi
-    osascript -e 'quit app "Ouroboros"' 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    i=0
-    while alive "$pid" && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i + 1)); done
-    if alive "$pid"; then kill -TERM "$pid" 2>/dev/null || true; fi
-    say "desktop app stopped"
+# No daemon check first, unlike `daemon_start`: `ouro web` adopts a running runtime and
+# starts one when there is none, which is the same thing this verb would have done by hand
+# and one fewer place that has to know how that is decided.
+web_open() {
+    ensure_ouro
+    (cd "$REPO" && "$OURO" --dev web)
 }
 
 status() {
@@ -205,9 +176,6 @@ status() {
     else
         say "daemon     down"
     fi
-
-    gpid="$(gui_pid)"
-    if [ -n "$gpid" ]; then say "desktop    up: pid $gpid"; else say "desktop    down"; fi
 
     found=""
     for spid in $(repo_daemons); do
@@ -287,8 +255,7 @@ reset_target() {
 # oauth.json, because "start over" should not also mean "sign in to ChatGPT again";
 # delete it yourself when that is what you mean. The persistent recovery marker also
 # stays: it is both the runtime's lock inode and the identity required before a custom
-# directory may be reset again. The desktop app is left alone: it only shows
-# disconnected once its daemon is gone, and `make gui` is the verb that brings it back.
+# directory may be reset again.
 reset() {
     RESET_DIR="$(reset_target)" || exit $?
 
@@ -302,12 +269,11 @@ reset() {
     say "==> emptying $RESET_DIR (oauth.json and runtime recovery marker kept)"
     find "$RESET_DIR" -mindepth 1 -maxdepth 1 \
         ! -name oauth.json ! -name runtime.owner.recovery -exec rm -rf {} +
-    say "reset. make daemon or make gui starts a fresh runtime"
+    say "reset. make daemon starts a fresh runtime"
 }
 
-# Everything down: the window, the published daemon, and any stray this checkout leaks.
+# Everything down: the published daemon, and any stray this checkout leaks.
 stop_all() {
-    gui_stop
     daemon_stop
     for spid in $(repo_daemons); do
         is_published "$spid" && continue
@@ -323,13 +289,12 @@ status) status ;;
 daemon) daemon_start ;;
 daemon-stop) daemon_stop ;;
 daemon-restart) daemon_restart ;;
-gui) gui_start ;;
-gui-stop) gui_stop ;;
+web) web_open ;;
 stop-all) stop_all ;;
 reset) reset ;;
 logs) logs ;;
 *)
-    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|gui|gui-stop|stop-all|reset|logs" >&2
+    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|web|stop-all|reset|logs" >&2
     exit 64
     ;;
 esac

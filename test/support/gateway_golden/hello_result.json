@@ -89,6 +89,7 @@
       "upgrade.history",
       "upgrade.rollouts",
       "upgrade.status",
+      "workspace.browse",
       "workspace.exec"
     ],
     "node": "ouroboros@golden",

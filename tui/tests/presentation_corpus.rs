@@ -25,10 +25,10 @@ use serde_json::Value;
 
 use ouro::model::transcript::{Hidden, PlanStatus, PresentationEvent};
 use ouro::model::Event;
-use ouro::ui::transcript::{ApprovalRequest, Entry};
+use ouro::ui::transcript::{ApprovalRequest, Entry, ProviderOption};
 use ouro::ui::transcript_cells::{
-    project, summarise, Block, Cell, Speaker, SubagentCell, ThinkingState, Tone, ToolCell,
-    ToolState,
+    project, summarise, Block, Cell, DividerKind, Speaker, SubagentCell, ThinkingState, Tone,
+    ToolCell, ToolState,
 };
 
 /// One fixture's event, decoded the way the transport hands it to the model.
@@ -230,6 +230,80 @@ fn a_delta_and_its_final_settle_into_one_message() {
     assert_eq!(projected.len(), 1, "{projected:?}");
     assert_eq!(
         message(&projected[0]),
+        (
+            Speaker::Agent,
+            "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+            false
+        )
+    );
+}
+
+/// The case the test above cannot reach: a provider note and a usage row land between the
+/// draft and the final that supersedes it.
+///
+/// A note flushes the pending draft so it can be drawn *after* the words it follows. That
+/// leaves nothing for the final to absorb, and both clients used to push a second message
+/// carrying the same answer — a duplicate an operator saw in a live browser.
+///
+/// The corpus is one event per file, so no single fixture can express an interleaving; the
+/// ordering is the test's and every payload is the corpus's, which is the same composition
+/// `cells` already does elsewhere. `event_output_text_delta_partial` exists for this: its
+/// text is a literal prefix of the final's, which the other delta fixture deliberately is
+/// not.
+#[test]
+fn a_final_settles_the_draft_a_note_flushed_early() {
+    let projected = cells(&[
+        "event_output_text_delta_partial",
+        "event_provider_event_compaction",
+        "event_usage",
+        "event_output_text_final",
+        "event_turn_completed",
+    ]);
+
+    // One message, and the notes still sit after the words they follow.
+    assert_eq!(projected.len(), 4, "{projected:?}");
+    assert_eq!(
+        message(&projected[0]),
+        (
+            Speaker::Agent,
+            "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+            false
+        )
+    );
+    assert!(matches!(projected[1], Cell::Runtime(_)), "{projected:?}");
+    assert!(matches!(projected[2], Cell::Usage(_)), "{projected:?}");
+    assert!(
+        matches!(
+            projected[3],
+            Cell::Divider {
+                kind: DividerKind::TurnEnd,
+                ..
+            }
+        ),
+        "{projected:?}"
+    );
+}
+
+/// The guard on the rule above: a turn that says something, calls a tool, then says
+/// something else must keep both halves. The final's text does not begin with the flushed
+/// draft's, so it is a new block and is pushed rather than folded into it.
+#[test]
+fn a_later_block_of_the_same_turn_is_its_own_message() {
+    let projected = cells(&[
+        "event_output_text_delta",
+        "event_tool_call_bash",
+        "event_tool_result_bash",
+        "event_output_text_final",
+    ]);
+
+    assert_eq!(projected.len(), 3, "{projected:?}");
+    assert_eq!(
+        message(&projected[0]),
+        (Speaker::Agent, "Running the suite now.", false)
+    );
+    assert!(matches!(projected[1], Cell::Tool(_)), "{projected:?}");
+    assert_eq!(
+        message(&projected[2]),
         (
             Speaker::Agent,
             "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
@@ -734,7 +808,7 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
              to you"
         )
     );
-    assert_eq!(detail.suggested_rule.as_deref(), Some("Bash(git push:*)"));
+    assert_eq!(detail.suggested_rule.as_deref(), Some("Bash(git push *)"));
     assert_eq!(detail.plan, None);
     assert_eq!(detail.subagent, None);
     assert!(detail.options.is_empty());
@@ -745,7 +819,7 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
 /// refuse it: a robot `approve` carries no answer, which is the one outcome the tool
 /// exists to prevent.
 #[test]
-fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions() {
+fn a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers() {
     let request = approval("event_approval_requested_question");
 
     assert!(request.question());
@@ -754,17 +828,58 @@ fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions()
 
     assert_eq!(detail.kind.as_deref(), Some("question"));
     assert_eq!(detail.command, None);
+
     assert_eq!(
-        detail.options,
-        vec![],
-        "ask_user options are plain strings, not the provider options a modal maps"
+        request.question_text().as_deref(),
+        Some("Need a decision — Which database should the staging environment point at?")
+    );
+    assert_eq!(
+        request.subject(),
+        "Need a decision — Which database should the staging environment point at?",
+        "the words it asks, not the whole payload as JSON"
+    );
+
+    // `AskUser.question/1` writes plain strings, which both readers used to drop for having
+    // no `name`. They are the answers themselves: the string is the label and the words
+    // sent back, and nothing on the wire says what they mean.
+    assert_eq!(
+        detail
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["staging-db", "scratch-db"]
+    );
+    assert_eq!(
+        detail
+            .options
+            .iter()
+            .map(|option| option.answer.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("staging-db"), Some("scratch-db")]
+    );
+    assert!(detail
+        .options
+        .iter()
+        .all(|option| option.option_id.is_none() && option.kind.is_none()));
+
+    assert!(
+        detail
+            .options
+            .iter()
+            .all(|option| option.decision().is_none()),
+        "no vendor kind said what these mean, so the four-way table maps nothing"
+    );
+    assert!(
+        detail.options.iter().all(ProviderOption::answerable),
+        "a bare-string option is an answer, and choosing it sends those words"
     );
 
     assert_eq!(
         status(&cell("event_approval_requested_question")),
         (
             "Approval needed",
-            r#"{"header":"Need a decision","kind":"question","options":["staging-db","scratch-db"],"question":"Which database should the staging environment point at?"}"#,
+            "Need a decision — Which database should the staging environment point at?",
             Tone::Warning
         )
     );
@@ -833,11 +948,12 @@ fn a_plan_exit_carries_its_own_heading_question_steps_and_three_answers() {
 }
 
 /// The escalation asks the same question as an ordinary command approval, which is what
-/// keeps a client that never learned the kind useful. Its `suggested_rule` is a map rather
-/// than a pattern, so there is no rule line to draw — and inventing one from the map would
-/// claim a rule nobody wrote.
+/// keeps a client that never learned the kind useful. Its `suggested_rule` is the engine's
+/// own pattern — the grammar `permissions.add` validates against and the only thing a
+/// remember row can save — and not the shape-of-a-rule map the native loop used to send,
+/// which no client could render and no rule could be built from.
 #[test]
-fn a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line() {
+fn a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it() {
     let request = approval("event_approval_requested_sandbox_escalation");
     let detail = request.detail();
 
@@ -848,7 +964,10 @@ fn a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line() {
         detail.reason.as_deref(),
         Some("the command wrote outside the workspace and the sandbox stopped it")
     );
-    assert_eq!(detail.suggested_rule, None);
+    assert_eq!(
+        detail.suggested_rule.as_deref(),
+        Some("Bash(cargo build *)")
+    );
 
     assert_eq!(
         request.subject(),
@@ -1124,6 +1243,7 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_input_accepted_steer",
         "event_input_accepted_unrecorded",
         "event_output_text_delta",
+        "event_output_text_delta_partial",
         "event_output_text_final",
         "event_plan_updated",
         "event_provider_event_compaction",

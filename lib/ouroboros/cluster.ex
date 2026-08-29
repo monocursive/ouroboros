@@ -12,6 +12,8 @@ defmodule Ouroboros.Cluster.Monitor do
   @max_node_name_bytes 512
   @max_fleet_profile_bytes 2 * 1024 * 1024
   @max_fleet_roster_entries 4_096
+  # A display label, bounded where it is read rather than by every surface that draws it.
+  @max_fleet_name_chars 120
   # A fleet profile accepted by this monitor must never exceed the evidence journal that
   # makes its session lists complete. Derive the limits from one contract so adding the
   # 257th otherwise-valid machine cannot turn all prior owner evidence unavailable.
@@ -407,6 +409,7 @@ defmodule Ouroboros.Cluster.Monitor do
 
     %{
       local_node: node(),
+      fleet_name: Ouroboros.Cluster.fleet_name(),
       generated_at: now,
       monitoring_since: state.started_at,
       summary: %{
@@ -829,6 +832,7 @@ defmodule Ouroboros.Cluster.Monitor do
          true <- MapSet.disjoint?(active.machines, removed.machines) do
       {:ok,
        %{
+         name: profile_name(profile),
          roster_revision: revision,
          members: active.by_machine,
          tombstones: removed.by_machine
@@ -844,6 +848,29 @@ defmodule Ouroboros.Cluster.Monitor do
 
   defp decode_fleet_roster(_invalid, _fleet_id),
     do: {:error, :invalid_fleet_profile}
+
+  # The fleet's own name, kept for display and for nothing else.
+  #
+  # Deliberately *not* part of the validation above: every check up there decides whether
+  # this node may act on the roster, and a label has no say in that. A name that is missing,
+  # blank, oversized or carrying control characters becomes `nil` — a fleet that reads as
+  # unnamed — rather than a profile this node refuses to cluster from. `ouro fleet` has
+  # always written one (`tui/src/fleet.rs`, `Profile.name` is not optional), so `nil` here
+  # means a hand-edited file or a profile older than this field.
+  #
+  # It is bounded and screened because it is read off disk and drawn into a browser page;
+  # a control character in a label has no legitimate reading.
+  defp profile_name(profile) do
+    with name when is_binary(name) <- Map.get(profile, "name"),
+         true <- String.valid?(name),
+         trimmed when trimmed != "" <- String.trim(name),
+         true <- String.length(trimmed) <= @max_fleet_name_chars,
+         false <- String.match?(trimmed, ~r/[\x00-\x1f\x7f-\x9f]/u) do
+      trimmed
+    else
+      _unnamed -> nil
+    end
+  end
 
   defp decode_profile_members(kind, entries) when is_list(entries) do
     if length(entries) <= @max_fleet_roster_entries do
@@ -1133,6 +1160,32 @@ defmodule Ouroboros.Cluster do
     end
   catch
     :exit, _reason -> fallback_fleet_status()
+  end
+
+  @doc """
+  The fleet's own name, or `nil` when this node is not running from a named profile.
+
+  `fleet.status` answered a directory and never a label, so every surface that wanted to
+  say which fleet it was looking at had to fall back to this machine's node name — a fact
+  about one member, standing in for the whole. The name has always been in the saved
+  profile (`ouro fleet` writes it as a required field); it was simply dropped on the way
+  through the decoder.
+
+  `nil` is a real answer and means "this runtime is not in a named fleet": no profile, an
+  ephemeral posture, an unreadable file, or a profile whose name is missing or unusable.
+  Callers draw what the runtime said or say nothing, and never invent a label.
+
+  Read from the profile rather than cached, so a rename an operator has just made is the
+  name the next status carries. This is the same read `formation/0` already performs on
+  this exact path (`expected_nodes/0` → `membership_hosts/0`), on a size-bounded file that
+  is `lstat`ed before it is opened.
+  """
+  @spec fleet_name() :: String.t() | nil
+  def fleet_name do
+    case __MODULE__.Monitor.fleet_profile_storage() do
+      {:ok, _fleet_id, profile, _opts} -> Map.get(profile, :name)
+      _unnamed -> nil
+    end
   end
 
   @doc false
@@ -1773,6 +1826,7 @@ defmodule Ouroboros.Cluster do
 
     %{
       local_node: node(),
+      fleet_name: fleet_name(),
       generated_at: now,
       monitoring_since: nil,
       summary: %{

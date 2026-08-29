@@ -10,7 +10,7 @@
         "kind": "command",
         "paths": [],
         "reason": "no permission rule engine is configured on this node, so every tool call is put to you",
-        "suggested_rule": "Bash(git push:*)",
+        "suggested_rule": "Bash(git push *)",
         "tool_call": {
           "command": "git push --force origin main",
           "cwd": "/srv/repo",

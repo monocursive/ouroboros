@@ -288,6 +288,75 @@ defmodule Ouroboros.ClusterTest do
       refute second_name in Node.list()
     end
 
+    # W8. `fleet.status` answered a directory and no label, so every surface that wanted to
+    # say which fleet it was looking at fell back to this machine's node name — one member
+    # standing in for the whole. The name has always been in the profile; the decoder simply
+    # dropped it. What must not change while retaining it: the validation above it.
+    test "the fleet's name survives the roster decode, and never gates it" do
+      fleet_id = "aaaa1111bbbb2222cccc4444"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      owner = test_fleet_member("owner", "127.0.0.1")
+      owner_node = :"ouro-owner@127.0.0.1"
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Cluster.reset_membership_cache()
+
+      on_exit(fn ->
+        Cluster.reset_membership_cache()
+
+        if previous_data_dir,
+          do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+          else: Application.delete_env(:ouroboros, :data_dir)
+      end)
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(owner_node),
+          "OUROBOROS_FLEET_ID" => fleet_id
+        },
+        fn ->
+          Application.put_env(:ouroboros, :data_dir, data_dir)
+
+          write_test_fleet_profile!(fleet_dir, fleet_id, local: owner, members: [owner])
+
+          assert Cluster.fleet_name() == "Cluster test fleet"
+          assert Cluster.fleet_status().fleet_name == "Cluster test fleet"
+
+          # A rename is picked up without a restart, for the reason membership is: the
+          # profile is the authority and it is re-read, not cached at boot.
+          rewrite_fleet_profile_name!(fleet_dir, "Ironworks")
+          assert Cluster.fleet_name() == "Ironworks"
+
+          # Every way the name can be unusable is the same answer — an unnamed fleet —
+          # and none of them costs this node its roster.
+          for unusable <- [nil, "", "   ", 42, "bell\aname", String.duplicate("n", 121)] do
+            rewrite_fleet_profile_name!(fleet_dir, unusable)
+
+            assert Cluster.fleet_name() == nil,
+                   "#{inspect(unusable)} was accepted as a fleet name"
+
+            # The validation the roster's *safety* rests on is untouched: this profile is
+            # still decoded, and still names its member.
+            assert owner_node in Cluster.membership_hosts(),
+                   "#{inspect(unusable)} as a name cost this node its roster"
+          end
+
+          # A profile that is genuinely invalid still refuses, name or no name.
+          File.write!(Path.join(fleet_dir, "profile.json"), "{ not json")
+          assert Cluster.fleet_name() == nil
+
+          # And with no profile at all there is no fleet to name.
+          File.rm!(Path.join(fleet_dir, "profile.json"))
+          assert Cluster.fleet_name() == nil
+          assert Cluster.fleet_status().fleet_name == nil
+        end
+      )
+    end
+
     test "expected membership follows the saved fleet profile while the runtime is up" do
       fleet_id = "aaaa1111bbbb2222cccc3333"
       data_dir = tmp_dir!()
@@ -2066,6 +2135,24 @@ defmodule Ouroboros.ClusterTest do
 
   @doc false
   def list_nodes_for_strategy_test, do: []
+
+  # Change only the name on a profile that is otherwise exactly as it was, so a test of the
+  # name cannot pass by having accidentally rewritten the roster underneath it.
+  defp rewrite_fleet_profile_name!(fleet_dir, name) do
+    path = Path.join(fleet_dir, "profile.json")
+
+    profile =
+      path
+      |> File.read!()
+      |> Jason.decode!()
+      |> then(fn profile ->
+        if is_nil(name), do: Map.delete(profile, "name"), else: Map.put(profile, "name", name)
+      end)
+
+    File.write!(path, Jason.encode!(profile), [:binary, :sync])
+    File.chmod!(path, 0o600)
+    path
+  end
 
   defp restart_cluster_monitor! do
     previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)

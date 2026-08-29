@@ -37,9 +37,8 @@ use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
-    Capabilities, Capability, CursorPruned, Effort, Event, EventType, ModelsCatalog, PlanChoice,
-    Plane, ProviderEntry, RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef,
-    Triage, TurnInput,
+    Capabilities, CursorPruned, Effort, Event, EventType, PlanChoice, Plane, ProviderEntry,
+    RuntimeStatus, SandboxMode, SessionInfo, StartRequest, StartedRef, Triage, TurnInput,
 };
 use crate::proto::{ErrorCode, Hello, Notification, RpcError};
 use crate::runtime::LogRing;
@@ -53,7 +52,6 @@ use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
-mod desktop;
 mod details;
 mod footer;
 mod home;
@@ -73,10 +71,6 @@ use session::{
     PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
 };
 
-pub use desktop::{
-    DesktopAccount, DesktopApproval, DesktopApprovalChoice, DesktopApprovalDiff, DesktopCell,
-    DesktopCellKind, DesktopQuickStart, DesktopReasoning, DesktopSession, DesktopTone,
-};
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use machines::{
     AddFailure, AddField, AddMachine, AddMethod, AddProgress, AddStage, AddStep, FleetJob,
@@ -104,9 +98,6 @@ const LIST_TICKS: u64 = 38; // ~3s
 const UPGRADE_TICKS: u64 = 63; // ~5s
 const DETAIL_TICKS: u64 = 125; // ~10s: `Mesh.state/1` is a whole agent's state tree
 const PROVIDER_TICKS: u64 = 750; // ~60s: each entry probes an executable
-/// ~4min. The catalogue is a snapshot packaged with the runtime, so it cannot change
-/// under a live connection; this cadence exists to recover a failed fetch, not to poll.
-const MODEL_TICKS: u64 = 3_000;
 const ACCOUNT_TICKS: u64 = 375; // ~30s; ~1s while a managed login is pending
 const ACCOUNT_LOGIN_TICKS: u64 = 13;
 const NOTICE_TICKS: u64 = 63;
@@ -246,8 +237,6 @@ pub enum Tag {
     AccountLogout,
     Status,
     Providers,
-    /// `runtime.models`. Asked for only where a picker will read it, never on a cadence.
-    Models,
     Sessions(Plane),
     Agents,
     AgentState(String),
@@ -355,8 +344,8 @@ pub enum Tag {
         id: String,
         want: bool,
     },
-    /// `interactive.configure {sandbox_mode}` — what `/sandbox` and the desktop's posture
-    /// picker both send. Its own tag for the same reason [`Tag::PlanMode`] is: the
+    /// `interactive.configure {sandbox_mode}` — what `/sandbox` sends. Its own tag for the
+    /// same reason [`Tag::PlanMode`] is: the
     /// interesting answer is the refusal. A transport that cannot be reconfigured, or a
     /// provider whose `normalized_values` exclude the mode, answers with a typed
     /// `unsupported_configuration` naming `sandbox_mode` — a sentence worth reading, which
@@ -432,11 +421,6 @@ pub enum Tag {
         plane: Plane,
         id: String,
         show: bool,
-    },
-    /// `computer_use.artifact {sha256}`. Keyed by sha so two screenshots can fetch at once
-    /// and a slow node cannot collapse them into one in-flight request.
-    Artifact {
-        sha: String,
     },
 }
 
@@ -847,16 +831,7 @@ pub struct App {
     pub ticks: u64,
     pub account: Loadable<AccountState>,
     pub status: Loadable<RuntimeStatus>,
-    /// The desktop's Machines panel is open, so member presence must stay live. The TUI's
-    /// machines overlay gets the same status cadence through `Overlay::Machines`; the
-    /// desktop has no overlay, so it raises this flag through
-    /// [`App::desktop_machines_open`] instead.
-    pub desktop_machines_open: bool,
     pub providers: Loadable<Vec<ProviderEntry>>,
-    /// What the runtime can vouch for about each provider's models. Fetched on demand by
-    /// the surfaces that offer a model picker; a gateway that does not serve
-    /// `runtime.models` leaves this empty and those surfaces stay free-text.
-    pub models: Loadable<ModelsCatalog>,
     pub sessions: SessionsTab,
     pub agents: Explorer,
     pub teams: Explorer,
@@ -945,10 +920,6 @@ pub struct App {
     completion_catalog: CompletionCatalog,
     outbound: VecDeque<Call>,
     in_flight: HashSet<Tag>,
-    /// Decoded `computer_use.artifact` bytes, keyed by sha256, overlaid onto Image cells
-    /// in [`Self::desktop_transcript`]. Projection stays fs-free: these were fetched by
-    /// RPC and handed in.
-    desktop_artifacts: HashMap<String, Arc<Vec<u8>>>,
     dropped_seen: u64,
     /// Set when the App has changed [`config`](Self::config) and wants it on disk. Drained
     /// by the driver, exactly like [`Call`]s are, because this type does no I/O.
@@ -963,15 +934,6 @@ pub struct App {
     /// The coding home's first prompt, held between `*.start` being issued and its answer
     /// arriving. There is nothing to send it to until the session exists.
     first_message: Option<PendingFirstMessage>,
-    /// A quick-start prompt a refused start took with it, waiting for the desktop to take
-    /// it back.
-    ///
-    /// The terminal keeps a refused first message in its own home draft or restores it into
-    /// the session composer; a native window renders neither, so without this hand-back the
-    /// operator's text would disappear leaving only an error behind. Set only for starts
-    /// [`App::desktop_quick_start`] issued, and drained by
-    /// [`App::desktop_take_restored_draft`].
-    desktop_restored_draft: Option<String>,
     /// A start launched from an existing composer (currently `/write`) has no modal to
     /// retain its retry boundary. Keep it here until success or a definite refusal.
     pending_background_start: Option<StartRequest>,
@@ -1113,9 +1075,7 @@ impl App {
             ticks: 0,
             account: Loadable::default(),
             status: Loadable::default(),
-            desktop_machines_open: false,
             providers: Loadable::default(),
-            models: Loadable::default(),
             sessions: SessionsTab::default(),
             agents: Explorer::default(),
             teams: Explorer::default(),
@@ -1153,12 +1113,10 @@ impl App {
             completion_catalog: CompletionCatalog::default(),
             outbound: VecDeque::new(),
             in_flight: HashSet::new(),
-            desktop_artifacts: HashMap::new(),
             dropped_seen: 0,
             save_pending: false,
             save_quiet: false,
             first_message: None,
-            desktop_restored_draft: None,
             pending_background_start: None,
             open_url_pending: None,
             leader_until: None,
@@ -2383,7 +2341,6 @@ impl App {
         // subscribe calls.
         if !self.sessions.recovering.is_empty()
             || matches!(self.overlay, Some(Overlay::Machines(_)))
-            || self.desktop_machines_open
         {
             self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
         }
@@ -2511,7 +2468,6 @@ impl App {
             Tag::Account => self.account.due(self.ticks),
             Tag::Status => self.status.due(self.ticks),
             Tag::Providers => self.providers.due(self.ticks),
-            Tag::Models => self.models.due(self.ticks),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.due(self.ticks),
             Tag::Sessions(Plane::Coding) => self.sessions.coding.due(self.ticks),
             Tag::Agents => self.agents.rows.due(self.ticks),
@@ -2531,7 +2487,6 @@ impl App {
             Tag::Account => self.account.started(),
             Tag::Status => self.status.started(),
             Tag::Providers => self.providers.started(),
-            Tag::Models => self.models.started(),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.started(),
             Tag::Sessions(Plane::Coding) => self.sessions.coding.started(),
             Tag::Agents => self.agents.rows.started(),

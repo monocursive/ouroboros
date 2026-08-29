@@ -270,6 +270,10 @@ pub struct ProviderOption {
     pub option_id: Option<String>,
     pub name: String,
     pub kind: Option<String>,
+    /// The words this option sends back, for the one shape that carries them: the native
+    /// `ask_user` question's bare-string options. `None` for a vendor option, whose
+    /// meaning is in its `kind` and not in its label.
+    pub answer: Option<String>,
 }
 
 impl ProviderOption {
@@ -297,6 +301,20 @@ impl ProviderOption {
             }
             _unknown => None,
         }
+    }
+
+    /// Whether a surface can send this option at all.
+    ///
+    /// Two shapes answer, for different reasons. A vendor option answers where its `kind`
+    /// names one of the four `interactive.respond_approval` accepts. An `ask_user` option
+    /// answers because it *is* the answer: a bare string carries no `kind` and means
+    /// nothing to the four-way table, and choosing it approves the question once with
+    /// those words riding `reason` — the only key the envelope will carry to
+    /// `Provider.Native.Tools.AskUser.answer_text/1`.
+    ///
+    /// Everything else is drawn as words and never as a button.
+    pub fn answerable(&self) -> bool {
+        self.answer.is_some() || self.decision().is_some()
     }
 }
 
@@ -455,26 +473,57 @@ impl ApprovalRequest {
         )
     }
 
+    /// The words an `ask_user` question actually asks.
+    ///
+    /// `Provider.Native.Tools.AskUser.question/1` writes `header`, `question` and
+    /// `options` and nothing a permission carries — no `tool_call`, no `command`, no
+    /// `reason` — so the generic fallback reaches the end of its key list and compacts the
+    /// whole payload. That is how a card headline becomes
+    /// `{"header":…,"kind":"question",…}`.
+    ///
+    /// Both fields are the runtime's own and both earn the line: the header is the two or
+    /// three words saying what kind of decision this is, and the question is the decision.
+    /// `None` where neither arrived, which is the one case with nothing better than the
+    /// fallback.
+    pub fn question_text(&self) -> Option<String> {
+        let header = json_nonempty_str(&self.payload, "header");
+        let question = json_nonempty_str(&self.payload, "question");
+
+        match (header, question) {
+            (Some(header), Some(question)) => Some(format!("{header} — {question}")),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+
     /// The tool call the provider is asking permission for, as one line.
     ///
     /// A sandbox escalation should read as `git commit … — writes to .git`, not as the
     /// raw JSON blob of `tool_call`.
     pub fn subject(&self) -> String {
-        // B2. A plan exit names no command and no tool, so the generic fallback would
-        // render the whole payload as JSON in the snack bar. Its own header is the
-        // sentence a person needs there.
-        if json_nonempty_str(&self.payload, "kind").as_deref() == Some("plan_exit") {
-            return json_nonempty_str(&self.payload, "header")
-                .unwrap_or_else(|| "plan ready — build it, or keep planning".to_string());
-        }
+        match json_nonempty_str(&self.payload, "kind").as_deref() {
+            // B2. A plan exit names no command and no tool, so the generic fallback would
+            // render the whole payload as JSON in the snack bar. Its own header is the
+            // sentence a person needs there.
+            Some("plan_exit") => json_nonempty_str(&self.payload, "header")
+                .unwrap_or_else(|| "plan ready — build it, or keep planning".to_string()),
 
-        let command = approval_command(&self.payload);
-        let reason = json_nonempty_str(&self.payload, "reason");
+            // An `ask_user` question names no command and no tool either, and the words it
+            // asks are the entire reason it was put to a person.
+            Some("question") => self
+                .question_text()
+                .unwrap_or_else(|| fallback_subject(&self.payload)),
 
-        match (command.as_deref(), reason.as_deref()) {
-            (Some(command), Some(reason)) => format!("{command} — {reason}"),
-            (Some(command), None) => command.to_string(),
-            (None, _) => fallback_subject(&self.payload),
+            _permission => {
+                let command = approval_command(&self.payload);
+                let reason = json_nonempty_str(&self.payload, "reason");
+
+                match (command.as_deref(), reason.as_deref()) {
+                    (Some(command), Some(reason)) => format!("{command} — {reason}"),
+                    (Some(command), None) => command.to_string(),
+                    (None, _) => fallback_subject(&self.payload),
+                }
+            }
         }
     }
 
@@ -543,7 +592,8 @@ fn approval_edits(call: &Value) -> Vec<ApprovalEdit> {
         .unwrap_or_default()
 }
 
-/// ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them.
+/// ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them — and
+/// the native `ask_user`'s `options: ["…", "…"]`, which are not that shape at all.
 ///
 /// Bounded at [`APPROVAL_OPTIONS`]: these are drawn as rows in a modal, and a provider
 /// that offered two hundred of them would push the command off the screen.
@@ -554,21 +604,39 @@ fn approval_options(payload: &Value) -> Vec<ProviderOption> {
         .map(|options| {
             options
                 .iter()
-                .filter_map(|option| {
-                    let name = json_nonempty_str(option, "name")
-                        .or_else(|| json_nonempty_str(option, "label"))?;
-
-                    Some(ProviderOption {
-                        option_id: json_nonempty_str(option, "optionId")
-                            .or_else(|| json_nonempty_str(option, "option_id")),
-                        name,
-                        kind: json_nonempty_str(option, "kind"),
-                    })
-                })
+                .filter_map(approval_option)
                 .take(APPROVAL_OPTIONS)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `Provider.Native.Tools.AskUser.question/1` declares `options: {:list, :string}` and
+/// writes exactly that. A reader that insists on `name` drops every one of them, and a
+/// question whose whole point is "which database?" renders as Allow/Deny. The string is the
+/// label and the words to send back; nothing on the wire says what it *means*, so it
+/// carries no `optionId` and no `kind` and maps onto none of the four.
+fn approval_option(option: &Value) -> Option<ProviderOption> {
+    if let Value::String(answer) = option {
+        let answer = nonempty_trimmed(answer)?;
+
+        return Some(ProviderOption {
+            option_id: None,
+            name: answer.clone(),
+            kind: None,
+            answer: Some(answer),
+        });
+    }
+
+    let name = json_nonempty_str(option, "name").or_else(|| json_nonempty_str(option, "label"))?;
+
+    Some(ProviderOption {
+        option_id: json_nonempty_str(option, "optionId")
+            .or_else(|| json_nonempty_str(option, "option_id")),
+        name,
+        kind: json_nonempty_str(option, "kind"),
+        answer: None,
+    })
 }
 
 /// ACP's `toolCall.locations: [{path, line?}]`, paths only.

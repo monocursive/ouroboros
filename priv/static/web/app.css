@@ -107,6 +107,51 @@ code,
   font-size: 0.9em;
 }
 
+/* A link is ink.
+ *
+ * The browser's own answer — blue, then purple once followed — is the one palette on this
+ * page nobody chose, and it breaks rule 1 twice over: it spends a colour on "you have been
+ * here", which is not a fact about a session, and it does it in a hue the token system has
+ * no name for. So `:visited` is deliberately the same ink as `:link`: where a reader has
+ * already been is their business, and a rail that faded the sessions somebody had opened
+ * would be inventing a state the runtime never reported.
+ *
+ * `--attention-green` is never reachable from here. A link is a way to somewhere, not a
+ * request for a person.
+ *
+ * The underline stays — it is what distinguishes a link from a word, and removing it
+ * globally would leave the ChatGPT verification URL and every markdown link indistinguishable
+ * from prose. Controls that are links only because a browser needs an `href` (the rail rows,
+ * the filled button, the back links) turn it off for themselves.
+ *
+ * The state selectors are wrapped in `:where()` on purpose. `a:visited` would otherwise
+ * outrank every single-class component rule below it — `.ouro-row-settled`, `.ouro-backlink`,
+ * `.ouro-new-cancel` — and a rail row would light back up to full ink the moment somebody
+ * had opened it once. Zero specificity makes this block a floor that any component can
+ * stand on rather than a ceiling it has to fight. */
+a,
+a:where(:visited) {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--border-strong);
+}
+
+a:where(:hover) {
+  color: var(--secondary);
+  text-decoration-color: var(--secondary);
+}
+
+/* One focus treatment, and it is never `outline: none`. A keyboard is a first-class way to
+   drive an operator surface, and a control whose focus cannot be seen is a control that has
+   to be found by guessing. `:focus-visible` rather than `:focus` so a mouse click does not
+   draw a ring nobody asked for. Components below may tighten the offset; none of them may
+   remove it. */
+:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
 /* The page a request that presented no usable credential gets, and the only thing an
    unauthenticated stranger can learn. It is centred and quiet on purpose. */
 .ouro-plain {
@@ -190,7 +235,8 @@ code,
   margin: 0;
 }
 
-/* Rule 3: one of these per view. */
+/* Rule 3: one of these per view. Sometimes an `<a>` — "New session" is a navigation — so
+   it turns off the link treatment the global rule above gives every anchor. */
 .ouro-button {
   font-family: var(--font-ui);
   font-size: 0.85rem;
@@ -200,6 +246,7 @@ code,
   border-radius: var(--radius);
   padding: 0.3rem 0.85rem;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .ouro-button:hover {
@@ -259,6 +306,15 @@ code,
   box-shadow: inset 3px 0 0 var(--attention-green);
 }
 
+/* `app.js` puts this on the body while a navigation is in flight, and said in as many
+   words that "the stylesheet decides what that looks like". It decides this: the cursor,
+   and nothing else. A page that dimmed or shifted while a patch was arriving would be a
+   page that flickered on every click, and LiveView's own `phx-*-loading` classes already
+   fade the specific element a person actually pressed. */
+body.phx-loading {
+  cursor: progress;
+}
+
 /* LiveView's own state classes. Fading is what the framework does while a patch is in
    flight; the error/exit classes mean the socket is gone. */
 .phx-click-loading,
@@ -270,4 +326,1807 @@ code,
 
 .phx-connected .ouro-page {
   box-shadow: none;
+}
+
+/* ==========================================================================
+ * The deck (W3): the attention stack, the transcript, the vitals.
+ *
+ * The three rules in the header above govern everything below, and the first is the one
+ * this section could most easily break:
+ *
+ *   1. --attention-green is spent in exactly ONE place on this page — the eye in the
+ *      needs-you glyph, and the count beside its heading. Not on a completed tool, not
+ *      on a succeeded subagent, and above all not on the added lines of a diff. The
+ *      diff tones below are ink-derived washes: emphasis, not a verdict.
+ *   2. Layers separate by hairline, never by shadow.
+ *   3. One filled button per view. Here it is "New session", and in this slice it is
+ *      disabled, because the slice that wires it has not landed.
+ * ========================================================================== */
+
+:root {
+  /* The deck's own measurements, named so the three columns cannot drift apart. */
+  --topbar-height: 56px;
+  --rail-width: 360px;
+  --vitals-width: 300px;
+
+  /* Diff tones. Emphasis, not semantics: a changed line is not a state a person is in.
+     A cool wash for additions and a warm one for removals — legible against each other,
+     and neither of them is --attention-green or --danger. */
+  --diff-add-bg: #17241d;
+  --diff-add-ink: #b7d8c4;
+  --diff-remove-bg: #271a1a;
+  --diff-remove-ink: #dcbcb8;
+  --diff-gutter: #6d7068;
+}
+
+[data-theme="light"] {
+  --diff-add-bg: #e2efe7;
+  --diff-add-ink: #1f4030;
+  --diff-remove-bg: #f5e3e1;
+  --diff-remove-ink: #4a2320;
+  --diff-gutter: #9a9e95;
+}
+
+/* -------------------------------------------------------------------------- Layout */
+
+.ouro-deck {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--workspace);
+}
+
+/* The vitals column exists only while a session is open; without it the transcript takes
+   the space rather than leaving a hole where a panel would have been. */
+.ouro-columns {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.ouro-columns:has(> .ouro-vitals) {
+  grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--vitals-width);
+}
+
+/* ------------------------------------------------------------------------- Top bar */
+
+.ouro-topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  height: var(--topbar-height);
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--hairline-2);
+  background: var(--page);
+  flex: 0 0 auto;
+}
+
+.ouro-wordmark {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.14em;
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* A link to /machines, but it reads as a row of dots: the underline the global rule gives
+   every anchor would draw a line under nothing. */
+.ouro-presence {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-decoration: none;
+}
+
+/* Hollow is "not connected", filled is "connected". Never green: presence is a fact
+   about a machine, not a request for a person's attention. */
+.ouro-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--tertiary);
+  background: transparent;
+  display: inline-block;
+}
+
+.ouro-dot-on {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.ouro-topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+/* -------------------------------------------------------------- Chrome icon buttons */
+
+/* The theme toggle and the needs-you bell. Rule 3 puts a ceiling on how loud these are
+   allowed to be: they are not the page's action, they are the page's furniture, so they
+   are tertiary glyphs with no border until a pointer or a keyboard finds them.
+
+   Rule 1 applies to the bell in particular. It would be the obvious place to spend the
+   attention green — it is literally the needs-you control — and it is exactly the wrong
+   place: the green means "a session needs a person right now", and a *switch* about future
+   notifications is not that. On, it is ink; the amber is reserved for the standing-risk
+   postures (auto-approve, full access) and this is not one. */
+.ouro-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  color: var(--tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.ouro-icon-button:hover {
+  color: var(--secondary);
+  border-color: var(--hairline-2);
+}
+
+/* `app.js` owns this attribute, because which theme a browser is in and whether a browser
+   granted notification permission are facts only the browser has. */
+.ouro-icon-button[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+/* Notification permission was denied at the browser level. The control stays visible and
+   stays operable — a person can grant it back in the browser's own settings, and hiding it
+   would leave nothing to explain why the bell never rang — but it stops claiming it can
+   do anything. */
+.ouro-icon-button[data-ouro-blocked] {
+  color: var(--tertiary);
+  opacity: 0.55;
+}
+
+.ouro-today {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+.ouro-pill {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+}
+
+/* Connected is the default, so a server-rendered page is not born claiming a fault.
+   LiveView writes its error classes onto its own root, which is an ancestor of this. */
+.ouro-pill-off {
+  display: none;
+}
+
+.phx-error .ouro-pill-on,
+.phx-client-error .ouro-pill-on,
+.phx-server-error .ouro-pill-on {
+  display: none;
+}
+
+.phx-error .ouro-pill-off,
+.phx-client-error .ouro-pill-off,
+.phx-server-error .ouro-pill-off {
+  display: inline;
+  color: var(--warn-amber);
+}
+
+.ouro-button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ouro-button[disabled]:hover {
+  background: var(--button-bg);
+  border-color: var(--button-bg);
+}
+
+/* ---------------------------------------------------------------------------- Rail */
+
+.ouro-rail {
+  border-right: 1px solid var(--hairline-2);
+  overflow-y: auto;
+  padding: 0.75rem 0 2rem;
+  background: var(--workspace);
+  min-height: 0;
+}
+
+.ouro-group-head {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.1em;
+  font-weight: 500;
+  font-size: 0.85rem;
+  color: var(--tertiary);
+  margin: 1rem 0 0.35rem;
+  padding: 0 var(--gutter);
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+/* The one heading that earns the tone, and the count beside it: this group is people-
+   shaped work by definition, which is exactly what the green means. */
+.ouro-group-needs_you .ouro-group-head {
+  color: var(--attention-green);
+}
+
+.ouro-count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.ouro-group-empty {
+  margin: 0;
+  padding: 0 var(--gutter);
+  color: var(--tertiary);
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.ouro-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.5rem var(--gutter);
+  text-decoration: none;
+  color: var(--ink);
+  border-left: 2px solid transparent;
+}
+
+.ouro-row:hover {
+  background: var(--panel);
+}
+
+.ouro-row-open {
+  background: var(--panel);
+  border-left-color: var(--border-strong);
+}
+
+.ouro-row-nested {
+  padding-left: calc(var(--gutter) + 1.25rem);
+}
+
+/* A needs-you row is a card, because it is the one row a person is meant to act on. */
+.ouro-row-needs_you {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-left: 2px solid transparent;
+  border-radius: var(--radius);
+  margin: 0.25rem var(--gutter);
+  padding: 0.6rem 0.75rem;
+}
+
+.ouro-row-settled {
+  color: var(--tertiary);
+}
+
+.ouro-glyph {
+  flex: 0 0 auto;
+  margin-top: 0.2rem;
+  color: var(--secondary);
+}
+
+.ouro-glyph-settled {
+  color: var(--tertiary);
+}
+
+.ouro-glyph-failed {
+  color: var(--danger);
+}
+
+.ouro-row-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.ouro-row-title {
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-row-line {
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-row-failed .ouro-row-line {
+  color: var(--danger);
+}
+
+.ouro-row-age {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  margin-top: 0.15rem;
+}
+
+/* -------------------------------------------------------------------- Focused pane */
+
+.ouro-focus {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--workspace);
+}
+
+.ouro-focus-head {
+  padding: 1rem var(--gutter) 0.75rem;
+  border-bottom: 1px solid var(--hairline-1);
+  flex: 0 0 auto;
+}
+
+.ouro-focus-title {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 500;
+  margin: 0;
+}
+
+.ouro-focus-meta {
+  margin: 0.2rem 0 0;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* Amber, and only for this: a session that may do anything is a fact a reader must not
+   have to go looking for. */
+.ouro-tag-full {
+  color: var(--warn-amber);
+  border: 1px solid var(--warn-amber);
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+  margin-left: 0.5rem;
+  font-size: 0.72rem;
+}
+
+.ouro-truncation {
+  padding: 0.35rem var(--gutter) 0;
+  margin: 0;
+}
+
+.ouro-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem var(--gutter) 2rem;
+}
+
+.ouro-composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline-2);
+  padding: 0.75rem var(--gutter);
+  background: var(--page);
+}
+
+.ouro-composer-input {
+  width: 100%;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--tertiary);
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.ouro-empty {
+  padding: 4rem var(--gutter);
+  color: var(--secondary);
+}
+
+.ouro-empty-head {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  margin: 0 0 0.5rem;
+}
+
+/* -------------------------------------------------------------------------- Vitals */
+
+.ouro-vitals {
+  border-left: 1px solid var(--hairline-2);
+  padding: 1rem var(--gutter);
+  overflow-y: auto;
+  background: var(--workspace);
+  min-height: 0;
+}
+
+.ouro-vital {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.ouro-vital dt {
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+}
+
+.ouro-vital dd {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* A bar, not a ring: a ring reads as a dial with a target, and a context window has no
+   target — it has a ceiling you would rather not reach. Ink on track. */
+.ouro-meter {
+  height: 3px;
+  background: var(--inset);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 0.3rem;
+}
+
+.ouro-meter-fill {
+  height: 100%;
+  background: var(--ink);
+}
+
+/* --------------------------------------------------------------------------- Cells */
+
+.ouro-cell {
+  margin: 0 0 0.65rem;
+  max-width: 62rem;
+}
+
+.ouro-quiet {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+.ouro-quiet-label {
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+  margin-right: 0.5rem;
+}
+
+.ouro-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* What the operator said sits right in a quiet bubble; what the agent said is a plain
+   reading column, because it is the thing being read. */
+.ouro-said-you {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ouro-bubble {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  max-width: 42rem;
+  white-space: pre-wrap;
+}
+
+.ouro-prose {
+  line-height: 1.65;
+}
+
+.ouro-prose > :first-child {
+  margin-top: 0;
+}
+
+.ouro-prose > :last-child {
+  margin-bottom: 0;
+}
+
+.ouro-prose pre {
+  background: var(--inset);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+}
+
+.ouro-prose code {
+  font-family: var(--font-mono);
+}
+
+.ouro-prose blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--hairline-2);
+  color: var(--secondary);
+}
+
+.ouro-prose a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* A draft still being written. A pulse, not a spinner: the words are already arriving,
+   and a spinner over arriving words says nothing is happening. */
+@keyframes ouro-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+.ouro-streaming .ouro-prose {
+  animation: ouro-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ouro-streaming .ouro-prose {
+    animation: none;
+    border-left: 2px solid var(--hairline-2);
+    padding-left: 0.6rem;
+  }
+}
+
+.ouro-thinking-text {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  white-space: pre-wrap;
+  margin: 0.2rem 0 0;
+}
+
+.ouro-thinking-collapsed {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+/* ---------------------------------------------------------------- Tools and bodies */
+
+.ouro-tool-row,
+.ouro-explore-row,
+.ouro-subagent-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.ouro-explore-row,
+.ouro-subagent-row {
+  cursor: pointer;
+}
+
+.ouro-tool-mark,
+.ouro-subagent-mark {
+  color: var(--tertiary);
+}
+
+/* Completed is ink. Failed is the danger tone. Nothing here is ever green. */
+.ouro-tool-completed .ouro-tool-mark {
+  color: var(--ink);
+}
+
+.ouro-tool-failed .ouro-tool-mark,
+.ouro-tool-failed .ouro-tool-outcome {
+  color: var(--danger);
+}
+
+.ouro-tool-verb {
+  color: var(--ink);
+}
+
+.ouro-tool-subject,
+.ouro-tool-line {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.ouro-tool-outcome,
+.ouro-tool-elapsed {
+  color: var(--tertiary);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.ouro-tool-elapsed {
+  margin-left: 0.5rem;
+}
+
+.ouro-body {
+  margin: 0.3rem 0 0 1.1rem;
+  border-left: 1px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-body-text {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--secondary);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.ouro-fold {
+  background: none;
+  border: 0;
+  border-bottom: 1px dotted var(--border);
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.15rem 0;
+  margin: 0.25rem 0;
+  cursor: pointer;
+}
+
+.ouro-fold:hover {
+  color: var(--ink);
+}
+
+.ouro-explore-calls,
+.ouro-subagent-rows {
+  margin: 0.3rem 0 0 1.1rem;
+  border-left: 1px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-file {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ouro-file-kind {
+  color: var(--tertiary);
+}
+
+.ouro-image {
+  margin: 0 0 0.65rem;
+}
+
+.ouro-image img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+}
+
+/* --------------------------------------------------------------------------- Diffs */
+
+.ouro-diff {
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.ouro-diff-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.4rem 0.6rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--hairline-1);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.ouro-diff-mark {
+  color: var(--tertiary);
+}
+
+.ouro-diff-path {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.ouro-diff-plus {
+  color: var(--diff-add-ink);
+  margin-left: auto;
+}
+
+.ouro-diff-minus {
+  color: var(--diff-remove-ink);
+}
+
+.ouro-hunk-head {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  padding: 0.25rem 0.6rem;
+  background: var(--workspace);
+}
+
+.ouro-hunk-section {
+  margin-left: 0.5rem;
+}
+
+.ouro-line {
+  display: grid;
+  grid-template-columns: 3.5rem 3.5rem 1rem minmax(0, 1fr);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.ouro-gutter {
+  color: var(--diff-gutter);
+  text-align: right;
+  padding-right: 0.5rem;
+  user-select: none;
+}
+
+.ouro-line-mark {
+  user-select: none;
+  color: var(--tertiary);
+}
+
+.ouro-line-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-right: 0.6rem;
+}
+
+.ouro-line-added {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-ink);
+}
+
+.ouro-line-removed {
+  background: var(--diff-remove-bg);
+  color: var(--diff-remove-ink);
+}
+
+.ouro-line-context {
+  color: var(--secondary);
+}
+
+.ouro-line-meta {
+  color: var(--tertiary);
+  font-style: italic;
+}
+
+.ouro-diffstat {
+  display: flex;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  border-top: 1px solid var(--hairline-1);
+  padding-top: 0.4rem;
+}
+
+/* A diff waiting on an answer is bracketed in amber, not in the attention green: the
+   card that asks is where a person acts, and this is only its subject. */
+.ouro-diff-pending {
+  border-color: var(--warn-amber);
+}
+
+/* ---------------------------------------------------- Status, notes, plans, usage */
+
+.ouro-status,
+.ouro-runtime,
+.ouro-divider {
+  font-size: 0.82rem;
+}
+
+.ouro-status {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.ouro-status-label,
+.ouro-runtime-label {
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-status-detail,
+.ouro-runtime-detail {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Success is INK. The green is not a verdict; see the header. */
+.ouro-tone-success {
+  color: var(--ink);
+}
+
+.ouro-tone-warning {
+  color: var(--warn-amber);
+}
+
+.ouro-tone-error {
+  color: var(--danger);
+}
+
+.ouro-tone-muted {
+  color: var(--tertiary);
+}
+
+.ouro-chat-note {
+  color: var(--tertiary);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.ouro-runtime {
+  border-left: 2px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-runtime-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.ouro-subagent-headline {
+  color: var(--ink);
+}
+
+.ouro-subagent-detail {
+  color: var(--tertiary);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.ouro-plan-steps {
+  margin: 0.3rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ouro-plan-steps li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+
+.ouro-step-glyph {
+  color: var(--tertiary);
+}
+
+.ouro-step-completed .ouro-step-glyph,
+.ouro-step-completed .ouro-step-text {
+  color: var(--ink);
+}
+
+.ouro-step-completed .ouro-step-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--tertiary);
+}
+
+.ouro-plan-explanation {
+  margin: 0;
+  color: var(--secondary);
+}
+
+.ouro-usage {
+  display: flex;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--tertiary);
+}
+
+.ouro-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--tertiary);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  margin: 1rem 0;
+}
+
+.ouro-divider::before,
+.ouro-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--hairline-2);
+}
+
+/* ------------------------------------------------------------------------ Composer */
+
+.ouro-composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+
+.ouro-composer-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.45;
+  color: var(--ink);
+  max-height: 200px;
+}
+
+.ouro-composer-input:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+
+.ouro-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  padding-bottom: 0.15rem;
+}
+
+.ouro-composer-refusal {
+  margin-bottom: 0.5rem;
+}
+
+/* A count the runtime published, not one this page kept. Quiet on purpose: a queue is a
+   fact about pacing, not a problem. */
+.ouro-chip {
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.4rem;
+  white-space: nowrap;
+}
+
+/* Rule 3 again: the deck has one filled button per region, so everything beside Send is
+   a quiet one. */
+.ouro-quiet-button {
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  color: var(--secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.ouro-quiet-button:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-composer-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.55rem;
+}
+
+.ouro-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.ouro-picker-label {
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-picker-option {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 0.1rem 0.4rem;
+  cursor: pointer;
+}
+
+.ouro-picker-option:hover {
+  color: var(--ink);
+  border-color: var(--hairline-2);
+}
+
+/* The mark moves only when the runtime's next answer moves it — see
+   `Ouroboros.Web.Live.Composer`. */
+.ouro-picker-on {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+/* The one posture worth the tone, and the same amber the "full access" tag spends. */
+.ouro-picker-warn .ouro-picker-label,
+.ouro-picker-warn .ouro-picker-on {
+  color: var(--warn-amber);
+}
+
+.ouro-picker-warn .ouro-picker-on {
+  border-color: var(--warn-amber);
+}
+
+/* ----------------------------------------------------------------------- Approvals */
+
+.ouro-approval {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline-2);
+  border-bottom: 1px solid var(--hairline-2);
+  background: var(--card);
+  padding: 0.85rem var(--gutter);
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.ouro-approval-warn {
+  border-left: 2px solid var(--warn-amber);
+}
+
+.ouro-approval-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ouro-approval-kind {
+  font-size: 0.7rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+}
+
+.ouro-approval-subject {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+}
+
+.ouro-approval-question {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+}
+
+.ouro-approval-command {
+  margin: 0.55rem 0 0;
+  background: var(--inset);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.6rem;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.ouro-approval-cwd {
+  margin: 0.3rem 0 0;
+  font-size: 0.76rem;
+  color: var(--tertiary);
+}
+
+/* The provider's own sentence about why it is asking, set in the reading face: it is
+   prose, not a field. */
+.ouro-approval-reason {
+  margin: 0.45rem 0 0;
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--secondary);
+}
+
+.ouro-approval-subagent {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--tertiary);
+}
+
+.ouro-approval-locations,
+.ouro-approval-edits {
+  margin: 0.45rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.76rem;
+  color: var(--secondary);
+}
+
+.ouro-approval-diff {
+  margin-top: 0.55rem;
+}
+
+.ouro-approval-plan {
+  margin-top: 0.55rem;
+}
+
+.ouro-approval-answers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* Ink, not an accent: four buttons all shouting would be four buttons nobody reads. */
+.ouro-approval-answer {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+}
+
+.ouro-approval-answer:hover {
+  background: var(--inset);
+}
+
+.ouro-approval-unmapped {
+  font-size: 0.76rem;
+}
+
+.ouro-approval-rule {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--hairline-1);
+  font-size: 0.78rem;
+}
+
+.ouro-approval-notice {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+}
+
+.ouro-inline-answers {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0 calc(var(--gutter) + 0.75rem) 0.4rem;
+}
+
+.ouro-auto {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.4rem var(--gutter);
+  border-top: 1px solid var(--hairline-1);
+  font-size: 0.76rem;
+}
+
+/* Warning, never green: a control that answers on a person's behalf is not a success. */
+.ouro-auto-on .ouro-quiet-button {
+  color: var(--warn-amber);
+  border-color: var(--warn-amber);
+}
+
+/* -------------------------------------------------------------------- Narrow view */
+
+@media (max-width: 1100px) {
+  .ouro-columns,
+  .ouro-columns:has(> .ouro-vitals) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: min-content;
+  }
+
+  .ouro-rail,
+  .ouro-vitals {
+    border: 0;
+    border-bottom: 1px solid var(--hairline-2);
+  }
+
+  .ouro-deck {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .ouro-transcript {
+    overflow-y: visible;
+  }
+}
+
+/* ==========================================================================
+ * The new-session form (W6): /new.
+ *
+ * The deck's tokens, one column, and the same three rules. The one that does real work
+ * here is the third: this page has exactly one filled button — "Start session" — and
+ * everything else on it (Browse, the sandbox cards, the ChatGPT controls) is a hairline.
+ *
+ * Rule 1 is spent nowhere on this page. Nothing here needs a person's attention in the
+ * sense the deck's green means; a form is a place a person is already standing.
+ *
+ * The warning tone appears twice and both times for the same reason: the full-access
+ * card's title carries it always, because that is a standing property of the posture, and
+ * the card carries it when chosen instead of the accent, so picking it never reads as an
+ * action highlight.
+ * ========================================================================== */
+
+.ouro-new {
+  background: var(--workspace);
+  min-height: 100vh;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+.ouro-new-top {
+  max-width: 46rem;
+  margin: 0 auto 1.5rem;
+}
+
+/* The back link and the theme toggle share a line on the two pages that have no top bar.
+   Baseline-aligned rather than centred: the link is text and the glyph is furniture beside
+   it, not a second thing of equal weight. */
+.ouro-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.ouro-new-back {
+  color: var(--tertiary);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.ouro-new-back:hover {
+  color: var(--secondary);
+}
+
+.ouro-new-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 1.6rem;
+  margin: 0.75rem 0 0.2rem;
+}
+
+.ouro-new-sub {
+  margin: 0;
+  color: var(--tertiary);
+  font-size: 0.9rem;
+}
+
+.ouro-new-form {
+  max-width: 46rem;
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+}
+
+.ouro-new-field {
+  padding: 1.1rem 1.25rem;
+  border-bottom: 1px solid var(--hairline-1);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ouro-new-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.ouro-new-label {
+  font-size: 0.85rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+}
+
+.ouro-new-aside {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+}
+
+.ouro-new-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ouro-new-row .ouro-new-input {
+  flex: 1;
+}
+
+.ouro-new-input,
+.ouro-new-select {
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  width: 100%;
+  background: var(--inset);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.55rem;
+}
+
+.ouro-new-input:focus-visible,
+.ouro-new-select:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+
+.ouro-new-select[disabled],
+.ouro-new-input[disabled] {
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
+/* The catalogue listbox. A real list rather than a dropdown, because the search above it
+   is what narrows it and a closed control would hide the effect of typing. */
+.ouro-new-list {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0;
+}
+
+.ouro-new-list option {
+  padding: 0.3rem 0.55rem;
+}
+
+/* A probe that found no executable is dimmer, and still selectable. */
+.ouro-new-dim {
+  color: var(--tertiary);
+}
+
+.ouro-new-hint {
+  margin: 0;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* The field's authoritative reading: what the request will actually carry. Ink rather
+   than tertiary, because it is the line on the page an operator is entitled to trust. */
+.ouro-new-intent {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+}
+
+.ouro-new-secondary {
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  background: transparent;
+  color: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.ouro-new-secondary:hover:not([disabled]) {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-new-secondary[disabled] {
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------------- Sandbox */
+
+.ouro-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.ouro-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  color: var(--ink);
+}
+
+.ouro-card:hover {
+  border-color: var(--border);
+}
+
+.ouro-card-on {
+  border-color: var(--border-strong);
+  background: var(--inset);
+}
+
+.ouro-card-on .ouro-card-title {
+  font-weight: 600;
+}
+
+/* The title wears the warning tone whether or not the row is chosen; the border joins it
+   only when it is. Never the attention green, and never the danger red: this is a posture
+   an operator may legitimately want, not a failure. */
+.ouro-card-warn .ouro-card-title {
+  color: var(--warn-amber);
+}
+
+.ouro-card-warn.ouro-card-on {
+  border-color: var(--warn-amber);
+}
+
+.ouro-card-title {
+  font-size: 0.88rem;
+}
+
+.ouro-card-line {
+  font-size: 0.78rem;
+  color: var(--tertiary);
+}
+
+/* ---------------------------------------------------------------------- Browse */
+
+.ouro-browse {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem;
+}
+
+.ouro-browse-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ouro-browse-path {
+  font-size: 0.8rem;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.ouro-browse-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.ouro-browse-root {
+  font-size: 0.72rem;
+  background: transparent;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+}
+
+.ouro-browse-root:hover {
+  color: var(--ink);
+}
+
+.ouro-browse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ouro-browse-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--inset);
+  padding: 0.05rem 0.35rem;
+}
+
+.ouro-browse-open {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+}
+
+.ouro-browse-open:hover {
+  color: var(--secondary);
+}
+
+.ouro-browse-use {
+  background: transparent;
+  border: 0;
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+}
+
+.ouro-browse-use:hover {
+  color: var(--ink);
+}
+
+.ouro-browse-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------------- ChatGPT */
+
+.ouro-account-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.ouro-account-code {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0.14em;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  align-self: flex-start;
+}
+
+/* ---------------------------------------------------------------------- Footer */
+
+.ouro-new-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+}
+
+.ouro-new-cancel {
+  color: var(--tertiary);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.ouro-new-cancel:hover {
+  color: var(--secondary);
+}
+
+.ouro-new-note {
+  margin: 0;
+  padding: 0 1.25rem 1.25rem;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+.ouro-new-refusal {
+  margin: 1rem 1.25rem 0;
+}
+
+.ouro-new-refusal-detail {
+  display: block;
+  margin-top: 0.4rem;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* ==========================================================================
+ * Machines (W7): the fleet, read-only.
+ *
+ * Rule 1 governs this section more than any other. A machine being up is an
+ * operational outcome, not a request for a person and not something to click, so no
+ * chip here touches --attention-green and none of them wears the filled-button accent.
+ * Connected is ink — success is ink everywhere on this surface. Offline is amber, the
+ * same amber a refusal wears: read this. Unknown is tertiary, because "we do not know"
+ * should recede rather than compete with the two answers that are answers.
+ * ========================================================================== */
+
+.ouro-machines {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.ouro-machines .ouro-header {
+  margin-bottom: 0;
+}
+
+.ouro-machines h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  margin: 0 0 0.35rem;
+}
+
+.ouro-backlink {
+  color: var(--tertiary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--hairline-2);
+}
+
+.ouro-backlink:hover {
+  color: var(--secondary);
+}
+
+/* The panel head's node name is an address, not a title. */
+.ouro-machines .ouro-panel-head h2 {
+  font-family: var(--font-mono);
+  font-variant-caps: normal;
+  letter-spacing: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+/* Rule 3: the filled button on this view is Refresh. Doctor is a hairline, because it
+   spends the fleet's time and should read as deliberate rather than as the way out. */
+.ouro-button-quiet {
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.85rem;
+  cursor: pointer;
+}
+
+.ouro-button-quiet:hover {
+  border-color: var(--secondary);
+}
+
+.ouro-button-quiet:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------------- Members */
+
+.ouro-members {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--hairline-1);
+  border: 1px solid var(--hairline-1);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ouro-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  background: var(--card);
+  padding: 0.7rem 0.85rem;
+}
+
+.ouro-member-name {
+  grid-column: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ouro-self-mark {
+  color: var(--tertiary);
+  font-size: 0.78rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-member-meta {
+  grid-column: 1;
+  color: var(--secondary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+/* `.ouro-member-chip`, not `.ouro-chip`, and the rename is a bug fix rather than taste.
+   The composer's "3 queued" chip (W4) already owned `.ouro-chip`, and this block sat
+   *after* it in the file — so for as long as this section was reachable, a member chip's
+   small-caps, its larger type and its grid placement would all have landed on the queue
+   count too. Nobody saw it because this section was unreachable: the unterminated rule
+   above swallowed everything from the new-session refusal to the end of the file. Two
+   different things wearing one class name is the actual defect; repairing the stylesheet
+   only made it visible. */
+.ouro-member-chip {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  justify-self: end;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* Success is INK, here as everywhere: see rule 1 in this file's header. */
+.ouro-member-chip-connected {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-member-chip-offline {
+  color: var(--warn-amber);
+}
+
+.ouro-member-chip-unknown {
+  color: var(--tertiary);
+}
+
+/* -------------------------------------------------------------- Footnotes and report */
+
+.ouro-footnote {
+  margin: 0.85rem 0 0;
+  color: var(--tertiary);
+  font-size: 0.82rem;
+}
+
+.ouro-empty-body {
+  margin: 0;
+  color: var(--secondary);
+}
+
+.ouro-status-stale {
+  margin-top: 1rem;
+}
+
+.ouro-report {
+  margin: 1rem 0 0;
+  padding: 0.85rem;
+  background: var(--inset);
+  border-radius: var(--radius);
+  color: var(--secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

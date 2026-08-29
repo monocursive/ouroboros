@@ -1522,16 +1522,47 @@ defmodule Ouroboros.Web.Presentation do
   end
 
   defp subject(payload) do
-    rendered =
-      case first_value(payload, ["tool_call", "tool", "command", "text"]) do
-        {:ok, value} -> bounded_compact(value)
-        :error -> nil
-      end
+    case question_subject(payload) do
+      nil ->
+        rendered =
+          case first_value(payload, ["tool_call", "tool", "command", "text"]) do
+            {:ok, value} -> bounded_compact(value)
+            :error -> nil
+          end
 
-    if is_nil(rendered) or rendered == "" or rendered == "null" do
-      bounded_compact(payload)
-    else
-      rendered
+        if is_nil(rendered) or rendered == "" or rendered == "null" do
+          bounded_compact(payload)
+        else
+          rendered
+        end
+
+      question ->
+        question
+    end
+  end
+
+  # An `ask_user` question carries none of the keys above — no tool call, no command, no
+  # text — so the row would compact the whole payload and read as JSON. Its own words are
+  # what the row is for, joined the way the card joins them
+  # (`Ouroboros.Web.Transcript.Approval.question_text/1`, `tui/src/model/transcript.rs`).
+  #
+  # A plan exit is deliberately not folded in here: its `question` is four lines naming the
+  # consequence of each answer, which belongs in the card and not in a one-line row.
+  defp question_subject(payload) do
+    if text(payload, ["kind"]) == "question" do
+      case {text(payload, ["header"]), text(payload, ["question"])} do
+        {nil, nil} ->
+          nil
+
+        {header, nil} ->
+          header
+
+        {nil, question} ->
+          question
+
+        {header, question} ->
+          bounded_copy("#{header} — #{question}", @text_bytes, @text_truncation)
+      end
     end
   end
 

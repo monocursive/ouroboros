@@ -1062,10 +1062,10 @@ test/support/gateway_golden/
 Do not add a Linux crate tree until Phase 4. Do not copy
 `computer-use-linux/src/server.rs`.
 
-Helper is compiled from the TUI/desktop Cargo workspace (already how
-`ouro` / `ouro-desktop` ship) so one `make desktop-app` embeds it. Not
-an Elixir NIF: crash isolation, TCC identity, and a killable process
-group.
+Helper is compiled from the `tui` Cargo workspace (already how `ouro`
+ships) so one `make computer-use` puts it in `priv/computer-use/` for a
+release to embed. Not an Elixir NIF: crash isolation, TCC identity, and
+a killable process group.
 
 ## 14. Tests (contract, not plumbing)
 
