@@ -70,20 +70,14 @@ defmodule Ouroboros.Web.Live.MachinesLive do
   @poll_interval 3_000
 
   @doc """
-  What the page says when the runtime belongs to no fleet.
+  What the page calls a runtime that belongs to no fleet.
 
   Named here rather than written into the markup so the empty state is a fact with a test,
-  as it is on the desktop (`tui/src/desktop/machines.rs:161`).
+  as it is on the desktop (`tui/src/desktop/machines.rs:161`). Its prose lives in the
+  markup, where the two commands it names can be `<code>` rather than backticks in a
+  string — the difference between a page and a terminal.
   """
   def no_fleet_title, do: "This machine runs on its own"
-
-  def no_fleet_body,
-    do:
-      "The runtime reports no fleet: its directory names only this machine and formation " <>
-        "names no strategy, so there is no roster to show and nothing to add a machine to. " <>
-        "Create one with `ouro fleet create`, or open Machines in the terminal client " <>
-        "(`ouro` → Machines) to be walked through it. This page shows the roster once a " <>
-        "fleet exists."
 
   @doc """
   The sentence that keeps the offline chip from claiming more than it knows.
@@ -488,14 +482,27 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     """
   end
 
-  defp no_fleet(assigns) do
+  @doc """
+  The empty state: a runtime that belongs to no fleet, and no Add button that cannot work.
+
+  Public for the same reason `roster/1` is — whether a machine running the suite is in a
+  fleet depends on what else the suite started, so the branch has to be reachable on its
+  own rather than only through whichever one the host happens to be in.
+  """
+  def no_fleet(assigns) do
     ~H"""
     <section class="ouro-panel">
       <div class="ouro-panel-head">
         <h2>{no_fleet_title()}</h2>
         <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
       </div>
-      <p class="ouro-empty-body">{no_fleet_body()}</p>
+      <p class="ouro-empty-body">
+        The runtime reports no fleet: its directory names only this machine and formation
+        names no strategy, so there is no roster to show and nothing to add a machine to.
+        Create one with <code>ouro fleet create</code>, or open Machines in the terminal
+        client (<code>ouro</code> → Machines) to be walked through it. This page shows the
+        roster once a fleet exists.
+      </p>
     </section>
     """
   end

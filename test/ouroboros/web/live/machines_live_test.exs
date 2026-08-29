@@ -317,18 +317,43 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       assert html =~ "Machines"
     end
 
-    test "a fleetless runtime gets the empty state naming ouro fleet create", %{conn: conn} do
-      # The real `fleet.status` on a suite host: one machine, no formation strategy.
-      {:ok, _view, html} = live(conn, "/machines")
+    test "a fleetless runtime gets the empty state naming ouro fleet create" do
+      # Rendered as a component rather than through the page, because whether the machine
+      # running this suite is in a fleet is not a fixed fact: a full run starts dozens of
+      # distributed nodes, and the cluster directory remembers every one of them. The page
+      # then correctly shows a roster, which is the *other* branch. Both must be reachable.
+      html = render_component(&MachinesLive.no_fleet/1, %{})
 
-      assert html =~ "This machine runs on its own"
-      assert html =~ "ouro fleet create"
-      assert html =~ "Machines"
+      assert html =~ MachinesLive.no_fleet_title()
+      assert html =~ "<code>ouro fleet create</code>"
+      assert html =~ "open Machines in the terminal"
       # No roster, and above all no member list claiming a fleet exists.
       refute html =~ "ouro-members"
+      # And no Add control, which is the whole point of the state.
+      refute html =~ "<form"
+      refute html =~ "<input"
     end
 
-    test "the empty state offers no add control", %{conn: conn} do
+    test "the page shows whichever branch fleet.status actually put it in", %{conn: conn} do
+      # The one assertion that survives any ambient cluster state: the page's verdict is
+      # the runtime's own. `expected > 1 or strategy != :none` is how `fleet.doctor` decides
+      # the same question (`lib/ouroboros/cluster.ex:1771`).
+      fleet = Ouroboros.Cluster.fleet_status()
+      clustered? = fleet.summary.expected > 1 or fleet.formation.strategy != :none
+
+      {:ok, _view, html} = live(conn, "/machines")
+
+      if clustered? do
+        assert html =~ "ouro-members"
+        assert html =~ MachinesLive.offline_footnote()
+        refute html =~ MachinesLive.no_fleet_title()
+      else
+        assert html =~ MachinesLive.no_fleet_title()
+        refute html =~ "ouro-members"
+      end
+    end
+
+    test "no page state offers an add control", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/machines")
 
       refute html =~ ~s(type="submit")
@@ -341,7 +366,7 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
 
       assert html =~ "Adding a machine"
       assert html =~ "Adds run in the terminal, not here"
-      assert html =~ "ouro fleet add user@host"
+      assert html =~ "<code>ouro fleet add user@host</code>"
       refute html =~ "<form"
     end
 
@@ -356,8 +381,12 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       after_click = render_click(view, "doctor")
 
       assert after_click =~ "ouro-report"
-      # The real report, rendered as the runtime wrote it.
-      assert after_click =~ "healthy"
+      # The real report, rendered as the runtime wrote it. Asserted on the headline's own
+      # words and the first check's id rather than on a verdict: whether this machine is
+      # healthy depends on what else the suite started, and the page reports either.
+      assert after_click =~ "warnings"
+      assert after_click =~ "errors"
+      assert after_click =~ "generated"
       assert after_click =~ "distribution"
     end
 
@@ -367,12 +396,14 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       assert render_click(view, "doctor") =~ ~s(<pre class="ouro-report ouro-mono">)
     end
 
-    test "refresh re-reads fleet.status without disturbing anything else", %{conn: conn} do
+    test "refresh re-reads fleet.status and asks the doctor nothing", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/machines")
 
       html = render_click(view, "refresh")
 
-      assert html =~ "This machine runs on its own"
+      assert html =~ "Machines"
+      refute html =~ "ouro-refusal"
+      # Re-reading the roster must not run the doctor: that is the whole of "on demand".
       refute html =~ "ouro-report"
     end
 
