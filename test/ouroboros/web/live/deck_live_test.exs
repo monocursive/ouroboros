@@ -50,10 +50,6 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   @token String.duplicate("t", 40)
   @cookie "_ouroboros_web"
 
-  # How long the deck coalesces text deltas before re-projecting. Waiting a little past it
-  # is what makes a live-event assertion deterministic rather than flaky.
-  @flush 160
-
   # ------------------------------------------------------------------------------------
   # A coordinator, in the registry the runtime actually looks in
   # ------------------------------------------------------------------------------------
@@ -514,8 +510,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
 
       FakePlane.emit(pid, corpus("event_approval_requested_permission", 1, "r1"))
-      Process.sleep(@flush)
-      _ = render(view)
+      flush(view)
 
       assert_receive {:responded, "r1", %{actor: :automation}}
       refute_push_event(view, "needs-you", %{}, 50)
@@ -527,6 +522,34 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   defp poll(view) do
     send(view.pid, :poll)
     render(view)
+  end
+
+  # The coalescing clock, driven the same way. This file used to sleep past the deck's
+  # 80ms window instead, and that flaked under full-suite load: the window opens when the
+  # view *absorbs* the event, so a nap measured from the emit runs out before the timer
+  # was even set whenever the view sits unscheduled for a while first. Driving it needs no
+  # clock at all — `FakePlane.emit/2` is a call the plane answers only after sending to
+  # its subscribers, so the event is queued on the view before emit returns, a :flush
+  # sent here queues behind it, and `render/1` pings the view before reading. Mailbox
+  # order is the whole guarantee. The real timer still fires afterwards; a :flush with
+  # nothing new to draw is the deck's ordinary cadence, not an artifact of the test.
+  defp flush(view) do
+    send(view.pid, :flush)
+    render(view)
+  end
+
+  defp assert_eventually(fun, attempts \\ 200)
+  defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
+
+  defp assert_eventually(fun, attempts) do
+    case fun.() do
+      value when value in [false, nil] ->
+        Process.sleep(10)
+        assert_eventually(fun, attempts - 1)
+
+      value ->
+        value
+    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -573,20 +596,28 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
     test "a live event reaches the transcript after the coalescing window", %{conn: conn} do
       id = session_id()
-      pid = plane(id: id, backlogs: [{:ok, [said(1, "first")]}])
+
+      # Sentinels that embed the session id, because the page is more than the transcript:
+      # the rail beside it lists the node's real stores, and by the time a full-suite run
+      # reaches this file those hold other tests' leftovers — ids like "second-delegation",
+      # objectives like "second objective". A page-wide match on a bare "second" is a match
+      # against all of that (seed 486710 failed exactly there, on the mount refute below).
+      first = "first delta of #{id}"
+      second = "second delta of #{id}"
+      pid = plane(id: id, backlogs: [{:ok, [said(1, first)]}])
 
       {:ok, view, html} = live(conn, "/s/interactive/#{id}")
-      assert html =~ "first"
-      refute html =~ "second"
+      assert html =~ first
+      refute html =~ second
 
-      FakePlane.emit(pid, said(2, "second"))
+      FakePlane.emit(pid, said(2, second))
 
-      # Absorbed immediately, drawn on the next flush. Waiting past the window is what
-      # makes this deterministic; a test that asserted straight away would be asserting
-      # that the coalescing does not exist.
-      Process.sleep(@flush)
-
-      assert render(view) =~ "second"
+      # Absorbed immediately, drawn on the next flush — which the test delivers rather
+      # than waits for. Asserting straight away would be asserting that the coalescing
+      # does not exist; sleeping past the window was a bet that the view absorbed the
+      # event within 80ms of the emit, and the timer only starts at the absorb, so
+      # full-suite load lost it.
+      assert flush(view) =~ second
     end
 
     test "a later event that rewrites an earlier cell rewrites it in place", %{conn: conn} do
@@ -608,8 +639,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         }
       )
 
-      Process.sleep(@flush)
-      asked = render(view)
+      asked = flush(view)
       assert asked =~ "before the ask"
 
       FakePlane.emit(
@@ -620,8 +650,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         }
       )
 
-      Process.sleep(@flush)
-      resolved = render(view)
+      resolved = flush(view)
 
       # The earlier cell changed, the earlier-still one did not, and nothing duplicated.
       assert resolved =~ "before the ask"
@@ -640,14 +669,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       {deltas, rest} = Enum.split(events, 2)
 
       for e <- deltas, do: FakePlane.emit(pid, e)
-      Process.sleep(@flush)
 
-      assert occurrences(render(view), "The answer is 42.") == 1
+      assert occurrences(flush(view), "The answer is 42.") == 1
 
       for e <- rest, do: FakePlane.emit(pid, e)
-      Process.sleep(@flush)
 
-      html = render(view)
+      html = flush(view)
       cells = projected(events)
 
       # The live path must render exactly what one `project/1` pass over the same events
@@ -688,8 +715,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         FakePlane.emit(pid, event(n, :output_text_delta, %{"text" => "chunk#{n} "}))
       end
 
-      Process.sleep(@flush)
-      html = render(view)
+      html = flush(view)
 
       # All twenty deltas accumulated into the one message cell the projection makes of
       # them — which is the projection's rule, and the reason coalescing is safe.
@@ -798,11 +824,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-divider"
 
       GenServer.stop(pid)
-      Process.sleep(@flush)
 
-      html = render(view)
-      assert html =~ "mid-sentence"
-      assert html =~ "ouro-divider"
+      # The divider waits on the :DOWN reaching the view, and no message of this test's
+      # orders that — the one wait here a driven :flush cannot close — so the wait is
+      # bounded on the condition itself rather than on a nap.
+      assert_eventually(fn -> render(view) =~ "ouro-divider" end)
+      assert render(view) =~ "mid-sentence"
     end
   end
 
@@ -884,10 +911,9 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
 
       FakePlane.emit(pid, event(1, :turn_started, %{}))
-      Process.sleep(@flush)
 
       # The button says what will happen before it happens.
-      assert render(view) =~ "Queue"
+      assert flush(view) =~ "Queue"
 
       submit(view, "and also this")
       assert_receive {:sent, :follow_up, _turn_id, "and also this", []}
@@ -903,7 +929,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       FakePlane.emit(pid, event(1, :turn_started, %{}))
       FakePlane.emit(pid, event(2, :turn_completed, %{}))
-      Process.sleep(@flush)
+      flush(view)
 
       submit(view, "next")
       assert_receive {:sent, :message, _turn_id, "next", []}
@@ -999,8 +1025,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "Interrupt"
 
       FakePlane.emit(pid, event(1, :turn_started, %{}))
-      Process.sleep(@flush)
-      assert render(view) =~ "Interrupt"
+      assert flush(view) =~ "Interrupt"
 
       view |> element("button", "Interrupt") |> render_click()
 
@@ -1017,16 +1042,14 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-chip"
 
       FakePlane.emit(pid, event(1, :queue_changed, %{"queued_turns" => 2}))
-      Process.sleep(@flush)
-      assert render(view) =~ "2 queued"
+      assert flush(view) =~ "2 queued"
 
       # The runtime's own count, so it comes back down when the runtime says so rather
       # than when this page thinks a turn was taken. Asserted on the chip's class, because
       # the projection has its own sentence about the queue in the transcript above and
       # the two must not be confused for each other.
       FakePlane.emit(pid, event(2, :queue_changed, %{"queued_turns" => 0}))
-      Process.sleep(@flush)
-      refute render(view) =~ "ouro-chip"
+      refute flush(view) =~ "ouro-chip"
     end
 
     test "a terminal session takes no messages and says so", %{conn: conn} do
@@ -1453,9 +1476,8 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert html =~ "ouro-approval"
 
       FakePlane.emit(pid, answered(2, "r1", "approved"))
-      Process.sleep(@flush)
 
-      refute render(view) =~ "ouro-approval-answers"
+      refute flush(view) =~ "ouro-approval-answers"
     end
   end
 
@@ -1533,7 +1555,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
 
       FakePlane.emit(pid, corpus("event_approval_requested_permission", 1, "r1"))
-      Process.sleep(@flush)
+      flush(view)
 
       assert_receive {:responded, "r1", %{decision: :approve, scope: :once, actor: :automation}}
     end
@@ -1610,7 +1632,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       # answer for it.
       FakePlane.emit(pid, request)
       FakePlane.emit(pid, said(2, "unrelated"))
-      Process.sleep(@flush)
+      flush(view)
 
       refute_receive {:responded, "r1", _response}, 150
     end
@@ -1626,7 +1648,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "Auto-approve is on"
 
       FakePlane.emit(pid, corpus("event_approval_requested_permission", 1, "r1"))
-      Process.sleep(@flush)
+      flush(view)
 
       refute_receive {:responded, _id, _response}, 150
     end
