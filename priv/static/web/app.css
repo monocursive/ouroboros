@@ -1,0 +1,273 @@
+/*
+ * Ouroboros web — design tokens and the little markup W0 has to dress.
+ *
+ * Hand-written, and it stays hand-written: this repo has no JavaScript toolchain and
+ * adding one to serve a single stylesheet would be a second toolchain to keep green.
+ *
+ * The palette is `tui/src/desktop_design.rs` ported to custom properties. Three rules
+ * come across with it and are not decoration:
+ *
+ *   1. --attention-green is *only* ever "a human is needed here". It is not success, it
+ *      is not "done", it is not a checkmark. Everything that finished correctly is ink.
+ *   2. Layers separate by hairline, not by shadow: page, workspace, panel, card, inset.
+ *   3. The primary action is scarce. One filled button per view; everything else is a
+ *      hairline or a plain link.
+ *
+ * Dark is the default because the daemon's other surface is a terminal. Light is a
+ * deliberate choice a viewer makes, so it lives behind an attribute rather than behind a
+ * media query — the browser's system preference does not get to overrule an operator who
+ * picked one.
+ */
+
+:root {
+  /* Layers, back to front. */
+  --page: #121310;
+  --workspace: #161713;
+  --panel: #1d1e1a;
+  --card: #21221e;
+  --inset: #2a2b26;
+
+  /* Separation, weakest to strongest. */
+  --hairline-1: #262722;
+  --hairline-2: #2e2f2a;
+  --border: #33342e;
+  --border-strong: #3a3b35;
+
+  /* Text, most to least important. */
+  --ink: #e8e9e4;
+  --secondary: #a9aca3;
+  --tertiary: #7a7d74;
+
+  /* Semantic tones. Never the action accent; see rule 1 above. */
+  --attention-green: #3db474;
+  --warn-amber: #c29a45;
+  --danger: #c75f55;
+
+  /* The one filled control. */
+  --button-bg: var(--ink);
+  --button-ink: #131411;
+
+  --font-display: "EB Garamond", "Iowan Old Style", "Palatino Linotype", Palatino,
+    "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-ui: "Hanken Grotesk", ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --radius: 4px;
+  --gutter: 1.25rem;
+}
+
+[data-theme="light"] {
+  --page: #e9e9e6;
+  --workspace: #ededea;
+  --panel: #f3f3f0;
+  --card: #f8f8f5;
+  --inset: #e3e3df;
+
+  --hairline-1: #e1e1dd;
+  --hairline-2: #dededa;
+  --border: #d8d8d3;
+  --border-strong: #c9c9c4;
+
+  --ink: #15171a;
+  --secondary: #565a54;
+  --tertiary: #8b8f87;
+
+  --attention-green: #2e9e63;
+  --warn-amber: #a8842f;
+  --danger: #b04a43;
+
+  --button-bg: var(--ink);
+  --button-ink: #f4f4f1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+.ouro-mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+/* The page a request that presented no usable credential gets, and the only thing an
+   unauthenticated stranger can learn. It is centred and quiet on purpose. */
+.ouro-plain {
+  background: var(--page);
+}
+
+.ouro-gate {
+  max-width: 34rem;
+  margin: 12vh auto 0;
+  padding: 2rem var(--gutter);
+  color: var(--secondary);
+}
+
+.ouro-gate h1,
+.ouro-header h1 {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  font-size: 1.75rem;
+  margin: 0 0 0.75rem;
+  color: var(--ink);
+}
+
+.ouro-gate p {
+  margin: 0 0 0.75rem;
+}
+
+.ouro-gate code {
+  background: var(--inset);
+  border-radius: var(--radius);
+  padding: 0.1em 0.35em;
+  color: var(--ink);
+}
+
+.ouro-page {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 3rem var(--gutter) 4rem;
+  background: var(--workspace);
+  min-height: 100vh;
+}
+
+.ouro-header {
+  border-bottom: 1px solid var(--hairline-2);
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.ouro-subhead {
+  margin: 0;
+  color: var(--tertiary);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+  font-size: 0.85rem;
+}
+
+.ouro-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.ouro-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--hairline-1);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.ouro-panel-head h2 {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  font-size: 1.15rem;
+  margin: 0;
+}
+
+/* Rule 3: one of these per view. */
+.ouro-button {
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  background: var(--button-bg);
+  color: var(--button-ink);
+  border: 1px solid var(--button-bg);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.85rem;
+  cursor: pointer;
+}
+
+.ouro-button:hover {
+  background: var(--secondary);
+  border-color: var(--secondary);
+}
+
+.ouro-button:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+.ouro-facts {
+  margin: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--hairline-1);
+  border: 1px solid var(--hairline-1);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ouro-fact {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: baseline;
+  background: var(--card);
+  padding: 0.6rem 0.85rem;
+}
+
+.ouro-fact dt {
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
+.ouro-fact dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* A refusal is a fact, not an alarm. Amber says "read this"; it does not shout. */
+.ouro-refusal {
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  background: var(--inset);
+  border-left: 2px solid var(--warn-amber);
+  border-radius: var(--radius);
+  color: var(--secondary);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+/* Rule 1, the only place it is spent: a view that has lost its socket needs a person. */
+.ouro-disconnected .ouro-page {
+  box-shadow: inset 3px 0 0 var(--attention-green);
+}
+
+/* LiveView's own state classes. Fading is what the framework does while a patch is in
+   flight; the error/exit classes mean the socket is gone. */
+.phx-click-loading,
+.phx-submit-loading,
+.phx-change-loading {
+  opacity: 0.6;
+  transition: opacity 120ms ease-out;
+}
+
+.phx-connected .ouro-page {
+  box-shadow: none;
+}

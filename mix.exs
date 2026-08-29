@@ -20,8 +20,59 @@ defmodule Ouroboros.MixProject do
         flags: [:error_handling],
         ignore_warnings: "dialyzer.ignore-warnings"
       ],
+      aliases: aliases(),
       releases: releases()
     ]
+  end
+
+  # `web.assets` hangs off `compile` rather than off a build step of its own because the
+  # two consumers that must never miss it are `mix compile` in a development loop and
+  # `mix release`, which compiles on its way to `:assemble`. One hook covers both, and a
+  # release then picks up `priv/static/web/` with the same verbatim `priv/` copy it has
+  # always done — no new packaging mechanism, and still no Node.
+  defp aliases do
+    [
+      "web.assets": &copy_web_assets/1,
+      compile: ["web.assets", "compile"]
+    ]
+  end
+
+  # The JavaScript `Ouroboros.Web` serves is the prebuilt bundle that already shipped
+  # inside each dependency. It is copied, never built: this repo has no JavaScript
+  # toolchain, and the alternative to a copy is esbuild, a package.json, and a second
+  # toolchain to keep green for two files nobody edits.
+  #
+  # They are copied rather than committed because a vendored copy of a dependency's asset
+  # is a file that silently disagrees with the dependency after the next `mix deps.get`.
+  @web_assets [
+    {"deps/phoenix/priv/static/phoenix.min.js", "priv/static/web/phoenix.min.js"},
+    {"deps/phoenix_live_view/priv/static/phoenix_live_view.min.js",
+     "priv/static/web/phoenix_live_view.min.js"}
+  ]
+
+  defp copy_web_assets(_args) do
+    Enum.each(@web_assets, fn {source, destination} ->
+      cond do
+        not File.regular?(source) ->
+          # Reachable only before `mix deps.get`, where every other task fails too. Say
+          # which file is missing rather than letting the browser find out.
+          Mix.raise("web.assets: #{source} is missing; run `mix deps.get` first")
+
+        stale?(source, destination) ->
+          File.mkdir_p!(Path.dirname(destination))
+          File.cp!(source, destination)
+
+        true ->
+          :ok
+      end
+    end)
+  end
+
+  defp stale?(source, destination) do
+    case {File.stat(source, time: :posix), File.stat(destination, time: :posix)} do
+      {{:ok, from}, {:ok, to}} -> from.mtime > to.mtime or from.size != to.size
+      _missing -> true
+    end
   end
 
   # One artifact for every node role. A `:builder` and a `:core` node must run the same
@@ -75,6 +126,21 @@ defmodule Ouroboros.MixProject do
       # nodes found each other; this is the discovery half, and it stays off unless
       # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.
       {:libcluster, "~> 3.5"},
+      # `Ouroboros.Web` — the LiveView operator surface (docs/WEB.md). Four packages and
+      # nothing else: there is no Node, no esbuild, no Tailwind, and no asset pipeline in
+      # this repo, and adding one to serve a handful of hand-written files would be a
+      # second toolchain to keep green for zero user-visible gain. The JavaScript these
+      # deps already ship prebuilt is copied into `priv/static/web/` by the `web.assets`
+      # alias below; the CSS is hand-authored.
+      #
+      # `phoenix_pubsub` arrives transitively and is already optional-compatible with
+      # `jido_signal`, so it needs no declaration of its own.
+      {:phoenix, "~> 1.8"},
+      {:phoenix_live_view, "~> 1.2"},
+      {:phoenix_html, "~> 4.3"},
+      # Bandit rather than Cowboy: it is pure Elixir, so the web surface adds nothing to
+      # the release's native build graph, which the Rust dist triples already pay for.
+      {:bandit, "~> 1.12"},
       # Jido.Harness 2.0 is not on Hex yet. Pin the reviewed upstream commit so
       # provider protocol changes cannot enter the runtime implicitly.
       {:jido_harness,

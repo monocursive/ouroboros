@@ -47,3 +47,10 @@ ouroboros-*.tar
 
 # Built Computer Use helper; never a source artifact.
 /priv/computer-use/
+
+# The two JavaScript bundles `mix web.assets` copies out of the dependencies on every
+# compile. `app.css` and `app.js` beside them are hand-written source and are kept: the
+# rule is that a file which would silently disagree with a dependency after the next
+# `mix deps.get` does not live in the repository.
+/priv/static/web/phoenix.min.js
+/priv/static/web/phoenix_live_view.min.js
