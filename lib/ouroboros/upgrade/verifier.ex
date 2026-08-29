@@ -56,6 +56,9 @@ defmodule Ouroboros.Upgrade.Verifier do
     "Elixir.Ouroboros.Storage.",
     "Elixir.Ouroboros.Control.",
     "Elixir.Ouroboros.Gateway.",
+    # An operator surface must not be hot-patchable by the thing it operates, and the
+    # browser one carries the token comparison and the session cookie's key.
+    "Elixir.Ouroboros.Web.",
     "Elixir.Ouroboros.Agent.Effects.",
     "Elixir.Ouroboros.Orchestration.",
     "Elixir.Ouroboros.Mesh.",

@@ -232,6 +232,15 @@ defmodule Ouroboros.Application do
     # Use precedes MCP because its pool holds the live per-session last-state map: an MCP
     # subtree crash must not restart it and discard those snapshots. A Desktop supervisor
     # crash may reconnect disposable MCP ports without losing durable session state.
+    #
+    # The web surface is last of all, and it is the second child here a stranger can
+    # reach. Everything the gateway's paragraph above says applies to it unchanged — it
+    # projects what the planes already know, holds nothing they rebuild from, and must be
+    # among the first things to stop — so it goes downstream of even the operator-surface
+    # tail rather than beside the gateway: under `rest_for_one` a crash of a browser
+    # endpoint then restarts nothing at all, which is the strongest form of the same
+    # argument. It reaches the runtime only through the gateway's own method table
+    # (`Ouroboros.Web.Call`), so two transports serve one authorization decision.
     children ++
       [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
       gateway_children() ++
@@ -239,7 +248,7 @@ defmodule Ouroboros.Application do
         Ouroboros.CodeIntel.Supervisor,
         Ouroboros.Provider.Native.Desktop.Supervisor,
         Ouroboros.Provider.Native.Mcp.Supervisor
-      ]
+      ] ++ web_children()
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data
@@ -273,6 +282,17 @@ defmodule Ouroboros.Application do
   defp gateway_children do
     if Ouroboros.Gateway.Config.enabled?() do
       [Ouroboros.Gateway]
+    else
+      []
+    end
+  end
+
+  # The same rule for the same reason: absent configuration means no web surface at all,
+  # not a disabled one, so a test run, a `:builder`, and a `:signer` never acquire an
+  # endpoint — or a bound port, or a published `web.json` — by inheriting a default.
+  defp web_children do
+    if Ouroboros.Web.Config.enabled?() do
+      [Ouroboros.Web]
     else
       []
     end
