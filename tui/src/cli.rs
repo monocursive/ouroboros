@@ -183,6 +183,24 @@ pub enum Command {
         print: bool,
     },
 
+    /// Open this daemon's browser surface (docs/WEB.md).
+    ///
+    /// Starts or adopts a local runtime exactly as the bare command does, reads the port
+    /// the web endpoint published to `web.json`, and turns it and the operator token into
+    /// the one URL that exchanges that token for a session cookie. The link is printed
+    /// whatever happens, because it carries the credential and is the whole of what a
+    /// browser needs.
+    ///
+    /// There is no `--addr` here, deliberately: the endpoint binds loopback and publishes
+    /// its port without its address, so this is a command about the daemon on this
+    /// machine. A remote surface is reached through the proxy in front of it.
+    Web {
+        /// Print the URL and exit instead of also opening a browser. The path for a
+        /// script, a remote shell, and a terminal on a machine with no browser at all.
+        #[arg(long)]
+        print: bool,
+    },
+
     /// Stop the runtime this client started.
     Stop,
 
