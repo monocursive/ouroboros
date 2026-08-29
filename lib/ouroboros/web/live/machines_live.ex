@@ -494,7 +494,9 @@ defmodule Ouroboros.Web.Live.MachinesLive do
       <div class="ouro-member-meta ouro-mono">
         <span :if={@member.host}>{@member.host} · </span>{@member.node}
       </div>
-      <span class={["ouro-chip", "ouro-chip-#{@member.presence}"]}>{@member.presence}</span>
+      <span class={["ouro-member-chip", "ouro-member-chip-#{@member.presence}"]}>
+        {@member.presence}
+      </span>
     </li>
     """
   end

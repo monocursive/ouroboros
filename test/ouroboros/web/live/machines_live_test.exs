@@ -240,7 +240,7 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
           }
         )
 
-      assert html =~ "ouro-chip-connected"
+      assert html =~ "ouro-member-chip-connected"
       assert html =~ "this machine"
       assert html =~ "anvil.example"
       assert html =~ "ouro-anvil@anvil.example"
@@ -258,7 +258,7 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
           }
         )
 
-      assert html =~ "ouro-chip-offline"
+      assert html =~ "ouro-member-chip-offline"
       refute html =~ "this machine"
     end
 
@@ -274,8 +274,8 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
           }
         )
 
-      assert html =~ "ouro-chip-unknown"
-      refute html =~ "ouro-chip-offline"
+      assert html =~ "ouro-member-chip-unknown"
+      refute html =~ "ouro-member-chip-offline"
     end
 
     test "no chip is ever the attention green or the filled-button accent" do
@@ -284,10 +284,10 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       css = File.read!("priv/static/web/app.css")
 
       for chip <- [
-            ".ouro-chip-connected",
-            ".ouro-chip-offline",
-            ".ouro-chip-unknown",
-            ".ouro-chip"
+            ".ouro-member-chip-connected",
+            ".ouro-member-chip-offline",
+            ".ouro-member-chip-unknown",
+            ".ouro-member-chip"
           ] do
         rule = rule_for(css, chip)
 
@@ -297,9 +297,9 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
         refute rule =~ "button-ink", "#{chip} wears the filled-button accent"
       end
 
-      assert rule_for(css, ".ouro-chip-connected") =~ "var(--ink)"
-      assert rule_for(css, ".ouro-chip-offline") =~ "var(--warn-amber)"
-      assert rule_for(css, ".ouro-chip-unknown") =~ "var(--tertiary)"
+      assert rule_for(css, ".ouro-member-chip-connected") =~ "var(--ink)"
+      assert rule_for(css, ".ouro-member-chip-offline") =~ "var(--warn-amber)"
+      assert rule_for(css, ".ouro-member-chip-unknown") =~ "var(--tertiary)"
     end
   end
 
@@ -352,7 +352,7 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       assert html =~ "fleet is unreachable"
       # The chips are still drawn: a refused refresh is not a reason to forget what was
       # known, only a reason to say the page is not current.
-      assert html =~ "ouro-chip-connected"
+      assert html =~ "ouro-member-chip-connected"
     end
   end
 

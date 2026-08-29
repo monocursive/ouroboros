@@ -2067,7 +2067,15 @@ body.phx-loading {
   overflow-wrap: anywhere;
 }
 
-.ouro-chip {
+/* `.ouro-member-chip`, not `.ouro-chip`, and the rename is a bug fix rather than taste.
+   The composer's "3 queued" chip (W4) already owned `.ouro-chip`, and this block sat
+   *after* it in the file — so for as long as this section was reachable, a member chip's
+   small-caps, its larger type and its grid placement would all have landed on the queue
+   count too. Nobody saw it because this section was unreachable: the unterminated rule
+   above swallowed everything from the new-session refusal to the end of the file. Two
+   different things wearing one class name is the actual defect; repairing the stylesheet
+   only made it visible. */
+.ouro-member-chip {
   grid-column: 2;
   grid-row: 1 / span 2;
   justify-self: end;
@@ -2081,16 +2089,16 @@ body.phx-loading {
 }
 
 /* Success is INK, here as everywhere: see rule 1 in this file's header. */
-.ouro-chip-connected {
+.ouro-member-chip-connected {
   color: var(--ink);
   border-color: var(--border-strong);
 }
 
-.ouro-chip-offline {
+.ouro-member-chip-offline {
   color: var(--warn-amber);
 }
 
-.ouro-chip-unknown {
+.ouro-member-chip-unknown {
   color: var(--tertiary);
 }
 

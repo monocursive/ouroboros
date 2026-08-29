@@ -65,7 +65,48 @@ defmodule Ouroboros.Web.StylesheetTest do
       assert rule_for(".ouro-backlink"),
              ".ouro-backlink has no rule; the Machines section is dead"
 
-      assert rule_for(".ouro-chip-connected"), "the Machines chips have no rules"
+      assert rule_for(".ouro-member-chip-connected"), "the Machines chips have no rules"
+    end
+
+    test "no component class is defined by two different sections" do
+      # The second defect the repair above uncovered. `.ouro-chip` was the composer's queue
+      # count (W4) *and* the machines member chip (W7), and because the machines block came
+      # later in the file it would have quietly restyled the queue count — small-caps, a
+      # larger face, a grid placement — the moment the section became reachable. Nobody had
+      # seen it, because the section had never been reachable.
+      #
+      # Sharing a class between two components is a decision; arriving at it by accident, in
+      # two sections written weeks apart, is this bug.
+      #
+      # The unit is the **page section** — the `/* ==== */` banners this file is organised
+      # by — not the individual rule. A class named twice inside one section is a component
+      # being refined by the slice that owns it: `.ouro-composer-input` gets its box in the
+      # focused-pane block and its behaviour in the composer block, and the media query at
+      # the end of the deck restates three layout classes on purpose. All of that is one
+      # author working on one thing. The same class claimed by two *different* sections is
+      # two authors who did not know about each other, which is what happened here.
+      # Split *before* stripping comments — the section banners are comments, and stripping
+      # first leaves one undifferentiated section in which nothing can collide. (Which is
+      # exactly what the first version of this test did, and it passed against a stylesheet
+      # with the collision put back on purpose.)
+      claimed =
+        @css
+        |> String.split(~r/\n(?=\/\* =+)/)
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {section, index} ->
+          ~r/(?:^|\n)\s*(\.[a-z][a-z0-9_-]*)\s*\{/
+          |> Regex.scan(strip_comments(section))
+          |> Enum.map(&{List.last(&1), index})
+        end)
+        |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+        |> Enum.filter(fn {_class, sections} -> Enum.uniq(sections) |> length() > 1 end)
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.sort()
+
+      assert claimed == [],
+             "these classes are claimed by more than one section of the stylesheet, so the " <>
+               "later section silently restyles the earlier one's component: " <>
+               inspect(claimed)
     end
   end
 
