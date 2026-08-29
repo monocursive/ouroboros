@@ -460,7 +460,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           :for={row <- @rows || []}
           value={row.name}
           selected={@chosen == row.name}
-          class={not row.detected? && "ouro-new-dim"}
+          class={if not row.detected?, do: "ouro-new-dim"}
         >
           {row.name}{if row.note, do: " — #{row.note}"}
         </option>
@@ -560,7 +560,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         value={NewSession.choice_value(row.choice)}
         selected={row.choice == @form.model_choice}
       >
-        {row.label}{if row.detail, do: " · #{row.detail}"}
+        <%!-- An em dash, not the middot the detail itself uses to join a name to a
+              context window: one option is one line here, and the two separators keep the
+              row's id readable apart from what the snapshot says about it. --%>
+        {row.label}{if row.detail, do: " — #{row.detail}"}
       </option>
     </select>
 
