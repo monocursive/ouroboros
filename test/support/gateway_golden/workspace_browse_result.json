@@ -1,0 +1,27 @@
+{
+  "id": 13,
+  "jsonrpc": "2.0",
+  "result": {
+    "entries": [
+      {
+        "dir": true,
+        "name": "apps"
+      },
+      {
+        "dir": true,
+        "name": "deps"
+      },
+      {
+        "dir": true,
+        "name": "lib"
+      }
+    ],
+    "parent": "/srv",
+    "path": "/srv/repo",
+    "roots": [
+      "/home/operator",
+      "/srv"
+    ],
+    "truncated": false
+  }
+}

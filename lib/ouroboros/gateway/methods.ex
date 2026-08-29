@@ -83,6 +83,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Permissions
+  alias Ouroboros.Gateway.Methods.Browse
   alias Ouroboros.Gateway.Methods.Encode
   alias Ouroboros.Gateway.Methods.Placement
   alias Ouroboros.Gateway.Methods.Present
@@ -339,6 +340,12 @@ defmodule Ouroboros.Gateway.Methods do
     # own — ten minutes — because the gateway killing the task would leave a ledger entry
     # nobody settles, and `Exec` already stops the command at the same number.
     "workspace.exec" => %{scope: :operate, timeout: @shell_timeout, outcome: :unknown},
+    # D11. One directory listing, so a client that has to choose a workspace before it can
+    # start a session does not need a second channel to the disk. `:operate` even though it
+    # writes nothing and starts nothing: this exists to start sessions, and a listener held
+    # at `read` scope is one that was not trusted to. The ceiling is the default because the
+    # work is one `readdir` and one `lstat` per name on a local filesystem.
+    "workspace.browse" => %{scope: :operate, timeout: @default_timeout},
     # G1. A delegation is a coding task with a parent, started through the workspace's
     # default team. `:operate` because it starts work, and the ceiling is the team's own
     # (`teams.add_worker` and `teams.delegate` each bound themselves at 60s, and this verb
@@ -889,6 +896,14 @@ defmodule Ouroboros.Gateway.Methods do
           "run through `/bin/sh -c` in the session's admitted workspace, on its owner node"},
          @session_node
        ]},
+    "workspace.browse" =>
+      {:closed,
+       [
+         {"path", :optional, :string,
+          "an absolute path inside one of `roots`; the first root by default, and a relative path is refused rather than resolved against the daemon's working directory"}
+       ],
+       "directories only, dotfiles excluded, name-sorted, and bounded at " <>
+         "#{Browse.limit()} entries with `truncated` saying whether the list was cut"},
     "interactive.delegate" =>
       {:closed,
        [
@@ -1728,6 +1743,24 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
+  # D11. The one method that reads the filesystem for its own sake. Everything that decides
+  # what it may read is `Ouroboros.Gateway.Methods.Browse` — the roots, the canonical
+  # containment check, and the rule that a refusal outside them says only that — so this is
+  # the parameter contract and the mapping from its typed refusals onto the wire.
+  def invoke("workspace.browse", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["path"]),
+           {:ok, path} <- fetch_optional_string(params, "path") do
+        case Browse.browse(path) do
+          {:ok, listing} -> {:ok, listing}
+          {:error, refusal} -> browse_refusal(refusal)
+        end
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   # G1. Three optional fields and no more: a delegation inherits this conversation's
   # workspace and provider unless told otherwise, and everything else about the child —
   # its team, its worker, its parent link, its coding node — is the runtime's to decide.
@@ -1966,6 +1999,46 @@ defmodule Ouroboros.Gateway.Methods do
   # this function and never arrive here.
   def invoke(method, _params) when is_binary(method) do
     {:error, code(:method_not_found), "this build does not serve #{method}"}
+  end
+
+  # D11. Six refusals, each named in `data.reason` so a client branches on the reason
+  # rather than on the sentence. The one that carries the rule rather than the mistake is
+  # `outside_roots`: it says the path is outside the directories this node browses and
+  # stops there — not whether it exists, not what it resolved to, not which root it was
+  # nearest. `roots` travels with it because a client that has to explain the refusal
+  # needs the surface it was held to, and those paths are the same ones a successful
+  # listing already hands back.
+  defp browse_refusal({:no_browse_roots, _detail}) do
+    {:error, code(:unavailable),
+     "this node browses no directories: $HOME is unset and :workspace_allowed_roots " <>
+       "(OUROBOROS_WORKSPACE_ROOTS) names none that resolve to one",
+     %{"reason" => "no_browse_roots"}}
+  end
+
+  defp browse_refusal({:relative_path, _detail}) do
+    {:error, code(:invalid_params),
+     "params.path must be an absolute path; this method resolves nothing against the " <>
+       "daemon's working directory", %{"reason" => "relative_path"}}
+  end
+
+  defp browse_refusal({:outside_roots, %{roots: roots}}) do
+    {:error, code(:invalid_params), "params.path is outside every directory this node browses",
+     %{"reason" => "outside_roots", "roots" => roots}}
+  end
+
+  defp browse_refusal({:no_such_directory, _detail}) do
+    {:error, code(:not_found), "no directory at that path on this node",
+     %{"reason" => "no_such_directory"}}
+  end
+
+  defp browse_refusal({:not_a_directory, _detail}) do
+    {:error, code(:invalid_params), "params.path does not name a directory",
+     %{"reason" => "not_a_directory"}}
+  end
+
+  defp browse_refusal({:unreadable, %{detail: detail}}) do
+    {:error, code(:upstream_error), "that directory could not be resolved or read",
+     %{"reason" => "unreadable", "detail" => detail}}
   end
 
   defp signing_decisions(signing_node) do

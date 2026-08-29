@@ -132,6 +132,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"coding_event_detail_result", coding_event_detail_result()},
       {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"mcp_list_result", mcp_list_result()},
+      {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
@@ -1093,6 +1094,32 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           detail: "`url` names an HTTP/SSE server; this client speaks stdio only"
         }
       ]
+    })
+  end
+
+  # D11. One directory listing, from literal paths rather than from a walk of whatever
+  # machine runs this task — a fixture that read a real filesystem would differ on every
+  # one of them, and what a second implementation has to agree about is the shape: an
+  # absolute `path`, a `parent` that is `null` at a root boundary and an absolute path
+  # everywhere else, the `roots` the answer was held to, entry rows that are directories
+  # and say so, and `truncated`.
+  #
+  # This is the ordinary answer, so `truncated` is `false` and the entry list is short.
+  # Pinning the cut here would mean either five hundred rows nobody reviews or three rows
+  # beside a flag claiming five hundred were dropped, which is a frame this build cannot
+  # produce; the cut itself is asserted where it is cheap and real — against a directory
+  # the test makes — in `Ouroboros.Gateway.WorkspaceBrowseTest`.
+  defp workspace_browse_result do
+    Conn.result_frame(13, %{
+      "path" => "/srv/repo",
+      "parent" => "/srv",
+      "roots" => ["/home/operator", "/srv"],
+      "entries" => [
+        %{"name" => "apps", "dir" => true},
+        %{"name" => "deps", "dir" => true},
+        %{"name" => "lib", "dir" => true}
+      ],
+      "truncated" => false
     })
   end
 
