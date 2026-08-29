@@ -1989,8 +1989,11 @@ defmodule Ouroboros.Web.Presentation do
   defp escape(<<0x0C, rest::binary>>, acc), do: escape(rest, acc <> "\\f")
   defp escape(<<0x0D, rest::binary>>, acc), do: escape(rest, acc <> "\\r")
 
+  # Lowercase, because `serde_json`'s escape table is `b"0123456789abcdef"`
+  # (`serde_json/src/ser.rs:1786`) and a golden fixture compares these bytes.
   defp escape(<<byte, rest::binary>>, acc) when byte < 0x20 do
-    escape(rest, acc <> "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0"))
+    hex = byte |> Integer.to_string(16) |> String.downcase(:ascii) |> String.pad_leading(4, "0")
+    escape(rest, acc <> "\\u" <> hex)
   end
 
   defp escape(<<byte, rest::binary>>, acc), do: escape(rest, acc <> <<byte>>)

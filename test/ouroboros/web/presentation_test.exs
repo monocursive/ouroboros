@@ -812,6 +812,13 @@ defmodule Ouroboros.Web.PresentationTest do
       assert Presentation.compact(%{"k" => control}) ==
                ~S({"k":"a\nb\tc\"d\\e\u0001"})
     end
+
+    test "a hex escape is lowercase, the way serde_json writes one" do
+      # `serde_json`'s escape table is `b"0123456789abcdef"`
+      # (`serde_json/src/ser.rs:1786`), and a golden fixture compares these bytes.
+      assert Presentation.compact(%{"k" => <<0x1F>>}) == ~S({"k":"\u001f"})
+      assert Presentation.compact(%{"k" => <<0x0B>>}) == ~S({"k":"\u000b"})
+    end
   end
 
   describe "payload key types" do

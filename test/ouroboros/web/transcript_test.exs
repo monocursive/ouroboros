@@ -1414,6 +1414,24 @@ defmodule Ouroboros.Web.TranscriptTest do
                })
     end
 
+    test "a read window this surface cannot place says the path, not a range it made up" do
+      # A limit and an end with no start matches none of the four arms
+      # (`tui/src/ui/transcript_cells.rs:3931-3939`), so the fallback is the bare path.
+      assert %{subject: "lib/a.ex"} =
+               Tools.summarise(%Cell.Tool{
+                 name: "Read",
+                 input: %{"path" => "lib/a.ex", "limit" => 20, "end_line" => 90}
+               })
+    end
+
+    test "a read window key that is present but unreadable is not looked past" do
+      assert %{subject: "lib/a.ex"} =
+               Tools.summarise(%Cell.Tool{
+                 name: "Read",
+                 input: %{"path" => "lib/a.ex", "offset" => %{"nested" => 1}, "line" => 12}
+               })
+    end
+
     test "an edit counts only from the two strings the call actually carried" do
       assert %{verb: "Edit", subject: "lib/a.ex (+2 −1)"} =
                Tools.summarise(%Cell.Tool{
@@ -1424,6 +1442,30 @@ defmodule Ouroboros.Web.TranscriptTest do
       # An edit tool that describes its change without carrying it gets no counts.
       assert %{subject: "lib/a.ex"} =
                Tools.summarise(%Cell.Tool{name: "Edit", input: %{"path" => "lib/a.ex"}})
+    end
+
+    test "an edit whose first anchor key is present but unusable counts nothing" do
+      # The Rust chains `.or_else` on key *presence* and converts the winner once
+      # (`tui/src/ui/transcript_cells.rs:3948-3957`), so a present-but-unreadable
+      # `old_string` ends the search rather than deferring to `oldText`. Looking past it
+      # would print a count from a field the call did not use for this edit.
+      assert %{subject: "lib/a.ex"} =
+               Tools.summarise(%Cell.Tool{
+                 name: "Edit",
+                 input: %{
+                   "path" => "lib/a.ex",
+                   "old_string" => 42,
+                   "oldText" => "a\nb",
+                   "new_string" => "c"
+                 }
+               })
+
+      # An absent first key still defers to the second.
+      assert %{subject: "lib/a.ex (+1 −2)"} =
+               Tools.summarise(%Cell.Tool{
+                 name: "Edit",
+                 input: %{"path" => "lib/a.ex", "oldText" => "a\nb", "newText" => "c"}
+               })
     end
 
     test "a_command_states_the_exit_code_a_provider_sent_and_says_failed_when_only_is_error_did" do

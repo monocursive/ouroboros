@@ -246,11 +246,15 @@ defmodule Ouroboros.Web.Transcript.Tools do
         limit = read_number(input, ["limit", "count", "num_lines", "length"])
         last = read_number(input, ["end_line", "endLine", "to"])
 
+        # The five arms of `match (offset, limit, end)`, in order. The fourth requires
+        # `end` to be absent as well: a call that named a limit *and* an end but no start
+        # described a window this surface cannot place, and it says the path rather than
+        # a range it made up (`tui/src/ui/transcript_cells.rs:3931-3939`).
         cond do
           offset && last -> "#{path}:#{offset}-#{last}"
           offset && limit && limit > 0 -> "#{path}:#{offset}-#{offset + limit - 1}"
           offset -> "#{path}:#{offset}"
-          limit -> "#{path}:1-#{limit}"
+          limit && is_nil(last) -> "#{path}:1-#{limit}"
           true -> path
         end
     end
@@ -292,16 +296,18 @@ defmodule Ouroboros.Web.Transcript.Tools do
   defp count_lines(""), do: 0
   defp count_lines(text), do: Text.line_count(text)
 
-  defp first_leaf(input, keys) when is_map(input) do
-    Enum.find_value(keys, fn key ->
-      case Map.fetch(input, key) do
-        {:ok, value} -> Presentation.leaf_text(value)
-        :error -> nil
-      end
-    end)
+  # The first of these keys the map *holds*, read once.
+  #
+  # `.or_else(…).and_then(leaf_text)` chains on key presence and converts the winner a
+  # single time (`tui/src/ui/transcript_cells.rs:3948-3957`), so a present `old_string`
+  # that is a number ends the search rather than deferring to `oldText`. Deliberately not
+  # `field/2`'s policy: this is reading a named field, not choosing a label.
+  defp first_leaf(input, keys) do
+    case Presentation.first_value(input, keys) do
+      {:ok, value} -> Presentation.leaf_text(value)
+      :error -> nil
+    end
   end
-
-  defp first_leaf(_input, _keys), do: nil
 
   # `"needle" in lib/`, in the shape Codex and Claude Code both print.
   defp grep_subject(input) do

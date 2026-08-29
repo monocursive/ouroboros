@@ -384,7 +384,7 @@ defmodule Ouroboros.Web.Transcript.Diff do
         section = String.trim(binary_part(rest, close + 2, byte_size(rest) - close - 2))
 
         ranges
-        |> String.split(~r/\s+/, trim: true)
+        |> String.split(~r/\s+/u, trim: true)
         |> Enum.reduce_while({1, 1}, fn token, {old_start, new_start} ->
           case hunk_range(token) do
             {?-, start} -> {:cont, {start, new_start}}
@@ -452,7 +452,7 @@ defmodule Ouroboros.Web.Transcript.Diff do
          strip_prefix_path(String.trim_leading(tail))}
 
       :nomatch ->
-        case String.split(rest, ~r/\s+/, trim: true) do
+        case String.split(rest, ~r/\s+/u, trim: true) do
           [old, new | _rest] -> {strip_prefix_path(old), strip_prefix_path(new)}
           [old] -> {strip_prefix_path(old), nil}
           [] -> {nil, nil}
