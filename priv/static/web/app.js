@@ -60,9 +60,67 @@
     }
   };
 
+  // Enter sends, Shift-Enter is a new line, and the box grows a little as it fills.
+  //
+  // A textarea rather than an input because a message is not a search box, and Enter is
+  // bound here rather than through `phx-keydown` because a round trip per keystroke to
+  // decide whether a key was a newline would make typing feel like the network.
+  //
+  // The submit goes through the form so LiveView's own `phx-submit` path runs — including
+  // `phx-disable-with`, which is the one-in-flight interlock a person can see. While that
+  // class is on the form the key does nothing, so holding Enter cannot queue a second
+  // send behind the first.
+  var Composer = {
+    // Tall enough for a paragraph, short enough that the transcript stays the page.
+    maxHeight: 200,
+
+    mounted: function () {
+      this.onKeyDown = function (event) {
+        if (event.key !== "Enter" || event.shiftKey || event.altKey || event.metaKey) return;
+        // An IME composing a character sends Enter to commit it; that Enter is not a send.
+        if (event.isComposing || event.keyCode === 229) return;
+
+        var form = this.el.form;
+        if (!form || form.classList.contains("phx-submit-loading")) return;
+        if (this.el.value.trim() === "") return;
+
+        event.preventDefault();
+
+        if (typeof form.requestSubmit === "function") {
+          form.requestSubmit();
+        } else {
+          form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        }
+      }.bind(this);
+
+      this.onInput = this.autosize.bind(this);
+
+      this.el.addEventListener("keydown", this.onKeyDown);
+      this.el.addEventListener("input", this.onInput);
+      this.autosize();
+    },
+
+    // The server owns the draft, so a send that cleared it or a refusal that handed it
+    // back both land here and the box has to follow.
+    updated: function () {
+      this.autosize();
+    },
+
+    destroyed: function () {
+      this.el.removeEventListener("keydown", this.onKeyDown);
+      this.el.removeEventListener("input", this.onInput);
+    },
+
+    autosize: function () {
+      var el = this.el;
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, this.maxHeight) + "px";
+    }
+  };
+
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
-    hooks: { ScrollPin: ScrollPin }
+    hooks: { ScrollPin: ScrollPin, Composer: Composer }
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the
