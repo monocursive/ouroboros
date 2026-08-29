@@ -450,8 +450,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
        "the plan-exit question, with the three answers in the runtime's own words", :interactive,
        134, :approval_requested, plan_exit_payload(), request_id: "req-plan-exit-000000000001"},
       {"event_approval_requested_sandbox_escalation",
-       "a re-run outside the sandbox, whose `suggested_rule` is a map rather than the " <>
-         "string a client renders", :interactive, 135, :approval_requested,
+       "a re-run outside the sandbox, carrying the C1 pattern its remember row would " <>
+         "save — the shape every `suggested_rule` has, on the path where it matters most",
+       :interactive, 135, :approval_requested,
        %{
          "kind" => "sandbox_escalation",
          "tool_call" => %{
@@ -461,7 +462,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          },
          "paths" => ["/srv/repo/target"],
          "reason" => "the command wrote outside the workspace and the sandbox stopped it",
-         "suggested_rule" => %{"tool" => "bash", "command_prefix" => "cargo"}
+         "suggested_rule" => "Bash(cargo build *)"
        }, request_id: "req-escalation-00000000001"},
       {"event_approval_requested_subagent",
        "a child agent's own permission, relayed whole with one key naming the asker and " <>

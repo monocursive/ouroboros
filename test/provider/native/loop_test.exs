@@ -424,10 +424,10 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert ask.payload["tool_call"]["name"] == "write"
       assert ask.payload["tool_call"]["cwd"] == context.workspace
 
-      assert ask.payload["suggested_rule"] == %{
-               "tool" => "write",
-               "paths" => ask.payload["paths"]
-             }
+      # The engine's own pattern, not a shape of one: the rule a remember row would save
+      # has to be something `permissions.add` will parse.
+      assert ask.payload["suggested_rule"] ==
+               "Edit(#{Path.dirname(hd(ask.payload["paths"]))}/**)"
 
       # Either the durable engine's "no rule matched" or, on a node without one, the
       # provider's own "no engine" — both are an honest ask, never an allow.
@@ -536,7 +536,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
       assert ask.payload["kind"] == "command"
       assert ask.payload["tool_call"]["command"] == "rm -rf /"
-      assert ask.payload["suggested_rule"]["command_prefix"] == "rm"
+      assert ask.payload["suggested_rule"] == "Bash(rm *)"
 
       send(
         pid,

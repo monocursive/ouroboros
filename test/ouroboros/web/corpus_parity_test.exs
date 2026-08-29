@@ -705,12 +705,13 @@ defmodule Ouroboros.Web.CorpusParityTest do
              "shown verbatim: it is the only place the consequences of each answer are stated"
     end
 
-    # Mirrors `a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line`. The
-    # escalation asks the same question as an ordinary command approval, which is what
-    # keeps a client that never learned the kind useful. Its `suggested_rule` is a map
-    # rather than a pattern, so there is no rule line to draw — and inventing one from the
-    # map would claim a rule nobody wrote.
-    test "a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line" do
+    # Mirrors `a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it`.
+    # The escalation asks the same question as an ordinary command approval, which is what
+    # keeps a client that never learned the kind useful. Its `suggested_rule` is the
+    # engine's own pattern — the grammar `permissions.add` validates against and the only
+    # thing a remember row can save — and not the shape-of-a-rule map the native loop used
+    # to send, which no client could render and no rule could be built from.
+    test "a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it" do
       request = approval("event_approval_requested_sandbox_escalation")
       detail = Approval.detail(request)
 
@@ -721,7 +722,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.reason ==
                "the command wrote outside the workspace and the sandbox stopped it"
 
-      assert detail.suggested_rule == nil
+      assert detail.suggested_rule == "Bash(cargo build *)"
 
       assert Approval.subject(request) ==
                "cargo build --release — the command wrote outside the workspace and the sandbox " <>

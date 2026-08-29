@@ -948,11 +948,12 @@ fn a_plan_exit_carries_its_own_heading_question_steps_and_three_answers() {
 }
 
 /// The escalation asks the same question as an ordinary command approval, which is what
-/// keeps a client that never learned the kind useful. Its `suggested_rule` is a map rather
-/// than a pattern, so there is no rule line to draw — and inventing one from the map would
-/// claim a rule nobody wrote.
+/// keeps a client that never learned the kind useful. Its `suggested_rule` is the engine's
+/// own pattern — the grammar `permissions.add` validates against and the only thing a
+/// remember row can save — and not the shape-of-a-rule map the native loop used to send,
+/// which no client could render and no rule could be built from.
 #[test]
-fn a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line() {
+fn a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it() {
     let request = approval("event_approval_requested_sandbox_escalation");
     let detail = request.detail();
 
@@ -963,7 +964,10 @@ fn a_sandbox_escalation_reads_as_a_command_and_offers_no_rule_line() {
         detail.reason.as_deref(),
         Some("the command wrote outside the workspace and the sandbox stopped it")
     );
-    assert_eq!(detail.suggested_rule, None);
+    assert_eq!(
+        detail.suggested_rule.as_deref(),
+        Some("Bash(cargo build *)")
+    );
 
     assert_eq!(
         request.subject(),

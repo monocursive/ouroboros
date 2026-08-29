@@ -183,10 +183,13 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert ask.payload["reason"] =~ "allows writes only under"
       assert ask.payload["reason"] =~ context.workspace
 
-      assert ask.payload["suggested_rule"] == %{
-               "tool" => "bash",
-               "command_prefix" => "dir=$(printf"
-             }
+      # This is the card where "don't ask again" matters most, and it used to carry
+      # `%{"command_prefix" => "dir=$(printf"}` — a shape no client could draw, from a
+      # token that was never a rule. It now carries what `permissions.add` would take.
+      rule = ask.payload["suggested_rule"]
+
+      assert is_binary(rule)
+      assert {:ok, _pattern} = Ouroboros.Control.Permissions.Pattern.parse(rule)
 
       assert is_binary(ask.request_id)
 
