@@ -61,6 +61,15 @@ make ouro
 ./tui/target/release/ouro
 ```
 
+The same runtime also serves a browser surface on loopback. `ouro web` starts or adopts a
+daemon, then opens the one link that exchanges the operator token for a session cookie;
+`--print` gives you the URL without opening anything, for a machine with no browser or a
+shell on the other end of `ssh -L`.
+
+```sh
+./tui/target/release/ouro web
+```
+
 Use the `ouro` executable as the lifecycle entrypoint. Its embedded release relies on the
 same native executable for exact process-incarnation checks and crash-releasing recovery
 locks. A bare extracted `bin/ouroboros start` does not carry that helper and deliberately
@@ -77,6 +86,7 @@ make daemon          # the dev runtime, headless, in its isolated ouroboros-dev 
 make daemon-restart  # recompile, then swap the runtime onto the new code
 make tui             # the terminal client, attached to the checkout runtime
 make gui             # the macOS desktop app, (re)launched against the checkout
+make web             # the checkout runtime's browser surface, opened in a browser
 make stop            # everything down, stray daemons included
 make reset           # stop the daemon, then empty the dev data dir (oauth.json kept)
 make logs            # follow the dev runtime's log

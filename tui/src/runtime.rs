@@ -74,6 +74,11 @@ pub mod embed;
 /// What the gateway publishes after it binds.
 pub const PUBLICATION_FILE: &str = "gateway.json";
 
+/// What the browser surface publishes after *its* endpoint binds (docs/WEB.md D5). Same
+/// directory, same 0600 write discipline, deliberately the same shape as `gateway.json` —
+/// minus the one field this client would most like it to carry; see [`WebPublication`].
+pub const WEB_PUBLICATION_FILE: &str = "web.json";
+
 /// Where a spawner leaves the token it generated. The gateway is told the path through
 /// `OUROBOROS_GATEWAY_TOKEN_FILE` and publishes neither the path nor the secret, so this
 /// name is a convention between `ouro daemon` and `ouro attach`, not a protocol fact.
@@ -181,6 +186,10 @@ impl Paths {
 
     pub fn publication(&self) -> PathBuf {
         self.data_dir.join(PUBLICATION_FILE)
+    }
+
+    pub fn web_publication(&self) -> PathBuf {
+        self.data_dir.join(WEB_PUBLICATION_FILE)
     }
 
     pub fn token_file(&self) -> PathBuf {
@@ -465,6 +474,43 @@ pub struct Publication {
     pub scope: String,
 }
 
+/// `web.json`, decoded tolerantly for the reason `gateway.json` is: a newer endpoint may
+/// publish more.
+///
+/// ## Staleness here is weaker than the gateway's, knowingly
+///
+/// [`Publication`] carries `birth`, the exact kernel incarnation, so a recycled PID cannot
+/// make a dead runtime look live. This document carries no such field —
+/// `Ouroboros.Web.Publication.document/3` writes `port`, `protocol`, `node`, `pid`, and
+/// `scope`, plus `token_file` when a file supplied the token, and nothing else — so
+/// [`web_publication_is_live`] can ask only whether *some* process holds that PID today.
+/// Between a killed daemon and its PID being reused, this client would read a stale
+/// publication as live and name a port nobody is listening on.
+///
+/// That is survivable because of what this record is used for and nothing more: `ouro web`
+/// builds a link and hands it to a browser, which either loads a page or does not. Nothing
+/// reached through here signals a process, removes a file, or authorizes anything. The
+/// checks that do — `ouro stop`, spawn-lock recovery, runtime ownership — read
+/// `gateway.json` or `runtime.owner`, both of which carry `birth`. Closing the gap means
+/// adding `birth` to the document the daemon writes; until that happens this paragraph is
+/// the honest statement of it, not a claim that PID liveness is enough in general.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebPublication {
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: u32,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub pid: i32,
+    #[serde(default)]
+    pub scope: String,
+    /// The 0600 file holding the operator token, named rather than embedded. Absent
+    /// exactly when no file supplied that token, which leaves nothing to point at.
+    #[serde(default)]
+    pub token_file: Option<String>,
+}
+
 /// The durable-directory owner written before any core runtime journal is opened.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeOwner {
@@ -716,6 +762,48 @@ pub fn read_owned_publication(data_dir: &Path) -> Result<Option<Publication>> {
 pub fn read_live_publication(data_dir: &Path) -> Result<Option<Publication>> {
     match read_owned_publication(data_dir)? {
         Some(publication) if publication_is_live(&publication)? => Ok(Some(publication)),
+        Some(_) | None => Ok(None),
+    }
+}
+
+/// PID liveness alone. There is no incarnation in `web.json` to check it against, which is
+/// the whole of what [`WebPublication`] documents and why this returns a plain `bool`
+/// where [`publication_is_live`] returns a `Result`: nothing here can fail, because
+/// nothing here is proved.
+pub fn web_publication_is_live(publication: &WebPublication) -> bool {
+    pid_alive(publication.pid)
+}
+
+/// Reads `web.json`, or `None` when no endpoint has written one.
+///
+/// Held to the same file discipline as [`read_publication`], through the same reader: a
+/// regular 0600 file owned by this uid, opened without following its final component, and
+/// bounded before a byte is allocated. The daemon writes it that way
+/// (`Ouroboros.Web.Publication`), so anything else here is a file this client should
+/// refuse rather than build a URL from.
+pub fn read_web_publication(data_dir: &Path) -> Result<Option<WebPublication>> {
+    ensure_private_data_dir(data_dir)?;
+    let path = data_dir.join(WEB_PUBLICATION_FILE);
+    let Some((contents, _identity)) =
+        read_private_file(&path, "web publication", PRIVATE_MARKER_MAX_BYTES)?
+    else {
+        return Ok(None);
+    };
+
+    let publication: WebPublication = serde_json::from_slice(&contents)
+        .with_context(|| format!("{} is not a web publication", path.display()))?;
+    if publication.pid <= 0 {
+        bail!("{} must contain a positive pid", path.display());
+    }
+    Ok(Some(publication))
+}
+
+/// The same read, with a publication whose PID is gone reported as absent rather than as a
+/// port. A malformed or unreadable file stays an error: that is a fact worth saying, not a
+/// reason to report the surface as missing.
+pub fn read_live_web_publication(data_dir: &Path) -> Result<Option<WebPublication>> {
+    match read_web_publication(data_dir)? {
+        Some(publication) if web_publication_is_live(&publication) => Ok(Some(publication)),
         Some(_) | None => Ok(None),
     }
 }
@@ -1657,7 +1745,21 @@ pub fn spawn_env(
 
     let mut env = vec![
         ("OUROBOROS_GATEWAY".to_string(), "1".to_string()),
+        // docs/WEB.md D5: wherever the gateway is on, the browser surface is on. It has to
+        // be said here rather than left to `config/runtime.exs`, because the line above is
+        // what takes that file out of its defaulted single-machine branch — the branch
+        // that would otherwise have enabled the web surface on its own — so a daemon this
+        // client spawns and did not tell would serve nothing to a browser. Same risk class
+        // answered the same way: loopback, and the one operator token this directory
+        // already has. Like every other value in this list it overrides a caller's, so the
+        // documented `OUROBOROS_WEB=0` opt-out belongs to a daemon an operator starts
+        // themselves, not to one `ouro` starts for them.
+        ("OUROBOROS_WEB".to_string(), "1".to_string()),
         ("OUROBOROS_GATEWAY_SCOPE".to_string(), "operate".to_string()),
+        // Stated for the same reason the line above it is: a daemon `ouro` spawned is the
+        // operator's own, and a read-scope browser surface would refuse every approve
+        // button while the terminal beside it operates the same sessions.
+        ("OUROBOROS_WEB_SCOPE".to_string(), "operate".to_string()),
         (
             "OUROBOROS_GATEWAY_ALLOW_SHUTDOWN".to_string(),
             "1".to_string(),
@@ -3466,6 +3568,173 @@ mod tests {
         for dir in [broad, linked, oversized, malformed_birth] {
             fs::remove_dir_all(dir).ok();
         }
+    }
+
+    #[test]
+    fn a_web_publication_decodes_with_and_without_a_token_file() {
+        let full = scratch("web-publication-full");
+        write_private(
+            &full.join(WEB_PUBLICATION_FILE),
+            br#"{"port":4321,"protocol":1,"node":"nonode@nohost","pid":42,"scope":"operate","token_file":"/data/gateway.token","future":true}"#,
+        );
+
+        let publication = read_web_publication(&full)
+            .expect("readable")
+            .expect("present");
+        assert_eq!(publication.port, 4321);
+        assert_eq!(publication.protocol, 1);
+        assert_eq!(publication.pid, 42);
+        assert_eq!(publication.scope, "operate");
+        assert_eq!(
+            publication.token_file.as_deref(),
+            Some("/data/gateway.token")
+        );
+
+        // The endpoint omits the key entirely when no file supplied its token, and a
+        // client that required one would refuse a surface that is running fine.
+        let minimal = scratch("web-publication-minimal");
+        write_private(
+            &minimal.join(WEB_PUBLICATION_FILE),
+            br#"{"port":4321,"pid":42}"#,
+        );
+
+        let publication = read_web_publication(&minimal)
+            .expect("readable")
+            .expect("present");
+        assert_eq!(publication.port, 4321);
+        assert_eq!(publication.protocol, 0);
+        assert_eq!(publication.scope, "");
+        assert_eq!(publication.token_file, None);
+
+        assert!(read_web_publication(&scratch("web-publication-absent"))
+            .expect("readable")
+            .is_none());
+
+        for dir in [full, minimal] {
+            fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_web_publication_read_is_private_bounded_nofollow_and_refuses_garbage() {
+        let garbage = scratch("web-publication-garbage");
+        write_private(&garbage.join(WEB_PUBLICATION_FILE), b"not json at all");
+        assert!(format!("{:#}", read_web_publication(&garbage).unwrap_err())
+            .contains("is not a web publication"));
+
+        let pidless = scratch("web-publication-pidless");
+        write_private(
+            &pidless.join(WEB_PUBLICATION_FILE),
+            br#"{"port":4321,"pid":0}"#,
+        );
+        assert!(format!("{:#}", read_web_publication(&pidless).unwrap_err())
+            .contains("must contain a positive pid"));
+
+        let broad = scratch("web-publication-broad-mode");
+        fs::write(
+            broad.join(WEB_PUBLICATION_FILE),
+            br#"{"port":4321,"pid":42}"#,
+        )
+        .expect("a broad web publication");
+        assert!(format!("{:#}", read_web_publication(&broad).unwrap_err()).contains("mode 0600"));
+
+        let linked = scratch("web-publication-symlink");
+        let target = linked.join("attacker-controlled");
+        write_private(&target, br#"{"port":4321,"pid":42}"#);
+        std::os::unix::fs::symlink(&target, linked.join(WEB_PUBLICATION_FILE))
+            .expect("a web publication symlink");
+        assert!(format!("{:#}", read_web_publication(&linked).unwrap_err())
+            .contains("without following links"));
+        assert!(target.exists());
+
+        let oversized = scratch("web-publication-oversized");
+        write_private(
+            &oversized.join(WEB_PUBLICATION_FILE),
+            &vec![b'x'; PRIVATE_MARKER_MAX_BYTES as usize + 1],
+        );
+        assert!(
+            format!("{:#}", read_web_publication(&oversized).unwrap_err()).contains("byte limit")
+        );
+
+        for dir in [garbage, pidless, broad, linked, oversized] {
+            fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_web_publication_naming_a_dead_pid_is_stale_but_still_readable() {
+        let dir = scratch("web-publication-stale");
+        let path = dir.join(WEB_PUBLICATION_FILE);
+
+        // This process is alive by construction, so its own pid is the one live pid a test
+        // can name without racing a spawn.
+        let live = std::process::id() as i32;
+        write_private(&path, format!(r#"{{"port":4321,"pid":{live}}}"#).as_bytes());
+        assert!(read_live_web_publication(&dir).expect("readable").is_some());
+
+        fs::remove_file(&path).expect("the live publication");
+        write_private(&path, br#"{"port":4321,"pid":2147483646}"#);
+
+        // Stale to the liveness question, and still readable to the one that reports why:
+        // the refusal names the pid, so the raw read has to keep working.
+        assert!(read_live_web_publication(&dir).expect("readable").is_none());
+        assert_eq!(
+            read_web_publication(&dir)
+                .expect("readable")
+                .expect("present")
+                .pid,
+            2_147_483_646
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spawn_env_enables_the_web_surface_at_operate_scope_over_a_callers_opt_out() {
+        // Setting OUROBOROS_GATEWAY is what takes `config/runtime.exs` out of the defaulted
+        // branch that enables the web surface on its own, so this variable is the only
+        // thing standing between a spawned daemon and no browser surface at all.
+        let caller = vec![("OUROBOROS_WEB".into(), "0".into())];
+        let env = spawn_env(
+            &caller,
+            Path::new("/data"),
+            Path::new("/data/gateway.token"),
+        )
+        .unwrap();
+        let lookup = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+
+        // Exactly "1", untrimmed and unpadded: the explicit branch of `config/runtime.exs`
+        // gates on `System.get_env("OUROBOROS_WEB") == "1"` rather than on the trimming
+        // `env_value` helper the surrounding file uses, so " 1 " would enable nothing.
+        assert_eq!(lookup("OUROBOROS_WEB"), Some("1"));
+
+        // Both surfaces of an `ouro`-spawned daemon carry the operator's own authority.
+        // The explicit branch defaults web scope to "read", which would leave a browser
+        // refusing every approve the terminal beside it is allowed to make.
+        assert_eq!(lookup("OUROBOROS_WEB_SCOPE"), Some("operate"));
+        assert_eq!(lookup("OUROBOROS_GATEWAY_SCOPE"), Some("operate"));
+
+        // The scope variable must not become a second way to turn the surface on. It is
+        // read only *inside* that `== "1"` branch, so it is inert on its own — which is
+        // what keeps `OUROBOROS_WEB=0` a real opt-out for a daemon an operator starts
+        // themselves, where this function is not involved at all. Pinning it here as an
+        // ordinary override is the client-side half of that contract: nothing in this list
+        // enables anything the daemon does not already gate on OUROBOROS_WEB.
+        assert!(
+            spawn_env(
+                &[("OUROBOROS_WEB_SCOPE".into(), "read".into())],
+                Path::new("/data"),
+                Path::new("/data/gateway.token"),
+            )
+            .unwrap()
+            .iter()
+            .any(|(key, value)| key == "OUROBOROS_WEB" && value == "1"),
+            "the scope variable is not what decides whether a surface exists"
+        );
     }
 
     #[test]

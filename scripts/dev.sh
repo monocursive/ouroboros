@@ -9,7 +9,8 @@
 # stray daemons that accumulate when none of that exists (three of them did, on the day
 # this file was written).
 #
-# Verbs: status | daemon | daemon-stop | daemon-restart | gui | gui-stop | stop-all | logs
+# Verbs: status | daemon | daemon-stop | daemon-restart | gui | gui-stop | web | stop-all
+#        | logs
 # Honour OUROBOROS_DATA_DIR when the caller sets one (ouro --dev does the same, with a
 # warning), so a scratch cycle never touches the real dev runtime.
 
@@ -174,6 +175,14 @@ gui_start() {
     open "$APP" --args --dev
 }
 
+# No daemon check first, unlike `daemon_start`: `ouro web` adopts a running runtime and
+# starts one when there is none, which is the same thing this verb would have done by hand
+# and one fewer place that has to know how that is decided.
+web_open() {
+    ensure_ouro
+    (cd "$REPO" && "$OURO" --dev web)
+}
+
 gui_stop() {
     pid="$(gui_pid)"
     if [ -z "$pid" ]; then
@@ -325,11 +334,12 @@ daemon-stop) daemon_stop ;;
 daemon-restart) daemon_restart ;;
 gui) gui_start ;;
 gui-stop) gui_stop ;;
+web) web_open ;;
 stop-all) stop_all ;;
 reset) reset ;;
 logs) logs ;;
 *)
-    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|gui|gui-stop|stop-all|reset|logs" >&2
+    say "usage: dev.sh status|daemon|daemon-stop|daemon-restart|gui|gui-stop|web|stop-all|reset|logs" >&2
     exit 64
     ;;
 esac

@@ -212,6 +212,36 @@ through the existing spawn-lock machinery exactly as `ouro attach` does), prints
 wraps it in dev. The desktop's HTTPS-only `open_url` guard does not apply — this URL is
 constructed locally from the publication, not received from a stream.
 
+**As built** (`tui/src/web_cli.rs`), with five notes where the paragraph above was
+imprecise or silent:
+
+- **Scope is stated by the client, not inherited.** D5 says `spawn_env` adds
+  `OUROBOROS_WEB=1`; that alone is not enough. Setting `OUROBOROS_GATEWAY` is what forces
+  `config/runtime.exs` down its *explicit* branch, and that branch defaults
+  `OUROBOROS_WEB_SCOPE` to `read` — mirroring `OUROBOROS_GATEWAY_SCOPE`'s own explicit
+  default, deliberately. A daemon `ouro` spawned is the operator's own, so `spawn_env`
+  sends `OUROBOROS_WEB_SCOPE=operate` beside `OUROBOROS_GATEWAY_SCOPE=operate`; otherwise
+  the browser would refuse every approve the terminal beside it is allowed to make. The
+  scope variable is read only *inside* the `OUROBOROS_WEB == "1"` gate, so it is inert on
+  its own and does not become a second way to turn the surface on.
+- The runtime is resolved by `local_runtime` — the *bare* `ouro` command's adopt-or-start
+  under the spawn lock. `ouro attach` was the wrong citation: it deliberately starts
+  nothing. A runtime `ouro web` spawned is detached before the URL is printed, for
+  `ouro daemon`'s reason: this command exits, and the browser it just opened must not go
+  with it.
+- `--print` writes the URL and opens nothing, for a script, a remote shell, or a machine
+  with no browser. Boot progress goes to stderr rather than stdout so that stays true.
+- `web.json` is polled for up to 10 s after the runtime is up. `Ouroboros.Web` is the last
+  child of the supervision tree, so the endpoint binds after the gateway publishes, and
+  the window where a fresh spawn has one publication and not the other is real. The
+  timeout names `OUROBOROS_WEB=0` as the likeliest cause; a `web.json` left behind by a
+  dead pid gets its own sentence, because that is a different situation.
+- **Known gap:** `web.json` carries no `birth`, so staleness here is PID liveness alone —
+  weaker than `gateway.json`'s incarnation check, and a recycled PID would read as live.
+  It is survivable only because nothing reached through this record signals a process or
+  authorizes anything: it produces a link a browser either loads or does not. Adding
+  `birth` to `Ouroboros.Web.Publication.document/3` closes it.
+
 ## 3. Dependencies and assets (D6)
 
 Added to `mix.exs`: `phoenix`, `phoenix_live_view`, `bandit`, `phoenix_html` (current
