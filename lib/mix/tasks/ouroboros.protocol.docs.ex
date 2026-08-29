@@ -88,6 +88,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "ledger_list_result" => {:method, "ledger.list"},
     "ledger_export_result" => {:method, "ledger.export"},
     "mcp_list_result" => {:method, "mcp.list"},
+    "workspace_browse_result" => {:method, "workspace.browse"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
     "coding_event_notification" => {:notification, "coding.event"},
