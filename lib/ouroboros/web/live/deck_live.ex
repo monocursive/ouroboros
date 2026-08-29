@@ -52,12 +52,31 @@ defmodule Ouroboros.Web.Live.DeckLive do
   mounted, one in flight at a time, and stop when the tab closes. Providers and models are
   not fetched here at all; they belong to a picker this slice does not have.
 
+  ## Mutations are serial because this process is
+
+  Every operator verb goes through `Ouroboros.Web.Call`, which is synchronous in *this*
+  process: the task it supervises is awaited here, so a second click cannot start a second
+  call while the first is in flight — LiveView delivers events one at a time and this one
+  blocks. That is the "one in-flight mutation at a time" rule, and it is a property of the
+  design rather than a flag somebody has to remember to set. What the flag would not have
+  caught is the *second click that lands after the first returns*, so a send carries a
+  caller-owned `turn_id` derived from the draft: resending the same `{id, input, turn_id}`
+  adopts the same turn rather than starting a second one, which is the protocol's own
+  answer to double submission. The button also wears `phx-disable-with`, which is the part
+  a person sees.
+
+  ## Auto-approve is this view's, and only this view's
+
+  The toggle lives in socket state and is never written down: a preference that survived a
+  reload would be a standing grant nobody remembers making. While it is on, every pending
+  request that is **not** a question, a plan exit, or a Computer Use ask is answered
+  `{approve, once, actor: "automation"}` — the terminal client's exact carve-outs, read
+  through the one predicate both surfaces share. Answered request ids are remembered so a
+  replay after a repair cannot answer the same request twice.
+
   ## What this slice does not do
 
-  Answering an approval, sending a message, and starting a session are W4–W6. The controls
-  for them are rendered **disabled and labelled**, because a button that looked live and
-  did nothing would be worse than no button, and a surface with no hint of where the
-  composer goes reads as broken rather than unfinished.
+  Starting a session is W6; its control is a link to a page that lands with it.
   """
 
   use Phoenix.LiveView
@@ -67,15 +86,22 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Live.ApprovalCard
   alias Ouroboros.Web.Live.Cells
+  alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.Rail
   alias Ouroboros.Web.Transcript
+  alias Ouroboros.Web.Transcript.Approval
   alias Ouroboros.Web.Transcript.Cell
   alias Ouroboros.Web.Watch
 
   @poll_interval 3_000
   @coalesce 80
   @planes %{"interactive" => :interactive, "coding" => :coding}
+
+  # A turn state nothing has been read from yet, so the composer has something to draw
+  # before a session is open.
+  @quiet_turn %{running?: false, spoke?: false, turn_id: nil, queued: 0}
 
   # ------------------------------------------------------------------------------------
   # Lifecycle
@@ -100,6 +126,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:cells, [])
       |> assign(:drawn, 0)
       |> assign(:truncated, 0)
+      # The serving runtime's method list, read once: it is the same list `hello` answers
+      # for a terminal client and it cannot change while this process lives.
+      |> assign(:methods, Methods.names())
+      |> reset_session_state()
       |> stream(:cells, [])
 
     # The first paint is server-rendered and has to have content in it: a deck that showed
@@ -131,6 +161,121 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   def handle_event("collapse", %{"block" => block}, socket),
     do: {:noreply, socket |> update(:expanded, &MapSet.delete(&1, block)) |> redraw(:reset)}
+
+  # ------------------------------------------------------------------------------------
+  # The composer
+  # ------------------------------------------------------------------------------------
+
+  # The draft is held server-side so a refusal can hand it back verbatim, and so a live
+  # delta landing under the cursor cannot take it away. Debounced at the element: this
+  # costs one round trip per pause in typing, not one per keystroke.
+  #
+  # A change also forgets the last send, which is what makes a deliberate repeat of the
+  # same words a second turn while a double-click stays one — see `turn_id_for/2`.
+  def handle_event("draft", %{"message" => text}, socket) when is_binary(text),
+    do: {:noreply, socket |> assign(:draft, text) |> assign(:last_send, nil)}
+
+  def handle_event("draft", _params, socket), do: {:noreply, socket}
+
+  def handle_event("send", %{"message" => text}, socket) when is_binary(text),
+    do: {:noreply, send_turn(socket, String.trim_trailing(text))}
+
+  def handle_event("interrupt", _params, %{assigns: %{open: {:interactive, id}}} = socket) do
+    params = session_params(socket, :interactive, id)
+
+    socket =
+      case call(socket, "interactive.interrupt", params) do
+        {:ok, _stopped} -> assign(socket, :composer_error, nil)
+        refusal -> assign(socket, :composer_error, refusal_message(refusal))
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("interrupt", _params, socket), do: {:noreply, socket}
+
+  # One handler for both pickers, because they are one call with a different key. The
+  # field is matched against the two this surface offers rather than passed through: a
+  # `phx-value-field` is browser input, and `interactive.configure` is a closed envelope.
+  def handle_event("configure", %{"field" => field, "choice" => choice}, socket)
+      when field in ["sandbox_mode", "reasoning_effort"] do
+    {:noreply, configure(socket, field, choice)}
+  end
+
+  def handle_event("configure", _params, socket), do: {:noreply, socket}
+
+  # ------------------------------------------------------------------------------------
+  # Approvals
+  # ------------------------------------------------------------------------------------
+
+  def handle_event(
+        "respond",
+        %{"request" => id, "decision" => decision, "scope" => scope},
+        socket
+      )
+      when decision in ["approve", "deny"] and scope in ["once", "session"] do
+    {:noreply, respond(socket, id, %{"decision" => decision, "scope" => scope})}
+  end
+
+  # A vendor option answers as whatever the locked decision table says it means, and an
+  # option with no mapping is never given a button — so reaching here with one is a browser
+  # sending something this page did not draw, and nothing is sent for it.
+  def handle_event("respond_option", %{"request" => id, "option" => index}, socket) do
+    with request when not is_nil(request) <- request(socket, id),
+         {index, ""} <- Integer.parse(index),
+         {decision, scope} when not is_nil(decision) <- ApprovalCard.option_answer(request, index) do
+      response = %{"decision" => to_string(decision), "scope" => to_string(scope)}
+      {:noreply, respond(socket, id, response)}
+    else
+      _unmapped ->
+        {:noreply,
+         notice(
+           socket,
+           :error,
+           "this build cannot map that option onto an answer, so it sent nothing"
+         )}
+    end
+  end
+
+  # B2. The explicit choice rides `provider_options`; the `decision`/`scope` beside it are
+  # the fallback mapping, so a runtime that reads the choice and one that does not settle
+  # the same way. A runtime that refuses the key outright gets the same answer without it.
+  def handle_event("plan_choice", %{"request" => id, "choice" => choice}, socket) do
+    case Approval.PlanChoice.parse(choice) do
+      nil ->
+        {:noreply,
+         notice(socket, :error, "this build does not know that plan answer, so it sent nothing")}
+
+      parsed ->
+        {decision, scope} = Approval.PlanChoice.decision(parsed)
+        fallback = %{"decision" => to_string(decision), "scope" => to_string(scope)}
+
+        response =
+          Map.put(fallback, "provider_options", %{
+            "choice" => Approval.PlanChoice.as_string(parsed)
+          })
+
+        {:noreply, respond(socket, id, response, fallback)}
+    end
+  end
+
+  def handle_event("remember", %{"request" => id}, socket),
+    do: {:noreply, remember(socket, id)}
+
+  # Turning it on flushes what is already waiting; turning it off answers nothing and
+  # un-answers nothing. Both directions are idempotent because the answered set is.
+  def handle_event("auto_approve", _params, socket) do
+    socket = update(socket, :auto_approve?, &(not &1))
+    {:noreply, auto_answer(socket)}
+  end
+
+  # A `phx-value-*` this page never drew. Every clause above matches on the values it
+  # renders, so anything reaching here is browser input that did not come from a control —
+  # and the honest response to a click that did not happen is to do nothing, not to crash
+  # the view and make an operator's transcript remount.
+  def handle_event(event, _params, socket)
+      when event in ["send", "respond", "respond_option", "plan_choice", "remember"],
+      do: {:noreply, socket}
 
   # ------------------------------------------------------------------------------------
   # Messages
@@ -285,6 +430,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:cells, [])
     |> assign(:drawn, 0)
     |> assign(:truncated, 0)
+    |> reset_session_state()
     |> stream(:cells, [], reset: true)
   end
 
@@ -427,6 +573,322 @@ defmodule Ouroboros.Web.Live.DeckLive do
   end
 
   # ------------------------------------------------------------------------------------
+  # Operator verbs
+  #
+  # Every one of them goes through `Ouroboros.Web.Call` and none of them touches a plane.
+  # They are written here rather than in the components because a component that could
+  # call the runtime would be a second authorization surface.
+  # ------------------------------------------------------------------------------------
+
+  defp reset_session_state(socket) do
+    socket
+    |> assign(:draft, "")
+    |> assign(:composer_error, nil)
+    |> assign(:approval_notice, nil)
+    |> assign(:approvals, [])
+    |> assign(:answered, MapSet.new())
+    |> assign(:last_send, nil)
+    |> assign(:turn, @quiet_turn)
+    # Automation does not follow a reader from one conversation into another. The toggle
+    # is this view's, and a view showing a different session is answering different
+    # questions than the one it was switched on for.
+    |> assign(:auto_approve?, false)
+  end
+
+  defp call(socket, method, params) do
+    Call.call(socket.assigns.scope, method, params, session: socket.assigns[:web_session])
+  end
+
+  # The runtime's own words, never this surface's paraphrase of them.
+  defp refusal_message({:error, _code, message}) when is_binary(message), do: message
+  defp refusal_message({:error, _code, message, _data}) when is_binary(message), do: message
+
+  defp refusal_message(other) do
+    Logger.error("web verb answered #{inspect(other, limit: 5)}")
+    "the runtime answered something this build cannot read"
+  end
+
+  defp notice(socket, tone, text),
+    do: assign(socket, :approval_notice, %{tone: tone, text: text})
+
+  # ---------------------------------------------------------------------------- Sending
+
+  defp send_turn(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
+    assign(socket, :composer_error, "write a message before sending")
+  end
+
+  defp send_turn(%{assigns: %{open: {:interactive, id}}} = socket, text) do
+    turn_id = turn_id_for(socket, text)
+
+    params =
+      socket
+      |> session_params(:interactive, id)
+      |> Map.merge(%{"input" => text, "turn_id" => turn_id})
+
+    socket = assign(socket, :last_send, {text, turn_id})
+    method = Composer.verb(socket.assigns.turn, session_status(socket))
+
+    case call(socket, method, params) do
+      {:ok, _turn} ->
+        sent(socket)
+
+      # The runtime knows better than this view did, and says which verb to use. The same
+      # params go back under it: the refusal carries `outcome: not_dispatched`, so nothing
+      # was created and the caller-owned turn id is still free.
+      {:error, _code, message, %{"retry_with" => retry}} when is_binary(retry) ->
+        if retry in socket.assigns.methods do
+          case call(socket, retry, params) do
+            {:ok, _turn} -> sent(socket)
+            refusal -> refused(socket, text, refusal_message(refusal))
+          end
+        else
+          refused(socket, text, message)
+        end
+
+      refusal ->
+        refused(socket, text, refusal_message(refusal))
+    end
+  end
+
+  defp send_turn(socket, _text) do
+    assign(
+      socket,
+      :composer_error,
+      "this plane runs to completion and takes no messages; the terminal client has its controls"
+    )
+  end
+
+  defp sent(socket), do: socket |> assign(:draft, "") |> assign(:composer_error, nil)
+
+  # The draft is handed back exactly as it was typed. A composer that cleared itself on a
+  # refusal would lose the one thing the operator could not get back.
+  defp refused(socket, text, message),
+    do: socket |> assign(:draft, text) |> assign(:composer_error, message)
+
+  # A second click of the same words with no typing in between is the same turn; anything
+  # else is a new one. The runtime does the deduplicating — `{id, input, turn_id}` repeated
+  # returns the turn it already has — so this only has to decide when the id is the same.
+  defp turn_id_for(%{assigns: %{last_send: {text, turn_id}}}, text), do: turn_id
+
+  defp turn_id_for(_socket, _text) do
+    "web-" <>
+      (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
+  end
+
+  # ------------------------------------------------------------------------ Configuring
+
+  defp configure(%{assigns: %{open: {:interactive, id}}} = socket, field, choice) do
+    if allowed_choice?(field, choice) do
+      params = socket |> session_params(:interactive, id) |> Map.put(field, choice)
+
+      case call(socket, "interactive.configure", params) do
+        {:ok, _configured} ->
+          # Nothing is assigned optimistically. The picker's mark is drawn from what the
+          # next read reports, so a transport that quietly declined the change cannot
+          # leave this page claiming it happened.
+          socket |> assign(:composer_error, nil) |> refresh_info()
+
+        refusal ->
+          assign(socket, :composer_error, refusal_message(refusal))
+      end
+    else
+      socket
+    end
+  end
+
+  defp configure(socket, _field, _choice), do: socket
+
+  defp allowed_choice?("sandbox_mode", choice), do: choice in Composer.sandbox_modes()
+  defp allowed_choice?("reasoning_effort", choice), do: choice in Composer.efforts()
+  defp allowed_choice?(_field, _choice), do: false
+
+  # -------------------------------------------------------------------------- Approving
+
+  defp respond(socket, request_id, response, fallback \\ nil)
+
+  # Only a request this view is actually holding. `phx-value-request` is browser input, and
+  # an id nobody drew is an answer to a question nobody was shown.
+  defp respond(%{assigns: %{open: {plane, id}}} = socket, request_id, response, fallback) do
+    if request(socket, request_id) do
+      send_response(socket, plane, id, request_id, response, fallback)
+    else
+      socket
+    end
+  end
+
+  defp respond(socket, _request_id, _response, _fallback), do: socket
+
+  defp send_response(socket, plane, id, request_id, response, fallback) do
+    method = "#{plane}.respond_approval"
+
+    params =
+      socket
+      |> session_params(plane, id)
+      |> Map.merge(%{"request_id" => request_id, "response" => response})
+
+    # Recorded before the call, not after: what this set is for is stopping automation
+    # answering the same request twice, and a refusal is not proof the first answer did
+    # not land.
+    socket = update(socket, :answered, &MapSet.put(&1, request_id))
+
+    case call(socket, method, params) do
+      {:ok, _answered} ->
+        assign(socket, :approval_notice, nil)
+
+      refusal ->
+        # Any refusal, not only `-32602`. A runtime with no `provider_options` in its
+        # gateway envelope refuses with one code; one whose plane's response schema
+        # predates the key refuses inside `InteractiveSession` with another. Neither
+        # answered the request — `respond_approval` is not an outcome-unknown verb — so
+        # one retry of the strictly weaker answer is safe, and a refusal that was about
+        # something else refuses the retry too and *that* is what gets rendered.
+        if is_map(fallback) do
+          plan_fallback(socket, method, params, fallback)
+        else
+          notice(socket, :error, refusal_message(refusal))
+        end
+    end
+  end
+
+  # B2. A runtime that will not take `provider_options` still takes the four-way answer
+  # the choice degrades to, and it settles the session the same way. Said once rather than
+  # dropped silently, because what is lost with the key is the follow-up prompt.
+  defp plan_fallback(socket, method, params, fallback) do
+    case call(socket, method, Map.put(params, "response", fallback)) do
+      {:ok, _answered} ->
+        notice(
+          socket,
+          :warning,
+          "this runtime does not take a plan choice, so the answer went as its four-way equivalent"
+        )
+
+      refusal ->
+        notice(socket, :error, refusal_message(refusal))
+    end
+  end
+
+  defp request(socket, request_id),
+    do: Enum.find(socket.assigns.approvals, &(&1.request_id == request_id))
+
+  # Every pending request that is not a question, a plan exit, or a Computer Use ask.
+  # `Transcript.question?/1` is the whole carve-out and it is the locked module's, so the
+  # rail's inline answers and this cannot disagree about what a permission is.
+  defp auto_answer(%{assigns: %{auto_approve?: true, open: {_plane, _id}}} = socket) do
+    if connected?(socket) do
+      Enum.reduce(socket.assigns.approvals, socket, fn request, socket ->
+        cond do
+          Transcript.question?(request) ->
+            socket
+
+          MapSet.member?(socket.assigns.answered, request.request_id) ->
+            socket
+
+          true ->
+            respond(socket, request.request_id, %{
+              "decision" => "approve",
+              "scope" => "once",
+              "actor" => "automation"
+            })
+        end
+      end)
+    else
+      socket
+    end
+  end
+
+  defp auto_answer(socket), do: socket
+
+  # ------------------------------------------------------------------------ Remembering
+
+  defp remember(socket, request_id) do
+    with request when not is_nil(request) <- request(socket, request_id),
+         detail = Approval.detail(request),
+         {%Approval.Rule{} = rule, nil} <-
+           Transcript.suggested_rule(
+             detail.suggested_rule,
+             socket.assigns.methods,
+             session_workspace(socket)
+           ) do
+      add_rule(socket, rule)
+    else
+      {nil, reason} when is_binary(reason) -> notice(socket, :error, reason)
+      _no_rule -> socket
+    end
+  end
+
+  # Computer Use remember is user-scoped by design (D4): the grant is "this app, from this
+  # operator", which is not a fact about a directory. Every other pattern is scoped to the
+  # workspace the gate already proved this session names.
+  defp add_rule(%{assigns: %{open: {plane, id}}} = socket, %Approval.Rule{} = rule) do
+    params =
+      if String.starts_with?(rule.pattern, "ComputerUse(") do
+        %{"scope" => "user", "pattern" => rule.pattern, "decision" => "allow"}
+      else
+        %{
+          "scope" => "workspace",
+          "pattern" => rule.pattern,
+          "decision" => "allow",
+          "workspace" => rule.workspace
+        }
+      end
+
+    params =
+      case owner(socket, plane, id) do
+        nil -> params
+        owner -> Map.put(params, "node", Atom.to_string(owner))
+      end
+
+    case call(socket, "permissions.add", params) do
+      {:ok, _rule} -> notice(socket, :success, "saved: #{rule.pattern}")
+      refusal -> notice(socket, :error, refusal_message(refusal))
+    end
+  end
+
+  defp add_rule(socket, _rule), do: socket
+
+  # ----------------------------------------------------------------- What the row knows
+
+  defp session_status(%{assigns: %{open: open}} = socket) when not is_nil(open) do
+    from_info = socket.assigns.info && Map.get(socket.assigns.info, :status)
+
+    from_row =
+      case row(socket.assigns.rows, open) do
+        %Rail.Row{status: status} -> status
+        _unknown -> nil
+      end
+
+    from_info || from_row
+  end
+
+  defp session_status(_socket), do: nil
+
+  defp session_workspace(%{assigns: %{open: open}} = socket) when not is_nil(open) do
+    from_info = socket.assigns.info && Map.get(socket.assigns.info, :workspace)
+
+    from_row =
+      case row(socket.assigns.rows, open) do
+        %Rail.Row{workspace: workspace} -> workspace
+        _unknown -> nil
+      end
+
+    from_info || from_row
+  end
+
+  defp session_workspace(_socket), do: nil
+
+  # The posture the session reported, and `nil` where nothing did — which is what makes
+  # the sandbox picker absent rather than defaulted. Takes assigns rather than the socket
+  # because the render is the only caller and it has no socket.
+  defp reported(assigns, key) do
+    options = (assigns.info && Map.get(assigns.info, :options)) || %{}
+
+    case Map.get(options, key) do
+      nil -> nil
+      value -> to_string(value)
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
   # Projection into the stream
   # ------------------------------------------------------------------------------------
 
@@ -439,12 +901,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
     truncated = max(total - window, 0)
     cells = entries |> Enum.take(-window) |> Transcript.project()
 
-    socket = assign(socket, :truncated, truncated)
+    socket =
+      socket
+      |> assign(:truncated, truncated)
+      # Approvals come off the whole held ledger, not off the drawn window: a request that
+      # scrolled past the redraw budget is still a request nobody has answered.
+      |> assign(:approvals, Watch.pending_approvals(socket.assigns.watch))
+      |> assign(:turn, Composer.turn_state(entries))
 
-    case mode do
-      :reset -> reset_stream(socket, cells)
-      :delta -> patch_stream(socket, cells)
-    end
+    socket =
+      case mode do
+        :reset -> reset_stream(socket, cells)
+        :delta -> patch_stream(socket, cells)
+      end
+
+    # Every path that changes what is pending ends here, so automation has exactly one
+    # place to look and the backlog flush on enable is the same code as the live one.
+    auto_answer(socket)
   end
 
   # Everything changed underneath the list — a different session, a reopened block, a
@@ -494,20 +967,44 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   @impl true
   def render(assigns) do
+    open_row = row(assigns.rows, assigns.open)
+    {rule, rule_refusal} = rule_offer(assigns)
+
     assigns =
       assigns
       |> assign(:triaged, Rail.triaged(assigns.rows, pending(assigns)))
       |> assign(:machines, machines(assigns.status))
       |> assign(:today, today(assigns.rows))
       |> assign(:activity, activity(assigns))
-      |> assign(:open_row, row(assigns.rows, assigns.open))
+      |> assign(:open_row, open_row)
+      |> assign(:rule, rule)
+      |> assign(:rule_refusal, rule_refusal)
+      |> assign(
+        :row_status,
+        (assigns.info && Map.get(assigns.info, :status)) || row_status(open_row)
+      )
+      |> assign(
+        :sandbox,
+        reported(assigns, :sandbox_mode) ||
+          (open_row && open_row.sandbox_mode &&
+             to_string(open_row.sandbox_mode))
+      )
+      |> assign(:effort, reported(assigns, :reasoning_effort))
+      |> assign(:ended?, ended?(assigns, open_row))
 
     ~H"""
     <div class="ouro-deck">
       <.top_bar machines={@machines} today={@today} />
 
       <div class="ouro-columns">
-        <.rail triaged={@triaged} open={@open} error={@list_error} activity={@activity} />
+        <.rail
+          triaged={@triaged}
+          open={@open}
+          error={@list_error}
+          activity={@activity}
+          approvals={@approvals}
+          answerable={@scope == :operate}
+        />
 
         <main class="ouro-focus">
           <.focused
@@ -519,6 +1016,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
             truncated={@truncated}
             expanded={@expanded}
             streams={@streams}
+            approvals={@approvals}
+            notice={@approval_notice}
+            rule={@rule}
+            rule_refusal={@rule_refusal}
+            auto_approve={@auto_approve?}
+            draft={@draft}
+            composer_error={@composer_error}
+            turn={@turn}
+            status={@row_status}
+            sandbox={@sandbox}
+            effort={@effort}
+            scope={@scope}
+            ended={@ended?}
           />
           <.nothing_open :if={is_nil(@open)} counts={Rail.counts(@triaged)} />
         </main>
@@ -575,6 +1085,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :open, :any, required: true
   attr :error, :any, required: true
   attr :activity, :map, required: true
+  attr :approvals, :list, default: []
+  attr :answerable, :boolean, default: false
 
   def rail(assigns) do
     assigns = assign(assigns, :counts, Rail.counts(assigns.triaged))
@@ -598,6 +1110,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
           entry={entry}
           open={@open}
           activity={@activity}
+          approvals={@approvals}
+          answerable={@answerable}
         />
       </section>
     </nav>
@@ -607,20 +1121,24 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :entry, :map, required: true
   attr :open, :any, required: true
   attr :activity, :map, required: true
+  attr :approvals, :list, default: []
+  attr :answerable, :boolean, default: false
 
   def rail_row(assigns) do
     row = assigns.entry.row
+    selected? = assigns.open == {row.plane, row.id}
 
     assigns =
       assigns
       |> assign(:row, row)
-      |> assign(:selected?, assigns.open == {row.plane, row.id})
+      |> assign(:selected?, selected?)
       |> assign(:href, "/s/#{row.plane}/#{row.id}")
       |> assign(
         :line,
         line(assigns.entry.group, row, Map.get(assigns.activity, {row.plane, row.id}))
       )
       |> assign(:age_in_line?, age_in_line?(assigns.entry.group, row))
+      |> assign(:answers, inline_answers(assigns, selected?))
 
     ~H"""
     <.link
@@ -640,8 +1158,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
       </span>
       <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
     </.link>
+    <ApprovalCard.inline :for={request <- @answers} request={request} />
     """
   end
+
+  # Two buttons on a row, for a plain permission and nothing else. A question, a plan exit
+  # and a Computer Use ask carry a decision a one-line row never showed, so those rows stay
+  # a link into the session — `Approval.question?/1` draws that line, once, for both
+  # surfaces. Outside the link element on purpose: a button inside an anchor is markup no
+  # browser agrees about.
+  defp inline_answers(%{answerable: true, approvals: approvals}, true) when is_list(approvals),
+    do: Enum.filter(approvals, &ApprovalCard.inline?/1)
+
+  defp inline_answers(_assigns, _selected?), do: []
 
   # The three glyphs, which are the same ring at three stages of closing.
   #
@@ -724,15 +1253,48 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :truncated, :integer, required: true
   attr :expanded, :any, required: true
   attr :streams, :map, required: true
+  attr :approvals, :list, required: true
+  attr :notice, :any, required: true
+  attr :rule, :any, required: true
+  attr :rule_refusal, :any, required: true
+  attr :auto_approve, :boolean, required: true
+  attr :draft, :string, required: true
+  attr :composer_error, :any, required: true
+  attr :turn, :map, required: true
+  attr :status, :any, required: true
+  attr :sandbox, :any, required: true
+  attr :effort, :any, required: true
+  attr :scope, :atom, required: true
+  attr :ended, :boolean, required: true
 
   def focused(assigns) do
     {plane, id} = assigns.open
+    operate? = assigns.scope == :operate
 
     assigns =
       assigns
       |> assign(:plane, plane)
       |> assign(:session_id, id)
       |> assign(:unrestricted?, unrestricted?(assigns.row, assigns.info))
+      |> assign(:pinned, List.first(assigns.approvals))
+      |> assign(:also_waiting, max(length(assigns.approvals) - 1, 0))
+      |> assign(:operate?, operate?)
+      |> assign(:can_answer, operate? and Call.available?(:operate, "#{plane}.respond_approval"))
+      |> assign(:can_remember, operate? and Call.available?(:operate, "permissions.add"))
+      |> assign(
+        :can_send,
+        plane == :interactive and operate? and
+          Call.available?(:operate, "interactive.send_message")
+      )
+      |> assign(
+        :can_interrupt,
+        plane == :interactive and operate? and Call.available?(:operate, "interactive.interrupt")
+      )
+      |> assign(
+        :can_configure,
+        plane == :interactive and operate? and Call.available?(:operate, "interactive.configure")
+      )
+      |> assign(:node, node_of(assigns.row))
 
     ~H"""
     <header class="ouro-focus-head">
@@ -761,17 +1323,61 @@ defmodule Ouroboros.Web.Live.DeckLive do
       </div>
     </div>
 
-    <div class="ouro-composer">
-      <input
-        type="text"
-        class="ouro-composer-input"
-        disabled
-        placeholder="Sending a message arrives in the next slice (W4)"
-        aria-label="composer, not yet wired"
-      />
+    <ApprovalCard.card
+      :if={@pinned && @can_answer}
+      request={@pinned}
+      node={@node}
+      rule={@rule}
+      rule_refusal={@rule_refusal}
+      notice={@notice}
+      also_waiting={@also_waiting}
+      can_remember={@can_remember}
+    />
+
+    <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
+
+    <Composer.composer
+      :if={@plane == :interactive}
+      draft={@draft}
+      error={@composer_error}
+      turn={@turn}
+      status={@status}
+      sandbox={@sandbox}
+      effort={@effort}
+      can_send={@can_send}
+      can_interrupt={@can_interrupt}
+      can_configure={@can_configure}
+      ended={@ended}
+    />
+    """
+  end
+
+  # Warning-toned because that is what it is: a control that answers questions on the
+  # operator's behalf. It says how long it lasts on its own face, because the honest answer
+  # — until this tab is closed or another session is opened — is not something a reader
+  # should have to know from a document.
+  attr :on, :boolean, required: true
+
+  def auto_approve_toggle(assigns) do
+    ~H"""
+    <div class={["ouro-auto", @on && "ouro-auto-on"]}>
+      <button
+        type="button"
+        class="ouro-quiet-button"
+        phx-click="auto_approve"
+        aria-pressed={to_string(@on)}
+      >
+        {if @on, do: "Auto-approve is on", else: "Auto-approve"}
+      </button>
+      <span class="ouro-quiet">
+        this view only · never a question, a plan exit, or a Computer Use ask
+      </span>
     </div>
     """
   end
+
+  defp node_of(%Rail.Row{node: node}) when not is_nil(node), do: to_string(node)
+  defp node_of(_absent), do: nil
 
   attr :counts, :map, required: true
 
@@ -859,10 +1465,46 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # The approvals the open session is waiting on, so its rail row triages as needing a
   # person the moment one arrives rather than when the next poll happens to see the status.
-  defp pending(%{open: {plane, id}, watch: watch}) when not is_nil(watch),
-    do: %{{plane, id} => length(Watch.pending_approvals(watch))}
+  #
+  # One session, because this view holds one subscription. Every other row reaches
+  # `NEEDS YOU` through its declared `awaiting_approval` status and can only be opened —
+  # the rail cannot offer an inline answer to a request it has not read.
+  defp pending(%{open: {plane, id}, approvals: approvals}) when is_list(approvals),
+    do: %{{plane, id} => length(approvals)}
 
   defp pending(_assigns), do: %{}
+
+  defp row_status(%Rail.Row{status: status}), do: status
+  defp row_status(_absent), do: nil
+
+  # A session that will produce no further events takes no further messages either, from
+  # either proof: the stream said so, or the row's status did.
+  defp ended?(assigns, row) do
+    watched = assigns.watch && Watch.ended?(assigns.watch)
+    listed = row && Rail.terminal?(row.status)
+
+    watched == true or listed == true
+  end
+
+  # The locked gate, asked once per render for the pinned request. Its two halves are a
+  # rule to offer or the sentence naming why there is none, and this passes it the two
+  # facts only the deck has: what this runtime serves, and what workspace this session
+  # named.
+  defp rule_offer(%{approvals: [request | _]} = assigns) do
+    workspace =
+      (assigns.info && Map.get(assigns.info, :workspace)) ||
+        case row(assigns.rows, assigns.open) do
+          %Rail.Row{workspace: workspace} -> workspace
+          _unknown -> nil
+        end
+
+    request
+    |> Approval.detail()
+    |> Map.get(:suggested_rule)
+    |> Transcript.suggested_rule(assigns.methods, workspace)
+  end
+
+  defp rule_offer(_assigns), do: {nil, nil}
 
   # Self is always connected — it is the machine answering this request — and every other
   # machine is filled iff `connected_nodes` names it.
