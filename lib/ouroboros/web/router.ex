@@ -39,6 +39,7 @@ defmodule Ouroboros.Web.Router do
     live_session :authenticated, on_mount: {Ouroboros.Web.Auth, :ensure_session} do
       live "/", Live.DeckLive, :index
       live "/s/:plane/:id", Live.DeckLive, :session
+      live "/new", Live.NewSessionLive, :index
       live "/status", StatusLive, :index
     end
 
