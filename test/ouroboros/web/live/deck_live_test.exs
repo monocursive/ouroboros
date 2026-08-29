@@ -278,6 +278,46 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert render(view) =~ "second"
     end
 
+    test "a later event that rewrites an earlier cell rewrites it in place", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      # An approval resolution does not append a cell — it rewrites the status cell the
+      # request made, found by `request_id`. That is the case the delta path has to get
+      # right: the changed cell is not the last one, and the ones after it must not move.
+      FakePlane.emit(pid, said(1, "before the ask"))
+
+      FakePlane.emit(
+        pid,
+        %{
+          event(2, :approval_requested, %{"kind" => "permission", "command" => "rm -rf /"})
+          | request_id: "req-1"
+        }
+      )
+
+      Process.sleep(@flush)
+      asked = render(view)
+      assert asked =~ "before the ask"
+
+      FakePlane.emit(
+        pid,
+        %{
+          event(3, :approval_resolved, %{"decision" => "denied"})
+          | request_id: "req-1"
+        }
+      )
+
+      Process.sleep(@flush)
+      resolved = render(view)
+
+      # The earlier cell changed, the earlier-still one did not, and nothing duplicated.
+      assert resolved =~ "before the ask"
+      assert resolved != asked
+      assert length(Regex.scan(~r/before the ask/, resolved)) == 1
+    end
+
     test "deltas that arrive together are drawn once, not once each", %{conn: conn} do
       id = session_id()
       pid = plane(id: id, backlogs: [{:ok, []}])

@@ -27,6 +27,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
   answers a backlog and silently declines the registration — without the check this view
   would sit forever waiting for live events from a conversation that ended an hour ago.
 
+  ### One thing the TUI does that this does not
+
+  The terminal client loops — replay, and if it progressed and a gap remains, replay again
+  — because the gateway's `*.replay` verb answers at most `REPLAY_LIMIT` events per frame.
+  In-process there is no such limit: `subscription_events/2` returns **every** retained
+  event above the cursor in one call (`interactive/task.ex:2301`, bounded only by the
+  session's own `event_limit`). So one subscribe closes the whole gap, and a loop here
+  would be a second round that could only ever answer nothing. `Watch.has_gap?/1` is still
+  the question to ask if that ever stops being true.
+
   ## Coalescing, and why it is not optional
 
   A streaming turn sends one message per text delta. Re-projecting the whole ledger per
