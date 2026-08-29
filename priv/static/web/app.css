@@ -1836,4 +1836,170 @@ code,
   display: block;
   margin-top: 0.4rem;
   color: var(--tertiary);
+ * Machines (W7): the fleet, read-only.
+ *
+ * Rule 1 governs this section more than any other. A machine being up is an
+ * operational outcome, not a request for a person and not something to click, so no
+ * chip here touches --attention-green and none of them wears the filled-button accent.
+ * Connected is ink — success is ink everywhere on this surface. Offline is amber, the
+ * same amber a refusal wears: read this. Unknown is tertiary, because "we do not know"
+ * should recede rather than compete with the two answers that are answers.
+ * ========================================================================== */
+
+.ouro-machines {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.ouro-machines .ouro-header {
+  margin-bottom: 0;
+}
+
+.ouro-machines h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  margin: 0 0 0.35rem;
+}
+
+.ouro-backlink {
+  color: var(--tertiary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--hairline-2);
+}
+
+.ouro-backlink:hover {
+  color: var(--secondary);
+}
+
+/* The panel head's node name is an address, not a title. */
+.ouro-machines .ouro-panel-head h2 {
+  font-family: var(--font-mono);
+  font-variant-caps: normal;
+  letter-spacing: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+/* Rule 3: the filled button on this view is Refresh. Doctor is a hairline, because it
+   spends the fleet's time and should read as deliberate rather than as the way out. */
+.ouro-button-quiet {
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.85rem;
+  cursor: pointer;
+}
+
+.ouro-button-quiet:hover {
+  border-color: var(--secondary);
+}
+
+.ouro-button-quiet:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------------- Members */
+
+.ouro-members {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--hairline-1);
+  border: 1px solid var(--hairline-1);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ouro-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  background: var(--card);
+  padding: 0.7rem 0.85rem;
+}
+
+.ouro-member-name {
+  grid-column: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ouro-self-mark {
+  color: var(--tertiary);
+  font-size: 0.78rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-member-meta {
+  grid-column: 1;
+  color: var(--secondary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.ouro-chip {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  justify-self: end;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* Success is INK, here as everywhere: see rule 1 in this file's header. */
+.ouro-chip-connected {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-chip-offline {
+  color: var(--warn-amber);
+}
+
+.ouro-chip-unknown {
+  color: var(--tertiary);
+}
+
+/* -------------------------------------------------------------- Footnotes and report */
+
+.ouro-footnote {
+  margin: 0.85rem 0 0;
+  color: var(--tertiary);
+  font-size: 0.82rem;
+}
+
+.ouro-empty-body {
+  margin: 0;
+  color: var(--secondary);
+}
+
+.ouro-status-stale {
+  margin-top: 1rem;
+}
+
+.ouro-report {
+  margin: 1rem 0 0;
+  padding: 0.85rem;
+  background: var(--inset);
+  border-radius: var(--radius);
+  color: var(--secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

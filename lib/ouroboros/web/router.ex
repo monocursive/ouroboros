@@ -40,6 +40,7 @@ defmodule Ouroboros.Web.Router do
       live "/", Live.DeckLive, :index
       live "/s/:plane/:id", Live.DeckLive, :session
       live "/new", Live.NewSessionLive, :index
+      live "/machines", Live.MachinesLive, :index
       live "/status", StatusLive, :index
     end
 
