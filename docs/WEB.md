@@ -614,10 +614,14 @@ notification arrives while the tab is hidden and focuses it when clicked**. Both
 
 ## 10. GPUI removal (D13)
 
-The desktop is **feature-frozen** from acceptance of this spec: defects only, no new
-slices. The freeze is now stated where a person editing that client will see it, at the top
-of `docs/DESKTOP.md`, pointing here. Nothing below has been done: W9 has not started, and
-this section is a plan rather than a record. At W9:
+**Executed at W9.** Everything below is done as written; `docs/DESKTOP.md` is now a
+tombstone. Two things went beyond this plan, both because the seam's last caller left with
+the desktop: `App::configure_reasoning_effort` (the native picker's session-default write;
+the TUI's per-turn `/think` is untouched) and the whole client-side `runtime.models`
+pipeline — `fetch_models`, `Tag::Models`, `App::models` — which had no TUI reader at all.
+`ModelsCatalog` and its decode tests stay in `model.rs` beside `decode_artifact`, on the
+same reasoning: they pin a wire shape the runtime still serves. The lockfile lost 593
+packages and gained nothing; no surviving crate moved versions.
 
 - **Delete:** `tui/src/desktop.rs`, `tui/src/desktop/machines.rs`,
   `tui/src/desktop_design.rs`, `tui/src/desktop_main.rs`; the `[[bin]] ouro-desktop` and

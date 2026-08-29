@@ -846,9 +846,9 @@ pub fn iterm2(payload: &[u8], name: &str, cols: u16, rows: u16) -> String {
 ///
 /// The escape it returns is a stream of terminal control bytes, which a cell-buffer renderer
 /// (ratatui's `Buffer`, and therefore the TUI transcript's `Paragraph`) strips as zero-width
-/// control characters. Its consumer is a surface that writes raw bytes to the terminal: a
-/// real image renderer such as the GPUI desktop, or a cursor-positioned placement pass over
-/// the backend. It is not something a [`ratatui::text::Line`] can carry.
+/// control characters. Its consumer is a surface that writes raw bytes to the terminal — a
+/// cursor-positioned placement pass over the backend. It is not something a
+/// [`ratatui::text::Line`] can carry.
 pub fn render(
     protocol: Protocol,
     header: Header,

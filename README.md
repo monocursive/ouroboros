@@ -98,7 +98,6 @@ make status          # what is running, on which port, and whether it is stale
 make daemon          # the dev runtime, headless, in its isolated ouroboros-dev data dir
 make daemon-restart  # recompile, then swap the runtime onto the new code
 make tui             # the terminal client, attached to the checkout runtime
-make gui             # the macOS desktop app, (re)launched against the checkout
 make web             # the checkout runtime's browser surface, opened in a browser
 make stop            # everything down, stray daemons included
 make reset           # stop the daemon, then empty the dev data dir (oauth.json kept)

@@ -96,11 +96,12 @@ pub fn transcript(watch: &Watch, width: usize) -> String {
 ///   path rather than written into a stream something else has to parse.
 ///
 /// Deterministic: object keys are written sorted — [`sorted_json`] — so the same events
-/// produce the same bytes on every run, on every machine, and from either binary. The
-/// plain build's `serde_json::Map` is already sorted; the desktop build's gpui tree
-/// enables `preserve_order`, and an export that differed between `ouro` and
-/// `ouro-desktop` would make "byte for byte" mean two different files. Key order is not
-/// part of what a JSON object says, so this is a canonical form, not a reshaping.
+/// produce the same bytes on every run, on every machine, and from every build. Sorting
+/// here rather than trusting the map is what makes that true: `serde_json::Map` is a
+/// `BTreeMap` only while nothing in the dependency graph enables `preserve_order`, so an
+/// export that read key order off the map would promise "byte for byte" and quietly mean
+/// something different the day the graph changed. Key order is not part of what a JSON
+/// object says, so this is a canonical form, not a reshaping.
 pub fn events_ndjson(watch: &Watch) -> String {
     let mut out = String::new();
 

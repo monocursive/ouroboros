@@ -2,16 +2,23 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   @moduledoc """
   The form that starts a session, at `/new`.
 
-  Its parity target is the GPUI desktop's new-session panel (`docs/DESKTOP.md`), and what
-  is ported is the *semantics*: which controls exist, what each of them may honestly
-  claim, and — above all — which fields end up in the request. The pixels are the deck's
-  own tokens. Every rule the panel holds is in `Ouroboros.Web.Live.NewSession`, which has
-  no socket in it; this module fetches, draws, and sends.
+  Its parity target was the GPUI desktop's new-session panel; that client was removed in
+  W9 and this page is now the only surface with the form, so the parity map in
+  `docs/WEB.md` §4 is the record of what was ported. What was ported is the *semantics*:
+  which controls exist, what each of them may honestly claim, and — above all — which
+  fields end up in the request. In particular the defaulting rule, which `docs/DESKTOP.md`
+  keeps as the one rule that outlived that client: what the config file supplies is where
+  a control *starts*, never what gets sent — a stored default is sendable, and only the
+  absence of one leaves the field off the request. The pixels are the deck's own tokens.
+  Every rule the panel holds is in `Ouroboros.Web.Live.NewSession`, which has no socket in
+  it; this module fetches, draws, and sends.
 
   ## Providers and models are read once
 
   `runtime.providers` and `runtime.models` are fetched on the connected mount and never
-  again — the TUI's rule (`mod.rs:107`), and not a cadence this page invents. A probe walks
+  again — a cadence this page does not invent. (The TUI set the precedent for
+  `runtime.providers`; it no longer asks for `runtime.models` at all, since it offers no
+  model picker to read the catalogue.) A probe walks
   the PATH for every configured adapter; running that every three seconds while somebody
   fills in a path would be a page that costs more than the session it starts. The one
   thing here that *does* poll is the ChatGPT card, at one second, and only while a login is

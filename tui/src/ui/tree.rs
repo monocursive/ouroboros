@@ -16,9 +16,11 @@
 //!   Same for `_opaque`: a pid is not a value, and showing it as one would invite someone
 //!   to believe it round-trips.
 //! * **Nothing is dropped for being unrecognized.** Keys are rendered in sorted order —
-//!   sorted here, at render time, rather than read off the `Map`: `serde_json`'s `Map` is
-//!   only a `BTreeMap` until something enables `preserve_order`, and the desktop build's
-//!   gpui dependency tree does. The same tree must read the same in both binaries.
+//!   sorted here, at render time, rather than read off the `Map`. `serde_json`'s `Map` is
+//!   only a `BTreeMap` while nothing in the dependency graph enables `preserve_order`,
+//!   which is a fact about a build rather than about this code. Sorting at render time
+//!   makes the order this module's own: the same payload reads the same way whatever else
+//!   ends up in the graph.
 
 use std::collections::HashSet;
 

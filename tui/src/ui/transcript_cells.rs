@@ -661,10 +661,15 @@ pub struct ImageCell {
     /// The decoded bytes, once a surface that can draw pixels has fetched them by sha.
     ///
     /// The drawable the projection carries so a renderer never stats a file: the fs-free
-    /// contract is kept because these were decoded at absorb time and handed in, not read
-    /// from disk during projection. Absent until `computer_use.artifact` has answered;
-    /// present and ready to hand to a real image renderer (the GPUI desktop) afterwards.
-    /// `Arc` so the per-frame projection clone is a refcount, not a copy of a screenshot.
+    /// contract is kept because bytes arrive decoded, handed in by whoever fetched them,
+    /// rather than read from disk during projection.
+    ///
+    /// **Nothing fills this today.** The terminal draws the placeholder below and never
+    /// needs the pixels, and the web surface fetches artifacts in-process rather than
+    /// through this projection. It is the seam an inline-pixel pass would fill (see the
+    /// note on [`Cell::Image`]'s rendering), kept because the sha beside it is meaningless
+    /// without somewhere for the answer to land. `Arc` so the per-frame projection clone
+    /// stays a refcount rather than a copy of a screenshot.
     pub bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
 
@@ -3117,8 +3122,7 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
 /// transcript is a `Paragraph` over that buffer, so there is no seam through which a
 /// [`crate::images::render`] escape could travel from here. Inline pixels need a surface
 /// that writes raw bytes to the terminal — a cursor-positioned placement pass over the
-/// backend, which is an operator-surface concern outside this projection — or a real image
-/// renderer, which is what the GPUI desktop is: it draws the same bytes with `gpui::img`.
+/// backend, which is an operator-surface concern outside this projection.
 ///
 /// So the honest thing on this surface is the label, with real dimensions from the artifact
 /// where it is one. The bytes the cell may carry are the drawable for those other surfaces,

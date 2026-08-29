@@ -537,8 +537,8 @@ full or by an unambiguous fragment) and `workspace:` (an absolute path on that m
 required with `machine:` and refused without it). The child's session request, worktree,
 sandbox, hooks, permission rules, and MCP config are all the **target** node's; the
 parent's posture travels in the request, and the child's approvals still relay to the
-parent's human. The client folds all three phases onto one transcript row per `task_id`
-(TUI and desktop), with a `⇄ node` badge only when `remote` is true — a `node` without
+parent's human. The client folds all three phases onto one transcript row per `task_id`,
+with a `⇄ node` badge only when `remote` is true — a `node` without
 the flag is the runtime naming where a local child ran, not saying it left.
 
 `status` is one of `completed`, `failed`, `stopped`, `timed_out`. `error` is present only
@@ -2917,8 +2917,6 @@ rediscovered:
   rerun. The older paths that report only at the end (the enroll-recipe add, the
   restart-as-a-fleet add) keep their end-only behaviour and have no rail: they have no
   stages to show here.
-- **The desktop's own add pane is a separate slice.** Nothing above describes it; this is
-  the terminal surface.
 - **Machines keeps membership removal and state retirement separate.** Its guidance says
   cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
   removed owner's state, importing the signed roster, and restarting does it show the

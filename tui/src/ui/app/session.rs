@@ -1468,8 +1468,7 @@ impl App {
             .and_then(|session| session.reasoning_effort)
     }
 
-    /// `/sandbox full|workspace|read-only`: `interactive.configure {sandbox_mode}`, the
-    /// one path the desktop's posture picker shares.
+    /// `/sandbox full|workspace|read-only`: `interactive.configure {sandbox_mode}`.
     ///
     /// No toggle and no bare-verb action. Three values have no "the other one", and the
     /// widest of them removes the OS sandbox — a verb that guessed which way an operator

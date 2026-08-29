@@ -344,8 +344,8 @@ pub enum Tag {
         id: String,
         want: bool,
     },
-    /// `interactive.configure {sandbox_mode}` — what `/sandbox` and the desktop's posture
-    /// picker both send. Its own tag for the same reason [`Tag::PlanMode`] is: the
+    /// `interactive.configure {sandbox_mode}` — what `/sandbox` sends. Its own tag for the
+    /// same reason [`Tag::PlanMode`] is: the
     /// interesting answer is the refusal. A transport that cannot be reconfigured, or a
     /// provider whose `normalized_values` exclude the mode, answers with a typed
     /// `unsupported_configuration` naming `sandbox_mode` — a sentence worth reading, which

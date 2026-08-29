@@ -6,7 +6,7 @@
 //!
 //! ## Invariants (doc §7.4–§7.6)
 //!
-//! * Never inject into this helper or `ouro-desktop`.
+//! * Never inject into this helper or into `ouro` itself.
 //! * Honor `--deny-app` before any focus or event.
 //! * Prefer `AXPress` / `AXConfirm` / `AXSetValue` when the live node lists them; fall back
 //!   to CGEvent only when the AX action was **not attempted**. A successful (or unknown)

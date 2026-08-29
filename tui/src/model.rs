@@ -533,11 +533,12 @@ pub fn plain(text: &str) -> String {
 
 /// A map's entries in sorted key order, whatever order the map itself iterates in.
 ///
-/// `serde_json::Map` is only a `BTreeMap` until something turns on `preserve_order` — and
-/// the desktop build's gpui dependency tree does, for the whole crate graph, features
-/// being additive. A rendering that followed the map's own order would therefore say
-/// different things in `ouro` and `ouro-desktop`. Every user-facing walk of a payload map
-/// sorts instead, so the same payload reads the same in both binaries.
+/// `serde_json::Map` is only a `BTreeMap` until something in the crate graph turns on
+/// `preserve_order`, and cargo features are additive: any dependency, anywhere in the
+/// graph, can turn it on for everyone without this code changing a line. A rendering that
+/// followed the map's own order would therefore be one `cargo add` away from saying
+/// something different. Every user-facing walk of a payload map sorts instead, so what a
+/// reader sees is a property of this function rather than of the build.
 pub fn sorted_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
     let mut entries: Vec<_> = fields.iter().collect();
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -993,9 +994,9 @@ pub struct RuntimeStatus {
     /// it stays a tree rather than a type.
     #[serde(default)]
     pub cluster: Value,
-    /// Sorted by construction: `serde_json::Map` is only a `BTreeMap` until
-    /// `preserve_order` is on — and the desktop build's gpui tree turns it on — so a
-    /// `BTreeMap` here says sorted rather than relying on it.
+    /// Sorted by construction: `serde_json::Map` is only a `BTreeMap` while nothing in the
+    /// crate graph enables `preserve_order`, so a `BTreeMap` here states the ordering
+    /// instead of inheriting it from whatever else happens to be compiled in.
     #[serde(default)]
     pub availability: BTreeMap<String, Availability>,
     #[serde(default)]

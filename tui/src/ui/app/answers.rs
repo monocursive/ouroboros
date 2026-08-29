@@ -595,10 +595,10 @@ impl App {
                 }
             },
             // The same shape as `Tag::PlanMode`, for the same reasons. Success re-lists so
-            // the footer's C5 cell and the desktop's posture picker read the mode off the
-            // session row the runtime just updated, rather than off a value this client
-            // assumed took hold: whether a change applies now or next turn is the
-            // runtime's answer, and only its own row can report which happened.
+            // the footer's C5 cell reads the mode off the session row the runtime just
+            // updated, rather than off a value this client assumed took hold: whether a
+            // change applies now or next turn is the runtime's answer, and only its own
+            // row can report which happened.
             Tag::SandboxMode { plane, id, want } => match result {
                 Ok(_value) => {
                     self.inform(
