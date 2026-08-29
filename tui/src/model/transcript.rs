@@ -960,10 +960,37 @@ fn detail(payload: &Value) -> String {
 }
 
 fn subject(payload: &Value) -> String {
+    if let Some(question) = question_subject(payload) {
+        return question;
+    }
+
     first_value(payload, &["tool_call", "tool", "command", "text"])
         .map(bounded_compact)
         .filter(|subject| !subject.is_empty() && subject != "null")
         .unwrap_or_else(|| bounded_compact(payload))
+}
+
+/// An `ask_user` question carries none of the keys above — no tool call, no command, no
+/// text — so the row would compact the whole payload and read as JSON. Its own words are
+/// what the row is for, joined the way the modal joins them
+/// (`ApprovalRequest::question_text`, `Ouroboros.Web.Presentation.question_subject/1`).
+///
+/// A plan exit is deliberately not folded in here: its `question` is four lines naming the
+/// consequence of each answer, which belongs in the modal and not in a one-line row.
+fn question_subject(payload: &Value) -> Option<String> {
+    if text(payload, &["kind"]).as_deref() != Some("question") {
+        return None;
+    }
+
+    match (text(payload, &["header"]), text(payload, &["question"])) {
+        (Some(header), Some(question)) => Some(bounded_copy(
+            &format!("{header} — {question}"),
+            PRESENTATION_TEXT_BYTES,
+            TEXT_TRUNCATION,
+        )),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
 }
 
 fn approval_resolution(payload: &Value) -> String {

@@ -335,6 +335,29 @@ defmodule Ouroboros.Web.Transcript.Approval do
   end
 
   @doc """
+  The words an `ask_user` question actually asks.
+
+  `Provider.Native.Tools.AskUser.question/1` writes `header`, `question` and `options` and
+  nothing a permission carries — no `tool_call`, no `command`, no `reason` — so the generic
+  fallback reaches the end of its key list and compacts the whole payload. That is how a
+  card headline becomes `{"header":…,"kind":"question",…}`.
+
+  Both fields are the runtime's own and both earn the line: the header is the two or three
+  words saying what kind of decision this is, and the question is the decision. `nil` where
+  neither arrived, which is the one case with nothing better than the fallback
+  (`tui/src/ui/transcript.rs`).
+  """
+  @spec question_text(map()) :: String.t() | nil
+  def question_text(payload) do
+    case {text(payload, "header"), text(payload, "question")} do
+      {nil, nil} -> nil
+      {header, nil} -> header
+      {nil, question} -> question
+      {header, question} -> "#{header} — #{question}"
+    end
+  end
+
+  @doc """
   The tool call the provider is asking permission for, as one line.
 
   A sandbox escalation should read as `git commit … — writes to .git`, not as the raw JSON
@@ -342,16 +365,23 @@ defmodule Ouroboros.Web.Transcript.Approval do
   """
   @spec subject(t()) :: String.t()
   def subject(%__MODULE__{payload: payload}) do
-    # B2. A plan exit names no command and no tool, so the generic fallback would render
-    # the whole payload as JSON. Its own header is the sentence a person needs there.
-    if text(payload, "kind") == "plan_exit" do
-      text(payload, "header") || "plan ready — build it, or keep planning"
-    else
-      case {command(payload), text(payload, "reason")} do
-        {nil, _reason} -> fallback_subject(payload)
-        {command, nil} -> command
-        {command, reason} -> "#{command} — #{reason}"
-      end
+    case text(payload, "kind") do
+      # B2. A plan exit names no command and no tool, so the generic fallback would render
+      # the whole payload as JSON. Its own header is the sentence a person needs there.
+      "plan_exit" ->
+        text(payload, "header") || "plan ready — build it, or keep planning"
+
+      # An `ask_user` question names no command and no tool either, and the words it asks
+      # are the entire reason it was put to a person.
+      "question" ->
+        question_text(payload) || fallback_subject(payload)
+
+      _permission ->
+        case {command(payload), text(payload, "reason")} do
+          {nil, _reason} -> fallback_subject(payload)
+          {command, nil} -> command
+          {command, reason} -> "#{command} — #{reason}"
+        end
     end
   end
 

@@ -637,12 +637,19 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.kind == "question"
       assert detail.command == nil
 
+      assert Approval.question_text(request.payload) ==
+               "Need a decision — Which database should the staging environment point at?"
+
+      assert Approval.subject(request) ==
+               "Need a decision — Which database should the staging environment point at?",
+             "the words it asks, not the whole payload as JSON"
+
       assert detail.options == [],
              "ask_user options are plain strings, not the provider options a modal maps"
 
       assert status(cell("event_approval_requested_question")) ==
                {"Approval needed",
-                ~S({"header":"Need a decision","kind":"question","options":["staging-db","scratch-db"],"question":"Which database should the staging environment point at?"}),
+                "Need a decision — Which database should the staging environment point at?",
                 :warning}
     end
 

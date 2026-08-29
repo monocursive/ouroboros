@@ -828,6 +828,17 @@ fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions()
 
     assert_eq!(detail.kind.as_deref(), Some("question"));
     assert_eq!(detail.command, None);
+
+    assert_eq!(
+        request.question_text().as_deref(),
+        Some("Need a decision — Which database should the staging environment point at?")
+    );
+    assert_eq!(
+        request.subject(),
+        "Need a decision — Which database should the staging environment point at?",
+        "the words it asks, not the whole payload as JSON"
+    );
+
     assert_eq!(
         detail.options,
         vec![],
@@ -838,7 +849,7 @@ fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions()
         status(&cell("event_approval_requested_question")),
         (
             "Approval needed",
-            r#"{"header":"Need a decision","kind":"question","options":["staging-db","scratch-db"],"question":"Which database should the staging environment point at?"}"#,
+            "Need a decision — Which database should the staging environment point at?",
             Tone::Warning
         )
     );

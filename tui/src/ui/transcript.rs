@@ -455,26 +455,57 @@ impl ApprovalRequest {
         )
     }
 
+    /// The words an `ask_user` question actually asks.
+    ///
+    /// `Provider.Native.Tools.AskUser.question/1` writes `header`, `question` and
+    /// `options` and nothing a permission carries — no `tool_call`, no `command`, no
+    /// `reason` — so the generic fallback reaches the end of its key list and compacts the
+    /// whole payload. That is how a card headline becomes
+    /// `{"header":…,"kind":"question",…}`.
+    ///
+    /// Both fields are the runtime's own and both earn the line: the header is the two or
+    /// three words saying what kind of decision this is, and the question is the decision.
+    /// `None` where neither arrived, which is the one case with nothing better than the
+    /// fallback.
+    pub fn question_text(&self) -> Option<String> {
+        let header = json_nonempty_str(&self.payload, "header");
+        let question = json_nonempty_str(&self.payload, "question");
+
+        match (header, question) {
+            (Some(header), Some(question)) => Some(format!("{header} — {question}")),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+
     /// The tool call the provider is asking permission for, as one line.
     ///
     /// A sandbox escalation should read as `git commit … — writes to .git`, not as the
     /// raw JSON blob of `tool_call`.
     pub fn subject(&self) -> String {
-        // B2. A plan exit names no command and no tool, so the generic fallback would
-        // render the whole payload as JSON in the snack bar. Its own header is the
-        // sentence a person needs there.
-        if json_nonempty_str(&self.payload, "kind").as_deref() == Some("plan_exit") {
-            return json_nonempty_str(&self.payload, "header")
-                .unwrap_or_else(|| "plan ready — build it, or keep planning".to_string());
-        }
+        match json_nonempty_str(&self.payload, "kind").as_deref() {
+            // B2. A plan exit names no command and no tool, so the generic fallback would
+            // render the whole payload as JSON in the snack bar. Its own header is the
+            // sentence a person needs there.
+            Some("plan_exit") => json_nonempty_str(&self.payload, "header")
+                .unwrap_or_else(|| "plan ready — build it, or keep planning".to_string()),
 
-        let command = approval_command(&self.payload);
-        let reason = json_nonempty_str(&self.payload, "reason");
+            // An `ask_user` question names no command and no tool either, and the words it
+            // asks are the entire reason it was put to a person.
+            Some("question") => self
+                .question_text()
+                .unwrap_or_else(|| fallback_subject(&self.payload)),
 
-        match (command.as_deref(), reason.as_deref()) {
-            (Some(command), Some(reason)) => format!("{command} — {reason}"),
-            (Some(command), None) => command.to_string(),
-            (None, _) => fallback_subject(&self.payload),
+            _permission => {
+                let command = approval_command(&self.payload);
+                let reason = json_nonempty_str(&self.payload, "reason");
+
+                match (command.as_deref(), reason.as_deref()) {
+                    (Some(command), Some(reason)) => format!("{command} — {reason}"),
+                    (Some(command), None) => command.to_string(),
+                    (None, _) => fallback_subject(&self.payload),
+                }
+            }
         }
     }
 
