@@ -124,6 +124,15 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     journal_dir = Path.join(base, "harness-journal")
     File.mkdir_p!(workspace)
 
+    # The stores' tables outlive an :ouroboros restart on purpose, so a live session
+    # record another test left behind — its workspace is that test's cwd, far outside the
+    # root this module is about to restrict to — would make the restricted boot below
+    # refuse the whole node over someone else's leftovers (the streaming suite hit the
+    # same landmine and drives its own records terminal; this module cannot rely on every
+    # predecessor doing so). Purged while the store processes are still up, because after
+    # stop_application/0 there is nothing left to ask.
+    purge_leftover_session_records()
+
     stop_application()
     Application.put_env(:ouroboros, :workspace_allowed_roots, [workspace])
 
@@ -564,6 +573,67 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     case Application.stop(:ouroboros) do
       :ok -> :ok
       {:error, {:not_started, :ouroboros}} -> :ok
+    end
+  end
+
+  # Every record is deleted; a non-terminal one with a live coordinator is killed and
+  # awaited first, because a coordinator checkpoints its terminal state and a delete that
+  # raced that write would be re-inserted. A non-terminal record whose coordinator is
+  # already gone has no writer left, so it is deleted as-is. Skipped entirely when the
+  # application is down — the tables may hold records, but the restricted boot's recovery
+  # is exactly what the tests below assert on, and with no store process there is no
+  # seam to purge through.
+  defp purge_leftover_session_records do
+    if Process.whereis(Ouroboros.Interactive.Store) do
+      Enum.each(Ouroboros.Interactive.Store.list(), fn session ->
+        alive? = not is_nil(Ouroboros.Interactive.Task.whereis(session.id))
+
+        if alive? and not Ouroboros.Interactive.State.terminal?(session) do
+          _ = Ouroboros.InteractiveSession.kill(session.id)
+          await_purged_terminal(:interactive, session.id)
+        end
+
+        _ = Ouroboros.Interactive.Store.delete(session.id)
+      end)
+    end
+
+    if Process.whereis(Ouroboros.Coding.Store) do
+      Enum.each(Ouroboros.Coding.Store.list(), fn task ->
+        alive? = not is_nil(Ouroboros.Coding.Task.whereis(task.id))
+
+        if alive? and not Ouroboros.Coding.TaskState.terminal?(task) do
+          _ = Ouroboros.CodingSession.cancel(task.id)
+          await_purged_terminal(:coding, task.id)
+        end
+
+        _ = Ouroboros.Coding.Store.delete(task.id)
+      end)
+    end
+  end
+
+  defp await_purged_terminal(plane, id, attempts \\ 200)
+
+  defp await_purged_terminal(_plane, _id, 0),
+    do: flunk("a leftover session never reached a terminal status under purge")
+
+  defp await_purged_terminal(plane, id, attempts) do
+    {store, terminal?} =
+      case plane do
+        :interactive -> {Ouroboros.Interactive.Store, &Ouroboros.Interactive.State.terminal?/1}
+        :coding -> {Ouroboros.Coding.Store, &Ouroboros.Coding.TaskState.terminal?/1}
+      end
+
+    case store.get(id) do
+      {:ok, record} ->
+        if terminal?.(record) do
+          :ok
+        else
+          Process.sleep(10)
+          await_purged_terminal(plane, id, attempts - 1)
+        end
+
+      _other ->
+        :ok
     end
   end
 
