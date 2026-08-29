@@ -339,6 +339,23 @@ defmodule Ouroboros.ClusterTest do
           File.write!(Path.join(fleet_dir, "profile.json"), "{ not json")
           assert late_node in Cluster.membership_hosts()
 
+          # A last-known roster is evidence only for the fleet and data directory that
+          # produced it. If this process is reconfigured while the replacement profile is
+          # unreadable, it must use that fleet's boot seed rather than dial the old fleet.
+          replacement_id = "dddd4444eeee5555ffff6666"
+          replacement_node = :"ouro-replacement@127.0.0.1"
+
+          with_env(
+            %{
+              "OUROBOROS_FLEET_ID" => replacement_id,
+              "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(replacement_node)
+            },
+            fn ->
+              assert Cluster.membership_hosts() == [replacement_node]
+              refute late_node in Cluster.membership_hosts()
+            end
+          )
+
           # The inverse: a canceled member leaves the dial list without a restart.
           write_test_fleet_profile!(fleet_dir, fleet_id,
             local: owner,
@@ -355,6 +372,23 @@ defmodule Ouroboros.ClusterTest do
           assert Cluster.membership_hosts() == [owner_node]
         end
       )
+    end
+
+    test "dynamic epmd strategies do not claim one process-global name" do
+      state = %Elixir.Cluster.Strategy.State{
+        topology: :test_roster,
+        connect: {__MODULE__, :connect_for_strategy_test, []},
+        list_nodes: {__MODULE__, :list_nodes_for_strategy_test, []},
+        config: [hosts: [:"peer@127.0.0.1"], timeout: 60_000],
+        meta: nil
+      }
+
+      assert {:ok, first} = Cluster.RosterEpmd.start_link([state])
+      assert {:ok, second} = Cluster.RosterEpmd.start_link([state])
+      refute first == second
+
+      GenServer.stop(first)
+      GenServer.stop(second)
     end
 
     @tag timeout: 300_000
@@ -2026,6 +2060,12 @@ defmodule Ouroboros.ClusterTest do
   defp test_fleet_member(machine, host) do
     %{"machine" => machine, "host" => host, "node" => "ouro-#{machine}@#{host}"}
   end
+
+  @doc false
+  def connect_for_strategy_test(_node), do: true
+
+  @doc false
+  def list_nodes_for_strategy_test, do: []
 
   defp restart_cluster_monitor! do
     previous_monitor = Process.whereis(Ouroboros.Cluster.Monitor)

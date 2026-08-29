@@ -36,7 +36,10 @@ defmodule Ouroboros.Cluster.RosterEpmd do
     # `build_topologies(:epmd)` already rejects that configuration with a named error.
     case Keyword.get(config, :hosts, []) do
       [] -> :ignore
-      seeds when is_list(seeds) -> GenServer.start_link(__MODULE__, state, name: __MODULE__)
+      # The topology supervisor already identifies this child by topology. A global
+      # module registration would make a second independent Cluster.Supervisor fail with
+      # `already_started`, even though libcluster explicitly supports named supervisors.
+      seeds when is_list(seeds) -> GenServer.start_link(__MODULE__, state)
     end
   end
 

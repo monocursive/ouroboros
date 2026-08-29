@@ -1256,7 +1256,7 @@ defmodule Ouroboros.Cluster do
   def reset_membership_cache, do: :persistent_term.erase(@membership_cache)
 
   defp remember_membership(fleet_id, hosts) do
-    entry = %{fleet_id: fleet_id, hosts: hosts, failure: nil}
+    entry = %{identity: membership_identity(fleet_id), hosts: hosts, failure: nil}
 
     # `:persistent_term.put` triggers a global scan whenever the stored term changes,
     # and this runs once per reconnect sweep; only write when membership actually moved.
@@ -1266,11 +1266,13 @@ defmodule Ouroboros.Cluster do
   end
 
   defp recall_membership(reason) do
+    identity = membership_identity(System.get_env("OUROBOROS_FLEET_ID"))
+
     case :persistent_term.get(@membership_cache, nil) do
-      %{hosts: hosts, failure: ^reason} ->
+      %{identity: ^identity, hosts: hosts, failure: ^reason} ->
         hosts
 
-      %{hosts: hosts} = entry ->
+      %{identity: ^identity, hosts: hosts} = entry ->
         Logger.warning(
           "fleet profile is unreadable; formation keeps dialing the last membership it read: " <>
             inspect(reason, limit: 10, printable_limit: 200)
@@ -1279,17 +1281,36 @@ defmodule Ouroboros.Cluster do
         :persistent_term.put(@membership_cache, %{entry | failure: reason})
         hosts
 
-      nil ->
+      _absent_or_different_fleet ->
         seed = node_list("OUROBOROS_CLUSTER_HOSTS")
 
         Logger.warning(
-          "fleet profile is unreadable and no membership was ever read; formation dials " <>
-            "the boot seed list: " <> inspect(reason, limit: 10, printable_limit: 200)
+          "fleet profile is unreadable and no membership was read for this fleet and data " <>
+            "directory; formation dials the boot seed list: " <>
+            inspect(reason, limit: 10, printable_limit: 200)
         )
 
-        :persistent_term.put(@membership_cache, %{fleet_id: nil, hosts: seed, failure: reason})
+        :persistent_term.put(@membership_cache, %{
+          identity: identity,
+          hosts: seed,
+          failure: reason
+        })
+
         seed
     end
+  end
+
+  # A cached roster belongs to both the fleet and the durable directory it was read
+  # from. Reusing it after either identity changes can dial a machine from a previous
+  # fleet while the replacement profile is unreadable — precisely when fail-closed
+  # separation matters most.
+  defp membership_identity(fleet_id) do
+    data_dir = Application.get_env(:ouroboros, :data_dir)
+
+    expanded =
+      if is_binary(data_dir) and data_dir != "", do: Path.expand(data_dir), else: data_dir
+
+    {fleet_id, expanded}
   end
 
   @doc "Formation facts needed by an operator, without strategy credentials."

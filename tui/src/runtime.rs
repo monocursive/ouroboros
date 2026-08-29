@@ -2021,7 +2021,20 @@ pub struct Daemon {
     child: Option<Child>,
     identity: ProcessIdentity,
     logs: LogRing,
-    epmd_failure: Option<tokio::sync::oneshot::Receiver<String>>,
+    epmd: EpmdLifecycle,
+    data_dir: PathBuf,
+}
+
+/// The EPMD this start selected, in the phase it is currently owned.
+///
+/// During startup validation the exact watch handle stays here, so a boot that fails
+/// can reap the daemon it just launched instead of orphaning it behind a durable
+/// ownership marker. Only a validated start hands the handle to the detached monitor;
+/// after that, health arrives on the oneshot channel as before.
+enum EpmdLifecycle {
+    Absent,
+    Boot(crate::fleet::EpmdRuntimeWatch),
+    Supervised(tokio::sync::oneshot::Receiver<String>),
 }
 
 impl Daemon {
@@ -2043,7 +2056,7 @@ impl Daemon {
         if let Ok(Some(status)) = child.try_wait() {
             return Some(status);
         }
-        if let Some(reason) = self.take_epmd_failure() {
+        if let Some(reason) = self.poll_epmd_failure_nonblocking() {
             eprintln!(
                 "ouro fleet: {reason}; stopping the still-owned runtime so recovery can restart distribution"
             );
@@ -2055,13 +2068,17 @@ impl Daemon {
     /// Waits while retaining ownership, so cancellation leaves the drop guard armed.
     /// Used by `ouro service-run`: the service manager supervises this foreground client,
     /// and this client in turn must remain attached to the BEAM child it started.
+    ///
+    /// Supervision is armed by a validated `start`, not here. Arming inside wait would
+    /// make a premature wait unreapable: the Boot child would move to the monitor, and
+    /// Drop/cleanup could no longer stop the packaged EPMD this start launched.
     pub async fn wait(&mut self) -> Result<ExitStatus> {
         let pid = self.identity.pid;
         let child = self
             .child
             .as_mut()
             .ok_or_else(|| anyhow!("cannot wait for a detached runtime"))?;
-        let status = if let Some(epmd_failure) = self.epmd_failure.as_mut() {
+        let status = if let EpmdLifecycle::Supervised(epmd_failure) = &mut self.epmd {
             tokio::select! {
                 status = child.wait() => status.context("waiting for the runtime")?,
                 failure = epmd_failure => {
@@ -2085,7 +2102,10 @@ impl Daemon {
             child.wait().await.context("waiting for the runtime")?
         };
         self.child = None;
-        self.epmd_failure = None;
+        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
+            watch.disarm();
+        }
+        self.epmd = EpmdLifecycle::Absent;
         Ok(status)
     }
 
@@ -2098,7 +2118,7 @@ impl Daemon {
         let started = Instant::now();
 
         loop {
-            if let Some(reason) = self.take_epmd_failure() {
+            if let Some(reason) = self.poll_epmd_failure().await {
                 eprintln!(
                     "ouro fleet: {reason}; stopping the still-owned runtime because distribution cannot recover in place"
                 );
@@ -2165,7 +2185,47 @@ impl Daemon {
     /// `ouro daemon` and the UI's deliberate detach choice exit this way.
     pub fn detach(&mut self) {
         self.child = None;
-        self.epmd_failure = None;
+        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
+            // Detach means the runtime — and therefore its EPMD — deliberately outlives
+            // this process; the ownership marker stays behind as the durable claim.
+            watch.disarm();
+        }
+        self.epmd = EpmdLifecycle::Absent;
+    }
+
+    /// Hands the boot-phase EPMD watch to the detached monitor. Called exactly when
+    /// startup validation has passed; before that, the watch stays reapable in place.
+    pub fn arm_epmd_supervision(&mut self) {
+        if matches!(self.epmd, EpmdLifecycle::Boot(_)) {
+            let EpmdLifecycle::Boot(watch) =
+                std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent)
+            else {
+                unreachable!("the Boot variant was just matched");
+            };
+            self.epmd = EpmdLifecycle::Supervised(watch.supervise());
+        }
+    }
+
+    /// After a failed startup validation: stop the packaged EPMD this exact start
+    /// launched and remove its ownership marker and lock, so a retry begins from a
+    /// machine that looks the way it did before the attempt. A reused incumbent daemon
+    /// is never touched — `Ok(false)` reports that nothing needed reaping.
+    pub async fn reap_spawned_epmd(&mut self) -> Result<bool> {
+        match std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent) {
+            EpmdLifecycle::Boot(watch) => {
+                let data_dir = self.data_dir.clone();
+                tokio::task::spawn_blocking(move || watch.reap_spawned(&data_dir))
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow!("EPMD cleanup was cancelled: {error}")))
+            }
+            EpmdLifecycle::Absent => Ok(false),
+            EpmdLifecycle::Supervised(receiver) => {
+                // Supervision only starts after validation passed, so there is nothing
+                // to undo; put the health channel back.
+                self.epmd = EpmdLifecycle::Supervised(receiver);
+                Ok(false)
+            }
+        }
     }
 
     pub fn log_tail(&self, count: usize) -> String {
@@ -2185,18 +2245,41 @@ impl Daemon {
         rendered
     }
 
-    fn take_epmd_failure(&mut self) -> Option<String> {
-        let receiver = self.epmd_failure.as_mut()?;
-        match receiver.try_recv() {
-            Ok(reason) => {
-                self.epmd_failure = None;
-                Some(reason)
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                self.epmd_failure = None;
-                None
-            }
+    async fn poll_epmd_failure(&mut self) -> Option<String> {
+        match &mut self.epmd {
+            EpmdLifecycle::Absent => None,
+            EpmdLifecycle::Boot(watch) => watch.health().await,
+            EpmdLifecycle::Supervised(receiver) => match receiver.try_recv() {
+                Ok(reason) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    Some(reason)
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    None
+                }
+            },
+        }
+    }
+
+    fn poll_epmd_failure_nonblocking(&mut self) -> Option<String> {
+        match &mut self.epmd {
+            EpmdLifecycle::Absent => None,
+            // NAMES probes are blocking TCP; the UI tick and other sync callers only
+            // observe a child that already exited. wait_ready runs the full health step.
+            EpmdLifecycle::Boot(watch) => watch.child_lost(),
+            EpmdLifecycle::Supervised(receiver) => match receiver.try_recv() {
+                Ok(reason) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    Some(reason)
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.epmd = EpmdLifecycle::Absent;
+                    None
+                }
+            },
         }
     }
 }
@@ -2208,6 +2291,9 @@ impl Drop for Daemon {
             // error path has already used terminate(); this is the cancellation/panic
             // backstop that makes an accidental early return fail safe instead of detach.
             let _ = child.start_kill();
+        }
+        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
+            watch.abort_spawned(&self.data_dir);
         }
     }
 }
@@ -2306,16 +2392,21 @@ pub fn spawn(
         }
     }
 
-    // The detached monitor owns/reaps a foreground EPMD child when this launcher
-    // created one. For a compatible incumbent it only observes NAMES health. It reports
-    // loss back to this exact child owner; it never signals an unowned EPMD or a bare PID.
-    let epmd_failure = epmd_watch.map(crate::fleet::EpmdRuntimeWatch::supervise);
+    // The watch stays in the boot phase until startup validation passes: the readiness
+    // loop checks its health in place, and a failed validation reaps the exact EPMD
+    // child it names instead of orphaning it. `arm_epmd_supervision` hands it to the
+    // detached monitor, which never signals an unowned EPMD or a bare PID.
+    let epmd = match epmd_watch {
+        Some(watch) => EpmdLifecycle::Boot(watch),
+        None => EpmdLifecycle::Absent,
+    };
 
     Ok(Daemon {
         child: Some(child),
         identity: ProcessIdentity { pid, birth },
         logs,
-        epmd_failure,
+        epmd,
+        data_dir: data_dir.to_path_buf(),
     })
 }
 
@@ -2680,6 +2771,7 @@ fn open_daemon_log(path: &Path, expected: Option<FileIdentity>) -> Result<File> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static SCRATCH: AtomicU32 = AtomicU32::new(0);
@@ -3992,7 +4084,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: None,
+            epmd: EpmdLifecycle::Absent,
+            data_dir: std::env::temp_dir(),
         };
 
         assert!(pid_alive(pid));
@@ -4027,7 +4120,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: None,
+            epmd: EpmdLifecycle::Absent,
+            data_dir: std::env::temp_dir(),
         };
 
         daemon.detach();
@@ -4074,7 +4168,8 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: Some(receiver),
+            epmd: EpmdLifecycle::Supervised(receiver),
+            data_dir: std::env::temp_dir(),
         };
 
         failure
@@ -4107,16 +4202,212 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd_failure: Some(receiver),
+            epmd: EpmdLifecycle::Supervised(receiver),
+            data_dir: std::env::temp_dir(),
         };
 
         let status = daemon.wait().await.expect("reap the normal runtime exit");
         assert!(status.success());
         assert!(daemon.child.is_none());
-        assert!(daemon.epmd_failure.is_none());
+        assert!(matches!(daemon.epmd, EpmdLifecycle::Absent));
         assert!(
             failure.send("late EPMD failure".into()).is_err(),
             "normal runtime completion must close and disarm its health receiver"
         );
+    }
+
+    fn sleep_command() -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn tokio_sleep_child() -> (Child, i32) {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a long-running child");
+        let pid = child.id().expect("the child pid") as i32;
+        (child, pid)
+    }
+
+    #[tokio::test]
+    async fn dropping_a_boot_daemon_stops_the_packaged_epmd() {
+        let data = scratch("drop-boot-epmd");
+        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
+        let epmd_pid = epmd.id() as i32;
+        let (child, pid) = tokio_sleep_child();
+        let daemon = Daemon {
+            child: Some(child),
+            identity: ProcessIdentity {
+                pid,
+                birth: format!("test:{pid}"),
+            },
+            logs: LogRing::default(),
+            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
+                Some(epmd),
+                Ipv4Addr::LOCALHOST,
+                65_302,
+            )),
+            data_dir: data.clone(),
+        };
+
+        drop(daemon);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !pid_alive(pid),
+            "dropping an armed Daemon must kill the runtime"
+        );
+        assert!(
+            !pid_alive(epmd_pid),
+            "dropping a Boot Daemon must stop the packaged EPMD"
+        );
+        fs::remove_dir_all(&data).ok();
+    }
+
+    #[tokio::test]
+    async fn wait_does_not_arm_boot_epmd_so_cancellation_can_still_reap_it() {
+        let data = scratch("wait-boot-epmd");
+        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
+        let epmd_pid = epmd.id() as i32;
+        let (child, pid) = tokio_sleep_child();
+        let mut daemon = Daemon {
+            child: Some(child),
+            identity: ProcessIdentity {
+                pid,
+                birth: format!("test:{pid}"),
+            },
+            logs: LogRing::default(),
+            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
+                Some(epmd),
+                Ipv4Addr::LOCALHOST,
+                65_303,
+            )),
+            data_dir: data.clone(),
+        };
+
+        {
+            let wait = daemon.wait();
+            tokio::pin!(wait);
+            tokio::select! {
+                result = &mut wait => panic!("the runtime should still be running: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        }
+        drop(daemon);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !pid_alive(pid),
+            "cancelling wait must still Drop-kill the runtime"
+        );
+        assert!(
+            !pid_alive(epmd_pid),
+            "wait must not arm Boot EPMD; cancellation must still be able to stop it"
+        );
+        fs::remove_dir_all(&data).ok();
+    }
+
+    #[tokio::test]
+    async fn failed_wait_ready_leaves_boot_epmd_reapable() {
+        let data = scratch("wait-ready-reap-epmd");
+        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
+        let epmd_pid = epmd.id() as i32;
+        let (child, pid) = tokio_sleep_child();
+        let mut daemon = Daemon {
+            child: Some(child),
+            identity: ProcessIdentity {
+                pid,
+                birth: format!("test:{pid}"),
+            },
+            logs: LogRing::default(),
+            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
+                Some(epmd),
+                Ipv4Addr::LOCALHOST,
+                65_304,
+            )),
+            data_dir: data.clone(),
+        };
+
+        let error = daemon
+            .wait_ready(&data, Duration::from_millis(200))
+            .await
+            .expect_err("no publication was written");
+        assert!(error.to_string().contains("did not publish"), "{error:#}");
+        assert!(
+            daemon
+                .reap_spawned_epmd()
+                .await
+                .expect("reap the Boot EPMD"),
+            "a failed readiness check must still be able to reap the packaged EPMD"
+        );
+        assert!(!pid_alive(epmd_pid), "reap must stop the packaged EPMD");
+
+        daemon.terminate(Duration::from_secs(2)).await.ok();
+        fs::remove_dir_all(&data).ok();
+    }
+
+    #[tokio::test]
+    async fn arming_makes_reap_a_no_op_so_a_validated_start_keeps_its_epmd() {
+        let data = scratch("arm-then-reap-epmd");
+        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
+        let epmd_pid = epmd.id() as i32;
+        let (child, pid) = tokio_sleep_child();
+        let mut daemon = Daemon {
+            child: Some(child),
+            identity: ProcessIdentity {
+                pid,
+                birth: format!("test:{pid}"),
+            },
+            logs: LogRing::default(),
+            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
+                Some(epmd),
+                Ipv4Addr::LOCALHOST,
+                65_305,
+            )),
+            data_dir: data.clone(),
+        };
+
+        daemon.arm_epmd_supervision();
+        assert!(
+            !daemon
+                .reap_spawned_epmd()
+                .await
+                .expect("armed EPMD is not ours to reap"),
+            "after validation the monitor owns EPMD; reap must not stop it"
+        );
+        assert!(
+            pid_alive(epmd_pid),
+            "an armed EPMD must survive a post-validation reap"
+        );
+
+        daemon.detach();
+        drop(daemon);
+        send_signal(pid, libc::SIGTERM).ok();
+        send_signal(epmd_pid, libc::SIGTERM).ok();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if pid_alive(epmd_pid) {
+            let _ = send_signal(epmd_pid, libc::SIGKILL);
+        }
+        if pid_alive(pid) {
+            let _ = send_signal(pid, libc::SIGKILL);
+        }
+        fs::remove_dir_all(&data).ok();
     }
 }
