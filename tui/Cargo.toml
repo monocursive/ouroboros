@@ -13,26 +13,12 @@ publish = false
 name = "ouro"
 path = "src/main.rs"
 
-[[bin]]
-name = "ouro-desktop"
-path = "src/desktop_main.rs"
-required-features = ["desktop"]
-
 [features]
 default = []
 # Compiles the release extractor. The embedded bytes themselves arrive separately, via
 # OUROBOROS_RELEASE_TARBALL at build time, so the extractor stays testable without a
 # `mix release` having run.
 embed = ["dep:flate2", "dep:tar", "dep:sha2"]
-# Native desktop client. Exact pre-1.0 versions are intentional: GPUI and
-# gpui-component evolve together, and a floating compatible range can compile two
-# different framework APIs into one binary.
-desktop = [
-  "dep:cocoa",
-  "dep:gpui",
-  "dep:gpui-component",
-  "dep:gpui-component-assets",
-]
 
 [dependencies]
 anyhow = "1"
@@ -89,23 +75,17 @@ tokio = { version = "1", features = [
 zeroize = "1"
 x509-parser = { version = "0.16", features = ["verify"] }
 
-gpui = { version = "=0.2.2", optional = true, features = ["runtime_shaders"] }
-gpui-component = { version = "=0.5.1", optional = true }
-gpui-component-assets = { version = "=0.5.1", optional = true }
-
-# The `embed` feature's three crates, and they belong in the platform-independent table
-# rather than under the `cfg(target_os = "macos")` header below. A blank line does not end
-# a TOML table: while these sat after that header they were macOS-only dependencies, so
+# The `embed` feature's three crates. They belong in the platform-independent table, and
+# once did not: this crate used to carry a `[target.'cfg(target_os = "macos")'.dependencies]`
+# table for the desktop client's `cocoa`, and a blank line does not end a TOML table, so
+# while these three sat after that header they were macOS-only dependencies and
 # `cargo build --features embed` on Linux compiled `src/runtime/embed.rs` against three
-# crates that were not in the graph and failed on every one of them. `make dist` on the
+# crates that were not in the graph, failing on every one of them. `make dist` on the
 # release workflow's `ubuntu-24.04` runner would have hit exactly this; `make dist-linux`
-# is what actually hit it.
+# is what actually hit it. The macOS table left with the desktop client; keep these here.
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-cocoa = { version = "=0.26.0", optional = true }
 
 [build-dependencies]
 sha2 = { version = "0.10", optional = true }

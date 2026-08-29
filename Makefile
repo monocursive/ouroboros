@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop web status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -21,15 +21,11 @@ help:
 	@echo "make daemon           start the dev runtime headless and leave it running"
 	@echo "make daemon-restart   recompile, then swap the dev runtime onto the new code"
 	@echo "make daemon-stop      stop the dev runtime"
-	@echo "make gui              build the desktop app and (re)launch it against the checkout"
-	@echo "make gui-stop         quit the desktop app"
 	@echo "make web              open the checkout runtime's browser surface in a browser"
 	@echo "make status           what is running, on which port, and whether it is stale"
-	@echo "make stop             everything down: app, daemon, and any stray daemons"
+	@echo "make stop             everything down: daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
-	@echo "make desktop-dev      build a local macOS Ouroboros.app using this checkout"
-	@echo "make desktop-app      build a release macOS Ouroboros.app with embedded runtime"
 	@echo "make test             formatting, script checks, mix test, cargo test/fmt/clippy"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
@@ -51,7 +47,7 @@ dev:
 
 tui: dev
 
-# The daemon/gui/status/stop family is one script, so the knowledge of where the dev
+# The daemon/web/status/stop family is one script, so the knowledge of where the dev
 # gateway publishes, how staleness is judged, and what counts as a stray daemon has a
 # single home. See scripts/dev.sh.
 daemon:
@@ -62,12 +58,6 @@ daemon-stop:
 
 daemon-restart:
 	@sh scripts/dev.sh daemon-restart
-
-gui:
-	@sh scripts/dev.sh gui
-
-gui-stop:
-	@sh scripts/dev.sh gui-stop
 
 web:
 	@sh scripts/dev.sh web
@@ -83,17 +73,6 @@ reset:
 
 logs:
 	@sh scripts/dev.sh logs
-
-desktop-dev: computer-use-debug
-	@echo "==> desktop-dev: building the native client and its lifecycle helper"
-	cd tui && $(CARGO) build --features desktop --bin ouro --bin ouro-desktop
-	./scripts/bundle-macos-desktop.sh debug
-
-desktop-app: computer-use release-tarball
-	@echo "==> desktop-app: embedding the runtime in both macOS app executables"
-	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
-	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features "embed desktop" --bin ouro --bin ouro-desktop
-	./scripts/bundle-macos-desktop.sh release
 
 computer-use:
 	@echo "==> computer-use: release helper into priv/computer-use/"
