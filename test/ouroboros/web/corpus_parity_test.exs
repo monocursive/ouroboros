@@ -616,7 +616,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
                "no permission rule engine is configured on this node, so every tool call is put " <>
                  "to you"
 
-      assert detail.suggested_rule == "Bash(git push:*)"
+      assert detail.suggested_rule == "Bash(git push *)"
       assert detail.plan == nil
       assert detail.subagent == nil
       assert detail.options == []

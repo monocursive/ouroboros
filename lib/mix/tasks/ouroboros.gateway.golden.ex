@@ -435,7 +435,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          "reason" =>
            "no permission rule engine is configured on this node, so every tool call is " <>
              "put to you",
-         "suggested_rule" => "Bash(git push:*)"
+         "suggested_rule" => "Bash(git push *)"
        }, request_id: "req-permission-000000000001"},
       {"event_approval_requested_question",
        "the native `ask_user` question, whose options are plain strings and not the " <>

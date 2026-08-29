@@ -808,7 +808,7 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
              to you"
         )
     );
-    assert_eq!(detail.suggested_rule.as_deref(), Some("Bash(git push:*)"));
+    assert_eq!(detail.suggested_rule.as_deref(), Some("Bash(git push *)"));
     assert_eq!(detail.plan, None);
     assert_eq!(detail.subagent, None);
     assert!(detail.options.is_empty());

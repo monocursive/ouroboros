@@ -1149,7 +1149,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert html =~ "git push --force origin main"
       assert html =~ "/srv/repo"
       assert html =~ "no permission rule engine is configured on this node"
-      assert html =~ "Bash(git push:*)"
+      assert html =~ "Bash(git push *)"
 
       # Sections this payload does not carry are simply not there.
       refute html =~ "ouro-approval-diff"
@@ -1653,16 +1653,16 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       {:ok, view, html} = live(conn, "/s/interactive/#{id}")
 
-      assert html =~ "Bash(git push:*)"
+      assert html =~ "Bash(git push *)"
       assert html =~ "Remember for this workspace"
 
       html = view |> element(~s(button[phx-click="remember"])) |> render_click()
 
-      assert html =~ "saved: Bash(git push:*)"
+      assert html =~ "saved: Bash(git push *)"
 
       # The rule the engine actually holds, not the sentence the card drew about it.
       assert [rule] = rules_for(workspace)
-      assert rule.pattern == "Bash(git push:*)"
+      assert rule.pattern == "Bash(git push *)"
       assert rule.decision == :allow
       assert rule.scope == :workspace
     end
