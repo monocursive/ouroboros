@@ -46,6 +46,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
   alias Ouroboros.Web.Live.NewSession
+  alias Ouroboros.Web.Prefs
 
   # Only while a login is pending, and only because a device-code flow completes on another
   # device: there is nothing for the runtime to push, so the page asks.
@@ -53,10 +54,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    config = Config.for_endpoint(socket.endpoint)
+
     socket =
       socket
-      |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
-      |> assign(:form, NewSession.new())
+      |> assign(:scope, config.scope)
+      |> assign(:data_dir, config.data_dir)
+      # Where the operator's last successful start left this form. `read/1` is total, so a
+      # corrupt file is a form with no defaults rather than a page that will not mount.
+      |> assign(:form, NewSession.new(Prefs.read(config.data_dir)))
       |> assign(:providers, nil)
       |> assign(:providers_error, nil)
       |> assign(:catalogue, nil)
@@ -211,6 +217,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     socket
     |> load_providers()
     |> load_models()
+    |> promote_seed()
     |> assign(:loaded?, true)
     |> read_account()
     # A login this runtime already has in flight — started from the TUI, or from another
@@ -237,6 +244,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         assign(socket, :catalogue_error, message(refused))
     end
   end
+
+  # A model seeded out of `web.prefs.json` arrives as a custom choice, because at mount
+  # there is no catalogue to check it against. Once there is one, a remembered model this
+  # runtime actually lists is drawn as its own row rather than sitting in the custom box
+  # looking like something nobody has heard of. It sends the same string either way.
+  defp promote_seed(socket),
+    do: assign(socket, :form, NewSession.promote(socket.assigns.form, field(socket)))
 
   # Read whenever the card is on screen, which is what makes "checking" a state that
   # resolves rather than a spinner.
@@ -291,6 +305,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       {:ok, answer} ->
         case NewSession.started(answer) do
           {:ok, id} ->
+            # Only on a start that actually happened, and only the keys the request
+            # carried. A refused start is not evidence about how the operator likes to
+            # work, and `id` is dropped because idempotency is the whole reason it exists:
+            # a remembered one would adopt a session that is already running.
+            _ = Prefs.write(socket.assigns.data_dir, Map.delete(params, "id"))
+
             push_navigate(socket, to: NewSession.deck_path(id))
 
           :error ->

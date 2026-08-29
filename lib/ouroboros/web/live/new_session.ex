@@ -22,9 +22,28 @@ defmodule Ouroboros.Web.Live.NewSession do
   The three optional postures — `model`, `sandbox_mode`, `reasoning_effort` — are omitted
   from the request when the operator did not state them. Omission is not the same as
   sending `"default"`: it leaves the choice with the plane, which is the only party that
-  knows what the selected transport can actually normalize. The web surface has no stored
-  form defaults at all (`docs/WEB.md` §4, D10 — `web.prefs.json` is a later slice), so an
-  untouched control here is always an absent field.
+  knows what the selected transport can actually normalize.
+
+  ## What a stored default is, and what it is not
+
+  `new/1` seeds this struct from `Ouroboros.Web.Prefs`, and the semantics are the
+  **desktop's**, which `docs/DESKTOP.md` states in one sentence: "What the file supplies is
+  where the control *starts*; an explicit pick is what gets sent, and an untouched panel
+  with no stored default states no posture at all, leaving the plane to decide."
+
+  Read carefully, that sentence says a stored default **is** sendable — only the *absence*
+  of one leaves the field off the request — and the desktop implements exactly that:
+  `let sandbox = self.new_sandbox.or(configured_sandbox)` under the comment "What the form
+  will actually send: the operator's pick, else the stored default, else nothing"
+  (`tui/src/desktop.rs:2264-2269`). So a seeded control here is a *stated* control on all
+  five keys, and "absent, not defaulted" continues to mean what it always meant: nothing
+  the operator has never chosen — this time or on a previous session — ever reaches the
+  plane. The alternative, a file that is displayed but not sent, would show an operator one
+  posture and request another, which is the exact failure `model_intent/3` exists to
+  prevent.
+
+  A field with no stored value and no pick is still absent, and `start_params/2` is
+  unchanged: it reads the struct, not the file, and cannot tell where a value came from.
   """
 
   alias Ouroboros.Gateway.Methods.Browse
@@ -76,9 +95,53 @@ defmodule Ouroboros.Web.Live.NewSession do
   was created. A caller-owned id makes the retry adopt the same immutable intent instead
   of starting a second session (`docs/PROTOCOL.md`, `interactive.start`'s `id`), and it
   survives a re-render, so the same form retried twice is one session either way.
+
+  Given a map from `Ouroboros.Web.Prefs.read/1`, the form starts where the operator's last
+  successful start left it. Every value in that map has already been checked against the
+  vocabulary its parameter admits, so nothing here re-validates and nothing here can be
+  seeded with something `start_params/2` would then decline to send — the seed and the
+  request would disagree, and this module exists so they cannot.
+
+  The stored model is seeded as a **custom** choice carrying the spec verbatim. That is the
+  one seed that is correct under every model field: `{:text, _}` reads the typed value,
+  `{:rows, _, _}` offers a custom row unconditionally (`rows/1` appends one), and
+  `:unsupported` sends nothing whatever is typed. `promote/2` upgrades it to the catalogue
+  row once a catalogue has actually arrived and turns out to list it — a change to how the
+  form *draws*, never to what it sends.
   """
-  @spec new() :: t()
-  def new, do: %__MODULE__{id: mint_id()}
+  @spec new(map()) :: t()
+  def new(prefs \\ %{}) when is_map(prefs) do
+    %__MODULE__{
+      id: mint_id(),
+      provider: Map.get(prefs, "provider"),
+      model_choice: if(Map.has_key?(prefs, "model"), do: :custom, else: :runtime_default),
+      model_text: Map.get(prefs, "model", ""),
+      workspace: Map.get(prefs, "workspace", ""),
+      sandbox: Map.get(prefs, "sandbox_mode"),
+      effort: Map.get(prefs, "reasoning_effort")
+    }
+  end
+
+  @doc """
+  Draw a seeded custom model as its catalogue row, when the catalogue turns out to have one.
+
+  Called once, after `runtime.models` answers. `model_option/3` returns the same string for
+  `{:catalog, id}` and for `:custom` carrying that id, so this cannot change the request —
+  it only stops a remembered catalogue model from being shown in the "custom" box as though
+  this runtime had never heard of it.
+  """
+  @spec promote(t(), model_field()) :: t()
+  def promote(%__MODULE__{model_choice: :custom} = form, field) do
+    case trimmed(form.model_text) do
+      nil ->
+        form
+
+      id ->
+        if offers?(field, {:catalog, id}), do: %{form | model_choice: {:catalog, id}}, else: form
+    end
+  end
+
+  def promote(%__MODULE__{} = form, _field), do: form
 
   @doc "The three sandbox postures the form offers, least power first."
   @spec sandbox_modes() :: [String.t()]
