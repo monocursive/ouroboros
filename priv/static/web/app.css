@@ -271,3 +271,913 @@ code,
 .phx-connected .ouro-page {
   box-shadow: none;
 }
+
+/* ==========================================================================
+ * The deck (W3): the attention stack, the transcript, the vitals.
+ *
+ * The three rules in the header above govern everything below, and the first is the one
+ * this section could most easily break:
+ *
+ *   1. --attention-green is spent in exactly ONE place on this page — the eye in the
+ *      needs-you glyph, and the count beside its heading. Not on a completed tool, not
+ *      on a succeeded subagent, and above all not on the added lines of a diff. The
+ *      diff tones below are ink-derived washes: emphasis, not a verdict.
+ *   2. Layers separate by hairline, never by shadow.
+ *   3. One filled button per view. Here it is "New session", and in this slice it is
+ *      disabled, because the slice that wires it has not landed.
+ * ========================================================================== */
+
+:root {
+  /* The deck's own measurements, named so the three columns cannot drift apart. */
+  --topbar-height: 56px;
+  --rail-width: 360px;
+  --vitals-width: 300px;
+
+  /* Diff tones. Emphasis, not semantics: a changed line is not a state a person is in.
+     A cool wash for additions and a warm one for removals — legible against each other,
+     and neither of them is --attention-green or --danger. */
+  --diff-add-bg: #17241d;
+  --diff-add-ink: #b7d8c4;
+  --diff-remove-bg: #271a1a;
+  --diff-remove-ink: #dcbcb8;
+  --diff-gutter: #6d7068;
+}
+
+[data-theme="light"] {
+  --diff-add-bg: #e2efe7;
+  --diff-add-ink: #1f4030;
+  --diff-remove-bg: #f5e3e1;
+  --diff-remove-ink: #4a2320;
+  --diff-gutter: #9a9e95;
+}
+
+/* -------------------------------------------------------------------------- Layout */
+
+.ouro-deck {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--workspace);
+}
+
+/* The vitals column exists only while a session is open; without it the transcript takes
+   the space rather than leaving a hole where a panel would have been. */
+.ouro-columns {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.ouro-columns:has(> .ouro-vitals) {
+  grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--vitals-width);
+}
+
+/* ------------------------------------------------------------------------- Top bar */
+
+.ouro-topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  height: var(--topbar-height);
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--hairline-2);
+  background: var(--page);
+  flex: 0 0 auto;
+}
+
+.ouro-wordmark {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.14em;
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.ouro-presence {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Hollow is "not connected", filled is "connected". Never green: presence is a fact
+   about a machine, not a request for a person's attention. */
+.ouro-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--tertiary);
+  background: transparent;
+  display: inline-block;
+}
+
+.ouro-dot-on {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.ouro-topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.ouro-today {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+.ouro-pill {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+}
+
+/* Connected is the default, so a server-rendered page is not born claiming a fault.
+   LiveView writes its error classes onto its own root, which is an ancestor of this. */
+.ouro-pill-off {
+  display: none;
+}
+
+.phx-error .ouro-pill-on,
+.phx-client-error .ouro-pill-on,
+.phx-server-error .ouro-pill-on {
+  display: none;
+}
+
+.phx-error .ouro-pill-off,
+.phx-client-error .ouro-pill-off,
+.phx-server-error .ouro-pill-off {
+  display: inline;
+  color: var(--warn-amber);
+}
+
+.ouro-button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ouro-button[disabled]:hover {
+  background: var(--button-bg);
+  border-color: var(--button-bg);
+}
+
+/* ---------------------------------------------------------------------------- Rail */
+
+.ouro-rail {
+  border-right: 1px solid var(--hairline-2);
+  overflow-y: auto;
+  padding: 0.75rem 0 2rem;
+  background: var(--workspace);
+  min-height: 0;
+}
+
+.ouro-group-head {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.1em;
+  font-weight: 500;
+  font-size: 0.85rem;
+  color: var(--tertiary);
+  margin: 1rem 0 0.35rem;
+  padding: 0 var(--gutter);
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+/* The one heading that earns the tone, and the count beside it: this group is people-
+   shaped work by definition, which is exactly what the green means. */
+.ouro-group-needs_you .ouro-group-head {
+  color: var(--attention-green);
+}
+
+.ouro-count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.ouro-group-empty {
+  margin: 0;
+  padding: 0 var(--gutter);
+  color: var(--tertiary);
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.ouro-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.5rem var(--gutter);
+  text-decoration: none;
+  color: var(--ink);
+  border-left: 2px solid transparent;
+}
+
+.ouro-row:hover {
+  background: var(--panel);
+}
+
+.ouro-row-open {
+  background: var(--panel);
+  border-left-color: var(--border-strong);
+}
+
+.ouro-row-nested {
+  padding-left: calc(var(--gutter) + 1.25rem);
+}
+
+/* A needs-you row is a card, because it is the one row a person is meant to act on. */
+.ouro-row-needs_you {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-left: 2px solid transparent;
+  border-radius: var(--radius);
+  margin: 0.25rem var(--gutter);
+  padding: 0.6rem 0.75rem;
+}
+
+.ouro-row-settled {
+  color: var(--tertiary);
+}
+
+.ouro-glyph {
+  flex: 0 0 auto;
+  margin-top: 0.2rem;
+  color: var(--secondary);
+}
+
+.ouro-glyph-settled {
+  color: var(--tertiary);
+}
+
+.ouro-glyph-failed {
+  color: var(--danger);
+}
+
+.ouro-row-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.ouro-row-title {
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-row-line {
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-row-failed .ouro-row-line {
+  color: var(--danger);
+}
+
+.ouro-row-age {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  margin-top: 0.15rem;
+}
+
+/* -------------------------------------------------------------------- Focused pane */
+
+.ouro-focus {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--workspace);
+}
+
+.ouro-focus-head {
+  padding: 1rem var(--gutter) 0.75rem;
+  border-bottom: 1px solid var(--hairline-1);
+  flex: 0 0 auto;
+}
+
+.ouro-focus-title {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 500;
+  margin: 0;
+}
+
+.ouro-focus-meta {
+  margin: 0.2rem 0 0;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* Amber, and only for this: a session that may do anything is a fact a reader must not
+   have to go looking for. */
+.ouro-tag-full {
+  color: var(--warn-amber);
+  border: 1px solid var(--warn-amber);
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+  margin-left: 0.5rem;
+  font-size: 0.72rem;
+}
+
+.ouro-truncation {
+  padding: 0.35rem var(--gutter) 0;
+  margin: 0;
+}
+
+.ouro-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem var(--gutter) 2rem;
+}
+
+.ouro-composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline-2);
+  padding: 0.75rem var(--gutter);
+  background: var(--page);
+}
+
+.ouro-composer-input {
+  width: 100%;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--tertiary);
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.ouro-empty {
+  padding: 4rem var(--gutter);
+  color: var(--secondary);
+}
+
+.ouro-empty-head {
+  font-family: var(--font-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  margin: 0 0 0.5rem;
+}
+
+/* -------------------------------------------------------------------------- Vitals */
+
+.ouro-vitals {
+  border-left: 1px solid var(--hairline-2);
+  padding: 1rem var(--gutter);
+  overflow-y: auto;
+  background: var(--workspace);
+  min-height: 0;
+}
+
+.ouro-vital {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.ouro-vital dt {
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+}
+
+.ouro-vital dd {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* A bar, not a ring: a ring reads as a dial with a target, and a context window has no
+   target — it has a ceiling you would rather not reach. Ink on track. */
+.ouro-meter {
+  height: 3px;
+  background: var(--inset);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 0.3rem;
+}
+
+.ouro-meter-fill {
+  height: 100%;
+  background: var(--ink);
+}
+
+/* --------------------------------------------------------------------------- Cells */
+
+.ouro-cell {
+  margin: 0 0 0.65rem;
+  max-width: 62rem;
+}
+
+.ouro-quiet {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+.ouro-quiet-label {
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+  margin-right: 0.5rem;
+}
+
+.ouro-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* What the operator said sits right in a quiet bubble; what the agent said is a plain
+   reading column, because it is the thing being read. */
+.ouro-said-you {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ouro-bubble {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  max-width: 42rem;
+  white-space: pre-wrap;
+}
+
+.ouro-prose {
+  line-height: 1.65;
+}
+
+.ouro-prose > :first-child {
+  margin-top: 0;
+}
+
+.ouro-prose > :last-child {
+  margin-bottom: 0;
+}
+
+.ouro-prose pre {
+  background: var(--inset);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+}
+
+.ouro-prose code {
+  font-family: var(--font-mono);
+}
+
+.ouro-prose blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--hairline-2);
+  color: var(--secondary);
+}
+
+.ouro-prose a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* A draft still being written. A pulse, not a spinner: the words are already arriving,
+   and a spinner over arriving words says nothing is happening. */
+@keyframes ouro-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+.ouro-streaming .ouro-prose {
+  animation: ouro-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ouro-streaming .ouro-prose {
+    animation: none;
+    border-left: 2px solid var(--hairline-2);
+    padding-left: 0.6rem;
+  }
+}
+
+.ouro-thinking-text {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  white-space: pre-wrap;
+  margin: 0.2rem 0 0;
+}
+
+.ouro-thinking-collapsed {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+/* ---------------------------------------------------------------- Tools and bodies */
+
+.ouro-tool-row,
+.ouro-explore-row,
+.ouro-subagent-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.ouro-explore-row,
+.ouro-subagent-row {
+  cursor: pointer;
+}
+
+.ouro-tool-mark,
+.ouro-subagent-mark {
+  color: var(--tertiary);
+}
+
+/* Completed is ink. Failed is the danger tone. Nothing here is ever green. */
+.ouro-tool-completed .ouro-tool-mark {
+  color: var(--ink);
+}
+
+.ouro-tool-failed .ouro-tool-mark,
+.ouro-tool-failed .ouro-tool-outcome {
+  color: var(--danger);
+}
+
+.ouro-tool-verb {
+  color: var(--ink);
+}
+
+.ouro-tool-subject,
+.ouro-tool-line {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.ouro-tool-outcome,
+.ouro-tool-elapsed {
+  color: var(--tertiary);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.ouro-tool-elapsed {
+  margin-left: 0.5rem;
+}
+
+.ouro-body {
+  margin: 0.3rem 0 0 1.1rem;
+  border-left: 1px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-body-text {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--secondary);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.ouro-fold {
+  background: none;
+  border: 0;
+  border-bottom: 1px dotted var(--border);
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.15rem 0;
+  margin: 0.25rem 0;
+  cursor: pointer;
+}
+
+.ouro-fold:hover {
+  color: var(--ink);
+}
+
+.ouro-explore-calls,
+.ouro-subagent-rows {
+  margin: 0.3rem 0 0 1.1rem;
+  border-left: 1px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-file {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ouro-file-kind {
+  color: var(--tertiary);
+}
+
+.ouro-image {
+  margin: 0 0 0.65rem;
+}
+
+.ouro-image img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+}
+
+/* --------------------------------------------------------------------------- Diffs */
+
+.ouro-diff {
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.ouro-diff-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.4rem 0.6rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--hairline-1);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.ouro-diff-mark {
+  color: var(--tertiary);
+}
+
+.ouro-diff-path {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.ouro-diff-plus {
+  color: var(--diff-add-ink);
+  margin-left: auto;
+}
+
+.ouro-diff-minus {
+  color: var(--diff-remove-ink);
+}
+
+.ouro-hunk-head {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  padding: 0.25rem 0.6rem;
+  background: var(--workspace);
+}
+
+.ouro-hunk-section {
+  margin-left: 0.5rem;
+}
+
+.ouro-line {
+  display: grid;
+  grid-template-columns: 3.5rem 3.5rem 1rem minmax(0, 1fr);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.ouro-gutter {
+  color: var(--diff-gutter);
+  text-align: right;
+  padding-right: 0.5rem;
+  user-select: none;
+}
+
+.ouro-line-mark {
+  user-select: none;
+  color: var(--tertiary);
+}
+
+.ouro-line-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-right: 0.6rem;
+}
+
+.ouro-line-added {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-ink);
+}
+
+.ouro-line-removed {
+  background: var(--diff-remove-bg);
+  color: var(--diff-remove-ink);
+}
+
+.ouro-line-context {
+  color: var(--secondary);
+}
+
+.ouro-line-meta {
+  color: var(--tertiary);
+  font-style: italic;
+}
+
+.ouro-diffstat {
+  display: flex;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--tertiary);
+  border-top: 1px solid var(--hairline-1);
+  padding-top: 0.4rem;
+}
+
+/* A diff waiting on an answer is bracketed in amber, not in the attention green: the
+   card that asks is where a person acts, and this is only its subject. */
+.ouro-diff-pending {
+  border-color: var(--warn-amber);
+}
+
+/* ---------------------------------------------------- Status, notes, plans, usage */
+
+.ouro-status,
+.ouro-runtime,
+.ouro-divider {
+  font-size: 0.82rem;
+}
+
+.ouro-status {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.ouro-status-label,
+.ouro-runtime-label {
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-status-detail,
+.ouro-runtime-detail {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Success is INK. The green is not a verdict; see the header. */
+.ouro-tone-success {
+  color: var(--ink);
+}
+
+.ouro-tone-warning {
+  color: var(--warn-amber);
+}
+
+.ouro-tone-error {
+  color: var(--danger);
+}
+
+.ouro-tone-muted {
+  color: var(--tertiary);
+}
+
+.ouro-chat-note {
+  color: var(--tertiary);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.ouro-runtime {
+  border-left: 2px solid var(--hairline-2);
+  padding-left: 0.75rem;
+}
+
+.ouro-runtime-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.ouro-subagent-headline {
+  color: var(--ink);
+}
+
+.ouro-subagent-detail {
+  color: var(--tertiary);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.ouro-plan-steps {
+  margin: 0.3rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ouro-plan-steps li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+
+.ouro-step-glyph {
+  color: var(--tertiary);
+}
+
+.ouro-step-completed .ouro-step-glyph,
+.ouro-step-completed .ouro-step-text {
+  color: var(--ink);
+}
+
+.ouro-step-completed .ouro-step-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--tertiary);
+}
+
+.ouro-plan-explanation {
+  margin: 0;
+  color: var(--secondary);
+}
+
+.ouro-usage {
+  display: flex;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--tertiary);
+}
+
+.ouro-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--tertiary);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  margin: 1rem 0;
+}
+
+.ouro-divider::before,
+.ouro-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--hairline-2);
+}
+
+/* -------------------------------------------------------------------- Narrow view */
+
+@media (max-width: 1100px) {
+  .ouro-columns,
+  .ouro-columns:has(> .ouro-vitals) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: min-content;
+  }
+
+  .ouro-rail,
+  .ouro-vitals {
+    border: 0;
+    border-bottom: 1px solid var(--hairline-2);
+  }
+
+  .ouro-deck {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .ouro-transcript {
+    overflow-y: visible;
+  }
+}

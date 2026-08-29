@@ -1,11 +1,20 @@
 defmodule Ouroboros.Web.Router do
   @moduledoc """
-  Every route the web surface serves, which in W0 is one.
+  Every route the web surface serves.
 
   The router never sees an unauthenticated request: `Ouroboros.Web.Auth` runs in the
   endpoint, above this, so a route added here is authenticated by construction rather
   than by remembering to pipe it through something. `/auth` is not a route for the same
   reason — it is the door, and the door is not inside the house.
+
+  `/` is the deck. `/s/:plane/:id` is the deck with one session open, and it is a
+  `live_patch` target rather than a separate page so that opening a session keeps the
+  socket, the subscription machinery, and the rail's scroll position — a full navigation
+  would tear down a live transcript to draw the same list again.
+
+  `/status` is W0's page, kept rather than folded in: it is one call deep and stands on
+  nothing, which makes it the page an operator loads when the deck itself is what looks
+  broken.
   """
 
   use Phoenix.Router, helpers: false
@@ -28,7 +37,14 @@ defmodule Ouroboros.Web.Router do
     pipe_through :browser
 
     live_session :authenticated, on_mount: {Ouroboros.Web.Auth, :ensure_session} do
-      live "/", StatusLive, :index
+      live "/", Live.DeckLive, :index
+      live "/s/:plane/:id", Live.DeckLive, :session
+      live "/status", StatusLive, :index
     end
+
+    # Not a LiveView: it answers bytes, and an `<img>` is a plain GET. It is inside the
+    # authenticated scope like everything else, so the cookie that opened the deck is the
+    # only thing that opens a screenshot.
+    get "/artifact/:plane/:id/:sha", ArtifactController, :show
   end
 end

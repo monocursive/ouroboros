@@ -70,7 +70,11 @@ defmodule Ouroboros.Web.AuthTest do
 
       assert conn.status == 200
       assert conn.resp_body =~ "Ouroboros"
-      assert conn.resp_body =~ "Runtime"
+      # W3 replaced W0's status page at `/` with the deck; this assertion follows the
+      # route rather than the page it used to serve. What it is checking has not changed:
+      # that the cookie reached a LiveView which reached the runtime and got an answer
+      # back — the machine's own name in the presence row is that answer.
+      assert conn.resp_body =~ "NEEDS YOU"
       assert conn.resp_body =~ to_string(node())
     end
 
