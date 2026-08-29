@@ -156,6 +156,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   news or into noise.
   """
   attr :request, :any, required: true
+  attr :detail, :any, required: true
   attr :node, :any, required: true
   attr :rule, :any, required: true
   attr :rule_refusal, :any, required: true
@@ -164,11 +165,10 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   attr :can_remember, :boolean, default: false
 
   def card(assigns) do
-    detail = Approval.detail(assigns.request)
+    detail = assigns.detail
 
     assigns =
       assigns
-      |> assign(:detail, detail)
       |> assign(:subject, Approval.subject(assigns.request))
       |> assign(:parsed, parsed_diff(detail))
       |> assign(:escalation?, detail.kind == "sandbox escalation")

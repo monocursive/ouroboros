@@ -586,6 +586,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:composer_error, nil)
     |> assign(:approval_notice, nil)
     |> assign(:approvals, [])
+    |> assign(:pinned_detail, nil)
     |> assign(:answered, MapSet.new())
     |> assign(:last_send, nil)
     |> assign(:turn, @quiet_turn)
@@ -770,6 +771,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp request(socket, request_id),
     do: Enum.find(socket.assigns.approvals, &(&1.request_id == request_id))
 
+  defp detail_of(nil), do: nil
+  defp detail_of(%Approval{} = request), do: Approval.detail(request)
+
   # Every pending request that is not a question, a plan exit, or a Computer Use ask.
   # `Transcript.question?/1` is the whole carve-out and it is the locked module's, so the
   # rail's inline answers and this cannot disagree about what a permission is.
@@ -901,12 +905,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
     truncated = max(total - window, 0)
     cells = entries |> Enum.take(-window) |> Transcript.project()
 
+    # Approvals come off the whole held ledger, not off the drawn window: a request that
+    # scrolled past the redraw budget is still a request nobody has answered.
+    approvals = Watch.pending_approvals(socket.assigns.watch)
+
     socket =
       socket
       |> assign(:truncated, truncated)
-      # Approvals come off the whole held ledger, not off the drawn window: a request that
-      # scrolled past the redraw budget is still a request nobody has answered.
-      |> assign(:approvals, Watch.pending_approvals(socket.assigns.watch))
+      |> assign(:approvals, approvals)
+      # Read once here rather than twice per render. `Approval.detail/1` parses the
+      # request's patch, and a poll every three seconds plus a flush every eighty
+      # milliseconds is not the cadence to re-parse a diff on.
+      |> assign(:pinned_detail, detail_of(List.first(approvals)))
       |> assign(:turn, Composer.turn_state(entries))
 
     socket =
@@ -1017,6 +1027,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             expanded={@expanded}
             streams={@streams}
             approvals={@approvals}
+            detail={@pinned_detail}
             notice={@approval_notice}
             rule={@rule}
             rule_refusal={@rule_refusal}
@@ -1254,6 +1265,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :expanded, :any, required: true
   attr :streams, :map, required: true
   attr :approvals, :list, required: true
+  attr :detail, :any, required: true
   attr :notice, :any, required: true
   attr :rule, :any, required: true
   attr :rule_refusal, :any, required: true
@@ -1324,8 +1336,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
     </div>
 
     <ApprovalCard.card
-      :if={@pinned && @can_answer}
+      :if={@pinned && @detail && @can_answer}
       request={@pinned}
+      detail={@detail}
       node={@node}
       rule={@rule}
       rule_refusal={@rule_refusal}
@@ -1490,7 +1503,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # rule to offer or the sentence naming why there is none, and this passes it the two
   # facts only the deck has: what this runtime serves, and what workspace this session
   # named.
-  defp rule_offer(%{approvals: [request | _]} = assigns) do
+  defp rule_offer(%{pinned_detail: %Approval.Detail{} = detail} = assigns) do
     workspace =
       (assigns.info && Map.get(assigns.info, :workspace)) ||
         case row(assigns.rows, assigns.open) do
@@ -1498,10 +1511,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           _unknown -> nil
         end
 
-    request
-    |> Approval.detail()
-    |> Map.get(:suggested_rule)
-    |> Transcript.suggested_rule(assigns.methods, workspace)
+    Transcript.suggested_rule(detail.suggested_rule, assigns.methods, workspace)
   end
 
   defp rule_offer(_assigns), do: {nil, nil}
