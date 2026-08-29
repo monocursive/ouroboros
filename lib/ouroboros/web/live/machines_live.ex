@@ -66,6 +66,7 @@ defmodule Ouroboros.Web.Live.MachinesLive do
 
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Layouts
 
   @poll_interval 3_000
 
@@ -394,8 +395,9 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     <main class="ouro-page ouro-machines">
       <header class="ouro-header">
         <h1>Machines</h1>
-        <p class="ouro-subhead">
+        <p class="ouro-subhead ouro-top-row">
           <a class="ouro-backlink" href="/">the deck</a>
+          <Layouts.theme_toggle />
         </p>
       </header>
 

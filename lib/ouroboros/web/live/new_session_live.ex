@@ -44,6 +44,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Layouts
   alias Ouroboros.Web.Live.NewSession
 
   # Only while a login is pending, and only because a device-code flow completes on another
@@ -369,7 +370,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     ~H"""
     <div class="ouro-new">
       <header class="ouro-new-top">
-        <a class="ouro-new-back" href="/">← Deck</a>
+        <div class="ouro-top-row">
+          <a class="ouro-new-back" href="/">← Deck</a>
+          <Layouts.theme_toggle />
+        </div>
         <h1 class="ouro-new-title">New session</h1>
         <p class="ouro-new-sub">Choose where and how this agent works</p>
       </header>

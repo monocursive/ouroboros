@@ -86,6 +86,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Layouts
   alias Ouroboros.Web.Live.ApprovalCard
   alias Ouroboros.Web.Live.Cells
   alias Ouroboros.Web.Live.Composer
@@ -1100,6 +1101,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
           <span class="ouro-pill-on">Connected</span>
           <span class="ouro-pill-off">Reconnecting</span>
         </span>
+        <Layouts.bell_toggle />
+        <Layouts.theme_toggle />
         <a class="ouro-button" href="/new">
           New session
         </a>
