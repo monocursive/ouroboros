@@ -217,14 +217,34 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   end
 
   # A durable row, so a test of the *rail* is testing the list the deck actually draws
-  # rather than a fixture beside it. `interactive.list` reads the store and nothing else,
-  # and the store is global to the node — hence the removal on exit.
+  # rather than a fixture beside it. `interactive.list` reads the store and nothing else.
+  #
+  # The store is global to the node and this row is real, which makes the cleanup part of
+  # the fixture rather than tidiness. Two rules, both of which this file got wrong first:
+  #
+  #   * the workspace has to exist. `Ouroboros.Workspace.Manager` recovers every live
+  #     session's lease at boot and refuses to start on a path that is not there, so a row
+  #     naming a directory nobody made takes the *next* application restart in the suite
+  #     down with it — and `Ouroboros.ApplicationRecoveryTest` restarts the application.
+  #   * the row has to be closed before it can be removed. `Store.delete/1` refuses a
+  #     session that is not terminal, so a plain delete leaves the row exactly where it
+  #     would do that damage.
   defp listed(id, opts \\ []) do
+    workspace =
+      Keyword.get_lazy(opts, :workspace, fn ->
+        dir =
+          Path.join(System.tmp_dir!(), "ouroboros-web-ws-#{System.unique_integer([:positive])}")
+
+        File.mkdir_p!(dir)
+        on_exit(fn -> File.rm_rf(dir) end)
+        dir
+      end)
+
     session = %State{
       id: id,
       node: node(),
       provider: :claude_code,
-      workspace: Keyword.get(opts, :workspace, "/tmp/w"),
+      workspace: workspace,
       workspace_mode: :shared_read,
       status: Keyword.get(opts, :status, :running),
       # `runtime_exposure: false` is what makes a session with no runtime snapshot a
@@ -236,7 +256,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     }
 
     :ok = Ouroboros.Interactive.Store.create(session)
-    on_exit(fn -> Ouroboros.Interactive.Store.delete(id) end)
+
+    on_exit(fn ->
+      :ok = Ouroboros.Interactive.Store.put(%{session | status: :closed})
+      :ok = Ouroboros.Interactive.Store.delete(id)
+    end)
+
     session
   end
 
