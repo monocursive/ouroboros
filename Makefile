@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart gui gui-stop web status stop reset logs desktop-dev desktop-app computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -23,6 +23,7 @@ help:
 	@echo "make daemon-stop      stop the dev runtime"
 	@echo "make gui              build the desktop app and (re)launch it against the checkout"
 	@echo "make gui-stop         quit the desktop app"
+	@echo "make web              open the checkout runtime's browser surface in a browser"
 	@echo "make status           what is running, on which port, and whether it is stale"
 	@echo "make stop             everything down: app, daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
@@ -67,6 +68,9 @@ gui:
 
 gui-stop:
 	@sh scripts/dev.sh gui-stop
+
+web:
+	@sh scripts/dev.sh web
 
 status:
 	@sh scripts/dev.sh status
