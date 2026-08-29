@@ -16,7 +16,9 @@ defmodule Ouroboros.Web.PrefsTest do
   alias Ouroboros.Web.Prefs
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "ouroboros-web-prefs-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "ouroboros-web-prefs-#{System.unique_integer([:positive])}")
+
     Ouroboros.DataDir.ensure_private!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     {:ok, dir: dir}
@@ -174,7 +176,10 @@ defmodule Ouroboros.Web.PrefsTest do
     end
 
     test "a file larger than the ceiling is refused without being parsed", %{dir: dir} do
-      write_raw!(dir, JSON.encode!(%{"provider" => "native", "pad" => String.duplicate("x", 70_000)}))
+      write_raw!(
+        dir,
+        JSON.encode!(%{"provider" => "native", "pad" => String.duplicate("x", 70_000)})
+      )
 
       log = capture_log(fn -> assert Prefs.read(dir) == %{} end)
       assert log =~ "larger than"

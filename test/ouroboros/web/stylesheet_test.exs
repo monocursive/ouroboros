@@ -62,7 +62,9 @@ defmodule Ouroboros.Web.StylesheetTest do
       assert rule_for(".ouro-new-refusal-detail"),
              ".ouro-new-refusal-detail has no rule of its own"
 
-      assert rule_for(".ouro-backlink"), ".ouro-backlink has no rule; the Machines section is dead"
+      assert rule_for(".ouro-backlink"),
+             ".ouro-backlink has no rule; the Machines section is dead"
+
       assert rule_for(".ouro-chip-connected"), "the Machines chips have no rules"
     end
   end
@@ -92,7 +94,13 @@ defmodule Ouroboros.Web.StylesheetTest do
     test "no link state is ever the attention green" do
       # Rule 1 of the stylesheet's own header: the green means "a human is needed here".
       # A link is a way to somewhere, which is not that.
-      for selector <- ["a", "a:where(:hover)", ".ouro-backlink", ".ouro-new-back", ".ouro-prose a"] do
+      for selector <- [
+            "a",
+            "a:where(:hover)",
+            ".ouro-backlink",
+            ".ouro-new-back",
+            ".ouro-prose a"
+          ] do
         rule = rule_for(selector)
         assert rule, "#{selector} has no rule in app.css"
         refute rule =~ "attention-green", "#{selector} spends the attention green"
@@ -237,7 +245,10 @@ defmodule Ouroboros.Web.StylesheetTest do
     test "the light diff washes read as emphasis rather than as a verdict" do
       light = colour_tokens(~s([data-theme="light"]))
 
-      for {bg, ink} <- [{"--diff-add-bg", "--diff-add-ink"}, {"--diff-remove-bg", "--diff-remove-ink"}] do
+      for {bg, ink} <- [
+            {"--diff-add-bg", "--diff-add-ink"},
+            {"--diff-remove-bg", "--diff-remove-ink"}
+          ] do
         ratio = contrast(light[ink], light[bg])
         assert ratio >= 4.5, "light #{ink} on #{bg} is #{Float.round(ratio, 2)}:1"
       end

@@ -1145,8 +1145,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
     conn = get(build_conn(), "/auth?token=#{@token}")
 
-    {:ok,
-     conn: put_req_cookie(build_conn(), @cookie, conn.resp_cookies[@cookie].value), dir: dir}
+    {:ok, conn: put_req_cookie(build_conn(), @cookie, conn.resp_cookies[@cookie].value), dir: dir}
   end
 
   # A rows-field carrying one catalogue model, for the promote tests: the only thing they

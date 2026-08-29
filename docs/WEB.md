@@ -673,9 +673,17 @@ this section is a plan rather than a record. At W9:
   permission dance, the Page Visibility gate, and the set of already-rung request ids.
   Every commit in W0–W8 that touched it says which of its claims are unverified, and the
   BEAM-side halves are asserted (the layout emits the script, the toggles render, the two
-  files agree on their storage keys, the server pushes the right edge), but nothing
-  executes the file. The honest options are a headless-browser gate in CI or a deliberate
-  standing acceptance; W8 did neither and is recording the choice rather than making it.
+  files agree on their storage keys, the server pushes the right edge), but **the suite
+  executes none of it**.
+
+  W8's own JavaScript was driven once, by hand, under a throwaway fake DOM in `node` —
+  the pre-paint script against a storage that throws, the theme toggle round-tripping
+  `data-theme` and `localStorage`, and the bell across on/off, hidden/visible,
+  granted/denied/revoked, no-API, and the same key twice. It passed. That is a fact about
+  one afternoon, not a gate: the harness is not in this repository and nothing re-runs it,
+  so the next edit to `app.js` has exactly the coverage it had before. The honest options
+  are a headless-browser gate in CI or a deliberate standing acceptance; W8 did neither and
+  is recording the choice rather than making it.
 - **Open**: whether `Web.Call` should also write to the effect ledger the way operate
   calls via the gateway are audited today (v1: same log line, no ledger change); whether
   the defaulted posture should eventually serve the web on the tailnet automatically once

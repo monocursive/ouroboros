@@ -92,7 +92,11 @@
   // ------------------------------------------------------------------------------------
 
   var Notifications = window.Notification;
-  var rung = {};
+
+  // `Object.create(null)` rather than `{}`: the keys here are session ids and request ids,
+  // and on an ordinary object `rung["constructor"]` and `rung["toString"]` are already
+  // truthy — a session whose id happened to be one of those would silently never ring.
+  var rung = Object.create(null);
 
   function bellOn() {
     return stored(BELL_KEY) === "on";
