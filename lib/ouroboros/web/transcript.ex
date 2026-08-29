@@ -617,6 +617,7 @@ defmodule Ouroboros.Web.Transcript do
 
     cond do
       final? ->
+        had_draft? = not is_nil(state.pending)
         fallback = if state.pending, do: state.pending.text, else: ""
         state = %{state | pending: nil}
         text = if text == "", do: fallback, else: text
@@ -624,7 +625,17 @@ defmodule Ouroboros.Web.Transcript do
         if String.trim(text) == "" do
           state
         else
-          push!(state, %Cell.Message{speaker: :agent, text: text, streaming: false})
+          # A note that arrived between the draft and its final flushed the draft into a
+          # cell of its own — that is what keeps the note *after* the words it follows — so
+          # there is nothing left here to absorb and pushing would say the answer twice.
+          # Settle the cell the draft became instead.
+          message = %Cell.Message{speaker: :agent, text: text, streaming: false}
+          settled = if had_draft?, do: nil, else: settled_draft(state, text)
+
+          case settled do
+            nil -> push!(state, message)
+            index -> put_at(state, index, message)
+          end
         end
 
       text == "" ->
@@ -637,6 +648,36 @@ defmodule Ouroboros.Web.Transcript do
           Text.append_bounded(draft.text, text, @agent_output_bytes, @agent_truncation)
 
         %{state | pending: %{draft | text: appended}}
+    end
+  end
+
+  # The agent message a settled final supersedes, if it supersedes one.
+  #
+  # Scans back for the most recent thing the agent said and stops at the first boundary —
+  # a message from the operator, or any divider — because nothing before one of those
+  # belongs to the exchange this text is part of.
+  #
+  # The candidate is only settled when the final text *continues* it. A draft is a literal
+  # prefix of the answer it was streaming; a turn's second block (text → tool → text) is
+  # not a prefix of its first, so it stays its own message. That test is the whole
+  # difference between folding a duplicate away and eating half a turn.
+  defp settled_draft(state, final_text), do: scan_settled(state, state.count - 1, final_text)
+
+  defp scan_settled(_state, index, _final_text) when index < 0, do: nil
+
+  defp scan_settled(state, index, final_text) do
+    case at(state, index) do
+      %Cell.Message{speaker: :agent, text: drafted} ->
+        if String.starts_with?(final_text, drafted), do: index, else: nil
+
+      %Cell.Message{} ->
+        nil
+
+      %Cell.Divider{} ->
+        nil
+
+      _other ->
+        scan_settled(state, index - 1, final_text)
     end
   end
 

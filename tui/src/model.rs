@@ -3467,6 +3467,7 @@ mod tests {
                 "event_input_accepted_steer",
                 "event_input_accepted_unrecorded",
                 "event_output_text_delta",
+                "event_output_text_delta_partial",
                 "event_output_text_final",
                 "event_plan_updated",
                 "event_provider_event_compaction",

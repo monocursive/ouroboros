@@ -27,8 +27,8 @@ use ouro::model::transcript::{Hidden, PlanStatus, PresentationEvent};
 use ouro::model::Event;
 use ouro::ui::transcript::{ApprovalRequest, Entry};
 use ouro::ui::transcript_cells::{
-    project, summarise, Block, Cell, Speaker, SubagentCell, ThinkingState, Tone, ToolCell,
-    ToolState,
+    project, summarise, Block, Cell, DividerKind, Speaker, SubagentCell, ThinkingState, Tone,
+    ToolCell, ToolState,
 };
 
 /// One fixture's event, decoded the way the transport hands it to the model.
@@ -230,6 +230,80 @@ fn a_delta_and_its_final_settle_into_one_message() {
     assert_eq!(projected.len(), 1, "{projected:?}");
     assert_eq!(
         message(&projected[0]),
+        (
+            Speaker::Agent,
+            "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+            false
+        )
+    );
+}
+
+/// The case the test above cannot reach: a provider note and a usage row land between the
+/// draft and the final that supersedes it.
+///
+/// A note flushes the pending draft so it can be drawn *after* the words it follows. That
+/// leaves nothing for the final to absorb, and both clients used to push a second message
+/// carrying the same answer — a duplicate an operator saw in a live browser.
+///
+/// The corpus is one event per file, so no single fixture can express an interleaving; the
+/// ordering is the test's and every payload is the corpus's, which is the same composition
+/// `cells` already does elsewhere. `event_output_text_delta_partial` exists for this: its
+/// text is a literal prefix of the final's, which the other delta fixture deliberately is
+/// not.
+#[test]
+fn a_final_settles_the_draft_a_note_flushed_early() {
+    let projected = cells(&[
+        "event_output_text_delta_partial",
+        "event_provider_event_compaction",
+        "event_usage",
+        "event_output_text_final",
+        "event_turn_completed",
+    ]);
+
+    // One message, and the notes still sit after the words they follow.
+    assert_eq!(projected.len(), 4, "{projected:?}");
+    assert_eq!(
+        message(&projected[0]),
+        (
+            Speaker::Agent,
+            "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+            false
+        )
+    );
+    assert!(matches!(projected[1], Cell::Runtime(_)), "{projected:?}");
+    assert!(matches!(projected[2], Cell::Usage(_)), "{projected:?}");
+    assert!(
+        matches!(
+            projected[3],
+            Cell::Divider {
+                kind: DividerKind::TurnEnd,
+                ..
+            }
+        ),
+        "{projected:?}"
+    );
+}
+
+/// The guard on the rule above: a turn that says something, calls a tool, then says
+/// something else must keep both halves. The final's text does not begin with the flushed
+/// draft's, so it is a new block and is pushed rather than folded into it.
+#[test]
+fn a_later_block_of_the_same_turn_is_its_own_message() {
+    let projected = cells(&[
+        "event_output_text_delta",
+        "event_tool_call_bash",
+        "event_tool_result_bash",
+        "event_output_text_final",
+    ]);
+
+    assert_eq!(projected.len(), 3, "{projected:?}");
+    assert_eq!(
+        message(&projected[0]),
+        (Speaker::Agent, "Running the suite now.", false)
+    );
+    assert!(matches!(projected[1], Cell::Tool(_)), "{projected:?}");
+    assert_eq!(
+        message(&projected[2]),
         (
             Speaker::Agent,
             "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
@@ -1124,6 +1198,7 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_input_accepted_steer",
         "event_input_accepted_unrecorded",
         "event_output_text_delta",
+        "event_output_text_delta_partial",
         "event_output_text_final",
         "event_plan_updated",
         "event_provider_event_compaction",
