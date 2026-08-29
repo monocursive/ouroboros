@@ -224,10 +224,12 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     test "says what it cannot do yet instead of pretending", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
-      # The one filled control, disabled and labelled rather than absent or fake.
+      # The one filled control now leads to the form's own page, and the presence
+      # dots to the machines page — real links whose pages land with their own
+      # slices and 404 honestly until then.
       assert html =~ "New session"
-      assert html =~ "disabled"
-      assert html =~ "coming in the next slice"
+      assert html =~ ~s(href="/new")
+      assert html =~ ~s(href="/machines")
 
       # And the composer names the slice that wires it.
       assert html =~ "ouro-composer" or html =~ "Nothing open"

@@ -541,7 +541,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     <header class="ouro-topbar">
       <span class="ouro-wordmark">Ouroboros</span>
 
-      <div class="ouro-presence" role="group" aria-label="machines">
+      <a class="ouro-presence" role="group" aria-label="machines" href="/machines">
         <span
           :for={machine <- @machines}
           class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
@@ -549,7 +549,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         >
           <span class="ouro-visually-hidden">{machine.name}</span>
         </span>
-      </div>
+      </a>
 
       <div class="ouro-topbar-right">
         <span :if={@today.tokens} class="ouro-today ouro-mono" title="sessions updated today, UTC">
@@ -559,9 +559,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
           <span class="ouro-pill-on">Connected</span>
           <span class="ouro-pill-off">Reconnecting</span>
         </span>
-        <button type="button" class="ouro-button" disabled title="coming in the next slice">
+        <a class="ouro-button" href="/new">
           New session
-        </button>
+        </a>
       </div>
     </header>
     """
