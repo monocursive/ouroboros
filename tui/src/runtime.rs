@@ -1756,6 +1756,10 @@ pub fn spawn_env(
         // themselves, not to one `ouro` starts for them.
         ("OUROBOROS_WEB".to_string(), "1".to_string()),
         ("OUROBOROS_GATEWAY_SCOPE".to_string(), "operate".to_string()),
+        // Stated for the same reason the line above it is: a daemon `ouro` spawned is the
+        // operator's own, and a read-scope browser surface would refuse every approve
+        // button while the terminal beside it operates the same sessions.
+        ("OUROBOROS_WEB_SCOPE".to_string(), "operate".to_string()),
         (
             "OUROBOROS_GATEWAY_ALLOW_SHUTDOWN".to_string(),
             "1".to_string(),
@@ -3686,7 +3690,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_env_enables_the_web_surface_over_a_callers_opt_out() {
+    fn spawn_env_enables_the_web_surface_at_operate_scope_over_a_callers_opt_out() {
         // Setting OUROBOROS_GATEWAY is what takes `config/runtime.exs` out of the defaulted
         // branch that enables the web surface on its own, so this variable is the only
         // thing standing between a spawned daemon and no browser surface at all.
@@ -3697,12 +3701,39 @@ mod tests {
             Path::new("/data/gateway.token"),
         )
         .unwrap();
-
-        assert_eq!(
+        let lookup = |name: &str| {
             env.iter()
-                .find(|(key, _)| key == "OUROBOROS_WEB")
-                .map(|(_, value)| value.as_str()),
-            Some("1")
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+
+        // Exactly "1", untrimmed and unpadded: the explicit branch of `config/runtime.exs`
+        // gates on `System.get_env("OUROBOROS_WEB") == "1"` rather than on the trimming
+        // `env_value` helper the surrounding file uses, so " 1 " would enable nothing.
+        assert_eq!(lookup("OUROBOROS_WEB"), Some("1"));
+
+        // Both surfaces of an `ouro`-spawned daemon carry the operator's own authority.
+        // The explicit branch defaults web scope to "read", which would leave a browser
+        // refusing every approve the terminal beside it is allowed to make.
+        assert_eq!(lookup("OUROBOROS_WEB_SCOPE"), Some("operate"));
+        assert_eq!(lookup("OUROBOROS_GATEWAY_SCOPE"), Some("operate"));
+
+        // The scope variable must not become a second way to turn the surface on. It is
+        // read only *inside* that `== "1"` branch, so it is inert on its own — which is
+        // what keeps `OUROBOROS_WEB=0` a real opt-out for a daemon an operator starts
+        // themselves, where this function is not involved at all. Pinning it here as an
+        // ordinary override is the client-side half of that contract: nothing in this list
+        // enables anything the daemon does not already gate on OUROBOROS_WEB.
+        assert!(
+            spawn_env(
+                &[("OUROBOROS_WEB_SCOPE".into(), "read".into())],
+                Path::new("/data"),
+                Path::new("/data/gateway.token"),
+            )
+            .unwrap()
+            .iter()
+            .any(|(key, value)| key == "OUROBOROS_WEB" && value == "1"),
+            "the scope variable is not what decides whether a surface exists"
         );
     }
 

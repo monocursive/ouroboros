@@ -212,9 +212,18 @@ through the existing spawn-lock machinery exactly as `ouro attach` does), prints
 wraps it in dev. The desktop's HTTPS-only `open_url` guard does not apply — this URL is
 constructed locally from the publication, not received from a stream.
 
-**As built** (`tui/src/web_cli.rs`), with four notes where the paragraph above was
+**As built** (`tui/src/web_cli.rs`), with five notes where the paragraph above was
 imprecise or silent:
 
+- **Scope is stated by the client, not inherited.** D5 says `spawn_env` adds
+  `OUROBOROS_WEB=1`; that alone is not enough. Setting `OUROBOROS_GATEWAY` is what forces
+  `config/runtime.exs` down its *explicit* branch, and that branch defaults
+  `OUROBOROS_WEB_SCOPE` to `read` — mirroring `OUROBOROS_GATEWAY_SCOPE`'s own explicit
+  default, deliberately. A daemon `ouro` spawned is the operator's own, so `spawn_env`
+  sends `OUROBOROS_WEB_SCOPE=operate` beside `OUROBOROS_GATEWAY_SCOPE=operate`; otherwise
+  the browser would refuse every approve the terminal beside it is allowed to make. The
+  scope variable is read only *inside* the `OUROBOROS_WEB == "1"` gate, so it is inert on
+  its own and does not become a second way to turn the surface on.
 - The runtime is resolved by `local_runtime` — the *bare* `ouro` command's adopt-or-start
   under the spawn lock. `ouro attach` was the wrong citation: it deliberately starts
   nothing. A runtime `ouro web` spawned is detached before the URL is printed, for
