@@ -1,0 +1,29 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000109",
+      "payload": {
+        "call_id": "toolu_01Read000000000000001",
+        "input": {
+          "file_path": "lib/ouroboros/gateway/wire.ex",
+          "limit": 40,
+          "offset": 120
+        },
+        "name": "Read"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 109,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "tool_call"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

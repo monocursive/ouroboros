@@ -1,0 +1,26 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000110",
+      "payload": {
+        "call_id": "toolu_01Read000000000000001",
+        "is_error": false,
+        "name": "Read",
+        "output": "  1→defmodule Ouroboros.Gateway.Wire do\n  2→  @moduledoc \"The encoder the socket is written from.\"\n  3→end\n"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 110,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "tool_result"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000143",
+      "payload": {
+        "delegation_id": "delegation-00000000000001",
+        "objective_digest": "3f9a1c2b",
+        "result_digest": "b7e40aa1",
+        "status": "completed",
+        "task_id": "task-0000000000000000000000002",
+        "task_node": "ouroboros@worker",
+        "team_id": "team-alpha"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 143,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "delegation"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000138",
+      "payload": {
+        "command_digest": "9f2c4e1a7b53d0086a1c",
+        "duration_ms": 1240,
+        "effect_id": "effect-000000000000000000003",
+        "exit_status": 0,
+        "kind": "operator_shell",
+        "output_bytes": 48,
+        "output_excerpt": "Compiling 1 file (.ex)\nGenerated ouroboros app\n",
+        "timed_out": false
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 138,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "provider_event"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

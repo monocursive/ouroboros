@@ -1,0 +1,29 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000141",
+      "payload": {
+        "applied": true,
+        "approval_mode": "auto_edit",
+        "choice": "auto_edit",
+        "follow_up": false,
+        "kind": "plan_exit",
+        "plan": false,
+        "sandbox_mode": "workspace_write"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": "req-plan-exit-000000000001",
+      "sequence": 141,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "provider_event"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

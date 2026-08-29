@@ -1,0 +1,37 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000115",
+      "payload": {
+        "explanation": "Land the golden corpus before the renderer.",
+        "plan": [
+          {
+            "status": "completed",
+            "step": "Extend the fixture list"
+          },
+          {
+            "status": "in_progress",
+            "step": "Assert the rendered words in Rust"
+          },
+          {
+            "status": "pending",
+            "step": "Port the projection to Elixir"
+          }
+        ]
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 115,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "plan_updated"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}
