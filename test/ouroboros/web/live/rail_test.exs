@@ -78,9 +78,54 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert Rail.triage_of(interactive("a", status: :awaiting_approval), 0) == :needs_you
     end
 
-    test "an idle conversation is a human's turn; an idle task is between turns" do
-      assert Rail.triage_of(interactive("a", status: :idle), 0) == :needs_you
-      assert Rail.triage_of(coding("t", status: :idle), 0) == :at_work
+    test "an idle session settles, on either plane, and is never NEEDS YOU" do
+      # A deliberate divergence from `tui/src/model.rs:249-254`, which routes
+      # interactive+idle to NeedsInput. On a rail a person scans for work that rule fills
+      # the top group with every conversation anyone has ever finished reading. See the
+      # `triage_of/2` docs; the green eye is for a real ask and nothing else.
+      assert Rail.triage_of(interactive("a", status: :idle), 0) == :settled
+      assert Rail.triage_of(coding("t", status: :idle), 0) == :settled
+    end
+
+    test "but an idle session holding an unanswered approval still needs a person" do
+      # Idle settles because nobody is blocked, not because the row is uninteresting. An
+      # ask outranks it, through the same door every other ask uses.
+      assert Rail.triage_of(interactive("a", status: :idle), 1) == :needs_you
+    end
+
+    test "NEEDS YOU has exactly two doors" do
+      # Enumerated rather than sampled: this is the group the whole page is arranged
+      # around, and anything that can enter it without an ask devalues all of it.
+      statuses = [
+        :awaiting_approval,
+        :idle,
+        :running,
+        :starting,
+        :closing,
+        :closed,
+        :completed,
+        :failed,
+        :cancelled,
+        :lost,
+        :something_new
+      ]
+
+      for status <- statuses, plane <- [:interactive, :coding] do
+        row =
+          if plane == :interactive,
+            do: interactive("a", status: status),
+            else: coding("a", status: status)
+
+        if status == :awaiting_approval do
+          assert Rail.triage_of(row, 0) == :needs_you
+        else
+          refute Rail.triage_of(row, 0) == :needs_you,
+                 "#{plane} #{status} reached NEEDS YOU without an ask"
+        end
+
+        assert Rail.triage_of(row, 1) == :needs_you,
+               "#{plane} #{status} ignored an unanswered approval"
+      end
     end
 
     test "every terminal status settles" do
@@ -317,6 +362,42 @@ defmodule Ouroboros.Web.Live.RailTest do
 
       assert html =~ "Read lib/thing.ex"
       refute html =~ "claude_code · core@one"
+    end
+
+    test "an idle session is drawn in the third group, reading 'idle · <age>'" do
+      html = render_rail([interactive("i", status: :idle, title: "The refactor thread")])
+
+      assert html =~ "The refactor thread"
+      assert html =~ ~r/idle · \d+[mhd]|idle · now/
+
+      # In SETTLED, dimmed, with the closed ring — not a card, and not the eye.
+      assert html =~ "ouro-row-settled"
+      assert html =~ "ouro-glyph-settled"
+      refute html =~ "ouro-row-needs_you"
+      refute html =~ "var(--attention-green)"
+    end
+
+    test "and its age is printed once, not once in the line and again in the column" do
+      html = render_rail([interactive("i", status: :idle)])
+
+      refute html =~ "ouro-row-age"
+      assert length(Regex.scan(~r/idle · /, html)) == 1
+    end
+
+    test "an idle session with an unanswered ask is a card again, with the eye" do
+      rows = [interactive("i", status: :idle)]
+
+      html =
+        render_component(&DeckLive.rail/1,
+          triaged: Rail.triaged(rows, %{{:interactive, "i"} => 1}),
+          open: nil,
+          error: nil,
+          activity: %{}
+        )
+
+      assert html =~ "ouro-row-needs_you"
+      assert html =~ "var(--attention-green)"
+      refute html =~ "idle · "
     end
 
     test "a settled row is dimmed and says its outcome" do

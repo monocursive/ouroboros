@@ -118,27 +118,33 @@ defmodule Ouroboros.Web.Live.Rail do
   `pending` is the count of approvals this view is holding for the session that **nobody
   has answered yet**. An approval a keypress or an automation has already answered is not
   a reason to triage the row as waiting on a person.
+
+  ## One deliberate divergence from the TUI
+
+  `NEEDS YOU` is entered by exactly two doors — an unanswered approval, or a status of
+  `awaiting_approval`. Nothing else, and in particular **not** an idle conversation.
+
+  The terminal client disagrees: `SessionInfo::triage` (`tui/src/model.rs:249-254`) routes
+  interactive+idle to `Triage::NeedsInput`, with a comment arguing that a conversation
+  waiting for its next prompt is a human's turn. On a rail that a person scans for work,
+  that reasoning does not survive contact: every conversation anyone has ever finished
+  reading is idle, so the group meant to hold "a machine is blocked on you right now"
+  fills up with sessions nobody owes anything. A first live pass found the top of the
+  deck full of them.
+
+  So an idle row settles here, and the green eye stays spent only on a real ask. This is a
+  **known, intentional difference from the Rust**, not a port of it — if the TUI adopts
+  the same rule the comment above and this paragraph should go together.
   """
   @spec triage_of(Row.t(), non_neg_integer()) :: group()
   def triage_of(%Row{} = row, pending \\ 0) when is_integer(pending) do
     cond do
-      pending > 0 or row.status == :awaiting_approval ->
-        :needs_you
-
-      terminal?(row.status) ->
-        :settled
-
-      busy?(row.status) ->
-        :at_work
-
-      # `idle` on the interactive plane is a conversation waiting for its next prompt — a
-      # human's turn, which is exactly what this grouping is for. On the coding plane
-      # there is nobody to prompt it, so an idle task is simply between turns.
-      row.plane == :interactive and row.status == :idle ->
-        :needs_you
-
-      true ->
-        :at_work
+      pending > 0 or row.status == :awaiting_approval -> :needs_you
+      terminal?(row.status) -> :settled
+      busy?(row.status) -> :at_work
+      # Idle, on either plane: between turns, and waiting on nobody in particular.
+      row.status == :idle -> :settled
+      true -> :at_work
     end
   end
 
@@ -192,6 +198,9 @@ defmodule Ouroboros.Web.Live.Rail do
   would be worse than declining to.
   """
   @spec outcome(Row.t()) :: String.t()
+  # Not an outcome so much as the absence of one — this group holds "nothing is happening
+  # here", and for an idle conversation that is the whole truth.
+  def outcome(%Row{status: :idle}), do: "idle"
   def outcome(%Row{status: :completed}), do: "completed"
   def outcome(%Row{status: :closed}), do: "closed"
   def outcome(%Row{status: :failed}), do: "failed"

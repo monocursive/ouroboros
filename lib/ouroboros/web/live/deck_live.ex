@@ -620,6 +620,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         :line,
         line(assigns.entry.group, row, Map.get(assigns.activity, {row.plane, row.id}))
       )
+      |> assign(:age_in_line?, age_in_line?(assigns.entry.group, row))
 
     ~H"""
     <.link
@@ -637,7 +638,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         <span class="ouro-row-title">{Rail.title(@row)}</span>
         <span class="ouro-row-line">{@line}</span>
       </span>
-      <span class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
+      <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
     </.link>
     """
   end
@@ -931,6 +932,17 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # one thing on this page a reader could not trust.
   defp line(:needs_you, row, activity), do: activity || ask_line(row)
 
+  # An idle row carries its age in the line rather than only in the right-hand column,
+  # because "idle" alone says nothing a reader can act on — how long it has been idle is
+  # the whole content of the row. The column is dropped for these rows so the age is not
+  # printed twice; `age_in_line?/2` is the one place that decision is made.
+  defp line(:settled, %Rail.Row{status: :idle} = row, _activity) do
+    case age(row.updated_at) do
+      "" -> "idle"
+      age -> "idle · #{age}"
+    end
+  end
+
   defp line(:settled, row, _activity) do
     case row.error do
       nil -> Rail.outcome(row)
@@ -939,6 +951,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
   end
 
   defp line(_at_work, row, activity), do: activity || provider_line(row)
+
+  defp age_in_line?(:settled, %Rail.Row{status: :idle}), do: true
+  defp age_in_line?(_group, _row), do: false
 
   defp ask_line(row) do
     case row.status do

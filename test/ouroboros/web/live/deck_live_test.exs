@@ -31,6 +31,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   alias Ouroboros.Interactive.Event
   alias Ouroboros.Interactive.State
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Transcript.Cell
 
   @endpoint Ouroboros.Web.Endpoint
 
@@ -176,6 +177,31 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   defp said(sequence, text),
     do: event(sequence, :output_text_final, %{"text" => text})
 
+  defp occurrences(haystack, needle),
+    do: haystack |> String.split(needle) |> length() |> Kernel.-(1)
+
+  # The events of one ordinary settling turn: deltas, then the notes and the usage row
+  # that land between the last delta and the final text.
+  defp settling_turn do
+    [
+      event(1, :output_text_delta, %{"text" => "The answer "}),
+      event(2, :output_text_delta, %{"text" => "is 42."}),
+      event(3, :provider_event, %{"kind" => "compaction"}),
+      event(4, :usage, %{"input_tokens" => 10, "output_tokens" => 5}),
+      event(5, :output_text_final, %{"text" => "The answer is 42."}),
+      event(6, :turn_completed, %{})
+    ]
+  end
+
+  # What one `project/1` pass over those events produces, so a live-path assertion can be
+  # written against the projection itself rather than against a number somebody would have
+  # to keep in step with it.
+  defp projected(events) do
+    events
+    |> Enum.map(&%Ouroboros.Web.Transcript.Entry.Event{event: &1})
+    |> Ouroboros.Web.Transcript.project()
+  end
+
   # ------------------------------------------------------------------------------------
   # The deck itself
   # ------------------------------------------------------------------------------------
@@ -316,6 +342,69 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert resolved =~ "before the ask"
       assert resolved != asked
       assert length(Regex.scan(~r/before the ask/, resolved)) == 1
+    end
+
+    test "a settling turn does not add a stream row the projection did not ask for",
+         %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      events = settling_turn()
+      {deltas, rest} = Enum.split(events, 2)
+
+      for e <- deltas, do: FakePlane.emit(pid, e)
+      Process.sleep(@flush)
+
+      assert occurrences(render(view), "The answer is 42.") == 1
+
+      for e <- rest, do: FakePlane.emit(pid, e)
+      Process.sleep(@flush)
+
+      html = render(view)
+      cells = projected(events)
+
+      # The live path must render exactly what one `project/1` pass over the same events
+      # produces: no extra row, no stale row, no row the patch forgot to remove. Asserted
+      # against the projection rather than against a literal, so it stays true when the
+      # projection changes — including when the duplicate this pins is fixed upstream.
+      assert occurrences(html, ~s(data-phx-stream)) == length(cells)
+
+      assert occurrences(html, "The answer is 42.") ==
+               Enum.count(cells, &match?(%Cell.Message{speaker: :agent}, &1))
+    end
+
+    # TRIPWIRE — pins a defect, not a desired behaviour.
+    #
+    # A live browser pass found the agent's answer rendered twice after a turn settled.
+    # It is not a stream-keying fault: the test above proves the live path draws exactly
+    # the cells `project/1` returns. `project/1` itself emits the message twice.
+    #
+    # Why: a delta accumulates into a pending draft. Any non-text event flushes that draft
+    # into a Message cell (so the compaction note can sit after the words it follows). When
+    # `output_text_final` then arrives there is no pending draft left to absorb it, so it
+    # pushes a *second* Message carrying the same text.
+    #
+    # `tui/src/ui/transcript_cells.rs:2056-2086` does the identical thing — `same_turn`
+    # is `!final_text` when `pending` is `None`, and the final arm pushes unconditionally.
+    # So both surfaces duplicate; the terminal just hides it better in a scrolling pane.
+    #
+    # The fix therefore belongs in the projection on BOTH sides plus a corpus fixture for
+    # this interleaving (docs/WEB.md §6) — changing only the Elixir would make the two
+    # renderers disagree with no parity test covering the case. Those modules are locked to
+    # this slice, so this pins the behaviour instead: when it is fixed, this test fails and
+    # says so, and the assertion becomes `== 1`.
+    test "KNOWN DEFECT: the projection emits a settled answer twice when notes interleave" do
+      cells = projected(settling_turn())
+      answers = Enum.filter(cells, &match?(%Cell.Message{speaker: :agent}, &1))
+
+      assert length(answers) == 2,
+             "the delta/final duplicate looks fixed — update this test to assert 1 and " <>
+               "check the Rust projection and the corpus moved with it"
+
+      assert Enum.all?(answers, &(&1.text == "The answer is 42."))
+      assert Enum.all?(answers, &(&1.streaming == false))
     end
 
     test "deltas that arrive together are drawn once, not once each", %{conn: conn} do
