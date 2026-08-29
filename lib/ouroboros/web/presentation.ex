@@ -2054,18 +2054,27 @@ defmodule Ouroboros.Web.Presentation do
   def bounded_value(value) do
     case clone_value(value, %{bytes: @value_bytes, nodes: @value_nodes}, 0) do
       {:ok, projected, _budget} -> projected
-      :truncated -> truncated_value()
+      {:truncated, _budget} -> truncated_value()
     end
   end
 
   @preferred_fields ~w(text content cmd command path file query pattern url error message reason)
 
+  # The budget travels out of a refusal as well as out of a success, because the Rust
+  # holds it by `&mut` and a subtree that spent nodes before failing leaves the parent with
+  # what it actually spent (`tui/src/model/transcript.rs:1198-1205`).
+  #
+  # Today the two are equivalent either way: every arm of `clone_taken/3` succeeds, so the
+  # only refusals are the depth check and an already-empty node budget, neither of which
+  # has spent anything. Threaded explicitly all the same — the equivalence is an accident
+  # of which arms can currently fail, and a later arm that refuses after spending would
+  # otherwise let a sibling draw more than the TUI draws for the same payload.
   defp clone_value(value, budget, depth) do
     if depth >= @value_depth do
-      :truncated
+      {:truncated, budget}
     else
       case take_node(budget) do
-        :error -> :truncated
+        :error -> {:truncated, budget}
         {:ok, budget} -> clone_taken(value, budget, depth)
       end
     end
@@ -2123,7 +2132,7 @@ defmodule Ouroboros.Web.Presentation do
     else
       case clone_value(head, budget, depth + 1) do
         {:ok, projected, budget} -> clone_list(tail, budget, depth, [projected | acc])
-        :truncated -> {[truncated_value() | acc], budget}
+        {:truncated, budget} -> {[truncated_value() | acc], budget}
       end
     end
   end
@@ -2133,17 +2142,24 @@ defmodule Ouroboros.Web.Presentation do
   defp clone_entries([{key, value} | rest], projected, budget, depth) do
     case clone_field(projected, key, value, budget, depth) do
       {:ok, projected, budget} -> clone_entries(rest, projected, budget, depth)
-      :error -> {:halted, projected, budget}
+      {:error, budget} -> {:halted, projected, budget}
     end
   end
 
   defp clone_field(projected, key, value, budget, depth) do
-    with false <- exhausted?(budget),
-         {:ok, budget} <- take_key(budget, key),
-         {:ok, cloned, budget} <- clone_value(value, budget, depth + 1) do
-      {:ok, Map.put(projected, key, cloned), budget}
+    if exhausted?(budget) do
+      {:error, budget}
     else
-      _refused -> :error
+      case take_key(budget, key) do
+        :error ->
+          {:error, budget}
+
+        {:ok, budget} ->
+          case clone_value(value, budget, depth + 1) do
+            {:ok, cloned, budget} -> {:ok, Map.put(projected, key, cloned), budget}
+            {:truncated, budget} -> {:error, budget}
+          end
+      end
     end
   end
 
