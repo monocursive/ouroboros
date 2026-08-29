@@ -74,6 +74,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
   through the one predicate both surfaces share. Answered request ids are remembered so a
   replay after a repair cannot answer the same request twice.
 
+  ## The needs-you bell pushes an edge, and decides nothing
+
+  Four rules stand between a session needing somebody and a banner appearing on their
+  screen, and this process can only know one of them. Whether the bell is on, whether the
+  browser granted permission, and whether anybody is actually looking at the tab are all
+  facts about a browser; they live in `app.js`. What lives here is the edge — which
+  sessions have just *entered* the needs-you group — pushed as `needs-you` and left alone.
+
+  What was already waiting when the page opened is recorded rather than announced, so a
+  deck opened in a background tab does not post one banner per pending approval on arrival
+  and a reconnect does not do it again. A request auto-approve answered never rings at all:
+  the bell runs after `auto_answer/1`, which records the request before its call goes out.
+
   ## What this slice does not do
 
   Starting a session is W6; its control is a link to a page that lands with it.
@@ -130,12 +143,20 @@ defmodule Ouroboros.Web.Live.DeckLive do
       # The serving runtime's method list, read once: it is the same list `hello` answers
       # for a terminal client and it cannot change while this process lives.
       |> assign(:methods, Methods.names())
+      # Every needs-you key this view has already rung for. See `announce_needs_you/1`.
+      |> assign(:announced, MapSet.new())
       |> reset_session_state()
       |> stream(:cells, [])
 
     # The first paint is server-rendered and has to have content in it: a deck that showed
     # an empty rail until a socket connected would flash empty on every navigation.
     socket = refresh(socket)
+
+    # What was already waiting when this page opened is not something that *started*
+    # needing a person, so it is recorded rather than announced. Without this a deck opened
+    # in a background tab would post one banner per pending approval on arrival, and a
+    # reconnect would do it again.
+    socket = seed_needs_you(socket)
 
     if connected?(socket), do: schedule_poll()
 
@@ -305,7 +326,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   @impl true
   def handle_info(:poll, socket) do
     schedule_poll()
-    {:noreply, refresh(socket)}
+    {:noreply, socket |> refresh() |> announce_needs_you()}
   end
 
   def handle_info({:ouroboros_interactive_event, id, event}, socket),
@@ -823,6 +844,79 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp auto_answer(socket), do: socket
 
+  # ------------------------------------------------------------------- Needs-you alerts
+
+  # The server half of the topbar bell, and it is deliberately the smaller half.
+  #
+  # Three rules decide whether a notification is posted, and only one of them is knowable
+  # here: **which sessions have just started needing somebody**. Whether anybody is looking
+  # at the tab (Page Visibility), whether the bell is even on, and whether the browser
+  # granted permission are all facts about a browser, and they live in `app.js`. So this
+  # pushes the *edge* and says nothing about what should be done with it.
+  #
+  # The edge is computed against the same triage the rail draws — `Rail.triaged/2` with this
+  # view's held approvals — rather than against a second notion of "needs you" kept beside
+  # it. A page that notified about a group it was not drawing would be worse than one that
+  # did not notify at all.
+  #
+  # A key that leaves the group is forgotten, so a session that needs a person again later
+  # rings again. A key that is still pending is never re-pushed. `app.js` keeps its own
+  # permanent set on top of this, because a LiveView remount re-seeds these assigns and a
+  # repair is not a new request.
+  defp seed_needs_you(socket), do: assign(socket, :announced, needs_you(socket) |> keys())
+
+  defp announce_needs_you(socket) do
+    current = needs_you(socket)
+    keys = keys(current)
+    fresh = Enum.reject(current, &MapSet.member?(socket.assigns.announced, &1.key))
+
+    socket = assign(socket, :announced, keys)
+
+    if connected?(socket) and fresh != [],
+      do: push_event(socket, "needs-you", %{sessions: fresh}),
+      else: socket
+  end
+
+  defp keys(sessions), do: MapSet.new(sessions, & &1.key)
+
+  # One entry per session in the needs-you group, keyed by the thing that identifies the
+  # *ask* wherever one is actually known.
+  #
+  # For the open session this view holds the requests, so the key is the `request_id` — the
+  # id the whole approval path is idempotent on, and the one W8 asks the bell not to repeat.
+  # For every other row the rail's evidence is the session's own `awaiting_approval` status
+  # and there is no request id on this side of the wire at all: `interactive.list` does not
+  # carry one. Those are keyed `<plane>:<id>`, which is the finest grain that exists here.
+  # Stated rather than papered over — a second ask on an unopened session is one
+  # notification, not two, and closing that would take a list verb that answered request
+  # ids.
+  defp needs_you(%{assigns: assigns}) do
+    # A request this view has answered is one nobody needs to be told about, whether the
+    # answer came from a person's click or from automation. `:answered` is written *before*
+    # the call goes out (`send_response/6`), which is why this holds even though the
+    # request stays in `:approvals` until the plane's resolution event arrives.
+    answered = Map.get(assigns, :answered, MapSet.new())
+    approvals = Map.get(assigns, :approvals, [])
+    open = Map.get(assigns, :open)
+
+    assigns.rows
+    |> Rail.triaged(pending(assigns))
+    |> Enum.filter(&(&1.group == :needs_you))
+    |> Enum.flat_map(fn %{row: row} ->
+      title = Rail.title(row)
+
+      case {open, approvals} do
+        {{plane, id}, [_first | _rest]} when {plane, id} == {row.plane, row.id} ->
+          approvals
+          |> Enum.reject(&MapSet.member?(answered, &1.request_id))
+          |> Enum.map(&%{key: &1.request_id, title: title})
+
+        _not_the_open_session ->
+          [%{key: "#{row.plane}:#{row.id}", title: title}]
+      end
+    end)
+  end
+
   # ------------------------------------------------------------------------ Remembering
 
   defp remember(socket, request_id) do
@@ -948,7 +1042,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     # Every path that changes what is pending ends here, so automation has exactly one
     # place to look and the backlog flush on enable is the same code as the live one.
-    auto_answer(socket)
+    # The bell runs *after* it, deliberately: a request auto-approve answered on the
+    # operator's behalf never needed them, so it must never ring.
+    socket |> auto_answer() |> announce_needs_you()
   end
 
   # Everything changed underneath the list — a different session, a reopened block, a
