@@ -375,36 +375,22 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
                Enum.count(cells, &match?(%Cell.Message{speaker: :agent}, &1))
     end
 
-    # TRIPWIRE — pins a defect, not a desired behaviour.
-    #
     # A live browser pass found the agent's answer rendered twice after a turn settled.
-    # It is not a stream-keying fault: the test above proves the live path draws exactly
-    # the cells `project/1` returns. `project/1` itself emits the message twice.
+    # It was never a stream-keying fault — the test above proves the live path draws
+    # exactly the cells `project/1` returns — so the fix went into the projection on both
+    # sides, guarded by `a_final_settles_the_draft_a_note_flushed_early` in
+    # `corpus_parity_test.exs` and its Rust twin.
     #
-    # Why: a delta accumulates into a pending draft. Any non-text event flushes that draft
-    # into a Message cell (so the compaction note can sit after the words it follows). When
-    # `output_text_final` then arrives there is no pending draft left to absorb it, so it
-    # pushes a *second* Message carrying the same text.
-    #
-    # `tui/src/ui/transcript_cells.rs:2056-2086` does the identical thing — `same_turn`
-    # is `!final_text` when `pending` is `None`, and the final arm pushes unconditionally.
-    # So both surfaces duplicate; the terminal just hides it better in a scrolling pane.
-    #
-    # The fix therefore belongs in the projection on BOTH sides plus a corpus fixture for
-    # this interleaving (docs/WEB.md §6) — changing only the Elixir would make the two
-    # renderers disagree with no parity test covering the case. Those modules are locked to
-    # this slice, so this pins the behaviour instead: when it is fixed, this test fails and
-    # says so, and the assertion becomes `== 1`.
-    test "KNOWN DEFECT: the projection emits a settled answer twice when notes interleave" do
+    # This stays as the deck's own end of that contract: whatever the projection does, the
+    # answer reaches an operator once.
+    test "a settled answer is drawn once, whatever arrived between the draft and its final" do
       cells = projected(settling_turn())
       answers = Enum.filter(cells, &match?(%Cell.Message{speaker: :agent}, &1))
 
-      assert length(answers) == 2,
-             "the delta/final duplicate looks fixed — update this test to assert 1 and " <>
-               "check the Rust projection and the corpus moved with it"
+      assert length(answers) == 1
 
-      assert Enum.all?(answers, &(&1.text == "The answer is 42."))
-      assert Enum.all?(answers, &(&1.streaming == false))
+      assert hd(answers).text == "The answer is 42."
+      refute hd(answers).streaming
     end
 
     test "deltas that arrive together are drawn once, not once each", %{conn: conn} do

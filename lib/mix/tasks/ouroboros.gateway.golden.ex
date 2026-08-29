@@ -201,6 +201,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"event_output_text_final", "the settled agent message for a turn", :interactive, 104,
        :output_text_final,
        %{"text" => "The suite passed: 412 tests, 0 failures.\n\nNothing else to change."}, []},
+      # The same turn's answer, half-arrived. Its text is a literal **prefix** of
+      # `event_output_text_final`'s, which is what a real delta stream is and what the
+      # other delta above deliberately is not: that one is a separate sentence, so the two
+      # of them together cannot express the case where a settled final supersedes the
+      # draft it was streamed from. This one can, and both renderers use the pair to pin
+      # what happens when a provider note lands between the draft and its final.
+      {"event_output_text_delta_partial",
+       "a streaming chunk that is a prefix of this turn's settled text", :interactive, 105,
+       :output_text_delta, %{"text" => "The suite passed: 412 "}, []},
       {"event_thinking_delta", "reasoning the provider chose to publish", :interactive, 105,
        :thinking_delta, %{"text" => "The failure is in the diff parser, not the transport."}, []},
       {"event_command_output_delta", "a chunk of live command output", :interactive, 106,

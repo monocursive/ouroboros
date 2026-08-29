@@ -217,6 +217,59 @@ defmodule Ouroboros.Web.CorpusParityTest do
                 false}
     end
 
+    # Mirrors `a_final_settles_the_draft_a_note_flushed_early`. The case the adjacent test
+    # above cannot reach: a provider note and a usage row land between the draft and the
+    # final that supersedes it.
+    #
+    # A note flushes the pending draft so it can be drawn *after* the words it follows.
+    # That leaves nothing for the final to absorb, and both clients used to push a second
+    # message carrying the same answer — a duplicate an operator saw in a live browser.
+    #
+    # The corpus is one event per file, so no single fixture can express an interleaving;
+    # the ordering is the test's and every payload is the corpus's, which is the same
+    # composition `cells/1` already does elsewhere. `event_output_text_delta_partial`
+    # exists for this: its text is a literal prefix of the final's, which the other delta
+    # fixture deliberately is not.
+    test "a_final_settles_the_draft_a_note_flushed_early" do
+      projected =
+        cells([
+          "event_output_text_delta_partial",
+          "event_provider_event_compaction",
+          "event_usage",
+          "event_output_text_final",
+          "event_turn_completed"
+        ])
+
+      # One message, and the notes still sit after the words they follow.
+      assert [message, %Cell.Runtime{}, %Cell.Usage{}, %Cell.Divider{kind: :turn_end}] = projected
+
+      assert message(message) ==
+               {:agent, "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+                false}
+    end
+
+    # Mirrors `a_later_block_of_the_same_turn_is_its_own_message`. The guard on the rule
+    # above: a turn that says something, calls a tool, then says something else must keep
+    # both halves. The final's text does not begin with the flushed draft's, so it is a
+    # new block and is pushed rather than folded into it.
+    test "a_later_block_of_the_same_turn_is_its_own_message" do
+      projected =
+        cells([
+          "event_output_text_delta",
+          "event_tool_call_bash",
+          "event_tool_result_bash",
+          "event_output_text_final"
+        ])
+
+      assert [first, %Cell.Tool{}, second] = projected
+
+      assert message(first) == {:agent, "Running the suite now.", false}
+
+      assert message(second) ==
+               {:agent, "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+                false}
+    end
+
     # Mirrors `reasoning_is_its_own_cell_and_never_the_agents_answer`.
     test "reasoning_is_its_own_cell_and_never_the_agents_answer" do
       assert %Cell.Thinking{text: text, lines: lines, state: state} =
@@ -872,6 +925,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_input_accepted_steer",
         "event_input_accepted_unrecorded",
         "event_output_text_delta",
+        "event_output_text_delta_partial",
         "event_output_text_final",
         "event_plan_updated",
         "event_provider_event_compaction",
