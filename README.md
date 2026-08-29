@@ -32,7 +32,11 @@ product. It currently proves:
   write-ahead-journaled `:release_handler` control boundary;
 - a token-authenticated loopback operator gateway, and `ouro` — one binary that carries
   a release, extracts it, starts it, and attaches to it, or attaches to one already
-  running somewhere else; and
+  running somewhere else;
+- a Phoenix LiveView operator surface served by the daemon itself, on the same loopback
+  posture and the same operator credential as the gateway: the session deck with a live
+  transcript, the composer, approvals, a new-session form, and read-only fleet
+  membership — reachable from any browser that can reach the runtime; and
 - real two-node behavior in tests using an OTP `:peer` OS process.
 
 It does **not** yet provide partition-safe placement, durable provider execution
@@ -69,6 +73,15 @@ shell on the other end of `ssh -L`.
 ```sh
 ./tui/target/release/ouro web
 ```
+
+It is the session deck — what needs you, what you are reading, what it is costing — with
+the transcript live, the composer, approvals, a new-session form, and the fleet's
+membership read-only. It is served by the daemon rather than by a build step, so any
+browser that can reach the runtime gets it: the laptop beside it, a phone over the
+tailnet, or several at once. There is no TLS in front of it; the bind refuses anything but
+loopback unless `OUROBOROS_WEB_ALLOW_REMOTE=1` says otherwise, and the documented remote
+posture is `tailscale serve` or your own reverse proxy. `OUROBOROS_WEB=0` turns it off.
+The design and its slices are in [`docs/WEB.md`](docs/WEB.md).
 
 Use the `ouro` executable as the lifecycle entrypoint. Its embedded release relies on the
 same native executable for exact process-incarnation checks and crash-releasing recovery

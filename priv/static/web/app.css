@@ -107,6 +107,51 @@ code,
   font-size: 0.9em;
 }
 
+/* A link is ink.
+ *
+ * The browser's own answer — blue, then purple once followed — is the one palette on this
+ * page nobody chose, and it breaks rule 1 twice over: it spends a colour on "you have been
+ * here", which is not a fact about a session, and it does it in a hue the token system has
+ * no name for. So `:visited` is deliberately the same ink as `:link`: where a reader has
+ * already been is their business, and a rail that faded the sessions somebody had opened
+ * would be inventing a state the runtime never reported.
+ *
+ * `--attention-green` is never reachable from here. A link is a way to somewhere, not a
+ * request for a person.
+ *
+ * The underline stays — it is what distinguishes a link from a word, and removing it
+ * globally would leave the ChatGPT verification URL and every markdown link indistinguishable
+ * from prose. Controls that are links only because a browser needs an `href` (the rail rows,
+ * the filled button, the back links) turn it off for themselves.
+ *
+ * The state selectors are wrapped in `:where()` on purpose. `a:visited` would otherwise
+ * outrank every single-class component rule below it — `.ouro-row-settled`, `.ouro-backlink`,
+ * `.ouro-new-cancel` — and a rail row would light back up to full ink the moment somebody
+ * had opened it once. Zero specificity makes this block a floor that any component can
+ * stand on rather than a ceiling it has to fight. */
+a,
+a:where(:visited) {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--border-strong);
+}
+
+a:where(:hover) {
+  color: var(--secondary);
+  text-decoration-color: var(--secondary);
+}
+
+/* One focus treatment, and it is never `outline: none`. A keyboard is a first-class way to
+   drive an operator surface, and a control whose focus cannot be seen is a control that has
+   to be found by guessing. `:focus-visible` rather than `:focus` so a mouse click does not
+   draw a ring nobody asked for. Components below may tighten the offset; none of them may
+   remove it. */
+:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
 /* The page a request that presented no usable credential gets, and the only thing an
    unauthenticated stranger can learn. It is centred and quiet on purpose. */
 .ouro-plain {
@@ -190,7 +235,8 @@ code,
   margin: 0;
 }
 
-/* Rule 3: one of these per view. */
+/* Rule 3: one of these per view. Sometimes an `<a>` — "New session" is a navigation — so
+   it turns off the link treatment the global rule above gives every anchor. */
 .ouro-button {
   font-family: var(--font-ui);
   font-size: 0.85rem;
@@ -200,6 +246,7 @@ code,
   border-radius: var(--radius);
   padding: 0.3rem 0.85rem;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .ouro-button:hover {
@@ -257,6 +304,15 @@ code,
 /* Rule 1, the only place it is spent: a view that has lost its socket needs a person. */
 .ouro-disconnected .ouro-page {
   box-shadow: inset 3px 0 0 var(--attention-green);
+}
+
+/* `app.js` puts this on the body while a navigation is in flight, and said in as many
+   words that "the stylesheet decides what that looks like". It decides this: the cursor,
+   and nothing else. A page that dimmed or shifted while a patch was arriving would be a
+   page that flickered on every click, and LiveView's own `phx-*-loading` classes already
+   fade the specific element a person actually pressed. */
+body.phx-loading {
+  cursor: progress;
 }
 
 /* LiveView's own state classes. Fading is what the framework does while a patch is in
@@ -355,10 +411,13 @@ code,
   color: var(--ink);
 }
 
+/* A link to /machines, but it reads as a row of dots: the underline the global rule gives
+   every anchor would draw a line under nothing. */
 .ouro-presence {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  text-decoration: none;
 }
 
 /* Hollow is "not connected", filled is "connected". Never green: presence is a fact
@@ -382,6 +441,52 @@ code,
   display: flex;
   align-items: center;
   gap: 0.85rem;
+}
+
+/* -------------------------------------------------------------- Chrome icon buttons */
+
+/* The theme toggle and the needs-you bell. Rule 3 puts a ceiling on how loud these are
+   allowed to be: they are not the page's action, they are the page's furniture, so they
+   are tertiary glyphs with no border until a pointer or a keyboard finds them.
+
+   Rule 1 applies to the bell in particular. It would be the obvious place to spend the
+   attention green — it is literally the needs-you control — and it is exactly the wrong
+   place: the green means "a session needs a person right now", and a *switch* about future
+   notifications is not that. On, it is ink; the amber is reserved for the standing-risk
+   postures (auto-approve, full access) and this is not one. */
+.ouro-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  color: var(--tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.ouro-icon-button:hover {
+  color: var(--secondary);
+  border-color: var(--hairline-2);
+}
+
+/* `app.js` owns this attribute, because which theme a browser is in and whether a browser
+   granted notification permission are facts only the browser has. */
+.ouro-icon-button[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+/* Notification permission was denied at the browser level. The control stays visible and
+   stays operable — a person can grant it back in the browser's own settings, and hiding it
+   would leave nothing to explain why the bell never rang — but it stops claiming it can
+   do anything. */
+.ouro-icon-button[data-ouro-blocked] {
+  color: var(--tertiary);
+  opacity: 0.55;
 }
 
 .ouro-today {
@@ -1481,6 +1586,16 @@ code,
   margin: 0 auto 1.5rem;
 }
 
+/* The back link and the theme toggle share a line on the two pages that have no top bar.
+   Baseline-aligned rather than centred: the link is text and the glyph is furniture beside
+   it, not a second thing of equal weight. */
+.ouro-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .ouro-new-back {
   color: var(--tertiary);
   text-decoration: none;
@@ -1836,6 +1951,10 @@ code,
   display: block;
   margin-top: 0.4rem;
   color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* ==========================================================================
  * Machines (W7): the fleet, read-only.
  *
  * Rule 1 governs this section more than any other. A machine being up is an
@@ -1948,7 +2067,15 @@ code,
   overflow-wrap: anywhere;
 }
 
-.ouro-chip {
+/* `.ouro-member-chip`, not `.ouro-chip`, and the rename is a bug fix rather than taste.
+   The composer's "3 queued" chip (W4) already owned `.ouro-chip`, and this block sat
+   *after* it in the file — so for as long as this section was reachable, a member chip's
+   small-caps, its larger type and its grid placement would all have landed on the queue
+   count too. Nobody saw it because this section was unreachable: the unterminated rule
+   above swallowed everything from the new-session refusal to the end of the file. Two
+   different things wearing one class name is the actual defect; repairing the stylesheet
+   only made it visible. */
+.ouro-member-chip {
   grid-column: 2;
   grid-row: 1 / span 2;
   justify-self: end;
@@ -1962,16 +2089,16 @@ code,
 }
 
 /* Success is INK, here as everywhere: see rule 1 in this file's header. */
-.ouro-chip-connected {
+.ouro-member-chip-connected {
   color: var(--ink);
   border-color: var(--border-strong);
 }
 
-.ouro-chip-offline {
+.ouro-member-chip-offline {
   color: var(--warn-amber);
 }
 
-.ouro-chip-unknown {
+.ouro-member-chip-unknown {
   color: var(--tertiary);
 }
 

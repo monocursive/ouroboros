@@ -243,6 +243,10 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     session = %State{
       id: id,
       node: node(),
+      # A title without a source is not a valid record — `valid_title?/1` refuses the pair
+      # rather than either half — so the two travel together or not at all.
+      title: Keyword.get(opts, :title),
+      title_source: if(Keyword.get(opts, :title), do: :human),
       provider: :claude_code,
       workspace: workspace,
       workspace_mode: :shared_read,
@@ -395,6 +399,134 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       # No vitals column either: a panel with nothing in it is worse than no panel.
       refute html =~ "ouro-vitals"
     end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # Needs-you notifications (W8)
+  #
+  # The server half only. Three of the four rules that decide whether a banner actually
+  # appears — the bell being on, the tab being hidden, the browser having granted
+  # permission — are facts about a browser and live in `app.js`, which nothing in this tree
+  # executes. What is asserted here is the one rule the server owns: *which* sessions have
+  # just started needing somebody, and that it says so exactly once each.
+  #
+  # UNVERIFIED by this file: `document.hidden` gating, the permission re-check, the
+  # `new Notification` call, and that clicking one focuses the tab.
+  # ------------------------------------------------------------------------------------
+
+  describe "needs-you notifications" do
+    test "what was already waiting when the page opened is not announced", %{conn: conn} do
+      # Otherwise a deck opened in a background tab posts one banner per pending approval
+      # on arrival, and every reconnect does it again.
+      id = session_id()
+      _row = listed(id, status: :awaiting_approval)
+
+      {:ok, view, html} = live(conn, "/")
+
+      assert html =~ id
+      refute_push_event(view, "needs-you", %{}, 50)
+    end
+
+    test "a session that enters the group is announced once, by name", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      # Nothing needed anybody when this page opened.
+      refute_push_event(view, "needs-you", %{}, 50)
+
+      id = session_id()
+      _row = listed(id, status: :awaiting_approval, title: "Rewire the listener")
+
+      poll(view)
+
+      assert_push_event(view, "needs-you", %{sessions: sessions})
+      assert [%{key: key, group: group, title: "Rewire the listener"}] = sessions
+      assert key == "interactive:#{id}"
+
+      # The group is what a banner is about; `app.js` hands it to the browser as the
+      # notification tag so two asks on one session do not stack two banners.
+      assert group == "interactive:#{id}"
+
+      # And not again while it is still waiting. A standing ask is one notification.
+      poll(view)
+      refute_push_event(view, "needs-you", %{}, 50)
+    end
+
+    test "a session that leaves the group and comes back rings again", %{conn: conn} do
+      id = session_id()
+      row = listed(id, status: :awaiting_approval)
+
+      {:ok, view, _html} = live(conn, "/")
+      poll(view)
+      refute_push_event(view, "needs-you", %{}, 50)
+
+      # Answered: out of the group.
+      :ok = Ouroboros.Interactive.Store.put(%{row | status: :running})
+      poll(view)
+
+      # Asked again: the same session, a new ask, and a person who should hear about it.
+      :ok = Ouroboros.Interactive.Store.put(%{row | status: :awaiting_approval})
+      poll(view)
+
+      assert_push_event(view, "needs-you", %{sessions: [%{key: key}]})
+      assert key == "interactive:#{id}"
+    end
+
+    test "a row that is merely running is never announced", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _row = listed(session_id(), status: :running)
+      poll(view)
+
+      refute_push_event(view, "needs-you", %{}, 50)
+    end
+
+    test "the open session is keyed by request id, not by session id", %{conn: conn} do
+      # The one place a request id exists on this side of the wire: the view is holding the
+      # requests for the session it has open. Everything else is keyed `<plane>:<id>`,
+      # because `interactive.list` does not carry one.
+      id = session_id()
+      _row = listed(id, status: :running)
+
+      _plane =
+        plane(
+          id: id,
+          backlogs: [{:ok, [asked(1, "req-web-bell", %{"kind" => "command", "command" => "ls"})]}]
+        )
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert_push_event(view, "needs-you", %{sessions: [session]})
+      assert session.key == "req-web-bell"
+
+      # And its group is still the session, so a second ask on the same conversation
+      # replaces this banner instead of stacking beside it.
+      assert session.group == "interactive:#{id}"
+    end
+
+    test "a request auto-approve answered never rings", %{conn: conn} do
+      # Auto-approve runs first and records the request in `:answered` *before* the call
+      # goes out, so the bell that runs after it has nothing left to say. A banner for
+      # something the page already handled would be the worst kind of noise.
+      id = session_id()
+      pid = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
+
+      FakePlane.emit(pid, corpus("event_approval_requested_permission", 1, "r1"))
+      Process.sleep(@flush)
+      _ = render(view)
+
+      assert_receive {:responded, "r1", %{actor: :automation}}
+      refute_push_event(view, "needs-you", %{}, 50)
+    end
+  end
+
+  # The list cadence, driven rather than waited for: the deck polls every three seconds and
+  # a test that slept for one would be three seconds slower for every case here.
+  defp poll(view) do
+    send(view.pid, :poll)
+    render(view)
   end
 
   # ------------------------------------------------------------------------------------

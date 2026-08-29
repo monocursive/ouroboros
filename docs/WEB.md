@@ -1,9 +1,16 @@
 # Ouroboros Web — the LiveView operator surface
 
-Status: **specification, nothing here is built.** Written 2026-08-29 against the `deploy`
-branch working tree (84987ab plus uncommitted fleet WIP). Every `file:line` claim below was
-verified against that tree; facts about code carry citations, decisions carry numbers
-(D1–D14), and anything uncertain says so.
+Status: **W0–W8 landed; W9 (the GPUI removal) is the only slice outstanding.** Written
+2026-08-29 as a specification against the `deploy` branch working tree (84987ab plus
+uncommitted fleet WIP); every `file:line` claim below was verified against that tree, facts
+about code carry citations, decisions carry numbers (D1–D14), and anything uncertain says
+so.
+
+The spec text is kept as written. Where the build diverged from it — and it did, in eight
+places worth knowing about — the divergence is recorded as an **As built** note beside the
+paragraph it corrects, rather than by editing the paragraph into agreement with the code.
+A spec that has been quietly rewritten to match what shipped cannot tell you what was
+learned. The as-built notes are in §9 (per slice) and in D10 and D14 (per decision).
 
 The decision this document specifies: retire the GPUI desktop client (`ouro-desktop`) and
 replace it with **Ouroboros.Web**, a Phoenix LiveView surface served by the daemon itself.
@@ -272,6 +279,19 @@ Release impact: these deps add single-digit MB to the 18 MB tarball and nothing 
 Rust build graph. `mix release`'s `:assemble` picks up `priv/static/web/` with no new
 mechanism.
 
+**As built**, two corrections to the paragraph above:
+
+- **`app.js` is ~380 lines, not ~50**, and the hooks are not the ones listed. There is no
+  clipboard hook and no notification-permission *hook*: what exists is `ScrollPin` (the
+  terminal client's `follow` flag, in a browser), `Composer` (Enter-to-send and autosize,
+  bound at the element because a round trip per keystroke to decide whether a key was a
+  newline would make typing feel like the network), and three things that are not hooks at
+  all — a delegated click listener for the two chrome toggles, a `phx:needs-you` listener,
+  and the pre-paint theme read (which lives in `<head>`, not in this file). It is still one
+  hand-written file with no module graph, and still small enough to read in one sitting.
+- **Markdown is Earmark plus an allowlist renderer**, not Earmark alone. See W3's as-built
+  note in §9 for what `escape: true` does not cover and how that was established.
+
 ## 4. Parity map
 
 **The parity target is the GPUI desktop surface, not the seven-tab TUI.** The TUI remains
@@ -311,6 +331,32 @@ Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/des
   `config.toml` belongs to the terminal client's machine. Per-browser conveniences
   (collapsed sections, theme) live in `localStorage`. Notifications API, reduced-motion,
   and keybinding remapping are later slices.
+
+  **As built** (W8 — `lib/ouroboros/web/prefs.ex`), with three corrections:
+
+  - **Five keys, not three.** `sandbox_mode` and `reasoning_effort` are stored beside
+    provider/model/workspace. They are choices a person makes the same way and about the
+    same work, and leaving them out would have made the file a partial memory of a form
+    somebody had just filled in.
+  - **A stored default is sendable**, and this is the one semantic here worth arguing
+    about. `docs/DESKTOP.md`'s new-session paragraph reads "What the file supplies is where
+    the control *starts*; an explicit pick is what gets sent, and an untouched panel with
+    **no stored default** states no posture at all" — and the desktop implements exactly
+    what that last clause forces: `self.new_sandbox.or(configured_sandbox)`, under the
+    comment "the operator's pick, else the stored default, else nothing"
+    (`tui/src/desktop.rs:2264-2269`). The web matches it. "Absent, not defaulted" keeps its
+    meaning: what never reaches the plane is what the operator has never chosen, this time
+    or last. A file that was drawn but not sent would show one posture and request another.
+  - **Notifications are not a later slice; they landed in W8.** A topbar bell, off by
+    default, that asks the browser for permission on enable and posts one notification per
+    session *entering* the needs-you group while the tab is hidden. Reduced-motion was
+    already honoured by the streaming pulse (`@media (prefers-reduced-motion: reduce)` in
+    `app.css`, since W3). Keybinding remapping is still a later slice.
+
+  The theme did stay in `localStorage` as specified, with one thing this paragraph did not
+  anticipate: it has to be applied **before first paint**, or a viewer who chose light sees
+  a dark frame on every navigation. That is a small inline `<script>` in `<head>` — the
+  only inline script this surface serves (`Ouroboros.Web.Layouts.theme_script/0`).
 
 **The three genuine losses, accepted:** native app presence (dock, ⌘-tab, native
 notifications); a UI while the daemon is down (`ouro` remains the bootstrapper and the
@@ -430,30 +476,120 @@ clients already follow (`desktop_respond_approval`'s recheck). No web-side lock.
 
 PR-sized, each green before the next; W1–W2 are deliberately before any transcript UI.
 
-- **W0 — endpoint skeleton.** Deps; `Ouroboros.Web` supervisor + `web_children()` tail
-  slot; `Web.Config` (bind/port/token/secret with both-layer refusals); `/auth` cookie
-  bootstrap; `web.json` sticky-port publication; verifier prefix; one page rendering
-  `runtime.status` through `Web.Call`. `ouro web` + `spawn_env` `OUROBOROS_WEB=1` +
-  `make web`. Gates: LiveViewTest for auth/refusals; boot-posture tests mirroring the
-  gateway's.
-- **W1 — golden transcript corpus.** Fixtures + Elixir drift tests + Rust accounting +
-  Rust presentation/projection snapshot tests. No web code.
-- **W2 — `Web.Presentation` + `Web.Transcript`** against the corpus; parity words
-  asserted on both sides. No web UI yet.
-- **W3 — sessions + read-only transcript.** Rail (triage port), subscribe/resync,
-  streams rendering, markdown, diffs, images via the artifact controller.
-- **W4 — composer.** Quick-start, send/follow-up/steer with the queue rules, turn
-  envelope, interrupt, connection pill.
-- **W5 — approvals.** Card with all optional sections, provider options, plan-exit,
-  auto-approve with the question/computer-use carve-outs, suggested-rule row
+- **W0 — endpoint skeleton.** ✅ **Landed.** Deps; `Ouroboros.Web` supervisor +
+  `web_children()` tail slot; `Web.Config` (bind/port/token/secret with both-layer
+  refusals); `/auth` cookie bootstrap; `web.json` sticky-port publication; verifier prefix;
+  one page rendering `runtime.status` through `Web.Call`. `ouro web` + `spawn_env`
+  `OUROBOROS_WEB=1` + `make web`. Gates: LiveViewTest for auth/refusals; boot-posture tests
+  mirroring the gateway's.
+
+  **As built**, three notes:
+
+  - **The socket is refused at the handshake, not only at the mount.** D4 says every route
+    requires the cookie; the socket is not a route. `use Phoenix.Endpoint` injects
+    `plug :socket_dispatch` as the **first** plug in the pipeline, so `/live` is answered
+    before `Plug.Session` has run and long before `Web.Auth` could see it — and moving the
+    `socket` declaration down the endpoint changes nothing, because the declaration
+    registers a path and the dispatch position is fixed. The `on_mount` hook alone would
+    have kept the data in; it would not have kept a stranger from *holding* a socket, which
+    is the distinction `Gateway.Listener` already draws when it caps connections rather
+    than trusting the token to do it. So `Ouroboros.Web.LiveSocket.connect/3` checks the
+    session on the cookie the browser sends with the upgrade.
+  - **Scope had to be stated by the client.** D5 says `spawn_env` adds `OUROBOROS_WEB=1`;
+    that alone would have served every `ouro`-spawned daemon a `read`-scope browser beside
+    an `operate` terminal. The full reasoning is in D14's as-built notes.
+  - **`web.json` carries no `birth`**, so staleness is PID liveness alone — weaker than
+    `gateway.json`'s incarnation check. Survivable because nothing reached through this
+    record signals a process or authorizes anything; see D14, "Known gap".
+- **W1 — golden transcript corpus.** ✅ **Landed.** Fixtures + Elixir drift tests + Rust
+  accounting + Rust presentation/projection snapshot tests. No web code.
+- **W2 — `Web.Presentation` + `Web.Transcript`** ✅ **Landed**, against the corpus; parity
+  words asserted on both sides. No web UI yet.
+- **W3 — sessions + read-only transcript.** ✅ **Landed.** Rail (triage port),
+  subscribe/resync, streams rendering, markdown, diffs, images via the artifact controller.
+
+  **As built**, three notes:
+
+  - **There is no resync *loop*.** §8 says the algorithm is the TUI's "verbatim"; it is the
+    TUI's minus one round. The terminal client loops — replay, and if it progressed and a
+    gap remains, replay again — because the gateway's `*.replay` verb answers at most
+    `REPLAY_LIMIT` events per frame. In-process there is no such limit:
+    `subscription_events/2` returns **every** retained event above the cursor in one call
+    (`interactive/task.ex:2301`, bounded only by the session's own `event_limit`), so one
+    subscribe closes the whole gap and a second round could only ever answer nothing.
+    Everything else is unchanged: contiguous high-water cursor, one repair function, floors
+    that render as dividers and never discard. `Watch.has_gap?/1` is kept as the question to
+    ask if that stops being true.
+  - **`NEEDS YOU` deliberately diverges from the TUI's triage.** §4 says the rules are
+    "ported from `tui/src/ui/app/session.rs:380`", and they are, with one door closed:
+    an **idle** interactive session settles here, where `SessionInfo::triage`
+    (`tui/src/model.rs:249-254`) routes it to `NeedsInput` on the argument that a
+    conversation waiting for its next prompt is a human's turn. On a rail a person scans
+    for work that argument does not survive contact — every conversation anyone has
+    finished reading is idle, so the group meant to hold "a machine is blocked on you right
+    now" fills with sessions nobody owes anything, and a first live pass found exactly
+    that. Intentional, and stated in `Ouroboros.Web.Live.Rail`'s own docs so the two
+    surfaces can be reconciled deliberately rather than by accident.
+  - **Markdown is Earmark *plus* an allowlist renderer**, not §3's "Earmark" alone.
+    `escape: true` covers less than its name suggests, and this was measured rather than
+    assumed: inline raw HTML is escaped, **block-level** raw HTML is parsed into a real AST
+    node the option does not touch, and `[click](javascript:alert(1))` is Markdown's own
+    link syntax whose `href` Earmark passes straight through. An agent message is untrusted
+    input reaching a browser that holds a cookie for a surface that can start agents, so
+    the AST is rendered against an allowlist of elements and per-element attributes and
+    anything else is dropped.
+- **W4 — composer.** ✅ **Landed.** Quick-start, send/follow-up/steer with the queue rules,
+  turn envelope, interrupt, connection pill.
+- **W5 — approvals.** ✅ **Landed.** Card with all optional sections, provider options,
+  plan-exit, auto-approve with the question/computer-use carve-outs, suggested-rule row
   (`permissions.add`).
-- **W6 — new-session form.** Pickers from providers/models, `workspace.browse` (method
-  first, then the UI), sandbox + effort, ChatGPT account card.
-- **W7 — machines (read-only)** + fleet status/doctor rendering + deferred-add empty
-  state.
-- **W8 — polish to the removal checklist.** Notifications permission hook, theme,
-  prefs file, docs (`WEB.md` as-built pass, README).
-- **W9 — gpui removal** (§10), only after the checklist below is checked live.
+- **W6 — new-session form.** ✅ **Landed.** Pickers from providers/models,
+  `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT account card.
+- **W7 — machines (read-only)** ✅ **Landed**, + fleet status/doctor rendering +
+  deferred-add empty state.
+
+  **As built:** `fleet.status` named no fleet. The saved profile has always carried a
+  `name` — `ouro fleet` writes it as a required field — but `Cluster`'s roster decoder kept
+  the roster, the revision and the tombstones and dropped it, so the page headed itself
+  with this machine's node: one member standing in for the whole. W7 shipped with the gap
+  documented rather than papered over; **W8 retained the name** (`Cluster.fleet_name/0`,
+  `fleet_status.fleet_name`, `nil` for a runtime in no named fleet).
+- **W8 — polish to the removal checklist.** ✅ **Landed.** Notifications, theme, prefs file,
+  docs (this as-built pass, README, the `DESKTOP.md` freeze note).
+
+  **As built**, four notes:
+
+  - **The link defect was not a missing rule.** A live pass found the machines page's back
+    link in the browser's blue-then-purple, and the cause was structural: a W7 merge left
+    `.ouro-new-refusal-detail` without its closing brace and the Machines section's comment
+    without its opening `/*`, and CSS error recovery answered by swallowing **every rule
+    from that point to the end of the file**. The whole Machines stylesheet was dead. 584
+    tests passed over it, because every one of them asserted on markup. Both halves are
+    fixed, the global `a` discipline was added as specified, and
+    `Ouroboros.Web.StylesheetTest` now asserts that the file's braces balance and its
+    comments close — the cheapest assertion in the slice and the one that matters most.
+  - **The light theme had never been rendered by anything.** It shipped in W0 behind
+    `[data-theme="light"]` with no way to reach it. The same test mechanises the audit:
+    every colour in the file is a token, every colour token declared for dark is declared
+    for light with a different value, the layers stack monotonically in both, light `--ink`
+    clears 4.5:1 on all five layers and the semantic tones clear 3:1 on a card. One
+    assumption the audit killed: light is **not** an inversion of dark's layer order. Both
+    palettes go lighter forwards — the page recedes to a grey rather than to near-black,
+    and in both themes a card is the brightest thing on it.
+  - **The bell pushes an edge and decides nothing.** Three of the four rules between a
+    session needing somebody and a banner appearing — the bell being on, permission being
+    granted, nobody looking at the tab — are facts about a browser and live in `app.js`.
+    What is pushed is which sessions have just *entered* the needs-you group. What was
+    already waiting when the page opened is recorded rather than announced, and a request
+    auto-approve answered never rings. Keys are the `request_id` for the open session and
+    `<plane>:<id>` for every other row, because `interactive.list` carries no request id.
+  - **The theme needed server help after all.** D10 files the theme under "per-browser
+    conveniences in `localStorage`", which is true and insufficient: read after the page
+    paints, it flashes. See D10's as-built note.
+- **W9 — gpui removal** (§10), only after the checklist below is checked live. **Not
+  started.** Nothing in this slice or its predecessors removed anything from the desktop;
+  `docs/DESKTOP.md` carries the feature-freeze note that §10 calls for and is otherwise
+  intact, because it is the inventory §4's parity map was built from.
 
 **Removal checklist** (all verified in a real browser against a live daemon, plus one
 tailnet-proxied session): quick-start → real session → reply renders; approval answered
@@ -462,10 +598,26 @@ restart mid-stream; screenshot renders; rename/delete gating; machines presence 
 member up/down; two concurrent browsers; `read`-scope endpoint refuses every operate
 control it hides.
 
+**Status of the checklist: not yet walked end to end.** It is the gate on W9 and it is
+still open. What W8 can say about it is narrower and worth separating from it: a live pass
+was made over the pages, and the two defects it found — the swallowed Machines stylesheet
+and the unstyled links it caused — are fixed. That is not the same as the list above, none
+of whose lines has been signed off in a real browser against a live daemon. The suite is
+headless by design (§0: "`Phoenix.LiveViewTest` is fully headless, which changes the
+economics of every future surface slice"), which is exactly why this checklist is a
+separate, human gate and not something a green suite is allowed to stand in for.
+
+Two more items belong on it, added by W8 because they are the parts of it no test in this
+tree executes: **the theme survives a reload without flashing**, and **a needs-you
+notification arrives while the tab is hidden and focuses it when clicked**. Both are
+`app.js`, and nothing in this repository runs JavaScript.
+
 ## 10. GPUI removal (D13)
 
 The desktop is **feature-frozen** from acceptance of this spec: defects only, no new
-slices. At W9:
+slices. The freeze is now stated where a person editing that client will see it, at the top
+of `docs/DESKTOP.md`, pointing here. Nothing below has been done: W9 has not started, and
+this section is a plan rather than a record. At W9:
 
 - **Delete:** `tui/src/desktop.rs`, `tui/src/desktop/machines.rs`,
   `tui/src/desktop_design.rs`, `tui/src/desktop_main.rs`; the `[[bin]] ouro-desktop` and
@@ -501,10 +653,37 @@ slices. At W9:
   accepted (the TUI over SSH is the fallback, as ever).
 - **Mailbox growth on wedged views** (§8) — mitigation stated; measure in W3 with the
   streaming-test load recipe before inventing anything.
+
+  **As built: still unmeasured, and therefore still open.** W3 built the mitigations —
+  O(delta) stream rendering inside a bounded window with floors on trim, deltas coalesced
+  to one projection per 80 ms flush, and crash-and-resync as the lag path — but no test in
+  this tree drives a view hard enough to observe a mailbox growing, and there is no
+  `Process.info(:message_queue_len)` self-check anywhere. §8's instruction not to invent
+  anything before measuring still stands; nobody has measured. This is the one risk in this
+  list that a slice was supposed to close and did not.
 - **Two operate surfaces**: gateway + web double the credentialed perimeter. Same
   credential, same postures, but the security-review pass in W0 should walk the Phoenix
   endpoint with the same eyes that reviewed the listener (frame limits → body limits,
   upload handling off by default, no code-reload endpoints in prod).
+- **The browser half of this surface is not tested by anything.** Added by W8, because W8
+  is where it stopped being a rounding error. `app.js` is ~380 lines and there is no
+  JavaScript toolchain here to run them in — deliberately, per §3, and the trade was cheap
+  while the file was fifty lines of LiveSocket wiring. It now also owns Enter-to-send,
+  scroll pinning, `localStorage` round-tripping for two preferences, the Notification
+  permission dance, the Page Visibility gate, and the set of already-rung request ids.
+  Every commit in W0–W8 that touched it says which of its claims are unverified, and the
+  BEAM-side halves are asserted (the layout emits the script, the toggles render, the two
+  files agree on their storage keys, the server pushes the right edge), but **the suite
+  executes none of it**.
+
+  W8's own JavaScript was driven once, by hand, under a throwaway fake DOM in `node` —
+  the pre-paint script against a storage that throws, the theme toggle round-tripping
+  `data-theme` and `localStorage`, and the bell across on/off, hidden/visible,
+  granted/denied/revoked, no-API, and the same key twice. It passed. That is a fact about
+  one afternoon, not a gate: the harness is not in this repository and nothing re-runs it,
+  so the next edit to `app.js` has exactly the coverage it had before. The honest options
+  are a headless-browser gate in CI or a deliberate standing acceptance; W8 did neither and
+  is recording the choice rather than making it.
 - **Open**: whether `Web.Call` should also write to the effect ledger the way operate
   calls via the gateway are audited today (v1: same log line, no ledger change); whether
   the defaulted posture should eventually serve the web on the tailnet automatically once

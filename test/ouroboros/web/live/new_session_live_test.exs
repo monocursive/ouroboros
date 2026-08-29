@@ -375,6 +375,179 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   # ------------------------------------------------------------------------------------
+  # Stored defaults (W8): `web.prefs.json`
+  #
+  # The semantics matched here are the **desktop's**, and they are not the ones a first
+  # reading of "absent, not defaulted" suggests. `docs/DESKTOP.md:71-74` says "What the file
+  # supplies is where the control *starts*; an explicit pick is what gets sent, and an
+  # untouched panel with *no stored default* states no posture at all" — and the desktop
+  # implements the reading that sentence's last clause forces: `self.new_sandbox
+  # .or(configured_sandbox)`, under the comment "the operator's pick, else the stored
+  # default, else nothing" (`tui/src/desktop.rs:2264-2269`).
+  #
+  # So a seeded control is a **stated** control, on all five keys. The alternative — a file
+  # that is displayed but not sent — would show an operator one posture and request another,
+  # which is the exact failure this module was split out to make impossible.
+  # ------------------------------------------------------------------------------------
+
+  describe "stored defaults" do
+    test "a form with no stored anything is the form W6 shipped" do
+      form = NewSession.new(%{})
+
+      assert form.provider == nil
+      assert form.model_choice == :runtime_default
+      assert form.workspace == ""
+      assert form.sandbox == nil
+      assert form.effort == nil
+
+      assert {:error, _no_provider} = NewSession.start_params(form, {:text, nil})
+    end
+
+    test "every stored key seeds its control" do
+      form =
+        NewSession.new(%{
+          "provider" => "native",
+          "model" => "openai_codex:gpt-5.6-sol",
+          "workspace" => "/srv/ouroboros",
+          "sandbox_mode" => "workspace_write",
+          "reasoning_effort" => "high"
+        })
+
+      assert form.provider == "native"
+      assert form.model_choice == :custom
+      assert form.model_text == "openai_codex:gpt-5.6-sol"
+      assert form.workspace == "/srv/ouroboros"
+      assert form.sandbox == "workspace_write"
+      assert form.effort == "high"
+    end
+
+    test "a seeded control is a stated control: every stored key reaches the request" do
+      # The decision, pinned. Change this test and you have changed the semantics away
+      # from the desktop's.
+      form =
+        NewSession.new(%{
+          "provider" => "native",
+          "model" => "openai_codex:gpt-5.6-sol",
+          "workspace" => "/srv/ouroboros",
+          "sandbox_mode" => "workspace_write",
+          "reasoning_effort" => "high"
+        })
+
+      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+
+      assert Map.keys(params) |> Enum.sort() ==
+               ["id", "model", "provider", "reasoning_effort", "sandbox_mode", "workspace"]
+
+      assert params["model"] == "openai_codex:gpt-5.6-sol"
+      assert params["sandbox_mode"] == "workspace_write"
+      assert params["reasoning_effort"] == "high"
+    end
+
+    test "a key with no stored value is still absent, not defaulted" do
+      form = NewSession.new(%{"provider" => "native", "sandbox_mode" => "read_only"})
+
+      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+
+      assert Map.keys(params) |> Enum.sort() == ["id", "provider", "sandbox_mode"]
+      refute Map.has_key?(params, "reasoning_effort")
+      refute Map.has_key?(params, "model")
+      refute Map.has_key?(params, "workspace")
+    end
+
+    test "the hint line says what the seed will actually send" do
+      form = NewSession.new(%{"provider" => "native", "model" => "openai_codex:x"})
+
+      assert NewSession.model_intent(form, {:text, nil}).hint == "Sends openai_codex:x"
+    end
+
+    test "a seeded model the catalogue lists is promoted to its own row" do
+      form = NewSession.new(%{"provider" => "native", "model" => "seeded-model"})
+      field = seeded_field()
+
+      promoted = NewSession.promote(form, field)
+
+      assert promoted.model_choice == {:catalog, "seeded-model"}
+
+      # And it sends exactly what it sent before being promoted: this changes the drawing,
+      # never the request.
+      assert NewSession.start_params(promoted, field) |> elem(1) |> Map.get("model") ==
+               NewSession.start_params(form, field) |> elem(1) |> Map.get("model")
+    end
+
+    test "a seeded model no catalogue has heard of stays custom, and is still sent" do
+      form = NewSession.new(%{"provider" => "native", "model" => "some-private-build"})
+      field = seeded_field()
+
+      assert NewSession.promote(form, field).model_choice == :custom
+      assert {:ok, params} = NewSession.start_params(form, field)
+      assert params["model"] == "some-private-build"
+    end
+
+    test "a provider that accepts no model option sends none, seeded or not" do
+      form = NewSession.new(%{"provider" => "native", "model" => "openai_codex:x"})
+
+      assert {:ok, params} = NewSession.start_params(form, :unsupported)
+      refute Map.has_key?(params, "model")
+    end
+  end
+
+  describe "stored defaults, through the page" do
+    setup :endpoint_seeded
+
+    test "the form opens where the last successful start left it", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/new")
+
+      assert form(view).provider == "native"
+      assert form(view).workspace == "/srv/remembered"
+      assert form(view).sandbox == "workspace_write"
+      assert form(view).effort == "high"
+
+      assert html =~ ~s(value="/srv/remembered")
+    end
+
+    test "and the request it would build carries them", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+
+      assert {:ok, params} = start_params(view)
+
+      assert params["provider"] == "native"
+      assert params["workspace"] == "/srv/remembered"
+      assert params["sandbox_mode"] == "workspace_write"
+      assert params["reasoning_effort"] == "high"
+    end
+
+    test "a refused start writes nothing over what is already there", %{conn: conn, dir: dir} do
+      {:ok, view, _html} = live(conn, "/new")
+
+      _ = change(view, %{"provider" => "no-such-provider", "workspace" => "/srv/rejected"})
+      html = view |> element("form.ouro-new-form") |> render_submit()
+
+      assert html =~ "must name a provider this node serves"
+
+      # A request the plane refused is not evidence about how the operator likes to work.
+      assert Ouroboros.Web.Prefs.read(dir) == %{
+               "provider" => "native",
+               "workspace" => "/srv/remembered",
+               "sandbox_mode" => "workspace_write",
+               "reasoning_effort" => "high"
+             }
+    end
+  end
+
+  describe "a corrupt prefs file" do
+    setup :endpoint_corrupt
+
+    test "is a form with no defaults rather than a page that will not mount", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/new")
+
+      assert html =~ "New session"
+      assert form(view).provider == nil
+      assert form(view).workspace == ""
+      assert form(view).sandbox == nil
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
   # Refusals
   # ------------------------------------------------------------------------------------
 
@@ -935,7 +1108,29 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
   defp endpoint(_context, scope \\ :operate)
 
-  defp endpoint(_context, scope) do
+  defp endpoint(context, scope), do: endpoint_with(context, scope, fn _dir -> :ok end)
+
+  # The same endpoint, with a `web.prefs.json` already in the data directory — the state a
+  # second visit to /new is in after a first one started something.
+  defp endpoint_seeded(context) do
+    endpoint_with(context, :operate, fn dir ->
+      Ouroboros.Web.Prefs.write(dir, %{
+        "provider" => "native",
+        "workspace" => "/srv/remembered",
+        "sandbox_mode" => "workspace_write",
+        "reasoning_effort" => "high"
+      })
+    end)
+  end
+
+  # And with one that cannot be read at all, which must cost the page nothing.
+  defp endpoint_corrupt(context) do
+    endpoint_with(context, :operate, fn dir ->
+      File.write!(Ouroboros.Web.Prefs.path(dir), "{\"provider\": ")
+    end)
+  end
+
+  defp endpoint_with(_context, scope, seed) do
     dir = Path.join(System.tmp_dir!(), "ouroboros-web-new-#{System.unique_integer([:positive])}")
     Ouroboros.DataDir.ensure_private!(dir)
     token_path = Path.join(dir, "gateway.token")
@@ -943,11 +1138,23 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     File.chmod!(token_path, 0o600)
     on_exit(fn -> File.rm_rf(dir) end)
 
+    seed.(dir)
+
     config = Config.new!(data_dir: dir, scope: scope)
     start_supervised!({Ouroboros.Web, config: config, server: false})
 
     conn = get(build_conn(), "/auth?token=#{@token}")
-    {:ok, conn: put_req_cookie(build_conn(), @cookie, conn.resp_cookies[@cookie].value)}
+
+    {:ok, conn: put_req_cookie(build_conn(), @cookie, conn.resp_cookies[@cookie].value), dir: dir}
+  end
+
+  # A rows-field carrying one catalogue model, for the promote tests: the only thing they
+  # need from a catalogue is whether it lists a given id.
+  defp seeded_field do
+    NewSession.model_field(
+      catalogue([provider_row(:native, total: 1, models: [model("seeded-model")])]),
+      "native"
+    )
   end
 
   # A real directory tree, and a real root for `workspace.browse` to be bounded by, so the
