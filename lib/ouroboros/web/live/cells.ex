@@ -320,9 +320,29 @@ defmodule Ouroboros.Web.Live.Cells do
   # ------------------------------------------------------------------------------------
 
   defp diff(assigns) do
+    assigns = assign(assigns, :parsed, assigns.cell.parsed)
+
     ~H"""
-    <div class={["ouro-cell", "ouro-diff", @cell.pending_approval && "ouro-diff-pending"]}>
-      <div :for={file <- @cell.parsed.files} class="ouro-diff-file">
+    <.parsed_diff parsed={@parsed} pending={@cell.pending_approval} />
+    """
+  end
+
+  @doc """
+  One parsed diff, drawn.
+
+  Public because the approval card draws the same patch: a request to write a file and the
+  transcript entry for having written it are the same bytes, and two renderers for them
+  would be two chances to disagree about what a hunk is. The card parses
+  `Approval.Detail`'s text with `Ouroboros.Web.Transcript.Diff.parse/2` and hands the
+  result here.
+  """
+  attr :parsed, :any, required: true
+  attr :pending, :boolean, default: false
+
+  def parsed_diff(assigns) do
+    ~H"""
+    <div class={["ouro-cell", "ouro-diff", @pending && "ouro-diff-pending"]}>
+      <div :for={file <- @parsed.files} class="ouro-diff-file">
         <div class="ouro-diff-head">
           <span class="ouro-diff-mark" title={Transcript.DiffFile.label(file)}>
             {Transcript.DiffFile.mark(file)}
@@ -345,7 +365,7 @@ defmodule Ouroboros.Web.Live.Cells do
           </div>
         </div>
       </div>
-      <p :if={@cell.parsed.truncated} class="ouro-quiet">
+      <p :if={@parsed.truncated} class="ouro-quiet">
         this diff is longer than the transcript will draw
       </p>
     </div>
