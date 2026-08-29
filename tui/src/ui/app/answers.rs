@@ -117,19 +117,6 @@ impl App {
                     .providers
                     .failed(error.to_string(), ticks, PROVIDER_TICKS),
             },
-            Tag::Models => match result {
-                Ok(value) => match ModelsCatalog::decode(&value) {
-                    Ok(catalogue) => self.models.ok(catalogue, ticks, MODEL_TICKS),
-                    Err(error) => self.models.failed(
-                        format!("runtime.models did not decode: {error}"),
-                        ticks,
-                        MODEL_TICKS,
-                    ),
-                },
-                // Including the `-32601` a gateway that does not serve the verb answers
-                // with. A picker reading this shows the refusal rather than an empty list.
-                Err(error) => self.models.failed(error.to_string(), ticks, MODEL_TICKS),
-            },
             Tag::Sessions(plane) => match result {
                 Ok(value) => {
                     let sessions = self.retain_offline_session_rows(
@@ -400,13 +387,6 @@ impl App {
                 Err(error) if show => self.action_failed("delegations", plane, &id, error),
                 Err(_quiet) => {}
             },
-            Tag::Artifact { sha } => {
-                if let Ok(value) = result {
-                    if let Ok(bytes) = model::decode_artifact(&value, &sha) {
-                        self.desktop_artifacts.insert(sha, Arc::new(bytes));
-                    }
-                }
-            }
             Tag::Action {
                 label, plane, id, ..
             } => match result {

@@ -181,12 +181,6 @@ pub(super) struct PendingFirstMessage {
     pub(super) turn_id: String,
     pub(super) start: StartRequest,
     pub(super) start_outcome_unknown: bool,
-    /// Whether the desktop seam issued this start rather than the terminal home.
-    ///
-    /// The two clients never share a process, so this is not a mode flag: it records which
-    /// surface typed the prompt, so a refused start hands the text back to a composer that
-    /// surface actually draws.
-    pub(super) desktop: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1560,74 +1554,6 @@ impl App {
             } else {
                 NoticeKind::Info
             },
-        );
-
-        Ok(())
-    }
-
-    /// Changes the session's default reasoning effort through `interactive.configure`.
-    /// The runtime remains authoritative: the desktop keeps drawing the prior value until
-    /// the successful answer refreshes the session row.
-    pub(super) fn configure_reasoning_effort(
-        &mut self,
-        want: Effort,
-    ) -> Result<(), (NoticeKind, String)> {
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            return Err((
-                NoticeKind::Info,
-                "open a session before changing its thinking level".to_string(),
-            ));
-        };
-
-        if plane != Plane::Interactive {
-            return Err((
-                NoticeKind::Info,
-                format!("{id} is a coding task; its thinking level is fixed at start"),
-            ));
-        }
-
-        if let Some(refusal) = self.owner_conflict_refusal(plane, &id) {
-            return Err((NoticeKind::Error, refusal));
-        }
-
-        let method = "interactive.configure";
-        if !self.hello.serves(method) {
-            return Err((
-                NoticeKind::Warn,
-                format!(
-                    "this gateway does not serve {method}, so the thinking level cannot be \
-                     changed on a running session"
-                ),
-            ));
-        }
-
-        if self.open_reasoning_effort() == Some(want) {
-            return Err((
-                NoticeKind::Info,
-                format!("{id} is already using {} thinking", want.label()),
-            ));
-        }
-
-        let params = self.routed_session_params(
-            plane,
-            &id,
-            json!({ "id": id, "reasoning_effort": want.as_str() }),
-        );
-        self.issue(Call::new(
-            Tag::Action {
-                label: "thinking level",
-                plane,
-                id: id.clone(),
-            },
-            method,
-            params,
-        ));
-        self.inform(
-            format!(
-                "asking {id} for {} thinking from the next turn",
-                want.label()
-            ),
-            NoticeKind::Info,
         );
 
         Ok(())

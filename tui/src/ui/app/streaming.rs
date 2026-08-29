@@ -69,8 +69,6 @@ impl App {
                     self.auto_answer_approvals(plane, id);
                     self.open_approval(plane, id.to_string());
                 }
-
-                self.request_desktop_artifacts();
             }
             Err(_undecodable) => {
                 if let Some(watch) = self.sessions.watches.get_mut(&key) {
@@ -442,8 +440,6 @@ impl App {
                     self.auto_answer_approvals(plane, &id);
                     self.open_approval(plane, id);
                 }
-
-                self.request_desktop_artifacts();
             }
             Err(error)
                 if subscribe && owner.is_some() && Self::resync_waits_for_remote_owner(&error) =>
@@ -826,46 +822,6 @@ impl App {
                 None,
                 Some("this session names no workspace, so there is no scope to save the rule in"),
             ),
-        }
-    }
-
-    /// Fetch staged desktop screenshots the open transcript named but this client has not
-    /// decoded yet. One in-flight request per sha; overlay happens in
-    /// [`App::desktop_transcript`].
-    fn request_desktop_artifacts(&mut self) {
-        if !self.hello.serves(model::ARTIFACT_METHOD) {
-            return;
-        }
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            return;
-        };
-        let shas: Vec<String> = {
-            let Some(watch) = self.sessions.open_watch() else {
-                return;
-            };
-            transcript_cells::project(
-                watch
-                    .recent_entries(transcript_cells::CHAT_ENTRY_WINDOW)
-                    .entries,
-            )
-            .into_iter()
-            .filter_map(|cell| match cell {
-                transcript_cells::Cell::Image(image) => image.sha,
-                _ => None,
-            })
-            .collect()
-        };
-
-        for sha in shas {
-            if self.desktop_artifacts.contains_key(&sha) {
-                continue;
-            }
-            let params = self.routed_session_params(plane, &id, model::artifact_params(&sha));
-            self.issue(Call::new(
-                Tag::Artifact { sha },
-                model::ARTIFACT_METHOD,
-                params,
-            ));
         }
     }
 }
