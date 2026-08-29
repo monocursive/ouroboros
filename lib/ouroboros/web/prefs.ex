@@ -147,15 +147,21 @@ defmodule Ouroboros.Web.Prefs do
   # ------------------------------------------------------------------------------------
 
   defp decode(file) do
-    with {:ok, encoded} <- File.read(file),
-         {:ok, decoded} when is_map(decoded) <- JSON.decode(encoded) do
-      sanitize(decoded)
-    else
-      {:ok, _not_an_object} ->
-        quietly(file, "it does not hold a JSON object")
+    # The two failures are reported apart on purpose. `read/1` has already `lstat`ed this
+    # path, so a read that fails here is a race — the file went away or its mode changed
+    # between the two calls — and saying "not readable JSON" about it would send whoever
+    # reads the log looking at the wrong thing entirely.
+    case File.read(file) do
+      {:ok, encoded} -> decode_json(file, encoded)
+      {:error, reason} -> quietly(file, "it could not be opened: #{inspect(reason)}")
+    end
+  end
 
-      {:error, reason} ->
-        quietly(file, "it is not readable JSON: #{inspect(reason)}")
+  defp decode_json(file, encoded) do
+    case JSON.decode(encoded) do
+      {:ok, decoded} when is_map(decoded) -> sanitize(decoded)
+      {:ok, _not_an_object} -> quietly(file, "it does not hold a JSON object")
+      {:error, reason} -> quietly(file, "it is not readable JSON: #{inspect(reason)}")
     end
   end
 
