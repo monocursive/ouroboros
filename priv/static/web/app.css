@@ -1453,3 +1453,387 @@ code,
     overflow-y: visible;
   }
 }
+
+/* ==========================================================================
+ * The new-session form (W6): /new.
+ *
+ * The deck's tokens, one column, and the same three rules. The one that does real work
+ * here is the third: this page has exactly one filled button — "Start session" — and
+ * everything else on it (Browse, the sandbox cards, the ChatGPT controls) is a hairline.
+ *
+ * Rule 1 is spent nowhere on this page. Nothing here needs a person's attention in the
+ * sense the deck's green means; a form is a place a person is already standing.
+ *
+ * The warning tone appears twice and both times for the same reason: the full-access
+ * card's title carries it always, because that is a standing property of the posture, and
+ * the card carries it when chosen instead of the accent, so picking it never reads as an
+ * action highlight.
+ * ========================================================================== */
+
+.ouro-new {
+  background: var(--workspace);
+  min-height: 100vh;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+.ouro-new-top {
+  max-width: 46rem;
+  margin: 0 auto 1.5rem;
+}
+
+.ouro-new-back {
+  color: var(--tertiary);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.ouro-new-back:hover {
+  color: var(--secondary);
+}
+
+.ouro-new-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 1.6rem;
+  margin: 0.75rem 0 0.2rem;
+}
+
+.ouro-new-sub {
+  margin: 0;
+  color: var(--tertiary);
+  font-size: 0.9rem;
+}
+
+.ouro-new-form {
+  max-width: 46rem;
+  margin: 0 auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+}
+
+.ouro-new-field {
+  padding: 1.1rem 1.25rem;
+  border-bottom: 1px solid var(--hairline-1);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ouro-new-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.ouro-new-label {
+  font-size: 0.85rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+}
+
+.ouro-new-aside {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+}
+
+.ouro-new-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ouro-new-row .ouro-new-input {
+  flex: 1;
+}
+
+.ouro-new-input,
+.ouro-new-select {
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  width: 100%;
+  background: var(--inset);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.55rem;
+}
+
+.ouro-new-input:focus-visible,
+.ouro-new-select:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+
+.ouro-new-select[disabled],
+.ouro-new-input[disabled] {
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
+/* The catalogue listbox. A real list rather than a dropdown, because the search above it
+   is what narrows it and a closed control would hide the effect of typing. */
+.ouro-new-list {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0;
+}
+
+.ouro-new-list option {
+  padding: 0.3rem 0.55rem;
+}
+
+/* A probe that found no executable is dimmer, and still selectable. */
+.ouro-new-dim {
+  color: var(--tertiary);
+}
+
+.ouro-new-hint {
+  margin: 0;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+/* The field's authoritative reading: what the request will actually carry. Ink rather
+   than tertiary, because it is the line on the page an operator is entitled to trust. */
+.ouro-new-intent {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+}
+
+.ouro-new-secondary {
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  background: transparent;
+  color: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.ouro-new-secondary:hover:not([disabled]) {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-new-secondary[disabled] {
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------------- Sandbox */
+
+.ouro-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.ouro-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  color: var(--ink);
+}
+
+.ouro-card:hover {
+  border-color: var(--border);
+}
+
+.ouro-card-on {
+  border-color: var(--border-strong);
+  background: var(--inset);
+}
+
+.ouro-card-on .ouro-card-title {
+  font-weight: 600;
+}
+
+/* The title wears the warning tone whether or not the row is chosen; the border joins it
+   only when it is. Never the attention green, and never the danger red: this is a posture
+   an operator may legitimately want, not a failure. */
+.ouro-card-warn .ouro-card-title {
+  color: var(--warn-amber);
+}
+
+.ouro-card-warn.ouro-card-on {
+  border-color: var(--warn-amber);
+}
+
+.ouro-card-title {
+  font-size: 0.88rem;
+}
+
+.ouro-card-line {
+  font-size: 0.78rem;
+  color: var(--tertiary);
+}
+
+/* ---------------------------------------------------------------------- Browse */
+
+.ouro-browse {
+  background: var(--card);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem;
+}
+
+.ouro-browse-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ouro-browse-path {
+  font-size: 0.8rem;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.ouro-browse-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.ouro-browse-root {
+  font-size: 0.72rem;
+  background: transparent;
+  color: var(--tertiary);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+}
+
+.ouro-browse-root:hover {
+  color: var(--ink);
+}
+
+.ouro-browse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ouro-browse-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--inset);
+  padding: 0.05rem 0.35rem;
+}
+
+.ouro-browse-open {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+}
+
+.ouro-browse-open:hover {
+  color: var(--secondary);
+}
+
+.ouro-browse-use {
+  background: transparent;
+  border: 0;
+  color: var(--tertiary);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+}
+
+.ouro-browse-use:hover {
+  color: var(--ink);
+}
+
+.ouro-browse-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------------- ChatGPT */
+
+.ouro-account-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.ouro-account-code {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0.14em;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  align-self: flex-start;
+}
+
+/* ---------------------------------------------------------------------- Footer */
+
+.ouro-new-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+}
+
+.ouro-new-cancel {
+  color: var(--tertiary);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.ouro-new-cancel:hover {
+  color: var(--secondary);
+}
+
+.ouro-new-note {
+  margin: 0;
+  padding: 0 1.25rem 1.25rem;
+  color: var(--tertiary);
+  font-size: 0.78rem;
+}
+
+.ouro-new-refusal {
+  margin: 1rem 1.25rem 0;
+}
+
+.ouro-new-refusal-detail {
+  display: block;
+  margin-top: 0.4rem;
+  color: var(--tertiary);
+}

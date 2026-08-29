@@ -143,11 +143,31 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   @impl true
   def handle_params(params, _uri, socket) do
-    case {Map.get(@planes, params["plane"]), params["id"]} do
-      {plane, id} when not is_nil(plane) and is_binary(id) -> {:noreply, open(socket, plane, id)}
-      _none -> {:noreply, close(socket)}
+    case opened(params) do
+      {plane, id} -> {:noreply, open(socket, plane, id)}
+      :none -> {:noreply, close(socket)}
     end
   end
+
+  # `/s/:plane/:id` names the session in the path. `?open=<plane>:<id>` is the same request
+  # made by a page that navigated here rather than patched — the new-session form, which
+  # cannot `live_patch` across a `live_session` boundary — and it opens the same session by
+  # the same route rather than a second one.
+  defp opened(%{"plane" => plane, "id" => id}) when is_binary(id) and id != "" do
+    case Map.get(@planes, plane) do
+      nil -> :none
+      known -> {known, id}
+    end
+  end
+
+  defp opened(%{"open" => open}) when is_binary(open) do
+    case String.split(open, ":", parts: 2) do
+      [plane, id] -> opened(%{"plane" => plane, "id" => id})
+      _malformed -> :none
+    end
+  end
+
+  defp opened(_params), do: :none
 
   # ------------------------------------------------------------------------------------
   # Events from the browser
