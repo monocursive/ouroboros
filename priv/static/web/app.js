@@ -20,9 +20,49 @@
   var meta = document.querySelector("meta[name='csrf-token']");
   var csrfToken = meta ? meta.getAttribute("content") : null;
 
+  // The transcript grows from the bottom while a turn streams, and a pane that jumped to
+  // the newest line while somebody was reading history would be unusable. So it follows
+  // only while the reader is already at the bottom, and stops the moment they scroll up —
+  // the terminal client's `follow` flag, in a browser.
+  //
+  // The connection pill needs no hook: LiveView writes `phx-connected` and the three
+  // `phx-*-error` classes onto its own root, and the stylesheet reads them.
+  var ScrollPin = {
+    // Within this many pixels of the bottom still counts as "at the bottom", because a
+    // reader who has not deliberately scrolled away should not be stranded by a rounding
+    // error or a half-rendered image.
+    slack: 48,
+
+    atBottom: function () {
+      var el = this.el;
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= this.slack;
+    },
+
+    mounted: function () {
+      this.pinned = true;
+      this.el.scrollTop = this.el.scrollHeight;
+
+      this.onScroll = function () {
+        this.pinned = this.atBottom();
+      }.bind(this);
+
+      this.el.addEventListener("scroll", this.onScroll, { passive: true });
+    },
+
+    updated: function () {
+      if (this.pinned) {
+        this.el.scrollTop = this.el.scrollHeight;
+      }
+    },
+
+    destroyed: function () {
+      this.el.removeEventListener("scroll", this.onScroll);
+    }
+  };
+
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
-    hooks: {}
+    hooks: { ScrollPin: ScrollPin }
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the

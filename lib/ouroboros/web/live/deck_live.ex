@@ -738,7 +738,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       the {@truncated} earlier entries this view holds are not drawn
     </p>
 
-    <div id="transcript" class="ouro-transcript" phx-update="stream">
+    <div id="transcript" class="ouro-transcript" phx-update="stream" phx-hook="ScrollPin">
       <div :for={{dom_id, item} <- @streams.cells} id={dom_id}>
         <Cells.cell
           cell={item.cell}
