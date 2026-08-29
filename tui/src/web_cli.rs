@@ -200,9 +200,9 @@ pub fn stale_publication_refusal(path: &Path, pid: i32) -> String {
     format!(
         "{} was left behind by pid {pid}, which is gone, and the runtime serving this data \
          directory now has published nothing in its place — so there is no browser surface \
-         to open. The likeliest cause is OUROBOROS_WEB=0 in the environment that daemon \
-         was started from. Check that variable, then `ouro stop` and `ouro web` to start a \
-         runtime that serves it.",
+         to open. The likeliest cause is OUROBOROS_WEB=0 in the environment *that* runtime \
+         was started from. Check it there, then `ouro stop` and `ouro web` to start one \
+         that serves it.",
         path.display()
     )
 }
