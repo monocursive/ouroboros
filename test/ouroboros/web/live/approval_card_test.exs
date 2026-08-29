@@ -72,6 +72,49 @@ defmodule Ouroboros.Web.Live.ApprovalCardTest do
     end
   end
 
+  describe "option_response/2" do
+    defp question(options) do
+      request(%{
+        "kind" => "question",
+        "header" => "Need a decision",
+        "question" => "Which database should the staging environment point at?",
+        "options" => options
+      })
+    end
+
+    test "a vendor option sends the decision its kind names" do
+      offered = with_options(["allow_once", "reject_always"])
+
+      assert ApprovalCard.option_response(offered, 0) ==
+               %{"decision" => "approve", "scope" => "once"}
+
+      assert ApprovalCard.option_response(offered, 1) ==
+               %{"decision" => "deny", "scope" => "session"}
+    end
+
+    test "an ask_user option approves once with its own words as the reason" do
+      # `interactive.respond_approval` takes `provider_options` for a plan-exit `choice`
+      # and refuses every other key (`Methods.plan_exit_options/1`), and
+      # `Tools.AskUser.answer_text/1` falls back to `reason`. So `reason` is the one key
+      # that carries the answer to the tool, and an approve without it arrives as "the
+      # operator acknowledged the question without giving an answer".
+      offered = question(["staging-db", "scratch-db"])
+
+      assert ApprovalCard.option_response(offered, 0) ==
+               %{"decision" => "approve", "scope" => "once", "reason" => "staging-db"}
+
+      assert ApprovalCard.option_response(offered, 1) ==
+               %{"decision" => "approve", "scope" => "once", "reason" => "scratch-db"}
+    end
+
+    test "an option this build cannot send maps onto nothing" do
+      assert ApprovalCard.option_response(with_options(["teleport"]), 0) == nil
+      assert ApprovalCard.option_response(with_options(["allow_once"]), 7) == nil
+      assert ApprovalCard.option_response(with_options(["allow_once"]), -1) == nil
+      assert ApprovalCard.option_response(question([""]), 0) == nil
+    end
+  end
+
   describe "parsed_diff/1" do
     test "is nil where the request carries no patch" do
       detail = Approval.detail(request(%{"kind" => "permission"}))

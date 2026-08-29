@@ -374,7 +374,15 @@ impl App {
                     plan: Some(choice.choice),
                 })
                 .collect()
-        } else if !detail.options.is_empty() {
+        // An `ask_user` option's answer rides `reason`, and `desktop_respond_approval`
+        // carries a decision and a scope and nothing else. A row labelled "staging-db" that
+        // sent a bare approve would reach the agent as "the operator acknowledged the
+        // question without giving an answer" — a button lying about what it sends, which is
+        // worse than not offering it. Until the window can carry the words, a question keeps
+        // the four standard answers.
+        } else if !detail.options.is_empty()
+            && detail.options.iter().all(|option| option.answer.is_none())
+        {
             detail
                 .options
                 .iter()

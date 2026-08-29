@@ -8,12 +8,13 @@ defmodule Ouroboros.Web.Transcript.Approval.Option do
   (`tui/src/ui/transcript.rs:261-273`).
   """
 
-  defstruct [:option_id, :kind, name: ""]
+  defstruct [:option_id, :kind, :answer, name: ""]
 
   @type t :: %__MODULE__{
           option_id: String.t() | nil,
           name: String.t(),
-          kind: String.t() | nil
+          kind: String.t() | nil,
+          answer: String.t() | nil
         }
 
   @doc """
@@ -41,6 +42,23 @@ defmodule Ouroboros.Web.Transcript.Approval.Option do
     do: {:deny, :session}
 
   def decision(%__MODULE__{}), do: nil
+
+  @doc """
+  Whether a surface can send this option at all.
+
+  Two shapes answer, for different reasons. A vendor option answers where its `kind` names
+  one of the four `interactive.respond_approval` accepts. An `ask_user` option answers
+  because it *is* the answer: a bare string carries no `kind` and means nothing to the
+  four-way table, and choosing it approves the question once with those words riding
+  `reason` — the only key the envelope will carry to
+  `Provider.Native.Tools.AskUser.answer_text/1`.
+
+  Everything else is drawn as words and never as a button
+  (`tui/src/ui/transcript.rs`).
+  """
+  @spec answerable?(t()) :: boolean()
+  def answerable?(%__MODULE__{answer: answer}) when is_binary(answer), do: true
+  def answerable?(%__MODULE__{} = option), do: decision(option) != nil
 end
 
 defmodule Ouroboros.Web.Transcript.Approval.Edit do
@@ -513,28 +531,43 @@ defmodule Ouroboros.Web.Transcript.Approval do
     end
   end
 
-  # ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them.
+  # ACP's `options: [{optionId, name, kind}]`, in the order the provider listed them —
+  # and the native `ask_user`'s `options: ["…", "…"]`, which are not that shape at all.
   #
   # Bounded: these are drawn as rows, and a provider that offered two hundred of them
   # would push the command off the screen.
   defp options(payload) do
     payload
     |> array("options")
-    |> Enum.map(fn option ->
-      case text(option, "name") || text(option, "label") do
-        nil ->
-          nil
-
-        name ->
-          %Option{
-            option_id: text(option, "optionId") || text(option, "option_id"),
-            name: name,
-            kind: text(option, "kind")
-          }
-      end
-    end)
+    |> Enum.map(&option/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.take(@options)
+  end
+
+  # `Provider.Native.Tools.AskUser.question/1` declares `options: {:list, :string}` and
+  # writes exactly that. A reader that insists on `name` drops every one of them, and a
+  # question whose whole point is "which database?" renders as Allow/Deny. The string is
+  # the label and the words to send back; nothing on the wire says what it *means*, so it
+  # carries no `optionId` and no `kind` and maps onto none of the four.
+  defp option(option) when is_binary(option) do
+    case nonempty(option) do
+      nil -> nil
+      answer -> %Option{option_id: nil, name: answer, kind: nil, answer: answer}
+    end
+  end
+
+  defp option(option) do
+    case text(option, "name") || text(option, "label") do
+      nil ->
+        nil
+
+      name ->
+        %Option{
+          option_id: text(option, "optionId") || text(option, "option_id"),
+          name: name,
+          kind: text(option, "kind")
+        }
+    end
   end
 
   # ACP's `toolCall.locations: [{path, line?}]`, paths only.

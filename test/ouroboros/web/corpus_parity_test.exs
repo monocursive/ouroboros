@@ -623,11 +623,11 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.diff == nil
     end
 
-    # Mirrors `a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions`.
+    # Mirrors `a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers`.
     # `ask_user` rides the approval channel to put a question to a person. Auto-approve
     # must refuse it: a robot `approve` carries no answer, which is the one outcome the
     # tool exists to prevent.
-    test "a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions" do
+    test "a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers" do
       request = approval("event_approval_requested_question")
 
       assert Approval.question?(request)
@@ -644,8 +644,19 @@ defmodule Ouroboros.Web.CorpusParityTest do
                "Need a decision — Which database should the staging environment point at?",
              "the words it asks, not the whole payload as JSON"
 
-      assert detail.options == [],
-             "ask_user options are plain strings, not the provider options a modal maps"
+      # `AskUser.question/1` writes plain strings, which both readers used to drop for
+      # having no `name`. They are the answers themselves: the string is the label and the
+      # words sent back, and nothing on the wire says what they mean.
+      assert Enum.map(detail.options, & &1.name) == ["staging-db", "scratch-db"]
+      assert Enum.map(detail.options, & &1.answer) == ["staging-db", "scratch-db"]
+      assert Enum.map(detail.options, & &1.option_id) == [nil, nil]
+      assert Enum.map(detail.options, & &1.kind) == [nil, nil]
+
+      assert Enum.map(detail.options, &Approval.Option.decision/1) == [nil, nil],
+             "no vendor kind said what these mean, so the four-way table maps nothing"
+
+      assert Enum.all?(detail.options, &Approval.Option.answerable?/1),
+             "a bare-string option is an answer, and choosing it sends those words"
 
       assert status(cell("event_approval_requested_question")) ==
                {"Approval needed",

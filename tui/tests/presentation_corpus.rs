@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use ouro::model::transcript::{Hidden, PlanStatus, PresentationEvent};
 use ouro::model::Event;
-use ouro::ui::transcript::{ApprovalRequest, Entry};
+use ouro::ui::transcript::{ApprovalRequest, Entry, ProviderOption};
 use ouro::ui::transcript_cells::{
     project, summarise, Block, Cell, DividerKind, Speaker, SubagentCell, ThinkingState, Tone,
     ToolCell, ToolState,
@@ -819,7 +819,7 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
 /// refuse it: a robot `approve` carries no answer, which is the one outcome the tool
 /// exists to prevent.
 #[test]
-fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions() {
+fn a_question_reads_as_the_words_it_asks_and_offers_its_options_as_answers() {
     let request = approval("event_approval_requested_question");
 
     assert!(request.question());
@@ -839,10 +839,40 @@ fn a_question_is_marked_as_one_and_its_options_are_words_rather_than_decisions()
         "the words it asks, not the whole payload as JSON"
     );
 
+    // `AskUser.question/1` writes plain strings, which both readers used to drop for having
+    // no `name`. They are the answers themselves: the string is the label and the words
+    // sent back, and nothing on the wire says what they mean.
     assert_eq!(
-        detail.options,
-        vec![],
-        "ask_user options are plain strings, not the provider options a modal maps"
+        detail
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["staging-db", "scratch-db"]
+    );
+    assert_eq!(
+        detail
+            .options
+            .iter()
+            .map(|option| option.answer.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("staging-db"), Some("scratch-db")]
+    );
+    assert!(detail
+        .options
+        .iter()
+        .all(|option| option.option_id.is_none() && option.kind.is_none()));
+
+    assert!(
+        detail
+            .options
+            .iter()
+            .all(|option| option.decision().is_none()),
+        "no vendor kind said what these mean, so the four-way table maps nothing"
+    );
+    assert!(
+        detail.options.iter().all(ProviderOption::answerable),
+        "a bare-string option is an answer, and choosing it sends those words"
     );
 
     assert_eq!(

@@ -237,14 +237,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
     {:noreply, respond(socket, id, %{"decision" => decision, "scope" => scope})}
   end
 
-  # A vendor option answers as whatever the locked decision table says it means, and an
-  # option with no mapping is never given a button — so reaching here with one is a browser
-  # sending something this page did not draw, and nothing is sent for it.
+  # A vendor option answers as whatever the locked decision table says it means; an
+  # `ask_user` option answers with its own words, as the `reason` the tool reads the answer
+  # from. An option with neither is never given a button — so reaching here with one is a
+  # browser sending something this page did not draw, and nothing is sent for it.
   def handle_event("respond_option", %{"request" => id, "option" => index}, socket) do
     with request when not is_nil(request) <- request(socket, id),
          {index, ""} <- Integer.parse(index),
-         {decision, scope} when not is_nil(decision) <- ApprovalCard.option_answer(request, index) do
-      response = %{"decision" => to_string(decision), "scope" => to_string(scope)}
+         response when is_map(response) <- ApprovalCard.option_response(request, index) do
       {:noreply, respond(socket, id, response)}
     else
       _unmapped ->

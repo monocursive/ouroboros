@@ -74,28 +74,69 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   def inline?(%Approval{} = request), do: not Transcript.question?(request)
 
   @doc """
-  The answer one provider-offered option stands for, by index into `detail.options`.
-
-  `nil` for an index that is not there or an option this build cannot map — the caller
-  answers nothing rather than answering a guess.
+  One provider-offered option, by index into `detail.options`, or `nil` for an index the
+  page never drew.
   """
-  @spec option_answer(Approval.t(), integer()) ::
-          {:approve | :deny, :once | :session} | nil
+  @spec option_at(Approval.t(), integer()) :: Approval.Option.t() | nil
   # Non-negative only. `Enum.at/2` counts a negative index from the end, so a browser
   # sending `-1` for an option this page never drew would answer the *last* one — which is
   # the sort of thing that approves a command by accident exactly once.
-  def option_answer(%Approval{} = request, index) when is_integer(index) and index >= 0 do
+  def option_at(%Approval{} = request, index) when is_integer(index) and index >= 0 do
     request
     |> Approval.detail()
     |> Map.get(:options, [])
     |> Enum.at(index)
-    |> case do
+  end
+
+  def option_at(%Approval{}, _index), do: nil
+
+  @doc """
+  The answer one provider-offered option stands for, by index into `detail.options`.
+
+  `nil` for an index that is not there or an option this build cannot map — the caller
+  answers nothing rather than answering a guess. An `ask_user` option maps onto nothing
+  here on purpose: it carries no `kind`, and what it sends is words rather than a
+  four-way answer. `option_response/2` is the one that knows how to send it.
+  """
+  @spec option_answer(Approval.t(), integer()) ::
+          {:approve | :deny, :once | :session} | nil
+  def option_answer(%Approval{} = request, index) do
+    case option_at(request, index) do
       nil -> nil
       option -> Approval.Option.decision(option)
     end
   end
 
-  def option_answer(%Approval{}, _index), do: nil
+  @doc """
+  The `respond_approval` response one option sends, by index into `detail.options`.
+
+  A vendor option sends whatever the locked decision table says its `kind` means. An
+  `ask_user` option sends `approve`/`once` with its own words as the `reason`, because
+  that is where `Provider.Native.Tools.AskUser.answer_text/1` reads the answer from and
+  the only key the envelope will carry to it: `interactive.respond_approval` accepts
+  `provider_options` for a plan-exit `choice` and for nothing else
+  (`lib/ouroboros/gateway/methods.ex`, `plan_exit_options/1`). An approve with no words
+  reaches the tool as "the operator acknowledged the question without giving an answer",
+  which is the outcome the tool exists to prevent.
+
+  `nil` for an index that is not there or an option this build cannot send.
+  """
+  @spec option_response(Approval.t(), integer()) :: map() | nil
+  def option_response(%Approval{} = request, index) do
+    case option_at(request, index) do
+      %Approval.Option{answer: answer} when is_binary(answer) ->
+        %{"decision" => "approve", "scope" => "once", "reason" => answer}
+
+      %Approval.Option{} = option ->
+        case Approval.Option.decision(option) do
+          nil -> nil
+          {decision, scope} -> %{"decision" => to_string(decision), "scope" => to_string(scope)}
+        end
+
+      nil ->
+        nil
+    end
+  end
 
   @doc "The parsed patch a request carries, or `nil` where it carries none."
   @spec parsed_diff(Approval.Detail.t()) :: ParsedDiff.t() | nil
@@ -289,7 +330,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         assigns.detail.options
         |> Enum.with_index()
         |> Enum.map(fn {option, index} ->
-          %{index: index, name: option.name, answer: Approval.Option.decision(option)}
+          %{index: index, name: option.name, answerable: Approval.Option.answerable?(option)}
         end)
       )
 
@@ -297,7 +338,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
     <div class="ouro-approval-answers">
       <%= for row <- @rows do %>
         <button
-          :if={row.answer}
+          :if={row.answerable}
           type="button"
           class="ouro-button ouro-approval-answer"
           phx-click="respond_option"
@@ -306,7 +347,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         >
           {row.name}
         </button>
-        <span :if={is_nil(row.answer)} class="ouro-approval-unmapped ouro-quiet">
+        <span :if={not row.answerable} class="ouro-approval-unmapped ouro-quiet">
           {row.name} — this build cannot map this option onto an answer
         </span>
       <% end %>
