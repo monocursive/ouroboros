@@ -914,6 +914,49 @@ fn an_answer_rewrites_the_row_that_asked() {
 }
 
 // ---------------------------------------------------------------------------
+// The two envelope fixtures that also carry a renderable payload
+// ---------------------------------------------------------------------------
+
+/// `run_completed` gets no `event_*` frame of its own because it already has one: the
+/// coding notification that has pinned the second plane's envelope since the corpus
+/// existed. The kind is still a kind a client renders, so its words are asserted here
+/// rather than left to the fixture that happens to carry them.
+#[test]
+fn the_coding_notification_is_a_finished_run_and_reads_as_one() {
+    assert_eq!(
+        chat_note(&cell("coding_event_notification")),
+        "run finished · objective satisfied"
+    );
+}
+
+/// The gateway replaces an oversized leaf with `{"_excerpt", "_bytes"}`, and a patch that
+/// arrived as one is still worth colouring — but its `+`/`-` counts describe the prefix
+/// and not the patch. So the diff is marked truncated, which is what makes the turn's
+/// diffstat say `in excerpt` instead of asserting a number it cannot know.
+#[test]
+fn an_excerpted_patch_is_drawn_and_says_its_counts_are_only_the_prefix() {
+    let projected = cells(&["interactive_event_excerpt_notification"]);
+
+    let diff = projected
+        .iter()
+        .find_map(|cell| match cell {
+            Cell::Diff(diff) => Some(diff),
+            _other => None,
+        })
+        .expect("an excerpted patch is still a patch");
+
+    assert!(
+        diff.diff.truncated,
+        "the counts describe the excerpt, not the patch"
+    );
+    assert_eq!(
+        diff.diff.text,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa… (600 bytes; full event via /details)",
+        "the excerpt keeps its prefix and names what did not arrive"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The provider's own events
 // ---------------------------------------------------------------------------
 
