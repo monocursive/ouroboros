@@ -1,0 +1,36 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000113",
+      "payload": {
+        "artifacts": [
+          {
+            "bytes": 184320,
+            "height": 982,
+            "kind": "image",
+            "media_type": "image/png",
+            "sha256": "abababababababababababababababababababababababababababababababab",
+            "width": 1512
+          }
+        ],
+        "call_id": "toolu_01Desktop00000000001",
+        "is_error": false,
+        "name": "desktop_state",
+        "output": "Captured the frontmost window of Calculator."
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 113,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "tool_result"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

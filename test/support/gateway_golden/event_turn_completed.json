@@ -1,0 +1,27 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000120",
+      "payload": {
+        "cost_usd": 0.0731,
+        "input_tokens": 18400,
+        "iterations": 3,
+        "output_tokens": 2100,
+        "status": "completed"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 120,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:01:30.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "turn_completed"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

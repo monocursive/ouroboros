@@ -1,0 +1,23 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000127",
+      "payload": {
+        "error": "the provider process exited with status 1"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 127,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "session_failed"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000136",
+      "payload": {
+        "kind": "command",
+        "paths": [
+          "/srv/worker-repo/target"
+        ],
+        "reason": "the session has no rule for this command",
+        "subagent": {
+          "description": "audit the parser",
+          "node": "ouroboros@worker",
+          "provider_session_id": "provider-0000000000000009",
+          "remote": true,
+          "task_id": "task-subagent-000000000001"
+        },
+        "tool_call": {
+          "command": "rm -rf target",
+          "cwd": "/srv/worker-repo",
+          "name": "bash"
+        }
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": "req-subagent-0000000000001",
+      "sequence": 136,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "approval_requested"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

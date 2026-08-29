@@ -72,6 +72,13 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   # Where each pinned frame belongs in the document. A fixture the task cannot place is a
   # hard failure rather than a fixture the reference silently drops.
+  #
+  # This map places the frames that pin the *envelope*, each under the method or
+  # notification it answers. The transcript corpus is placed by `transcript_owners/0`
+  # instead: it is one frame per event payload rather than one per verb, every entry would
+  # otherwise have to be spelled out twice, and the gloss that says what each one pins is
+  # already written beside the payload in `Golden.transcript_corpus/0`. `fixture_owners/0`
+  # is the union, and `check_fixtures!/0` still refuses a fixture neither of them names.
   @fixture_owners %{
     "hello_result" => {:method, "hello"},
     "runtime_status_result" => {:method, "runtime.status"},
@@ -145,7 +152,14 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   @doc "Every golden fixture and the place this document gives it."
   @spec fixture_owners() :: %{String.t() => {atom(), term()}}
-  def fixture_owners, do: @fixture_owners
+  def fixture_owners, do: Map.merge(@fixture_owners, transcript_owners())
+
+  defp transcript_owners do
+    Map.new(Golden.transcript_corpus(), fn {name, gloss, _plane, _sequence, _type, _payload,
+                                            _fields} ->
+      {name, {:transcript, gloss}}
+    end)
+  end
 
   @doc "The methods answered by `Ouroboros.Gateway.Conn` rather than by `Methods.invoke/2`."
   @spec connection_answered() :: [String.t()]
@@ -185,6 +199,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
       connection_section(),
       errors_section(),
       notifications_section(),
+      transcript_section(),
       methods_section(),
       limits_section()
     ]
@@ -201,6 +216,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
       "- [How a connection works](#how-a-connection-works)\n",
       "- [Errors](#errors)\n",
       "- [Notifications](#notifications)\n",
+      "- [Transcript payloads](#transcript-payloads)\n",
       "- [Methods](#methods)\n",
       band_lines,
       "- [What this is not](#what-this-is-not)\n"
@@ -342,6 +358,70 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
       ["\n### `", Atom.to_string(code_name), "` — `", name, ".json`\n", fixture_block(name)]
     end)
   end
+
+  # ---------------------------------------------------------------------------
+
+  defp transcript_section do
+    corpus = Golden.transcript_corpus()
+
+    entries =
+      Enum.map(corpus, fn {name, gloss, plane, _sequence, type, _payload, _fields} ->
+        [
+          "\n### `",
+          name,
+          ".json` — `",
+          Atom.to_string(type),
+          "`\n\n",
+          gloss,
+          ". Rides `",
+          method_for(plane),
+          "`.\n",
+          fixture_block(name)
+        ]
+      end)
+
+    [
+      """
+
+      ## Transcript payloads
+
+      One frame per event payload a client turns into words. The frames in
+      [Notifications](#notifications) pin the envelope — the framing, the resync cursor,
+      the excerpt marker — and say almost nothing about what is inside `payload`; these
+      say only that. They exist because the protocol has more than one client that has to
+      read the same bytes into the same sentences, and a payload that appears in neither
+      suite is a payload the two are free to disagree about.
+
+      What a client should *do* with each of them — which cell it becomes, how a tool call
+      and its result are correlated, why an unrecognised kind is drawn rather than dropped
+      — is presentation rather than protocol, and belongs to the client. What is pinned
+      here is narrower and is the whole contract: these bytes, on the wire, from this
+      build.
+
+      Every payload's field names are the emitting module's own. Two consequences are
+      worth reading before writing a decoder against them:
+
+      * **The ACP dialect does not normalize.** `tool_call`, `tool_result`, `plan_updated`
+        and `usage` on that path carry the agent's raw `sessionUpdate` object, camelCase
+        included, so a decoder that reads only `call_id` finds nothing and must also read
+        `toolCallId`. Only `file_change` is normalized on that path.
+      * **A payload leaf may not be the type it was.** Any string above the listener's
+        per-leaf cap arrives as `{"_excerpt", "_bytes"}` and any binary as
+        `{"_b64", "_bytes"}`, so `payload.diff` is sometimes a map. The two shapes are
+        pinned side by side in `interactive_event_excerpt_notification.json` and
+        `interactive_event_detail_result.json`.
+
+      #{length(corpus)} frames follow, in reading order rather than alphabetical: what a
+      person typed, what the agent said, what it ran, what changed, the bookkeeping, the
+      turn, the session, the run, the approvals, the provider's own events, and the two
+      types this runtime mints itself.
+      """,
+      entries
+    ]
+  end
+
+  defp method_for(:interactive), do: "interactive.event"
+  defp method_for(:coding), do: "coding.event"
 
   # ---------------------------------------------------------------------------
 
@@ -722,7 +802,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   defp check_fixtures! do
     declared = Golden.fixtures() |> Enum.map(fn {name, _frame} -> name end) |> MapSet.new()
-    placed = @fixture_owners |> Map.keys() |> MapSet.new()
+    placed = fixture_owners() |> Map.keys() |> MapSet.new()
 
     unplaced = declared |> MapSet.difference(placed) |> Enum.sort()
     stale = placed |> MapSet.difference(declared) |> Enum.sort()

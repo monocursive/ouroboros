@@ -1,0 +1,44 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000140",
+      "payload": {
+        "approvals_denied": 0,
+        "cost_usd": 0.0731,
+        "description": "audit the parser",
+        "files": [
+          "lib/ouroboros/web/presentation.ex",
+          "lib/ouroboros/web/transcript.ex",
+          "test/web/presentation_test.exs",
+          "test/web/transcript_test.exs"
+        ],
+        "files_changed": 4,
+        "input_tokens": 18400,
+        "kind": "subagent",
+        "node": "ouroboros@worker",
+        "output_tokens": 2100,
+        "phase": "settled",
+        "provider_session_id": "provider-0000000000000009",
+        "remote": true,
+        "status": "completed",
+        "summary_bytes": 512,
+        "task_id": "task-subagent-000000000001",
+        "tool_calls": 31,
+        "turns": 9
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 140,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "provider_event"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}

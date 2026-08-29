@@ -1,0 +1,33 @@
+{
+  "jsonrpc": "2.0",
+  "method": "interactive.event",
+  "params": {
+    "event": {
+      "_struct": "Ouroboros.Interactive.Event",
+      "harness_session_id": "harness-0000000000000000001",
+      "id": "evt-0000000000000000000000114",
+      "payload": {
+        "changes": [
+          {
+            "added_lines": 4,
+            "diff": "--- a/lib/ouroboros/web/presentation.ex\n+++ b/lib/ouroboros/web/presentation.ex\n@@ -1,5 +1,7 @@\n defmodule Ouroboros.Web.Presentation do\n-  def from_event(event) do\n-    event.type\n+  def from_event(%{type: type} = event) do\n+    case type do\n+      :output_text_final -> {:agent_text, event.payload[\"text\"]}\n+    end\n   end\n end\n",
+            "kind": "update",
+            "path": "lib/ouroboros/web/presentation.ex",
+            "relative_path": "lib/ouroboros/web/presentation.ex",
+            "removed_lines": 2
+          }
+        ],
+        "status": "completed"
+      },
+      "provider": "claude_code",
+      "provider_session_id": "provider-0000000000000001",
+      "request_id": null,
+      "sequence": 114,
+      "session_id": "session-0000000000000000000001",
+      "timestamp": "2026-01-01T00:00:00.000000Z",
+      "turn_id": "turn-0000000000000000000001",
+      "type": "file_change"
+    },
+    "id": "session-0000000000000000000001"
+  }
+}
