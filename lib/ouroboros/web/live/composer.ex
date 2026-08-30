@@ -186,13 +186,13 @@ defmodule Ouroboros.Web.Live.Composer do
 
     ~H"""
     <div class="ouro-composer">
-      <p :if={@error} class="ouro-refusal ouro-composer-refusal">{@error}</p>
+      <p :if={@error} class="ouro-refusal ouro-composer-refusal" role="alert">{@error}</p>
 
-      <p :if={@ended} class="ouro-quiet">
+      <p :if={@ended} class="ouro-quiet" role="status">
         This session has ended; it takes no further messages.
       </p>
 
-      <p :if={not @ended and not @can_send} class="ouro-quiet">
+      <p :if={not @ended and not @can_send} class="ouro-quiet" role="status">
         This endpoint was started at read scope, so it can show this session but not speak in it.
       </p>
 

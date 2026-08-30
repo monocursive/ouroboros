@@ -36,11 +36,13 @@
   /* Text, most to least important. */
   --ink: #e8e9e4;
   --secondary: #a9aca3;
-  --tertiary: #7a7d74;
+  --tertiary: #979a91;
+  --focus: #78c89f;
 
   /* Semantic tones. Never the action accent; see rule 1 above. */
   --attention-green: #3db474;
   --warn-amber: #c29a45;
+  --danger-ink: #ffffff;
   --danger: #c75f55;
 
   /* The one filled control. */
@@ -72,10 +74,12 @@
 
   --ink: #15171a;
   --secondary: #565a54;
-  --tertiary: #8b8f87;
+  --tertiary: #656961;
+  --focus: #246b47;
 
   --attention-green: #2e9e63;
   --warn-amber: #a8842f;
+  --danger-ink: #f7f7f4;
   --danger: #b04a43;
 
   --button-bg: var(--ink);
@@ -148,7 +152,7 @@ a:where(:hover) {
    draw a ring nobody asked for. Components below may tighten the offset; none of them may
    remove it. */
 :focus-visible {
-  outline: 2px solid var(--border-strong);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -571,7 +575,6 @@ body.phx-loading {
   padding: 0 var(--gutter);
   color: var(--tertiary);
   font-size: 0.8rem;
-  opacity: 0.7;
 }
 
 .ouro-row {
@@ -582,6 +585,48 @@ body.phx-loading {
   text-decoration: none;
   color: var(--ink);
   border-left: 2px solid transparent;
+}
+
+.ouro-row-wrap {
+  position: relative;
+}
+
+.ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+  padding-right: 6.5rem;
+}
+
+.ouro-row-actions {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ouro-row-wrap:hover .ouro-row-actions,
+.ouro-row-wrap:focus-within .ouro-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ouro-row-action {
+  border: 0;
+  background: var(--panel);
+  color: var(--secondary);
+  padding: 0.2rem 0.3rem;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.ouro-row-action:hover {
+  color: var(--ink);
+}
+
+.ouro-row-action-danger:hover {
+  color: var(--danger);
 }
 
 .ouro-row:hover {
@@ -1559,6 +1604,68 @@ body.phx-loading {
   }
 }
 
+@media (max-width: 520px) {
+  .ouro-topbar {
+    height: auto;
+    min-height: var(--topbar-height);
+    padding: 0.55rem var(--gutter);
+    gap: 0.65rem;
+    flex-wrap: wrap;
+  }
+
+  .ouro-topbar-right {
+    width: 100%;
+    margin-left: 0;
+    gap: 0.65rem;
+  }
+
+  .ouro-today {
+    display: none;
+  }
+
+  .ouro-topbar-right .ouro-button {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+}
+
+.ouro-session-dialog {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  width: min(30rem, calc(100vw - 2rem));
+  margin: 0;
+  padding: 0;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  z-index: 20;
+}
+
+.ouro-session-dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.25rem;
+}
+
+.ouro-session-dialog-form h2,
+.ouro-session-dialog-form p {
+  margin: 0;
+}
+
+.ouro-session-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.ouro-button-danger {
+  background: var(--danger);
+  color: var(--danger-ink);
+}
+
 /* ==========================================================================
  * The new-session form (W6): /new.
  *
@@ -1681,8 +1788,13 @@ body.phx-loading {
 
 .ouro-new-input:focus-visible,
 .ouro-new-select:focus-visible {
-  outline: 2px solid var(--border-strong);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
+}
+
+.ouro-new-message {
+  min-height: 6rem;
+  resize: vertical;
 }
 
 .ouro-new-select[disabled],

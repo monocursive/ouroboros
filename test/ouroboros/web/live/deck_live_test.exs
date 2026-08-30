@@ -36,7 +36,6 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
-  import Plug.Conn, only: [put_req_cookie: 3]
 
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Interactive.Event
@@ -816,7 +815,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   end
 
   describe "the coordinator going away" do
-    test "is the end of the stream, and is drawn as one", %{conn: conn} do
+    test "resubscribes to a restarted coordinator without ending the stream", %{conn: conn} do
       id = session_id()
       pid = plane(id: id, backlogs: [{:ok, [said(1, "mid-sentence")]}])
 
@@ -824,11 +823,14 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-divider"
 
       GenServer.stop(pid)
+      refute render(view) =~ "ouro-divider"
 
-      # The divider waits on the :DOWN reaching the view, and no message of this test's
-      # orders that — the one wait here a driven :flush cannot close — so the wait is
-      # bounded on the condition itself rather than on a nap.
-      assert_eventually(fn -> render(view) =~ "ouro-divider" end)
+      _replacement = plane(id: id, backlogs: [{:ok, [said(2, "after restart")]}])
+      send(view.pid, :poll)
+
+      assert_receive {:subscribed, _subscriber, 1}
+      assert_eventually(fn -> render(view) =~ "after restart" end)
+      refute render(view) =~ "ouro-divider"
       assert render(view) =~ "mid-sentence"
     end
   end

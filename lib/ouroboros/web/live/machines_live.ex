@@ -542,8 +542,10 @@ defmodule Ouroboros.Web.Live.MachinesLive do
         walks the whole directory, so it runs when you ask it to and never on a cadence.
       </p>
 
-      <p :if={@error} class="ouro-refusal">{@error}</p>
-      <pre :if={@report} class="ouro-report ouro-mono">{@report}</pre>
+      <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+      <div :if={@report} role="status">
+        <pre class="ouro-report ouro-mono">{@report}</pre>
+      </div>
     </section>
     """
   end

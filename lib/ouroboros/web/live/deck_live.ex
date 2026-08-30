@@ -104,6 +104,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Live.Cells
   alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.Rail
+  alias Ouroboros.Web.Route
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.Approval
   alias Ouroboros.Web.Transcript.Cell
@@ -139,6 +140,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:expanded, MapSet.new())
       |> assign(:cells, [])
       |> assign(:drawn, 0)
+      |> assign(:session_action, nil)
+      |> assign(:session_action_error, nil)
       |> assign(:truncated, 0)
       # The serving runtime's method list, read once: it is the same list `hello` answers
       # for a terminal client and it cannot change while this process lives.
@@ -244,6 +247,65 @@ defmodule Ouroboros.Web.Live.DeckLive do
     {:noreply, configure(socket, field, choice)}
   end
 
+  def handle_event(
+        "session-action",
+        %{"action" => action, "plane" => plane, "id" => id},
+        socket
+      )
+      when action in ["rename", "delete"] do
+    with {:ok, plane} <- Map.fetch(@planes, plane),
+         row when not is_nil(row) <- row(socket.assigns.rows, {plane, id}),
+         true <- session_action_allowed?(socket, action, row) do
+      {:noreply,
+       socket
+       |> assign(:session_action, %{action: action, row: row})
+       |> assign(:session_action_error, nil)}
+    else
+      _invalid -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("session-action-cancel", _params, socket) do
+    {:noreply, socket |> assign(:session_action, nil) |> assign(:session_action_error, nil)}
+  end
+
+  def handle_event(
+        "session-rename",
+        %{"title" => title},
+        %{assigns: %{session_action: %{action: "rename", row: row}}} = socket
+      ) do
+    title = String.trim(title)
+
+    if title == "" do
+      {:noreply, assign(socket, :session_action_error, "Enter a session name.")}
+    else
+      params =
+        socket
+        |> session_params(:interactive, row.id)
+        |> Map.put("title", title)
+
+      {:noreply, finish_session_action(socket, "interactive.rename", params)}
+    end
+  end
+
+  def handle_event(
+        "session-delete",
+        _params,
+        %{assigns: %{session_action: %{action: "delete", row: row}}} = socket
+      ) do
+    if session_action_allowed?(socket, "delete", row) do
+      method = "#{row.plane}.delete"
+      params = session_params(socket, row.plane, row.id)
+      {:noreply, finish_session_action(socket, method, params, deleted: {row.plane, row.id})}
+    else
+      {:noreply, assign(socket, :session_action_error, "Only terminal sessions can be deleted.")}
+    end
+  end
+
+  def handle_event(event, _params, socket)
+      when event in ["session-action", "session-rename", "session-delete"],
+      do: {:noreply, socket}
+
   def handle_event("configure", _params, socket), do: {:noreply, socket}
 
   # ------------------------------------------------------------------------------------
@@ -326,7 +388,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   @impl true
   def handle_info(:poll, socket) do
     schedule_poll()
-    {:noreply, socket |> refresh() |> announce_needs_you()}
+    {:noreply, socket |> refresh() |> recover_subscription() |> announce_needs_you()}
   end
 
   def handle_info({:ouroboros_interactive_event, id, event}, socket),
@@ -339,17 +401,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
     {:noreply, socket |> assign(:flush_scheduled?, false) |> redraw(:delta)}
   end
 
-  # The coordinator a subscription is registered with went away, which is the only way
-  # this view learns that no further events are coming. Not an error and not a reason to
-  # resubscribe on a loop: a retired coordinator is a session that ended.
+  # A coordinator can retire because the session ended or disappear because its
+  # supervisor is restarting it. Ask the durable session before deciding which happened.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{assigns: %{monitor: ref}} = socket) do
-    socket =
-      socket
-      |> assign(:monitor, nil)
-      |> update(:watch, &Watch.ended(&1, ended_status(socket)))
-      |> redraw(:reset)
-
-    {:noreply, socket}
+    {:noreply, socket |> assign(:monitor, nil) |> recover_subscription() |> redraw(:reset)}
   end
 
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket), do: {:noreply, socket}
@@ -433,6 +488,36 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
+  defp session_action_allowed?(socket, "rename", row) do
+    row.plane == :interactive and socket.assigns.scope == :operate and
+      Call.available?(:operate, "interactive.rename")
+  end
+
+  defp session_action_allowed?(socket, "delete", row) do
+    socket.assigns.scope == :operate and Rail.terminal?(row.status) and
+      Call.available?(:operate, "#{row.plane}.delete")
+  end
+
+  defp finish_session_action(socket, method, params, opts \\ []) do
+    case call(socket, method, params) do
+      {:ok, _answer} ->
+        socket =
+          if Keyword.get(opts, :deleted) == socket.assigns.open do
+            close(socket)
+          else
+            socket
+          end
+
+        socket
+        |> assign(:session_action, nil)
+        |> assign(:session_action_error, nil)
+        |> refresh()
+
+      refused ->
+        assign(socket, :session_action_error, refusal_message(refused))
+    end
+  end
+
   defp owner(socket, plane, id) do
     Enum.find_value(socket.assigns.rows, fn row ->
       if row.plane == plane and row.id == id, do: row.node
@@ -493,6 +578,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp resubscribe(%{assigns: %{open: {plane, id}, watch: watch}} = socket) do
     if connected?(socket), do: subscribe(socket, plane, id, watch), else: socket
+  end
+
+  defp recover_subscription(%{assigns: %{open: nil}} = socket), do: socket
+
+  defp recover_subscription(%{assigns: %{monitor: monitor}} = socket) when is_reference(monitor),
+    do: socket
+
+  defp recover_subscription(%{assigns: %{open: {plane, id}}} = socket) do
+    ref = ref(socket, plane, id)
+
+    case Methods.session(plane, ref) do
+      {:ok, status, true} ->
+        update(socket, :watch, &Watch.ended(&1, to_string(status)))
+
+      _live_or_temporarily_unavailable ->
+        resubscribe(socket)
+    end
   end
 
   defp subscribe(socket, plane, id, watch) do
@@ -566,30 +668,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
       :coding -> Ouroboros.Coding.TaskRef.new(id, owner)
     end
   end
-
-  # The status a `:DOWN` stands for.
-  #
-  # The plane's own word where something still carries one — a coordinator retires *after*
-  # its checkpoint says why, so `interactive.info`'s last answer and the rail row are both
-  # ahead of this view. Never re-asked: `info` would restart the coordinator that just
-  # retired, which is a side effect a divider has no business causing. The generic word
-  # when neither knows, and never a guess at success or failure.
-  defp ended_status(%{assigns: %{open: {plane, id}}} = socket) do
-    from_info = socket.assigns.info && Map.get(socket.assigns.info, :status)
-
-    from_row =
-      case Enum.find(socket.assigns.rows, &(&1.plane == plane and &1.id == id)) do
-        %Rail.Row{status: status} -> status
-        _unknown -> nil
-      end
-
-    case from_info || from_row do
-      status when is_atom(status) and not is_nil(status) -> to_string(status)
-      _unknown -> "ended"
-    end
-  end
-
-  defp ended_status(_socket), do: "ended"
 
   # ------------------------------------------------------------------------------------
   # Live events
@@ -1138,6 +1216,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           activity={@activity}
           approvals={@approvals}
           answerable={@scope == :operate}
+          scope={@scope}
         />
 
         <main class="ouro-focus">
@@ -1170,6 +1249,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
         <.vitals :if={@open} info={@info} row={@open_row} />
       </div>
+
+      <.session_action_dialog action={@session_action} error={@session_action_error} />
     </div>
     """
   end
@@ -1182,11 +1263,20 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :today, :map, required: true
 
   def top_bar(assigns) do
+    connected = Enum.count(assigns.machines, & &1.connected?)
+
+    assigns =
+      assign(
+        assigns,
+        :machines_label,
+        "Machines — #{connected} connected of #{length(assigns.machines)}"
+      )
+
     ~H"""
     <header class="ouro-topbar">
       <span class="ouro-wordmark">Ouroboros</span>
 
-      <a class="ouro-presence" role="group" aria-label="machines" href="/machines">
+      <a class="ouro-presence" aria-label={@machines_label} href="/machines">
         <span
           :for={machine <- @machines}
           class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
@@ -1200,7 +1290,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         <span :if={@today.tokens} class="ouro-today ouro-mono" title="sessions updated today, UTC">
           {@today.tokens} tokens<span :if={@today.cost}> · ${@today.cost}</span>
         </span>
-        <span class="ouro-pill">
+        <span class="ouro-pill" role="status" aria-live="polite" aria-atomic="true">
           <span class="ouro-pill-on">Connected</span>
           <span class="ouro-pill-off">Reconnecting</span>
         </span>
@@ -1224,6 +1314,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :activity, :map, required: true
   attr :approvals, :list, default: []
   attr :answerable, :boolean, default: false
+  attr :scope, :atom, default: :read
 
   def rail(assigns) do
     assigns = assign(assigns, :counts, Rail.counts(assigns.triaged))
@@ -1249,6 +1340,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           activity={@activity}
           approvals={@approvals}
           answerable={@answerable}
+          scope={@scope}
         />
       </section>
     </nav>
@@ -1260,6 +1352,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :activity, :map, required: true
   attr :approvals, :list, default: []
   attr :answerable, :boolean, default: false
+  attr :scope, :atom, default: :read
 
   def rail_row(assigns) do
     row = assigns.entry.row
@@ -1269,32 +1362,68 @@ defmodule Ouroboros.Web.Live.DeckLive do
       assigns
       |> assign(:row, row)
       |> assign(:selected?, selected?)
-      |> assign(:href, "/s/#{row.plane}/#{row.id}")
+      |> assign(:href, Route.session(row.plane, row.id))
       |> assign(
         :line,
         line(assigns.entry.group, row, Map.get(assigns.activity, {row.plane, row.id}))
       )
       |> assign(:age_in_line?, age_in_line?(assigns.entry.group, row))
       |> assign(:answers, inline_answers(assigns, selected?))
+      |> assign(
+        :can_rename,
+        row.plane == :interactive and Call.available?(assigns.scope, "interactive.rename")
+      )
+      |> assign(
+        :can_delete,
+        Rail.terminal?(row.status) and Call.available?(assigns.scope, "#{row.plane}.delete")
+      )
 
     ~H"""
-    <.link
-      patch={@href}
-      class={[
-        "ouro-row",
-        "ouro-row-#{@entry.group}",
-        @entry.depth == 1 && "ouro-row-nested",
-        @selected? && "ouro-row-open",
-        (@entry.group == :settled and Rail.failed?(@row)) && "ouro-row-failed"
-      ]}
-    >
-      <.glyph group={@entry.group} failed={Rail.failed?(@row)} />
-      <span class="ouro-row-body">
-        <span class="ouro-row-title">{Rail.title(@row)}</span>
-        <span class="ouro-row-line">{@line}</span>
-      </span>
-      <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
-    </.link>
+    <div class="ouro-row-wrap">
+      <.link
+        patch={@href}
+        class={[
+          "ouro-row",
+          "ouro-row-#{@entry.group}",
+          @entry.depth == 1 && "ouro-row-nested",
+          @selected? && "ouro-row-open",
+          (@entry.group == :settled and Rail.failed?(@row)) && "ouro-row-failed"
+        ]}
+      >
+        <.glyph group={@entry.group} failed={Rail.failed?(@row)} />
+        <span class="ouro-row-body">
+          <span class="ouro-row-title">{Rail.title(@row)}</span>
+          <span class="ouro-row-line">{@line}</span>
+        </span>
+        <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
+      </.link>
+      <div :if={@can_rename or @can_delete} class="ouro-row-actions">
+        <button
+          :if={@can_rename}
+          type="button"
+          class="ouro-row-action"
+          phx-click="session-action"
+          phx-value-action="rename"
+          phx-value-plane={@row.plane}
+          phx-value-id={@row.id}
+          aria-label={"Rename #{Rail.title(@row)}"}
+        >
+          Rename
+        </button>
+        <button
+          :if={@can_delete}
+          type="button"
+          class="ouro-row-action ouro-row-action-danger"
+          phx-click="session-action"
+          phx-value-action="delete"
+          phx-value-plane={@row.plane}
+          phx-value-id={@row.id}
+          aria-label={"Delete #{Rail.title(@row)}"}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
     <ApprovalCard.inline :for={request <- @answers} request={request} />
     """
   end
@@ -1308,6 +1437,68 @@ defmodule Ouroboros.Web.Live.DeckLive do
     do: Enum.filter(approvals, &ApprovalCard.inline?/1)
 
   defp inline_answers(_assigns, _selected?), do: []
+
+  attr :action, :any, required: true
+  attr :error, :any, required: true
+
+  def session_action_dialog(assigns) do
+    ~H"""
+    <dialog
+      :if={@action}
+      open
+      class="ouro-session-dialog"
+      aria-labelledby="session-action-title"
+    >
+      <form
+        :if={@action.action == "rename"}
+        phx-submit="session-rename"
+        class="ouro-session-dialog-form"
+      >
+        <h2 id="session-action-title">Rename session</h2>
+        <label for="session-title">Session name</label>
+        <input
+          id="session-title"
+          name="title"
+          class="ouro-new-input"
+          value={Rail.title(@action.row)}
+          required
+          autofocus
+        />
+        <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+        <div class="ouro-session-dialog-actions">
+          <button type="button" class="ouro-button-quiet" phx-click="session-action-cancel">
+            Cancel
+          </button>
+          <button type="submit" class="ouro-button" phx-disable-with="Renaming…">Rename</button>
+        </div>
+      </form>
+
+      <form
+        :if={@action.action == "delete"}
+        phx-submit="session-delete"
+        class="ouro-session-dialog-form"
+      >
+        <h2 id="session-action-title">Delete session</h2>
+        <p>
+          Permanently delete <strong>{Rail.title(@action.row)}</strong>? This cannot be undone.
+        </p>
+        <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+        <div class="ouro-session-dialog-actions">
+          <button type="button" class="ouro-button-quiet" phx-click="session-action-cancel">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="ouro-button ouro-button-danger"
+            phx-disable-with="Deleting…"
+          >
+            Delete
+          </button>
+        </div>
+      </form>
+    </dialog>
+    """
+  end
 
   # The three glyphs, which are the same ring at three stages of closing.
   #
@@ -1449,7 +1640,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
       the {@truncated} earlier entries this view holds are not drawn
     </p>
 
-    <div id="transcript" class="ouro-transcript" phx-update="stream" phx-hook="ScrollPin">
+    <div
+      id="transcript"
+      class="ouro-transcript"
+      phx-update="stream"
+      phx-hook="ScrollPin"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions text"
+      aria-label="Session transcript"
+    >
       <div :for={{dom_id, item} <- @streams.cells} id={dom_id}>
         <Cells.cell
           cell={item.cell}
@@ -1521,13 +1721,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :counts, :map, required: true
 
   def nothing_open(assigns) do
+    assigns = assign(assigns, :total, assigns.counts |> Map.values() |> Enum.sum())
+
     ~H"""
     <div class="ouro-empty">
       <h1 class="ouro-empty-head">Nothing open</h1>
       <p :if={@counts[:needs_you] > 0}>
         {@counts[:needs_you]} {if @counts[:needs_you] == 1, do: "session needs", else: "sessions need"} you.
       </p>
-      <p :if={@counts[:needs_you] == 0}>Pick a session from the rail to read it.</p>
+      <p :if={@total > 0 and @counts[:needs_you] == 0}>Pick a session from the rail to read it.</p>
+      <p :if={@total == 0}>
+        No sessions yet. <a href="/new">Start a new session</a>.
+      </p>
     </div>
     """
   end

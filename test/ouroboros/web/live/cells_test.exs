@@ -468,6 +468,15 @@ defmodule Ouroboros.Web.Live.CellsTest do
       refute html =~ "figcaption"
     end
 
+    test "reserved characters in a session id stay inside one route segment" do
+      sha = String.duplicate("a", 64)
+      cell = %Cell.Image{named: "capture", sha: sha, media_type: "image/png"}
+
+      html = paint(cell, plane: :interactive, session_id: "a/b?c#d%e")
+
+      assert html =~ ~s(src="/artifact/interactive/a%2Fb%3Fc%23d%25e/#{sha}")
+    end
+
     test "an image with no digest to fetch by says what it was instead of showing a hole" do
       html = paint(%Cell.Image{named: "a picture", pixels: {10, 10}, format: "png"})
 

@@ -304,7 +304,7 @@ defmodule Ouroboros.Web.Live.Cells do
     <figure class="ouro-cell ouro-image">
       <img
         :if={@cell.sha}
-        src={"/artifact/#{@plane}/#{@session_id}/#{@cell.sha}"}
+        src={Ouroboros.Web.Route.artifact(@plane, @session_id, @cell.sha)}
         alt={Cell.Image.label(@cell)}
         loading="lazy"
         width={@cell.pixels && elem(@cell.pixels, 0)}

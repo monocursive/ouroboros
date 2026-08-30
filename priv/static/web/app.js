@@ -235,6 +235,12 @@
     announce(detail.sessions || []);
   });
 
+  window.addEventListener("phx:focus-invalid", function (event) {
+    var detail = event.detail || {};
+    var target = detail.selector && document.querySelector(detail.selector);
+    if (target && target.focus) target.focus();
+  });
+
   function paintChrome() {
     paintThemeButtons();
     paintBellButtons();
@@ -361,9 +367,23 @@
     }
   };
 
+  var FocusInvalid = {
+    mounted: function () {
+      this.focusIfInvalid();
+    },
+
+    updated: function () {
+      this.focusIfInvalid();
+    },
+
+    focusIfInvalid: function () {
+      if (this.el.getAttribute("aria-invalid") === "true") this.el.focus();
+    }
+  };
+
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
-    hooks: { ScrollPin: ScrollPin, Composer: Composer }
+    hooks: { ScrollPin: ScrollPin, Composer: Composer, FocusInvalid: FocusInvalid }
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the

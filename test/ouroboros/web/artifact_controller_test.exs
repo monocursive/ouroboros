@@ -21,7 +21,7 @@ defmodule Ouroboros.Web.ArtifactControllerTest do
   use ExUnit.Case, async: false
 
   import Phoenix.ConnTest
-  import Plug.Conn, only: [put_req_cookie: 3, get_resp_header: 2]
+  import Plug.Conn, only: [get_resp_header: 2]
 
   alias Ouroboros.Web.Config
 

@@ -83,6 +83,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:polling_account?, false)
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
+      |> assign(:provider_invalid?, false)
+      |> assign(:initial_message, "")
+      |> assign(:started_id, nil)
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
@@ -112,7 +115,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         effort: blank_to_nil(params["effort"])
     }
 
-    {:noreply, socket |> assign(:form, reconcile(form, socket)) |> assign(:refusal, nil)}
+    provider_invalid? =
+      socket.assigns.provider_invalid? and blank?(params["provider"] || form.provider)
+
+    {:noreply,
+     socket
+     |> assign(:form, reconcile(form, socket))
+     |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+     |> assign(:provider_invalid?, provider_invalid?)
+     |> assign(:refusal, nil)}
   end
 
   # A card, not a radio group: three postures with their consequences written under them,
@@ -193,12 +204,26 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   def handle_event("start", _params, socket) do
-    case NewSession.start_params(socket.assigns.form, field(socket)) do
-      {:error, message} ->
-        {:noreply, assign(socket, :refusal, %{message: message, detail: nil})}
+    if blank?(socket.assigns.form.provider) do
+      {:noreply,
+       socket
+       |> assign(:provider_invalid?, true)
+       |> assign(:refusal, nil)
+       |> push_event("focus-invalid", %{selector: "#provider"})}
+    else
+      case socket.assigns.started_id do
+        id when is_binary(id) ->
+          {:noreply, send_initial(socket, id)}
 
-      {:ok, params} ->
-        {:noreply, start(socket, params)}
+        nil ->
+          case NewSession.start_params(socket.assigns.form, field(socket)) do
+            {:error, message} ->
+              {:noreply, assign(socket, :refusal, %{message: message, detail: nil})}
+
+            {:ok, params} ->
+              {:noreply, start(socket, params)}
+          end
+      end
     end
   end
 
@@ -318,7 +343,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             # a remembered one would adopt a session that is already running.
             _ = Prefs.write(socket.assigns.data_dir, Map.delete(params, "id"))
 
-            push_navigate(socket, to: NewSession.deck_path(id))
+            socket
+            |> assign(:started_id, id)
+            |> send_initial(id)
 
           :error ->
             socket
@@ -334,6 +361,44 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         # and a page that cleared the fields would make the operator retype what the
         # runtime just told them to change.
         socket |> assign(:starting?, false) |> assign(:refusal, NewSession.refusal(refused))
+    end
+  end
+
+  defp send_initial(socket, id) do
+    message = String.trim(socket.assigns.initial_message)
+
+    if message == "" do
+      push_navigate(socket, to: NewSession.deck_path(id))
+    else
+      digest =
+        :crypto.hash(:sha256, id <> <<0>> <> message)
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 24)
+
+      params = %{
+        "id" => id,
+        "input" => message,
+        "turn_id" => "web-" <> digest
+      }
+
+      case call(socket, "interactive.send_message", params) do
+        {:ok, _turn} ->
+          push_navigate(socket, to: NewSession.deck_path(id))
+
+        refused ->
+          detail =
+            case NewSession.refusal(refused) do
+              %{message: message} -> message
+              _other -> "the runtime refused the first message"
+            end
+
+          socket
+          |> assign(:starting?, false)
+          |> assign(:refusal, %{
+            message: "The session started, but its first message was not sent.",
+            detail: detail
+          })
+      end
     end
   end
 
@@ -370,6 +435,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   defp blank_to_nil(value) when is_binary(value), do: if(String.trim(value) != "", do: value)
   defp blank_to_nil(_value), do: nil
+
+  defp blank?(value), do: not is_binary(value) or String.trim(value) == ""
 
   # ------------------------------------------------------------------------------------
   # Render
@@ -409,6 +476,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         <.provider_field
           rows={@providers}
           error={@providers_error}
+          invalid={@provider_invalid?}
           loaded={@loaded?}
           chosen={@form.provider}
         />
@@ -432,6 +500,23 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         <.thinking_field effort={@form.effort} />
 
         <.sandbox_field sandbox={@form.sandbox} />
+
+        <section class="ouro-new-field" aria-labelledby="initial-message-label">
+          <div class="ouro-new-label-row">
+            <label class="ouro-new-label" id="initial-message-label" for="initial-message">
+              First message
+            </label>
+            <span class="ouro-new-aside">Optional</span>
+          </div>
+          <textarea
+            id="initial-message"
+            class="ouro-new-input ouro-new-message"
+            name="initial_message"
+            rows="4"
+            placeholder="What should this agent do?"
+          >{@initial_message}</textarea>
+          <p class="ouro-new-hint">Sent immediately after the session starts.</p>
+        </section>
 
         <.account_card :if={@gated?} card={@account_card} scope={@scope} />
 
@@ -472,6 +557,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   attr :rows, :any, required: true
   attr :error, :any, required: true
+  attr :invalid, :boolean, required: true
   attr :loaded, :boolean, required: true
   attr :chosen, :any, required: true
 
@@ -481,11 +567,19 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     ~H"""
     <section class="ouro-new-field" aria-labelledby="provider-label">
       <div class="ouro-new-label-row">
-        <span class="ouro-new-label" id="provider-label">Provider</span>
+        <label class="ouro-new-label" id="provider-label" for="provider">Provider</label>
         <span class="ouro-new-aside">Required</span>
       </div>
 
-      <select class="ouro-new-select" name="provider" aria-labelledby="provider-label">
+      <select
+        id="provider"
+        class="ouro-new-select"
+        phx-hook="FocusInvalid"
+        name="provider"
+        required
+        aria-invalid={to_string(@invalid)}
+        aria-describedby={if @invalid, do: "provider-error", else: nil}
+      >
         <option value="" selected={is_nil(@chosen) or @chosen == ""}>Choose a provider</option>
         <option
           :for={row <- @rows || []}
@@ -497,6 +591,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </option>
       </select>
 
+      <p :if={@invalid} id="provider-error" class="ouro-refusal" role="alert">
+        choose a provider before starting a session
+      </p>
       <p :if={@error} class="ouro-refusal">the provider list could not be read: {@error}</p>
       <p :if={not @loaded and is_nil(@error)} class="ouro-new-hint">reading the provider list…</p>
       <p :if={@footnote} class="ouro-new-hint">{@footnote}</p>

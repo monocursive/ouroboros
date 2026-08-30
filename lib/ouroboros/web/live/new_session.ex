@@ -570,18 +570,9 @@ defmodule Ouroboros.Web.Live.NewSession do
   def started(%{"id" => id}) when is_binary(id), do: {:ok, id}
   def started(_other), do: :error
 
-  @doc """
-  Where the deck is asked to open the session this form just started.
-
-  A query parameter rather than `/s/interactive/:id` because this is a navigation and not
-  a patch — the form is a different LiveView, so the deck mounts fresh either way — and
-  because the deck's `handle_params` is the one place that decides what "open" means. The
-  two ends of that contract are `Ouroboros.Web.Live.DeckLive.handle_params/3` and this
-  function, and they are tested against each other rather than against a literal typed
-  twice.
-  """
+  @doc "Where the deck is asked to open the session this form just started."
   @spec deck_path(String.t()) :: String.t()
-  def deck_path(id) when is_binary(id), do: "/?open=interactive:" <> id
+  def deck_path(id) when is_binary(id), do: Ouroboros.Web.Route.session(:interactive, id)
 
   # ------------------------------------------------------------------------------------
   # Refusals

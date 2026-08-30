@@ -2,10 +2,10 @@ defmodule Ouroboros.Web.ArtifactController do
   @moduledoc """
   Computer-use screenshots, served as bytes to the one browser that is already signed in.
 
-  The transcript's image cells name a picture by the SHA-256 of its content and nothing
-  else — that digest is the only key `computer_use.artifact` accepts, and the projection
-  is filesystem-free by contract, so a cell never holds a path. This controller is the
-  route between that digest and an `<img>`.
+  The transcript's image cells name a picture by the SHA-256 of its content. The
+  controller also resolves the durable interactive session's native provider-session id,
+  because the live helper pool may forget that directory after the coordinator retires.
+  Neither identifier exposes a filesystem path to the projection or browser.
 
   ## Behind the same door as everything else
 
@@ -92,22 +92,46 @@ defmodule Ouroboros.Web.ArtifactController do
 
   defp fetch(conn, scope, plane, id, sha) do
     params =
-      case owner(conn, scope, plane, id) do
-        owner when is_atom(owner) and not is_nil(owner) ->
-          %{"sha256" => sha, "node" => Atom.to_string(owner)}
-
-        # The list did not name an owner — a session this node has never seen, or a list
-        # that failed. Ask locally rather than not at all: the artifact is very often
-        # here, and a wrong guess is the same 404 as no guess.
-        _unknown ->
-          %{"sha256" => sha}
-      end
+      %{"sha256" => sha}
+      |> maybe_put_node(owner(conn, scope, plane, id))
+      |> maybe_put_provider_session(provider_session(conn, scope, plane, id))
 
     case Call.call(scope, @method, params, session: session(conn)) do
       {:ok, %{bytes: _bytes} = artifact} -> {:ok, artifact}
       _refused -> :error
     end
   end
+
+  defp maybe_put_node(params, owner) when is_atom(owner) and not is_nil(owner),
+    do: Map.put(params, "node", Atom.to_string(owner))
+
+  defp maybe_put_node(params, _unknown), do: params
+
+  defp maybe_put_provider_session(params, id) when is_binary(id) and id != "",
+    do: Map.put(params, "session_id", id)
+
+  defp maybe_put_provider_session(params, _unknown), do: params
+
+  defp provider_session(conn, scope, :interactive, id) do
+    params =
+      case owner(conn, scope, :interactive, id) do
+        owner when is_atom(owner) and not is_nil(owner) ->
+          %{"id" => id, "node" => Atom.to_string(owner)}
+
+        _unknown ->
+          %{"id" => id}
+      end
+
+    case Call.call(scope, "interactive.info", params, session: session(conn)) do
+      {:ok, info} when is_map(info) ->
+        Map.get(info, :provider_session_id) || Map.get(info, "provider_session_id")
+
+      _refused ->
+        nil
+    end
+  end
+
+  defp provider_session(_conn, _scope, _plane, _id), do: nil
 
   # The owner node of one session, from the plane's own list. `nil` where the list refused
   # or does not carry it.

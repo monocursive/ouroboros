@@ -217,7 +217,8 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
     ~H"""
     <section
       class={["ouro-approval", @escalation? && "ouro-approval-warn"]}
-      aria-label="approval requested"
+      aria-label={"Approval requested: #{@detail.title || @subject}"}
+      aria-live="polite"
     >
       <header class="ouro-approval-head">
         <span :if={@detail.kind} class="ouro-approval-kind">{@detail.kind}</span>
@@ -278,9 +279,13 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         </button>
       </div>
 
-      <p :if={@rule_refusal} class="ouro-quiet">{@rule_refusal}</p>
+      <p :if={@rule_refusal} class="ouro-quiet" role="status">{@rule_refusal}</p>
 
-      <p :if={@notice} class={["ouro-approval-notice", tone_class(@notice.tone)]}>
+      <p
+        :if={@notice}
+        class={["ouro-approval-notice", tone_class(@notice.tone)]}
+        role="status"
+      >
         {@notice.text}
       </p>
     </section>

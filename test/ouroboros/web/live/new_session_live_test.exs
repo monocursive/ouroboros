@@ -1082,6 +1082,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       {:ok, _view, bare} = live(conn, "/?open=abc")
       assert bare =~ "Nothing open"
     end
+
+    test "the deck path percent-encodes a caller-owned id as one segment" do
+      assert NewSession.deck_path("a/b?c#d%e") == "/s/interactive/a%2Fb%3Fc%23d%25e"
+    end
   end
 
   # ------------------------------------------------------------------------------------

@@ -21,7 +21,7 @@ defmodule Ouroboros.Web.Live.RailTest do
   alias Ouroboros.Web.Live.DeckLive
   alias Ouroboros.Web.Live.Rail
 
-  defp interactive(id, fields \\ []) do
+  defp interactive(id, fields) do
     Rail.from_interactive(
       Enum.into(fields, %{
         id: id,
@@ -429,6 +429,32 @@ defmodule Ouroboros.Web.Live.RailTest do
       html = render_rail([interactive("abc", status: :running)])
 
       assert html =~ ~s(href="/s/interactive/abc")
+    end
+
+    test "operate scope exposes rename and terminal-only delete controls" do
+      active =
+        render_component(&DeckLive.rail/1,
+          triaged: Rail.triaged([interactive("active", status: :running)]),
+          open: nil,
+          error: nil,
+          activity: %{},
+          scope: :operate
+        )
+
+      assert active =~ ~s(phx-value-action="rename")
+      refute active =~ ~s(phx-value-action="delete")
+
+      terminal =
+        render_component(&DeckLive.rail/1,
+          triaged: Rail.triaged([interactive("done", status: :completed)]),
+          open: nil,
+          error: nil,
+          activity: %{},
+          scope: :operate
+        )
+
+      assert terminal =~ ~s(phx-value-action="rename")
+      assert terminal =~ ~s(phx-value-action="delete")
     end
 
     test "a refused list says so instead of drawing an empty rail as if it were empty" do

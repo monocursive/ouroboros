@@ -25,7 +25,6 @@ defmodule Ouroboros.Web.LayoutsTest do
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
-  import Plug.Conn, only: [put_req_cookie: 3]
 
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
