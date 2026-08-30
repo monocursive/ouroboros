@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "computer-use"]
+members = [".", "computer-use", "sandbox"]
 
 [package]
 name = "ouro"

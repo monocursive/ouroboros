@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -39,6 +39,8 @@ help:
 	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
 	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
+	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
+	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -88,6 +90,35 @@ computer-use:
 	    chmod 0755 "$$dest/ouro-computer-use"; \
 	  fi; \
 	done
+
+# The sandbox helper only enforces on Linux, so building it on a Mac produces a binary
+# whose `doctor` reports `"usable": false` and which `Sandbox.Helper.probe/1` therefore
+# declines to select. That is deliberate: the target stays runnable everywhere so the
+# install path is exercised on the machine the code is written on, and detection falls
+# through to sandbox-exec exactly as it would with no helper at all.
+sandbox:
+	@echo "==> sandbox: release helper into priv/sandbox/"
+	cd tui && $(CARGO) build --release -p ouro-sandbox
+	mkdir -p priv/sandbox
+	cp tui/target/release/ouro-sandbox priv/sandbox/ouro-sandbox
+	chmod 0755 priv/sandbox/ouro-sandbox
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/sandbox"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    cp priv/sandbox/ouro-sandbox "$$dest/ouro-sandbox"; \
+	    chmod 0755 "$$dest/ouro-sandbox"; \
+	  fi; \
+	done
+	@echo "==> sandbox: what this build can enforce here"
+	@priv/sandbox/ouro-sandbox doctor
+
+# The Linux enforcement proof, reproducible from a Mac. The helper's unit tests run
+# anywhere; `tui/sandbox/tests/linux_enforcement.rs` only means something on a kernel with
+# Landlock, and user namespaces need a privileged container to be creatable at all.
+sandbox-linux-test:
+	@echo "==> sandbox-linux-test: enforcement suite in a privileged Linux container"
+	scripts/sandbox-linux-test.sh
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
@@ -159,7 +190,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: computer-use
+release-tarball: computer-use sandbox
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

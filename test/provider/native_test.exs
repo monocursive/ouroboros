@@ -267,7 +267,7 @@ defmodule Ouroboros.Provider.NativeTest do
       assert {:ok, status} = Native.status(%{})
 
       assert status.details["sandbox"] == Ouroboros.Provider.Native.Sandbox.label(detection)
-      assert status.details["sandbox"] in ["sandbox-exec", "bwrap", "none"]
+      assert status.details["sandbox"] in ["sandbox-exec", "ouro-sandbox", "bwrap", "none"]
       assert status.details["sandbox_notes"] == detection.notes
 
       case detection.backend do

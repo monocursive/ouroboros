@@ -47,6 +47,7 @@ ouroboros-*.tar
 
 # Built Computer Use helper; never a source artifact.
 /priv/computer-use/
+/priv/sandbox/
 
 # The two JavaScript bundles `mix web.assets` copies out of the dependencies on every
 # compile. `app.css` and `app.js` beside them are hand-written source and are kept: the

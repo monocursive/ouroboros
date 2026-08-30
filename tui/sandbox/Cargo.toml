@@ -1,0 +1,30 @@
+[package]
+name = "ouro-sandbox"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Ouroboros native-session sandbox helper (Linux): namespaces, Landlock, and seccomp applied to one command."
+publish = false
+
+# An isolated workspace member, for the same reason `computer-use` is one: the Linux
+# enforcement is raw `libc::syscall` against namespaces, Landlock, and seccomp, and none of
+# that belongs in the `ouro` terminal client's build graph. `ouro` never depends on this
+# member. Non-Linux builds compile the portable request/plan core and an honest
+# "unsupported platform" executor, which is what keeps `cargo test` meaningful on macOS.
+
+[[bin]]
+name = "ouro-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+# The request wire format. `derive` because the request is a struct with defaults, and a
+# hand-written Deserialize for it would be the same code with more places to get it wrong.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Every Linux enforcement call is a raw syscall: there is no Landlock or seccomp crate in
+# this dependency graph and adding one would put a security-critical third party between
+# this helper and the kernel for what amounts to three `syscall(2)` wrappers and a cBPF
+# program. `libc` is already in this workspace's lock behind `ouro`.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
