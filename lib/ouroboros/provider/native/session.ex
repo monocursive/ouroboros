@@ -289,12 +289,19 @@ defmodule Ouroboros.Provider.Native.Session do
   def init({request, context}) do
     options = Map.new(request.provider_options || %{})
     fork? = truthy_option(options, "fork_session")
+    fork_to_turn = option(options, "fork_to_turn")
     requested_id = if(fork?, do: nil, else: request.provider_session_id)
     checkpoint_limit = Checkpoint.limit(options)
 
     with {:ok, provider_session_id} <- session_id(requested_id),
-         :ok <-
-           seed_fork(request.provider_session_id, provider_session_id, fork?, checkpoint_limit),
+         {:ok, seeded} <-
+           seed_fork(
+             request.provider_session_id,
+             provider_session_id,
+             fork?,
+             checkpoint_limit,
+             fork_to_turn
+           ),
          {:ok, scope} <-
            Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
          {:ok, model_spec} <- Loop.resolve_model(request.model),
@@ -400,12 +407,17 @@ defmodule Ouroboros.Provider.Native.Session do
           register(provider_session_id)
 
           state =
-            journal(state, "session_opened", %{
-              "provider_session_id" => provider_session_id,
-              "resumed" => state.resumed?,
-              "forked_from_provider_session_id" => if(fork?, do: request.provider_session_id),
-              "journal_version" => Journal.version()
-            })
+            journal(
+              state,
+              "session_opened",
+              %{
+                "provider_session_id" => provider_session_id,
+                "resumed" => state.resumed?,
+                "forked_from_provider_session_id" => if(fork?, do: request.provider_session_id),
+                "journal_version" => Journal.version()
+              }
+              |> Map.merge(seeded_fields(seeded))
+            )
 
           # Written at open as well as on every change: a session that *started* planning
           # — `provider_options: %{plan: true}` — has a posture worth resuming into, and
@@ -1137,28 +1149,93 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp seed_fork(_source_id, _child_id, false, _limit), do: :ok
+  defp seed_fork(_source_id, _child_id, false, _limit, _to_turn), do: {:ok, nil}
 
-  defp seed_fork(source_id, child_id, true, limit)
+  defp seed_fork(source_id, child_id, true, limit, to_turn)
        when is_binary(source_id) and is_binary(child_id) do
     with :ok <- Paths.validate_session_id(source_id),
          {:ok, source_path, _durable?} <- Checkpoint.locate(source_id),
-         {:ok, messages} <- Checkpoint.read(source_path),
+         {:ok, conversation} <- Checkpoint.load(source_path),
+         {:ok, messages} <- fork_slice(source_path, conversation, to_turn),
          {:ok, child_path, _durable?} <- Checkpoint.locate(child_id),
          {:ok, _digest} <- Checkpoint.write(child_path, messages, event_limit: limit) do
-      :ok
+      {:ok, %{to_turn: to_turn, message_count: length(messages)}}
     else
       {:error, :no_checkpoint} -> {:error, :fork_source_unavailable}
+      # A boundary this parent cannot honour is named as itself. Wrapping it as
+      # `fork_source_unusable` would report a broken checkpoint for a turn that is merely
+      # older than what the parent still holds, which is a different problem with a
+      # different answer.
+      {:refused, reason} -> {:error, reason}
       {:error, reason} -> {:error, {:fork_source_unusable, reason}}
     end
   end
 
-  defp seed_fork(_source_id, _child_id, true, _limit), do: {:error, :fork_source_required}
+  defp seed_fork(_source_id, _child_id, true, _limit, _to_turn),
+    do: {:error, :fork_source_required}
+
+  # R3. A tail fork is the whole list, exactly as it was before `to_turn` existed.
+  defp fork_slice(_source_path, conversation, nil), do: {:ok, conversation.messages}
+
+  # Otherwise the child is the parent's conversation *as it stood at the end of a turn*.
+  # The arithmetic is `rewind`'s, and it has to be: the parent's turn manifest counts
+  # messages from the start of the session while the list on disk may be a tail a trim
+  # left behind or a compaction rewrote (checkpoint.ex moduledoc), so a `to_turn` is only
+  # meaningful once it is rebased through `offset`, and only *exists* above
+  # `rewind_floor`. Below that floor there is no slice of this list that is the
+  # conversation as it stood at that turn, and answering with the tail anyway would hand
+  # back a fork that claims a branch point it does not have.
+  defp fork_slice(source_path, conversation, to_turn) do
+    session_dir = Path.dirname(source_path)
+
+    case Checkpoint.message_count_at(session_dir, to_turn) do
+      {:ok, 0} ->
+        {:ok, []}
+
+      {:ok, absolute} when absolute < conversation.rewind_floor ->
+        {:refused, {:turn_boundary_dropped, to_turn}}
+
+      {:ok, absolute}
+      when absolute - conversation.offset > length(conversation.messages) ->
+        {:refused, {:turn_boundary_beyond_conversation, to_turn}}
+
+      {:ok, absolute} ->
+        {:ok, Enum.take(conversation.messages, absolute - conversation.offset)}
+
+      # `message_count_at/2` refuses a turn id this session never recorded, which is what
+      # stops a turn id borrowed from another session cutting this one's transcript.
+      :error ->
+        {:refused, {:unknown_turn, to_turn}}
+    end
+  end
+
+  # The truncation, written into the child's own `session_opened` record. A fork that cut
+  # its parent's conversation and left a record indistinguishable from a tail fork would
+  # make the child's journal claim a history it does not have; `to_turn` + `message_count`
+  # is the `rewind` record's own pair, for the same reason.
+  defp seeded_fields(nil), do: %{}
+  defp seeded_fields(%{to_turn: nil}), do: %{}
+
+  defp seeded_fields(%{to_turn: to_turn, message_count: count}) do
+    %{"forked_at_turn" => Journal.jsonable(to_turn), "forked_message_count" => count}
+  end
 
   defp truthy_option(options, key) do
     Map.get(options, key) == true or Map.get(options, String.to_existing_atom(key)) == true
   rescue
     ArgumentError -> Map.get(options, key) == true
+  end
+
+  # Provider options reach here as atoms from `Ouroboros.Provider.session_fork_options/3`
+  # and as strings from a durable checkpoint that was written as JSON. Both spellings are
+  # the same option, which is the assumption `truthy_option/2` already makes.
+  defp option(options, key) do
+    case Map.get(options, key) do
+      nil -> Map.get(options, String.to_existing_atom(key))
+      value -> value
+    end
+  rescue
+    ArgumentError -> Map.get(options, key)
   end
 
   # A corrupt checkpoint fails the open rather than silently starting an empty session

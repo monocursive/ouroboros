@@ -14,7 +14,9 @@ defmodule Ouroboros.Provider.Native.InteractivePlaneTest do
 
   @moduletag :capture_log
 
+  alias Ouroboros.Interactive.{Ref, State, Store}
   alias Ouroboros.InteractiveSession
+  alias Ouroboros.Provider.Native.{Journal, Paths}
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -58,6 +60,12 @@ defmodule Ouroboros.Provider.Native.InteractivePlaneTest do
         Process.sleep(25)
         await_replay(session, predicate, deadline)
     end
+  end
+
+  defp await_turns(session, count) do
+    await_replay(session, fn events ->
+      Enum.count(events, &(&1.type == :turn_completed)) >= count
+    end)
   end
 
   test "a session started the ordinary way runs a turn and keeps a resumable id", context do
@@ -231,5 +239,128 @@ defmodule Ouroboros.Provider.Native.InteractivePlaneTest do
         IO.puts("#{event.type} #{inspect(event.payload, limit: :infinity)}")
       end
     end
+  end
+
+  # R3, end to end at the level a client uses: `interactive.fork` with the two new
+  # parameters, over a provider that has a conversation to cut and real models to
+  # substitute. The pieces below the plane are covered by
+  # `Ouroboros.Provider.Native.ForkAtTurnTest`; what is under test here is that the plane
+  # threads both of them from the caller's map to the child's start request without a
+  # special case, and that the child's *journal* is what names the substituted model —
+  # which is what makes a fork-for-eval self-describing after the fact.
+  test "a fork carries a branch point and a substituted model to the child", context do
+    {parent_spec, _parent_agent} =
+      NativeModelScript.start([
+        [
+          {:tool_call,
+           %{
+             id: "w1",
+             name: "write",
+             input: %{"path" => "lib/b.ex", "content" => "first\n"}
+           }}
+        ],
+        [{:text, "wrote first"}, {:finish, :stop}],
+        [
+          {:tool_call,
+           %{
+             id: "w2",
+             name: "write",
+             input: %{"path" => "lib/b.ex", "content" => "second\n"}
+           }}
+        ],
+        [{:text, "wrote second"}, {:finish, :stop}]
+      ])
+
+    parent_id = "native-fork-parent-#{System.unique_integer([:positive])}"
+
+    assert {:ok, parent} =
+             InteractiveSession.start(
+               id: parent_id,
+               provider: :native,
+               workspace: context.workspace,
+               model: parent_spec,
+               approval_mode: :auto_approve
+             )
+
+    on_exit(fn -> InteractiveSession.close(parent) end)
+
+    assert {:ok, _turn} = InteractiveSession.send_message(parent, "write first", id: "turn-1")
+    await_turns(parent, 1)
+
+    assert {:ok, _turn} = InteractiveSession.send_message(parent, "write second", id: "turn-2")
+    await_turns(parent, 2)
+
+    assert {:ok, before_fork} = InteractiveSession.info(parent)
+    parent_provider_id = before_fork.provider_session_id
+
+    # The branch point is asked for the way a client asks: `rewind_points` hands back the
+    # turns this session can be cut at, and `to_turn` takes exactly one of them. The ids
+    # are the runtime's own, not the caller-minted turn ids, which is precisely why a
+    # client has to ask rather than guess.
+    assert {:ok, points} = InteractiveSession.rewind_points(parent)
+    assert length(points) == 2
+    first_turn = points |> List.first() |> Map.fetch!("turn_id")
+
+    {child_spec, child_agent} =
+      NativeModelScript.start([[{:text, "branched"}, {:finish, :stop}]])
+
+    child_id = "native-fork-child-#{System.unique_integer([:positive])}"
+
+    assert {:ok, child} =
+             InteractiveSession.fork(parent, child_id, %{
+               to_turn: first_turn,
+               model: child_spec
+             })
+
+    on_exit(fn -> InteractiveSession.close(Ref.new(child.id)) end)
+    assert child.id == child_id
+
+    child_ref = Ref.new(child.id)
+    assert {:ok, child_info} = InteractiveSession.info(child_ref)
+    assert State.forked_from(child_info) == parent_id
+    assert child_info.provider == :native
+    refute child_info.provider_session_id == parent_provider_id
+
+    # The substituted model is the child's start intent, not the parent's.
+    assert {:ok, durable} = Store.get(child.id)
+    assert State.request(durable).model == child_spec
+    refute State.request(durable).model == parent_spec
+
+    assert {:ok, _turn} = InteractiveSession.send_message(child_ref, "carry on", id: "child-1")
+
+    await_turns(child_ref, 1)
+
+    # Branched at turn one: the child's context holds the first turn and not the second.
+    # `=~` rather than equality because a prompt reaches the model inside the runtime
+    # exposure envelope, and what matters here is which turns are present.
+    [call] = NativeModelScript.requests(child_agent)
+    contents = Enum.map(call.messages, &to_string(&1.content || ""))
+    assert Enum.any?(contents, &(&1 =~ "write first"))
+    assert Enum.any?(contents, &(&1 =~ "Wrote lib/b.ex"))
+    refute Enum.any?(contents, &(&1 =~ "write second"))
+    refute Enum.any?(contents, &(&1 =~ "wrote second"))
+    assert List.last(call.messages).content =~ "carry on"
+
+    # Four inherited messages — the whole of turn one — plus the child's own prompt.
+    assert length(call.messages) == 5
+
+    # And the child's own journal names the model it ran on. This is the record that makes
+    # an eval fork readable months later without the operator having to remember what they
+    # substituted.
+    assert {:ok, child_after} = InteractiveSession.info(child_ref)
+    {:ok, dir, _durable?} = Paths.session_dir(child_after.provider_session_id)
+    {:ok, window} = Journal.window(Journal.path(dir), limit: 500)
+
+    opened = Enum.find(window.records, &(&1["kind"] == "session_opened"))
+    assert opened["forked_from_provider_session_id"] == parent_provider_id
+    assert opened["forked_at_turn"] == first_turn
+
+    started = Enum.find(window.records, &(&1["kind"] == "turn_started"))
+    assert started["model_spec"] == child_spec
+
+    # The parent is untouched: still two turns, still its own conversation.
+    assert {:ok, after_fork} = InteractiveSession.info(parent)
+    assert after_fork.provider_session_id == parent_provider_id
+    assert State.forked_from(after_fork) == nil
   end
 end

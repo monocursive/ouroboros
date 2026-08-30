@@ -583,6 +583,107 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
+    # R3. This provider reaches its session over a managed transport, so its thread is the
+    # vendor's and branches where the vendor branches it. The refusal has to happen before
+    # anything is started: a child created and then found to be a tail fork is exactly the
+    # silent widening `to_turn` exists to prevent.
+    test "a vendor session refuses to be forked at a turn rather than branching at its tail",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      planned = unique_id("no-such-branch")
+
+      assert {:error, {:unforkable_at_turn, details}} =
+               InteractiveSession.fork(ref, planned, %{to_turn: "t2"})
+
+      assert details.provider == @provider
+      assert details.to_turn == "t2"
+      assert details.reason == :vendor_forks_at_tail
+
+      # Nothing was created, and the parent did not count a branch it never started.
+      assert Store.get(planned) == :not_found
+      assert {:ok, %State{} = parent} = InteractiveSession.info(ref)
+      assert State.forks(parent) == 0
+
+      # And the same session forks perfectly well at its tail, which is the point: the
+      # refusal is about the parameter, not about this provider's ability to branch.
+      assert {:ok, child} = InteractiveSession.fork(ref, unique_id("tail-fork"))
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(child.id)
+      retire_session(id)
+    end
+
+    # R3. `model` is the one piece of the parent's start intent a fork may replace. It is
+    # asserted on the plan because the plan *is* the child's start request — the projection
+    # a client sees deliberately hides provider options — and because a plan starts
+    # nothing, which keeps the assertion clear of provider readiness. That the substituted
+    # spec then reaches a live child and its journal is
+    # `Ouroboros.Provider.Native.InteractivePlaneTest`, on a provider that has real models.
+    test "a fork may substitute the child's model, and inherits the parent's otherwise",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      # Nothing named: the child's start intent is the parent's, untouched. This is the
+      # behaviour every fork before this parameter relied on.
+      assert {:ok, inherited} =
+               GenServer.call(Task.whereis(id), {:fork_plan, unique_id("inherit"), %{}})
+
+      # This provider normalizes no `:model`, so the parent has none and neither does the
+      # plan. A fork that invented one would be starting a different session.
+      refute inherited[:model]
+
+      assert {:ok, substituted} =
+               GenServer.call(
+                 Task.whereis(id),
+                 {:fork_plan, unique_id("substitute"), %{model: "challenger-model"}}
+               )
+
+      assert substituted[:model] == "challenger-model"
+
+      # Exactly one key moved. Everything else about the child is still the parent's own
+      # start intent, which is what keeps a model substitution from being a second start.
+      assert substituted[:forked_from] == id
+      assert substituted[:provider] == @provider
+      assert substituted[:provider_session_id] == "ouroboros-test-session"
+      assert substituted[:provider_options][:fork_session] == true
+      assert substituted[:sandbox_mode] == :read_only
+
+      assert Keyword.delete(substituted, :model)
+             |> Keyword.equal?(
+               Keyword.delete(inherited, :model)
+               |> Keyword.put(:id, substituted[:id])
+             )
+
+      # A plan is intent, not a session: naming a model started nothing.
+      assert Store.get(substituted[:id]) == :not_found
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    # The two-element call is what a parent coordinator on an older build in the same fleet
+    # still receives. It has to keep planning a tail fork rather than killing the parent
+    # with a `function_clause` on a message shape it has never seen.
+    test "the coordinator still answers the fork_plan call that carries no overrides",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+      planned = unique_id("legacy-plan")
+
+      assert {:ok, opts} = GenServer.call(Task.whereis(id), {:fork_plan, planned})
+      assert opts[:id] == planned
+      assert opts[:forked_from] == id
+      refute Map.has_key?(Map.new(opts[:provider_options]), :fork_to_turn)
+
+      assert {:ok, %State{id: ^id}} = InteractiveSession.info(ref)
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
     test "the fork id is caller-owned, so a repeat opens the same child", %{id: id} do
       ref = start_session(id, sandbox_mode: :read_only)
       adapter = name_provider_session(ref)
@@ -712,6 +813,11 @@ defmodule Ouroboros.InteractiveControlsTest do
       # And the capability map a footer greys its verbs from is still on the row.
       assert row.options.capabilities.fork == :native
       assert Map.has_key?(row.options, :approval_mode)
+
+      # R3/D10. Present and false rather than absent: a client reads an absent capability
+      # as offered, so omitting it here would advertise replay for a session that has no
+      # journal because its tool loop ran in a vendor process.
+      assert row.options.capabilities.replay == false
 
       assert :ok = HarnessAdapter.finish(adapter)
       retire_session(id)

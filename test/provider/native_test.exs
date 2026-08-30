@@ -138,7 +138,11 @@ defmodule Ouroboros.Provider.NativeTest do
                fork: :native,
                # C4. `:native` because this runtime holds the conversation it folds, which
                # is what lets the report carry real token counts.
-               compact: :native
+               compact: :native,
+               # R3/D10. The one transport that runs its tool loop here, and so the one
+               # with a turn journal to replay from. Every other provider answers `false`
+               # rather than omitting the key.
+               replay: true
              }
     end
 
